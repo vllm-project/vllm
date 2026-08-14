@@ -365,8 +365,6 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
-        assert self.moe_config.intermediate_size_per_partition_unpadded is not None
-        assert self.moe_config.hidden_dim_unpadded is not None
         score_mode = (
             "sqrtsoftplus"
             if self.moe_config.routing_method == RoutingMethodType.DeepseekV4
@@ -384,6 +382,9 @@ class AiterW4A16ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
             expert_map=expert_map,
             quant_config=self.quant_config,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            # No unpadded dims: moe_gemm_a16w4 narrows N to the unpadded width
+            # when block_m == 16, dropping columns that hold live weight data
+            # (gpt-oss TP4 GPQA 0.6528 -> 0.4167). Compute the full padded width.
             unpadded_N_w1=None,
             unpadded_K_w1=None,
             unpadded_N_w2=None,
