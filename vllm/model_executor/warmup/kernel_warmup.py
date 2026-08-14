@@ -232,6 +232,13 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     Every rank profiles the same tactics. When distributed, per-tactic
     timings are averaged over the world CPU group so all ranks select the
     same tactic.
+
+    Setting ``VLLM_FLASHINFER_AUTOTUNE_DISTRIBUTED_SYNC=0`` disables the
+    cross-rank synchronization and the persistent-cache broadcast: every rank
+    tunes independently with no CPU-group collectives during tuning. This is
+    a workaround for multi-node deployments where the synchronized flow
+    deadlocks (ranks can desynchronize between tuning rounds and block
+    forever in the timing all-reduce).
     """
     from flashinfer.autotuner import AutoTuner, set_autotune_process_group
 
@@ -269,6 +276,18 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         is_profile=True,
         randomize_inputs=True,
     )
+
+    if world.world_size > 1 and not envs.VLLM_FLASHINFER_AUTOTUNE_DISTRIBUTED_SYNC:
+        # Tune independently on every rank. No autotune process group is set,
+        # so no cross-rank collectives run during tuning, and the persistent
+        # cache stays disabled because ranks may select different tactics.
+        with (
+            torch.inference_mode(),
+            fi_utils.autotune(tune_mode=True, **autotune_kwargs),
+        ):
+            runner._dummy_run(**dummy_run_kwargs)
+        world.barrier()
+        return
 
     # Read cached autotune results and broadcast to all ranks.
     cached_results: bytes | None = None
