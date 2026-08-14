@@ -1065,6 +1065,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 if replayssm_backend.name == "flashinfer":
                     assert attn_metadata.ring_start_d is not None
                     assert attn_metadata.prev_num_accepted_d is not None
+                    assert attn_metadata.cb_scaled is not None
+                    assert attn_metadata.cumAdt_vec is not None
+                    assert attn_metadata.cb_old is not None
                     selective_state_update_replayssm_flashinfer(
                         ssm_state,
                         hidden_states_d,
@@ -1082,9 +1085,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         dt_bias=dt_bias,
                         dt_softplus=True,
                         state_batch_indices=state_indices_tensor_d_input,
-                        cb_scaled=attn_metadata.fi_cb_scaled_scratch,
-                        cumAdt_vec=attn_metadata.fi_cumAdt_vec_scratch,
-                        cb_old=attn_metadata.fi_cb_old_scratch,
+                        cb_scaled=attn_metadata.cb_scaled,
+                        cumAdt_vec=attn_metadata.cumAdt_vec,
+                        cb_old=attn_metadata.cb_old,
+                        algorithm="auto",
                     )
                 else:
                     selective_state_update_replayssm_triton(

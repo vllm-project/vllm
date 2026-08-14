@@ -9,6 +9,16 @@ from vllm.v1.metrics.reader import Counter
 from ...models.utils import check_logprobs_close
 from ...utils import large_gpu_mark, multi_gpu_test
 
+try:
+    from flashinfer.mamba import checkpointing_ssu  # noqa: F401
+
+    HAS_FLASHINFER_CHECKPOINTING_SSU = True
+except ImportError:
+    HAS_FLASHINFER_CHECKPOINTING_SSU = False
+
+# Flip when FlashInfer ReplaySSM metadata is implemented in mamba_attn.
+FLASHINFER_REPLAYSSM_METADATA_READY = False
+
 # Mamba2 (Nemotron-3) hybrid.
 MAMBA2_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
 MODELS = [
@@ -21,7 +31,14 @@ PROMPTS = [
 ]
 
 
-def _check_replayssm_parity(vllm_runner, model_name, *, tensor_parallel_size=1):
+def _check_replayssm_parity(
+    vllm_runner,
+    model_name,
+    *,
+    tensor_parallel_size=1,
+    mamba_backend: str = "triton",
+    name_1: str = "replayssm",
+):
     # Compare logprobs, not greedy ids: ReplaySSM's fp arithmetic can flip a
     # near-tie. Baseline and ReplaySSM run at the same TP, so TP numerics are
     # common-mode and only ReplaySSM varies.
@@ -31,6 +48,7 @@ def _check_replayssm_parity(vllm_runner, model_name, *, tensor_parallel_size=1):
         enable_prefix_caching=False,
         mamba_cache_mode="none",
         tensor_parallel_size=tensor_parallel_size,
+        mamba_backend=mamba_backend,
     )
     with vllm_runner(model_name, **common) as llm:
         baseline = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
@@ -43,7 +61,7 @@ def _check_replayssm_parity(vllm_runner, model_name, *, tensor_parallel_size=1):
         outputs_0_lst=baseline,
         outputs_1_lst=replay,
         name_0="baseline",
-        name_1="replayssm",
+        name_1=name_1,
     )
 
 
@@ -58,6 +76,57 @@ def test_replayssm_decode_matches_baseline_tp2(vllm_runner, model_name):
     # Tensor-parallel correctness: ReplaySSM's caches and checkpoint state are
     # sharded per rank, so TP2 decode must still match the baseline at TP2.
     _check_replayssm_parity(vllm_runner, model_name, tensor_parallel_size=2)
+
+
+@pytest.mark.skipif(
+    not HAS_FLASHINFER_CHECKPOINTING_SSU,
+    reason="flashinfer.mamba.checkpointing_ssu not available",
+)
+@pytest.mark.skipif(
+    not FLASHINFER_REPLAYSSM_METADATA_READY,
+    reason="FlashInfer ReplaySSM metadata not implemented yet",
+)
+@pytest.mark.parametrize("model_name", MODELS)
+def test_replayssm_flashinfer_decode_matches_baseline(vllm_runner, model_name):
+    _check_replayssm_parity(
+        vllm_runner,
+        model_name,
+        mamba_backend="flashinfer",
+        name_1="replayssm_flashinfer",
+    )
+
+
+@pytest.mark.skipif(
+    not HAS_FLASHINFER_CHECKPOINTING_SSU,
+    reason="flashinfer.mamba.checkpointing_ssu not available",
+)
+@pytest.mark.skipif(
+    not FLASHINFER_REPLAYSSM_METADATA_READY,
+    reason="FlashInfer ReplaySSM metadata not implemented yet",
+)
+@pytest.mark.parametrize("model_name", MODELS)
+def test_replayssm_flashinfer_matches_triton_replayssm(vllm_runner, model_name):
+    common = dict(
+        max_model_len=1024,
+        trust_remote_code=True,
+        enable_prefix_caching=False,
+        mamba_cache_mode="none",
+        use_replayssm=True,
+        replayssm_buffer_len=16,
+    )
+    with vllm_runner(model_name, mamba_backend="triton", **common) as llm:
+        triton = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
+    with vllm_runner(model_name, mamba_backend="flashinfer", **common) as llm:
+        flashinfer = llm.generate_greedy_logprobs(
+            PROMPTS, max_tokens=32, num_logprobs=5
+        )
+
+    check_logprobs_close(
+        outputs_0_lst=triton,
+        outputs_1_lst=flashinfer,
+        name_0="replayssm_triton",
+        name_1="replayssm_flashinfer",
+    )
 
 
 # Prefix spans several mamba blocks; prefix caching only reuses full blocks.
