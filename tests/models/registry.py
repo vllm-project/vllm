@@ -825,7 +825,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Cosmos3EdgeForConditionalGeneration": _HfExamplesInfo(
         "nvidia/Cosmos3-Edge",
         max_model_len=4096,
-        is_available_online=False,
+        min_transformers_version="5.15",
+        use_original_num_layers=True,
+        hf_overrides={
+            "text_config": {
+                "num_hidden_layers": 2,
+                "hybrid_override_pattern": "*-",
+            }
+        },
     ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",
@@ -840,8 +847,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "deepseek-ai/DeepSeek-OCR-2",
     ),
     "Dots3NoteForCausalLM": _HfExamplesInfo(
-        "rednote-hilab/dots3.note",
-        trust_remote_code=True,
+        "dots-studio/dots3-note-prev",
         is_available_online=False,
     ),
     "UnlimitedOCRForCausalLM": _HfExamplesInfo(
@@ -1674,9 +1680,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     "Dots3NoteMTPModel": _HfExamplesInfo(
-        "rednote-hilab/dots3.note",
-        speculative_model="rednote-hilab/dots3.note",
-        trust_remote_code=True,
+        "dots-studio/dots3-note-prev",
+        speculative_model="dots-studio/dots3-note-prev",
         is_available_online=False,
     ),
     "Gemma4MTPModel": _HfExamplesInfo(
