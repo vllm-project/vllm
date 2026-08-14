@@ -17,8 +17,8 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
     initialize_replayssm_backend,
     selective_state_update,
-    selective_state_update_replayssm,
-    translate_vllm_replayssm_bookkeeping,
+    selective_state_update_replayssm_flashinfer,
+    selective_state_update_replayssm_triton,
 )
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -256,14 +256,24 @@ def test_replayssm_uninitialized_backend_raises():
         mod._replayssm_backend = old
 
 
-def test_replayssm_bookkeeping_adapter_not_implemented():
-    with pytest.raises(NotImplementedError, match="bookkeeping adapter"):
-        translate_vllm_replayssm_bookkeeping(
-            write_pos=torch.zeros(1, dtype=torch.int32),
-            is_flush=torch.zeros(1, dtype=torch.int8),
-            state_batch_indices=None,
-            max_cache_len=16,
-            batch=1,
+@pytest.mark.skipif(
+    not HAS_FLASHINFER_CHECKPOINTING_SSU,
+    reason="flashinfer.mamba.checkpointing_ssu not available",
+)
+def test_replayssm_triton_entry_rejects_flashinfer_backend():
+    initialize_replayssm_backend(
+        MambaConfig(backend=MambaBackendEnum.FLASHINFER), use_replayssm=True
+    )
+    tensor = torch.empty(1)
+    with pytest.raises(RuntimeError, match="Triton ReplaySSM"):
+        selective_state_update_replayssm_triton(
+            tensor,
+            tensor,
+            tensor,
+            tensor,
+            tensor,
+            tensor,
+            out=tensor,
         )
 
 
@@ -271,13 +281,13 @@ def test_replayssm_bookkeeping_adapter_not_implemented():
     not HAS_FLASHINFER_CHECKPOINTING_SSU,
     reason="flashinfer.mamba.checkpointing_ssu not available",
 )
-def test_replayssm_flashinfer_call_hits_bookkeeping_gap(monkeypatch):
+def test_replayssm_flashinfer_call(monkeypatch):
     import flashinfer.mamba
 
-    kernel = Mock()
+    kernel = Mock(return_value=torch.empty(1, 1, 2, 4))
     monkeypatch.setattr(flashinfer.mamba, "checkpointing_ssu", kernel)
-    backend = FlashInferReplaySSMBackend(
-        MambaConfig(backend=MambaBackendEnum.FLASHINFER)
+    initialize_replayssm_backend(
+        MambaConfig(backend=MambaBackendEnum.FLASHINFER), use_replayssm=True
     )
 
     batch, nheads, dim, dstate, ngroups, L = 1, 2, 4, 8, 1, 16
@@ -293,28 +303,33 @@ def test_replayssm_flashinfer_call_hits_bookkeeping_gap(monkeypatch):
     x_cache = torch.empty(1, nheads, L, dim)
     dt_cache = torch.empty(1, nheads, L)
     B_cache = torch.empty(1, ngroups, L, dstate)
-    write_pos = torch.zeros(batch, dtype=torch.int32)
-    is_flush = torch.zeros(batch, dtype=torch.int8)
+    ring_start = torch.zeros(1, dtype=torch.int32)
+    prev_num_accepted = torch.zeros(1, dtype=torch.int32)
 
-    with pytest.raises(NotImplementedError, match="bookkeeping adapter"):
-        backend(
-            state,
-            x,
-            dt,
-            A,
-            B,
-            C,
-            D=D,
-            dt_bias=dt_bias,
-            x_cache=x_cache,
-            dt_cache=dt_cache,
-            B_cache=B_cache,
-            write_pos=write_pos,
-            is_flush=is_flush,
-            max_cache_len=L,
-            out=out,
-        )
-    kernel.assert_not_called()
+    selective_state_update_replayssm_flashinfer(
+        state,
+        x,
+        dt,
+        A,
+        B,
+        C,
+        out,
+        x_cache,
+        B_cache,
+        dt_cache,
+        ring_start,
+        prev_num_accepted,
+        D=D,
+        dt_bias=dt_bias,
+        dt_softplus=True,
+    )
+    assert kernel.call_count == 1
+    kwargs = kernel.call_args.kwargs
+    assert kwargs["dt_softplus"] is True
+    # ring_start / prev_num_accepted are positional after the caches.
+    args = kernel.call_args.args
+    assert args[4] is ring_start
+    assert args[5] is prev_num_accepted
 
 
 @pytest.mark.skipif(
@@ -331,10 +346,11 @@ def test_replayssm_dispatch_fn_uses_initialized_backend():
 
     called = Mock(return_value=torch.empty(1))
     old = mod._replayssm_backend
-    mod._replayssm_backend = called
+    mod._replayssm_backend = TritonReplaySSMBackend(MambaConfig())
+    mod._replayssm_backend._kernel = called
     try:
         tensor = torch.empty(1)
-        selective_state_update_replayssm(
+        selective_state_update_replayssm_triton(
             tensor,
             tensor,
             tensor,
