@@ -251,6 +251,21 @@ class TestEnvWithChoices:
                 env_func()
 
 
+def test_gdn_decode_kernel_env(monkeypatch: pytest.MonkeyPatch):
+    env_func = environment_variables["VLLM_GDN_DECODE_KERNEL"]
+    monkeypatch.delenv("VLLM_GDN_DECODE_KERNEL", raising=False)
+    assert env_func() == "cuda"
+
+    for value in ("cuda", "triton"):
+        monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", value)
+        assert env_func() == value
+
+    for value in ("fused", "invalid"):
+        monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", value)
+        with pytest.raises(ValueError, match="VLLM_GDN_DECODE_KERNEL"):
+            env_func()
+
+
 class TestEnvListWithChoices:
     """Test cases for env_list_with_choices function."""
 
