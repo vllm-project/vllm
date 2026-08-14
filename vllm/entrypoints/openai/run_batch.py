@@ -9,8 +9,8 @@ import tempfile
 from argparse import Namespace
 from collections.abc import Awaitable, Callable
 from http import HTTPStatus
-from io import BytesIO, StringIO
-from typing import Any, TypeAlias
+from io import BytesIO
+from typing import IO, Any, TypeAlias
 from urllib.parse import urlparse
 
 import aiohttp
@@ -243,6 +243,11 @@ class BatchFrontendArgs(BaseFrontendArgs):
     output_tmp_dir: str | None = None
     """The directory to store the output file before uploading it
     to the output URL."""
+    max_inflight: int = 1024
+    """Maximum number of requests submitted to the engine at once. Bounds
+    frontend memory, which would otherwise grow with the size of the input
+    file. The engine schedules its own batches, so this only caps how many
+    requests are queued ahead of it."""
     enable_metrics: bool = False
     """Enable Prometheus metrics"""
     host: str | None = None
@@ -303,6 +308,8 @@ def parse_args():
 # each line of output with some prefix.
 _BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]\n"  # noqa: E501
 
+_DOWNLOAD_CHUNK_SIZE = 1 << 20
+
 
 class BatchProgressTracker:
     def __init__(self):
@@ -316,12 +323,12 @@ class BatchProgressTracker:
         if self._pbar:
             self._pbar.update()
 
-    def pbar(self) -> tqdm:
+    def pbar(self, total: int | None = None) -> tqdm:
         enable_tqdm = (
             not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
         )
         self._pbar = tqdm(
-            total=self._total,
+            total=self._total if total is None else total,
             unit="req",
             desc="Running batch",
             mininterval=5,
@@ -331,29 +338,47 @@ class BatchProgressTracker:
         return self._pbar
 
 
-async def read_file(path_or_url: str) -> str:
-    if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
+@contextlib.asynccontextmanager
+async def local_input_path(path_or_url: str, tmp_dir: str | None):
+    """
+    Yield a local path holding the batch input.
+
+    The input is read twice, once to validate it and once to run it, so a URL
+    body is downloaded to a temporary file rather than held in memory.
+    """
+    if not path_or_url.startswith(("http://", "https://")):
+        yield path_or_url
+        return
+
+    with tempfile.NamedTemporaryFile(
+        mode="wb",
+        dir=tmp_dir,
+        prefix="tmp_batch_input_",
+        suffix=".jsonl",
+    ) as f:
+        logger.info("Downloading %s to %s", path_or_url, f.name)
         async with aiohttp.ClientSession() as session, session.get(path_or_url) as resp:
             resp.raise_for_status()
-            return await resp.text()
-    else:
-        with open(path_or_url, encoding="utf-8") as f:
-            return f.read()
+            async for chunk in resp.content.iter_chunked(_DOWNLOAD_CHUNK_SIZE):
+                f.write(chunk)
+        f.flush()
+        yield f.name
 
 
-async def write_local_file(
-    output_path: str, batch_outputs: list[BatchRequestOutput]
-) -> None:
+def validate_batch(input_path: str) -> int:
     """
-    Write the responses to a local file.
-    output_path: The path to write the responses to.
-    batch_outputs: The list of batch outputs to write.
+    Parse every request and return how many there are.
+
+    Parsing up front keeps a malformed batch from producing partial output, and
+    the parsed requests are discarded so this does not scale with batch size.
     """
-    # We should make this async, but as long as run_batch runs as a
-    # standalone program, blocking the event loop won't affect performance.
-    with open(output_path, "w", encoding="utf-8") as f:
-        for o in batch_outputs:
-            print(o.model_dump_json(), file=f)
+    num_requests = 0
+    with open(input_path, encoding="utf-8") as f:
+        for request_json in f:
+            if request_json.strip():
+                BatchRequestInput.model_validate_json(request_json)
+                num_requests += 1
+    return num_requests
 
 
 async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> None:
@@ -409,45 +434,33 @@ async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> No
                 ) from e
 
 
-async def write_file(
-    path_or_url: str, batch_outputs: list[BatchRequestOutput], output_tmp_dir: str
-) -> None:
+@contextlib.asynccontextmanager
+async def batch_output_writer(path_or_url: str, output_tmp_dir: str | None):
     """
-    Write batch_outputs to a file or upload to a URL.
-    path_or_url: The path or URL to write batch_outputs to.
-    batch_outputs: The list of batch outputs to write.
-    output_tmp_dir: The directory to store the output file before uploading it
-    to the output URL.
+    Yield a file that receives responses as they complete.
+
+    Responses are appended and flushed while the batch runs, so an interrupted
+    run leaves the work finished so far on disk. A URL destination is staged in
+    a local file and uploaded once the batch completes.
     """
-    if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
-        if output_tmp_dir is None:
-            logger.info("Writing outputs to memory buffer")
-            output_buffer = StringIO()
-            for o in batch_outputs:
-                print(o.model_dump_json(), file=output_buffer)
-            output_buffer.seek(0)
-            logger.info("Uploading outputs to %s", path_or_url)
-            await upload_data(
-                path_or_url,
-                output_buffer.read().strip().encode("utf-8"),
-                from_file=False,
-            )
-        else:
-            # Write responses to a temporary file and then upload it to the URL.
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                encoding="utf-8",
-                dir=output_tmp_dir,
-                prefix="tmp_batch_output_",
-                suffix=".jsonl",
-            ) as f:
-                logger.info("Writing outputs to temporary local file %s", f.name)
-                await write_local_file(f.name, batch_outputs)
-                logger.info("Uploading outputs to %s", path_or_url)
-                await upload_data(path_or_url, f.name, from_file=True)
-    else:
+    if not path_or_url.startswith(("http://", "https://")):
         logger.info("Writing outputs to local file %s", path_or_url)
-        await write_local_file(path_or_url, batch_outputs)
+        with open(path_or_url, "w", encoding="utf-8") as f:
+            yield f
+        return
+
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=output_tmp_dir,
+        prefix="tmp_batch_output_",
+        suffix=".jsonl",
+    ) as f:
+        logger.info("Writing outputs to temporary local file %s", f.name)
+        yield f
+        f.flush()
+        logger.info("Uploading outputs to %s", path_or_url)
+        await upload_data(path_or_url, f.name, from_file=True)
 
 
 async def download_bytes_from_url(
@@ -790,6 +803,85 @@ def validate_run_batch_args(args):
         )
 
 
+async def run_one_request(
+    request_json: str,
+    endpoint_registry: dict[str, Any],
+    tracker: BatchProgressTracker,
+) -> BatchRequestOutput:
+    """Route a single line of the batch to its endpoint handler."""
+    request = BatchRequestInput.model_validate_json(request_json)
+
+    # Use the last segment of the URL as the endpoint key.
+    # More advanced URL matching is done in url_matcher of endpoint_registry.
+    endpoint_key = request.url.split("/")[-1]
+
+    result = None
+    if endpoint_key in endpoint_registry:
+        endpoint_config = endpoint_registry[endpoint_key]
+        result = handle_endpoint_request(
+            request,
+            tracker,
+            url_matcher=endpoint_config["url_matcher"],
+            handler_getter=endpoint_config["handler_getter"],
+            wrapper_fn=endpoint_config["wrapper_fn"],
+        )
+
+    if result is None:
+        result = make_async_error_request_output(
+            request,
+            error_msg=f"URL {request.url} was used. "
+            "Supported endpoints: /v1/chat/completions, /v1/embeddings,"
+            " /v1/audio/transcriptions, /v1/audio/translations, /score, "
+            " /rerank. See vllm/entrypoints/openai/api_server.py "
+            "for supported score/rerank versions.",
+        )
+
+    return await result
+
+
+async def dispatch_batch(
+    input_path: str,
+    output_file: IO[str],
+    endpoint_registry: dict[str, Any],
+    tracker: BatchProgressTracker,
+    max_inflight: int,
+) -> None:
+    """
+    Run every request in the batch, writing responses as they finish.
+
+    At most ``max_inflight`` requests are alive at once, so neither the parsed
+    requests nor their responses accumulate for the whole batch.
+    """
+    pending: set[asyncio.Task[BatchRequestOutput]] = set()
+
+    def write_completed(finished: set[asyncio.Task[BatchRequestOutput]]) -> None:
+        for task in finished:
+            print(task.result().model_dump_json(), file=output_file)
+        output_file.flush()
+
+    with open(input_path, encoding="utf-8") as f:
+        for request_json in f:
+            if not request_json.strip():
+                continue
+
+            pending.add(
+                asyncio.create_task(
+                    run_one_request(request_json, endpoint_registry, tracker)
+                )
+            )
+            if len(pending) >= max_inflight:
+                finished, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                write_completed(finished)
+
+    while pending:
+        finished, pending = await asyncio.wait(
+            pending, return_when=asyncio.FIRST_COMPLETED
+        )
+        write_completed(finished)
+
+
 async def run_batch(
     engine_client: EngineClient,
     args: Namespace,
@@ -802,49 +894,20 @@ async def run_batch(
     tracker = BatchProgressTracker()
     logger.info("Reading batch from %s...", args.input_file)
 
-    # Submit all requests in the file to the engine "concurrently".
-    response_futures: list[Awaitable[BatchRequestOutput]] = []
-    for request_json in (await read_file(args.input_file)).strip().split("\n"):
-        # Skip empty lines.
-        request_json = request_json.strip()
-        if not request_json:
-            continue
+    async with local_input_path(args.input_file, args.output_tmp_dir) as input_path:
+        num_requests = validate_batch(input_path)
 
-        request = BatchRequestInput.model_validate_json(request_json)
-
-        # Use the last segment of the URL as the endpoint key.
-        # More advanced URL matching is done in url_matcher of endpoint_registry.
-        endpoint_key = request.url.split("/")[-1]
-
-        result = None
-        if endpoint_key in endpoint_registry:
-            endpoint_config = endpoint_registry[endpoint_key]
-            result = handle_endpoint_request(
-                request,
-                tracker,
-                url_matcher=endpoint_config["url_matcher"],
-                handler_getter=endpoint_config["handler_getter"],
-                wrapper_fn=endpoint_config["wrapper_fn"],
-            )
-
-        if result is not None:
-            response_futures.append(result)
-        else:
-            response_futures.append(
-                make_async_error_request_output(
-                    request,
-                    error_msg=f"URL {request.url} was used. "
-                    "Supported endpoints: /v1/chat/completions, /v1/embeddings,"
-                    " /v1/audio/transcriptions, /v1/audio/translations, /score, "
-                    " /rerank. See vllm/entrypoints/openai/api_server.py "
-                    "for supported score/rerank versions.",
+        async with batch_output_writer(
+            args.output_file, args.output_tmp_dir
+        ) as output_file:
+            with tracker.pbar(total=num_requests):
+                await dispatch_batch(
+                    input_path,
+                    output_file,
+                    endpoint_registry,
+                    tracker,
+                    args.max_inflight,
                 )
-            )
-
-    with tracker.pbar():
-        responses = await asyncio.gather(*response_futures)
-
-    await write_file(args.output_file, responses, args.output_tmp_dir)
 
 
 async def main(args: Namespace):

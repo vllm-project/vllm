@@ -6,12 +6,17 @@ import subprocess
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pydantic
 import pytest
 
 from vllm.assets.audio import AudioAsset
 from vllm.entrypoints.openai.run_batch import (
+    BatchProgressTracker,
     BatchRequestOutput,
+    batch_output_writer,
+    dispatch_batch,
     download_bytes_from_url,
+    validate_batch,
 )
 
 CHAT_MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
@@ -879,3 +884,77 @@ async def test_download_bytes_backslash_bypass():
         await download_bytes_from_url(
             bypass_url, allowed_media_domains=["evil.internal"]
         )
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for streaming batch execution
+# ---------------------------------------------------------------------------
+
+
+def test_validate_batch_counts_requests(tmp_path):
+    """Blank lines are skipped and do not count towards the request total."""
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text(INPUT_BATCH + "\n\n")
+
+    assert validate_batch(str(input_path)) == len(INPUT_BATCH.strip().split("\n"))
+
+
+def test_validate_batch_rejects_malformed_request(tmp_path):
+    """A malformed request is rejected before any of the batch is run.
+
+    Requests are parsed up front so that an invalid line fails the whole batch
+    without leaving partial output behind.
+    """
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text(INPUT_BATCH + "\n" + INVALID_INPUT_BATCH + "\n")
+
+    with pytest.raises(pydantic.ValidationError):
+        validate_batch(str(input_path))
+
+
+@pytest.mark.asyncio
+async def test_dispatch_batch_writes_a_response_per_request(tmp_path):
+    """Every request must produce exactly one response line.
+
+    Responses finish out of order and are written in groups as they complete,
+    so a missed drain would silently truncate the output.
+    """
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text(INPUT_BATCH + "\n")
+    output_path = tmp_path / "output.jsonl"
+
+    requests = [json.loads(line) for line in INPUT_BATCH.strip().split("\n")]
+
+    with open(output_path, "w", encoding="utf-8") as output_file:
+        # An empty registry routes every request to an error response, which
+        # exercises the dispatch loop without starting an engine.
+        await dispatch_batch(
+            str(input_path),
+            output_file,
+            {},
+            BatchProgressTracker(),
+            max_inflight=2,
+        )
+
+    lines = output_path.read_text().strip().split("\n")
+    assert len(lines) == len(requests)
+    assert {
+        BatchRequestOutput.model_validate_json(line).custom_id for line in lines
+    } == {request["custom_id"] for request in requests}
+
+
+@pytest.mark.asyncio
+async def test_batch_output_writer_persists_before_completion(tmp_path):
+    """Responses reach disk while the batch is still running.
+
+    This is what makes an interrupted run recoverable rather than a total loss.
+    """
+    output_path = tmp_path / "output.jsonl"
+
+    async with batch_output_writer(str(output_path), None) as output_file:
+        print("first", file=output_file)
+        output_file.flush()
+        assert output_path.read_text() == "first\n"
+        print("second", file=output_file)
+
+    assert output_path.read_text() == "first\nsecond\n"
