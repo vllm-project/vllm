@@ -224,22 +224,21 @@ class QuantizationConfig(ABC):
             return base_quant_method
 
         self.online_quant_config.packed_modules_mapping = self.packed_modules_mapping
-        online_method = self.online_quant_config.get_quant_method(layer, prefix)
         checkpoint_is_quantized = base_quant_method is not None and not isinstance(
             base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
         )
-        online_is_quantized = online_method is not None and not isinstance(
-            online_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
-        )
+        online_target = self.online_quant_config.get_quantization_target(layer, prefix)
+        online_is_quantized = online_target is not None
+
         if checkpoint_is_quantized and online_is_quantized:
             raise ValueError(
-                f"Cannot apply requested online quantization {online_method} to "
-                f"pre-quantized layer {prefix}: {base_quant_method} was selected "
-                "by the checkpoint quantization config."
+                f"Cannot apply requested online quantization {online_target[1]} to "
+                f"pre-quantized layer {prefix}: {base_quant_method} was already "
+                "selected by the checkpoint quantization config."
             )
-        if not online_is_quantized:
+        if checkpoint_is_quantized or not online_is_quantized:
             return base_quant_method
-        return online_method
+        return self.online_quant_config.get_quant_method(layer, prefix)
 
     @staticmethod
     def get_cache_scale_mapper() -> "WeightsMapper":

@@ -19,6 +19,10 @@ from vllm._custom_ops import scaled_fp4_quant
 from vllm.config.load import LoadConfig
 from vllm.config.model import ModelConfig
 from vllm.config.quantization import QuantizationConfigArgs
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     UnquantizedLinearMethod,
@@ -31,6 +35,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.layers.quantization.modelopt import ModelOptFp8Config
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
@@ -64,6 +71,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     weight_amax,
 )
 from vllm.model_executor.model_loader import weight_utils
+from vllm.model_executor.model_loader.base_loader import log_online_quantization
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
@@ -187,6 +195,36 @@ def test_online_ignore_keeps_checkpoint_quantization(default_vllm_config, dist_i
     assert isinstance(layer.quant_method, QuarkLinearMethod)
 
 
+def test_online_ignored_moe_skips_method_construction(
+    default_vllm_config, dist_init, monkeypatch
+) -> None:
+    """Ignored checkpoint-quantized MoEs do not select a transient backend."""
+    default_vllm_config.model_config = ModelConfig()
+    prefix = "model.layers.0.mlp.experts"
+    quant_config = _fully_quantized_quark_config()
+    quant_config.set_online_quantization(
+        QuantizationConfigArgs(linear="mxfp4", ignore=[prefix])
+    )
+    assert quant_config.online_quant_config is not None
+    monkeypatch.setattr(
+        quant_config.online_quant_config,
+        "get_quant_method",
+        lambda *args: pytest.fail("online method should not be constructed"),
+    )
+
+    layer = FusedMoEFactory(
+        num_experts=4,
+        top_k=2,
+        hidden_size=32,
+        intermediate_size=64,
+        params_dtype=torch.bfloat16,
+        quant_config=quant_config,
+        prefix=prefix,
+    ).routed_experts
+
+    assert not isinstance(layer.quant_method, UnquantizedFusedMoEMethod)
+
+
 def test_activation_only_override_keeps_checkpoint_config(monkeypatch) -> None:
     """Activation-only overrides do not attach an online quantization overlay."""
     checkpoint_config = _moe_only_compressed_tensors_config()
@@ -262,6 +300,33 @@ def test_online_overlay_loads_sidecar_checkpoint_config(monkeypatch, tmp_path) -
     assert result is checkpoint_config
     assert loaded_configs == [{}]
     assert result.online_quant_config is model_config.quantization_config
+
+
+def test_log_online_quantization_for_composable_config(monkeypatch) -> None:
+    """Composable configs log their nested online quantization results."""
+    online_config = OnlineQuantizationConfig(QuantizationConfigArgs(linear="mxfp8"))
+    online_config.quantized_layers = {
+        "model.layers.0.self_attn.o_proj": ("linear", "mxfp8", None),
+        "model.layers.1.self_attn.o_proj": ("linear", "mxfp8", None),
+    }
+    vllm_config = SimpleNamespace(
+        quant_config=SimpleNamespace(online_quant_config=online_config)
+    )
+    log_args = []
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.base_loader.logger.info",
+        lambda *args: log_args.append(args),
+    )
+
+    log_online_quantization(cast(Any, vllm_config))
+
+    assert log_args == [
+        (
+            "Quantized %d layers of types: %s",
+            2,
+            "; ".join(online_config.quantized_layer_summaries),
+        )
+    ]
 
 
 def test_checkpoint_quantization_rejects_online_shorthand() -> None:
