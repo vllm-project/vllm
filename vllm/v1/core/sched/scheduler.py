@@ -2809,13 +2809,36 @@ class Scheduler(SchedulerInterface):
             is_affected = False
             marked_invalid_block = False
             req_id = request.request_id
-            # TODO (davidb): add support for hybrid memory allocator
-            (req_block_ids,) = self.kv_cache_manager.get_block_ids(req_id)
+            req_block_id_groups = self.kv_cache_manager.get_block_ids(req_id)
             # We iterate only over blocks that may contain externally computed
             # tokens
             req_num_computed_tokens = (
                 request.num_computed_tokens - num_scheduled_tokens.get(req_id, 0)
             )
+
+            if len(req_block_id_groups) != 1:
+                # Mooncake reports load failures as physical block IDs without
+                # identifying the hybrid KV group. Attention and Mamba groups
+                # can use different logical block sizes, so there is no safe
+                # common token boundary at which to truncate them. Conservatively
+                # recompute the complete prefix for every matching hybrid request.
+                # This is a rare eviction-race path and preserves correctness.
+                req_hybrid_block_ids = {
+                    block_id
+                    for group_block_ids in req_block_id_groups
+                    for block_id in group_block_ids
+                }
+                if req_hybrid_block_ids.isdisjoint(invalid_block_ids):
+                    continue
+
+                request.num_computed_tokens = 0
+                total_affected_tokens += max(req_num_computed_tokens, 0)
+                if evict_blocks:
+                    blocks_to_evict.update(req_hybrid_block_ids)
+                affected_req_ids.add(req_id)
+                continue
+
+            (req_block_ids,) = req_block_id_groups
 
             req_num_computed_blocks = (
                 req_num_computed_tokens + self.block_size - 1
