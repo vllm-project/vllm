@@ -362,6 +362,46 @@ def test_fused_norm_rope_ds_mla(num_tokens: int):
     assert (topk == 7).all(), "topk buffer should be untouched (no indexer)"
 
 
+def test_fused_norm_rope_supports_large_token_count():
+    """Keep the token count off CUDA grid-y at its 65,536-block boundary."""
+    num_tokens = 65536
+    dev = "cuda"
+    dtype = torch.bfloat16
+    positions = torch.zeros(num_tokens, device=dev, dtype=torch.int64)
+    q_c = torch.ones((num_tokens, 1), device=dev, dtype=dtype)
+    kv_c = torch.ones((num_tokens, 1), device=dev, dtype=dtype)
+    k_pe = torch.ones((num_tokens, 2), device=dev, dtype=dtype)
+    norm_w = torch.ones(1, device=dev, dtype=dtype)
+    cos_sin = torch.tensor([[1.0, 0.0]], device=dev, dtype=torch.float32)
+    topk = torch.empty((num_tokens, 1), device=dev, dtype=torch.int32)
+    slot_mapping = torch.arange(num_tokens, device=dev, dtype=torch.int64)
+    mla_cache = torch.empty((1, num_tokens, 3), device=dev, dtype=dtype)
+
+    q_out = K.fused_norm_rope(
+        positions,
+        q_c,
+        norm_w,
+        EPS,
+        kv_c,
+        norm_w,
+        EPS,
+        k_pe,
+        cos_sin,
+        None,
+        None,
+        None,
+        EPS,
+        None,
+        topk,
+        slot_mapping=slot_mapping,
+        mla_kv_cache=mla_cache,
+        has_indexer=False,
+    )
+
+    rows = torch.tensor([0, num_tokens - 1], device=dev)
+    assert_bf16(q_out[rows], rms_norm(q_c[rows], norm_w), "large-token q norm")
+
+
 # ── fused_q ──────────────────────────────────────────────────────────────────
 
 
@@ -537,6 +577,39 @@ def test_fused_q_bf16_query(num_tokens: int, has_indexer: bool):
         assert_fp8(iq_fp8, q_ref, "indexer-Q fp8 (bf16-query path)")
         iw_ref = index_w * scale_ref * (INDEX_HEAD_DIM**-0.5) * (INDEX_HEADS**-0.5)
         torch.testing.assert_close(iw_out, iw_ref, rtol=1e-3, atol=1e-3)
+
+
+def test_fused_q_triton_supports_large_token_count():
+    """Keep the token count off CUDA grid-y in the Triton fallback.
+
+    The minimal dimensions also bypass CuTeDSL on SM100.
+    """
+    num_tokens = 65536
+    dev = "cuda"
+    dtype = torch.bfloat16
+    positions = torch.zeros(num_tokens, device=dev, dtype=torch.int64)
+    q_pe = torch.ones((num_tokens, 1, 2), device=dev, dtype=dtype)
+    ql_nope = torch.ones((num_tokens, 1, 1), device=dev, dtype=dtype)
+    cos_sin = torch.tensor([[1.0, 0.0]], device=dev, dtype=torch.float32)
+    q_scale = torch.ones(1, device=dev, dtype=torch.float32)
+
+    _, _, mqa_q = K.fused_q(
+        positions,
+        q_pe,
+        cos_sin,
+        None,
+        None,
+        ql_nope,
+        q_scale,
+        None,
+        0.0,
+        0.0,
+        has_indexer=False,
+    )
+
+    rows = torch.tensor([0, num_tokens - 1], device=dev)
+    ref = torch.cat([ql_nope, q_pe], dim=-1).to(FP8)
+    assert_fp8(mqa_q[rows], ref[rows], "large-token fused Q")
 
 
 # ── fused_eh_norm (MTP) ──────────────────────────────────────────────────────
