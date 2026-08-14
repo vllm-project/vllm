@@ -998,6 +998,24 @@ def test_parser_manager_rejects_non_engine_adapter_metadata():
     )
 
 
+def test_reasoning_adapter_counts_after_final_non_streaming_parse():
+    parser = _CombinedReasoningAdapter(make_mock_tokenizer(_VOCAB))
+    request = _make_delegating_request()
+    token_ids = [ord("a"), ord("b"), 201, ord("c")]
+
+    parser.extract_reasoning_streaming(
+        "",
+        "ab</think>c",
+        "ab</think>c",
+        [],
+        token_ids,
+        token_ids,
+    )
+    parser.extract_reasoning("ab</think>c", request)
+
+    assert parser.count_reasoning_tokens(token_ids) == 2
+
+
 def _make_delegating_request():
     req = MagicMock(spec=ChatCompletionRequest)
     req.tools = []
