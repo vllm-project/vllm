@@ -949,6 +949,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
+            assert new_req_data.prefill_token_ids is not None
             req_id = new_req_data.req_id
 
             # Streaming input update: request already exists from a prior
@@ -957,13 +958,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self._remove_request(req_id)
 
             prompt_len = new_req_data.prompt_len
-            all_token_ids = new_req_data.all_token_ids
-            assert all_token_ids is not None
             sampling_params = new_req_data.sampling_params
             self.req_states.add_request(
                 req_id=req_id,
                 prompt_len=prompt_len,
-                all_token_ids=all_token_ids,
+                all_token_ids=new_req_data.prefill_token_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
             )
