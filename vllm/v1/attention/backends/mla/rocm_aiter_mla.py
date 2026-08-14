@@ -1325,9 +1325,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             f"{self._decode_num_heads}, got {q.shape[1]}"
         )
         mla_padded_q = AiterMLAHelper.get_mla_padded_q(self._decode_num_heads, q)
-        mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(
-            self._decode_num_heads
-        )
+        mla_num_heads = AiterMLAHelper.get_actual_mla_num_heads(self._decode_num_heads)
         o = torch.empty(
             B,
             mla_num_heads,
