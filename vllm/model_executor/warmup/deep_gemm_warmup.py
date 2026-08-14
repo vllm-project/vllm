@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
 )
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+from vllm.model_executor.layers.quantization.modelopt import ModelOptLinearMethod
 from vllm.model_executor.layers.quantization.online.mxfp8 import Mxfp8OnlineLinearMethod
 from vllm.tracing import instrument
 from vllm.utils.deep_gemm import (
@@ -90,13 +91,12 @@ def _extract_data_from_linear_base_module(
     LinearBase module.
     """
     assert isinstance(m, LinearBase)
-    assert isinstance(m.quant_method, Fp8LinearMethod)
-    assert m.quant_method.block_quant
-    assert m.quant_method.quant_config is not None
 
     w = m.weight
     ws = m.weight_scale_inv if hasattr(m, "weight_scale_inv") else m.weight_scale
-    quant_block_size = m.quant_method.quant_config.weight_block_size
+    # Set by every block-quantized linear method; the methods disagree on where
+    # they keep their own copy, the layer attribute is the common one.
+    quant_block_size = m.weight_block_size
 
     assert isinstance(w, torch.Tensor)
     assert isinstance(ws, torch.Tensor)
@@ -145,22 +145,34 @@ def _is_deep_gemm_backed_kernel(fp8_linear: object) -> bool:
     )
 
 
+def _block_fp8_linear_kernel(quant_method: object) -> object | None:
+    """The block-FP8 linear kernel a method selected, or None.
+
+    The methods disagree on the attribute name: ``Fp8LinearMethod`` calls it
+    ``fp8_linear``, the generic ``ModelOptLinearMethod`` calls it ``kernel``.
+    """
+    if isinstance(quant_method, Mxfp8OnlineLinearMethod):
+        return None
+    if isinstance(quant_method, Fp8LinearMethod):
+        if not quant_method.block_quant or quant_method.use_marlin:
+            return None
+        return getattr(quant_method, "fp8_linear", None)
+    if isinstance(quant_method, ModelOptLinearMethod):
+        # FP8_PB / FP8_PB_WO. The other ModelOpt formats select a non-DeepGEMM
+        # kernel, so the caller's _is_deep_gemm_backed_kernel drops them.
+        return quant_method.kernel
+    return None
+
+
 def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     """
     Return True if the input module/layer could be processed with DeepGEMM.
     """
 
-    if not (
-        isinstance(module, LinearBase)
-        and isinstance(module.quant_method, Fp8LinearMethod)
-        and not isinstance(module.quant_method, Mxfp8OnlineLinearMethod)
-        and getattr(module.quant_method, "block_quant", False)
-        and not getattr(module.quant_method, "use_marlin", True)
-    ):
+    if not isinstance(module, LinearBase):
         return False
 
-    fp8_linear = getattr(module.quant_method, "fp8_linear", None)
-    if not _is_deep_gemm_backed_kernel(fp8_linear):
+    if not _is_deep_gemm_backed_kernel(_block_fp8_linear_kernel(module.quant_method)):
         return False
 
     block_size = get_mk_alignment_for_contiguous_layout()[0]
