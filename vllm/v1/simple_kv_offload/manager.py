@@ -20,6 +20,7 @@ from vllm.v1.core.kv_cache_coordinator import (
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheSpec,
     MambaSpec,
     SlidingWindowSpec,
 )
@@ -107,11 +108,8 @@ class SimpleCPUOffloadScheduler:
         assert 0 <= self.fa_gidx < len(self.cpu_kv_cache_config.kv_cache_groups)
         # FA group's own block_size; divides scheduler_block_size (the LCM)
         # but is NOT assumed to equal it.
-        self.fa_block_size: int = (
-            self.cpu_kv_cache_config.kv_cache_groups[
-                self.fa_gidx
-            ].kv_cache_spec.block_size
-            * self.cp_world_size
+        self.fa_block_size: int = self._group_block_size(
+            self.cpu_kv_cache_config.kv_cache_groups[self.fa_gidx].kv_cache_spec
         )
         assert self.block_size % self.fa_block_size == 0
 
@@ -221,6 +219,22 @@ class SimpleCPUOffloadScheduler:
             kv_cache_groups=gpu_config.kv_cache_groups,
         )
 
+    def _group_block_size(self, spec: KVCacheSpec) -> int:
+        """Tokens one block of this group covers across the DCP ranks.
+
+        Mirrors ``resolve_kv_cache_block_sizes`` and the ``dcp_world_size`` that
+        ``HybridKVCacheCoordinator.find_longest_cache_hit`` passes down: DCP
+        shards the sequence for full-attention groups only, so a full-attention
+        block spans ``block_size * dcp`` tokens while a Mamba group keeps its
+        full per-rank state and spans ``block_size``. Scaling every group is a
+        no-op at dcp=1, which is why it went unnoticed; on a hybrid model at
+        dcp=4 it makes this manager take a quarter of the Mamba blocks it
+        should.
+        """
+        if isinstance(spec, FullAttentionSpec):
+            return spec.block_size * self.cp_world_size
+        return spec.block_size
+
     @staticmethod
     def _estimate_lazy_target_blocks(
         kv_cache_config: "KVCacheConfig",
@@ -272,6 +286,12 @@ class SimpleCPUOffloadScheduler:
             remaining_hashes, max_hit_len
         )
 
+        # update_state_after_alloc() indexes whole scheduler blocks per group and
+        # asserts that contract. Partial hash hits can return a finer length --
+        # under DCP the full-attention block is dcp x the hash block, so a hybrid
+        # model reports multiples of the hash block -- so re-align here. The
+        # surplus blocks stay pinned and are released with the rest.
+        hit_length = hit_length // self.block_size * self.block_size
         if hit_length > 0:
             pin_blocks = [
                 blk for grp in cpu_hit_blocks for blk in grp if not blk.is_null
@@ -355,9 +375,7 @@ class SimpleCPUOffloadScheduler:
         # the rest will be released along with the temp pin below.
         cpu_hit_blocks: list[list[KVCacheBlock]] = []
         for g in range(num_groups):
-            g_block_size = (
-                kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
-            )
+            g_block_size = self._group_block_size(kv_cache_groups[g].kv_cache_spec)
             assert num_external_tokens % g_block_size == 0, (
                 f"num_external_tokens={num_external_tokens} not aligned to "
                 f"group {g} block_size={g_block_size}"
@@ -376,9 +394,7 @@ class SimpleCPUOffloadScheduler:
                 continue
 
             # Number of blocks in the computed range for this group.
-            g_block_size = (
-                kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
-            )
+            g_block_size = self._group_block_size(kv_cache_groups[g].kv_cache_spec)
             n_computed_g = cdiv(total_computed_tokens, g_block_size)
 
             # Back-trace: ext blocks sit at the tail of the computed range.
@@ -595,9 +611,7 @@ class SimpleCPUOffloadScheduler:
                 already_stored_g = state.num_stored_blocks[g]
                 group_gpu_ids = block_ids_by_group[g]
 
-                g_block_size = (
-                    kv_cache_groups[g].kv_cache_spec.block_size * self.cp_world_size
-                )
+                g_block_size = self._group_block_size(kv_cache_groups[g].kv_cache_spec)
                 ready_blocks_g = aligned_tokens // g_block_size
                 scannable = group_gpu_ids[already_stored_g:ready_blocks_g]
 
