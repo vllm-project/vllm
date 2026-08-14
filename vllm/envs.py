@@ -1953,6 +1953,16 @@ class QuantSettings(BaseSettings):
             "unified serving."
         ),
     )
+    kimi_k3_aux_attn_res_stream: bool = Field(
+        default=False,
+        description=(
+            "Kimi-K3 only, and unrelated to the MoE flags above. Tap the "
+            "pre-norm AttnRes mixture, rather than the post-mixture sum, as "
+            "the auxiliary hidden state handed to a DFlash drafter. This "
+            "changes the numerics the speculator sees, so it is off by "
+            "default while the effect is measured."
+        ),
+    )
     kimi_k3_gemm_rs: bool = Field(
         default=False,
         description=(
@@ -2574,6 +2584,15 @@ class UsageSettings(BaseSettings):
             "linear-attention models. Default: enabled."
         ),
     )
+    gdn_decode_kernel: Literal["cuda", "triton"] = Field(
+        default="cuda",
+        description=(
+            'Select the GDN MTP decode implementation. "cuda" uses the fused '
+            'decode kernel where supported and falls back to "triton" '
+            'otherwise; setting it explicitly to "cuda" raises when '
+            "unsupported."
+        ),
+    )
     pp_layer_partition: str | None = Field(
         default=None,
         description="Pipeline stage partition strategy.",
@@ -2611,6 +2630,11 @@ class UsageSettings(BaseSettings):
         if isinstance(v, str):
             return {p.strip() for p in v.split(",") if p.strip()}
         return v
+
+    @field_validator("gdn_decode_kernel", mode="before")
+    @classmethod
+    def _lower_gdn_decode_kernel(cls, v: Any) -> Any:
+        return v.lower() if isinstance(v, str) else v
 
 
 # ----------------------------------------------------------------------------
