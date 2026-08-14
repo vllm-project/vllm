@@ -5,8 +5,27 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.distributed.eplb.eplb_state import compute_logical_maps
+from vllm.distributed.eplb.eplb_state import (
+    _compute_eplb_load_stats,  # pyright: ignore[reportPrivateUsage]
+    compute_logical_maps,
+)
 from vllm.distributed.eplb.policy.default import DefaultEplbPolicy
+
+
+def test_eplb_load_stats_reduce_across_ranks():
+    num_tokens_per_rank = torch.tensor(
+        [
+            [100, 0, 0, 0],
+            [100, 0, 0, 0],
+        ],
+        dtype=torch.float32,
+    )
+
+    avg_tokens, max_tokens = _compute_eplb_load_stats(num_tokens_per_rank)
+
+    assert avg_tokens.item() == 50
+    assert max_tokens.item() == 200
+    assert (avg_tokens / max_tokens).item() == 0.25
 
 
 def test_basic_rebalance():
