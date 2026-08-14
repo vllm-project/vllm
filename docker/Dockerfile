@@ -195,10 +195,6 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         && test -n "${CUDA_DRIVER_STUB}" \
         && mkdir -p "${CUDA_PYPI_ROOT}/lib/stubs" \
         && cp "${CUDA_DRIVER_STUB}" "${CUDA_PYPI_ROOT}/lib/stubs/libcuda.so" \
-        && NCCL_LIBRARY=$(find "$(dirname "${CUDA_PYPI_ROOT}")/nccl/lib" \
-            -name 'libnccl.so.2' -print -quit) \
-        && test -n "${NCCL_LIBRARY}" \
-        && ln -s "${NCCL_LIBRARY}" "${CUDA_PYPI_ROOT}/lib/libnccl.so.2" \
         && for library in "${CUDA_PYPI_ROOT}"/lib/*.so.*; do \
             linker_name="${library%%.so.*}.so"; \
             if [ ! -e "${linker_name}" ]; then \
@@ -269,6 +265,16 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     else \
         uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    fi
+
+RUN if [ -n "${CUDA_TOOLKIT_PYPI_VERSION}" ]; then \
+        CUDA_PYPI_ROOT=$(/opt/venv/bin/python3 -c \
+            'import nvidia; from pathlib import Path; print(Path(next(iter(nvidia.__path__))) / "cu13")') \
+        && NCCL_LIBRARY=$(find "$(dirname "${CUDA_PYPI_ROOT}")/nccl/lib" \
+            -name 'libnccl.so.2' -print -quit) \
+        && test -n "${NCCL_LIBRARY}" \
+        && ln -s "${NCCL_LIBRARY}" "${CUDA_PYPI_ROOT}/lib/libnccl.so.2" \
+        && ln -s libnccl.so.2 "${CUDA_PYPI_ROOT}/lib/libnccl.so"; \
     fi
 
 # Track PyTorch lib versions used during build and match in downstream instances.
