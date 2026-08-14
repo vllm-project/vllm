@@ -3,6 +3,7 @@
 
 import ast
 import json
+import keyword as _python_keyword
 import math
 import warnings
 from dataclasses import dataclass
@@ -451,7 +452,16 @@ def get_parameter_value(val: ast.expr) -> Any:
         UnexpectedAstError: If the AST node is not a supported literal type.
     """
     if isinstance(val, ast.Constant):
-        return val.value
+        if val.value is None or isinstance(val.value, (str, int, float)):
+            return val.value
+        # bytes/Ellipsis/complex constants have no JSON representation and
+        # would otherwise surface as a TypeError deep inside json.dumps;
+        # reject them explicitly like other unsupported nodes.
+        logger.warning(
+            "Non-JSON-representable constant in tool call arguments: %s",
+            ast.dump(val),
+        )
+        raise UnexpectedAstError("Tool call arguments must be JSON values")
     elif isinstance(val, ast.Dict):
         if not all(isinstance(k, ast.Constant) for k in val.keys):
             logger.warning(
@@ -465,8 +475,44 @@ def get_parameter_value(val: ast.expr) -> Any:
         }
     elif isinstance(val, ast.List):
         return [get_parameter_value(v) for v in val.elts]
+    elif isinstance(val, ast.Tuple):
+        # JSON has no tuple type; a tuple argument (e.g. ``size=(800, 600)``)
+        # is treated as a list so it round-trips through ``json.dumps``.
+        # Without this the whole call is dropped.
+        return [get_parameter_value(v) for v in val.elts]
+    elif isinstance(val, ast.Set):
+        # JSON has no set type either; a set argument (e.g.
+        # ``tags={'a', 'b'}``) is treated as a list, preserving source order.
+        return [get_parameter_value(v) for v in val.elts]
+    elif isinstance(val, ast.JoinedStr) and all(
+        isinstance(part, ast.Constant) for part in val.values
+    ):
+        # An f-string without placeholders (``f'hello'``) is a plain string
+        # constant, but Python parses it as JoinedStr rather than Constant;
+        # without this branch the whole call is dropped. F-strings with real
+        # placeholders still fall through to the raise below.
+        return "".join(
+            str(part.value)  # type: ignore
+            for part in val.values
+        )
     elif isinstance(val, ast.Name) and val.id in _JSON_NAME_LITERALS:
         return _JSON_NAME_LITERALS[val.id]
+    elif isinstance(val, ast.UnaryOp) and isinstance(val.op, (ast.USub, ast.UAdd)):
+        # A negative (or explicitly positive) number is parsed by Python as a
+        # unary operation over a numeric constant, e.g. ``-1`` becomes
+        # ``UnaryOp(USub, Constant(1))`` rather than a plain ``Constant(-1)``.
+        # These are extremely common tool arguments (negative longitudes,
+        # offsets, deltas); without this branch the whole call is dropped.
+        # Restrict to numeric operands so ``not``/``~`` and other expressions
+        # still raise below.
+        operand = get_parameter_value(val.operand)
+        if isinstance(operand, (int, float)) and not isinstance(operand, bool):
+            return -operand if isinstance(val.op, ast.USub) else operand
+        logger.warning(
+            "Unsupported unary operand in tool call arguments: %s",
+            ast.dump(val),
+        )
+        raise UnexpectedAstError("Tool call arguments must be literals")
     else:
         logger.warning(
             "Unsupported AST node type in tool call arguments: %s",
@@ -524,6 +570,343 @@ def handle_single_tool(call: ast.Call) -> ToolCall:
     )
 
 
+def escape_ctrl_chars_in_strings(text: str) -> str:
+    """Escape literal control chars inside string literals of pythonic text.
+
+    Models emitting pythonic tool calls frequently place raw newlines inside a
+    string argument (e.g. ``exec(command='line1\\nline2')`` written with a real
+    line break). That is invalid Python — ``ast.parse`` fails with "unterminated
+    string literal" — so the call would be dropped even though the intent is
+    unambiguous. A NUL byte is worse: ``ast.parse`` rejects it anywhere in the
+    source with ``ValueError``. Escaping ``\\n``/``\\r``/``\\t``/``\\x00`` only
+    *inside* string literals makes the text parseable while preserving the
+    argument value exactly (the escape sequences evaluate back to the original
+    control chars).
+
+    Text outside string literals is returned unchanged.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    index, length = 0, len(text)
+    while index < length:
+        char = text[index]
+        if quote is None:
+            if char in {"'", '"'}:
+                quote = char
+            out.append(char)
+        elif char == "\\" and index + 1 < length:
+            out.append(char)
+            out.append(text[index + 1])
+            index += 2
+            continue
+        elif char == quote:
+            quote = None
+            out.append(char)
+        elif char == "\n":
+            out.append("\\n")
+        elif char == "\r":
+            out.append("\\r")
+        elif char == "\t":
+            out.append("\\t")
+        elif char == "\x00":
+            out.append("\\x00")
+        else:
+            out.append(char)
+        index += 1
+    return "".join(out)
+
+
+_RESERVED_KW_SUFFIX = "_pyreservedkw_"
+
+
+def rename_reserved_kwargs(text: str) -> tuple[str, bool]:
+    """Rename Python-keyword parameter names so pythonic tool text parses.
+
+    Tools legitimately name parameters ``from``, ``in``, ``class`` — but
+    ``memory_get(from=1)`` is a Python ``SyntaxError``, so the whole call
+    would be dropped. Rename ``from=`` to ``from_pyreservedkw_=`` (outside
+    string literals only, and only in keyword-argument position: preceded by
+    ``(`` or ``,`` and followed by a single ``=``), parse, then restore the
+    original name with :func:`restore_reserved_kwarg_names`.
+
+    Returns (rewritten_text, changed). Keyword *values* (``x=True``) and
+    keywords inside string arguments are never touched.
+    """
+    out: list[str] = []
+    quote: str | None = None
+    changed = False
+    last_sig = ""
+    index, length = 0, len(text)
+    while index < length:
+        char = text[index]
+        if quote is not None:
+            out.append(char)
+            if char == "\\" and index + 1 < length:
+                out.append(text[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            out.append(char)
+            last_sig = char
+            index += 1
+            continue
+        if char.isalpha() or char == "_":
+            end = index
+            while end < length and (text[end].isalnum() or text[end] == "_"):
+                end += 1
+            name = text[index:end]
+            look = end
+            while look < length and text[look].isspace():
+                look += 1
+            if (
+                _python_keyword.iskeyword(name)
+                and look < length
+                and text[look] == "="
+                and (look + 1 >= length or text[look + 1] != "=")
+                and last_sig in {"(", ","}
+            ):
+                out.append(name + _RESERVED_KW_SUFFIX)
+                changed = True
+            else:
+                out.append(name)
+            last_sig = name[-1]
+            index = end
+            continue
+        out.append(char)
+        if not char.isspace():
+            last_sig = char
+        index += 1
+    return "".join(out), changed
+
+
+def restore_reserved_kwarg_names(arguments: dict) -> dict:
+    """Undo :func:`rename_reserved_kwargs` on a decoded arguments dict.
+
+    Only keys that carry the rename suffix *and* whose stem is a Python
+    keyword are restored, making this an exact inverse of the rename.
+    """
+    restored = {}
+    for key, value in arguments.items():
+        if (
+            isinstance(key, str)
+            and key.endswith(_RESERVED_KW_SUFFIX)
+            and _python_keyword.iskeyword(key[: -len(_RESERVED_KW_SUFFIX)])
+        ):
+            restored[key[: -len(_RESERVED_KW_SUFFIX)]] = value
+        else:
+            restored[key] = value
+    return restored
+
+
+def normalize_leading_zero_ints(text: str) -> str:
+    """Strip leading zeros from decimal integer literals so the text parses.
+
+    Models emit zero-padded integers (``month=07``), which Python rejects
+    ("leading zeros in decimal integer literals are not permitted"), so the
+    whole call would be dropped. Rewrite ``07`` to ``7`` outside string
+    literals only. Tokens that are already valid Python are left alone:
+    all-zero literals (``00``), floats and fractional parts (``07.5``,
+    ``1.07``), exponents (``1e07``, consumed as a name run), and ``0x``/
+    ``0o``/``0b`` prefixes (the digit run stops at the prefix letter).
+    """
+    out: list[str] = []
+    quote: str | None = None
+    index, length = 0, len(text)
+    while index < length:
+        char = text[index]
+        if quote is not None:
+            out.append(char)
+            if char == "\\" and index + 1 < length:
+                out.append(text[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            out.append(char)
+            index += 1
+            continue
+        if char.isalpha() or char == "_":
+            end = index
+            while end < length and (text[end].isalnum() or text[end] == "_"):
+                end += 1
+            out.append(text[index:end])
+            index = end
+            continue
+        if char.isdigit():
+            end = index
+            while end < length and (text[end].isdigit() or text[end] == "_"):
+                end += 1
+            token = text[index:end]
+            digits = token.replace("_", "")
+            follower = text[end] if end < length else ""
+            preceded_by_dot = index > 0 and text[index - 1] == "."
+            if (
+                digits[0] == "0"
+                and digits.strip("0")
+                and not preceded_by_dot
+                and follower not in {".", "e", "E", "j", "J"}
+            ):
+                out.append(str(int(digits)))
+            else:
+                out.append(token)
+            index = end
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+_QUOTE_FOLLOWERS = {",", ")", "]", "}", ":"}
+
+
+def escape_nested_quotes_in_strings(text: str) -> tuple[str, bool]:
+    """Close a broken string literal at the only closing quote that works.
+
+    Models emitting shell commands frequently nest unescaped same-style
+    quotes inside a string argument — ``command='sed -n '360,450p' f.py'``,
+    or a quoted ``python3 -c`` payload that itself contains quoted strings —
+    which Python reads as juxtaposed garbage, so the call is dropped even
+    though the intent is unambiguous. A string is treated as broken when
+    its first unescaped quote cannot syntactically close it (what follows
+    is none of ``,``, ``)``, ``]``, ``}``, ``:``). For a broken string,
+    every syntactically plausible closing quote is tried: interior quotes
+    escaped, the rest of the text kept verbatim, and the result (with
+    control chars escaped) validated with ``ast.parse``. Exactly one
+    candidate parsing means recovery — the decoded value is exactly the
+    text the model wrote. Zero or several parsing candidates means the
+    nesting is genuinely ambiguous and the text is returned unchanged
+    rather than guessed at.
+
+    Returns (rewritten_text, changed); run the result through
+    escape_ctrl_chars_in_strings before parsing — quotes chosen here can
+    move raw control chars inside the string.
+    """
+
+    def unescaped_quotes(start: int, quote: str) -> list[int]:
+        positions = []
+        j = start
+        while j < len(text):
+            if text[j] == "\\":
+                j += 2
+                continue
+            if text[j] == quote:
+                positions.append(j)
+            j += 1
+        return positions
+
+    def is_closer(pos: int) -> bool:
+        k = pos + 1
+        while k < len(text) and text[k].isspace():
+            k += 1
+        return k < len(text) and text[k] in _QUOTE_FOLLOWERS
+
+    prefix: list[str] = []
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char not in {"'", '"'}:
+            prefix.append(char)
+            index += 1
+            continue
+        quotes = unescaped_quotes(index + 1, char)
+        if not quotes:
+            return text, False
+        if is_closer(quotes[0]):
+            # The normal reading closes this string; move past it.
+            prefix.append(text[index : quotes[0] + 1])
+            index = quotes[0] + 1
+            continue
+        winners = []
+        for close in (j for j in quotes if is_closer(j)):
+            interior: list[str] = []
+            for j in range(index + 1, close):
+                if text[j] == char and not _is_escaped(text, j):
+                    interior.append("\\")
+                interior.append(text[j])
+            candidate = "".join(
+                ["".join(prefix), char, "".join(interior), char, text[close + 1 :]]
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)
+                try:
+                    ast.parse(escape_ctrl_chars_in_strings(candidate))
+                except (SyntaxError, ValueError):
+                    continue
+            winners.append(candidate)
+        if len(winners) == 1:
+            return winners[0], True
+        return text, False
+    return text, False
+
+
+def contains_broken_string_literal(text: str) -> bool:
+    """Whether some string literal's first closing quote cannot close it.
+
+    Streaming guard companion to escape_nested_quotes_in_strings:
+    completion-based partial parses of nested-quote text read the string as
+    implicit concatenation and stream argument prefixes that can never be
+    retracted. Callers should withhold tool deltas while this returns True
+    and let the requote recovery run on the final text instead. A string
+    whose closing quote has not arrived yet is NOT broken (normal
+    streaming); a closing quote at the very end of the text counts as
+    broken only because its follower is still unknown.
+    """
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char not in {"'", '"'}:
+            index += 1
+            continue
+        j = index + 1
+        close = -1
+        while j < len(text):
+            if text[j] == "\\":
+                j += 2
+                continue
+            if text[j] == char:
+                close = j
+                break
+            j += 1
+        if close == -1:
+            return False
+        k = close + 1
+        while k < len(text) and text[k].isspace():
+            k += 1
+        if k >= len(text) or text[k] not in _QUOTE_FOLLOWERS:
+            return True
+        index = close + 1
+    return False
+
+
+def _is_escaped(text: str, index: int) -> bool:
+    """Whether the character at ``index`` is backslash-escaped.
+
+    A character is escaped iff it is preceded by an *odd* number of consecutive
+    backslashes. Checking only the single preceding character is wrong for even
+    runs: in ``'ab\\'`` the closing quote follows an escaped backslash (``\\\\``)
+    and is therefore NOT escaped — it closes the string. Common in regex/code
+    arguments such as ``r'\\\\b'``.
+    """
+    backslashes = 0
+    j = index - 1
+    while j >= 0 and text[j] == "\\":
+        backslashes += 1
+        j -= 1
+    return backslashes % 2 == 1
+
+
 def make_valid_python(text: str) -> tuple[str, str] | None:
     """Attempt to close all open brackets/quotes to make partial Python valid.
 
@@ -541,6 +924,14 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     """
     bracket_stack: list[str] = []
     for index, char in enumerate(text):
+        # Inside a string literal only an unescaped matching quote is
+        # significant; brackets are literal text. Without this guard a bracket
+        # in a string argument (e.g. `cmd='grep -F "]"'`) corrupts the bracket
+        # stack and the whole tool call is rejected as mismatched.
+        if bracket_stack and bracket_stack[-1] in {"'", '"'}:
+            if char == bracket_stack[-1] and not _is_escaped(text, index):
+                bracket_stack.pop()
+            continue
         if char in {"[", "(", "{"}:
             bracket_stack.append(char)
         elif char == "]":
@@ -553,15 +944,7 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
             if not bracket_stack or bracket_stack.pop() != "{":
                 raise UnexpectedAstError("Mismatched curly braces")
         elif char in {"'", '"'}:
-            if bracket_stack and bracket_stack[-1] == char:
-                if index > 0 and text[index - 1] == "\\":
-                    pass
-                else:
-                    bracket_stack.pop()
-            elif bracket_stack and bracket_stack[-1] in {"'", '"'}:
-                pass
-            else:
-                bracket_stack.append(char)
+            bracket_stack.append(char)
 
     text = text.rstrip()
     if text.endswith("=") or text.endswith(":"):
@@ -600,19 +983,23 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     #   1. Mid-key inside a dict (`..., "k`) closes to `..., "k"}` — a
     #      syntactically invalid mixed dict/set.
     #   2. A bare string inside a dict (`{"k`) closes to `{"k"}` — valid
-    #      Python but a *set* literal, which downstream tool-call AST
-    #      handling rejects.
-    # Validate the candidate parses, has a body, and contains no Set
-    # nodes (pythonic tool calls always use dicts for `{...}`).
+    #      Python but a *set* literal that is really a truncated dict.
+    # Validate the candidate parses and has a body, and treat Set nodes as
+    # incomplete — but only when this completion added a `}` itself; a set
+    # already closed in the model text is a genuine set argument, not an
+    # artifact. Callers whose models emit raw control chars inside string
+    # arguments must escape them (see escape_ctrl_chars_in_strings) before
+    # calling.
     try:
         module = ast.parse(candidate)
     except SyntaxError:
         return None
     if not module.body:
         return None
-    for node in ast.walk(module):
-        if isinstance(node, ast.Set):
-            return None
+    if "}" in added_text:
+        for node in ast.walk(module):
+            if isinstance(node, ast.Set):
+                return None
 
     return candidate, added_text
 

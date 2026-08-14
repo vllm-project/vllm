@@ -149,7 +149,7 @@ class DotsOCRProcessingInfo(Qwen2VLProcessingInfo):
         self,
         **kwargs: object,
     ) -> Qwen2VLProcessor:
-        self.get_tokenizer().image_token = IMAGE_TOKEN  # Ensure image token is set
+        setattr(self.get_tokenizer(), "image_token", IMAGE_TOKEN)  # noqa: B010
         processor = self.ctx.get_hf_processor(
             Qwen2VLProcessor,
             **kwargs,
@@ -430,7 +430,7 @@ class DotsVisionBlock(nn.Module):
         *,
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
-        max_seqlen: int | None = None,
+        max_seqlen: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
@@ -483,6 +483,7 @@ class DotsVisionTransformer(nn.Module):
         )
         if require_post_norm is None:
             require_post_norm = len(self.blocks) == config.num_hidden_layers
+        self.post_trunk_norm: RMSNorm | None
         if require_post_norm and self.config.post_norm:
             self.post_trunk_norm = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
         else:
@@ -536,7 +537,7 @@ class DotsVisionTransformer(nn.Module):
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
-    def compute_attn_mask_seqlen(self, cu_seqlens: torch.Tensor) -> int | None:
+    def compute_attn_mask_seqlen(self, cu_seqlens: torch.Tensor) -> torch.Tensor | None:
         max_seqlen = None
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
@@ -552,15 +553,17 @@ class DotsVisionTransformer(nn.Module):
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
         # Convert grid_thw to tensor (always expecting list format now)
-        grid_thw = torch.tensor(grid_thw, device=hidden_states.device, dtype=torch.long)
+        grid_thw_tensor = torch.tensor(
+            grid_thw, device=hidden_states.device, dtype=torch.long
+        )
         hidden_states = hidden_states.to(self.dtype)
-        hidden_states = self.patch_embed(hidden_states, grid_thw)
+        hidden_states = self.patch_embed(hidden_states, grid_thw_tensor)
 
         cu_seqlens = torch.repeat_interleave(
-            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
+            grid_thw_tensor[:, 1] * grid_thw_tensor[:, 2], grid_thw_tensor[:, 0]
         ).cumsum(
             dim=0,
-            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+            dtype=grid_thw_tensor.dtype if torch.jit.is_tracing() else torch.int32,
         )
         cu_seqlens = torch.cat([cu_seqlens.new_zeros(1), cu_seqlens])
 
@@ -620,6 +623,7 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<|img|><|imgpad|><|endofimg|>"
+        return None
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -627,6 +631,7 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
         self.config: DotsOCRConfig = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
+        assert multimodal_config is not None
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         if isinstance(self.config.vision_config, dict):
             vision_config = DotsVisionConfig(**self.config.vision_config)
@@ -676,6 +681,8 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
                 image_embeds=image_embeds,
                 image_grid_thw=image_grid_thw,
             )
+
+        raise AssertionError
 
     def _process_image_input(
         self, image_input: DotsOCRImageInputs

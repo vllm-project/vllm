@@ -126,7 +126,6 @@ repos:
         -c, requirements/xpu.txt,
         -o, requirements/test/xpu.txt,
         --index-strategy, unsafe-best-match,
-        --torch-backend, xpu,
         --python-platform, x86_64-manylinux_2_39,
         --python-version, "3.12",
       ]

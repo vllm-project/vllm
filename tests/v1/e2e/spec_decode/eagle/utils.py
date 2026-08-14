@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
-import torch
+from typing import Any
 
-from tests.utils import wait_for_rocm_memory_to_settle
-from vllm import LLM, SamplingParams
-from vllm.distributed import cleanup_dist_env_and_memory
+import pytest
+
+from vllm import SamplingParams
+from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
 
 from ..utils import (
     _skip_if_insufficient_gpus_for_tp,
+    assert_request_outputs_match,
     evaluate_llm_for_gsm8k,
     get_test_prompts,
 )
@@ -25,26 +26,24 @@ def _run_eagle_correctness(
     enable_chunked_prefill: bool,
     model_impl: str,
     attn_backend: str,
+    vllm_runner,
 ):
     """
     Compare the outputs of an original LLM and a speculative LLM
     which should be the same when using eagle speculative decoding.
     """
-    if model_impl == "transformers":
-        import transformers
-        from packaging.version import Version
-
-        installed = Version(transformers.__version__)
-        required = Version("5.0.0")
-        if installed < required:
-            pytest.skip(
-                "Eagle3 with the Transformers modeling backend requires "
-                f"transformers>={required}, but got {installed}"
-            )
+    method, model_name, spec_model_name, tp_size = model_setup
+    _skip_if_insufficient_gpus_for_tp(tp_size)
 
     test_prompts = get_test_prompts(mm_enabled)
 
-    if "Llama-4-Scout" in model_setup[1] and attn_backend == "FLASH_ATTN":
+    extra_kwargs: dict[str, Any] = {}
+    if not mm_enabled and "Qwen3-VL" in model_name:
+        # These cases only exercise text generation. Avoid profiling an unused
+        # vision tower, which adds substantial memory to both reference runs.
+        extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
+
+    if "Llama-4-Scout" in model_name and attn_backend == "FLASH_ATTN":
         if current_platform.is_rocm():
             print(
                 "FLASH_ATTN for spec_decode not supported on "
@@ -66,38 +65,36 @@ def _run_eagle_correctness(
         m.setenv("VLLM_MLA_DISABLE", "1")
 
         if attn_backend == "ROCM_AITER_FA" and current_platform.is_rocm():
-            if "deepseek" in model_setup[1].lower():
+            if "deepseek" in model_name.lower():
                 m.setenv("VLLM_ROCM_USE_AITER", "1")
                 m.delenv("VLLM_MLA_DISABLE", raising=False)
                 attention_config = {"backend": "ROCM_AITER_MLA"}
             else:
                 m.setenv("VLLM_ROCM_USE_AITER", "1")
 
-        method, model_name, spec_model_name, tp_size = model_setup
-        _skip_if_insufficient_gpus_for_tp(tp_size)
-
         max_model_len = 2048
         max_num_batched_tokens = 128 if enable_chunked_prefill else max_model_len
 
-        ref_llm = LLM(
-            model=model_name,
+        with vllm_runner(
+            model_name,
+            block_size=None,
+            trust_remote_code=False,
             max_model_len=max_model_len,
             tensor_parallel_size=tp_size,
             attention_config=attention_config,
-        )
-        evaluate_llm_for_gsm8k(
-            ref_llm, expected_accuracy_threshold=expected_accuracy_threshold
-        )
-        ref_outputs = ref_llm.chat(test_prompts, sampling_config)
-        del ref_llm
-        torch.accelerator.empty_cache()
-        cleanup_dist_env_and_memory()
-        # ROCm frees VRAM lazily; wait so the spec engine started right after
-        # does not OOM on its startup memory guard.
-        wait_for_rocm_memory_to_settle()
+            enable_chunked_prefill=None,
+            compilation_config=CompilationConfig(),
+            **extra_kwargs,
+        ) as ref_runner:
+            evaluate_llm_for_gsm8k(
+                ref_runner.llm,
+                expected_accuracy_threshold=expected_accuracy_threshold,
+            )
+            ref_outputs = ref_runner.llm.chat(test_prompts, sampling_config)
 
-        spec_llm = LLM(
-            model=model_name,
+        with vllm_runner(
+            model_name,
+            block_size=None,
             trust_remote_code=True,
             tensor_parallel_size=tp_size,
             speculative_config={
@@ -111,27 +108,29 @@ def _run_eagle_correctness(
             enable_chunked_prefill=enable_chunked_prefill,
             model_impl=model_impl,
             attention_config=attention_config,
-        )
-        # EAGLE/EAGLE3 supports async scheduling; assert it is active by default.
-        assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
-        evaluate_llm_for_gsm8k(
-            spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
-        )
-        spec_outputs = spec_llm.chat(test_prompts, sampling_config)
-        matches = 0
-        misses = 0
-        for ref_output, spec_output in zip(ref_outputs, spec_outputs):
-            if ref_output.outputs[0].text == spec_output.outputs[0].text:
-                matches += 1
-            else:
-                misses += 1
-                print(f"ref_output: {ref_output.outputs[0].text}")
-                print(f"spec_output: {spec_output.outputs[0].text}")
+            compilation_config=CompilationConfig(),
+            **extra_kwargs,
+        ) as spec_runner:
+            # EAGLE/EAGLE3 supports async scheduling by default.
+            has_async = (
+                spec_runner.llm.llm_engine.vllm_config.scheduler_config.async_scheduling
+            )
+            assert has_async, (
+                f"Expected async scheduling for {method}: target={model_name}, "
+                f"draft={spec_model_name}, backend={attn_backend}; got {has_async}"
+            )
+            evaluate_llm_for_gsm8k(
+                spec_runner.llm,
+                expected_accuracy_threshold=expected_accuracy_threshold,
+            )
+            spec_outputs = spec_runner.llm.chat(test_prompts, sampling_config)
 
-        assert matches > int(0.6 * len(ref_outputs))
-        del spec_llm
-        torch.accelerator.empty_cache()
-        cleanup_dist_env_and_memory()
-        # ROCm frees VRAM lazily; wait so the next parametrization's engine does
-        # not OOM on its startup memory guard.
-        wait_for_rocm_memory_to_settle()
+        assert_request_outputs_match(
+            ref_outputs,
+            spec_outputs,
+            required_matches=int(0.6 * len(ref_outputs)) + 1,
+            context=(
+                f"{method} target={model_name}, draft={spec_model_name}, "
+                f"backend={attn_backend}"
+            ),
+        )

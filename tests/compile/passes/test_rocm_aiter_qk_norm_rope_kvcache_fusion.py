@@ -420,10 +420,9 @@ _FUSION_CONFIGS = [
 @pytest.mark.parametrize("use_shuffle_kv_layout", ["1", "0"])
 @pytest.mark.parametrize(
     "kv_stride_order",
-    [
-        pytest.param((0, 1, 2, 3, 4), id="block_first"),
-        pytest.param((1, 0, 2, 3, 4), id="kv_first"),
-    ],
+    # FA/unified use the 4D packed cache (num_blocks, num_kv_heads, block_size,
+    # 2*head_size); no separate K/V dim to permute.
+    [pytest.param((0, 1, 2, 3), id="packed_4d")],
 )
 @pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
 @pytest.mark.parametrize("block_size", [16, 32, 64])
@@ -458,6 +457,14 @@ def test_qk_norm_rope_kvcache_fusion(
         and use_shuffle_kv_layout == "1"
     ):
         pytest.skip("ROCM_AITER_UNIFIED_ATTN is NHD-only; shuffle env is ignored")
+    if (
+        attn_backend == AttentionBackendEnum.ROCM_AITER_FA
+        and use_shuffle_kv_layout == "1"
+    ):
+        pytest.skip(
+            "ROCM_AITER_FA gates the qk_norm+rope+kvcache fusion off under shuffle "
+            "layout (defers to reshape_and_cache_shuffle_triton), so nothing fuses"
+        )
     _run_qk_norm_rope_kvcache_fusion_test(
         attn_backend=attn_backend,
         enable_aiter_triton_rope=enable_aiter_triton_rope,

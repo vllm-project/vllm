@@ -2003,6 +2003,23 @@ def scaled_int8_quant(
     Returns:
       tuple[torch.Tensor, torch.Tensor, torch.Tensor | None] : Output int8 tensor, scales, and optionally azp.
     """
+    if current_platform.is_xpu():
+        # XPU has no _C int8 quant op; use the torch.compile reference.
+        if not symmetric:
+            raise NotImplementedError(
+                "asymmetric int8 activation quantization is unsupported on XPU"
+            )
+        if scale is not None:
+            q = (input.to(torch.float32) / scale).round().clamp(-128, 127)
+            return q.to(torch.int8), scale, None
+
+        from vllm._xpu_ops import xpu_ops
+
+        q, scales, _ = xpu_ops.dynamic_per_token_int8_quant_ref(
+            input.contiguous(), True, 8
+        )
+        return q, scales.reshape(-1, 1).to(torch.float32), None
+
     output = torch.empty_like(input, dtype=torch.int8)
     if scale is not None:
         # static-per-tensor quantization.
@@ -2755,6 +2772,43 @@ def fused_kda_decode(
         lower_bound,
         output_gate,
         norm_weight,
+        norm_eps,
+    )
+    return out
+
+
+def fused_gdn_decode_post_conv_mtp(
+    mixed_qkv: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    state_indices: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    state: torch.Tensor,
+    output_gate: torch.Tensor,
+    norm_weight: torch.Tensor,
+    out: torch.Tensor | None = None,
+    scale: float = 128**-0.5,
+    norm_eps: float = 1e-5,
+) -> torch.Tensor:
+    if out is None:
+        out = torch.empty_like(output_gate)
+    torch.ops._C.fused_gdn_decode_post_conv_mtp(
+        mixed_qkv,
+        a,
+        b,
+        A_log,
+        dt_bias,
+        state_indices,
+        cu_seqlens,
+        num_accepted_tokens,
+        state,
+        output_gate,
+        norm_weight,
+        out,
+        scale,
         norm_eps,
     )
     return out

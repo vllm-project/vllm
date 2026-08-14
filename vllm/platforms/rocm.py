@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import platform
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING
@@ -15,7 +16,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .interface import DeviceCapability, Platform, PlatformEnum
+from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -111,6 +112,16 @@ def _rocm_device_count_stateless(cuda_visible_devices: str | None = None) -> int
     )
     r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
     return r
+
+
+@cache
+def _get_wsl_kernel_version() -> tuple[int, ...] | None:
+    try:
+        release = platform.uname().release
+        parts = release.split("-")[0].split(".")
+        return tuple(int(part) for part in parts[:3])
+    except (TypeError, ValueError):
+        return None
 
 
 def _sync_hip_cuda_env_vars():
@@ -509,11 +520,11 @@ class RocmPlatform(Platform):
         "deepseek_v4_fp8",
         "compressed-tensors",
         "fbgemm_fp8",
+        "inc",
         "quark",
         "mxfp4",
         "mxfp8",
         "torchao",
-        "bitsandbytes",
         "modelopt",
         "modelopt_fp4",
         "modelopt_mxfp8",
@@ -535,6 +546,25 @@ class RocmPlatform(Platform):
         # Import ROCm-specific extension
         with contextlib.suppress(ImportError):
             import vllm._rocm_C  # noqa: F401
+
+    @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
+
+    @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        if in_wsl():
+            version = _get_wsl_kernel_version()
+            if version is None or version < (4, 19, 121):
+                # warning_once() causes a circular import on WSL, see #48397.
+                logger.warning(
+                    "Using 'pin_memory=False' as WSL is detected and the "
+                    "WSL2 kernel version is below 4.19.121. This may slow "
+                    "down performance. Please run `wsl --update`."
+                )
+                return False
+
+        return True
 
     @classmethod
     def get_valid_backends(
@@ -598,23 +628,38 @@ class RocmPlatform(Platform):
         if selected_backend is not None:
             try:
                 backend_class = selected_backend.get_class()
-                invalid_reasons = backend_class.validate_configuration(
+                sel_invalid_reasons = backend_class.validate_configuration(
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
                 )
             except ImportError:
-                invalid_reasons = ["ImportError"]
-            if invalid_reasons:
-                raise ValueError(
-                    f"Selected backend {selected_backend} is not valid for "
-                    f"this configuration. Reason: {invalid_reasons}"
-                )
-            else:
+                sel_invalid_reasons = ["ImportError"]
+            if not sel_invalid_reasons:
                 logger.info_once(
                     "Using %s backend (selected via --attention-backend).",
                     selected_backend.name,
                 )
                 return selected_backend.get_path()
+            # Only tolerate the mismatch for turboquant_* KV-cache layers:
+            # boundary layers keep the native dtype (served by the selected
+            # backend) while turboquant_* layers need TURBOQUANT, so no single
+            # --attention-backend can serve every layer. For any other dtype
+            # the explicit selection is genuinely invalid -> fail loud.
+            kv_dtype = attn_selector_config.kv_cache_dtype
+            if not (kv_dtype is not None and str(kv_dtype).startswith("turboquant")):
+                raise ValueError(
+                    f"Selected backend {selected_backend} is not valid for "
+                    f"this configuration. Reason: {sel_invalid_reasons}"
+                )
+            # NOTE: pass a str (not the list) -- info_once hashes its args.
+            logger.info_once(
+                "Selected backend %s is incompatible with this turboquant "
+                "layer (%s); using the auto-selected per-layer backend. "
+                "Reason: %s",
+                selected_backend.name,
+                attn_selector_config.attn_type,
+                str(sel_invalid_reasons),
+            )
 
         # No selected backend or the selected backend is invalid,
         # so we try finding a valid backend.

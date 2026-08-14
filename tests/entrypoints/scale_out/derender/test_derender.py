@@ -308,6 +308,25 @@ async def test_derender_chat_unknown_model(client):
     assert response.status_code == 404
 
 
+@pytest.mark.asyncio
+async def test_derender_chat_model_omitted_resolves_served_name(client):
+    """Omitting `model` resolves the served name rather than rejecting.
+
+    Mirrors test_serving_chat.py's "full name is returned when no model is
+    specified" assertion for the derender path. Asserts the resolved value,
+    not just the status, so the fallback is proven to have fired.
+    """
+    gen_req = await _render_chat(client)
+    synthetic_ids = gen_req["token_ids"][:3]
+
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={"generate_response": _make_generate_response(synthetic_ids)},
+    )
+    assert response.status_code == 200
+    assert response.json()["model"] == MODEL_NAME
+
+
 # ---------------------------------------------------------------------------
 # Completion derender tests
 # ---------------------------------------------------------------------------

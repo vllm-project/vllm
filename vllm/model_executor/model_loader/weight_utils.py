@@ -260,12 +260,8 @@ def get_quant_config(
         and hf_quant_config.get("quant_method") == "compressed-tensors"
         and "config_groups" in hf_quant_config
     ):
-        if hf_text_config is not None:
-            n_heads = getattr(hf_text_config, "num_attention_heads", None)
-            n_kv_heads = getattr(hf_text_config, "num_key_value_heads", None)
-        else:
-            n_heads = getattr(model_config.hf_config, "num_attention_heads", None)
-            n_kv_heads = getattr(model_config.hf_config, "num_key_value_heads", None)
+        n_heads = model_config.model_arch_config.total_num_attention_heads
+        n_kv_heads = model_config.model_arch_config.total_num_kv_heads
 
         hf_quant_config["total_num_heads"] = n_heads
         hf_quant_config["total_num_kv_heads"] = (
@@ -330,9 +326,6 @@ def get_quant_config(
         assert isinstance(model_config.quantization_config, QuantizationConfigArgs)
         return OnlineQuantizationConfig(args=model_config.quantization_config)
 
-    # Inflight BNB quantization
-    if model_config.quantization == "bitsandbytes":
-        return quant_cls.from_config({})
     model_name_or_path = (
         maybe_download_from_modelscope(
             model_config.model,
@@ -380,9 +373,7 @@ def get_quant_config(
     with open(quant_config_file) as f:
         config = json.load(f)
 
-        if model_config.quantization == "bitsandbytes":
-            config["adapter_name_or_path"] = model_config.model
-        elif model_config.quantization in ("modelopt", "modelopt_mixed"):
+        if model_config.quantization in ("modelopt", "modelopt_mixed"):
             if config.get("producer", {}).get("name") == "modelopt":
                 return quant_cls.from_config(config)
             else:

@@ -61,3 +61,49 @@ Some HF processors, such as the one for Qwen2-VL, are [very slow](https://github
 When new data is passed in, we first check which items are in the cache, and which ones are missing. The missing items are passed into the HF processor in a single batch and cached, before being merged with the existing items in the cache.
 
 Since we only process the missing multi-modal data items, the number of input placeholder tokens no longer corresponds to the number of the multi-modal inputs, so they can't be passed alongside the text prompt to HF processor. Therefore, we process the text and multi-modal inputs separately, using [dummy text](#dummy-text) to avoid HF errors. Since this skips HF's prompt updating code, we apply [automatic prompt updating](#automatic-prompt-updating) afterwards to keep the output tokens and multi-modal data consistent with each other.
+
+## Speeding Up Multi‑Modal Data Processing
+
+### Fused Normalisation on the Device
+
+To accelerate the multi‑modal data pipeline (decoding, resizing, normalisation, and rescaling), we offload the heavy numerical preprocessing from the CPU to the GPU and optimise data movement.
+
+#### Fusing Normalisation and Rescaling on the GPU
+
+Traditionally, the CPU would divide pixel values by 255, then subtract the mean and divide by the standard deviation. We fuse these steps into one operation and run it entirely on the GPU.
+
+**How it works**: We use a dedicated `FusedInputNorm` module that bakes the rescale factor (1/255) directly into the layer's `weight` and `bias` parameters. Instead of performing three separate steps (scale, subtract, divide), the module does everything in a single affine transformation: `y = x * weight + bias`.
+
+The parameters are set as follows:
+
+- `weight` controls both the standard deviation and the rescale factor
+- `bias` centers the data using the mean and the same rescale factor
+
+This means the module takes raw pixel values (0–255) and outputs properly normalised values without ever explicitly dividing by 255 as a separate step.
+
+#### Optimized Data Path for Fused Normalisation
+
+Performing fused normalisation directly on the device allows us to keep the entire transfer path—from **Entrypoint** through **Engine Core** to **GPU memory**—in **`uint8`**. This halves PCIe bandwidth and reduces CPU memory footprint.
+
+Only after data reaches GPU memory do we cast to `fp32` for the `FusedInputNorm` layer (to ensure numerical accuracy), then cast to `bf16` for subsequent layers—all within the GPU, avoiding any host‑side conversions.
+
+Overall path: **`Entrypoint (uint8) → Engine Core (uint8) → GPU Memory (uint8)`** → GPU‑local `fp32` `FusedInputNorm` → `bf16` output.
+
+#### Toggle: `mm_device_do_normalize`
+
+This GPU‑side fusion is controlled by a config flag called **`mm_device_do_normalize`**.
+
+- When `True`, normalisation and rescaling are done on the GPU using the `FusedInputNorm` layer; when `False`, we fall back to the old CPU‑side path.
+- The flag is **enabled by default** for all models that support it.
+- Currently, it’s on by default for these architectures:
+
+| name         | Architecture                         | Example HF Models                   |
+|--------------|--------------------------------------|-------------------------------------|
+| `qwen2-vl`   | `Qwen2VLForConditionalGeneration`    | `Qwen/Qwen2-VL-2B-Instruct`, etc.   |
+| `qwen2.5-vl` | `Qwen2_5_VLForConditionalGeneration` | `Qwen/Qwen2.5-VL-3B-Instruct`, etc. |
+
+#### What We Gain Overall
+
+- **CPU offload**: The arithmetic for normalisation and rescaling is completely gone from the CPU.
+- **PCIe savings**: Sending `uint8` (1 byte) instead of `bf16` (2 bytes) slashes data transfer volume by **50%** .
+- **GPU overhead**: The fused kernel is very lightweight and can often be merged with subsequent CUDA operations, so it hardly adds any extra cost.

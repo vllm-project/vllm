@@ -81,6 +81,21 @@ class DFlashProposer(SpecDecodeBaseProposer):
         )
 
     @override
+    def load_model(self, target_model: torch.nn.Module) -> None:
+        from vllm.model_executor.models.qwen3_dflash import (
+            dflash_target_rope_is_neox_style,
+        )
+
+        draft_model_config = self.speculative_config.draft_model_config
+        assert draft_model_config is not None
+        # The drafter must rotate Q/K the way its target does. Take that from the
+        # built target before super() constructs the draft.
+        is_neox_style = dflash_target_rope_is_neox_style(target_model)
+        if is_neox_style is not None:
+            draft_model_config.hf_config.is_neox_style = is_neox_style
+        super().load_model(target_model)
+
+    @override
     def _create_draft_vllm_config(self) -> VllmConfig:
         base = super()._create_draft_vllm_config()
         # The draft model is text-only — clear the target's multimodal
