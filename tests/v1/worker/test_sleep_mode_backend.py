@@ -48,7 +48,7 @@ def test_worker_wraps_backend_with_communicator_memory_lifecycle(monkeypatch):
     wake is staged across tags (weights first, then kv_cache)."""
     from vllm.v1.worker.gpu_worker import Worker
 
-    calls = []
+    calls: list[tuple[str, object]] = []
 
     class Backend:
         def suspend(self, level: int = 1) -> None:
