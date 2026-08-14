@@ -19,12 +19,15 @@
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
+    VocabParallelEmbedding as VllmVocabParallelEmbedding,
 )
 from vllm.model_executor.models.interfaces_base import VllmModelForTextGeneration
+from vllm.model_executor.models.transformers.layers import (
+    get_logits_processor_cls,
+    get_parallel_lm_head_cls,
+    get_vocab_parallel_embedding_cls,
+)
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 
 if TYPE_CHECKING:
@@ -47,19 +50,23 @@ class CausalMixin(VllmModelForTextGeneration):
             self.skip_prefixes.append("lm_head.")
 
         if self.pp_group.is_last_rank:
-            self.lm_head = ParallelLMHead(
+            self.lm_head = get_parallel_lm_head_cls()(
                 self.text_config.vocab_size,
                 self.text_config.hidden_size,
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             if tie_word_embeddings:
+                vpe_classes = (
+                    get_vocab_parallel_embedding_cls(),
+                    VllmVocabParallelEmbedding,
+                )
                 for module in self.model.get_input_embeddings().modules():
-                    if isinstance(module, VocabParallelEmbedding):
+                    if isinstance(module, vpe_classes):
                         self.lm_head = self.lm_head.tie_weights(module)
                         break
 
-            self.logits_processor = LogitsProcessor(
+            self.logits_processor = get_logits_processor_cls()(
                 self.text_config.vocab_size,
                 scale=getattr(self.text_config, "logit_scale", 1.0),
                 soft_cap=getattr(self.text_config, "final_logit_softcapping", None),

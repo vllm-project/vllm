@@ -9,6 +9,7 @@ is set and the symbol exists, and otherwise falls back to
 logging that reports which source was used.
 """
 
+import importlib
 import logging
 import sys
 import types
@@ -78,8 +79,62 @@ def test_act_and_mul_falls_back_for_unknown_activation(
     assert isinstance(layers.get_act_and_mul_fn("gelu"), GeluAndMul)
 
 
-@pytest.fixture(scope="module")
-def tiny_llama_path(tmp_path_factory):
+# Each getter and the module/class name it resolves between the two trees.
+_CLASS_GETTERS = (
+    (
+        "get_vocab_parallel_embedding_cls",
+        "vocab_parallel_embedding",
+        "VocabParallelEmbedding",
+    ),
+    ("get_parallel_lm_head_cls", "vocab_parallel_embedding", "ParallelLMHead"),
+    ("get_logits_processor_cls", "logits_processor", "LogitsProcessor"),
+)
+
+
+@pytest.mark.parametrize("getter,module,name", _CLASS_GETTERS)
+def test_class_getter_falls_back_when_disabled(monkeypatch, getter, module, name):
+    """Disabled: each getter returns the vLLM class."""
+    monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "0")
+    vllm_cls = getattr(
+        importlib.import_module(f"vllm.model_executor.layers.{module}"), name
+    )
+    assert getattr(layers, getter)() is vllm_cls
+
+
+@pytest.mark.parametrize("getter,module,name", _CLASS_GETTERS)
+def test_class_getter_uses_hw_agnostic_when_enabled(
+    monkeypatch, caplog, getter, module, name
+):
+    """Enabled: each getter returns the hw-agnostic class and logs it."""
+    monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
+    hw_cls = getattr(
+        importlib.import_module(f"vllm.model_executor.hw_agnostic.layers.{module}"),
+        name,
+    )
+    with caplog.at_level(logging.INFO):
+        resolved = getattr(layers, getter)()
+    assert resolved is hw_cls
+    assert f"Using hw-agnostic layer: {name}" in caplog.text
+
+
+@pytest.mark.parametrize("getter,module,name", _CLASS_GETTERS)
+def test_class_getter_falls_back_when_symbol_missing(
+    monkeypatch, caplog, getter, module, name
+):
+    """Enabled but the symbol is not ported: fall back to vLLM and warn."""
+    monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
+    hw_module = f"vllm.model_executor.hw_agnostic.layers.{module}"
+    monkeypatch.setitem(sys.modules, hw_module, types.ModuleType(hw_module))
+    vllm_cls = getattr(
+        importlib.import_module(f"vllm.model_executor.layers.{module}"), name
+    )
+    with caplog.at_level(logging.WARNING):
+        resolved = getattr(layers, getter)()
+    assert resolved is vllm_cls
+    assert "falling back to default" in caplog.text
+
+
+def _save_tiny_llama(tmp_path_factory, name: str, *, tie_word_embeddings: bool) -> str:
     """A randomly-initialized microscopic Llama saved to disk (with an ungated
     tokenizer) so vLLM can load it like any local checkpoint."""
     from transformers import AutoTokenizer, LlamaConfig, LlamaForCausalLM
@@ -93,19 +148,40 @@ def tiny_llama_path(tmp_path_factory):
         num_attention_heads=4,
         rms_norm_eps=1e-6,
         hidden_act="silu",
+        tie_word_embeddings=tie_word_embeddings,
     )
     torch.manual_seed(0)
     model = LlamaForCausalLM(config)
 
-    path = tmp_path_factory.mktemp("tiny_llama")
+    path = tmp_path_factory.mktemp(name)
     model.save_pretrained(path)
     tokenizer.save_pretrained(path)
     return str(path)
 
 
+@pytest.fixture(scope="module")
+def tiny_llama_path(tmp_path_factory):
+    """A tiny Llama with an untied `lm_head`."""
+    return _save_tiny_llama(tmp_path_factory, "tiny_llama", tie_word_embeddings=False)
+
+
+@pytest.fixture(scope="module")
+def tiny_llama_tied_path(tmp_path_factory):
+    """A tiny Llama whose `lm_head` is tied to the input embedding."""
+    return _save_tiny_llama(
+        tmp_path_factory, "tiny_llama_tied", tie_word_embeddings=True
+    )
+
+
 # Registered names of the layers the backend can
 # currently route to hw-agnostic implementations.
-_COVERED_LAYERS = ("rms_norm", "silu_and_mul")
+_COVERED_LAYERS = (
+    "rms_norm",
+    "silu_and_mul",
+    "vocab_parallel_embedding",
+    "parallel_lm_head",
+    "logits_processor",
+)
 
 
 def _layer_providers(model) -> dict[str, str]:
@@ -162,12 +238,42 @@ def test_hw_agnostic_matches_vllm_end_to_end(monkeypatch, vllm_runner, tiny_llam
 
     monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "0")
     vllm_providers, vllm_outputs = _serve(vllm_runner, tiny_llama_path, prompts)
-    # Both replaceable layers present in a Llama block must be vLLM's here.
-    assert vllm_providers == {"rms_norm": "vllm", "silu_and_mul": "vllm"}
+    # Every replaceable layer present in the model must be vLLM's here.
+    assert vllm_providers == dict.fromkeys(_COVERED_LAYERS, "vllm")
 
     monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
     hw_providers, hw_outputs = _serve(vllm_runner, tiny_llama_path, prompts)
-    assert hw_providers == {"rms_norm": "hw_agnostic", "silu_and_mul": "hw_agnostic"}
+    assert hw_providers == dict.fromkeys(_COVERED_LAYERS, "hw_agnostic")
+
+    check_logprobs_close(
+        outputs_0_lst=vllm_outputs,
+        outputs_1_lst=hw_outputs,
+        name_0="vllm",
+        name_1="hw_agnostic",
+    )
+
+
+def test_hw_agnostic_matches_vllm_with_tied_lm_head(
+    monkeypatch, vllm_runner, tiny_llama_tied_path
+):
+    """Tied `lm_head`: the hw-agnostic embedding and head still match vLLM.
+
+    Exercises `ParallelLMHead.tie_weights` across the hw-agnostic classes and the
+    `isinstance` check that decides whether to tie; a class mismatch there would
+    silently drop the tie, so this guards it end to end.
+    """
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    from ..utils import check_logprobs_close
+
+    prompts = ["The capital of France is", "vLLM is"]
+
+    monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "0")
+    _, vllm_outputs = _serve(vllm_runner, tiny_llama_tied_path, prompts)
+
+    monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
+    hw_providers, hw_outputs = _serve(vllm_runner, tiny_llama_tied_path, prompts)
+    assert hw_providers == dict.fromkeys(_COVERED_LAYERS, "hw_agnostic")
 
     check_logprobs_close(
         outputs_0_lst=vllm_outputs,
