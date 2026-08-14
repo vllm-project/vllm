@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from typing import TYPE_CHECKING
@@ -53,6 +54,28 @@ from vllm.utils.torch_utils import (
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
+
+# TEMP stream-topology instrumentation (read-only). Enable with
+# VLLM_DEBUG_MOE_STREAMS=1; grep logs for "[MOE-STREAM-DEBUG]". Capped so it
+# fires only a handful of times, not every step. Remove once the stream question
+# is resolved.
+_STREAM_DEBUG = os.getenv("VLLM_DEBUG_MOE_STREAMS", "0") == "1"
+_STREAM_DEBUG_MAX = 48
+_stream_debug_count = 0
+
+
+def _fmt_stream(stream: object) -> str:
+    if stream is None:
+        return "None"
+    return f"id={id(stream):#x} cuda_stream={getattr(stream, 'cuda_stream', None)}"
+
+
+def _stream_debug(msg: str) -> None:
+    global _stream_debug_count
+    if _stream_debug_count >= _STREAM_DEBUG_MAX:
+        return
+    _stream_debug_count += 1
+    logger.warning("[MOE-STREAM-DEBUG] %s", msg)
 
 
 def register_layer_for_moe_forward_op(
@@ -609,7 +632,20 @@ class MoERunner(MoERunnerInterface):
             hidden_states.untyped_storage().data_ptr()
             != shared_experts_input.untyped_storage().data_ptr()
         ):
+            if _STREAM_DEBUG:
+                _stream_debug(
+                    f"routed-input copy SKIPPED (alias already broken) "
+                    f"layer={self.layer_name} "
+                    f"stream={_fmt_stream(torch.cuda.current_stream())}"
+                )
             return hidden_states
+
+        if _STREAM_DEBUG:
+            _stream_debug(
+                f"routed-input copy TAKEN (aliases shared input) "
+                f"layer={self.layer_name} rows={hidden_states.shape[0]} "
+                f"stream={_fmt_stream(torch.cuda.current_stream())}"
+            )
 
         idx = dbo_current_ubatch_id() if self.enable_dbo else 0
         buf = self._routed_input_buffer[idx]
@@ -663,6 +699,14 @@ class MoERunner(MoERunnerInterface):
         if shared_experts_overlapping and shared_experts_input is not None:
             hidden_states = self._maybe_copy_routed_input(
                 hidden_states, shared_experts_input
+            )
+
+        if _STREAM_DEBUG:
+            _stream_debug(
+                f"routed kernel launch: layer={self.layer_name} "
+                f"overlapping={shared_experts_overlapping} "
+                f"monolithic={self.routed_experts.quant_method.is_monolithic} "
+                f"stream={_fmt_stream(torch.cuda.current_stream())}"
             )
 
         if self.routed_experts.quant_method.is_monolithic:
@@ -925,6 +969,13 @@ class MoERunner(MoERunnerInterface):
                 shared_experts_input
             )
 
+        if _STREAM_DEBUG:
+            _stream_debug(
+                f"_forward_impl gate: layer={self.layer_name} "
+                f"overlapping={shared_experts_overlapping} "
+                f"stream={_fmt_stream(torch.cuda.current_stream())}"
+            )
+
         # If the Runner holds the gate, apply it after the stream sync,
         # so it can run overlapped with the
         # NOTE: in future PR, MoE runner will always hold the gate.
@@ -939,6 +990,11 @@ class MoERunner(MoERunnerInterface):
             # TODO(bnell): parts of the dispatch/combine steps will go away once
             # #32567 lands and the remaining kernels are made MKs.  The PCP
             # code will probably remain
+            if _STREAM_DEBUG:
+                _stream_debug(
+                    f"_forward_impl dispatch: layer={self.layer_name} "
+                    f"stream={_fmt_stream(torch.cuda.current_stream())}"
+                )
             hidden_states, router_logits = self._maybe_dispatch(
                 hidden_states,
                 router_logits,

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections.abc import Callable
 from enum import IntEnum
 
@@ -20,6 +21,28 @@ from vllm.v1.worker.ubatching import (
 )
 
 logger = init_logger(__name__)
+
+# TEMP stream-topology instrumentation (read-only). Enable with
+# VLLM_DEBUG_MOE_STREAMS=1; grep logs for "[MOE-STREAM-DEBUG]". Capped so it
+# fires only a handful of times (during eager warmup/capture and the first
+# eager steps), not every step. Remove once the stream question is resolved.
+_STREAM_DEBUG = os.getenv("VLLM_DEBUG_MOE_STREAMS", "0") == "1"
+_STREAM_DEBUG_MAX = 24
+_stream_debug_count = 0
+
+
+def _fmt_stream(stream: object) -> str:
+    if stream is None:
+        return "None"
+    return f"id={id(stream):#x} cuda_stream={getattr(stream, 'cuda_stream', None)}"
+
+
+def _stream_debug(msg: str) -> None:
+    global _stream_debug_count
+    if _stream_debug_count >= _STREAM_DEBUG_MAX:
+        return
+    _stream_debug_count += 1
+    logger.warning("[MOE-STREAM-DEBUG] %s", msg)
 
 
 class SharedExpertsOrder(IntEnum):
@@ -147,10 +170,14 @@ class SharedExperts(torch.nn.Module):
         Returns true if the shared experts were enqueued, false otherwise. Call
         `wait` to wait for the shared experts to finish if this returns true.
         """
-        if (
-            self._determine_shared_experts_order(shared_experts_input)
-            != SharedExpertsOrder.MULTI_STREAM_OVERLAPPED
-        ):
+        order = self._determine_shared_experts_order(shared_experts_input)
+        if _STREAM_DEBUG:
+            _stream_debug(
+                f"maybe_forward_async: order={order.name} "
+                f"main(current_stream)={_fmt_stream(current_stream())} "
+                f"aux(self._stream)={_fmt_stream(self._stream)}"
+            )
+        if order != SharedExpertsOrder.MULTI_STREAM_OVERLAPPED:
             return False
         assert self._stream is not None
         idx = self._output_idx
@@ -166,6 +193,11 @@ class SharedExperts(torch.nn.Module):
         self._input_ready_event[idx].record(current_stream())
         with torch.cuda.stream(self._stream):
             self._input_ready_event[idx].wait(self._stream)
+            if _STREAM_DEBUG:
+                _stream_debug(
+                    "shared MLP (self._layer) running on "
+                    f"{_fmt_stream(torch.cuda.current_stream())}"
+                )
             self._output[idx] = self._layer(shared_experts_input)
             self._output_ready_event[idx].record(self._stream)
         return True
