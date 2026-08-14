@@ -167,11 +167,12 @@ def task_routes(request, monkeypatch) -> tuple[str, list[tuple[str, list[str]]]]
     monkeypatch.setenv("VLLM_SERVER_DEV_MODE", "1")
 
     app = FastAPI()
+    args = Namespace()
     app.state = Namespace()
-    app.state.args = Namespace()
+    app.state.args = args
 
     # Register routers for this specific task (development mode already enabled).
-    register_api_routers(app, supported_tasks=(task,))
+    register_api_routers(args, app, supported_tasks=(task,))
 
     routes = get_all_http_routes(app)
     return task, routes
@@ -292,9 +293,10 @@ def _collect_all_auto_routes(monkeypatch) -> set[str]:
     all_paths: set[str] = set()
     for task in get_args(SupportedTask):
         app = FastAPI()
+        args = Namespace()
         app.state = Namespace()
-        app.state.args = Namespace()
-        register_api_routers(app, supported_tasks=(task,))
+        app.state.args = args
+        register_api_routers(args, app, supported_tasks=(task,))
         routes = get_all_http_routes(app)
         all_paths.update({path for path, _ in routes})
     return all_paths
