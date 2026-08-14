@@ -7,14 +7,25 @@ This involves the exchange of expert weights between GPUs.
 """
 
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import torch
 from torch.distributed import ProcessGroup, all_gather
 
 from vllm.distributed.eplb.eplb_communicator import EplbCommunicator
-from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
+from vllm.distributed.eplb.eplb_utils import CrossThreadDeviceEvent
+from vllm.distributed.eplb.platform_backend import EplbDeviceRuntime
+from vllm.distributed.eplb.weight_utils import (
+    EplbExpertWeight,
+    EplbLayerWeights,
+    empty_eplb_weight_like,
+    get_eplb_expert_tensor,
+    get_eplb_num_experts,
+    iter_eplb_weight_tensors,
+)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -53,7 +64,7 @@ class AsyncEplbLayerResult:
     """
     transfer_metadata: TransferMetadata
     """Metadata describing what was received during transfer_layer."""
-    consumed_event: CpuGpuEvent
+    consumed_event: CrossThreadDeviceEvent
     """
     Event used to synchronize access to the intermediate buffer. The async worker calls
     wait() after it finishes transferring weights to the intermediate buffer. The main
@@ -173,12 +184,13 @@ def move_to_buffer(
     num_local_experts: int,
     old_indices: np.ndarray,
     new_indices: np.ndarray,
-    expert_weights: Sequence[torch.Tensor],
-    expert_weights_buffers: Sequence[torch.Tensor],
-    cuda_stream: torch.cuda.Stream | None,
+    expert_weights: EplbLayerWeights,
+    expert_weights_buffers: Sequence[EplbExpertWeight],
+    transfer_stream: Any | None,
     ep_rank: int,
     communicator: EplbCommunicator,
     layer_idx: int = 0,
+    device_runtime: EplbDeviceRuntime | None = None,
 ) -> TransferMetadata:
     """
     Rearranges expert weights during EPLB rebalancing.
@@ -191,7 +203,7 @@ def move_to_buffer(
             global-to-local assignments after rebalance.
         expert_weights: Original expert weights for the layer.
         expert_weights_buffers: Intermediate buffers (one per tensor).
-        cuda_stream: CUDA stream for async copies (can be None for sync mode).
+        transfer_stream: Device stream for async copies (None for sync mode).
         ep_rank: Rank of this process in expert parallel group.
         communicator: EplbCommunicator instance for P2P communication.
         layer_idx: Index of the MoE layer being transferred.
@@ -263,9 +275,17 @@ def move_to_buffer(
             expert = new_local_expert_ids[dst]
             src_local = expert_to_src_map.get(expert, -1)
             if src_local != -1:
-                with torch.cuda.stream(cuda_stream):
+                stream_context = (
+                    device_runtime.stream_context(transfer_stream)
+                    if device_runtime is not None and transfer_stream is not None
+                    else nullcontext()
+                )
+                with stream_context:
                     for w, b in zip(expert_weights, expert_weights_buffers):
-                        b[dst].copy_(w[src_local], non_blocking=True)
+                        get_eplb_expert_tensor(b, dst).copy_(
+                            get_eplb_expert_tensor(w, src_local),
+                            non_blocking=True,
+                        )
 
     communicator.set_transfer_context(old_indices, layer_idx)
 
@@ -298,7 +318,9 @@ def move_to_buffer(
             recver_pos = remainder_start + sender_pos
             if recver_pos < len(ranks_to_recv):
                 recv_ranks.append(ranks_to_recv[recver_pos])
-            expert_tensors = [w[src] for w in expert_weights]
+            expert_tensors = [
+                get_eplb_expert_tensor(weight, src) for weight in expert_weights
+            ]
             for dst in recv_ranks:
                 communicator.add_send(expert_tensors, dst, expert_id=int(expert))
 
@@ -330,7 +352,10 @@ def move_to_buffer(
             else:
                 src = ranks_to_send[recver_pos - remainder_start]
             communicator.add_recv(
-                [b[dst] for b in expert_weights_buffers],
+                [
+                    get_eplb_expert_tensor(buffer, dst)
+                    for buffer in expert_weights_buffers
+                ],
                 src,
                 expert_id=int(expert),
             )
@@ -348,8 +373,8 @@ def move_to_buffer(
 
 
 def move_from_buffer(
-    expert_weights: Sequence[torch.Tensor],
-    expert_weights_buffers: list[torch.Tensor],
+    expert_weights: EplbLayerWeights,
+    expert_weights_buffers: Sequence[EplbExpertWeight],
     transfer_metadata: TransferMetadata,
     new_indices: np.ndarray,
     ep_rank: int,
@@ -383,7 +408,10 @@ def move_from_buffer(
         dest_indices = np.nonzero(dest_mask_np)[0].tolist()
         for dst in dest_indices:
             for w, b in zip(expert_weights, expert_weights_buffers):
-                w[dst].copy_(b[dst], non_blocking=True)
+                get_eplb_expert_tensor(w, dst).copy_(
+                    get_eplb_expert_tensor(b, dst),
+                    non_blocking=True,
+                )
 
     if recv_count == 0:
         return
@@ -421,20 +449,24 @@ def move_from_buffer(
 
     for dst, src in zip(matched_dst_rows.tolist(), matched_src_rows.tolist()):
         for w in expert_weights:
-            w[dst].copy_(w[src], non_blocking=True)
+            get_eplb_expert_tensor(w, dst).copy_(
+                get_eplb_expert_tensor(w, src),
+                non_blocking=True,
+            )
 
 
 def transfer_layer(
     old_layer_indices: torch.Tensor,
     new_layer_indices: torch.Tensor,
-    expert_weights: Sequence[torch.Tensor],
-    expert_weights_buffer: Sequence[torch.Tensor],
+    expert_weights: EplbLayerWeights,
+    expert_weights_buffer: Sequence[EplbExpertWeight],
     ep_group: ProcessGroup,
     communicator: EplbCommunicator,
     is_profile: bool = False,
-    cuda_stream: torch.cuda.Stream | None = None,
+    transfer_stream: Any | None = None,
     rank_mapping: dict[int, int] | None = None,
     layer_idx: int = 0,
+    device_runtime: EplbDeviceRuntime | None = None,
 ) -> TransferMetadata:
     """
     Rearranges the expert weights in place according to the new expert indices.
@@ -454,7 +486,7 @@ def transfer_layer(
         is_profile (bool): If `True`, do not perform any actual weight copy.
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
-        cuda_stream: CUDA stream for async copies (can be None for sync mode).
+        transfer_stream: Device stream for async copies (None for sync mode).
         rank_mapping: Optional rank mapping for elastic expert parallelism.
         layer_idx: Index of the MoE layer being transferred.
 
@@ -488,8 +520,8 @@ def transfer_layer(
 
     assert old_layer_indices.shape == new_layer_indices.shape
     num_physical_experts = old_layer_indices.shape[0]
-    assert len(expert_weights[0]) >= 1
-    num_local_physical_experts = expert_weights[0].shape[0]
+    num_local_physical_experts = get_eplb_num_experts(expert_weights[0])
+    assert num_local_physical_experts >= 1
     assert num_physical_experts == ep_size * num_local_physical_experts
 
     old_layer_indices_np = old_layer_indices.cpu().numpy()
@@ -501,22 +533,24 @@ def transfer_layer(
         new_indices=new_layer_indices_np,
         expert_weights=expert_weights,
         expert_weights_buffers=expert_weights_buffer,
-        cuda_stream=cuda_stream,
+        transfer_stream=transfer_stream,
         ep_rank=ep_group.rank(),
         communicator=communicator,
         layer_idx=layer_idx,
+        device_runtime=device_runtime,
     )
 
 
 def rearrange_expert_weights_inplace(
     old_global_expert_indices: torch.Tensor,
     new_global_expert_indices: torch.Tensor,
-    expert_weights: Sequence[Sequence[torch.Tensor]],
-    expert_buffer: Sequence[torch.Tensor],
+    expert_weights: Sequence[EplbLayerWeights],
+    expert_buffer: Sequence[EplbExpertWeight],
     ep_group: ProcessGroup,
     communicator: EplbCommunicator,
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
+    device_runtime: EplbDeviceRuntime | None = None,
 ) -> None:
     """
     Rearranges the expert weights in place according to the new expert indices.
@@ -561,31 +595,33 @@ def rearrange_expert_weights_inplace(
     assert len(expert_weights) == num_moe_layers
     assert len(expert_weights[0]) >= 1
 
-    num_local_physical_experts = expert_weights[0][0].shape[0]
+    num_local_physical_experts = get_eplb_num_experts(expert_weights[0][0])
     assert new_global_expert_indices.shape == (num_moe_layers, num_physical_experts)
 
     ep_size = ep_group.size()
     ep_rank = ep_group.rank()
     assert num_physical_experts == ep_size * num_local_physical_experts
 
-    first_layer_weights = list(expert_weights[0])
-
     if is_profile:
         if communicator.needs_profile_buffer_reservation:
             # Reserve NCCL communication buffers via a dummy all_gather.
             # Backends that pre-allocate their own transfer buffers
             # skip this to avoid the extra memory spike during profiling.
-            profile_buffer: list[torch.Tensor] = [
-                torch.empty_like(w) for w in first_layer_weights
+            profile_buffer = [
+                empty_eplb_weight_like(weight) for weight in expert_weights[0]
             ]
             for weight, buffer in zip(expert_weights[0], profile_buffer):
-                dummy_recv_buffer = [buffer for _ in range(ep_size)]
-                torch.distributed.barrier()
-                all_gather(
-                    dummy_recv_buffer,
-                    weight,
-                    group=ep_group,
-                )
+                for tensor, buffer_tensor in zip(
+                    iter_eplb_weight_tensors(weight),
+                    iter_eplb_weight_tensors(buffer),
+                ):
+                    dummy_recv_buffer = [buffer_tensor for _ in range(ep_size)]
+                    torch.distributed.barrier()
+                    all_gather(
+                        dummy_recv_buffer,
+                        tensor,
+                        group=ep_group,
+                    )
         return
 
     weights_buffer = list(expert_buffer)
@@ -600,10 +636,11 @@ def rearrange_expert_weights_inplace(
             new_indices=new_global_expert_indices_cpu[layer_idx],
             expert_weights=expert_weights[layer_idx],
             expert_weights_buffers=weights_buffer,
-            cuda_stream=None,
+            transfer_stream=None,
             ep_rank=ep_rank,
             communicator=communicator,
             layer_idx=layer_idx,
+            device_runtime=device_runtime,
         )
 
         move_from_buffer(
