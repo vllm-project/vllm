@@ -10,6 +10,7 @@ See also `tests/kernels/moe/test_ocp_mx_moe.py`.
 import importlib.metadata
 from dataclasses import dataclass
 from importlib.util import find_spec
+from unittest.mock import Mock, patch
 
 import huggingface_hub
 import lm_eval
@@ -18,6 +19,7 @@ import torch
 from packaging import version
 
 from vllm._aiter_ops import is_aiter_found_and_supported
+from vllm.model_executor.layers.fused_moe import FusedMoeWeightScaleSupported
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkConfig,
     QuarkLinearMethod,
@@ -27,6 +29,7 @@ from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
 )
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
     QuarkW4A8Fp8MoEMethod,
+    QuarkW8A8Fp8MoEMethod,
     QuarkW8A8Int8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
@@ -175,6 +178,125 @@ def test_quark_w8a8_fp8_per_block_requires_block_size():
 
     with pytest.raises(ValueError, match="requires `block_size`"):
         QuarkW8A8Fp8PerBlock(weight_config, input_config)
+
+
+QUARK_MOE_MODULE = "vllm.model_executor.layers.quantization.quark.quark_moe"
+
+
+def test_quark_w8a8_fp8_moe_per_block_requires_block_size():
+    weight_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_block",
+        "is_dynamic": False,
+        "symmetric": True,
+    }
+    input_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_group",
+        "is_dynamic": True,
+        "group_size": 128,
+        "symmetric": True,
+    }
+
+    with pytest.raises(ValueError, match="requires `block_size`"):
+        QuarkW8A8Fp8MoEMethod(weight_config, input_config, Mock())
+
+
+def test_quark_w8a8_fp8_moe_rejects_per_block_static_input():
+    weight_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_block",
+        "is_dynamic": False,
+        "block_size": [128, 128],
+        "symmetric": True,
+    }
+    input_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_group",
+        "is_dynamic": False,
+        "group_size": 128,
+        "symmetric": True,
+    }
+
+    with pytest.raises(ValueError, match="dynamic"):
+        QuarkW8A8Fp8MoEMethod(weight_config, input_config, Mock())
+
+
+def _make_per_block_fp8_moe_method():
+    weight_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_block",
+        "is_dynamic": False,
+        "block_size": [128, 128],
+        "symmetric": True,
+    }
+    input_config = {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_group",
+        "is_dynamic": True,
+        "group_size": 128,
+        "symmetric": True,
+    }
+    moe = Mock()
+    moe.has_bias = False
+    moe.w13_num_shards = 2
+    return QuarkW8A8Fp8MoEMethod(weight_config, input_config, moe)
+
+
+def test_quark_w8a8_fp8_moe_per_block_weight_shapes():
+    with (
+        patch(
+            f"{QUARK_MOE_MODULE}.select_fp8_moe_backend",
+            return_value=(Mock(), Mock()),
+        ),
+        patch(f"{QUARK_MOE_MODULE}.get_current_vllm_config"),
+        patch(
+            f"{QUARK_MOE_MODULE}.get_tensor_model_parallel_world_size", return_value=1
+        ),
+    ):
+        method = _make_per_block_fp8_moe_method()
+        assert method.block_quant
+        assert method.weight_block_size == [128, 128]
+
+        layer = torch.nn.Module()
+        method.create_weights(
+            layer,
+            num_experts=4,
+            hidden_size=512,
+            intermediate_size_per_partition=256,
+            params_dtype=torch.bfloat16,
+        )
+
+    assert layer.weight_block_size == [128, 128]
+    assert layer.w13_weight.shape == (4, 2 * 256, 512)
+    assert layer.w2_weight.shape == (4, 512, 256)
+    # One scale per 128x128 tile of each expert's weight.
+    assert layer.w13_weight_scale.shape == (4, 2 * (256 // 128), 512 // 128)
+    assert layer.w2_weight_scale.shape == (4, 512 // 128, 256 // 128)
+    # The loader shards block scales on the block grid, not per row.
+    for scale in (layer.w13_weight_scale, layer.w2_weight_scale):
+        assert scale.quant_method == FusedMoeWeightScaleSupported.BLOCK.value
+
+
+def test_quark_w8a8_fp8_moe_per_block_rejects_misaligned_partition():
+    with (
+        patch(
+            f"{QUARK_MOE_MODULE}.select_fp8_moe_backend",
+            return_value=(Mock(), Mock()),
+        ),
+        patch(f"{QUARK_MOE_MODULE}.get_current_vllm_config"),
+        patch(
+            f"{QUARK_MOE_MODULE}.get_tensor_model_parallel_world_size", return_value=1
+        ),
+        pytest.raises(ValueError, match="not divisible by"),
+    ):
+        _make_per_block_fp8_moe_method().create_weights(
+            torch.nn.Module(),
+            num_experts=4,
+            hidden_size=512,
+            intermediate_size_per_partition=192,
+            params_dtype=torch.bfloat16,
+        )
 
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
