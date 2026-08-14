@@ -58,6 +58,7 @@ STR_THINKING_BUDGET = "thinking_budget"
 THINKING_TOKEN_BUDGET = 5
 THINK_START_TOKEN_ID = 999
 THINK_END_TOKEN_ID = 998
+EOS_TOKEN_ID = 997
 
 # LogitsProcessor subclass or "none"
 LogitprocType: TypeAlias = type[LogitsProcessor] | str
@@ -104,7 +105,13 @@ class MockReasoningConfig:
 
     reasoning_start_token_ids = [THINK_START_TOKEN_ID]
     reasoning_end_token_ids = [THINK_END_TOKEN_ID]
+    natural_reasoning_end_token_ids = [THINK_END_TOKEN_ID]
+    premature_eos_policy = "allow"
     enabled = True
+
+
+class MockEosMaskReasoningConfig(MockReasoningConfig):
+    premature_eos_policy = "mask_in_reasoning"
 
 
 def _generate_fake_sampling_metadata(
@@ -965,6 +972,94 @@ def test_thinking_budget_holder_sync_add_without_budget_drops_row():
         )
     )
     assert not h.has_tracked_requests()
+
+
+def test_thinking_budget_holder_masks_eos_in_open_reasoning_without_budget():
+    params = SamplingParams()
+    params.update_from_generation_config({}, EOS_TOKEN_ID)
+    output_token_ids = [THINK_START_TOKEN_ID, 10]
+    h = ThinkingBudgetStateHolder(
+        MockEosMaskReasoningConfig(),
+        4,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[(0, params, None, output_token_ids)],
+            moved=(),
+        )
+    )
+
+    logits = torch.zeros((1, VOCAB_SIZE), dtype=torch.float32)
+    h.update_state([output_token_ids], None)
+    h.apply_to_logits(logits, predict_bonus_token=False, spec_token_ids=None)
+
+    assert h.has_tracked_requests()
+    assert torch.isneginf(logits[0, EOS_TOKEN_ID])
+    assert logits[0, THINK_END_TOKEN_ID] == 0
+
+
+def test_thinking_budget_holder_unmasks_eos_after_reasoning_end():
+    params = SamplingParams()
+    params.update_from_generation_config({}, EOS_TOKEN_ID)
+    output_token_ids = [THINK_START_TOKEN_ID, 10, THINK_END_TOKEN_ID]
+    h = ThinkingBudgetStateHolder(
+        MockEosMaskReasoningConfig(),
+        4,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[(0, params, None, output_token_ids)],
+            moved=(),
+        )
+    )
+
+    logits = torch.zeros((1, VOCAB_SIZE), dtype=torch.float32)
+    h.update_state([output_token_ids], None)
+    h.apply_to_logits(logits, predict_bonus_token=False, spec_token_ids=None)
+
+    assert logits[0, EOS_TOKEN_ID] == 0
+
+
+def test_thinking_budget_holder_masks_eos_in_spec_rows_until_reasoning_end():
+    params = SamplingParams()
+    params.update_from_generation_config({}, EOS_TOKEN_ID)
+    output_token_ids = [THINK_START_TOKEN_ID, 10]
+    spec_token_ids = [[11, THINK_END_TOKEN_ID, 12]]
+    h = ThinkingBudgetStateHolder(
+        MockEosMaskReasoningConfig(),
+        4,
+        3,
+        torch.device("cpu"),
+        False,
+    )
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[(0, params, None, output_token_ids)],
+            moved=(),
+        )
+    )
+
+    logits = torch.zeros((3, VOCAB_SIZE), dtype=torch.float32)
+    h.update_state([output_token_ids], spec_token_ids)
+    h.apply_to_logits(
+        logits, predict_bonus_token=False, spec_token_ids=spec_token_ids
+    )
+
+    assert torch.isneginf(logits[0, EOS_TOKEN_ID])
+    assert torch.isneginf(logits[1, EOS_TOKEN_ID])
+    assert logits[2, EOS_TOKEN_ID] == 0
 
 
 def test_thinking_budget_holder_swap_exchanges_state():

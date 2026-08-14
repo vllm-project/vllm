@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import field
+from typing import Literal
 
 from vllm.config.model import ModelConfig
 from vllm.config.utils import config
@@ -25,6 +26,8 @@ class ReasoningConfig:
     """String that indicates the start of reasoning."""
     reasoning_end_str: str = ""
     """String forced when the thinking budget is exhausted."""
+    premature_eos_policy: Literal["allow", "mask_in_reasoning"] = "allow"
+    """Policy for EOS tokens sampled before reasoning has naturally ended."""
 
     _reasoning_start_token_ids: list[int] | None = field(
         default=None, init=False, repr=False

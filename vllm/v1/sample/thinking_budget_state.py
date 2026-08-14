@@ -15,6 +15,7 @@ from vllm.v1.sample.logits_processor.interface import (
 
 if TYPE_CHECKING:
     from vllm.config.reasoning import ReasoningConfig
+    from vllm.sampling_params import SamplingParams
 
 
 def maybe_create_thinking_budget_state_holder(
@@ -52,15 +53,30 @@ class ThinkingBudgetStateHolder:
 
         # No separate enable flag: a non-``None`` ``reasoning_config`` is the switch.
         self.is_enabled = reasoning_config is not None
+        mask_eos_in_reasoning = (
+            reasoning_config is not None
+            and getattr(reasoning_config, "premature_eos_policy", "allow")
+            == "mask_in_reasoning"
+        )
 
         if reasoning_config is None:
             self.think_start_token_ids = []
             self.think_end_token_ids = []
+            self.natural_think_end_token_ids = []
         else:
             rs = reasoning_config.reasoning_start_token_ids
             re = reasoning_config.reasoning_end_token_ids
+            natural_re = getattr(
+                reasoning_config, "natural_reasoning_end_token_ids", None
+            )
             self.think_start_token_ids = rs if rs else []
             self.think_end_token_ids = re if re else []
+            self.natural_think_end_token_ids = (
+                natural_re if natural_re else self.think_end_token_ids
+            )
+        self.mask_eos_in_reasoning = mask_eos_in_reasoning and bool(
+            self.think_start_token_ids and self.natural_think_end_token_ids
+        )
 
         self.device = device
         self._state: dict[int, dict[str, Any]] = {}
@@ -72,11 +88,11 @@ class ThinkingBudgetStateHolder:
             self._mask_capacity = max_num_reqs
 
     def has_tracked_requests(self) -> bool:
-        """True when ``sync_batch`` has state for a ``thinking_token_budget`` row.
+        """True when ``sync_batch`` has state for a tracked reasoning row.
 
         Used to decide whether sampling needs output-token rows and spec combining;
-        distinct from merely having a holder instance (reasoning may be on with no
-        budgeted requests in this batch).
+        distinct from merely having a holder instance (reasoning may be on with
+        no budgeted or EOS-protected requests in this batch).
         """
         return bool(self._state)
 
@@ -89,10 +105,14 @@ class ThinkingBudgetStateHolder:
 
         for index, params, prompt_tok_ids, output_tok_ids in batch_update.added:
             thinking_token_budget = params.thinking_token_budget
-            if thinking_token_budget is not None:
+            eos_token_ids = self._get_eos_token_ids(params)
+            should_track_eos = self.mask_eos_in_reasoning and bool(eos_token_ids)
+            if thinking_token_budget is not None or should_track_eos:
                 self._state[index] = self._init_state_entry(
-                    prompt_tok_ids, thinking_token_budget
+                    prompt_tok_ids,
+                    thinking_token_budget if thinking_token_budget is not None else -1,
                 )
+                self._state[index]["eos_token_ids"] = eos_token_ids
                 self._state[index]["output_tok_ids"] = output_tok_ids
                 self._state[index]["spec_token_ids"] = []
             else:
@@ -146,6 +166,7 @@ class ThinkingBudgetStateHolder:
             state["in_spec_mode"] = self.in_spec_mode
             state["force_index"] = []
             self._update_think_state(state)
+            self._update_eos_mask_state(state)
 
     def apply_to_logits(
         self,
@@ -167,6 +188,33 @@ class ThinkingBudgetStateHolder:
             if target_list[i : i + len(token_ids)] == token_ids:
                 return i
         return -1
+
+    @staticmethod
+    def _get_eos_token_ids(params: "SamplingParams") -> list[int]:
+        if params.ignore_eos or params.eos_token_id is None:
+            return []
+        return [params.eos_token_id]
+
+    def _is_open_reasoning(self, token_ids: list[int]) -> bool:
+        if not self.think_start_token_ids or not self.natural_think_end_token_ids:
+            return False
+        last_start = self._find_last_sequence_index(
+            token_ids, self.think_start_token_ids
+        )
+        last_end = self._find_last_sequence_index(
+            token_ids, self.natural_think_end_token_ids
+        )
+        return last_start >= 0 and last_start > last_end
+
+    def _update_eos_mask_state(self, state: dict[str, Any]) -> None:
+        if not self.mask_eos_in_reasoning or not state.get("eos_token_ids"):
+            state["mask_eos_in_think"] = False
+            return
+        prompt_tok_ids = state.get("prompt_tok_ids") or []
+        output_tok_ids = state.get("output_tok_ids") or []
+        state["mask_eos_in_think"] = self._is_open_reasoning(
+            [*prompt_tok_ids, *output_tok_ids]
+        )
 
     def _init_state_entry(
         self, prompt_tok_ids: list[int] | None, thinking_token_budget: int
@@ -210,6 +258,8 @@ class ThinkingBudgetStateHolder:
         return {
             "in_think": in_think,
             "in_end": in_end,
+            "mask_eos_in_think": self.mask_eos_in_reasoning
+            and self._is_open_reasoning(prompt_tok_ids or []),
             "check_count_down": countdown,
             "think_count": think_count,
             "end_count": 0,
@@ -506,11 +556,28 @@ class ThinkingBudgetStateHolder:
         # avoid per-iteration scalar sync writes to GPU tensors.
         active_indices_cpu: list[int] = []
         force_tokens_cpu: list[int] = []
+        eos_mask_indices_cpu: list[int] = []
+        eos_tokens_cpu: list[int] = []
 
         for seq_idx in sorted(self._state.keys()):
             if seq_idx not in self.cu_num_tokens:
                 continue
             state = self._state[seq_idx]
+            if self.mask_eos_in_reasoning and state.get("eos_token_ids"):
+                spec_tokens = (
+                    spec_token_ids_for_layout[seq_idx]
+                    if seq_idx < len(spec_token_ids_for_layout)
+                    else []
+                )
+                self._append_eos_mask_entries(
+                    eos_mask_indices_cpu,
+                    eos_tokens_cpu,
+                    seq_idx,
+                    state,
+                    spec_tokens,
+                    predict_bonus_token,
+                    logits.shape[0],
+                )
             if state.get("in_end", False):
                 # logits processor in spec mode are called twice
                 # once for bonus token logits and
@@ -550,33 +617,76 @@ class ThinkingBudgetStateHolder:
                                 else:
                                     state["bonus_token_forced"] = True
 
-        if active_indices_cpu:
-            device = logits.device
-            if current_platform.is_rocm() and logits.is_contiguous():
-                # Flattened index_fill avoids ROCm faults seen with 2-D
-                # advanced-indexing writes on the thinking-budget path.
-                vocab_size = logits.shape[1]
-                flat_indices_cpu = [
-                    row * vocab_size + token
-                    for row, token in zip(active_indices_cpu, force_tokens_cpu)
-                ]
-                flat_indices = async_tensor_h2d(
-                    flat_indices_cpu, dtype=torch.long, device=device
-                )
-                logits.view(-1).index_fill_(0, flat_indices, 1e9)
-            elif current_platform.is_rocm():
-                fill = logits.new_tensor(1e9)
-                for row, token in zip(active_indices_cpu, force_tokens_cpu):
-                    logits[row, token] = fill
-            else:
-                active_indices = async_tensor_h2d(
-                    active_indices_cpu, dtype=torch.long, device=device
-                )
-                force_tokens = async_tensor_h2d(
-                    force_tokens_cpu, dtype=torch.long, device=device
-                )
-                # Avoid CPU->GPU sync.
-                fill = logits.new_full((len(active_indices_cpu),), 1e9)
-                logits.index_put_((active_indices, force_tokens), fill)
+        self._set_logits_values(
+            logits, eos_mask_indices_cpu, eos_tokens_cpu, -float("inf")
+        )
+        self._set_logits_values(logits, active_indices_cpu, force_tokens_cpu, 1e9)
 
         return logits
+
+    def _append_eos_mask_entries(
+        self,
+        rows: list[int],
+        tokens: list[int],
+        seq_idx: int,
+        state: dict[str, Any],
+        spec_tokens: list[int],
+        predict_bonus_token: bool,
+        num_logits_rows: int,
+    ) -> None:
+        base_row = self.cu_num_tokens[seq_idx]
+        eos_token_ids = state.get("eos_token_ids") or []
+
+        def append_row(row: int) -> None:
+            if row >= num_logits_rows:
+                return
+            rows.extend([row] * len(eos_token_ids))
+            tokens.extend(eos_token_ids)
+
+        if not self.in_spec_mode:
+            if state.get("mask_eos_in_think", False):
+                append_row(base_row)
+            return
+
+        prompt_tok_ids = state.get("prompt_tok_ids") or []
+        output_tok_ids = state.get("output_tok_ids") or []
+        base_tokens = [*prompt_tok_ids, *output_tok_ids]
+        if predict_bonus_token:
+            if self._is_open_reasoning([*base_tokens, *spec_tokens]):
+                append_row(base_row)
+            return
+
+        for draft_idx in range(len(spec_tokens)):
+            if self._is_open_reasoning([*base_tokens, *spec_tokens[:draft_idx]]):
+                append_row(base_row + draft_idx)
+
+    def _set_logits_values(
+        self,
+        logits: torch.Tensor,
+        rows_cpu: list[int],
+        tokens_cpu: list[int],
+        value: float,
+    ) -> None:
+        if not rows_cpu:
+            return
+        device = logits.device
+        if current_platform.is_rocm() and logits.is_contiguous():
+            # Flattened index_fill avoids ROCm faults seen with 2-D
+            # advanced-indexing writes on the thinking-budget path.
+            vocab_size = logits.shape[1]
+            flat_indices_cpu = [
+                row * vocab_size + token for row, token in zip(rows_cpu, tokens_cpu)
+            ]
+            flat_indices = async_tensor_h2d(
+                flat_indices_cpu, dtype=torch.long, device=device
+            )
+            logits.view(-1).index_fill_(0, flat_indices, value)
+        elif current_platform.is_rocm():
+            fill = logits.new_tensor(value)
+            for row, token in zip(rows_cpu, tokens_cpu):
+                logits[row, token] = fill
+        else:
+            rows = async_tensor_h2d(rows_cpu, dtype=torch.long, device=device)
+            tokens = async_tensor_h2d(tokens_cpu, dtype=torch.long, device=device)
+            fill = logits.new_full((len(rows_cpu),), value)
+            logits.index_put_((rows, tokens), fill)
