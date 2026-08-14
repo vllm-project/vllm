@@ -18,6 +18,7 @@ Limitations:
 """
 
 __all__ = [
+    "detach_layerwise_weights_from_source",
     "record_metadata_for_reloading",
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
@@ -27,6 +28,7 @@ __all__ = [
 ]
 
 from .layerwise import (
+    detach_layerwise_weights_from_source,
     finalize_layerwise_processing,
     finalize_layerwise_reload,
     initialize_layerwise_reload,

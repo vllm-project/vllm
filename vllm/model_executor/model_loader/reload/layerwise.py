@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from functools import wraps
 from weakref import WeakKeyDictionary, WeakSet
 
@@ -32,6 +32,7 @@ from .utils import (
 logger = init_logger(__name__)
 
 __all__ = [
+    "detach_layerwise_weights_from_source",
     "get_layerwise_info",
     "record_metadata_for_reloading",
     "initialize_layerwise_reload",
@@ -65,6 +66,31 @@ def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
         )
 
     return LAYERWISE_INFO[layer]
+
+
+def detach_layerwise_weights_from_source(
+    model: torch.nn.Module, source_tensors: Iterable[torch.Tensor]
+) -> None:
+    """Own buffered reload weights that alias reusable source storage.
+
+    Layerwise loading may defer a layer until a later input batch. Clone only
+    those pending weights that still share storage with the current batch so
+    callers may safely reuse their transport buffers.
+    """
+    source_storage_ptrs = {
+        tensor.untyped_storage().data_ptr() for tensor in source_tensors
+    }
+    if not source_storage_ptrs:
+        return
+
+    for layer in model.modules():
+        for _, arguments in get_layerwise_info(layer).loaded_weights:
+            loaded_weight = arguments.arguments.get("loaded_weight")
+            if (
+                isinstance(loaded_weight, torch.Tensor)
+                and loaded_weight.untyped_storage().data_ptr() in source_storage_ptrs
+            ):
+                arguments.arguments["loaded_weight"] = loaded_weight.clone()
 
 
 def record_metadata_for_reloading(model: torch.nn.Module):

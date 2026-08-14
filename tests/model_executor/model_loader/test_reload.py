@@ -17,6 +17,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
+    detach_layerwise_weights_from_source,
     finalize_layerwise_reload,
     initialize_layerwise_reload,
     initialize_online_processing,
@@ -53,6 +54,30 @@ def _fp8_reload_unsupported() -> bool:
 
         return on_gfx90a()
     return False
+
+
+def test_detach_layerwise_weights_from_source_clones_only_pending_aliases():
+    layer = torch.nn.Linear(2, 2)
+    source = torch.arange(4)
+    owned = source.clone()
+
+    def load(param, loaded_weight):
+        pass
+
+    signature = inspect.signature(load)
+    info = reload_layerwise.get_layerwise_info(layer)
+    info.loaded_weights = [
+        ("source", signature.bind(layer.weight, source)),
+        ("owned", signature.bind(layer.weight, owned)),
+    ]
+
+    detach_layerwise_weights_from_source(layer, [source])
+
+    detached = info.loaded_weights[0][1].arguments["loaded_weight"]
+    retained = info.loaded_weights[1][1].arguments["loaded_weight"]
+    assert torch.equal(detached, source)
+    assert detached.untyped_storage().data_ptr() != source.untyped_storage().data_ptr()
+    assert retained is owned
 
 
 class _AliasedBufferLayer(torch.nn.Module):
