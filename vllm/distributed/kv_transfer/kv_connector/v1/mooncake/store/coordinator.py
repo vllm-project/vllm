@@ -90,6 +90,14 @@ class MooncakeStoreCoordinator:
         self.retention_interval = retention_interval
         self._verify_and_split_kv_cache_groups()
 
+    @property
+    def cache_hit_alignment_tokens(self) -> int:
+        return (
+            self.hash_block_size
+            if self.enable_partial_hash_hits
+            else self.lcm_block_size
+        )
+
     def align_lookup_length(self, length: int) -> int:
         alignment = (
             self.hash_block_size
@@ -152,14 +160,46 @@ class MooncakeStoreCoordinator:
         already reflects the eagle-pruned hit length and a second pop would
         leave the trailing block unloaded.
         """
-        blocks_per_group, hit_length = self._find_hit_blocks(
-            block_hashes, max_length, cached_block_pool, apply_eagle=apply_eagle
+        candidate_length = max_length
+        while True:
+            blocks_per_group, hit_length = self._find_hit_blocks(
+                block_hashes,
+                candidate_length,
+                cached_block_pool,
+                apply_eagle=apply_eagle,
+            )
+            masks = tuple(
+                [blk is not cached_block_pool.null_block for blk in blocks]
+                for blocks in blocks_per_group
+            )
+            if hit_length == 0 or self._exact_partial_hit_key_exists(
+                block_hashes, hit_length, cached_block_pool
+            ):
+                return masks, hit_length
+
+            candidate_length = max(0, hit_length - self.cache_hit_alignment_tokens)
+
+    def _exact_partial_hit_key_exists(
+        self,
+        block_hashes: Sequence[BlockHash],
+        hit_length: int,
+        cached_block_pool: ExternalCachedBlockPool,
+    ) -> bool:
+        """Whether the reconciled partial FullAttention tail can be loaded."""
+        if not self.enable_partial_hash_hits:
+            return True
+
+        # Attribute access, not tuple unpacking: SpecGroup carries manager_cls
+        # and use_eagle here, so the upstream 3-tuple unpack raises ValueError
+        # on the first lookup. git apply cannot see that -- it is a runtime
+        # arity mismatch, not a textual conflict.
+        group = self.attention_groups[0]
+        assert isinstance(group.spec, FullAttentionSpec)
+        hash_idx = hit_length // self.hash_block_size - 1
+        return (
+            cached_block_pool.get_cached_block(block_hashes[hash_idx], group.group_ids)
+            is not None
         )
-        masks = tuple(
-            [blk is not cached_block_pool.null_block for blk in blocks]
-            for blocks in blocks_per_group
-        )
-        return masks, hit_length
 
     def load_mask(
         self,
