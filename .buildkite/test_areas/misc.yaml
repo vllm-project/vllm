@@ -364,6 +364,8 @@ steps:
   # time ~53m + ~1.9m setup means even a perfect 3-way split floors at ~19.6m,
   # so tokenizers_ (17.4m, 1369 nodes, longest node 0.20m) is pytest-sharded
   # across shards 0-1 and everything else is grouped for ~13m/shard.
+  # An index outside 0-3 would skip every guard and pass empty; fail it instead.
+  - case "$$BUILDKITE_PARALLEL_JOB" in 0|1|2|3) ;; *) echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" && exit 1;; esac
   - test "$$BUILDKITE_PARALLEL_JOB" != "1" || python3 standalone_tests/lazy_imports.py
   - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s test_envs.py
   - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s test_inputs.py
