@@ -1447,18 +1447,29 @@ def _get_hisparse_hma_config(
     )
     assert config is not None
 
-    source_specs = {
-        (
-            f"{name}{HISPARSE_INDEXER_SOURCE_SUFFIX}" if name in indexer_specs else name
-        ): spec
-        for name, spec in specs.items()
-    }
     # Host pages retain the scheduler block size. The packed GPU slab uses
     # native kernel pages so indexer and hot-cache block IDs share one layout.
     gpu_indexer_specs = {
         name: spec.copy_with_new_block_size(gpu_block_size)
         for name, spec in indexer_specs.items()
     }
+    source_specs: dict[str, KVCacheSpec] = {}
+    for name, spec in specs.items():
+        if name not in indexer_specs:
+            source_specs[name] = spec
+            continue
+        assert isinstance(spec, MLAAttentionSpec)
+        gpu_spec = gpu_indexer_specs[name]
+        assert isinstance(gpu_spec, MLAAttentionSpec)
+        assert spec.storage_block_size % gpu_spec.storage_block_size == 0
+        kernel_pages_per_host_block = (
+            spec.storage_block_size // gpu_spec.storage_block_size
+        )
+        source_specs[f"{name}{HISPARSE_INDEXER_SOURCE_SUFFIX}"] = replace(
+            spec,
+            alignment=None,
+            page_size_padded=(kernel_pages_per_host_block * gpu_spec.page_size_bytes),
+        )
     indexer_group_spec = UniformTypeKVCacheSpecs.from_specs(gpu_indexer_specs)
     assert indexer_group_spec is not None
     indexer_group = KVCacheGroupSpec(

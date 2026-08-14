@@ -148,6 +148,17 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
     assert indexer_group.block_pool_id == 0
     assert host_group.kv_cache_spec.block_size == block_size
     assert indexer_group.kv_cache_spec.block_size == gpu_block_size
+    host_specs = host_group.kv_cache_spec.kv_cache_specs
+    gpu_indexer_specs = indexer_group.kv_cache_spec.kv_cache_specs
+    source_spec = host_specs["model.layers.0.self_attn.indexer.hisparse_source"]
+    gpu_indexer_spec = gpu_indexer_specs["model.layers.0.self_attn.indexer"]
+    kernel_pages_per_host_block = (
+        source_spec.storage_block_size // gpu_indexer_spec.storage_block_size
+    )
+    assert (
+        source_spec.page_size_bytes
+        == kernel_pages_per_host_block * gpu_indexer_spec.page_size_bytes
+    )
     resident_groups = [
         group
         for group in auxiliary_groups

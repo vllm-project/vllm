@@ -438,6 +438,12 @@ def init_hisparse_worker(
         source_block_size = source_spec.storage_block_size
         assert source_block_size % kernel_block_size == 0
         blocks_per_kv_block = source_block_size // kernel_block_size
+        kernel_page_stride = (
+            gpu_indexer_spec.page_size_bytes // source_spec.dtype.itemsize
+        )
+        assert source_spec.page_size_bytes == (
+            blocks_per_kv_block * gpu_indexer_spec.page_size_bytes
+        )
         source_cache = torch.as_strided(
             raw_tensors[cache_name].view(source_spec.dtype),
             size=(
@@ -446,7 +452,7 @@ def init_hisparse_worker(
                 source_spec.head_size,
             ),
             stride=(
-                source_spec.page_size_bytes // source_spec.dtype.itemsize,
+                kernel_page_stride,
                 source_spec.head_size,
                 1,
             ),
