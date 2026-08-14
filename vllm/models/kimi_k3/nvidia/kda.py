@@ -46,6 +46,7 @@ from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
 
@@ -187,20 +188,12 @@ def _flashkda_prefill(
     lower_bound: float,
     initial_state: torch.Tensor,
     cu_seqlens: torch.Tensor,
+    out: torch.Tensor,
+    final_state: torch.Tensor,
+    workspace: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     import vllm._flashkda_C  # noqa: F401
 
-    out = torch.empty(v.shape, dtype=v.dtype, device=v.device)
-    final_state = torch.empty_like(initial_state)
-    workspace = torch.empty(
-        torch.ops._flashkda_C.get_workspace_size(
-            q.shape[0] * q.shape[1],
-            q.shape[2],
-            cu_seqlens.numel() - 1,
-        ),
-        dtype=torch.uint8,
-        device=q.device,
-    )
     # FlashKDA hardcodes dense Q/K/V/G strides. Beta may be row-strided because
     # FlashKDA materializes its transposed [H, T] layout internally.
     # TODO: Teach FlashKDA to consume beta in [T, H] layout directly instead
@@ -312,6 +305,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         config: KimiLinearConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
+        run_gemm_rs: bool = False,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
 
@@ -436,6 +430,21 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             vllm_config.model_config.dtype,
             self.gate_lower_bound,
         )
+        self._flashkda_buffer_specs: (
+            tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
+        ) = None
+        if self.kda_prefill_backend == "flashkda":
+            T = vllm_config.scheduler_config.max_num_batched_tokens
+            N = vllm_config.scheduler_config.max_num_seqs
+            H, D = self.local_num_heads, self.head_dim
+            import vllm._flashkda_C  # noqa: F401
+
+            workspace_size = torch.ops._flashkda_C.get_workspace_size(T, H, N)
+            self._flashkda_buffer_specs = (
+                ((1, T, H, D), self.model_config.dtype),
+                ((N, H, D, D), self.get_state_dtype()[1]),
+                ((workspace_size,), torch.uint8),
+            )
 
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         decode_norm_weight = None
@@ -462,7 +471,16 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.o_proj",
         )
+        self.run_gemm_rs = run_gemm_rs
+        if self.run_gemm_rs:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
 
+            self.run_gemm_rs = get_gemm_rs().can_run(self.o_proj)
+            if not self.run_gemm_rs:
+                logger.warning_once(
+                    "GEMM-RS is disabled for %s due to an incompatible projection.",
+                    prefix,
+                )
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -503,6 +521,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
+        if self.run_gemm_rs:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
+
+            gemm_rs = get_gemm_rs()
+            if gemm_rs.should_run(core_attn_out):
+                return gemm_rs(core_attn_out, self.o_proj.weight)
         return self.o_proj(core_attn_out)[0]
 
     @eager_break_during_capture
@@ -696,6 +720,15 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 )
                 if self.kda_prefill_backend == "flashkda":
                     assert self.gate_lower_bound is not None
+                    assert self._flashkda_buffer_specs is not None
+                    workspace_out, final_state, workspace = (
+                        current_workspace_manager().get_simultaneous(
+                            *self._flashkda_buffer_specs
+                        )
+                    )
+                    flashkda_out = (
+                        workspace_out if has_spec_decode else core_attn_out
+                    )[:, : q_ns.shape[1]]
                     (
                         core_attn_out_non_spec,
                         last_recurrent_state,
@@ -710,6 +743,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         lower_bound=self.gate_lower_bound,
                         initial_state=initial_state,
                         cu_seqlens=non_spec_query_start_loc,
+                        out=flashkda_out,
+                        final_state=final_state[: initial_state.shape[0]],
+                        workspace=workspace,
                     )
                 else:
                     (
@@ -766,10 +802,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             core_attn_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
             core_attn_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
         elif core_attn_out_non_spec is not None:
-            # TODO: prefill and decode kernels write directly to core_attn_out
-            core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
-                0, :num_actual_tokens
-            ]
+            if self.kda_prefill_backend != "flashkda" or m.num_prefills == 0:
+                # TODO: decode kernels write directly to core_attn_out
+                core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
+                    0, :num_actual_tokens
+                ]
         else:
             assert core_attn_out_spec is not None
         # Triton normalizes in place, so this is a self-copy with no device

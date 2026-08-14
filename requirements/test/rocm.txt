@@ -131,7 +131,7 @@ cloudpickle==3.1.2
     #   tilelang
 cohere==7.0.8
     # via -r requirements/test/rocm.in
-cohere-melody==0.9.0
+cohere-melody==0.11.1
     # via -r requirements/test/rocm.in
 colorama==0.4.6
     # via

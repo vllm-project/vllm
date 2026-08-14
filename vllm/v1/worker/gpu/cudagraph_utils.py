@@ -54,6 +54,9 @@ class BatchExecutionDescriptor:
     num_tokens: int
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
+    # Upper bound on per-request query length. Varlen decode graphs leave
+    # uniform_token_count unset, so this is what keeps a prefill batch out of one.
+    max_query_len: int | None = None
     num_active_loras: int = 0
 
 
@@ -75,13 +78,20 @@ def _is_compatible(
     num_tokens: int,
     uniform_token_count: int | None,
     num_active_loras: int,
+    max_query_len: int | None,
 ) -> bool:
     # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
     # desc.num_reqs=None means no request padding needed (PIECEWISE)
+    # desc.max_query_len=None means the graph does not constrain query length; a
+    # caller that does not track max_query_len must not match one that does
     return (
         (
             desc.uniform_token_count is None
             or desc.uniform_token_count == uniform_token_count
+        )
+        and (
+            desc.max_query_len is None
+            or (max_query_len is not None and desc.max_query_len >= max_query_len)
         )
         and (desc.num_reqs is None or desc.num_reqs >= num_reqs)
         and desc.num_tokens >= num_tokens
@@ -97,6 +107,7 @@ class CudaGraphManager:
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        varlen_decode: bool = False,
     ):
         self.vllm_config = vllm_config
         self.device = device
@@ -105,6 +116,7 @@ class CudaGraphManager:
         assert self.compilation_config is not None
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
+        self.varlen_decode = varlen_decode
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -204,12 +216,27 @@ class CudaGraphManager:
         else:
             decode_query_lens = [self.decode_query_len]
 
+        capture_varlen_decode = (
+            separate_decode_routine and bool(decode_mode) and self.varlen_decode
+        )
         for num_tokens, num_active_loras in product(
             capture_sizes, self.lora_capture_cases
         ):
+            # Varlen decode graphs take any mix of 1..decode_query_len tokens per
+            # request, worst case 1 token per request (or max_num_reqs)
+            if capture_varlen_decode and num_tokens <= max_decode_tokens:
+                desc = BatchExecutionDescriptor(
+                    cg_mode=decode_mode,
+                    num_tokens=num_tokens,
+                    num_reqs=min(num_tokens, self.max_num_reqs),
+                    max_query_len=self.decode_query_len,
+                    num_active_loras=num_active_loras,
+                )
+                descs_by_mode[decode_mode].append(desc)
+                descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
             # Capture uniform decode specfifc graphs if required
             #  (i.e. separate decode routine)
-            if separate_decode_routine and decode_mode:
+            elif separate_decode_routine and decode_mode and not self.varlen_decode:
                 for decode_query_len in decode_query_lens:
                     rounded_num_tokens = round_up(num_tokens, decode_query_len)
                     rounded_num_reqs = rounded_num_tokens // decode_query_len
@@ -346,12 +373,19 @@ class CudaGraphManager:
                         compilation_counter.num_cudagraph_captured += 1
         self._graphs_captured = True
 
+    def captured_token_counts(self) -> list[int]:
+        """Sorted token counts with a captured graph, ignoring LoRA variants."""
+        return sorted(
+            {desc.num_tokens for desc in self.graphs if desc.num_active_loras == 0}
+        )
+
     def dispatch(
         self,
         num_reqs: int,
         num_tokens: int,
         uniform_token_count: int | None,
         num_active_loras: int,
+        max_query_len: int | None = None,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
 
@@ -365,6 +399,7 @@ class CudaGraphManager:
                     num_tokens,
                     uniform_token_count,
                     effective_loras,
+                    max_query_len,
                 ):
                     return desc
         return BatchExecutionDescriptor(
@@ -413,6 +448,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        varlen_decode: bool = False,
     ):
         super().__init__(
             vllm_config,
@@ -420,6 +456,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             cudagraph_mode,
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
+            varlen_decode=varlen_decode,
         )
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
@@ -483,6 +520,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                 attn_groups,
                 kv_cache_config,
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
+                max_query_len=desc.max_query_len,
             )
 
             # Capture with dummy rows marked as padding.
@@ -574,8 +612,11 @@ def prepare_inputs_to_capture(
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
     full_cudagraph: bool,
+    max_query_len: int | None = None,
 ) -> AttentionState:
-    input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
+    input_batch = InputBatch.make_dummy(
+        num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
+    )
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(

@@ -108,15 +108,20 @@ class RoutedExpertsCapturer:
     def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         """Capture expert routing decisions for a specific layer.
 
-        Under data parallelism, ``topk_ids`` may have three different batch
+        Under data parallelism, ``topk_ids`` may have four different batch
         layouts depending on where the DP combine happens and whether
-        Sequence Parallelism (SP) is active for the MoE layer:
+        Expert Parallelism (EP) or Sequence Parallelism (SP) is active for the
+        MoE layer:
           - ``n == total`` (naive dispatch): all DP ranks' tokens are
             concatenated before routing; we slice out this rank's span
             using the cumulative per-rank counts.
           - ``n == token_num_per_dp`` (modular-kernel path): DP combine
             happens inside ``quant_method.apply``; ``select_experts`` only
             ever sees this rank's tokens, so we take the whole tensor.
+          - ``n == sum(dp_metadata.local_sizes)`` (naive DP+EP dispatch):
+            sequence-parallel shards from every DP rank are gathered through
+            the flattened EP group. The shard sizes include CUDA-graph / SP
+            padding, so we use them to locate this DP rank's unpadded rows.
           - ``n == ceil(token_num_per_dp / tp_size)`` (SP + modular-kernel
             path): tokens were split along dim=0 across the TP group by
             ``_sequence_parallel_context``
@@ -143,6 +148,8 @@ class RoutedExpertsCapturer:
             token_num_per_dp = int(num_tokens_dp[self.dp_rank].item())
             total = int(num_tokens_dp.sum().item())
             n = topk_ids.shape[0]
+            shard_sizes = getattr(ctx.dp_metadata, "local_sizes", None)
+            gathered_size = sum(shard_sizes) if shard_sizes is not None else -1
 
             if n == total:
                 # Naive dispatch: all DP ranks' tokens concatenated
@@ -157,6 +164,17 @@ class RoutedExpertsCapturer:
                 # rank's tokens, take the whole tensor.
                 start_loc = 0
                 end_loc = token_num_per_dp
+            elif shard_sizes is not None and n == gathered_size:
+                # Naive DP+EP dispatch gathers the sequence-parallel shards in
+                # flattened DP-then-TP order. ``local_sizes`` is the exact
+                # all-gatherv layout, including padding. Select this DP rank's
+                # contiguous shard group, then trim its trailing padding.
+                num_dp_ranks = len(num_tokens_dp)
+                assert len(shard_sizes) % num_dp_ranks == 0
+                shards_per_dp_rank = len(shard_sizes) // num_dp_ranks
+                first_shard = self.dp_rank * shards_per_dp_rank
+                start_loc = sum(shard_sizes[:first_shard])
+                end_loc = start_loc + token_num_per_dp
             elif (
                 self.tp_size > 1
                 and n != token_num_per_dp
@@ -189,8 +207,8 @@ class RoutedExpertsCapturer:
                 raise AssertionError(
                     "RoutedExpertsCapturer: unexpected topk_ids batch "
                     f"dim {n} (expected {total}, {token_num_per_dp}, "
-                    f"or {sp_expected} for dp_rank={self.dp_rank}, "
-                    f"tp_size={self.tp_size})"
+                    f"{gathered_size}, or {sp_expected} for "
+                    f"dp_rank={self.dp_rank}, tp_size={self.tp_size})"
                 )
 
         if layer_id >= self.device_buffer.shape[1]:
