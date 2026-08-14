@@ -28,13 +28,29 @@ CompileKeyT = TypeVar("CompileKeyT")
 
 @dataclass(frozen=True)
 class WarmupIntRange:
+    """Expand integers with range semantics or a custom monotonic progression."""
+
     start: int
     stop: int
     step: int = 1
+    advance: Callable[[int], int] | None = None
 
 
 WarmupValues = Any
 CompileKeyDispatchFn = Callable[..., CompileKeyT]
+WarmupPredicateFn = Callable[..., bool]
+_LocalExprs = tuple[tuple[str, ast.AST], ...]
+
+
+def _eval_local_exprs(
+    local_exprs: _LocalExprs,
+    values: Mapping[str, Any],
+    globals_: Mapping[str, Any],
+) -> dict[str, Any]:
+    evaluated_values = dict(values)
+    for name, expr in local_exprs:
+        evaluated_values[name] = _eval_dispatch_expr(expr, evaluated_values, globals_)
+    return evaluated_values
 
 
 @dataclass(frozen=True)
@@ -46,7 +62,20 @@ class _WarmupInputRows:
 
 def _expand_warmup_values(values: WarmupValues) -> tuple[Any, ...]:
     if isinstance(values, WarmupIntRange):
-        return tuple(range(values.start, values.stop, values.step))
+        if values.advance is None:
+            return tuple(range(values.start, values.stop, values.step))
+        if values.step != 1:
+            raise ValueError("WarmupIntRange cannot set both step and advance")
+
+        expanded: list[int] = []
+        value = values.start
+        while value < values.stop:
+            expanded.append(value)
+            next_value = values.advance(value)
+            if next_value <= value:
+                raise ValueError("WarmupIntRange.advance must return a greater value")
+            value = next_value
+        return tuple(expanded)
     if isinstance(values, (list, tuple)):
         return tuple(values)
     return (values,)
@@ -73,20 +102,6 @@ def zip_inputs(*rows: Mapping[str, WarmupValues]) -> _WarmupInputRows:
         input_rows.append(dict(row))
 
     return _WarmupInputRows(rows=tuple(input_rows))
-
-
-def _expand_warmup_value_grid(
-    values: Mapping[str, WarmupValues],
-    input_names: frozenset[str],
-) -> tuple[dict[str, Any], ...]:
-    names = tuple(name for name in values if name in input_names)
-    if not names:
-        return ({},)
-
-    expanded_values = tuple(_expand_warmup_values(values[name]) for name in names)
-    return tuple(
-        dict(zip(names, value_set)) for value_set in itertools.product(*expanded_values)
-    )
 
 
 def _expand_warmup_input_rows(
@@ -117,7 +132,7 @@ def _merge_warmup_kwargs(parts: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class _CompileKeyDispatchTrace:
-    local_exprs: tuple[tuple[str, ast.AST], ...]
+    local_exprs: _LocalExprs
     field_exprs: tuple[tuple[str, ast.AST], ...]
     globals: Mapping[str, Any]
     input_names: frozenset[str]
@@ -128,16 +143,31 @@ class _CompileKeyDispatchTrace:
         compile_key_type: type[CompileKeyT],
         kwargs: Mapping[str, Any],
     ) -> CompileKeyT:
-        dispatch_values = {**self.defaults, **kwargs}
-        for name, expr in self.local_exprs:
-            dispatch_values[name] = _eval_dispatch_expr(
-                expr, dispatch_values, self.globals
-            )
+        dispatch_values = _eval_local_exprs(
+            self.local_exprs, {**self.defaults, **kwargs}, self.globals
+        )
         return compile_key_type(
             **{
                 field: _eval_dispatch_expr(expr, dispatch_values, self.globals)
                 for field, expr in self.field_exprs
             }
+        )
+
+
+@dataclass(frozen=True)
+class _WarmupPredicateTrace:
+    local_exprs: _LocalExprs
+    return_expr: ast.AST
+    globals: Mapping[str, Any]
+    input_names: frozenset[str]
+    defaults: Mapping[str, Any]
+
+    def matches(self, kwargs: Mapping[str, Any]) -> bool:
+        dispatch_values = _eval_local_exprs(
+            self.local_exprs, {**self.defaults, **kwargs}, self.globals
+        )
+        return bool(
+            _eval_dispatch_expr(self.return_expr, dispatch_values, self.globals)
         )
 
 
@@ -317,10 +347,10 @@ def _collect_input_names(
     }
 
 
-def _collect_dispatch_body(
-    fn: CompileKeyDispatchFn[Any],
+def _collect_expression_body(
+    fn: Callable[..., Any],
     function_def: ast.FunctionDef,
-) -> tuple[list[tuple[str, ast.AST]], ast.Call]:
+) -> tuple[list[tuple[str, ast.AST]], ast.AST]:
     local_exprs: list[tuple[str, ast.AST]] = []
     for statement in function_def.body:
         if (
@@ -335,7 +365,8 @@ def _collect_dispatch_body(
                 statement.targets[0], ast.Name
             ):
                 raise _dispatch_expr_error(
-                    statement, "Dispatch assignments must target one local name"
+                    statement,
+                    "Traced warmup helper assignments must target one local name",
                 )
             local_exprs.append((statement.targets[0].id, statement.value))
             continue
@@ -343,29 +374,45 @@ def _collect_dispatch_body(
         if isinstance(statement, ast.AnnAssign):
             if statement.value is None:
                 raise _dispatch_expr_error(
-                    statement, "Dispatch annotations must assign a value"
+                    statement, "Traced warmup helper annotations must assign a value"
                 )
             if not isinstance(statement.target, ast.Name):
                 raise _dispatch_expr_error(
-                    statement, "Dispatch assignments must target one local name"
+                    statement,
+                    "Traced warmup helper assignments must target one local name",
                 )
             local_exprs.append((statement.target.id, statement.value))
             continue
 
-        if isinstance(statement, ast.Return) and isinstance(statement.value, ast.Call):
+        if isinstance(statement, ast.Return) and statement.value is not None:
             return local_exprs, statement.value
 
         if isinstance(statement, ast.Return):
             raise _dispatch_expr_error(
-                statement, "Dispatch must return one CompileKey(...) call"
+                statement, "Traced warmup helper must return an expression"
             )
 
         raise _dispatch_expr_error(
             statement,
-            "Dispatch may only contain local assignments before CompileKey return",
+            "Traced warmup helper may only contain local assignments before return",
         )
 
-    raise ValueError(f"Expected {fn.__name__} to return one CompileKey(...) call")
+    raise ValueError(f"Expected {fn.__name__} to return an expression")
+
+
+def _function_trace_inputs(
+    fn: Callable[..., Any],
+) -> tuple[dict[str, Any], set[str]]:
+    signature = inspect.signature(fn)
+    defaults = {
+        name: parameter.default
+        for name, parameter in signature.parameters.items()
+        if parameter.default is not inspect.Parameter.empty
+    }
+    bound_self = getattr(fn, "__self__", None)
+    if bound_self is not None:
+        defaults["self"] = bound_self
+    return defaults, set(signature.parameters)
 
 
 def _trace_compile_key_dispatch(
@@ -375,21 +422,20 @@ def _trace_compile_key_dispatch(
     globals_ = source_fn.__globals__
     function_def = get_function_source_node(fn)
 
-    local_exprs, return_call = _collect_dispatch_body(fn, function_def)
+    local_exprs, return_expr = _collect_expression_body(fn, function_def)
+    if not isinstance(return_expr, ast.Call):
+        raise _dispatch_expr_error(
+            return_expr,
+            "Dispatch must return one CompileKey(...) call",
+        )
 
     field_exprs: list[tuple[str, ast.AST]] = []
-    signature = inspect.signature(fn)
-    defaults = {
-        name: parameter.default
-        for name, parameter in signature.parameters.items()
-        if parameter.default is not inspect.Parameter.empty
-    }
-    candidate_names = set(signature.parameters)
+    defaults, candidate_names = _function_trace_inputs(fn)
     input_names: set[str] = set()
     local_names = {name for name, _ in local_exprs}
     for _, expr in local_exprs:
         input_names.update(_collect_input_names(expr, candidate_names))
-    for keyword in return_call.keywords:
+    for keyword in return_expr.keywords:
         if keyword.arg is None:
             raise ValueError(f"{fn.__name__} cannot use **kwargs in CompileKey")
         field_exprs.append((keyword.arg, keyword.value))
@@ -400,6 +446,30 @@ def _trace_compile_key_dispatch(
     return _CompileKeyDispatchTrace(
         tuple(local_exprs),
         tuple(field_exprs),
+        globals_,
+        frozenset(input_names),
+        defaults,
+    )
+
+
+def _trace_warmup_predicate(
+    fn: WarmupPredicateFn,
+) -> _WarmupPredicateTrace:
+    source_fn = getattr(fn, "__func__", fn)
+    globals_ = source_fn.__globals__
+    function_def = get_function_source_node(fn)
+
+    local_exprs, return_expr = _collect_expression_body(fn, function_def)
+    defaults, candidate_names = _function_trace_inputs(fn)
+    input_names: set[str] = set()
+    local_names = {name for name, _ in local_exprs}
+    for _, expr in local_exprs:
+        input_names.update(_collect_input_names(expr, candidate_names))
+    input_names.update(_collect_input_names(return_expr, candidate_names, local_names))
+
+    return _WarmupPredicateTrace(
+        tuple(local_exprs),
+        return_expr,
         globals_,
         frozenset(input_names),
         defaults,
@@ -424,6 +494,7 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
 
         def traced(
             *input_groups: _WarmupInputRows,
+            _when: WarmupPredicateFn | None = None,
             **kwargs: WarmupValues,
         ) -> list[CompileKeyT]:
             for group in input_groups:
@@ -432,24 +503,50 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
                         "_trace_dispatch positional arguments must be "
                         "zip_inputs(...) groups"
                     )
+            predicate_trace = (
+                _trace_warmup_predicate(_when) if _when is not None else None
+            )
+            input_names = compile_key_dispatch_trace.input_names
+            if predicate_trace is not None:
+                input_names = input_names | predicate_trace.input_names
             expanded_input_groups = tuple(
-                _expand_warmup_input_rows(
-                    group.rows, compile_key_dispatch_trace.input_names
-                )
+                _expand_warmup_input_rows(group.rows, input_names)
                 for group in input_groups
             )
-            expanded_kwargs = _expand_warmup_value_grid(
-                kwargs, compile_key_dispatch_trace.input_names
+            # Expand independent keyword inputs into cartesian-product axes.
+            expanded_kwarg_axes = tuple(
+                (name, _expand_warmup_values(value))
+                for name, value in kwargs.items()
+                if name in input_names
             )
-            dispatch_value_groups = (*expanded_input_groups, expanded_kwargs)
-            return list(
-                dict.fromkeys(
-                    compile_key_dispatch_trace.compile_key(
-                        self.CompileKey, _merge_warmup_kwargs(dispatch_values)
+            dispatch_value_axes = (
+                *expanded_input_groups,
+                *(values for _, values in expanded_kwarg_axes),
+            )
+            input_group_count = len(expanded_input_groups)
+            kwarg_names = tuple(name for name, _ in expanded_kwarg_axes)
+            compile_keys: dict[CompileKeyT, None] = {}
+            for dispatch_value_set in itertools.product(*dispatch_value_axes):
+                dispatch_values = _merge_warmup_kwargs(
+                    (
+                        *dispatch_value_set[:input_group_count],
+                        dict(
+                            zip(
+                                kwarg_names,
+                                dispatch_value_set[input_group_count:],
+                            )
+                        ),
                     )
-                    for dispatch_values in itertools.product(*dispatch_value_groups)
                 )
-            )
+                if predicate_trace is not None and not predicate_trace.matches(
+                    dispatch_values
+                ):
+                    continue
+                compile_key = compile_key_dispatch_trace.compile_key(
+                    self.CompileKey, dispatch_values
+                )
+                compile_keys[compile_key] = None
+            return list(compile_keys)
 
         return traced
 

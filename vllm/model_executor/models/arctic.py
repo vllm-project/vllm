@@ -557,7 +557,7 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.num_experts = config.num_local_experts
         self.num_experts_per_tok = config.num_experts_per_tok
 
