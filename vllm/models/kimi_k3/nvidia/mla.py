@@ -134,6 +134,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         aux_stream: torch.cuda.Stream | None = None,
         use_rope: bool = False,
         non_causal_multi_token_decode: bool = False,
+        run_gemm_rs: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -270,6 +271,16 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
+        self.run_gemm_rs = run_gemm_rs
+        if self.run_gemm_rs:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
+
+            self.run_gemm_rs = get_gemm_rs().can_run(self.o_proj)
+            if not self.run_gemm_rs:
+                logger.warning_once(
+                    "GEMM-RS is disabled for %s due to an incompatible projection.",
+                    prefix,
+                )
 
         # ---- Attention backend / impl / KV cache ----
         self.quant_config = quant_config
@@ -541,10 +552,13 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         if gate is not None:
             attn_out = _gate_sigmoid_mul(attn_out, gate)
 
-        # ``o_proj`` (RowParallelLinear + out-of-place all-reduce) returns a
-        # fresh private tensor, so return it directly rather than copying into a
-        # caller buffer -- the previous ``output[:] = ...`` convention forced an
-        # extra [num_tokens, hidden] copy per layer.
+        if self.run_gemm_rs:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
+
+            gemm_rs = get_gemm_rs()
+            if gemm_rs.should_run(attn_out):
+                return gemm_rs(attn_out, self.o_proj.weight)
+
         return self.o_proj(attn_out)[0]
 
     @eager_break_during_capture
