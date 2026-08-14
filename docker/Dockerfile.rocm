@@ -518,16 +518,25 @@ RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
         cp dist/*.whl /app/install; \
     fi; \
     (cd /app/install && sha256sum *.whl > wheel.sha256); \
-    python3 -c "import glob, zipfile, sys; \
-names = zipfile.ZipFile(glob.glob('/app/install/*.whl')[0]).namelist(); \
-so = [n for n in names if n.endswith('.so')]; \
-sys.exit('no compiled extension in wheel' if not so else 0)"
+    ARCHS="${ARCHS}" python3 -c "import glob, os, zipfile, sys; \
+z = zipfile.ZipFile(glob.glob('/app/install/*.whl')[0]); \
+so = [n for n in z.namelist() if n.endswith('.so')]; \
+sys.exit('no compiled extension in wheel') if not so else None; \
+blob = b''.join(z.read(n) for n in so); \
+missing = [a for a in os.environ['ARCHS'].replace(';', ' ').split() if a.encode() not in blob]; \
+sys.exit('wheel has no code objects for: ' + ' '.join(missing)) if missing else None"
 
 # Gated so the hipcc build is skipped entirely when not requested.
 FROM scratch AS export_lmcache_true
 COPY --from=build_lmcache /app/install/*.whl /app/install/wheel.sha256 /
 FROM scratch AS export_lmcache_false
 FROM export_lmcache_${INSTALL_LMCACHE} AS export_lmcache
+
+# Digest alone, so the install layer can key on the wheel without committing it.
+FROM scratch AS export_lmcache_digest_true
+COPY --from=build_lmcache /app/install/wheel.sha256 /
+FROM scratch AS export_lmcache_digest_false
+FROM export_lmcache_digest_${INSTALL_LMCACHE} AS export_lmcache_digest
 
 # ROCShmem build stage - split from DeepEP so changing DEEPEP_BRANCH does not
 # invalidate the slow ROCShmem build.
@@ -907,6 +916,30 @@ RUN case "$(which python3)" in \
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --upgrade huggingface-hub[cli]
 
+# --no-deps: lmcache's metadata is shared with its CUDA build and pins
+# numpy<=2.2.6, which would downgrade vLLM's. These four are the only runtime
+# deps requirements/rocm.txt lacks; the otel exporter is needed because
+# `lmcache server` initialises observability unconditionally.
+# LMCache's builtin hashing uses Python hash(), randomised per process: export a
+# fixed PYTHONHASHSEED (any value) or TP>1 workers disagree on keys and never hit.
+# Placed before the vLLM wheel install: this layer varies only with LMCACHE_REF
+# and the arch set, so it stays reusable across vLLM source changes.
+ARG INSTALL_LMCACHE
+# Digest only — puts the wheel in this layer's cache key (a bind mount alone lets
+# a warm builder reuse a stale install) without committing the blob to a layer.
+COPY --from=export_lmcache_digest / /lmcache_digest/
+RUN --mount=type=bind,from=export_lmcache,src=/,target=/lmcache_install \
+    --mount=type=cache,target=/root/.cache/uv \
+    if [ "$INSTALL_LMCACHE" = "true" ]; then \
+        (cd /lmcache_install && sha256sum -c /lmcache_digest/wheel.sha256) \
+        && uv pip install --system --no-deps /lmcache_install/*.whl \
+        && uv pip install --system sortedcontainers cupy-rocm-7-0 aiofile \
+           opentelemetry-exporter-prometheus \
+        && python3 -c "import lmcache, lmcache.c_ops, importlib.metadata as m; \
+[m.version(d) for d in ('sortedcontainers','aiofile','cupy-rocm-7-0','opentelemetry-exporter-prometheus')]; \
+print('lmcache', lmcache.__version__)"; \
+    fi
+
 # Install vLLM using uv (inherited from base stage)
 # Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
@@ -920,28 +953,6 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     uv pip install --system /nixl_install/*.whl
 
-# --no-deps: lmcache's metadata is shared with its CUDA build and pins
-# numpy<=2.2.6, which would downgrade vLLM's. These four are the only runtime
-# deps requirements/rocm.txt lacks; the otel exporter is needed because
-# `lmcache server` initialises observability unconditionally.
-# LMCache's builtin hashing uses Python hash(), randomised per process: export a
-# fixed PYTHONHASHSEED (any value) or TP>1 workers disagree on keys and never hit.
-ARG INSTALL_LMCACHE
-# COPY rather than bind-mount so the wheel and its digest are inputs to this
-# layer's cache key; a bind mount alone lets a warm builder reuse a stale
-# install after LMCACHE_REF/ARCH changed. Empty when the connector is off.
-COPY --from=export_lmcache / /lmcache_install/
-RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$INSTALL_LMCACHE" = "true" ]; then \
-        (cd /lmcache_install && sha256sum -c wheel.sha256) \
-        && uv pip install --system --no-deps /lmcache_install/*.whl \
-        && uv pip install --system sortedcontainers cupy-rocm-7-0 aiofile \
-           opentelemetry-exporter-prometheus \
-        && python3 -c "import lmcache, lmcache.c_ops, importlib.metadata as m; \
-[m.version(d) for d in ('sortedcontainers','aiofile','cupy-rocm-7-0','opentelemetry-exporter-prometheus')]; \
-print('lmcache', lmcache.__version__)"; \
-    fi; \
-    rm -rf /lmcache_install
 
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE
