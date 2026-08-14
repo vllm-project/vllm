@@ -604,3 +604,54 @@ def test_chat_params_keeps_template_tool_choice_when_api_auto():
 
     assert chat_params.chat_template_kwargs["tool_choice"] == "required"
     assert chat_params.tool_choice == "auto"
+
+
+def _message_level_tools_request(
+    *, tool_choice="auto", role="developer"
+) -> ChatCompletionRequest:
+    """A request whose only tool is declared on a message, so ``request.tools``
+    stays empty."""
+    return ChatCompletionRequest(
+        model="test-model",
+        messages=[
+            {
+                "role": role,
+                "content": "",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "calc",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+            },
+            {"role": "user", "content": "Call the calc tool."},
+        ],
+        tool_choice=tool_choice,
+    )
+
+
+@pytest.mark.parametrize("role", ["developer", "system"])
+def test_delegating_parser_extracts_message_level_tool_calls(role):
+    """A tool declared on a message is callable: the call comes back
+    structured instead of leaking into the content as raw XTML."""
+    parser = KimiK3DelegatingParser(DummyTokenizer())
+    request = _message_level_tools_request(tool_choice="auto", role=role)
+    output = (
+        f"{THINK_OPEN}step{THINK_CLOSE}"
+        + _response("")
+        + _tools(_call("calc", 1, _arg("x", "number", "1")))
+    )
+
+    reasoning, content, tool_calls = parser.parse(
+        output, request, enable_auto_tools=True
+    )
+
+    assert request.tools is None
+    assert reasoning == "step"
+    assert tool_calls is not None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].name == "calc"
+    assert json.loads(tool_calls[0].arguments) == {"x": 1}

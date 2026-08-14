@@ -343,3 +343,60 @@ def test_reasoning_end_matches_reference_over_marker_dense_sequences(seed):
             assert parser.is_reasoning_end_streaming(
                 full, delta
             ) == _reference_is_reasoning_end(full), (head, delta)
+
+
+TOOLS_CHANNEL = f"{OPEN}tools{SEP}call{CLOSE}tools{SEP}"
+
+
+def _message_level_tools_request(
+    tool_choice: str, role: str = "developer"
+) -> ChatCompletionRequest:
+    return ChatCompletionRequest(
+        model="test-model",
+        messages=[
+            {
+                "role": role,
+                "content": "",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "calc",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+            },
+            {"role": "user", "content": "hi"},
+        ],
+        tool_choice=tool_choice,
+    )
+
+
+@pytest.mark.parametrize("role", ["developer", "system"])
+def test_tool_channels_preserved_for_message_level_tools(role):
+    """The tools channel must survive for the tool parser even though the
+    tools were declared on a message rather than on the request."""
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    rest = f"{RESPONSE_OPEN}answer{CLOSE}response{SEP}{TOOLS_CHANNEL}"
+
+    reasoning, content = parser.extract_reasoning_content(
+        f"{THINK_OPEN}step{THINK_CLOSE}{rest}",
+        _message_level_tools_request("auto", role),
+    )
+
+    assert reasoning == "step"
+    assert content == rest
+
+
+def test_tool_channels_stripped_for_message_level_tools_with_choice_none():
+    parser = KimiK3ReasoningParser(DummyTokenizer())
+    rest = f"{RESPONSE_OPEN}answer{CLOSE}response{SEP}{TOOLS_CHANNEL}"
+
+    reasoning, content = parser.extract_reasoning_content(
+        f"{THINK_OPEN}step{THINK_CLOSE}{rest}",
+        _message_level_tools_request("none"),
+    )
+
+    assert reasoning == "step"
+    assert content == "answer"

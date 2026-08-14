@@ -151,6 +151,29 @@ class TestRustFixtureParity:
             "<|message_model|>"
         )
 
+    def test_tool_declare_on_system_message(self, inkling_tokenizer):
+        """`developer` folds into `system`, so either role may declare."""
+        tool = {
+            "type": "function",
+            "function": {"name": "local_tool", "parameters": {"z": 1}},
+        }
+        rendered = render_text(
+            inkling_tokenizer,
+            [
+                {"role": "system", "content": "rules", "tools": [tool]},
+                {"role": "user", "content": "hi"},
+            ],
+        )
+
+        assert "local_tool" in rendered
+        assert rendered == render_text(
+            inkling_tokenizer,
+            [
+                {"role": "developer", "content": "rules", "tools": [tool]},
+                {"role": "user", "content": "hi"},
+            ],
+        )
+
     def test_text_image(self, inkling_tokenizer):
         messages = [
             {

@@ -108,11 +108,11 @@ def render_inkling_messages(
     input_ids: list[int] = []
     tool_call_id_to_name: dict[str, str] = {}
 
-    # Request-level tools plus per-developer-message tools (Rust renderer
+    # Request-level tools plus per-message tools (Rust renderer
     # semantics) are declared in a single leading system block.
     all_tools = list(tools or [])
     for message in messages:
-        if message.get("role") == "developer":
+        if message.get("role") in {"developer", "system"}:
             all_tools.extend(message.get("tools") or [])
 
     if all_tools:
