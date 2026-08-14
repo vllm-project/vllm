@@ -378,7 +378,10 @@ def test_dispatch_body_must_be_local_assignments_then_compile_key_return() -> No
 
     with pytest.raises(ValueError, match="local assignments"):
         BranchKernel()
-    with pytest.raises(ValueError, match="may only unpack its variadic keyword"):
+    with pytest.raises(
+        ValueError,
+        match=r"may unpack only its own \*\*kwargs parameter once",
+    ):
         KwargsReturnKernel()
 
 
