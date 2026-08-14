@@ -215,6 +215,21 @@ class CachedHfTokenizer(TokenizerLike):
                 cache_dir=download_dir,
                 **kwargs,
             )
+        except AttributeError as e:
+            # Some models (e.g. gemma4_assistant) ship extra_special_tokens
+            # as a list but older Transformers expects a dict.
+            if "'list' object has no attribute 'keys'" in str(e):
+                tokenizer = AutoTokenizer.from_pretrained(
+                    path_or_repo_id,
+                    *args,
+                    trust_remote_code=trust_remote_code,
+                    revision=revision,
+                    cache_dir=download_dir,
+                    extra_special_tokens={},
+                    **kwargs,
+                )
+            else:
+                raise
         except ValueError as e:
             # If the error pertains to the tokenizer class not existing or not
             # currently being imported,

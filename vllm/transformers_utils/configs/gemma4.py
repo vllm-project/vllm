@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Per-layer config resolution for Gemma4 and its variants."""
+"""Per-layer config resolution for Gemma4 and its variants.
+
+Also provides thin config classes for model types (gemma4_assistant,
+gemma4_text) not yet in the installed Transformers version.
+"""
 
 from copy import copy
 
@@ -27,8 +31,25 @@ def gemma4_layer_config(
         global_head_dim = getattr(text_config, "global_head_dim", None)
         layer.head_dim = global_head_dim or text_config.head_dim
         if getattr(text_config, "attention_k_eq_v", False):
-            global_kv_heads = getattr(text_config, "num_global_key_value_heads", None)
+            global_kv_heads = getattr(
+                text_config, "num_global_key_value_heads", None
+            )
             layer.num_key_value_heads = (
                 global_kv_heads or text_config.num_key_value_heads
             )
     return layer
+
+
+class Gemma4TextConfig(PretrainedConfig):
+    model_type = "gemma4_text"
+
+
+class Gemma4AssistantConfig(PretrainedConfig):
+    model_type = "gemma4_assistant"
+
+    def __init__(self, text_config=None, **kwargs):
+        if text_config is not None and isinstance(text_config, dict):
+            self.text_config = Gemma4TextConfig(**text_config)
+        elif text_config is not None:
+            self.text_config = text_config
+        super().__init__(**kwargs)
