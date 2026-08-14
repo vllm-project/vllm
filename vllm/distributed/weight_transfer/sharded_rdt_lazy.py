@@ -35,21 +35,20 @@ def _freeze_kwargs(kwargs: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
 
 @dataclass
 class _Scatter:
-    """One recorded scatter: pull ``src`` and copy it into ``layer``'s
-    ``param_name`` at the recorded strided region.
+    """One recorded scatter: pull ``src``, copy it into ``layer``'s
+    ``param_name`` at the recorded strided region. The bake's output unit; see
+    the engine module's Data flow.
 
-    Captured once during the bake and self-contained, so replay needs no lookups:
-    the destination geometry is read off the meta view (no real storage needed)
-    and rebuilt each sync as ``param.as_strided(shape, stride, offset)``, while
-    ``dtype``/``nbytes`` describe the slice ON THE WIRE and feed the packed
-    layout. ``layer`` is resolved to a param at replay time, never baked -- every
+    Self-contained so replay needs no lookups. Destination geometry is read off
+    the meta view and rebuilt each sync as ``as_strided(shape, stride, offset)``
+    -- ``layer`` is resolved to a param at replay time, never baked, since every
     sync re-materializes fresh tensors.
 
-    ``dtype`` is the PRODUCED dtype, i.e. the lazy's after its op chain, which is
-    what the producer packs. Taking it from the source name's metadata instead
-    would be wrong for any chain that reinterprets dtype (``view(dtype)`` is in
-    the allowlist): the two sides would size the same slice differently and split
-    the packed blob at different offsets.
+    ``dtype``/``nbytes`` describe the slice ON THE WIRE and feed the packed
+    layout, so ``dtype`` is the PRODUCED dtype (the lazy's after its op chain),
+    not the source name's: ``view(dtype)`` is allowlisted, and taking the
+    source's would size the slice with the wrong itemsize and carve the packed
+    blob differently on the two sides.
     """
 
     layer: Any

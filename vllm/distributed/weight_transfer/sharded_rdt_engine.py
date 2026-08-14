@@ -15,6 +15,34 @@ kernel-copy. Names with no recorded plan take a plain per-slice load.
 
 Only valid with ``is_checkpoint_format=True`` (layerwise reload).
 
+Data flow
+---------
+One thing at four resolutions, over three lifetimes. ``FetchKey`` --
+``(name, op_chain)``, "which slice of which trainer tensor" -- is the atom;
+everything else is bookkeeping around it.
+
+    BAKE      once at init, kept for the engine's life
+      LazyRDTTensor intercepts the model's loaders; each copy_ records a
+      _Scatter (sharded_rdt_lazy): src FetchKey, owning layer, the destination
+      as_strided region, and the produced dtype/nbytes.
+        -> _name_to_plan: name -> that module's scatter list
+
+    PLAN      once, cached, _build_call_plan
+      _Chunk    one packed pull: its scatters, deduped keys, the byte-exact
+                pack_layout, which producer serves it, and what to run after
+                (materialize / quant / free).  One per (gather group, ep_rank).
+      _CallPlan all chunks + pre_free + residual + name_group_idx.
+
+    RUN       per chunk, per sync, _run_chunk_pipeline
+      _Chunk -> _PendingPull   issued, not yet landed: Ray ref, arena views,
+                               ring slot.               [RPC thread]
+             -> _ProcItem      chunk + results + slot.  [hand-off to the
+                               background scatter thread]
+
+The RUN pair stays split on purpose: it is the thread boundary, and only
+``targets`` should outlive the get -- carrying the Ray ref and the whole-arena
+blob into the queue would keep both alive for the scatter's lifetime.
+
 See docs/training/weight_transfer/sharded_rdt.md for the design and the measured
 results behind the choices here.
 """
@@ -53,15 +81,12 @@ logger = init_logger(__name__)
 
 @dataclass
 class _Chunk:
-    """One packed pull plus its post-processing, fully described at plan time.
+    """One packed pull plus its post-processing (see Data flow).
 
-    One chunk per (gather group, producer ep_rank) in the worker's baked copies,
-    so a module's copies span chunks when its experts live on several
-    coordinates. ``keys``/``pack_layout``/``pack_bytes`` are the deduped keys and
-    the byte-exact packed layout mirroring the producer, precomputed so the pull
-    path does no per-call arithmetic. ``materialize`` = modules whose FIRST
-    scatter is here, ``quant`` = modules whose LAST scatter is here, ``free`` =
-    groups whose last chunk this is.
+    A module's copies span chunks when its experts live on several producer
+    coordinates, so ``materialize`` fires on its FIRST chunk and ``quant`` on its
+    LAST -- materialize-once by construction, not by a runtime counter.
+    ``pack_layout`` mirrors the producer's rule byte-exactly.
     """
 
     scatters: "list[_Scatter]"
@@ -78,17 +103,14 @@ class _Chunk:
 
 @dataclass
 class _CallPlan:
-    """The STATIC plan for one sync: a pure function of the baked plan and the
-    driver's group partition, both fixed for the engine's lifetime. Built once
-    and reused, so runtime is pure execution — each ``_Chunk`` carries its own
-    scatter/pack/materialize/quant/free actions, with no per-sync side-tables.
+    """The static plan for one sync (see Data flow). Pure, so it is built once
+    and reused; runtime is then execution only.
 
-    ``pre_free`` = groups with NO chunk on this worker; their signal fires at
-    sync start (owners tolerate a signal preceding its publish). With the
-    last-chunk signals this keeps the completeness invariant consumer-local:
-    every gi is signaled exactly once. ``residual`` = live-but-unbaked names for
-    the plain-load fallback. ``name_group_idx`` selects the owning producer for a
-    residual name's on-demand pull.
+    ``pre_free`` = groups with NO chunk on this worker, signaled at sync start
+    (owners tolerate a signal preceding its publish). With the last-chunk signals
+    this keeps the completeness invariant consumer-local: every group is signaled
+    exactly once. ``residual`` = live-but-unbaked names for the plain-load
+    fallback; ``name_group_idx`` picks the owning producer for their pulls.
     """
 
     chunks: "list[_Chunk]"
@@ -99,15 +121,11 @@ class _CallPlan:
 
 @dataclass
 class _PendingPull:
-    """An issued-but-not-completed pull: the produce RPC is dispatched and the
-    transfer pointed at ring-slot arena views, but the blocking ``ray.get`` has
-    not run.
+    """A dispatched pull whose blocking ``ray.get`` has not run (see Data flow).
 
-    ``targets``/``blob`` hold the arena views strongly referenced until
-    completion -- ``set_target_for_ref`` stores WEAKREFS, so dropping them would
-    silently reroute the transfer into a fallback buffer. ``targets`` are the
-    per-key dtype views the scatter reads; ``blob`` is the whole-arena uint8 view
-    handed to ``set_target_for_ref``."""
+    ``targets``/``blob`` must stay strongly referenced until it completes:
+    ``set_target_for_ref`` stores WEAKREFS, so dropping them silently reroutes the
+    transfer into a fallback buffer."""
 
     ref: "Any"
     keys: "list[FetchKey]"
@@ -118,13 +136,10 @@ class _PendingPull:
 
 @dataclass
 class _ProcItem:
-    """One chunk of deferred post-processing handed from the RPC thread (which
-    did the synchronous pull) to the background process thread.
+    """A landed pull handed to the background scatter thread (see Data flow).
 
-    ``chunk`` is the self-describing ``_Chunk`` (scatters + materialize/quant
-    module lists). ``results`` are views aliasing the ring arena ``slot``; they
-    are held as strong refs here so they outlive the RPC-thread frame until the
-    background scatter consumes them.
+    ``results`` alias the ring arena ``slot``, held as strong refs so they
+    outlive the RPC-thread frame until the scatter consumes them.
     """
 
     chunk: "_Chunk"
