@@ -1073,6 +1073,8 @@ statsmodels==0.14.4
     # via genai-perf
 structlog==25.4.0
     # via gpt-oss
+suffix-gpu==0.1.1
+    # via -r requirements/test/cuda.in
 supervisor==4.3.0
     # via model-hosting-container-standards
 sympy==1.13.3
@@ -1131,6 +1133,7 @@ torch==2.13.0+cpu
     #   runai-model-streamer
     #   segmentation-models-pytorch
     #   sentence-transformers
+    #   suffix-gpu
     #   tensorizer
     #   timm
     #   torchvision
