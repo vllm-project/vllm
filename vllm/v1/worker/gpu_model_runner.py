@@ -1635,11 +1635,7 @@ class GPUModelRunner(
                 bufs=self._get_mamba_bufs(),
                 num_reqs=num_reqs,
                 num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
-                num_accepted_tokens_cpu_tensor=(
-                    self.num_accepted_tokens.cpu
-                    if self.use_async_scheduling
-                    else self.input_batch.num_accepted_tokens_cpu_tensor
-                ),
+                num_accepted_tokens_cpu_tensor=self.num_accepted_tokens.cpu,
                 input_batch=self.input_batch,
                 kv_cache_config=self.kv_cache_config,
                 forward_context=self.compilation_config.static_forward_context,
@@ -2001,9 +1997,8 @@ class GPUModelRunner(
         return encoder_seq_lens, encoder_seq_lens_cpu
 
     def _sync_num_accepted_tokens(
-        self, num_reqs: int, prev_req_id_to_index: dict | None
+        self, num_reqs: int, prev_req_id_to_index: dict[str, int] | None
     ) -> None:
-        # Async mode: condense() reordered indices, use prev_positions mapping
         if self.use_async_scheduling:
             if prev_req_id_to_index:
                 # Remap the previous-iteration runner snapshot through prev_positions.
@@ -2017,13 +2012,13 @@ class GPUModelRunner(
                     self.num_accepted_tokens.np[:num_reqs]
                 )
             else:
-                # Default initialization for initial step
+                # Initial step or all-chunked-prefill step
                 self.num_accepted_tokens.np[:num_reqs].fill(1)
                 self.input_batch.num_accepted_tokens_cpu[:num_reqs].fill(1)
         else:
-            # Non-async mode: InputBatch owns current-request counts.
-            self.num_accepted_tokens.np[:num_reqs] = (
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+            # Non-async mode: write back 1:1 to input_batch
+            self.input_batch.num_accepted_tokens_cpu[:num_reqs] = (
+                self.num_accepted_tokens.np[:num_reqs]
             )
 
     def _prepare_inputs(
@@ -2183,7 +2178,6 @@ class GPUModelRunner(
         if needs_cpu_accepted_counts:
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.synchronize()
-            # Async mode: condense() reordered indices, use prev_positions mapping
             self._sync_num_accepted_tokens(num_reqs, prev_req_id_to_index)
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()

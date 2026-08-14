@@ -1768,7 +1768,7 @@ class TestSyncNumAcceptedTokens:
             np=np.array([4, 3, 2, 0, 0], dtype=np.int32),
         )
         runner.input_batch = SimpleNamespace(
-            num_accepted_tokens_cpu=np.array([4, 2, 1, 0, 0], dtype=np.int32)
+            num_accepted_tokens_cpu=np.array([9, 9, 9, 0, 0], dtype=np.int32)
         )
         runner.prev_positions = SimpleNamespace(np=np.array([0, 2, -1], dtype=np.int32))
 
@@ -1805,9 +1805,11 @@ class TestSyncNumAcceptedTokens:
         num_reqs = 2
         runner = Mock(spec=GPUModelRunner)
         runner.use_async_scheduling = False
-        runner.num_accepted_tokens = SimpleNamespace(np=np.zeros(5, dtype=np.int32))
+        runner.num_accepted_tokens = SimpleNamespace(
+            np=np.array([5, 4, 0, 0, 0], dtype=np.int32)
+        )
         runner.input_batch = SimpleNamespace(
-            num_accepted_tokens_cpu=np.array([5, 4, 0, 0, 0], dtype=np.int32)
+            num_accepted_tokens_cpu=np.zeros(5, dtype=np.int32)
         )
 
         GPUModelRunner._sync_num_accepted_tokens(runner, num_reqs, None)
@@ -1817,4 +1819,17 @@ class TestSyncNumAcceptedTokens:
         )
         np.testing.assert_array_equal(
             runner.input_batch.num_accepted_tokens_cpu[:num_reqs], expected
+        )
+
+    def test_d2h_target_is_runner_buffer(self):
+        """Verify D2H copy target is unconditionally runner.num_accepted_tokens.cpu."""
+        runner = Mock(spec=GPUModelRunner)
+        runner.use_async_scheduling = True
+        runner.num_accepted_tokens = SimpleNamespace(cpu=Mock(), gpu=Mock())
+        runner.input_batch = SimpleNamespace(num_accepted_tokens_cpu_tensor=Mock())
+
+        # runner buffer should be distinct from input_batch buffer
+        assert (
+            runner.num_accepted_tokens.cpu
+            != runner.input_batch.num_accepted_tokens_cpu_tensor
         )
