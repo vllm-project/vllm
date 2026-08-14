@@ -63,9 +63,11 @@ from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.executor.vllm_net_devices import set_worker_net_device
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
+from vllm.utils.debug.debug_stat import worker_debug_stat_loop, engine_debug_stat_loop, get_engine_debug_stat, get_worker_debug_stat
 
 logger = init_logger(__name__)
-
+engine_debug_stat = get_engine_debug_stat()
+worker_debug_stat = get_worker_debug_stat()
 
 class FutureWrapper(Future):
     def __init__(
@@ -260,7 +262,12 @@ class MultiprocExecutor(Executor):
         return tp_size, pp_size, pcp_size
 
     def _post_init_executor(self) -> None:
-        pass
+        debug_thread = Thread(
+            target=engine_debug_stat_loop,
+            name="engine_debug_stat_loop",
+            daemon=True,
+        )
+        debug_thread.start()
 
     def _is_driver_worker(self, rank: int) -> bool:
         return rank % self.parallel_config.tensor_parallel_size == 0
@@ -307,6 +314,7 @@ class MultiprocExecutor(Executor):
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        engine_debug_stat.execute += 1
         return self.collective_rpc(
             "execute_model",
             args=(scheduler_output,),
@@ -319,6 +327,7 @@ class MultiprocExecutor(Executor):
     def sample_tokens(  # type: ignore[override]
         self, grammar_output: GrammarOutput | None, non_block: bool = False
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+        engine_debug_stat.sample += 1
         return self.collective_rpc(
             "sample_tokens",
             args=(grammar_output,),
@@ -329,10 +338,12 @@ class MultiprocExecutor(Executor):
         )
 
     def execute_dummy_batch(self) -> None:
+        engine_debug_stat.dummy += 1
         self.collective_rpc("execute_dummy_batch", unique_reply_rank=self.output_rank)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         # OPTIMIZATION: Get output only from a single worker (output_rank)
+        engine_debug_stat.take_draft += 1
         return self.collective_rpc(
             "take_draft_token_ids", unique_reply_rank=self.output_rank
         )
@@ -347,6 +358,7 @@ class MultiprocExecutor(Executor):
         unique_reply_rank: int | None = None,
         kv_output_aggregator: KVOutputAggregator | None = None,
     ) -> Any:
+        engine_debug_stat.send_rpc += 1
         """Returns single result if unique_reply_rank and/or kv_output_aggregator
         is provided, otherwise list."""
         assert self.rpc_broadcast_mq is not None, (
@@ -385,6 +397,7 @@ class MultiprocExecutor(Executor):
                 )
                 try:
                     status, result = mq.dequeue(timeout=dequeue_timeout)
+                    engine_debug_stat.recv_rpc += 1
                 except TimeoutError as e:
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
@@ -936,6 +949,7 @@ class WorkerProc:
         else:
             result = (WorkerProc.ResponseStatus.SUCCESS, output)
         if (response_mq := self.worker_response_mq) is not None:
+            worker_debug_stat.resp_rpc += 1
             response_mq.enqueue(result)
 
     def handle_output(self, output: Any):
@@ -967,20 +981,32 @@ class WorkerProc:
             self.enqueue_output(output)
 
     def worker_busy_loop(self):
+        debug_thread = Thread(
+            target=worker_debug_stat_loop,
+            name="worker_debug_stat_loop",
+            daemon=True,
+        )
+        debug_thread.start()
+
         """Main busy loop for Multiprocessing Workers"""
         assert self.rpc_broadcast_mq is not None
         while True:
+            worker_debug_stat.set_call_step(0, 1)
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
                 indefinite=True
             )
+            worker_debug_stat.set_call_step(0, 2)
+            worker_debug_stat.recv_rpc += 1
             try:
+                worker_debug_stat.set_call_step(0, 3)
                 if isinstance(method, str):
                     func = getattr(self.worker, method)
                 elif isinstance(method, bytes):
                     func = partial(cloudpickle.loads(method), self.worker)
-
+                worker_debug_stat.set_call_step(0, 4)
                 output = func(*args, **kwargs)
             except Exception as e:
+                worker_debug_stat.set_call_step(0, 5)
                 # Notes have been introduced in python 3.11
                 if hasattr(e, "add_note"):
                     e.add_note(traceback.format_exc())
