@@ -27,6 +27,7 @@ def _impl():
         kv_lora_rank=KV_LORA_RANK,
         qk_rope_head_dim=QK_ROPE_HEAD_DIM,
         scale=0.125,
+        kv_cache_dtype="auto",
     )
 
 
@@ -111,14 +112,14 @@ def test_gfx942_gluon_graph_shape_gate(num_heads, qlen, num_reqs, expected):
 
 def test_existing_single_token_gluon_respects_small_head_mode(monkeypatch):
     monkeypatch.setattr(rocm_aiter_mla, "_gluon_mla_decode_supported", lambda: False)
-    assert not AiterMLAHelper.use_gluon_decode(NUM_HEADS, 1)
+    assert not AiterMLAHelper.use_gluon_decode(NUM_HEADS, 1, "auto")
 
     monkeypatch.setattr(rocm_aiter_mla, "_gluon_mla_decode_supported", lambda: True)
     monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "auto")
-    assert not AiterMLAHelper.use_gluon_decode(NUM_HEADS, 1)
+    assert not AiterMLAHelper.use_gluon_decode(NUM_HEADS, 1, "auto")
 
     monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "gluon")
-    assert AiterMLAHelper.use_gluon_decode(NUM_HEADS, 1)
+    assert AiterMLAHelper.use_gluon_decode(NUM_HEADS, 1, "auto")
 
 
 def test_nondivisor_head_tile_padding_and_unpadding():
