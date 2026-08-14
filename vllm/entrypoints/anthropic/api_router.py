@@ -17,9 +17,9 @@ from vllm.entrypoints.anthropic.protocol import (
 )
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
-    sanitize_message,
     validate_json_request,
     with_cancellation,
 )

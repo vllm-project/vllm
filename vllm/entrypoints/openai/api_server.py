@@ -16,8 +16,7 @@ from contextlib import asynccontextmanager
 from typing import Any, cast
 
 import uvloop
-from fastapi import FastAPI, HTTPException
-from fastapi.exceptions import RequestValidationError
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import State
 
@@ -31,6 +30,7 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_se
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
+from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
 from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
@@ -41,15 +41,10 @@ from vllm.entrypoints.serve.utils.api_utils import (
 )
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.server_utils import (
-    exception_handler,
     get_uvicorn_log_config,
-    http_exception_handler,
     lifespan,
     log_response,
-    validation_exception_handler,
-    vllm_error_handler,
 )
-from vllm.exceptions import VLLMError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.renderers.online_derenderer import OnlineDerenderer
@@ -275,6 +270,8 @@ def build_app(
     # `engine_client=None` at Phase B (see `_init_endpoint_plugins_state`).
     _attach_endpoint_plugins(app, supported_tasks)
 
+    init_exception_handler(app)
+
     app.root_path = args.root_path
     app.add_middleware(
         CORSMiddleware,
@@ -283,28 +280,6 @@ def build_app(
         allow_methods=args.allowed_methods,
         allow_headers=args.allowed_headers,
     )
-
-    # Exception handlers are registered in four layers:
-    #   1. framework errors raised by FastAPI/Starlette
-    #   2. vLLM-specific errors dispatched via a single ``VLLMError`` handler
-    #   3. fallback handlers for raw exceptions not yet migrated to ``VLLMError``
-    #   4. the raw ``Exception`` handler as a safety net
-    # Registering specific exception types (rather than only ``Exception``)
-    # ensures they are handled by ``ExceptionMiddleware`` (inside the Prometheus
-    # middleware) rather than ``ServerErrorMiddleware`` (outside it), so their
-    # status codes are recorded correctly.
-    app.exception_handler(HTTPException)(http_exception_handler)
-    app.exception_handler(RequestValidationError)(validation_exception_handler)
-
-    app.exception_handler(VLLMError)(vllm_error_handler)
-
-    # TODO(zqzten): remove these fallback handlers after migration to VLLMError
-    app.exception_handler(ValueError)(exception_handler)
-    app.exception_handler(TypeError)(exception_handler)
-    app.exception_handler(OverflowError)(exception_handler)
-    app.exception_handler(NotImplementedError)(exception_handler)
-
-    app.exception_handler(Exception)(exception_handler)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
     if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
