@@ -37,6 +37,13 @@ class ExternalCachedBlockPool:
         # determined and we just want each spec's manager to apply its own mask.
         self._exists = exists
         self.hash_block_size = hash_block_size
+        # False on the recv side, where the pool answers "present" to anything.
+        # The exact-boundary retry must not run against such a pool: it would
+        # shorten a hit that the lookup already validated, and load_mask's caller
+        # keeps using the original token_len, so process_tokens' trailing chunks
+        # would fall off the end of the mask and leave those blocks
+        # uninitialized -- silent corruption where -704 was at least loud.
+        self.tracks_existence = exists is not None
         self.null_block = KVCacheBlock(block_id=0)
         # Dummy ID 1 for present block for duck-typing.
         self._present_block = KVCacheBlock(block_id=1)
@@ -188,13 +195,23 @@ class MooncakeStoreCoordinator:
         """Whether the reconciled partial FullAttention tail can be loaded."""
         if not self.enable_partial_hash_hits:
             return True
+        if not cached_block_pool.tracks_existence:
+            # Recv-side pool: it has no truth to check, and shortening the hit
+            # here would desynchronise the mask from its caller's token_len.
+            return True
 
         # Attribute access, not tuple unpacking: SpecGroup carries manager_cls
         # and use_eagle here, so the upstream 3-tuple unpack raises ValueError
         # on the first lookup. git apply cannot see that -- it is a runtime
         # arity mismatch, not a textual conflict.
         group = self.attention_groups[0]
-        assert isinstance(group.spec, FullAttentionSpec)
+        if not isinstance(group.spec, FullAttentionSpec):
+            # Nothing to revalidate: the defect needs an attention group coarser
+            # than hash granularity, and a recurrent group is tail-only. Upstream
+            # asserts FullAttentionSpec here, which crashes at the first lookup on
+            # a Mamba-only layout -- reachable, since partial hits are enabled by
+            # a Mamba group alone.
+            return True
         hash_idx = hit_length // self.hash_block_size - 1
         return (
             cached_block_pool.get_cached_block(block_hashes[hash_idx], group.group_ids)
