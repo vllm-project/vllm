@@ -22,11 +22,106 @@ import torch
 
 from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
 from vllm.logger import init_logger
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
 logger = init_logger(__name__)
+
+
+@triton.jit
+def _update_replayssm_ring_trackers_kernel(
+    ring_start,
+    prev_num_accepted,
+    state_batch_indices,
+    n_slots,
+    logical_window: tl.constexpr,
+    ring_buffer_len: tl.constexpr,
+    pad_slot_id: tl.constexpr,
+    BLOCK: tl.constexpr,
+) -> None:
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < n_slots
+    slots = tl.load(
+        state_batch_indices + offsets, mask=mask, other=pad_slot_id
+    )
+    valid = mask & (slots != pad_slot_id)
+    prev = tl.load(prev_num_accepted + slots, mask=valid, other=0)
+    start = tl.load(ring_start + slots, mask=valid, other=0)
+    must_checkpoint = prev + 1 > logical_window
+    next_start = tl.where(
+        must_checkpoint,
+        (start + prev) % ring_buffer_len,
+        start,
+    )
+    next_prev = tl.where(must_checkpoint, 1, prev + 1)
+    tl.store(ring_start + slots, next_start, mask=valid)
+    tl.store(prev_num_accepted + slots, next_prev, mask=valid)
+
+
+@triton.jit
+def _reset_replayssm_ring_trackers_kernel(
+    ring_start,
+    prev_num_accepted,
+    state_batch_indices,
+    n_slots,
+    pad_slot_id: tl.constexpr,
+    BLOCK: tl.constexpr,
+) -> None:
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < n_slots
+    slots = tl.load(
+        state_batch_indices + offsets, mask=mask, other=pad_slot_id
+    )
+    valid = mask & (slots != pad_slot_id)
+    tl.store(ring_start + slots, 0, mask=valid)
+    tl.store(prev_num_accepted + slots, 0, mask=valid)
+
+
+def update_replayssm_ring_trackers(
+    ring_start: torch.Tensor,
+    prev_num_accepted: torch.Tensor,
+    state_batch_indices: torch.Tensor,
+    logical_window: int,
+    pad_slot_id: int = NULL_BLOCK_ID,
+) -> None:
+    state_batch_indices = state_batch_indices.reshape(-1)
+    n_slots = state_batch_indices.numel()
+    if n_slots == 0:
+        return
+    block = 128
+    _update_replayssm_ring_trackers_kernel[(triton.cdiv(n_slots, block),)](
+        ring_start,
+        prev_num_accepted,
+        state_batch_indices,
+        n_slots,
+        logical_window,
+        logical_window + 1,
+        pad_slot_id,
+        BLOCK=block,
+    )
+
+
+def reset_replayssm_ring_trackers(
+    ring_start: torch.Tensor,
+    prev_num_accepted: torch.Tensor,
+    state_batch_indices: torch.Tensor,
+    pad_slot_id: int = NULL_BLOCK_ID,
+) -> None:
+    state_batch_indices = state_batch_indices.reshape(-1)
+    n_slots = state_batch_indices.numel()
+    if n_slots == 0:
+        return
+    block = 128
+    _reset_replayssm_ring_trackers_kernel[(triton.cdiv(n_slots, block),)](
+        ring_start,
+        prev_num_accepted,
+        state_batch_indices,
+        n_slots,
+        pad_slot_id,
+        BLOCK=block,
+    )
 
 
 class MambaSSUBackend(ABC):
@@ -407,7 +502,7 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
         if indices is not None and indices.dim() > 1:
             indices = indices[:, 0]
 
-        return self._kernel(
+        result = self._kernel(
             state,
             x_cache,
             B_cache,
@@ -433,6 +528,15 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
             cb_old=cb_old,
             algorithm=algorithm,
         )
+        if indices is not None:
+            update_replayssm_ring_trackers(
+                ring_start,
+                prev_num_accepted_tokens,
+                indices,
+                logical_window=x_cache.size(2) - 1,
+                pad_slot_id=null_block_id,
+            )
+        return result
 
 
 _REPLAYSSM_BACKEND_REGISTRY: dict[MambaBackendEnum, type[ReplaySSMBackend]] = {

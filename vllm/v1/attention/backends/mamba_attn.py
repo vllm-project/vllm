@@ -27,29 +27,6 @@ from vllm.v1.kv_cache_interface import MambaSpec
 M = TypeVar("M", bound="BaseMambaAttentionMetadata")
 
 
-def _derive_flashinfer_replayssm_ring_state(
-    decode_steps: torch.Tensor,
-    logical_window: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return the ring cursor and live-token count before each T=1 call."""
-    positive_steps = torch.clamp(decode_steps - 1, min=0)
-    flushes_before = torch.div(
-        positive_steps,
-        logical_window,
-        rounding_mode="floor",
-    )
-    prev_num_accepted = torch.where(
-        decode_steps == 0,
-        torch.zeros_like(decode_steps),
-        torch.remainder(positive_steps, logical_window) + 1,
-    )
-    ring_start = torch.remainder(
-        flushes_before * logical_window,
-        logical_window + 1,
-    )
-    return ring_start, prev_num_accepted
-
-
 @dataclass
 class BaseMambaAttentionMetadata:
     num_prefills: int
@@ -105,12 +82,8 @@ class BaseMambaAttentionMetadata:
     write_pos_d: torch.Tensor | None = None
     is_flush_d: torch.Tensor | None = None
     bc_pre_scratch: torch.Tensor | None = None
-    # ReplaySSM — FlashInfer checkpointing_ssu:
-    # ring_start / prev_num_accepted (always), plus two-kernel scratch
-    # (cb_scaled / cumAdt_vec / cb_old) so monolith and two-kernel are both
-    # available via algorithm="auto". All None unless that backend is on.
-    ring_start_d: torch.Tensor | None = None
-    prev_num_accepted_d: torch.Tensor | None = None
+    # ReplaySSM — FlashInfer checkpointing_ssu two-kernel scratch.
+    # The per-layer ring trackers live in the Mamba KV cache.
     cb_scaled: torch.Tensor | None = None
     cumAdt_vec: torch.Tensor | None = None
     cb_old: torch.Tensor | None = None
@@ -235,8 +208,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.float32,
                 device=device,
             )
-            self.decode_ring_start_d = None
-            self.decode_prev_num_accepted_d = None
             self.decode_cb_scaled = None
             self.decode_cumAdt_vec = None
             self.decode_cb_old = None
@@ -244,22 +215,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             self.decode_bc_pre_scratch = None
             scratch_bs = max(
                 self.decode_cudagraph_max_bs, scheduler_config.max_num_seqs
-            )
-            # checkpointing_ssu indexes these tensors by state_batch_indices,
-            # so they cover cache slots rather than decode rows.
-            num_cache_slots = vllm_config.cache_config.num_gpu_blocks
-            if num_cache_slots is None:
-                # Unit-test builders run before cache sizing.
-                num_cache_slots = scratch_bs
-            self.decode_ring_start_d = torch.zeros(
-                (num_cache_slots,),
-                dtype=torch.int32,
-                device=device,
-            )
-            self.decode_prev_num_accepted_d = torch.zeros(
-                (num_cache_slots,),
-                dtype=torch.int32,
-                device=device,
             )
             # x_cache page: (nheads, L, head_dim); AR decode uses T=1.
             # Scratch shapes follow flashinfer's bench_checkpointing_ssu.py
@@ -291,8 +246,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
         else:
             self.decode_bc_pre_scratch = None
-            self.decode_ring_start_d = None
-            self.decode_prev_num_accepted_d = None
             self.decode_cb_scaled = None
             self.decode_cumAdt_vec = None
             self.decode_cb_old = None
@@ -600,8 +553,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
         write_pos_d = None
         is_flush_d = None
-        ring_start_d = None
-        prev_num_accepted_d = None
         cb_scaled = None
         cumAdt_vec = None
         cb_old = None
@@ -691,7 +642,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     num_reqs - num_prefills : num_reqs
                 ]
 
-        if self.use_replayssm and num_decodes > 0:
+        if (
+            self.use_replayssm
+            and not self.use_flashinfer_replayssm
+            and num_decodes > 0
+        ):
             decode_base_cpu = common_attn_metadata.replayssm_decode_base_cpu
             num_computed_tokens_cpu = common_attn_metadata._num_computed_tokens_cpu
             if decode_base_cpu is None or num_computed_tokens_cpu is None:
@@ -745,51 +700,24 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     & ((num_computed_d + query_lens_cpu) % block_size == 0)
                 )
             is_flush_cpu = is_flush_cpu.to(torch.int8)
-            if self.use_flashinfer_replayssm:
-                assert self.decode_ring_start_d is not None
-                assert self.decode_prev_num_accepted_d is not None
-                assert self.decode_cb_scaled is not None
-                assert self.decode_cumAdt_vec is not None
-                assert self.decode_cb_old is not None
-                ring_start_d = self.decode_ring_start_d
-                prev_num_accepted_d = self.decode_prev_num_accepted_d
-                state_slots = state_indices_tensor_d[:num_decodes, 0].long()
-                # For T=1, a checkpoint replays B old tokens and leaves the
-                # fresh token live. Derive the host-owned ring state before
-                # this call from the number of completed decode steps.
-                logical_window = self.replayssm_buffer_len
-                ring_start_cpu, prev_num_accepted_cpu = (
-                    _derive_flashinfer_replayssm_ring_state(
-                        decode_steps_cpu,
-                        logical_window,
-                    )
-                )
-                ring_start = async_tensor_h2d(
-                    ring_start_cpu.to(torch.int32).tolist(),
-                    dtype=torch.int32,
-                    device=common_attn_metadata.query_start_loc.device,
-                )
-                prev_num_accepted = async_tensor_h2d(
-                    prev_num_accepted_cpu.to(torch.int32).tolist(),
-                    dtype=torch.int32,
-                    device=common_attn_metadata.query_start_loc.device,
-                )
-                ring_start_d.index_copy_(0, state_slots, ring_start)
-                prev_num_accepted_d.index_copy_(0, state_slots, prev_num_accepted)
-                cb_scaled = self.decode_cb_scaled[:num_decodes]
-                cumAdt_vec = self.decode_cumAdt_vec[:num_decodes]
-                cb_old = self.decode_cb_old[:num_decodes]
-            else:
-                write_pos_d = async_tensor_h2d(
-                    write_pos_cpu.to(torch.int32).tolist(),
-                    dtype=torch.int32,
-                    device=common_attn_metadata.query_start_loc.device,
-                )
-                is_flush_d = async_tensor_h2d(
-                    is_flush_cpu.tolist(),
-                    dtype=torch.int8,
-                    device=common_attn_metadata.query_start_loc.device,
-                )
+            write_pos_d = async_tensor_h2d(
+                write_pos_cpu.to(torch.int32).tolist(),
+                dtype=torch.int32,
+                device=common_attn_metadata.query_start_loc.device,
+            )
+            is_flush_d = async_tensor_h2d(
+                is_flush_cpu.tolist(),
+                dtype=torch.int8,
+                device=common_attn_metadata.query_start_loc.device,
+            )
+
+        if self.use_flashinfer_replayssm and num_decodes > 0:
+            assert self.decode_cb_scaled is not None
+            assert self.decode_cumAdt_vec is not None
+            assert self.decode_cb_old is not None
+            cb_scaled = self.decode_cb_scaled[:num_decodes]
+            cumAdt_vec = self.decode_cumAdt_vec[:num_decodes]
+            cb_old = self.decode_cb_old[:num_decodes]
 
         bc_pre_scratch = None
         if (
@@ -811,8 +739,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             write_pos_d=write_pos_d,
             is_flush_d=is_flush_d,
             bc_pre_scratch=bc_pre_scratch,
-            ring_start_d=ring_start_d,
-            prev_num_accepted_d=prev_num_accepted_d,
             cb_scaled=cb_scaled,
             cumAdt_vec=cumAdt_vec,
             cb_old=cb_old,
@@ -853,8 +779,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         write_pos_d = metadata.write_pos_d
         is_flush_d = metadata.is_flush_d
         bc_pre_scratch = metadata.bc_pre_scratch
-        ring_start_d = metadata.ring_start_d
-        prev_num_accepted_d = metadata.prev_num_accepted_d
         cb_scaled = metadata.cb_scaled
         cumAdt_vec = metadata.cumAdt_vec
         cb_old = metadata.cb_old
@@ -939,8 +863,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 if self.decode_bc_pre_scratch is not None:
                     bc_pre_scratch = self.decode_bc_pre_scratch[:padded_bs]
             elif self.use_flashinfer_replayssm:
-                assert ring_start_d is not None
-                assert prev_num_accepted_d is not None
                 assert self.decode_cb_scaled is not None
                 assert self.decode_cumAdt_vec is not None
                 assert self.decode_cb_old is not None
@@ -956,8 +878,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             write_pos_d=write_pos_d,
             is_flush_d=is_flush_d,
             bc_pre_scratch=bc_pre_scratch,
-            ring_start_d=ring_start_d,
-            prev_num_accepted_d=prev_num_accepted_d,
             cb_scaled=cb_scaled,
             cumAdt_vec=cumAdt_vec,
             cb_old=cb_old,

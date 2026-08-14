@@ -85,12 +85,17 @@ class MambaStateDtypeCalculator:
         cls,
         base_dtypes: tuple[torch.dtype, ...],
         model_dtype: ModelDType | torch.dtype,
+        include_trackers: bool = False,
     ) -> tuple[torch.dtype, ...]:
         """Append the ReplaySSM ring dtypes to a base ``(conv, ssm)`` tuple:
         ``(x_cache, dt_cache, B_cache)`` = ``(activation, fp32, activation)``.
+        FlashInfer also appends int32 ``(ring_start, prev_num_accepted)``.
         """
         activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
-        return (*base_dtypes, activation_dtype, torch.float32, activation_dtype)
+        ring_dtypes = (activation_dtype, torch.float32, activation_dtype)
+        if include_trackers:
+            return (*base_dtypes, *ring_dtypes, torch.int32, torch.int32)
+        return (*base_dtypes, *ring_dtypes)
 
     @classmethod
     def _mamba_state_dtype(
@@ -214,20 +219,24 @@ class MambaStateShapeCalculator:
         n_groups: int,
         tp_world_size: int,
         ring_buffer_len: int,
+        include_trackers: bool = False,
     ) -> tuple[tuple[int, ...], ...]:
-        """Append the physical ReplaySSM ring shapes to ``(conv, ssm)``.
+        """Append the physical ReplaySSM ring and optional tracker shapes.
 
         ``base_shapes[1]`` is ``(nheads // tp, head_dim, state_size)``;
         B_cache uses the un-extended ``n_groups``.
         """
         local_nheads, head_dim, state_size = base_shapes[1]
         local_ngroups = divide(n_groups, tp_world_size)
-        return (
+        shapes = (
             *base_shapes,
             (local_nheads, ring_buffer_len, head_dim),
             (local_nheads, ring_buffer_len),
             (local_ngroups, ring_buffer_len, state_size),
         )
+        if include_trackers:
+            return (*shapes, (), ())
+        return shapes
 
     @classmethod
     def short_conv_state_shape(

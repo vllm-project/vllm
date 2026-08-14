@@ -2543,7 +2543,6 @@ class VllmConfig:
             self.cache_config.use_kda_recoverssm = False
             return self
         self.cache_config.use_kda_recoverssm = self.num_speculative_tokens > 0
-
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
                 "--use-replayssm is not supported for architecture "

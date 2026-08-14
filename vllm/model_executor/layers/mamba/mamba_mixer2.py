@@ -38,6 +38,7 @@ from vllm.model_executor.layers.mamba.ops.ssd_combined import (
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     get_replayssm_backend,
+    reset_replayssm_ring_trackers,
     selective_state_update,
     selective_state_update_replayssm_flashinfer,
     selective_state_update_replayssm_triton,
@@ -519,9 +520,19 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 "--use-replayssm requires tensor-parallel heads to divide evenly"
             )
         # The tuple is (conv_state, ssm_state); with the cached (ReplaySSM) decode
-        # kernel enabled it is (conv_state, ssm_state, x_cache, dt_cache, B_cache).
-        _n_state = 5 if self.use_replayssm else 2
+        # kernel enabled it also has x/dt/B rings and, for FlashInfer, two
+        # per-slot ring trackers.
+        if self.use_replayssm:
+            _n_state = (
+                7
+                if self.mamba_config.backend == MambaBackendEnum.FLASHINFER
+                else 5
+            )
+        else:
+            _n_state = 2
         self.kv_cache = tuple(torch.tensor([]) for _ in range(_n_state))
+        self._replayssm_ring_start = torch.tensor([])
+        self._replayssm_prev_num_accepted = torch.tensor([])
 
         self.num_spec = vllm_config.num_speculative_tokens
         if self.num_spec > 0:
@@ -548,6 +559,22 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         # Check if running on Blackwell (SM100+) for kernel tuning
         self.is_blackwell = current_platform.is_device_capability_family(100)
+
+    def _get_contiguous_replayssm_tracker(
+        self,
+        source: torch.Tensor,
+        attr_name: str,
+    ) -> torch.Tensor:
+        buffer = getattr(self, attr_name)
+        if (
+            buffer.shape != source.shape
+            or buffer.device != source.device
+            or buffer.dtype != source.dtype
+        ):
+            buffer = torch.zeros_like(source, memory_format=torch.contiguous_format)
+            setattr(self, attr_name, buffer)
+        buffer.copy_(source)
+        return buffer
 
     def forward(
         self,
@@ -709,6 +736,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
         is_mamba_cache_all = self.cache_config.mamba_cache_mode == "all"
+        ring_start = prev_num_accepted = None
+        ring_start_src = prev_num_accepted_src = None
 
         attn_metadata: AttentionMetadata | None = None
         if attn_metadata_raw is not None:
@@ -725,9 +754,28 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
             ssm_state = self.kv_cache[1]
             if self.use_replayssm:
-                x_cache, dt_cache, B_cache = self.kv_cache[2:]
+                x_cache, dt_cache, B_cache = self.kv_cache[2:5]
+                if self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
+                    ring_start, prev_num_accepted = self.kv_cache[5:]
+                    ring_start_src = ring_start
+                    prev_num_accepted_src = prev_num_accepted
+                    # Scalar states are strided across packed KV pages, while
+                    # FlashInfer requires contiguous tracker arrays.
+                    if not ring_start.is_contiguous():
+                        ring_start = self._get_contiguous_replayssm_tracker(
+                            ring_start,
+                            "_replayssm_ring_start",
+                        )
+                    if not prev_num_accepted.is_contiguous():
+                        prev_num_accepted = self._get_contiguous_replayssm_tracker(
+                            prev_num_accepted,
+                            "_replayssm_prev_num_accepted",
+                        )
+                else:
+                    ring_start = prev_num_accepted = None
             else:
                 x_cache = dt_cache = B_cache = None
+                ring_start = prev_num_accepted = None
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
@@ -984,6 +1032,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 #   tensor
                 assert state_indices_tensor_p is not None
                 ssm_state[state_indices_tensor_p] = varlen_states
+                if ring_start is not None:
+                    assert prev_num_accepted is not None
+                    reset_replayssm_ring_trackers(
+                        ring_start,
+                        prev_num_accepted,
+                        state_indices_tensor_p,
+                    )
 
         # Process decode requests
         if has_decode:
@@ -1064,8 +1119,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 assert self.replayssm_buffer_len is not None
                 replayssm_backend = get_replayssm_backend()
                 if replayssm_backend.name == "flashinfer":
-                    assert attn_metadata.ring_start_d is not None
-                    assert attn_metadata.prev_num_accepted_d is not None
+                    assert ring_start is not None
+                    assert prev_num_accepted is not None
                     assert attn_metadata.cb_scaled is not None
                     assert attn_metadata.cumAdt_vec is not None
                     assert attn_metadata.cb_old is not None
@@ -1080,8 +1135,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         x_cache,
                         B_cache,
                         dt_cache,
-                        attn_metadata.ring_start_d,
-                        attn_metadata.prev_num_accepted_d,
+                        ring_start,
+                        prev_num_accepted,
                         D=D_d,
                         dt_bias=dt_bias,
                         dt_softplus=True,
@@ -1131,6 +1186,16 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     is_blackwell=self.is_blackwell,
                 )
 
+        if ring_start_src is not None and ring_start is not ring_start_src:
+            assert ring_start is not None
+            ring_start_src.copy_(ring_start)
+        if (
+            prev_num_accepted_src is not None
+            and prev_num_accepted is not prev_num_accepted_src
+        ):
+            assert prev_num_accepted is not None
+            prev_num_accepted_src.copy_(prev_num_accepted)
+
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None
         assert self.cache_config is not None
@@ -1141,7 +1206,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         if self.use_replayssm:
             return MambaStateDtypeCalculator.append_replayssm_ring(
-                base_dtype, self.model_config.dtype
+                base_dtype,
+                self.model_config.dtype,
+                include_trackers=(
+                    self.mamba_config.backend == MambaBackendEnum.FLASHINFER
+                ),
             )
         return base_dtype
 
@@ -1167,6 +1236,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 self.n_groups,
                 tp_world_size,
                 ring_buffer_len,
+                include_trackers=(
+                    self.mamba_config.backend == MambaBackendEnum.FLASHINFER
+                ),
             )
         return base_shape
 
