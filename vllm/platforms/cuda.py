@@ -729,12 +729,8 @@ class NvmlCudaPlatform(CudaPlatformBase):
                 handle = pynvml.nvmlDeviceGetHandleByUUID(device_id)
                 return pynvml.nvmlDeviceGetIndex(handle)
             except pynvml.NVMLError_NotFound:
-                # NVIDIA documents that CUDA_VISIBLE_DEVICES accepts the
-                # first few characters of a GPU UUID (including "GPU-") rather
-                # than the full 36-char UUID.  NVML's
-                # nvmlDeviceGetHandleByUUID() requires an exact, full match,
-                # so fall back to a prefix scan over the physical devices
-                # (and their MIG instances).
+                # CUDA_VISIBLE_DEVICES accepts a UUID prefix, but NVML needs
+                # an exact match, so fall back to a prefix scan.
                 prefix = device_id.removeprefix("GPU-").removeprefix("MIG-")
                 for index in range(pynvml.nvmlDeviceGetCount()):
                     handle = pynvml.nvmlDeviceGetHandleByIndex(index)
