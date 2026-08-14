@@ -124,24 +124,28 @@ steps:
   commands:
     - pytest -v -s models/language/generation_ppl_test
 
-- label: Language Models Test (Extended Pooling)
+- label: Language Models Test (Extended Pooling) %N
   device: h200_35gb
   key: language-models-test-extended-pooling
   timeout_in_minutes: 120
+  parallelism: 4
   optional: true
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/pooling
   commands:
-    - pytest -v -s models/language/pooling -m 'not core_model'
+    - pytest -v -s models/language/pooling -m 'not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   mirror:
     amd:
       dind: false
       device: mi300_1
       timeout_in_minutes: 95
+      parallelism: 2
       depends_on:
       - image-build-amd
+      commands:
+      - pytest -v -s models/language/pooling -m 'not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: Language Models Test (MTEB)
   key: language-models-test-mteb
