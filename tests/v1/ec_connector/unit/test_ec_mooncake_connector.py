@@ -23,6 +23,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_ec_connector import (
     ECMooncakeConnectorMetadata,
     ECMooncakeLoadSpec,
     ECMooncakeRegistryServer,
+    _ContiguousAllocator,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -182,6 +183,21 @@ class TestECMooncakeFactory:
         assert cls.__name__ == "ECMooncakeConnector"
 
 
+class TestContiguousAllocator:
+    def test_reuses_and_coalesces_contiguous_regions(self):
+        allocator = _ContiguousAllocator(1024, alignment=256)
+
+        first = allocator.allocate(1)
+        second = allocator.allocate(300)
+        assert first == (0, 256)
+        assert second == (256, 512)
+        assert allocator.allocate(300) is None
+
+        allocator.free(*first)
+        allocator.free(*second)
+        assert allocator.allocate(1024) == (0, 1024)
+
+
 class TestECMooncakeConnectorValidation:
     def test_consumer_scheduler_requires_remote_registry(
         self, mock_vllm_config_consumer
@@ -326,6 +342,54 @@ class TestECMooncakeSchedulerMetadata:
 
 
 class TestECMooncakeWorkerTransfer:
+    @pytest.mark.skipif(
+        not torch.accelerator.is_available(),
+        reason="Requires an accelerator for registered pool",
+    )
+    def test_consumer_reuses_registered_cuda_pool(self, mock_vllm_config_consumer):
+        mock_vllm_config_consumer.ec_transfer_config.ec_buffer_size = 4096
+        mock_vllm_config_consumer.ec_transfer_config.ec_connector_extra_config[
+            "consumer_buffer_pool_size"
+        ] = 4096
+        specs = [
+            ECMooncakeLoadSpec(
+                mm_hash=f"hash_{index}",
+                num_token=1,
+                nbytes=256,
+                shape=(32, 2),
+                dtype="float32",
+                producer_zmq="tcp://127.0.0.1:1",
+                lease_id=f"lease_{index}",
+            )
+            for index in range(2)
+        ]
+
+        with patch_ec_mooncake_deps():
+            consumer = ECMooncakeConnector(
+                mock_vllm_config_consumer, ECConnectorRole.WORKER
+            )
+            consumer.bind_connector_metadata(ECMooncakeConnectorMetadata(loads=specs))
+            cache: dict[str, torch.Tensor] = {}
+            with patch.object(consumer, "_send_pull", return_value={"ok": True}):
+                consumer.start_load_caches(cache)
+
+            engine = consumer._engine
+            pool = consumer._consumer_pool
+            assert isinstance(engine, CopyingFakeTransferEngine)
+            assert pool is not None
+            assert engine.register_calls == [[pool.data_ptr()]]
+            assert engine.batch_unregister_calls == []
+            assert cache["hash_0"].data_ptr() == pool.data_ptr()
+            assert cache["hash_1"].data_ptr() == pool.data_ptr() + 256
+
+            cache.clear()
+            consumer._release_stale_consumer_allocations(cache)
+            torch.accelerator.synchronize()
+            consumer._poll_consumer_pool_frees()
+            assert consumer._consumer_pool_allocator is not None
+            assert consumer._consumer_pool_allocator.allocate(4096) == (0, 4096)
+            consumer.shutdown()
+
     def test_single_process_save_and_load(self, mock_vllm_config_producer):
         """Host-memory pull path (fake engine uses memcpy; CUDA ptrs need e2e)."""
         port = _find_free_port()

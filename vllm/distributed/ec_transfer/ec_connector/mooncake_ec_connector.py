@@ -11,6 +11,7 @@ Mooncake transport instead of shared filesystem.
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 import uuid
@@ -77,6 +78,44 @@ class ECMooncakeConnectorMetadata(ECConnectorMetadata):
 class _RegisteredTensor:
     tensor: torch.Tensor
     in_flight: int = 0
+
+
+@dataclass
+class _ConsumerPoolAllocation:
+    offset: int
+    size: int
+    tensor: torch.Tensor
+
+
+class _ContiguousAllocator:
+    def __init__(self, capacity: int, alignment: int = 256):
+        self.capacity = capacity
+        self.alignment = alignment
+        self._free = [(0, capacity)]
+
+    def allocate(self, nbytes: int) -> tuple[int, int] | None:
+        size = math.ceil(nbytes / self.alignment) * self.alignment
+        for index, (offset, available) in enumerate(self._free):
+            if size > available:
+                continue
+            if size == available:
+                self._free.pop(index)
+            else:
+                self._free[index] = (offset + size, available - size)
+            return offset, size
+        return None
+
+    def free(self, offset: int, size: int) -> None:
+        self._free.append((offset, size))
+        self._free.sort()
+        merged: list[tuple[int, int]] = []
+        for free_offset, free_size in self._free:
+            if merged and sum(merged[-1]) == free_offset:
+                previous_offset, previous_size = merged[-1]
+                merged[-1] = (previous_offset, previous_size + free_size)
+            else:
+                merged.append((free_offset, free_size))
+        self._free = merged
 
 
 class ECMooncakeRegistryServer:
@@ -177,6 +216,8 @@ class ECMooncakeConnector(ECConnectorBase):
       registry (default ``9018``).
     - ``mooncake_protocol`` (optional): Passed to ``TransferEngine.initialize``
       (default ``"rdma"``).
+    - ``consumer_buffer_pool_size`` (consumer, optional): Bytes reserved for a
+      long-lived registered CUDA receive arena (default ``ec_buffer_size``).
 
     Limitations: ``tensor_parallel_size`` and ``pipeline_parallel_size`` must
     be ``1`` (same assumption as Mooncake KV connector for P2P handshake).
@@ -210,6 +251,18 @@ class ECMooncakeConnector(ECConnectorBase):
             raise ValueError("ECMooncakeConnector requires ec_buffer_size > 0.")
         self._model_config = vllm_config.model_config
         self._metadata_fields_cache: dict[str, set[str]] = {}
+
+        pool_size = self._extra.get(
+            "consumer_buffer_pool_size", self._registered_capacity
+        )
+        self._consumer_pool_capacity = int(pool_size)
+        self._consumer_pool: torch.Tensor | None = None
+        self._consumer_pool_allocator: _ContiguousAllocator | None = None
+        self._consumer_allocations: dict[str, _ConsumerPoolAllocation] = {}
+        self._consumer_pending_frees: list[
+            tuple[torch.Event, _ConsumerPoolAllocation]
+        ] = []
+        self._consumer_pool_disabled = self._consumer_pool_capacity <= 0
 
         # Scheduler (consumer): mm_hash -> pending tensor layout from registry
         self._pending_specs: dict[str, ECMooncakeLoadSpec] = {}
@@ -440,6 +493,92 @@ class ECMooncakeConnector(ECConnectorBase):
         for address in addresses:
             self._pending_unregister.pop(address, None)
 
+    def _ensure_consumer_pool(self, device: torch.device) -> None:
+        if (
+            self._consumer_pool is not None
+            or self._consumer_pool_disabled
+            or device.type != "cuda"
+        ):
+            return
+        try:
+            pool = torch.empty(
+                self._consumer_pool_capacity, dtype=torch.uint8, device=device
+            )
+            ret = self._ensure_engine().batch_register_memory(
+                [pool.data_ptr()], [pool.nbytes]
+            )
+            if ret != 0:
+                raise RuntimeError(f"Mooncake returned {ret}")
+        except (RuntimeError, torch.OutOfMemoryError) as e:
+            self._consumer_pool_disabled = True
+            logger.warning(
+                "Could not initialize the EC consumer buffer pool; falling back "
+                "to per-tensor registration: %s",
+                e,
+            )
+            return
+        self._consumer_pool = pool
+        self._consumer_pool_allocator = _ContiguousAllocator(pool.nbytes)
+        logger.info(
+            "Registered %d-byte CUDA receive pool for Mooncake EC",
+            pool.nbytes,
+        )
+
+    def _poll_consumer_pool_frees(self) -> None:
+        allocator = self._consumer_pool_allocator
+        if allocator is None:
+            return
+        pending = []
+        for event, allocation in self._consumer_pending_frees:
+            if event.query():
+                allocator.free(allocation.offset, allocation.size)
+            else:
+                pending.append((event, allocation))
+        self._consumer_pending_frees = pending
+
+    def _release_stale_consumer_allocations(
+        self, encoder_cache: dict[str, torch.Tensor]
+    ) -> None:
+        if self._consumer_pool is None:
+            return
+        for mm_hash, allocation in list(self._consumer_allocations.items()):
+            if encoder_cache.get(mm_hash) is allocation.tensor:
+                continue
+            self._consumer_allocations.pop(mm_hash)
+            event = torch.Event()
+            event.record(torch.accelerator.current_stream(self._consumer_pool.device))
+            self._consumer_pending_frees.append((event, allocation))
+        self._poll_consumer_pool_frees()
+
+    def _allocate_consumer_tensor(
+        self,
+        spec: ECMooncakeLoadSpec,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, _ConsumerPoolAllocation | None]:
+        expected_nbytes = (
+            math.prod(spec.shape) * torch.empty((), dtype=dtype).element_size()
+        )
+        if expected_nbytes != spec.nbytes:
+            raise ValueError(
+                f"EC tensor size mismatch for {spec.mm_hash}: metadata has "
+                f"{spec.nbytes} bytes, shape and dtype require {expected_nbytes}."
+            )
+
+        self._ensure_consumer_pool(device)
+        allocator = self._consumer_pool_allocator
+        pool = self._consumer_pool
+        if allocator is not None and pool is not None:
+            region = allocator.allocate(spec.nbytes)
+            if region is not None:
+                offset, size = region
+                tensor = (
+                    pool.narrow(0, offset, spec.nbytes).view(dtype).view(spec.shape)
+                )
+                return tensor, _ConsumerPoolAllocation(offset, size, tensor)
+
+        return torch.empty(spec.shape, dtype=dtype, device=device), None
+
     def start_load_caches(
         self, encoder_cache: dict[str, torch.Tensor], **kwargs: Any
     ) -> None:
@@ -454,29 +593,49 @@ class ECMooncakeConnector(ECConnectorBase):
             )
         device = torch.device(buf)
 
-        pending: list[tuple[ECMooncakeLoadSpec, torch.Tensor]] = []
+        self._release_stale_consumer_allocations(encoder_cache)
+
+        pending: list[
+            tuple[ECMooncakeLoadSpec, torch.Tensor, _ConsumerPoolAllocation | None]
+        ] = []
         for spec in metadata.loads:
             if spec.mm_hash in encoder_cache:
                 continue
             torch_dtype = getattr(torch, spec.dtype, None)
             if torch_dtype is None:
                 raise ValueError(f"Unsupported torch dtype string: {spec.dtype!r}")
-            t = torch.empty(spec.shape, dtype=torch_dtype, device=device)
-            pending.append((spec, t))
+            tensor, allocation = self._allocate_consumer_tensor(
+                spec, torch_dtype, device
+            )
+            pending.append((spec, tensor, allocation))
         if not pending:
             return
 
-        tensors = [tensor for _, tensor in pending]
-        ret = eng.batch_register_memory(
-            [tensor.data_ptr() for tensor in tensors],
-            [tensor.nbytes for tensor in tensors],
-        )
-        if ret != 0:
-            raise RuntimeError("Mooncake EC batch_register_memory failed on consumer.")
+        standalone = [tensor for _, tensor, allocation in pending if allocation is None]
+        standalone_registered = False
         try:
-            batches: dict[str, list[tuple[ECMooncakeLoadSpec, torch.Tensor]]] = {}
-            for spec, tensor in pending:
-                batches.setdefault(spec.producer_zmq, []).append((spec, tensor))
+            if standalone:
+                ret = eng.batch_register_memory(
+                    [tensor.data_ptr() for tensor in standalone],
+                    [tensor.nbytes for tensor in standalone],
+                )
+                if ret != 0:
+                    raise RuntimeError(
+                        "Mooncake EC batch_register_memory failed on consumer."
+                    )
+                standalone_registered = True
+            batches: dict[
+                str,
+                list[
+                    tuple[
+                        ECMooncakeLoadSpec,
+                        torch.Tensor,
+                        _ConsumerPoolAllocation | None,
+                    ]
+                ],
+            ] = {}
+            for item in pending:
+                batches.setdefault(item[0].producer_zmq, []).append(item)
             for producer_zmq, batch in batches.items():
                 pull = {
                     "op": "pull",
@@ -488,16 +647,26 @@ class ECMooncakeConnector(ECConnectorBase):
                             "nbytes": tensor.nbytes,
                             "lease_id": spec.lease_id,
                         }
-                        for spec, tensor in batch
+                        for spec, tensor, _ in batch
                     ],
                 }
                 resp = self._send_pull(producer_zmq, pull)
                 if not resp.get("ok"):
                     raise RuntimeError(f"EC Mooncake pull failed: {resp}")
+        except Exception:
+            allocator = self._consumer_pool_allocator
+            if allocator is not None:
+                for _, _, allocation in pending:
+                    if allocation is not None:
+                        allocator.free(allocation.offset, allocation.size)
+            raise
         finally:
-            self._unregister_memories(tensors)
-        for spec, t in pending:
-            encoder_cache[spec.mm_hash] = t
+            if standalone_registered:
+                self._unregister_memories(standalone)
+        for spec, tensor, allocation in pending:
+            encoder_cache[spec.mm_hash] = tensor
+            if allocation is not None:
+                self._consumer_allocations[spec.mm_hash] = allocation
             logger.debug("Loaded EC tensor for mm_hash=%s via Mooncake", spec.mm_hash)
 
     def save_caches(
@@ -650,6 +819,13 @@ class ECMooncakeConnector(ECConnectorBase):
             self._client_zmq_ctx.term()
 
         if self._engine is not None:
+            if self._consumer_pool is not None and self._unregister_memory(
+                self._consumer_pool
+            ):
+                self._consumer_pool = None
+                self._consumer_pool_allocator = None
+                self._consumer_allocations.clear()
+                self._consumer_pending_frees.clear()
             with self._tensor_lock:
                 addresses = [
                     entry.tensor.data_ptr() for entry in self._tensor_by_hash.values()
