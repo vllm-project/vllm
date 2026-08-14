@@ -68,6 +68,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .ernie45 import Ernie4_5ForCausalLM
@@ -809,9 +810,9 @@ class SiglipEncoder(nn.Module):
         if cu_seqlens is None:
             raise ValueError("cu_seqlens cannot be None for SiglipEncoder.")
         if not isinstance(cu_seqlens, torch.Tensor):
-            cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32, device=device)
+            cu_seqlens = async_tensor_h2d(cu_seqlens, dtype=torch.int32, device=device)
         else:
-            cu_seqlens = cu_seqlens.to(device=device)
+            cu_seqlens = cu_seqlens.to(device=device, non_blocking=True)
 
         max_seqlen = None
         if self.attn_backend in {
@@ -1133,10 +1134,13 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         siglip_position_ids.append(image_position_ids)
         cu_seqlens.append(cu_seqlens[-1] + numel)
 
+        # Both are built on the host; stage them over non-blocking.
         siglip_position_ids = torch.concat(siglip_position_ids, dim=0).to(
-            pixel_values.device
+            pixel_values.device, non_blocking=True
         )
-        cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32).to(pixel_values.device)
+        cu_seqlens = async_tensor_h2d(
+            cu_seqlens, dtype=torch.int32, device=pixel_values.device
+        )
 
         vision_outputs = self.visual(
             pixel_values=pixel_values,

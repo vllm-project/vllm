@@ -73,6 +73,7 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .ernie45_vl_moe import Ernie4_5_VLMoeForCausalLM
@@ -813,8 +814,8 @@ class VariableResolutionResamplerModel(nn.Module):
                             b_offset + (temp_offset + 1) * spatial_size,
                         )
                     )
-            slice_offsets = torch.tensor(np.concatenate(slice_offsets, axis=-1)).to(
-                x.device
+            slice_offsets = async_tensor_h2d(
+                np.concatenate(slice_offsets, axis=-1), device=x.device
             )
 
             slice_offsets2 = []
@@ -830,8 +831,8 @@ class VariableResolutionResamplerModel(nn.Module):
                             b_offset + (temp_offset + 1) * spatial_size,
                         )
                     )
-            slice_offsets2 = torch.tensor(np.concatenate(slice_offsets2, axis=-1)).to(
-                x.device
+            slice_offsets2 = async_tensor_h2d(
+                np.concatenate(slice_offsets2, axis=-1), device=x.device
             )
 
             x_timestep_1 = torch.index_select(x, dim=0, index=slice_offsets)

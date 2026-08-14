@@ -1364,14 +1364,16 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
             )
         else:
             pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
+            # As on the image path, these are host-built; stage them over
+            # non-blocking.
             siglip_position_ids = torch.concat(siglip_position_ids, dim=0).to(
-                pixel_values_videos.device
+                pixel_values_videos.device, non_blocking=True
             )
-            cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32).to(
-                pixel_values_videos.device
+            cu_seqlens = async_tensor_h2d(
+                cu_seqlens, dtype=torch.int32, device=pixel_values_videos.device
             )
             sample_indices = torch.concat(sample_indices, dim=0).to(
-                pixel_values_videos.device
+                pixel_values_videos.device, non_blocking=True
             )
 
             video_embeds = self.visual(
