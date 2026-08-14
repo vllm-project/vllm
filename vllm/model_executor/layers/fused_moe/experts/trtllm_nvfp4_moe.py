@@ -213,8 +213,13 @@ class TrtLlmNvFp4ExpertsBase:
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        """Supports non-gated MoE (i.e. Nemotron-Nano)."""
-        return True
+        """Non-gated MoE is disabled: semantically corrupt output on SM100.
+
+        See https://github.com/vllm-project/vllm/issues/52308. Backend
+        selection falls back to FLASHINFER_CUTLASS for non-gated (ReLU^2)
+        models such as Nemotron-Nano; gated models are unaffected.
+        """
+        return False
 
     @staticmethod
     def _supports_quant_scheme(
