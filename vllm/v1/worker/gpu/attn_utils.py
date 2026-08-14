@@ -243,6 +243,22 @@ def init_attn_backend(
     return attn_groups, attn_cg_support_info, kernel_block_sizes
 
 
+def get_query_lens_mismatch_unsupported_backend(
+    attn_groups: list[list[AttentionGroup]],
+) -> str | None:
+    """Name the first backend needing the CPU query lengths to be exact, if any.
+
+    The attention selector already excludes these when adaptive verification is
+    enabled, but models that hard-wire their backend never consult it. See
+    AttentionBackend.supports_device_cpu_query_lens_mismatch().
+    """
+    for groups in attn_groups:
+        for group in groups:
+            if not group.backend.supports_device_cpu_query_lens_mismatch():
+                return group.backend.__name__
+    return None
+
+
 def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig, shared_layers: dict[str, str], device: torch.device
 ):
