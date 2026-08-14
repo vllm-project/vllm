@@ -13,7 +13,10 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm.distributed.weight_transfer import WeightTransferEngineFactory
+from vllm.distributed.weight_transfer import (
+    WeightTransferEngineFactory,
+    WeightTransferTrainerFactory,
+)
 from vllm.distributed.weight_transfer.m2n_common import (
     REPLICATE,
     REPLICATED,
@@ -29,6 +32,11 @@ from vllm.distributed.weight_transfer.m2n_engine import (
     M2NWeightTransferInitInfo,
     M2NWeightTransferUpdateInfo,
 )
+from vllm.distributed.weight_transfer.m2n_source import (
+    mesh_from_tensor,
+    placements_from_tensor,
+)
+from vllm.distributed.weight_transfer.m2n_trainer import M2NTrainerInitInfo
 
 
 class TestLayout:
@@ -75,6 +83,14 @@ class TestLayout:
     def test_shard_must_divide_evenly(self):
         with pytest.raises(ValueError, match="does not divide evenly"):
             validate_layout(M2NMesh((1, 3), 0), (REPLICATE, 0), (8, 16), "source")
+
+
+class TestSourceLayout:
+    def test_plain_tensor_is_replicated_across_trainer_ranks(self):
+        """A tensor with no DTensor metadata is the same on every trainer rank,
+        so the source describes it as replicated over all of them."""
+        assert placements_from_tensor(torch.zeros(4)) is REPLICATED
+        assert mesh_from_tensor(torch.zeros(4), 4) == M2NMesh((4, 1), 0)
 
 
 class TestTransferable:
@@ -150,6 +166,54 @@ class TestWireTypes:
 
         engine._reshard.assert_not_called()
 
+    def test_trainer_rank_must_be_a_trainer_rank(self):
+        """A trainer rank must fall within the trainer portion of the group."""
+        with pytest.raises(ValueError, match="num_trainer_ranks"):
+            M2NTrainerInitInfo(
+                master_address="127.0.0.1",
+                master_port=1234,
+                world_size=4,
+                num_trainer_ranks=2,
+                rank=2,
+            )
+
+    def test_trainer_destination_mesh_must_cover_the_workers(self):
+        """The destination mesh must include every inference worker."""
+        with pytest.raises(ValueError, match="dst_mesh_dims"):
+            M2NTrainerInitInfo(
+                master_address="127.0.0.1",
+                master_port=1234,
+                world_size=6,
+                num_trainer_ranks=2,
+                dst_mesh_dims=(3, 1),  # 3 != the 4 inference workers
+                rank=0,
+            )
+
+    def test_destination_mesh_defaults_to_flat(self):
+        """A replicated destination does not care how the mesh is factored, so
+        callers that do not shard it need not supply one."""
+        info = M2NTrainerInitInfo(
+            master_address="127.0.0.1",
+            master_port=1234,
+            world_size=6,
+            num_trainer_ranks=2,
+            rank=0,
+        )
+        assert info.destination_mesh_dims == (4, 1)
+
+    def test_sender_is_trainer_rank_zero(self):
+        """Trainer rank 0 drives the inference control plane."""
+        info = M2NTrainerInitInfo(
+            master_address="127.0.0.1", master_port=1234, world_size=4, rank=0
+        )
+        assert info.is_sender
+
 class TestRegistration:
-    def test_worker_registry_exposes_the_backend(self):
+    def test_both_registries_expose_the_backend(self):
+        """Both worker and trainer factories register nccl_m2n."""
         assert "nccl_m2n" in WeightTransferEngineFactory._registry
+        assert "nccl_m2n" in WeightTransferTrainerFactory._registry
+
+    def test_init_info_dispatches_to_the_backend(self):
+        """Trainer init info selects the nccl_m2n factory entry."""
+        assert M2NTrainerInitInfo.backend == "nccl_m2n"
