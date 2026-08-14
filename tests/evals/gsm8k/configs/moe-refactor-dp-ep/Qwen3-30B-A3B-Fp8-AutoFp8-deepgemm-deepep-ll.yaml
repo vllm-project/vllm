@@ -1,0 +1,8 @@
+model_name: "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
+accuracy_threshold: 0.88
+num_questions: 1319
+num_fewshot: 5
+server_args: "--enforce-eager --max-model-len 8192 --data-parallel-size 2 --enable-expert-parallel --all2all-backend deepep_low_latency --disable-uvicorn-access-log"
+env:
+  VLLM_USE_DEEP_GEMM: "1"
+  VLLM_USE_DEEP_GEMM_MOE: "1"

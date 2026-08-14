@@ -1,0 +1,27 @@
+[
+  {
+    "role": "developer",
+    "content": "Use tools when needed.",
+    "tools": [
+      {
+        "function": {
+          "name": "lookup",
+          "description": "Lookup a record.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": ["id"]
+          }
+        }
+      }
+    ]
+  },
+  {
+    "role": "user",
+    "content": "Find record abc."
+  }
+]

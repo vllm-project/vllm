@@ -1,0 +1,26 @@
+BasedOnStyle: Google
+UseTab: Never
+IndentWidth: 2
+ColumnLimit: 80
+
+# Force pointers to the type for C++.
+DerivePointerAlignment: false
+PointerAlignment: Left
+
+# Reordering #include statements can (and currently will) introduce errors
+SortIncludes: false
+
+# Style choices
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+IndentPPDirectives: BeforeHash
+
+IncludeCategories:
+  - Regex:           '^<'
+    Priority:        4
+  - Regex:           '^"(llvm|llvm-c|clang|clang-c|mlir|mlir-c)/'
+    Priority:        3
+  - Regex:           '^"(qoda|\.\.)/'
+    Priority:        2
+  - Regex:           '.*'
+    Priority:        1

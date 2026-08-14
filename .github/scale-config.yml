@@ -1,0 +1,21 @@
+# scale-config.yml:
+#   Powers what instance types are available for GHA auto-scaled
+#   runners. Runners listed here will be available as self hosted
+#   runners, configuration is directly pulled from the main branch.
+# runner_types:
+#   runner_label:
+#     instance_type: m4.large
+#     os: linux
+#     # min_available defaults to the global cfg in the ALI Terraform
+#     min_available: undefined
+#     # when max_available value is not defined, no max runners is enforced
+#     max_available: undefined
+#     disk_size: 50
+#     is_ephemeral: true
+
+runner_types:
+  linux.2xlarge:
+    disk_size: 150
+    instance_type: c5.2xlarge
+    is_ephemeral: true
+    os: linux
