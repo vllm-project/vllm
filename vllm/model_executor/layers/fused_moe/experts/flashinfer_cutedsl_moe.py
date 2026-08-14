@@ -13,6 +13,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    activation_to_flashinfer_int,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
@@ -56,6 +59,9 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         self.global_num_experts = moe_config.num_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
         self.local_expert_offset = self.ep_rank * self.local_num_experts
+        self.gemm1_alpha = quant_config.gemm1_alpha
+        self.gemm1_beta = quant_config.gemm1_beta
+        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
@@ -76,7 +82,7 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -90,16 +96,18 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SILU
+        return activation in (
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.RELU2_NO_MUL,
+        )
 
     @staticmethod
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
         return True
-
-    def supports_expert_map(self) -> bool:
-        return False
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
@@ -149,6 +157,22 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         # The functional API expects x_sf with trailing dim: (M, K//16, 1).
         x_sf = a1q_scale.unsqueeze(-1)
 
+        # The kernel defaults swiglu_{alpha,beta,limit} to the plain-SwiGLU
+        # values, so only forward the ones the model actually sets.
+        swiglu_params: dict[str, float | None] = {}
+        if activation == MoEActivation.SILU:
+            swiglu_params = {"swiglu_limit": self.gemm1_clamp_limit}
+        elif activation in (
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        ):
+            swiglu_params = {
+                "swiglu_alpha": self.gemm1_alpha,
+                "swiglu_beta": self.gemm1_beta,
+                "swiglu_limit": self.gemm1_clamp_limit,
+            }
+        swiglu_kwargs = {k: v for k, v in swiglu_params.items() if v is not None}
+
         flashinfer_cute_dsl_fused_moe_nvfp4(
             x=hidden_states,
             x_sf=x_sf,
@@ -166,4 +190,6 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
             num_local_experts=self.local_num_experts,
             local_expert_offset=self.local_expert_offset,
             moe_output=output,
+            activation_type=activation_to_flashinfer_int(activation),
+            **swiglu_kwargs,
         )

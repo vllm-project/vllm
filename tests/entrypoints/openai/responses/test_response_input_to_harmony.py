@@ -12,7 +12,7 @@ from openai.types.responses import ResponseFunctionToolCall, ResponseReasoningIt
 from openai.types.responses.response_reasoning_item import (
     Content as ReasoningTextContent,
 )
-from openai_harmony import Role
+from openai_harmony import DeveloperContent, Role
 
 from vllm.entrypoints.openai.responses.harmony import response_input_to_harmony
 
@@ -65,14 +65,16 @@ class TestResponseInputToHarmonyMessage:
         assert msg.content[0].text == "Hello"
 
     def test_system_message(self):
+        """System messages carry developer instructions and must be rendered
+        as developer messages with DeveloperContent."""
         msg = response_input_to_harmony(
             {"type": "message", "role": "system", "content": "Be helpful."},
             prev_responses=[],
         )
 
-        assert msg.author.role == Role.SYSTEM
-        assert msg.content[0].text == "Be helpful."
-        assert msg.channel is None
+        assert msg.author.role == Role.DEVELOPER
+        assert isinstance(msg.content[0], DeveloperContent)
+        assert msg.content[0].instructions == "Be helpful."
 
     def test_assistant_message_gets_final_channel(self):
         msg = response_input_to_harmony(
@@ -85,14 +87,16 @@ class TestResponseInputToHarmonyMessage:
         assert msg.content[0].text == "The answer is 42."
 
     def test_developer_message_gets_instructions_prefix(self):
+        """Developer messages must use DeveloperContent which adds the
+        '# Instructions' header the model was trained on."""
         msg = response_input_to_harmony(
             {"type": "message", "role": "developer", "content": "Be concise."},
             prev_responses=[],
         )
 
         assert msg.author.role == Role.DEVELOPER
-        assert msg.content[0].text == "Instructions:\nBe concise."
-        assert msg.channel is None
+        assert isinstance(msg.content[0], DeveloperContent)
+        assert msg.content[0].instructions == "Be concise."
 
     def test_message_with_array_content(self):
         msg = response_input_to_harmony(
@@ -112,7 +116,9 @@ class TestResponseInputToHarmonyMessage:
         assert msg.content[0].text == "Part one. "
         assert msg.content[1].text == "Part two."
 
-    def test_developer_message_array_content_gets_prefix_on_each_part(self):
+    def test_developer_message_array_content_concatenated(self):
+        """Array content in developer messages is flattened and rendered
+        via DeveloperContent with the '# Instructions' header."""
         msg = response_input_to_harmony(
             {
                 "type": "message",
@@ -125,8 +131,9 @@ class TestResponseInputToHarmonyMessage:
             prev_responses=[],
         )
 
-        assert msg.content[0].text == "Instructions:\nRule 1."
-        assert msg.content[1].text == "Instructions:\nRule 2."
+        assert msg.author.role == Role.DEVELOPER
+        assert isinstance(msg.content[0], DeveloperContent)
+        assert msg.content[0].instructions == "Rule 1.Rule 2."
 
     # -----------------------------------------------------------------------
     # type="reasoning"

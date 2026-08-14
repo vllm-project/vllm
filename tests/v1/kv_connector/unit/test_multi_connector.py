@@ -53,11 +53,17 @@ class MockConnectorStats(KVConnectorStats):
 class MockConnector(KVConnectorBase_V1):
     """Mock connector for testing."""
 
+    _supports_divergent_local_hybrid_hits = False
+
     def __new__(cls, *args, **kwargs):
         # mock all KVConnectorBase_V1 functions
         mock = MagicMock(spec_set=KVConnectorBase_V1)
+        mock.supports_divergent_local_hybrid_hits = (
+            cls._supports_divergent_local_hybrid_hits
+        )
         # Override just build_kv_connector_stats
         mock.build_kv_connector_stats = cls.build_kv_connector_stats
+        mock.get_kv_connector_stats.return_value = None
         return mock
 
     @classmethod
@@ -91,8 +97,14 @@ class MockConnector(KVConnectorBase_V1):
 class MockHMAConnector(KVConnectorBase_V1, SupportsHMA):
     """Mock connector that supports HMA for testing."""
 
+    _supports_divergent_local_hybrid_hits = False
+
     def __new__(cls, *args, **kwargs):
         mock = MagicMock(spec_set=cls)
+        mock.supports_divergent_local_hybrid_hits = (
+            cls._supports_divergent_local_hybrid_hits
+        )
+        mock.get_kv_connector_stats.return_value = None
         return mock
 
     def start_load_kv(self, forward_context, **kwargs):
@@ -120,10 +132,19 @@ class MockHMAConnector(KVConnectorBase_V1, SupportsHMA):
         return (False, None)
 
 
+class MockDivergentHMAConnector(MockHMAConnector):
+    _supports_divergent_local_hybrid_hits = True
+
+
 # Register mock connectors
 KVConnectorFactory.register_connector("MockConnector", __name__, MockConnector.__name__)
 KVConnectorFactory.register_connector(
     "MockHMAConnector", __name__, MockHMAConnector.__name__
+)
+KVConnectorFactory.register_connector(
+    "MockDivergentHMAConnector",
+    __name__,
+    MockDivergentHMAConnector.__name__,
 )
 
 
@@ -215,8 +236,10 @@ def test_multi_example_connector_consistency():
     llm = LLM(
         model=MODEL_NAME,
         enforce_eager=True,
+        block_size=16,
         gpu_memory_utilization=0.5,
         kv_transfer_config=kv_transfer_config,
+        async_scheduling=False,
     )
     # Run generation - this should trigger saving KV cache
     # Use a single prompt to avoid race conditions depending on the order of scheduling
@@ -261,14 +284,15 @@ def test_multi_example_connector_consistency():
     storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
     storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
     # First event is bind_gpu_block_pool from initialization, then
-    # set_xfer_handshake_metadata, then on_new_request when the request is enqueued,
-    # then get_num_new_matched_tokens and update_state_after_alloc from generate().
+    # set_xfer_handshake_metadata_pp_aware, then on_new_request when the request is
+    # enqueued, then get_num_new_matched_tokens and update_state_after_alloc from
+    # generate().
     assert storage1_scheduler_events[:6] == [
         "bind_gpu_block_pool",
-        "set_xfer_handshake_metadata",
+        "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[0] 0",
+        "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
     # First three events are from initialization (register_kv_caches,
@@ -285,10 +309,10 @@ def test_multi_example_connector_consistency():
     ]
     assert storage2_scheduler_events[:6] == [
         "bind_gpu_block_pool",
-        "set_xfer_handshake_metadata",
+        "set_xfer_handshake_metadata_pp_aware",
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[0] 0",
+        "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
     assert events["storage2-WORKER"][:8] == [
@@ -311,11 +335,15 @@ def test_multi_example_connector_consistency():
 
     events = get_connector_events()
     # get_num_new_matched_tokens will return new tokens from the first
-    # connector so update_state_after_alloc will be with allocated blocks
-    # on that one but with zero blocks for others (first nonzero match is
-    # chosen).
-    storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
-    storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
+    # connector (first nonzero match is chosen), so update_state_after_alloc
+    # will report those external tokens on that one. Other connectors still
+    # receive the request's real blocks but with 0 external tokens.
+    storage1_scheduler_events = _events_from_request(
+        _ignore_event_collection(events["storage1-SCHEDULER"])
+    )
+    storage2_scheduler_events = _events_from_request(
+        _ignore_event_collection(events["storage2-SCHEDULER"])
+    )
     assert storage1_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
@@ -325,7 +353,7 @@ def test_multi_example_connector_consistency():
     assert storage2_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[0] 0",
+        "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
 
@@ -341,15 +369,19 @@ def test_multi_example_connector_consistency():
 
     events = get_connector_events()
     # get_num_new_matched_tokens will be called for both connectors but will
-    # return 0 from the first connector, but the second connector should have
-    # a hit, so update_state_after_alloc will only be called with allocated
-    # blocks for the second connector.
-    storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
-    storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
+    # return 0 from the first connector, while the second connector has a hit.
+    # Both connectors receive the request's real blocks, but only the chosen
+    # (second) connector reports external tokens.
+    storage1_scheduler_events = _events_from_request(
+        _ignore_event_collection(events["storage1-SCHEDULER"])
+    )
+    storage2_scheduler_events = _events_from_request(
+        _ignore_event_collection(events["storage2-SCHEDULER"])
+    )
     assert storage1_scheduler_events[:4] == [
         "on_new_request",
         "get_num_new_matched_tokens 0",
-        "update_state_after_alloc num_blocks=[0] 0",
+        "update_state_after_alloc num_blocks=[7] 0",
         "build_connector_meta",
     ]
     assert storage2_scheduler_events[:4] == [
@@ -365,7 +397,20 @@ def test_multi_example_connector_consistency():
 
 
 def _ignore_event_collection(events: list[str]) -> list[str]:
-    return [event for event in events if event != "take_events"]
+    # Filter out per-step polling hooks that the scheduler calls repeatedly
+    # and which are not meaningful state transitions for these assertions.
+    ignored = {"get_kv_connector_stats", "has_pending_push_work", "take_events"}
+    return [event for event in events if event not in ignored]
+
+
+def _events_from_request(events: list[str]) -> list[str]:
+    # The async engine-core can emit a trailing build_connector_meta from the
+    # previous generation's final (idle) scheduler step. Depending on timing it
+    # may be flushed into this window ahead of on_new_request, so anchor the
+    # comparison on the new request's first event to avoid a flaky ordering.
+    if "on_new_request" in events:
+        return events[events.index("on_new_request") :]
+    return events
 
 
 def get_connector_events() -> dict[str, list[str]]:
@@ -1000,11 +1045,8 @@ def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
     )
 
 
-def test_multi_connector_hma_opt_in():
+def test_multi_connector_hma_support_detection():
     """
-    MultiConnector currently assumes HMA is opt-in: it needs
-    --no-disable-hybrid-kv-cache-manager to be enabled.
-
     At runtime, _all_support_hma is True only when every sub-connector
     implements SupportsHMA. Test all combinations of HMA / non-HMA
     sub-connectors.
@@ -1037,6 +1079,16 @@ def test_multi_connector_hma_opt_in():
     assert mc_mixed2._all_support_hma is False
 
 
+def test_divergent_local_hybrid_hit_capability_is_conservative():
+    all_supported = _make_multi_connector(
+        ["MockDivergentHMAConnector", "MockDivergentHMAConnector"]
+    )
+    assert all_supported.supports_divergent_local_hybrid_hits is True
+
+    mixed = _make_multi_connector(["MockDivergentHMAConnector", "MockHMAConnector"])
+    assert mixed.supports_divergent_local_hybrid_hits is False
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Requires GPU to instantiate LLM"
 )
@@ -1060,7 +1112,7 @@ def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
             "connectors": [
                 {
                     "kv_connector": "NixlConnector",
-                    "kv_role": "kv_both",
+                    "kv_role": "kv_consumer",
                 },
                 {
                     "kv_connector": "MockConnector",
@@ -1074,7 +1126,7 @@ def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
     )
 
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
     ):
         llm = LLM(

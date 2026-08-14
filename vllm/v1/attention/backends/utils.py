@@ -17,6 +17,7 @@ from typing_extensions import runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
 from vllm.v1.kv_cache_interface import KVCacheSpec, MambaSpec
 
 if TYPE_CHECKING:
@@ -45,6 +46,106 @@ PAD_SLOT_ID = -1
 NULL_BLOCK_ID = 0
 
 
+def compute_mm_prefix_range_tensor(
+    mm_prefix_range: dict[int, list[tuple[int, int]]] | None,
+    num_seqs: int,
+    device: torch.device,
+) -> torch.Tensor | None:
+    """Convert mm_prefix_range dict to padded tensor for Triton kernel.
+
+    Returns shape: (num_seqs, max_ranges, 2) with 0-padding for empty ranges.
+    Empty ranges have start==end==0, which kernel skips via is_valid check.
+    """
+    if mm_prefix_range is None:
+        return None
+
+    range_lists = [
+        mm_prefix_range.get(i, [(0, 0)]) or [(0, 0)] for i in range(num_seqs)
+    ]
+
+    if all(r == [(0, 0)] for r in range_lists):
+        return None
+
+    max_ranges = max(len(r) for r in range_lists)
+    padded = []
+    for r in range_lists:
+        padded_r = list(r) + [(0, 0)] * (max_ranges - len(r))
+        padded.append(padded_r)
+    padded = async_tensor_h2d(padded, dtype=torch.int32, device=device)
+    return padded.view(num_seqs, max_ranges, 2)
+
+
+def fill_mm_prefix_query_ranges(
+    out: np.ndarray,
+    mm_prefix_range: dict[int, list[tuple[int, int]]] | None,
+    query_start_loc_cpu: torch.Tensor,
+    seq_lens_cpu: torch.Tensor,
+) -> int:
+    """Map each scheduled query token to the mm_prefix range containing it.
+
+    Writes into ``out``, a caller-owned ``(max_num_batched_tokens, 2)`` int32
+    staging buffer, and returns the number of rows written (0 if no range
+    covers any scheduled query token, in which case ``out`` is untouched and
+    the caller should skip the mask_mod entirely). Row ``i`` holds the absolute
+    ``[start, end]`` bounds of the bidirectional range that query token ``i``
+    belongs to, or ``(-1, -1)`` when it is outside every range.
+
+    mm_prefix ranges never overlap, so "query and key share a range" is
+    equivalent to "the key lies inside the query's own range". The kernel
+    therefore needs no key-side lookup, and this metadata is sized by scheduled
+    query tokens rather than by context length -- bounded by
+    ``max_num_batched_tokens`` instead of ``num_seqs * max_seq_len``.
+
+    Ranges are absolute prompt positions and may extend past the tokens
+    scheduled so far under chunked prefill; the portion outside the current
+    chunk is simply not recorded. Degenerate ranges (``start >= end``) are
+    skipped to match the Triton path's ``start < end`` validity check.
+
+    ``seq_lens_cpu`` only needs to be exact for prefill rows, since mm_prefix
+    ranges cover prompt tokens: an over-estimate on a decode row shifts that
+    row's query position further past every range, which still matches nothing.
+    """
+    if mm_prefix_range is None:
+        return 0
+
+    query_start_loc = query_start_loc_cpu.numpy()
+    num_actual_tokens = int(query_start_loc[-1])
+    if num_actual_tokens <= 0:
+        return 0
+    assert num_actual_tokens <= out.shape[0], (
+        f"mm_prefix staging buffer holds {out.shape[0]} tokens, got {num_actual_tokens}"
+    )
+
+    # Resolve every span before touching `out`, so batches whose ranges all
+    # fall outside the scheduled tokens skip the fill entirely.
+    spans: list[tuple[int, int, int, int]] = []
+    for req_idx, req_ranges in mm_prefix_range.items():
+        if not req_ranges:
+            continue
+        token_start = int(query_start_loc[req_idx])
+        query_len = int(query_start_loc[req_idx + 1]) - token_start
+        if query_len <= 0:
+            continue
+        # Absolute position of this request's first scheduled query token.
+        context_len = int(seq_lens_cpu[req_idx]) - query_len
+        for start, end in req_ranges:
+            if start >= end:
+                continue
+            first = max(start - context_len, 0)
+            last = min(end - context_len, query_len - 1)
+            if first > last:
+                continue
+            spans.append((token_start + first, token_start + last + 1, start, end))
+
+    if not spans:
+        return 0
+
+    out[:num_actual_tokens] = -1
+    for row_start, row_end, start, end in spans:
+        out[row_start:row_end] = (start, end)
+    return num_actual_tokens
+
+
 def is_valid_kv_cache_layout(value: str) -> bool:
     return value in get_args(KVCacheLayoutType)
 
@@ -57,7 +158,7 @@ def get_kv_cache_layout():
     cache_layout: Literal["NHD", "HND"] | None = None
     if _KV_CACHE_LAYOUT_OVERRIDE is not None:
         cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
-        logger.info_once(
+        logger.debug_once(
             "`_KV_CACHE_LAYOUT_OVERRIDE` variable detected. "
             "Setting KV cache layout to %s.",
             cache_layout,
@@ -360,8 +461,8 @@ def make_local_attention_virtual_batches(
     # tensor first, which recovers perf.
     # Upload the index tensors to the block_table's device up-front so that the
     # fancy indexing below doesn't implicitly force a synchronous H2D copy.
-    batch_indices_torch = torch.from_numpy(batch_indices).to(device, non_blocking=True)
-    block_indices_torch = torch.from_numpy(block_indices).to(device, non_blocking=True)
+    batch_indices_torch = async_tensor_h2d(batch_indices, device=device)
+    block_indices_torch = async_tensor_h2d(block_indices, device=device)
 
     # Save as a lambda so we can return this for update_block_table
     make_block_table = lambda block_table: block_table[
@@ -375,8 +476,8 @@ def make_local_attention_virtual_batches(
 
     return CommonAttentionMetadata(
         query_start_loc_cpu=query_start_loc_cpu,
-        query_start_loc=query_start_loc_cpu.to(device=device, non_blocking=True),
-        seq_lens=seq_lens_cpu.to(device=device, non_blocking=True),
+        query_start_loc=async_tensor_h2d(query_start_loc_cpu, device=device),
+        seq_lens=async_tensor_h2d(seq_lens_cpu, device=device),
         num_reqs=len(seq_lens_cpu),
         num_actual_tokens=common_attn_metadata.num_actual_tokens,
         max_query_len=seqlens_q_local.max(),
@@ -438,8 +539,14 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
 
     decode_query_start_loc[:1].fill_(0)  # Avoid sync from scalar assignment.
     decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
-    decode_max_query_len = int(num_decode_tokens.max().item())
-    total_num_decode_tokens = int(num_decode_tokens.sum().item())
+
+    # `num_decode_tokens` is a histogram over `logits_indices`, so its total is
+    # just how many there were -- already known as a Python int.
+    total_num_decode_tokens = num_logits_indices
+
+    # Largest per-request logits count.
+    decode_max_query_len = common_attn_metadata.max_logits_per_req
+    assert decode_max_query_len is not None
 
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=decode_query_start_loc,
@@ -484,14 +591,15 @@ def split_decodes_prefills_and_extends(
     num_reqs = common_attn_metadata.num_reqs
     num_tokens = common_attn_metadata.num_actual_tokens
     query_start_loc = common_attn_metadata.query_start_loc_cpu
+
+    if max_query_len <= decode_threshold:
+        return num_reqs, 0, 0, num_tokens, 0, 0
+
     # Upper bound is exact for prefill rows; decode rows still satisfy
     # seq_len > query_len under the optimistic bound, so `seq_lens ==
     # query_lens` identifies prefills correctly either way.
     assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
     seq_lens = common_attn_metadata.seq_lens_cpu_upper_bound
-
-    if max_query_len <= decode_threshold:
-        return num_reqs, 0, 0, num_tokens, 0, 0
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     is_prefill_or_extend = query_lens > decode_threshold
@@ -581,7 +689,9 @@ def split_decodes_and_prefills(
         # check if we are in a padded uniform batch; this is used for full-CGs, some
         # requests may have a query length of 0 but since they are padding its fine
         # to treat them as decodes (ensures num_decodes matches the captured size)
-        if torch.all((query_lens == query_lens[0]) | (query_lens == 0)):
+        if treat_short_extends_as_decodes and torch.all(
+            (query_lens == query_lens[0]) | (query_lens == 0)
+        ):
             return num_reqs, 0, num_tokens, 0  # all decodes
         is_prefill = query_lens != query_lens[0]
     else:
@@ -803,14 +913,12 @@ def create_fast_prefill_custom_backend(
 
 
 def compute_causal_conv1d_metadata(
-    query_start_loc_p_cpu: torch.Tensor,
-    *,
-    device: torch.device,
-):
+    query_start_loc_p_cpu: torch.Tensor, *, device: torch.device
+) -> tuple[dict[int, dict[str, Any]], torch.Tensor, torch.Tensor]:
     # Needed for causal_conv1d. Use the CPU query_start_loc to avoid DtoH sync.
     assert query_start_loc_p_cpu.device.type == "cpu"
     seqlens = query_start_loc_p_cpu.diff()
-    nums_dict = {}  # type: ignore
+    nums_dict: dict[int, dict[str, Any]] = {}
     batch_ptr = None
     token_chunk_offset_ptr = None
     for BLOCK_M in [8]:  # cover all BLOCK_M values
@@ -818,7 +926,7 @@ def compute_causal_conv1d_metadata(
         nums_dict[BLOCK_M] = {}
         nums_dict[BLOCK_M]["nums"] = nums
         nums_dict[BLOCK_M]["tot"] = nums.sum().item()
-        mlist = torch.from_numpy(np.repeat(np.arange(len(nums)), nums))
+        mlist = np_to_pinned_tensor(np.repeat(np.arange(len(nums)), nums))
         nums_dict[BLOCK_M]["mlist"] = mlist
         mlist_len = len(nums_dict[BLOCK_M]["mlist"])
         nums_dict[BLOCK_M]["mlist_len"] = mlist_len
@@ -826,7 +934,7 @@ def compute_causal_conv1d_metadata(
         offsetlist = []  # type: ignore
         for idx, num in enumerate(nums):
             offsetlist.extend(range(num))
-        offsetlist = torch.tensor(offsetlist, dtype=torch.int32)
+        offsetlist = torch.tensor(offsetlist, dtype=torch.int32, pin_memory=PIN_MEMORY)
         nums_dict[BLOCK_M]["offsetlist"] = offsetlist
 
         if batch_ptr is None:
@@ -840,16 +948,15 @@ def compute_causal_conv1d_metadata(
         else:
             if batch_ptr.nelement() < MAX_NUM_PROGRAMS:
                 batch_ptr.resize_(MAX_NUM_PROGRAMS).fill_(PAD_SLOT_ID)
-                token_chunk_offset_ptr.resize_(  # type: ignore
-                    MAX_NUM_PROGRAMS
-                ).fill_(PAD_SLOT_ID)
+                assert token_chunk_offset_ptr is not None
+                token_chunk_offset_ptr.resize_(MAX_NUM_PROGRAMS).fill_(PAD_SLOT_ID)
 
+        assert batch_ptr is not None
         batch_ptr[0:mlist_len].copy_(mlist, non_blocking=True)
-        token_chunk_offset_ptr[  # type: ignore
-            0:mlist_len
-        ].copy_(offsetlist, non_blocking=True)
+        assert token_chunk_offset_ptr is not None
+        token_chunk_offset_ptr[0:mlist_len].copy_(offsetlist, non_blocking=True)
         nums_dict[BLOCK_M]["batch_ptr"] = batch_ptr
-        nums_dict[BLOCK_M]["token_chunk_offset_ptr"] = token_chunk_offset_ptr  # type: ignore
+        nums_dict[BLOCK_M]["token_chunk_offset_ptr"] = token_chunk_offset_ptr
 
     return nums_dict, batch_ptr, token_chunk_offset_ptr
 
@@ -864,20 +971,20 @@ def get_dcp_local_seq_lens(
     use this function to calculate split decode seq_lens of each dcp rank.
     Only consider dcp now, we can extend the case of cp based on this.
     """
-    num_requests = seq_lens.size(0)
+    seq_lens_i32 = seq_lens.to(torch.int32)
     if dcp_rank is None:
-        rank_offsets = (
-            torch.arange(dcp_size, dtype=torch.int32, device=seq_lens.device)
-            .unsqueeze(0)
-            .repeat(num_requests, 1)
+        rank_offsets = torch.arange(
+            dcp_size,
+            dtype=torch.int32,
+            device=seq_lens.device,
+        ).view(
+            *((1,) * seq_lens_i32.dim()),
+            dcp_size,
         )
+        seq_lens_tiled = seq_lens_i32.unsqueeze(-1)
     else:
-        rank_offsets = torch.tensor(
-            [[dcp_rank]], dtype=torch.int32, device=seq_lens.device
-        )
-    seq_lens_tiled = (
-        seq_lens.to(torch.int32).unsqueeze(-1).repeat(1, rank_offsets.shape[1])
-    )
+        rank_offsets = torch.tensor(dcp_rank, dtype=torch.int32, device=seq_lens.device)
+        seq_lens_tiled = seq_lens_i32
     base = (
         seq_lens_tiled
         // cp_kv_cache_interleave_size
@@ -891,7 +998,7 @@ def get_dcp_local_seq_lens(
         cp_kv_cache_interleave_size,
     )
     dcp_local_seq_lens = base + remainder
-    return dcp_local_seq_lens.squeeze(1)
+    return dcp_local_seq_lens
 
 
 def mamba_get_block_table_tensor(
@@ -922,10 +1029,8 @@ def mamba_get_block_table_tensor(
         assert isinstance(kv_cache_spec, MambaSpec)
         # NOTE: For 0-length requests in CUDA graph, use a start_index of 0
         # to handle the invalid block table.
-        start_indices = torch.clamp(
-            (seq_lens - 1) // kv_cache_spec.block_size,
-            min=0,
-        )
+        start_indices = (seq_lens - 1) // kv_cache_spec.block_size
+        start_indices.clamp_(min=0)
         # Use int32 for arithmetic to avoid dtype promotion overhead,
         # then convert to int64 for gather (which requires Long indices)
         offsets = torch.arange(

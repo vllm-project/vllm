@@ -4,7 +4,7 @@ default_install_hook_types:
 default_stages:
   - pre-commit # Run locally
   - manual # Run in CI
-exclude: 'vllm/third_party/.*'
+exclude: 'vllm/third_party/.*|vllm/models/kimi_k3/nvidia/ops/third_party/.*|vllm/models/kimi_k3/amd/ops/third_party/.*'
 repos:
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.14.0
@@ -21,7 +21,7 @@ repos:
   rev: v21.1.2
   hooks:
   - id: clang-format
-    exclude: 'csrc/(moe/topk_softmax_kernels.cu|quantization/gguf/(ggml-common.h|dequantize.cuh|vecdotq.cuh|mmq.cuh|mmvq.cuh))|vllm/third_party/.*'
+    exclude: 'csrc/libtorch_stable/moe/topk_softmax_kernels.cu|vllm/third_party/.*'
     types_or: [c++, cuda]
     args: [--style=file, --verbose]
 - repo: https://github.com/DavidAnson/markdownlint-cli2
@@ -30,7 +30,7 @@ repos:
   - id: markdownlint-cli2
     language_version: lts
     args: [--fix]
-    exclude: ^CLAUDE\.md$
+    exclude: (^|/)CLAUDE\.md$
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
@@ -126,11 +126,23 @@ repos:
         -c, requirements/xpu.txt,
         -o, requirements/test/xpu.txt,
         --index-strategy, unsafe-best-match,
-        --torch-backend, xpu,
         --python-platform, x86_64-manylinux_2_39,
         --python-version, "3.12",
       ]
       files: ^requirements/(common|xpu|test/xpu)\.(in|txt)$
+    - id: pip-compile
+      alias: pip-compile-cpu
+      name: pip-compile-cpu
+      args: [
+        requirements/test/cuda.in,
+        -o, requirements/test/cpu.txt,
+        --index-strategy, unsafe-best-match,
+        --torch-backend, cpu,
+        --python-platform, x86_64-manylinux_2_28,
+        --python-version, "3.12",
+      ]
+      files: ^requirements/(common|cpu|test/(cuda|cpu))\.(in|txt)$
+      exclude: ^requirements/test/cuda\.txt$
     - id: pip-compile
       alias: pip-compile-docs
       name: pip-compile-docs
@@ -141,6 +153,11 @@ repos:
         --python-version, "3.12",
       ]
       files: ^requirements/docs\.(in|txt)$
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c
+  hooks:
+  - id: check-json
+    files: ^\.buildkite/.*\.json$
 - repo: local
   hooks:
   - id: format-torch-nightly-test
@@ -148,33 +165,27 @@ repos:
     language: python
     entry: python tools/pre_commit/generate_nightly_torch_test.py
     files: ^requirements/test/cuda\.(in|txt)$
-  - id: mypy-local
-    name: Run mypy locally for lowest supported Python version
-    entry: python tools/pre_commit/mypy.py 0 "3.10"
-    stages: [pre-commit] # Don't run in CI
+  - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
+    name: Run mypy for Python 3.10
+    entry: python tools/pre_commit/mypy.py "3.10"
     <<: &mypy_common
       language: python
       types_or: [python, pyi]
       require_serial: true
-      additional_dependencies: ["mypy[faster-cache]==1.19.1", regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, pydantic]
-  - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.10
-    entry: python tools/pre_commit/mypy.py 1 "3.10"
-    <<: *mypy_common
-    stages: [manual] # Only run in CI
+      additional_dependencies: ["mypy==1.20.2", regex, types-cachetools, types-setuptools, types-PyYAML, types-requests, types-torch, pydantic]
   - id: mypy-3.11 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.11
-    entry: python tools/pre_commit/mypy.py 1 "3.11"
+    entry: python tools/pre_commit/mypy.py "3.11"
     <<: *mypy_common
     stages: [manual] # Only run in CI
   - id: mypy-3.12 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.12
-    entry: python tools/pre_commit/mypy.py 1 "3.12"
+    entry: python tools/pre_commit/mypy.py "3.12"
     <<: *mypy_common
     stages: [manual] # Only run in CI
   - id: mypy-3.13 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.13
-    entry: python tools/pre_commit/mypy.py 1 "3.13"
+    entry: python tools/pre_commit/mypy.py "3.13"
     <<: *mypy_common
     stages: [manual] # Only run in CI
   - id: shellcheck
@@ -203,7 +214,7 @@ repos:
     name: Check SPDX headers
     entry: python tools/pre_commit/check_spdx_header.py
     language: python
-    types: [python]
+    types_or: [python, rust, proto]
   - id: check-root-lazy-imports
     name: Check root lazy imports
     entry: python tools/pre_commit/check_init_lazy_imports.py
@@ -222,6 +233,12 @@ repos:
     name: Update Dockerfile dependency graph
     entry: tools/pre_commit/update-dockerfile-graph.sh
     language: script
+  - id: test-nonroot-entrypoint
+    name: Test non-root entrypoint wrapper
+    entry: bash docker/entrypoints/test_vllm_nonroot_entrypoint.sh
+    language: system
+    pass_filenames: false
+    files: ^docker/entrypoints/(vllm-nonroot-entrypoint|test_vllm_nonroot_entrypoint)\.sh$
   - id: check-forbidden-imports
     name: Check for forbidden imports
     entry: python tools/pre_commit/check_forbidden_imports.py
@@ -247,10 +264,6 @@ repos:
     files: ^docker/(Dockerfile|versions\.json)$
     pass_filenames: false
     additional_dependencies: [dockerfile-parse]
-  - id: attention-backend-docs
-    name: Check attention backend documentation is up to date
-    entry: python tools/pre_commit/generate_attention_backend_docs.py --check
-    language: python
   - id: check-boolean-context-manager
     name: Check for boolean ops in with-statements
     entry: python tools/pre_commit/check_boolean_context_manager.py

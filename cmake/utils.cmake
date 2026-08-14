@@ -81,6 +81,14 @@ function (hipify_sources_target OUT_SRCS NAME ORIG_SRCS)
   set_property(GLOBAL APPEND PROPERTY VLLM_HIPIFY_ALL_SRCS ${SRCS})
   set_property(GLOBAL APPEND PROPERTY VLLM_HIPIFY_ALL_BYPRODUCTS ${HIP_SRCS})
 
+  # Chain hipify targets so they run sequentially. Parallel hipify
+  # invocations race on shutil.copytree, overwriting .hip files
+  # produced by another target back to .cu originals.
+  if (DEFINED _VLLM_LAST_HIPIFY_TARGET)
+    add_dependencies(hipify${NAME} ${_VLLM_LAST_HIPIFY_TARGET})
+  endif()
+  set(_VLLM_LAST_HIPIFY_TARGET "hipify${NAME}" PARENT_SCOPE)
+
   # Swap out original extension sources with hipified sources.
   list(APPEND HIP_SRCS ${CXX_SRCS})
   set(${OUT_SRCS} ${HIP_SRCS} PARENT_SCOPE)
@@ -233,14 +241,15 @@ endmacro()
 # `<major>.<minor>`, dedupes them and then sorts them in ascending order and 
 # stores them in `OUT_ARCHES`.
 #
-# Example:
-#   CUDA_ARCH_FLAGS="-gencode arch=compute_75,code=sm_75;...;-gencode arch=compute_90a,code=sm_90a" 
-#   extract_unique_cuda_archs_ascending(OUT_ARCHES CUDA_ARCH_FLAGS)
-#   OUT_ARCHES="7.5;...;9.0"
+# Prefer `code=sm_*`; fall back to `arch=compute_*` for PTX-only flags.
+# This handles mismatches such as `arch=compute_20,code=sm_121`.
 function(extract_unique_cuda_archs_ascending OUT_ARCHES CUDA_ARCH_FLAGS)
   set(_CUDA_ARCHES)
   foreach(_ARCH ${CUDA_ARCH_FLAGS})
-    string(REGEX MATCH "arch=compute_\([0-9]+[af]?\)" _COMPUTE ${_ARCH})
+    string(REGEX MATCH "code=sm_\([0-9]+[af]?\)" _COMPUTE ${_ARCH})
+    if (NOT _COMPUTE)
+      string(REGEX MATCH "arch=compute_\([0-9]+[af]?\)" _COMPUTE ${_ARCH})
+    endif()
     if (_COMPUTE)
       set(_COMPUTE ${CMAKE_MATCH_1})
     endif()
@@ -388,14 +397,24 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   # match — e.g. SRC="12.0f" matches TGT="12.1a" since SM121 is in the SM12x
   # family. The output uses TGT's value to preserve the user's compilation flags.
   set(_CUDA_ARCHS)
+  # Resolve exact base matches before family fallbacks so a generic entry such
+  # as 10.0f cannot consume a 10.7 target that has a 10.7f source entry.
+  foreach(_arch ${_SRC_CUDA_ARCHS})
+    if(_arch MATCHES "[af]$")
+      string(REGEX REPLACE "[af]$" "" _base "${_arch}")
+      if("${_base}" IN_LIST _TGT_CUDA_ARCHS)
+        list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
+        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}")
+        list(APPEND _CUDA_ARCHS "${_arch}")
+      endif()
+    endif()
+  endforeach()
+
   foreach(_arch ${_SRC_CUDA_ARCHS})
     if(_arch MATCHES "[af]$")
       list(REMOVE_ITEM _SRC_CUDA_ARCHS "${_arch}")
       string(REGEX REPLACE "[af]$" "" _base "${_arch}")
-      if ("${_base}" IN_LIST TGT_CUDA_ARCHS)
-        list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}")
-        list(APPEND _CUDA_ARCHS "${_arch}")
-      elseif("${_base}a" IN_LIST _TGT_CUDA_ARCHS)
+      if("${_base}a" IN_LIST _TGT_CUDA_ARCHS)
         list(REMOVE_ITEM _TGT_CUDA_ARCHS "${_base}a")
         list(APPEND _CUDA_ARCHS "${_base}a")
       elseif("${_base}f" IN_LIST _TGT_CUDA_ARCHS)
@@ -474,6 +493,16 @@ function(cuda_archs_loose_intersection OUT_CUDA_ARCHS SRC_CUDA_ARCHS TGT_CUDA_AR
   set(_CUDA_ARCHS ${_FINAL_ARCHS})
 
   set(${OUT_CUDA_ARCHS} ${_CUDA_ARCHS} PARENT_SCOPE)
+endfunction()
+
+
+function(cuda_archs_sm90plus OUT_CUDA_ARCHS TGT_CUDA_ARCHS)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(_archs "9.0a;10.0f;10.7f;11.0f;12.0f" "${TGT_CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(_archs "9.0a;10.0a;10.1a;10.3a;12.0a;12.1a" "${TGT_CUDA_ARCHS}")
+  endif()
+  set(${OUT_CUDA_ARCHS} ${_archs} PARENT_SCOPE)
 endfunction()
 
 #

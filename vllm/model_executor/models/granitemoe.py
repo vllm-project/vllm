@@ -40,7 +40,7 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -101,7 +101,7 @@ class GraniteMoeMoE(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=num_experts,
             top_k=top_k,
             hidden_size=hidden_size,
@@ -365,19 +365,6 @@ class GraniteMoeModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                # Loading kv cache quantization scales
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -518,7 +505,7 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
         self.logits_processor = LogitsProcessor(
             config.vocab_size,

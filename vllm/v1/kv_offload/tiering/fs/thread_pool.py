@@ -9,6 +9,7 @@ Thread pool:
 """
 
 import threading
+import time
 from collections import deque
 from collections.abc import Callable, Iterable
 
@@ -25,26 +26,37 @@ class JobState:
     Each task calls task_done(success) when it finishes.
     """
 
-    __slots__ = ("_job_id", "_n_tasks", "_completed", "_success", "_lock")
+    __slots__ = (
+        "_job_id",
+        "_n_tasks",
+        "_completed",
+        "_success",
+        "_transfer_time",
+        "_lock",
+    )
 
     def __init__(self, job_id: JobId, n_tasks: int) -> None:
         self._job_id: JobId = job_id
         self._n_tasks = n_tasks
         self._completed = 0
         self._success = True
+        self._transfer_time = 0.0
         self._lock = threading.Lock()
 
     @property
     def job_id(self) -> JobId:
         return self._job_id
 
-    def task_done(self, success: bool) -> tuple[bool, bool]:
+    def task_done(
+        self, success: bool, transfer_time: float
+    ) -> tuple[bool, bool, float]:
         """Returns if job completed and success flag"""
         with self._lock:
             self._completed += 1
+            self._transfer_time += transfer_time
             if not success:
                 self._success = False
-            return self._completed == self._n_tasks, self._success
+            return self._completed == self._n_tasks, self._success, self._transfer_time
 
 
 class DualQueueThreadPool:
@@ -67,7 +79,8 @@ class DualQueueThreadPool:
         self._condition = threading.Condition(threading.Lock())
         self._stop = False
         self._threads: list[threading.Thread] = []
-        self._finished_q: deque[tuple[JobId, bool]] = deque()
+        self._finished_q: deque[tuple[JobId, bool, float]] = deque()
+        self._inflight_jobs = 0  # guarded by _condition
 
         for i in range(n_read_threads):
             t = threading.Thread(
@@ -98,6 +111,7 @@ class DualQueueThreadPool:
         """Enqueue load tasks for a job (high-priority for load-priority threads)."""
         state = JobState(job_id, n_tasks)
         with self._condition:
+            self._inflight_jobs += 1
             for fn in tasks:
                 self._load_q.append((fn, state))
             self._condition.notify(n_tasks)
@@ -111,21 +125,38 @@ class DualQueueThreadPool:
         """Enqueue store tasks for a job (high-priority for store-priority threads)."""
         state = JobState(job_id, n_tasks)
         with self._condition:
+            self._inflight_jobs += 1
             for fn in tasks:
                 self._store_q.append((fn, state))
             self._condition.notify(n_tasks)
 
-    def get_finished(self) -> list[tuple[JobId, bool]]:
+    def get_finished(self) -> list[tuple[JobId, bool, float]]:
+        # No lock needed: deque is thread-safe for concurrent append/popleft,
+        # and the manager is the sole popper.
         jobs = []
         while self._finished_q:
             jobs.append(self._finished_q.popleft())
         return jobs
+
+    def wait_idle(self) -> None:
+        """Block until there are no in-flight jobs.
+
+        After this returns, every submitted job has had its last task
+        finish, so no worker thread is still copying data. Note:
+        completed jobs may still be sitting in ``_finished_q`` waiting
+        for ``get_finished()`` to drain them.
+        """
+        with self._condition:
+            self._condition.wait_for(lambda: self._inflight_jobs == 0)
 
     def shutdown(self, wait: bool = True) -> None:
         with self._condition:
             self._stop = True
             self._load_q.clear()
             self._store_q.clear()
+            # Cancelled tasks will not decrement _inflight_jobs; reset it so a
+            # subsequent wait_idle() returns instead of hanging.
+            self._inflight_jobs = 0
             self._condition.notify_all()
         if wait:
             for t in self._threads:
@@ -144,15 +175,23 @@ class DualQueueThreadPool:
                 secondary = self._store_q if load_priority else self._load_q
                 task, state = primary.popleft() if primary else secondary.popleft()
             try:
+                start_time = time.monotonic()
                 task()
-                job_finished, success = state.task_done(True)
+                transfer_time = time.monotonic() - start_time
+                job_finished, success, total_time = state.task_done(True, transfer_time)
             except Exception as exc:
+                transfer_time = time.monotonic() - start_time
                 logger.error(
-                    "FileSystemTierManagerPython: job %s block I/O failed: %s",
+                    "Job %s block I/O failed: %s",
                     state.job_id,
                     exc,
                 )
-                job_finished, success = state.task_done(False)
+                job_finished, success, total_time = state.task_done(
+                    False, transfer_time
+                )
 
             if job_finished:
-                self._finished_q.append((state.job_id, success))
+                with self._condition:
+                    self._finished_q.append((state.job_id, success, total_time))
+                    self._inflight_jobs -= 1
+                    self._condition.notify_all()

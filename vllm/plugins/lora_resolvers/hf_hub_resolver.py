@@ -3,13 +3,12 @@
 import asyncio
 import os
 
-from huggingface_hub import HfApi, snapshot_download
-
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolverRegistry
 from vllm.plugins.lora_resolvers.filesystem_resolver import FilesystemResolver
+from vllm.transformers_utils.repo_utils import hf_api
 
 logger = init_logger(__name__)
 
@@ -49,7 +48,7 @@ class HfHubResolver(FilesystemResolver):
             return None
 
         repo_path = await asyncio.to_thread(
-            snapshot_download,
+            hf_api().snapshot_download,
             repo_id=maybe_repo,
             allow_patterns=f"{maybe_subpath}/*" if maybe_subpath != "." else "*",
         )
@@ -110,7 +109,10 @@ class HfHubResolver(FilesystemResolver):
         Args:
             repo_name: Name of the HF hub repo to inspect.
         """
-        repo_files = await asyncio.to_thread(HfApi().list_repo_files, repo_id=repo_name)
+        repo_files = await asyncio.to_thread(
+            hf_api().list_repo_files,
+            repo_id=repo_name,
+        )
         adapter_dirs = {
             os.path.dirname(name)
             for name in repo_files

@@ -18,14 +18,13 @@ import regex as re
 import torch
 import torch.nn as nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -33,22 +32,26 @@ from vllm.model_executor.layers.mhc import HCHeadOp
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.models.deepseek_v4.common.ops import (
+    fused_mtp_input_rmsnorm,
+    mtp_shared_head_rmsnorm,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .model import (
-    DeepseekV4DecoderLayer,
-    make_deepseek_v4_expert_params_mapping,
-)
+from .model import DeepseekV4DecoderLayer
 
 logger = init_logger(__name__)
 
 # MoE expert scales are fused into per-layer w13/w2 tensors. The exact
-# parameter suffix depends on which FusedMoE method handles the experts:
+# parameter suffix depends on which MoERunner method handles the experts:
 # - fp4 experts (Mxfp4MoEMethod) register ``w{1,2,3}_weight_scale``;
 # - fp8 experts (Fp8MoEMethod with block_quant=True) register
 #   ``w{1,2,3}_weight_scale_inv``.
@@ -85,6 +88,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             bias=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.e_proj",
         )
         self.h_proj = ReplicatedLinear(
             config.hidden_size,
@@ -92,6 +96,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             bias=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.h_proj",
         )
 
         self.hc_eps = config.hc_eps
@@ -131,23 +136,29 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
-        # masking inputs at position 0, as not needed by MTP
-        inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
-        inputs_embeds = self.enorm(inputs_embeds)
-
         # Target stashes pre-hc_head residual as flat (T, hc_mult * D);
-        # reshape to (T, hc_mult, D) — the training-time layout.
+        # reshape to (T, hc_mult, D) — the training-time layout — before
+        # the fused norm pass so both inputs are 3D-friendly.
         previous_hidden_states = previous_hidden_states.view(
             -1, self.hc_mult, self.config.hidden_size
         )
-        previous_hidden_states = self.hnorm(previous_hidden_states)
+        # Fused: mask inputs at position 0 (not needed by MTP), enorm, hnorm.
+        inputs_embeds, previous_hidden_states = fused_mtp_input_rmsnorm(
+            inputs_embeds,
+            positions,
+            previous_hidden_states,
+            self.enorm.weight.data,
+            self.hnorm.weight.data,
+            self.enorm.variance_epsilon,
+            self.hc_mult,
+        )
         hidden_states = self.h_proj(previous_hidden_states) + self.e_proj(
             inputs_embeds
         ).unsqueeze(-2)
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
             positions=positions, x=hidden_states, input_ids=None
         )
-        if current_platform.is_cuda():
+        if self.mtp_block.use_fused_mhc:
             hidden_states = self.mtp_block.hc_post(
                 hidden_states, residual, post_mix, res_mix
             )
@@ -245,13 +256,15 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
             mtp_layer.rms_norm_eps,
             mtp_layer.hc_eps,
         )
-        logits = self.logits_processor(
-            mtp_layer.shared_head.head, mtp_layer.shared_head(hidden_states)
+        hidden_states = mtp_shared_head_rmsnorm(
+            hidden_states,
+            mtp_layer.shared_head.norm.weight.data,
+            mtp_layer.shared_head.norm.variance_epsilon,
         )
+        logits = self.logits_processor(mtp_layer.shared_head.head, hidden_states)
         return logits
 
 
-@support_torch_compile
 class DeepSeekV4MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -292,11 +305,6 @@ class DeepSeekV4MTP(nn.Module):
             ".emb.tok_emb.weight": ".embed_tokens.weight",
             ".head.weight": ".shared_head.head.weight",
             ".norm.weight": ".shared_head.norm.weight",
-            # Pre-MoE norm + gate are now owned by
-            # ``DeepseekV4MoE.norm_gate`` (see NormGatedLinear).
-            ".ffn_norm.weight": ".ffn.norm_gate.norm.weight",
-            ".ffn.gate.weight": ".ffn.norm_gate.gate.weight",
-            ".ffn.gate.tid2eid": ".ffn.norm_gate.tid2eid",
         }
 
         def _remap_weight_name(name: str) -> str:
@@ -326,6 +334,21 @@ class DeepSeekV4MTP(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
+        def _resolve_scale_name(name: str) -> str:
+            # Quark checkpoints name FP8 block scales ``.weight_scale``,
+            # but block-FP8 layers register them as ``.weight_scale_inv``
+            # while MXFP4 experts register ``.weight_scale``. Auto-detect:
+            # rename to ``_inv`` only when that variant exists and the plain
+            # one does not.
+            if name.endswith(".weight_scale") and name not in params_dict:
+                inv = name.removesuffix(".weight_scale") + ".weight_scale_inv"
+                if inv in params_dict:
+                    return inv
+            # Otherwise leave the name unchanged: either it already matches a
+            # param, or it is genuinely unknown and should surface the normal
+            # KeyError downstream rather than be silently rewritten.
+            return name
+
         # TP for attention
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
@@ -335,19 +358,13 @@ class DeepSeekV4MTP(nn.Module):
         head_rank_end = n_local_head * (tp_rank + 1)
 
         # Pre-compute expert mapping ONCE.
-        first_layer = next(iter(self.model.layers.values()))
-        if first_layer.mtp_block.ffn.use_mega_moe:
-            expert_mapping = make_deepseek_v4_expert_params_mapping(
-                self.config.n_routed_experts
-            )
-        else:
-            expert_mapping = FusedMoE.make_expert_params_mapping(
-                self,
-                ckpt_gate_proj_name="w1",
-                ckpt_down_proj_name="w2",
-                ckpt_up_proj_name="w3",
-                num_experts=self.config.n_routed_experts,
-            )
+        expert_mapping = fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="w1",
+            ckpt_down_proj_name="w2",
+            ckpt_up_proj_name="w3",
+            num_experts=self.config.n_routed_experts,
+        )
 
         # FP8 experts register ``..._weight_scale_inv`` (block_quant) while
         # FP4/MXFP4 experts register ``..._weight_scale``. Choose the suffix
@@ -391,6 +408,7 @@ class DeepSeekV4MTP(nn.Module):
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
+                name = _resolve_scale_name(name)
 
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -444,12 +462,8 @@ class DeepSeekV4MTP(nn.Module):
                             ".shared_experts.w2", ".shared_experts.down_proj"
                         )
                     if name.endswith(".ffn.gate.bias"):
-                        # ``e_score_correction_bias`` lives on
-                        # ``norm_gate`` directly (not on the inner gate).
-                        name = name.replace(
-                            ".ffn.gate.bias",
-                            ".ffn.norm_gate.e_score_correction_bias",
-                        )
+                        name = name.replace(".bias", ".e_score_correction_bias")
+                    name = _resolve_scale_name(name)
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
@@ -467,7 +481,7 @@ class DeepSeekV4MTP(nn.Module):
             self.model.mtp_start_layer_idx,
             self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
         ):
-            if layer_idx not in loaded_layers:
+            if layer_idx not in loaded_layers and is_mtp_completeness_check_enabled():
                 raise ValueError(
                     f"MTP speculative decoding layer {layer_idx} weights "
                     f"missing from checkpoint. The checkpoint may have "
@@ -475,13 +489,8 @@ class DeepSeekV4MTP(nn.Module):
                     f"Use a checkpoint that includes MTP layer weights, "
                     f"or disable speculative decoding."
                 )
-        self.finalize_mega_moe_weights()
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
-
-    def finalize_mega_moe_weights(self) -> None:
-        for layer in self.model.layers.values():
-            layer.mtp_block.ffn.finalize_mega_moe_weights()
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """

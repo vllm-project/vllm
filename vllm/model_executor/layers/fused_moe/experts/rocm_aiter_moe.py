@@ -17,7 +17,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import disable_inplace
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -54,7 +53,7 @@ class ActivationMethod(IntEnum):
     GELU = 1
 
 
-aiter_topK_meta_data = None
+aiter_topK_meta_data: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 @lru_cache(maxsize=1)
@@ -241,30 +240,36 @@ def rocm_aiter_fused_experts(
     moe_config: FusedMoEConfig,
     activation: MoEActivation = MoEActivation.SILU,
     apply_router_weight_on_input: bool = False,
-    expert_map: torch.Tensor | None = None,
+    expert_mask: torch.Tensor | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
     a1q_scale: torch.Tensor | None = None,
     num_local_tokens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = None,
+    moe_sorting_dispatch_policy: int = 0,
 ) -> torch.Tensor:
     """ROCm AITER fused MoE expert computation."""
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
+    # Gate/up interleave hint; only the SWIGLUOAI activations override it.
+    activation_interleave = None
     if activation == MoEActivation.SILU:
         activation_method = ActivationMethod.SILU
     elif activation == MoEActivation.GELU:
         activation_method = ActivationMethod.GELU
     elif activation == MoEActivation.SWIGLUOAI:
         activation_method = rocm_aiter_ops.get_aiter_activation_type("swiglu")
+    elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+        activation_method = rocm_aiter_ops.get_aiter_activation_type("swiglu")
+        activation_interleave = False
+    elif activation == MoEActivation.SITU:
+        activation_method = rocm_aiter_ops.get_aiter_activation_type("situ")
     else:
         raise ValueError(f"Unsupported activation: {activation}")
 
     # All AITER Fused MoE kernels are expecting the following datatypes
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
-
-    expert_mask = expert_map if expert_map is not None else None
 
     # w8a8 per-channel quantization
     if (
@@ -337,9 +342,53 @@ def rocm_aiter_fused_experts(
         assert moe_config.intermediate_size_per_partition_unpadded is not None
         hidden_pad = hidden_states.shape[1] - moe_config.hidden_dim_unpadded
         intermediate_pad = (
-            moe_config.intermediate_size_per_partition
-            - moe_config.intermediate_size_per_partition_unpadded
+            (
+                moe_config.intermediate_size_per_partition
+                - moe_config.intermediate_size_per_partition_unpadded
+            )
+            if moe_config.intermediate_pad is None
+            else moe_config.intermediate_pad
         )
+
+        # Round hidden_pad/intermediate_pad to match AITER's CK/FlyDSL MoE
+        # dispatch (currently pinned to v0.1.13.post1):
+        # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1073
+        # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1099
+        # TODO: Revisit this once we bump AITER to 0.1.15 with padding fixes
+        # for CK/FlyDSL MoE GEMM e.g. https://github.com/ROCm/aiter/pull/3401
+        # SITU's A16W4 FlyDSL kernel pads per gate/up half; pass through unrounded.
+        if activation != MoEActivation.SITU:
+            hidden_pad = hidden_pad // 128 * 128
+            intermediate_pad = (
+                intermediate_pad // 64 * 64 * (2 if moe_config.tp_size == 1 else 1)
+            )
+
+        # https://github.com/ROCm/aiter/pull/3123 specialized the AITER stage1 GEMMs
+        # for interleaved vs separated gate and up weights.
+        # For gpt-oss i.e. use_mxfp4_w4a16=True, the weights are shuffled by
+        # `rocm_aiter_ops.shuffle_weight_a16w4` in `oracle/mxfp4.py`,
+        # which always sets `is_guinterleave=True`.
+        # Hence, we pass in GateMode.INTERLEAVE to match the weight shuffling.
+        from aiter.ops.flydsl.moe_common import GateMode
+
+        gate_mode = ""
+        if activation == MoEActivation.SITU:
+            # a8w4 (VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1) uses the gate/up-
+            # interleaved (_gui_) fp8 flydsl kernels; default a16w4 SiTU stays
+            # separated.
+            gate_mode = (
+                GateMode.INTERLEAVE.value
+                if rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
+                else GateMode.SEPARATED.value
+            )
+        elif quant_config.use_mxfp4_w4a16:
+            gate_mode = GateMode.INTERLEAVE.value
+        elif activation_interleave is not None:
+            gate_mode = (
+                GateMode.INTERLEAVE.value
+                if activation_interleave
+                else GateMode.SEPARATED.value
+            )
 
         return rocm_aiter_ops.fused_moe(
             hidden_states,
@@ -357,14 +406,20 @@ def rocm_aiter_fused_experts(
             doweight_stage1=apply_router_weight_on_input,
             num_local_tokens=num_local_tokens,
             output_dtype=output_dtype,
-            hidden_pad=hidden_pad // 128 * 128,
-            intermediate_pad=intermediate_pad // 64 * 64 * 2,
+            hidden_pad=hidden_pad,
+            intermediate_pad=intermediate_pad,
+            gate_mode=gate_mode,
             bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
             bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
+            moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
+            beta=moe_config.activation_situ_beta,
+            linear_beta=moe_config.activation_situ_linear_beta,
         )
 
 
 class AiterExperts(mk.FusedMoEExpertsModular):
+    consumes_expert_mask = True
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         # When paired with MoRI, the prepare/finalize handles FP8
@@ -417,11 +472,10 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         ]
         if (weight_key, activation_key) not in SUPPORTED_W_A:
             return False
-        # CK MXFP4 MoE kernels are only supported on gfx950.
         if weight_key == kMxfp4Static:
-            from vllm.platforms.rocm import on_gfx950
+            from vllm.platforms.rocm import on_gfx950, on_gfx1250
 
-            if not on_gfx950():
+            if not on_gfx950() or on_gfx1250():
                 return False
         return True
 
@@ -431,6 +485,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
 
     @staticmethod
@@ -439,9 +494,6 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
-
-    def supports_expert_map(self):
-        return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
@@ -498,12 +550,13 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             topk_ids=topk_ids,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            expert_map=expert_map,
+            expert_mask=expert_map,
             quant_config=self.quant_config,
             moe_config=self.moe_config,
             a1q_scale=a1q_scale,
             num_local_tokens=num_local_tokens,
             output_dtype=output.dtype,
+            moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
         )
         # avoid redundant copy when output is a view of the result
         if (
@@ -513,7 +566,6 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             and output.is_contiguous()
             and result.is_contiguous()
             and output._base is None
-            and disable_inplace()
         ):
             output.set_(result)
         else:
