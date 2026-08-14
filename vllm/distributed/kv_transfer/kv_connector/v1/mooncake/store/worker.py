@@ -17,7 +17,6 @@ import queue
 import socket
 import threading
 import time
-from collections import defaultdict
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -507,7 +506,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.group_put_steps = group_put_steps
         self.coord = coord
         self.kv_role = kv_role
-        self.stored_requests: defaultdict[str, int] = defaultdict(int)
+        # req_id -> save_seqs of its store jobs that are still queued or running.
+        # Keying by save_seq, which never repeats for the engine's lifetime,
+        # rather than counting jobs per request id makes the ledger immune to id
+        # reuse across preemption: a job left over from a retired generation is
+        # missing from the set its resumed generation builds, so it can no longer
+        # retire that generation, rewind its resume offset, or mark it skipped.
+        self.stored_requests: dict[str, set[int]] = {}
         # save_seq -> times this rank finished with it, drained every step so the
         # scheduler can release the blocks it referenced for those jobs.
         self._completed_saves: dict[int, int] = {}
@@ -526,14 +531,16 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # batch resumes here, so pressure-skipped or failed ranges are retried.
         self._saved_offset: dict[str, int] = {}
 
-    def add_stored_request(self, req_id: str):
+    def add_request(self, request: ReqMeta) -> None:
+        # Register before enqueueing so a job is never picked up unledgered.
+        assert request.save_seq is not None
         with self.done_task_lock:
-            self.stored_requests[req_id] += 1
+            self.stored_requests.setdefault(request.req_id, set()).add(request.save_seq)
+        super().add_request(request)
 
-    def dec_stored_request(self, req_id: str):
+    def is_live_store_job(self, req_meta: ReqMeta) -> bool:
         with self.done_task_lock:
-            if req_id in self.stored_requests:
-                self.stored_requests[req_id] -= 1
+            return req_meta.save_seq in self.stored_requests.get(req_meta.req_id, ())
 
     def delete_finished_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -542,16 +549,19 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self._skip_store_requests.discard(req_id)
             self._saved_offset.pop(req_id, None)
 
-    def record_save_completed(self, req_meta: ReqMeta) -> None:
-        """Report a store job as done with the GPU blocks it was given.
+    def finish_store_job(self, req_meta: ReqMeta) -> None:
+        """Retire a job from the ledger and report its blocks as no longer read.
 
         Every path out of a job must reach this, skips and failures included: a
         job that never reports leaves its blocks referenced for the rest of the
-        run.
+        run. The discard is a no-op for a job whose generation already retired.
         """
         save_seq = req_meta.save_seq
         assert save_seq is not None, "a queued store job always carries a save_seq"
         with self.done_task_lock:
+            live = self.stored_requests.get(req_meta.req_id)
+            if live is not None:
+                live.discard(save_seq)
             self._completed_saves[save_seq] = self._completed_saves.get(save_seq, 0) + 1
 
     def take_completed_saves(self) -> dict[int, int]:
@@ -560,21 +570,26 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self._completed_saves = {}
         return completed
 
-    def _record_saved(self, req_id: str, token_len: int) -> None:
-        # Guard on liveness so a concurrent finish/preempt pop isn't recreated.
+    def _record_saved(self, req_meta: ReqMeta, token_len: int) -> None:
+        # Guard on job liveness so neither a concurrent finish/preempt pop nor a
+        # stale job's offset is written back over the live generation's.
         with self.done_task_lock:
-            if req_id in self.stored_requests:
-                self._saved_offset[req_id] = token_len
+            if req_meta.save_seq in self.stored_requests.get(req_meta.req_id, ()):
+                self._saved_offset[req_meta.req_id] = token_len
 
     def _should_skip_request(self, req_id: str) -> bool:
         with self.done_task_lock:
             return self._store_pressure_active and req_id in self._skip_store_requests
 
-    def _mark_request_skipped_for_pressure(self, req_id: str) -> bool:
+    def _mark_request_skipped_for_pressure(self, req_meta: ReqMeta) -> bool:
+        req_id = req_meta.req_id
         with self.done_task_lock:
             already_skipped = req_id in self._skip_store_requests
             self._store_pressure_active = True
-            self._skip_store_requests.add(req_id)
+            # The pressure itself is global, but only a live job may sentence its
+            # own request to being skipped.
+            if req_meta.save_seq in self.stored_requests.get(req_id, ()):
+                self._skip_store_requests.add(req_id)
         return already_skipped
 
     def _clear_store_pressure(self) -> bool:
@@ -749,7 +764,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 failed_codes,
             )
             if MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes:
-                self._mark_request_skipped_for_pressure(req_meta.req_id)
+                self._mark_request_skipped_for_pressure(req_meta)
             return False
 
         if self._clear_store_pressure():
@@ -768,13 +783,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
         req_id = req_meta.req_id
         current_event = req_meta.current_event
 
-        if req_id not in self.stored_requests:
-            self.record_save_completed(req_meta)
+        if not self.is_live_store_job(req_meta):
+            self.finish_store_job(req_meta)
             self.request_queue.task_done()
             return
 
-        # Report completion in `finally` so the scheduler releases this job's GPU
-        # block references even when the store path raises.
+        # Finish in `finally` so the scheduler releases this job's GPU block
+        # references even when the store path raises.
         try:
             if self._should_skip_request(req_id):
                 logger.debug(
@@ -830,7 +845,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     group_indices.append(g_idx)
 
             if not keys:
-                self._record_saved(req_id, token_len)
+                self._record_saved(req_meta, token_len)
                 return
 
             # Check which blocks already exist (dedup)
@@ -856,7 +871,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             ]
 
             if not missing_indices:
-                self._record_saved(req_id, token_len)
+                self._record_saved(req_meta, token_len)
                 return
 
             if len(missing_indices) != len(keys):
@@ -976,7 +991,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
                     if (
                         MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes
-                        and not self._mark_request_skipped_for_pressure(req_id)
+                        and not self._mark_request_skipped_for_pressure(req_meta)
                     ):
                         logger.warning(
                             "Detected Mooncake CPU/disk offloading pressure "
@@ -986,7 +1001,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             req_id,
                         )
                 else:
-                    self._record_saved(req_id, token_len)
+                    self._record_saved(req_meta, token_len)
                     if self._clear_store_pressure():
                         logger.info(
                             "Mooncake CPU/disk offloading pressure cleared "
@@ -1006,8 +1021,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if self.enable_kv_event and stored_events:
                 self.update_kv_event(stored_events)
         finally:
-            self.dec_stored_request(req_id)
-            self.record_save_completed(req_meta)
+            self.finish_store_job(req_meta)
             self.request_queue.task_done()
 
 
@@ -1693,7 +1707,6 @@ class MooncakeStoreWorker:
                     continue
                 request.current_event = current_event
                 assert self.kv_send_thread is not None
-                self.kv_send_thread.add_stored_request(request.req_id)
                 self.kv_send_thread.add_request(request)
 
         if self.kv_role in ["kv_producer", "kv_both"]:
@@ -1755,34 +1768,24 @@ class MooncakeStoreWorker:
         finished_req_ids: set[str],
         meta: MooncakeStoreConnectorMetadata,
     ) -> None:
-        """Retire the store ledger of requests that finished or were preempted.
+        """Retire the ledger entries of requests that finished or were preempted.
 
-        This no longer tells the scheduler anything about block lifetime — each
-        job holds its own reference on the blocks it reads. All that is left is
-        per-request hygiene: dropping the resume offset so a request that comes
-        back after preemption saves from the start rather than from where the
-        previous attempt stopped.
+        An entry may only go once its jobs have drained, because they still read
+        the resume offset it owns; a request that comes back after preemption
+        then saves from the start rather than from where the last attempt got to.
         """
         assert self.kv_send_thread is not None
 
         for req_id in meta.preempted_req_ids:
             self.kv_send_thread.delete_finished_stored_request(req_id)
 
-        for req_id in self.kv_send_thread.stored_requests.copy():
-            if (
-                self.kv_send_thread.stored_requests[req_id] == 0
-                and req_id in self.finished_store_req
-            ):
-                self.finished_store_req.remove(req_id)
-                self.kv_send_thread.delete_finished_stored_request(req_id)
-
-        for req_id in finished_req_ids:
-            req_remain_jobs = self.kv_send_thread.stored_requests.get(req_id)
-            if req_remain_jobs == 0:
-                self.kv_send_thread.delete_finished_stored_request(req_id)
-            elif req_remain_jobs is not None:
+        for req_id in finished_req_ids | self.finished_store_req:
+            if self.kv_send_thread.stored_requests.get(req_id):
                 # Queued jobs still need the resume offset; retire on a later step.
                 self.finished_store_req.add(req_id)
+            else:
+                self.finished_store_req.discard(req_id)
+                self.kv_send_thread.delete_finished_stored_request(req_id)
 
     def build_connector_worker_meta(self) -> MooncakeStoreWorkerMetadata | None:
         if self.kv_send_thread is None:
