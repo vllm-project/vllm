@@ -25,13 +25,11 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
 )
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     ShardedRDTWeightTransferEngine,
-    _CallPlan,
     _dtype_from_name,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_lazy import (
     BakeSink,
     LazyRDTTensor,
-    PullSink,
     _Scatter,
     _UnsupportedLazyOp,
 )
@@ -106,7 +104,6 @@ def _planner(baked, *, name_meta, live=None, name_ep_rank=None):
     eng._name_meta = dict(name_meta)
     eng._live_names = set(live or name_meta)
     eng._name_ep_rank = {n: er for n, er in (name_ep_rank or {}).items() if er >= 0}
-    eng._name_group_idx = {}
     if eng._name_ep_rank:
         eng._produce_methods = [object()] * 4
         eng._router = RdtRouter(4, 1, None, 0, producer_ep_ranks=[0, 1, 2, 3])
@@ -543,7 +540,6 @@ class TestBuildCallPlan:
         plan = eng._build_call_plan(names, group_lens)
         assert len(plan.chunks) == len(group_lens) == 5
         assert plan.pre_free == []
-        assert plan.residual == []
 
     def test_stamps_multiply_chunks_within_a_group(self):
         layer = _FakeLayer("l")
@@ -649,31 +645,6 @@ class TestBuildCallPlan:
         assert plan.pre_free == [0]
         assert len(plan.chunks) == 3
 
-    def test_live_but_unbaked_names_become_residual(self):
-        baked, name_meta, names, group_lens = _one_module_per_layer(2)
-        del baked["norm.weight"]  # unbaked but still live => plain load
-        eng = _planner(baked, name_meta=name_meta, live=set(names))
-        plan = eng._build_call_plan(names, group_lens)
-        assert plan.residual == ["norm.weight"]
-
-    def test_names_that_never_copied_are_dropped_entirely(self):
-        """Experts owned by another EP rank no-op in their loader; paying
-        _load_unbaked for them every sync would be pure waste."""
-        baked, name_meta, names, group_lens = _one_module_per_layer(2)
-        del baked["norm.weight"]
-        eng = _planner(baked, name_meta=name_meta, live=set(names) - {"norm.weight"})
-        plan = eng._build_call_plan(names, group_lens)
-        assert plan.residual == []
-
-    def test_the_plan_carries_a_name_to_plan_map(self):
-        """It selects the owning producer for a residual name's on-demand pull.
-        The planner returns it rather than writing engine state, so the plan stays
-        a pure function of its inputs."""
-        baked, name_meta, names, group_lens = _one_module_per_layer(3)
-        eng = _planner(baked, name_meta=name_meta)
-        plan = eng._build_call_plan(names, group_lens)
-        assert plan.name_group_idx == {n: i for i, n in enumerate(names)}
-
     def test_modules_are_deduped_within_a_group(self):
         """Several names of one fused module map to the same scatter list; the
         plan must not chunk it twice."""
@@ -700,7 +671,7 @@ class TestBuildCallPlan:
         assert [c.pack_bytes for c in a.chunks] == [c.pack_bytes for c in b.chunks]
         assert [c.keys for c in a.chunks] == [c.keys for c in b.chunks]
         assert [c.free for c in a.chunks] == [c.free for c in b.chunks]
-        assert a.residual == b.residual and a.pre_free == b.pre_free
+        assert a.pre_free == b.pre_free
 
     def test_single_producer_routes_every_chunk_to_local_owner_zero(self):
         baked, name_meta, names, group_lens = _one_module_per_layer(2)
@@ -709,39 +680,27 @@ class TestBuildCallPlan:
         assert [c.owner for c in plan.chunks] == [0] * len(plan.chunks)
 
 
-class TestResidualGuard:
-    """Residual (live-but-unbaked) names load AFTER the pipeline — after this
-    consumer signaled every group, i.e. after the producers freed them. On an
-    expert-sharded model that is a guaranteed stall-watchdog death, so the plan
-    build fails at init instead."""
+class TestUnbakedNamesGuard:
+    """A live name with no baked plan has no way to load — there is no fallback,
+    and its pull would target groups the pipeline already freed — so the plan
+    build fails at init, naming the names."""
 
-    def _static_plan(self, eng, names, group_lens):
-        from vllm.distributed.weight_transfer.sharded_rdt_engine import (
-            ShardedRDTWeightTransferInitInfo,
-        )
-
-        eng._build_static_plan(
-            ShardedRDTWeightTransferInitInfo(names=names, group_lens=group_lens)
-        )
-
-    def test_residual_on_a_stamped_model_fails_at_init(self):
+    def test_a_live_unbaked_name_fails_the_plan_build(self):
         baked, name_meta, names, group_lens = _one_module_per_layer(2)
-        del baked["norm.weight"]  # unbaked but live => residual
-        eng = _planner(
-            baked,
-            name_meta=name_meta,
-            live=set(names),
-            name_ep_rank={"model.layers.0.w": 0},
-        )
-        with pytest.raises(RuntimeError, match="residual"):
-            self._static_plan(eng, names, group_lens)
+        del baked["norm.weight"]  # unbaked but live
+        eng = _planner(baked, name_meta=name_meta, live=set(names))
+        with pytest.raises(RuntimeError, match="norm.weight"):
+            eng._build_call_plan(names, group_lens)
 
-    def test_residual_on_an_unstamped_model_stays_a_plain_load(self):
+    def test_never_copied_names_are_dropped_entirely(self):
+        """Experts owned by another EP rank no-op in their loader: not an error,
+        and not a chunk — their group is pre-freed if nothing else fills it."""
         baked, name_meta, names, group_lens = _one_module_per_layer(2)
         del baked["norm.weight"]
-        eng = _planner(baked, name_meta=name_meta, live=set(names))
-        self._static_plan(eng, names, group_lens)
-        assert eng._cached_plan.residual == ["norm.weight"]
+        eng = _planner(baked, name_meta=name_meta, live=set(names) - {"norm.weight"})
+        plan = eng._build_call_plan(names, group_lens)
+        assert len(names) - 1 == len(plan.chunks)
+        assert plan.pre_free == [len(group_lens) - 1]
 
 
 class TestCallPlanRouting:
@@ -892,13 +851,11 @@ class TestSignalCompleteness:
         eng, names, group_lens = self._moe_planner(worker_experts=[0, 1, 2, 3])
         plan = eng._build_call_plan(names, group_lens)
         assert self._signals(plan) == list(range(len(group_lens)))
-        assert plan.residual == []
 
     def test_round_robin_placement_signals_every_group_exactly_once(self):
         eng, names, group_lens = self._moe_planner(worker_experts=[0, 2, 4, 6])
         plan = eng._build_call_plan(names, group_lens)
         assert self._signals(plan) == list(range(len(group_lens)))
-        assert plan.residual == []
 
     def test_placement_changes_only_the_chunk_count_never_the_signals(self):
         """linear experts 0-3 hit 2 producer coordinates; round_robin 0,2,4,6
@@ -1010,137 +967,6 @@ class TestDtypeFromName:
     def test_rejects_an_unknown_name(self):
         with pytest.raises(ValueError):
             _dtype_from_name("float9")
-
-
-class TestPullSink:
-    """The plain-load path: one slice pulled on demand per copy_. Only reached
-    for names with no baked plan (attention scales, partial layers)."""
-
-    def _lazy(self, sink, shape=(4,)):
-        return LazyRDTTensor(
-            name="w",
-            shape=torch.Size(shape),
-            dtype=torch.bfloat16,
-            device=META,
-            sink=sink,
-        )
-
-    def test_a_meta_destination_pulls_nothing(self):
-        """Layerwise reload drives pass 1 against a meta-restored param; there is
-        no data to copy yet, but the numel must still count or
-        _layerwise_process never fires for the layer."""
-        calls = []
-        sink = PullSink(lambda keys: calls.append(keys))
-        dest = torch.empty((4,), dtype=torch.bfloat16, device=META)
-        dest.copy_(self._lazy(sink))
-        assert calls == []
-
-    def test_a_real_destination_pulls_and_copies_the_slice(self):
-        want = torch.arange(4, dtype=torch.bfloat16)
-        blob = want.view(torch.uint8).clone()
-        pulled = []
-
-        def _pull(keys):
-            pulled.append(keys)
-            return blob
-
-        dest = torch.zeros((4,), dtype=torch.bfloat16)
-        dest.copy_(self._lazy(PullSink(_pull)))
-        assert torch.equal(dest, want)
-        assert pulled == [[("w", ())]]
-
-    def test_the_op_chain_is_what_gets_requested(self):
-        pulled = []
-        blob = torch.zeros(2, dtype=torch.bfloat16).view(torch.uint8).clone()
-
-        def _pull(keys):
-            pulled.append(keys)
-            return blob
-
-        dest = torch.zeros((2,), dtype=torch.bfloat16)
-        dest.copy_(self._lazy(PullSink(_pull)).narrow(0, 1, 2))
-        assert pulled == [[("w", (("narrow", (0, 1, 2), ()),))]]
-
-    def test_fetch_reads_back_only_the_slices_bytes(self):
-        """The producer answers with one packed blob; a single-key request is
-        that slice at offset 0, and trailing arena bytes must be ignored."""
-        payload = torch.arange(3, dtype=torch.bfloat16)
-        blob = torch.cat(
-            [payload.view(torch.uint8), torch.full((32,), 0xFF, dtype=torch.uint8)]
-        )
-        sink = PullSink(lambda keys: blob)
-        got = sink.fetch(("w", ()), torch.Size((3,)), torch.bfloat16)
-        assert torch.equal(got, payload)
-
-
-class TestUnbakedPullRouting:
-    """A residual pull must go to the producer that owns the name's group AND
-    carry this worker's consumer id.
-
-    The consumer id keys the producer's per-consumer serve rings. Omitting it
-    made every worker's residual pull default to consumer 0, so concurrent pulls
-    from different workers were served out of one ring and overwrote each other's
-    packed blob.
-    """
-
-    @pytest.fixture(autouse=True)
-    def _no_ray(self, monkeypatch):
-        """The sink's closure wraps its call in `ray.get`; the fake producer
-        already returns the resolved value, so make `ray.get` the identity."""
-        import ray
-
-        monkeypatch.setattr(ray, "get", lambda x: x)
-
-    def _engine(self, consumer_id, name_group_idx, owners_by_group):
-        eng = object.__new__(ShardedRDTWeightTransferEngine)
-        eng._name_meta = {n: ("bfloat16", [2]) for n in name_group_idx}
-        eng._name_ep_rank = {}
-        eng._cached_plan = _CallPlan(
-            chunks=[], pre_free=[], residual=[], name_group_idx=dict(name_group_idx)
-        )
-        eng._consumer_id = consumer_id
-        n_prod = max(max(o) for o in owners_by_group) + 1
-        # num_consumers=8 so the harness's consumer ids (up to 7) are real
-        # fleet positions rather than out-of-range indices.
-        eng._router = RdtRouter(n_prod, 8, owners_by_group, len(owners_by_group))
-        eng._produce_methods = [_RecordingProducer(p) for p in range(n_prod)]
-        return eng
-
-    def test_the_pull_carries_this_workers_consumer_id(self):
-        eng = self._engine(7, {"w": 0}, [[0]])
-        eng._pull_sink_for("w").fetch(("w", ()), torch.Size((2,)), torch.bfloat16)
-        assert eng._produce_methods[0].calls == [([("w", ())], 7)]
-
-    def test_two_workers_do_not_share_a_serve_ring(self):
-        ids = []
-        for consumer_id in (0, 3):
-            eng = self._engine(consumer_id, {"w": 0}, [[0]])
-            eng._pull_sink_for("w").fetch(("w", ()), torch.Size((2,)), torch.bfloat16)
-            ids.append(eng._produce_methods[0].calls[0][1])
-        assert ids == [0, 3]
-
-    def test_a_name_is_pulled_from_the_owner_of_its_group(self):
-        eng = self._engine(0, {"a": 0, "b": 1}, [[0], [1]])
-        for name in ("a", "b"):
-            eng._pull_sink_for(name).fetch((name, ()), torch.Size((2,)), torch.bfloat16)
-        assert [p.calls for p in eng._produce_methods] == [
-            [([("a", ())], 0)],
-            [([("b", ())], 0)],
-        ]
-
-
-class _RecordingProducer:
-    """Stands in for a Ray actor's bound producer method: records `(keys,
-    consumer_id)` and answers the way the real one does, with a one-element list
-    holding the packed blob."""
-
-    def __init__(self, rank):
-        self.rank = rank
-        self.calls = []
-
-    def remote(self, keys, consumer_id=0):
-        self.calls.append((list(keys), consumer_id))
-        return [torch.zeros(64, dtype=torch.uint8)]
 
 
 class TestOpAllowlistAgreement:

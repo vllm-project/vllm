@@ -5,8 +5,8 @@
 The consumer asks the trainer for the exact slice a worker consumes, described as
 an op chain replayed on the trainer's live tensor. ``LazyRDTTensor`` builds the
 chain by intercepting the model's own weight loaders; ``copy_`` is its data sink,
-meaning either ``BakeSink`` (dry run: record how the slice would be fetched and
-where it lands) or ``PullSink`` (plain-load fallback: actually fetch it).
+``BakeSink`` — the dry run records how each slice would be fetched and where it
+lands.
 
 Chains are built against meta tensors, so nothing here touches Ray or a GPU.
 """
@@ -14,7 +14,6 @@ Chains are built against meta tensors, so nothing here touches Ray or a GPU.
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from math import prod
 from typing import Any
 
 import torch
@@ -98,8 +97,8 @@ class BakeSink:
     )
     current: "tuple[Any, str] | None" = None
     # Source names whose ``copy_`` fired during the bake. Names not here never
-    # moved data (e.g. experts owned by another EP rank), so ``receive_weights``
-    # skips them instead of paying ``_load_unbaked`` every sync.
+    # moved data (e.g. experts owned by another EP rank) and are skipped; names
+    # here but unbaked fail the plan build.
     copied_names: "set[str]" = field(default_factory=set)
 
     def accept_copy(self, dest: torch.Tensor, src: "LazyRDTTensor") -> torch.Tensor:
@@ -119,37 +118,6 @@ class BakeSink:
                 )
             )
         return _meta_copy_(dest, src)
-
-
-class PullSink:
-    """``copy_`` sink for the plain (unbaked) load: fetch one slice on demand and
-    copy it in.
-
-    Used only by ``_load_unbaked``, for names with no recorded plan. The engine
-    binds ``pull`` per name to the producer owning that name's gather group and to
-    this worker's ``consumer_id``, so the producer serves from the right
-    per-consumer ring.
-
-    Layerwise reload drives each param twice: pass 1 against a meta-restored param
-    (a no-op that still counts the numel), pass 2 the real fetch.
-    """
-
-    def __init__(self, pull: "Callable[[list[FetchKey]], torch.Tensor]") -> None:
-        self._pull = pull
-
-    def fetch(
-        self, key: "FetchKey", shape: torch.Size, dtype: torch.dtype
-    ) -> torch.Tensor:
-        blob = self._pull([key])
-        nbytes = prod(shape) * dtype.itemsize
-        return blob[:nbytes].view(dtype).reshape(shape)
-
-    def accept_copy(self, dest: torch.Tensor, src: "LazyRDTTensor") -> torch.Tensor:
-        if dest.device.type == "meta":
-            return _meta_copy_(dest, src)
-        mat = self.fetch(src._key(), src.shape, src.dtype)
-        with torch._C.DisableTorchFunctionSubclass():
-            return dest.copy_(mat)
 
 
 class _UnsupportedLazyOp(NotImplementedError):
@@ -176,7 +144,7 @@ class LazyRDTTensor(torch.Tensor):
     _name: str
     _ops: OpChain
     # Handles this lazy's copy_. ``None`` only on bare construction.
-    _sink: "BakeSink | PullSink | None"
+    _sink: "BakeSink | None"
 
     @staticmethod
     def __new__(
@@ -186,7 +154,7 @@ class LazyRDTTensor(torch.Tensor):
         dtype: torch.dtype,
         device: torch.device,
         ops: OpChain = (),
-        sink: "BakeSink | PullSink | None" = None,
+        sink: "BakeSink | None" = None,
     ) -> "LazyRDTTensor":
         t = torch.Tensor._make_wrapper_subclass(
             cls,

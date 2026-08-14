@@ -35,13 +35,15 @@ Discovering the chains means running the model's loaders, which is expensive. So
 
 1. `initialize_layerwise_reload` puts the params on meta and saves the kernel tensors.
 2. `_install_recording_stamps` wraps each loadable param's *original* `weight_loader` (bypassing `online_process_loader`, so `_layerwise_process` never fires) with a stamp that sets `BakeSink.current = (leaf_module, param_name)`.
-3. One `model.load_weights` pass over every name. Each `copy_` reaches `BakeSink.accept_copy`, which records a `_BakedCopy`: the op chain from the source lazy, and the `offset/shape/stride` of the destination read off the **meta** view (valid on meta — no real storage needed). Then it fires a meta `copy_`, which moves nothing but still counts against the layer's loaded numel.
-4. Modules that fully loaded (copied numel ≥ `get_layer_size`) become `_ModulePlan`s indexed by source name. Partial, unattributable or attention-scale modules are left out and fall back to a plain load.
+3. One `model.load_weights` pass over every name. Each `copy_` reaches `BakeSink.accept_copy`, which records a `_Scatter`: the op chain from the source lazy, the destination's `offset/shape/stride` read off the **meta** view (valid on meta — no real storage needed), and the slice's produced dtype. Then it fires a meta `copy_`, which moves nothing but still counts against the layer's loaded numel.
+4. Modules that fully loaded (copied numel ≥ `get_layer_size`) contribute their scatter list, indexed by source name. A partial module is left out — it would leave unwritten regions that finalize inits, so baking it would scatter garbage.
 5. The model is restored.
 
 Every later sync is pure replay: no `load_weights`, no lazy dispatch, no discovery. Reconstruct each destination as `param.as_strided(shape, stride, offset)` and `copy_` the received slice in.
 
-A `copy_` that arrives with no loader stamp cannot be attributed to a param. It is recorded as `None`, which poisons its whole module — that module then takes the plain load rather than scattering into a region nobody identified.
+A `copy_` that arrives with no loader stamp cannot be attributed to a param, so it is not recorded at all — which leaves its module short of `get_layer_size` and fails the same coverage gate. (`_install_recording_stamps` stamps even loaderless params, e.g. GLM's router bias, precisely so this does not happen.)
+
+**There is no fallback load.** A name that is live (its `copy_` fired during the bake) but has no baked plan fails the plan build at init, naming the offending names. Such a name could not be loaded anyway: its pull would run after the pipeline signalled every group, so the producers would already have freed them and the pull would block until the stall watchdog. Names whose `copy_` never fired — experts owned by another EP rank, say — are simply skipped.
 
 ### 3. Gather groups, chunks, and the ring
 

@@ -11,7 +11,8 @@ destination slice is fetched (an op chain) and where it lands (an ``as_strided``
 descriptor). REPLAY, every sync: no ``load_weights``, no lazy dispatch, no
 discovery — pull the recorded slices in packed chunks over a ring of receive
 arenas, scatter them into freshly materialized params, then quant and
-kernel-copy. Names with no recorded plan take a plain per-slice load.
+kernel-copy. A live name with no recorded plan fails the plan build: there
+is no fallback load.
 
 Only valid with ``is_checkpoint_format=True`` (layerwise reload).
 
@@ -31,7 +32,7 @@ everything else is bookkeeping around it.
       _Chunk    one packed pull: its scatters, deduped keys, the byte-exact
                 pack_layout, which producer serves it, and what to run after
                 (materialize / quant / free).  One per (gather group, ep_rank).
-      _CallPlan all chunks + pre_free + residual + name_group_idx.
+      _CallPlan all chunks + pre_free.
 
     RUN       per chunk, per sync, _run_chunk_pipeline
       _Chunk -> _PendingPull   issued, not yet landed: Ray ref, arena views,
@@ -68,7 +69,6 @@ from vllm.distributed.weight_transfer.sharded_rdt_lazy import (
     BakeSink,
     FetchKey,
     LazyRDTTensor,
-    PullSink,
     _Scatter,
 )
 from vllm.logger import init_logger
@@ -109,14 +109,11 @@ class _CallPlan:
     ``pre_free`` = groups with NO chunk on this worker, signaled at sync start
     (owners tolerate a signal preceding its publish). With the last-chunk signals
     this keeps the completeness invariant consumer-local: every group is signaled
-    exactly once. ``residual`` = live-but-unbaked names for the plain-load
-    fallback; ``name_group_idx`` picks the owning producer for their pulls.
+    exactly once.
     """
 
     chunks: "list[_Chunk]"
     pre_free: "list[int]"
-    residual: "list[str]"
-    name_group_idx: "dict[str, int]"
 
 
 @dataclass
@@ -319,11 +316,11 @@ class ShardedRDTWeightTransferEngine(
         # from parallel_config. See _num_consumers.
         self._num_consumers_override: int = 0
         # Source name -> the plan for the module consuming it. Several names of a
-        # fused module share one entry; replay dedups. A name absent here is
-        # unbaked and takes the plain load.
+        # fused module share one entry; replay dedups. A live name absent here
+        # fails the plan build.
         self._name_to_plan: dict[str, list[_Scatter]] = {}
-        # name -> (dtype_name, shape) for every init name, so the plain-load
-        # fallback can rebuild lazies from just the gathered names.
+        # name -> (dtype_name, shape) for every init name; the bake builds its
+        # lazies from this.
         self._name_meta: dict[str, tuple[str, list[int]]] = {}
         # Names whose copy_ fired during the bake. Unbaked names not here never
         # move data (e.g. non-local EP experts), so receive_weights skips them.
@@ -552,23 +549,9 @@ class ShardedRDTWeightTransferEngine(
             )
         self._cached_plan = self._build_call_plan(init_info.names, init_info.group_lens)
         logger.info(
-            "[RDT-PLAN] pre-built static call plan at init: %d chunks, "
-            "%d residual name(s)",
+            "[RDT-PLAN] pre-built static call plan at init: %d chunks",
             len(self._cached_plan.chunks),
-            len(self._cached_plan.residual),
         )
-        if self._cached_plan.residual and self._name_ep_rank:
-            # Residual pulls run after the pipeline has signaled every group, so
-            # on an expert-sharded model they hit freed groups — a guaranteed
-            # stall-watchdog death in sync 1. Fail at init with the names.
-            raise RuntimeError(
-                f"Sharded RDT: {len(self._cached_plan.residual)} residual "
-                f"(unbaked) name(s) on an expert-sharded model, first: "
-                f"{self._cached_plan.residual[:3]}. Residual pulls run after "
-                "the per-group free barrier and would stall until the "
-                "watchdog. Fix the loader so these names bake, or fall back "
-                "to a full-gather source."
-            )
 
     def _preregister_at_init(self) -> None:
         """Register every NIXL buffer this worker will use at init, before any
@@ -695,26 +678,15 @@ class ShardedRDTWeightTransferEngine(
                 "be supplied at init_transfer_engine()."
             )
         self._run_chunk_pipeline(self._cached_plan)
-        residual = self._cached_plan.residual
-        if residual:
-            # Rare/absent path (0% once unbaked-skip prunes dead names); runs
-            # inline after the pipeline. It touches only non-baked layers, so it
-            # does not race the background threads' baked layers.
-            self._load_unbaked(residual)
 
     def _build_lazy_weights(
         self,
         names: list[str],
-        sinks: "list[BakeSink | PullSink]",
+        sink: "BakeSink",
         device: torch.device,
     ) -> list[tuple[str, torch.Tensor]]:
-        """Zero-storage lazies for ``names``, dtype/shape from the init metadata.
-
-        One sink per name: the same ``BakeSink`` for all of them during the dry
-        run, a per-name ``PullSink`` on the plain-load path (names in different
-        gather groups are served by different producers). Building them upfront is
-        just a few object allocations.
-        """
+        """Zero-storage lazies for ``names``, dtype/shape from the init metadata,
+        all feeding the bake's recording sink."""
         return [
             (
                 name,
@@ -726,7 +698,7 @@ class ShardedRDTWeightTransferEngine(
                     sink=sink,
                 ),
             )
-            for name, sink in zip(names, sinks)
+            for name in names
         ]
 
     def _issue_pull(self, chunk: "_Chunk", slot: int) -> "_PendingPull":
@@ -814,50 +786,6 @@ class ShardedRDTWeightTransferEngine(
 
     # ---------------- Bake (dry run, at init) / replay ----------------
 
-    def _load_unbaked(
-        self,
-        names: list[str],
-    ) -> None:
-        """Plain load for a call whose names aren't all baked: rebuild lazies
-        for ``names`` (dtype/shape from the init metadata) and run vLLM's stock
-        inline layerwise reload — the worker's ``initialize_layerwise_reload`` is
-        active for the sync, so each layer is processed as it completes and the
-        lazy's Pass-2 ``copy_`` pulls its slice on demand. No recording, no
-        batching; runs every sync for the call (the rare, unbaked case)."""
-        device = torch.empty(0).device
-        self.model.load_weights(
-            # A producer is bound here (receive_weights raises otherwise). Each
-            # name pulls from its group's owner, so routing does not affect load
-            # order.
-            self._build_lazy_weights(
-                names, [self._pull_sink_for(n) for n in names], device
-            )
-        )
-
-    def _pull_sink_for(self, name: str) -> "PullSink":
-        """A one-slice-at-a-time pull sink for ``name``, bound to the producer
-        that owns its gather group AND to this worker's ``consumer_id``.
-
-        The consumer id is what keeps the producer's per-consumer serve rings
-        apart. Without it every worker's residual pull is served out of consumer
-        0's ring, and concurrent pulls overwrite each other's packed blob.
-        """
-        assert self._cached_plan is not None  # residuals come from the plan
-        group_idx = self._cached_plan.name_group_idx.get(name, 0)
-        method = self._produce_methods[
-            self._owner_of(group_idx, self._name_ep_rank.get(name, -1))
-        ]
-        consumer_id = self._consumer_id
-
-        def _pull(keys: "list[FetchKey]") -> torch.Tensor:
-            import ray
-
-            # The producer always answers with ONE byte-packed blob, so a
-            # single-key request is that slice at offset 0.
-            return ray.get(method.remote(keys, consumer_id=consumer_id))[0]
-
-        return PullSink(_pull)
-
     def _bake(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
         """Bake the replay plan once, as a self-driven meta dry run.
 
@@ -867,8 +795,8 @@ class ShardedRDTWeightTransferEngine(
         the path). Nothing materializes or pulls; the lazy's ``copy_`` records
         the source op chain and the meta destination's geometry. Afterwards one
         scatter list per fully-loaded leaf module (copied numel == loadable
-        size) is indexed by source name; partial or unrecordable modules take the
-        plain load. The model is restored.
+        size) is indexed by source name; a partial or unrecordable module fails
+        the plan build. The model is restored.
 
         This leans on layerwise internals a public API should expose first-class:
         a currently-loading hook instead of monkeypatched stamps, a dry-run mode
@@ -902,7 +830,7 @@ class ShardedRDTWeightTransferEngine(
             # lazy's copy_ — with no inline _layerwise_process, no deferral.
             self._install_recording_stamps(model, recorder)
             model.load_weights(
-                self._build_lazy_weights(names, [recorder] * len(names), self.device)
+                self._build_lazy_weights(names, recorder, self.device)
             )
             # Keep only fully-loaded modules (copied numel >= loadable size, the
             # test online_process_loader uses): a partial module leaves unwritten
@@ -921,8 +849,9 @@ class ShardedRDTWeightTransferEngine(
                     self._name_to_plan[c.src[0]] = copies
             self._restore_after_dry_run(model)
 
-        # Names whose copy_ fired during the bake (baked + unbaked-but-live).
-        # Residual names not in here no-op for this worker and are skipped.
+        # Names whose copy_ fired during the bake. Names not in here no-op for
+        # this worker (e.g. foreign-EP experts) and are skipped; live names that
+        # did not bake fail the plan build.
         self._live_names = set(recorder.copied_names)
 
         n_groups = len({id(g) for g in self._name_to_plan.values()})
@@ -976,8 +905,8 @@ class ShardedRDTWeightTransferEngine(
                     # nn.Parameter) is still loaded by the model's load_weights
                     # through the getattr(param, "weight_loader",
                     # default_weight_loader) fallback — unstamped, its bake copy
-                    # would be unattributable, making the name residual (a hard
-                    # error on stamped models). Stamp the same default loader
+                    # would be unattributable, failing the module's coverage
+                    # gate and the plan build. Stamp the same default loader
                     # the fallback would pick; the restore deletes it again.
                     tensor.weight_loader = _make_stamp(
                         module, name, default_weight_loader, added=True
@@ -1184,21 +1113,18 @@ class ShardedRDTWeightTransferEngine(
         chunk_route: list[tuple[int, int]] = []  # chunk idx -> (group idx, ep_rank)
         free_at: dict[int, list[int]] = {}  # chunk idx -> groups to signal after it
         pre_free: list[int] = []  # groups with no chunk here (signal at start)
-        residual: list[str] = []
-        name_group_idx: dict[str, int] = {}
+        unbaked: list[str] = []
         pos = 0
         for gi, glen in enumerate(group_lens):
             gnames = names[pos : pos + glen]
             pos += glen
-            for n in gnames:
-                name_group_idx[n] = gi
             modules: list[list[_Scatter]] = []
             seen: set[int] = set()
             for n in gnames:
                 mod = self._name_to_plan.get(n)
                 if mod is None:
                     if n in self._live_names:
-                        residual.append(n)
+                        unbaked.append(n)
                 elif id(mod) not in seen:
                     seen.add(id(mod))
                     modules.append(mod)
@@ -1212,6 +1138,16 @@ class ShardedRDTWeightTransferEngine(
                 raw_chunks.append(scatters)
                 chunk_route.append((gi, er))
             free_at.setdefault(len(raw_chunks) - 1, []).append(gi)
+        if unbaked:
+            # A live name with no baked plan cannot be loaded: there is no
+            # fallback, and its pull would target groups the pipeline has
+            # already freed. Fail here, where the names are known.
+            raise RuntimeError(
+                f"Sharded RDT: {len(unbaked)} live name(s) did not bake, "
+                f"first: {unbaked[:3]}. Fix the loader so these names bake "
+                "(fully load their module in one pass), or exclude them from "
+                "the synced set."
+            )
 
         # --- pass 2: per-module first/last chunk -> materialize/quant ----------
         first_at: dict[int, int] = {}
@@ -1259,12 +1195,7 @@ class ShardedRDTWeightTransferEngine(
                     owner=self._owner_of(*chunk_route[ci]),
                 )
             )
-        return _CallPlan(
-            chunks=chunks,
-            pre_free=pre_free,
-            residual=residual,
-            name_group_idx=name_group_idx,
-        )
+        return _CallPlan(chunks=chunks, pre_free=pre_free)
 
     def _owner_of(self, group_idx: int, ep_rank: int = -1) -> int:
         """The trainer rank this worker pulls (``group_idx``, ``ep_rank``) from —
