@@ -1635,6 +1635,15 @@ class EngineCoreProc(EngineCore):
             max_num_batched_tokens=scheduler_config.max_num_batched_tokens,
             instance_id=self.vllm_config.instance_id,
             kv_events_config=self.scheduler.get_kv_event_publisher_config(),
+            weight_transfer_backend=(
+                self.vllm_config.weight_transfer_config.backend
+                if self.vllm_config.weight_transfer_config is not None
+                else None
+            ),
+            enable_sleep_mode=self.vllm_config.model_config.enable_sleep_mode,
+            supports_draft_weight_updates=(
+                self.model_executor.supports_draft_weight_updates()
+            ),
         )
 
     def process_input_sockets(
