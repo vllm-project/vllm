@@ -46,6 +46,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     ChunkedTokenDatabase,
     KeyMetadata,
     MooncakeStoreConnectorMetadata,
+    MooncakeStoreWorkerMetadata,
     PoolKey,
     ReqMeta,
 )
@@ -507,6 +508,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.coord = coord
         self.kv_role = kv_role
         self.stored_requests: defaultdict[str, int] = defaultdict(int)
+        # save_seq -> times this rank finished with it, drained every step so the
+        # scheduler can release the blocks it referenced for those jobs.
+        self._completed_saves: dict[int, int] = {}
         self.enable_kv_event = enable_kv_event
         # Caller always passes a non-None ReplicateConfig — see
         # MooncakeStoreWorker.__init__ where store_replicate_config is built.
@@ -537,6 +541,24 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 del self.stored_requests[req_id]
             self._skip_store_requests.discard(req_id)
             self._saved_offset.pop(req_id, None)
+
+    def record_save_completed(self, req_meta: ReqMeta) -> None:
+        """Report a store job as done with the GPU blocks it was given.
+
+        Every path out of a job must reach this, skips and failures included: a
+        job that never reports leaves its blocks referenced for the rest of the
+        run.
+        """
+        save_seq = req_meta.save_seq
+        assert save_seq is not None, "a queued store job always carries a save_seq"
+        with self.done_task_lock:
+            self._completed_saves[save_seq] = self._completed_saves.get(save_seq, 0) + 1
+
+    def take_completed_saves(self) -> dict[int, int]:
+        with self.done_task_lock:
+            completed = self._completed_saves
+            self._completed_saves = {}
+        return completed
 
     def _record_saved(self, req_id: str, token_len: int) -> None:
         # Guard on liveness so a concurrent finish/preempt pop isn't recreated.
@@ -747,12 +769,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
         current_event = req_meta.current_event
 
         if req_id not in self.stored_requests:
+            self.record_save_completed(req_meta)
             self.request_queue.task_done()
             return
 
-        # Decrement the in-flight counter and signal task_done() in `finally`
-        # so the scheduler can release the GPU blocks it pinned for this
-        # request (via `delay_free_blocks`) even when the store path raises.
+        # Report completion in `finally` so the scheduler releases this job's GPU
+        # block references even when the store path raises.
         try:
             if self._should_skip_request(req_id):
                 logger.debug(
@@ -985,6 +1007,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.update_kv_event(stored_events)
         finally:
             self.dec_stored_request(req_id)
+            self.record_save_completed(req_meta)
             self.request_queue.task_done()
 
 
@@ -1673,13 +1696,13 @@ class MooncakeStoreWorker:
                 self.kv_send_thread.add_stored_request(request.req_id)
                 self.kv_send_thread.add_request(request)
 
-        # Check completion of previously queued transfers
-        done_sending = (
-            self._get_and_clear_finished_sending(finished_req_ids, meta)
-            if self.kv_role in ["kv_producer", "kv_both"]
-            else set()
-        )
+        if self.kv_role in ["kv_producer", "kv_both"]:
+            self._close_ended_store_requests(finished_req_ids, meta)
 
+        # Blocks read by a store job are released by the scheduler when the job
+        # reports back (see build_connector_worker_meta), so no request ever waits
+        # on a `finished_sending` signal to get its blocks back.
+        done_sending: set[str] = set()
         done_recving: set[str] = set()
         if self.load_async:
             for recv_thread in self.kv_recv_threads:
@@ -1727,13 +1750,20 @@ class MooncakeStoreWorker:
             self.kv_connector_stats = MooncakeStoreConnectorStats()
             return kv_connector_stats
 
-    def _get_and_clear_finished_sending(
+    def _close_ended_store_requests(
         self,
         finished_req_ids: set[str],
         meta: MooncakeStoreConnectorMetadata,
-    ) -> set[str]:
+    ) -> None:
+        """Retire the store ledger of requests that finished or were preempted.
+
+        This no longer tells the scheduler anything about block lifetime — each
+        job holds its own reference on the blocks it reads. All that is left is
+        per-request hygiene: dropping the resume offset so a request that comes
+        back after preemption saves from the start rather than from where the
+        previous attempt stopped.
+        """
         assert self.kv_send_thread is not None
-        finished_sending: set[str] = set()
 
         for req_id in meta.preempted_req_ids:
             self.kv_send_thread.delete_finished_stored_request(req_id)
@@ -1744,18 +1774,23 @@ class MooncakeStoreWorker:
                 and req_id in self.finished_store_req
             ):
                 self.finished_store_req.remove(req_id)
-                finished_sending.add(req_id)
                 self.kv_send_thread.delete_finished_stored_request(req_id)
 
         for req_id in finished_req_ids:
             req_remain_jobs = self.kv_send_thread.stored_requests.get(req_id)
             if req_remain_jobs == 0:
-                finished_sending.add(req_id)
                 self.kv_send_thread.delete_finished_stored_request(req_id)
             elif req_remain_jobs is not None:
+                # Queued jobs still need the resume offset; retire on a later step.
                 self.finished_store_req.add(req_id)
 
-        return finished_sending
+    def build_connector_worker_meta(self) -> MooncakeStoreWorkerMetadata | None:
+        if self.kv_send_thread is None:
+            return None
+        completed_saves = self.kv_send_thread.take_completed_saves()
+        if not completed_saves:
+            return None
+        return MooncakeStoreWorkerMetadata(completed_saves=completed_saves)
 
     def lookup(self, num_tokens: int, block_hashes: Sequence[BlockHash]) -> int:
         """Check how many prefix tokens exist in the store.
