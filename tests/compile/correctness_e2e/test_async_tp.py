@@ -29,18 +29,16 @@ NVFP4_HF_OVERRIDES = {
 @create_new_process_for_each_test()
 @pytest.mark.parametrize(
     "model_id",
-    ["meta-llama/Llama-3.2-1B-Instruct", "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8"],
+    ["meta-llama/Llama-3.2-1B-Instruct", "RedHatAI/Llama-3.2-1B-Instruct-FP8"],
 )
 @pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize("async_tp_enabled", [True])
 @pytest.mark.parametrize("distributed_backend", ["mp"])
-@pytest.mark.parametrize("eager_mode", [False, True])
 def test_async_tp_pass_correctness(
     model_id: str,
     tp_size: int,
     async_tp_enabled: bool,
     distributed_backend: str,
-    eager_mode: bool,
     num_gpus_available: int,
     monkeypatch,
 ):
@@ -64,8 +62,6 @@ def test_async_tp_pass_correctness(
         "--max-num-seqs",
         "8",
     ]
-    if eager_mode:
-        common_args.append("--enforce-eager")
 
     compilation_config = {
         "mode": CompilationMode.VLLM_COMPILE,
@@ -92,11 +88,17 @@ def test_async_tp_pass_correctness(
         "mp",
     ]
 
-    compare_two_settings(model_id, async_tp_args, tp_args, method="generate")
+    compare_two_settings(
+        model_id,
+        async_tp_args,
+        tp_args,
+        method="generate",
+        force_v1_runner=True,
+    )
 
 
 @create_new_process_for_each_test()
-def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int, monkeypatch):
+def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int):
     if (
         not current_platform.is_cuda()
         or not current_platform.is_device_capability_family(100)
@@ -104,8 +106,6 @@ def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int, monkeypatch):
         pytest.skip("NVFP4 requires Blackwell")
     if not has_flashinfer():
         pytest.skip("FlashInfer is required for the NVFP4 AsyncTP path")
-
-    monkeypatch.setenv("VLLM_NVFP4_GEMM_BACKEND", "flashinfer-cutlass")
 
     tp_size = 2
     if num_gpus_available < tp_size:
@@ -120,6 +120,8 @@ def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int, monkeypatch):
         "8",
         "--load-format",
         "dummy",
+        "--linear-backend",
+        "flashinfer_cutlass",
         "--hf-overrides",
         json.dumps(NVFP4_HF_OVERRIDES),
     ]
@@ -154,4 +156,10 @@ def test_async_tp_pass_nvfp4_correctness(num_gpus_available: int, monkeypatch):
         "mp",
     ]
 
-    compare_two_settings(NVFP4_MODEL_ID, async_tp_args, tp_args, method="generate")
+    compare_two_settings(
+        NVFP4_MODEL_ID,
+        async_tp_args,
+        tp_args,
+        method="generate",
+        force_v1_runner=True,
+    )

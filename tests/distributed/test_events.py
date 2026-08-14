@@ -80,20 +80,38 @@ def test_replay_mechanism(publisher, subscriber):
         batch = create_test_events(1)
         publisher.publish(batch)
 
-    time.sleep(0.5)  # Need publisher to process above requests
-    subscriber.request_replay(10)
+    # Drain live events to ensure publisher has buffered them.
+    for _ in range(19):
+        assert subscriber.receive_one(timeout=1000) is not None
 
-    batch = create_test_events(1)
-    publisher.publish(batch)  # 20th message
+    subscriber.request_replay(10)
 
     replayed = subscriber.receive_replay()
 
-    assert len(replayed) > 0, "No replayed messages received"
-    seqs = [seq for seq, _ in replayed]
-    assert all(seq >= 10 for seq in seqs), "Replayed messages not in order"
-    assert seqs == list(range(min(seqs), max(seqs) + 1)), (
-        "Replayed messages not consecutive"
+    assert len(replayed) == 9, (
+        f"Expected 9 replayed messages (seq 10-18), got {len(replayed)}"
     )
+    seqs = [seq for seq, _ in replayed]
+    assert seqs == list(range(10, 19)), "Replayed sequences should be 10-18"
+
+
+def test_replay_includes_topic(publisher, subscriber, publisher_config):
+    """Test that replay responses include the topic, matching PUB format"""
+    for _ in range(5):
+        publisher.publish(create_test_events(1))
+
+    # Drain live events to ensure publisher has processed them.
+    for _ in range(5):
+        assert subscriber.receive_one(timeout=1000) is not None
+
+    subscriber.request_replay(0)
+
+    # receive_replay unpacks (topic, seq, payload) and asserts
+    # topic == publisher topic for each message.
+    replayed = subscriber.receive_replay()
+    assert len(replayed) == 5, f"Expected 5 replayed messages, got {len(replayed)}"
+    seqs = [seq for seq, _ in replayed]
+    assert seqs == list(range(5)), "Replayed sequences should be 0-4"
 
 
 def test_buffer_limit(publisher, subscriber, publisher_config):
@@ -108,15 +126,16 @@ def test_buffer_limit(publisher, subscriber, publisher_config):
     time.sleep(0.5)  # Need publisher to process above requests
     subscriber.request_replay(0)
 
-    batch = create_test_events(1)
-    publisher.publish(batch)
-
     replayed = subscriber.receive_replay()
 
-    assert len(replayed) <= buffer_size, "Can't replay more than buffer size"
+    assert len(replayed) == buffer_size, (
+        f"Expected {buffer_size} replayed messages, got {len(replayed)}"
+    )
 
-    oldest_seq = min(seq for seq, _ in replayed)
-    assert oldest_seq >= 10, "The oldest sequence should be at least 10"
+    seqs = [seq for seq, _ in replayed]
+    assert seqs == list(range(10, buffer_size + 10)), (
+        "Should replay seq 11 through buffer_size+10"
+    )
 
 
 def test_topic_filtering(publisher_config):
@@ -265,7 +284,7 @@ def test_data_parallel_rank_tagging(publisher_config):
         sub_1.close()
 
 
-def test_event_publisher_factory():
+def test_event_publisher_factory(random_port):
     """Test event publisher factory creation behavior under different configurations"""
     from vllm.config.kv_events import KVEventsConfig
     from vllm.distributed.kv_events import ZmqEventPublisher
@@ -289,10 +308,15 @@ def test_event_publisher_factory():
     config = KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",
-        endpoint="inproc://test-factory-true",
+        endpoint=f"tcp://*:{random_port}",
+        replay_endpoint=f"tcp://*:{random_port + 100}",
     )
-    publisher = EventPublisherFactory.create(config, DP_RANK)
+    publisher = EventPublisherFactory.create(config, DP_RANK + 1)
     assert isinstance(publisher, ZmqEventPublisher)
+    resolved_config = publisher.get_publisher_config()
+    assert resolved_config.endpoint == f"tcp://*:{random_port + 1}"
+    assert resolved_config.replay_endpoint == f"tcp://*:{random_port + 101}"
+    assert config.endpoint == f"tcp://*:{random_port}"
     publisher.shutdown()
 
     # test unknown publisher

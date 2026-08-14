@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -132,14 +131,10 @@ class DistributionBasedRouting(RoutingStrategy):
         """Sample expert IDs based on the specified distribution."""
 
         if self.distribution == "uniform":
-            # Uniform random sampling
-            return torch.randint(
-                low=0,
-                high=num_experts,
-                size=(num_tokens, top_k),
-                dtype=indices_type,
-                device=device,
-            )
+            # Generate random scores, and take the top-k to avoid duplicate topk_ids
+            scores = torch.rand(num_tokens, num_experts, device=device)
+            _, topk_ids = torch.topk(scores, top_k, dim=-1)
+            return topk_ids.to(indices_type)
 
         elif self.distribution == "normal":
             # For normal distribution, sample continuous values and map to
@@ -314,13 +309,11 @@ class RoutingSimulatorRouter(BaseRouter):
         top_k: int,
         global_num_experts: int,
         eplb_state: EplbLayerState | None = None,
-        indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            indices_type_getter=indices_type_getter,
         )
 
     @property

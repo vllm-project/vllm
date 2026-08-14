@@ -12,45 +12,9 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.platform_utils import get_device_name_as_file_name
 
 logger = logging.getLogger(__name__)
-
-
-def apply_w8a8_block_int8_linear(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    block_size: list[int],
-    weight_scale: torch.Tensor,
-    input_scale: torch.Tensor | None = None,
-    bias: torch.Tensor | None = None,
-) -> torch.Tensor:
-    assert input_scale is None
-    # View input as 2D matrix for fp8 methods
-    input_2d = input.view(-1, input.shape[-1])
-    output_shape = [*input.shape[:-1], weight.shape[0]]
-
-    q_input, x_scale = per_token_group_quant_int8(input_2d, block_size[1])
-    output = w8a8_block_int8_matmul(
-        q_input, weight, x_scale, weight_scale, block_size, output_dtype=input.dtype
-    )
-
-    if bias is not None:
-        output = output + bias
-    return output.to(dtype=input.dtype).view(*output_shape)
-
-
-def input_to_int8(
-    x: torch.Tensor, dtype: torch.dtype = torch.int8
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """This function quantizes input values to int8 values with
-    tensor-wise quantization."""
-    iinfo = torch.iinfo(dtype)
-    min_val, max_val = x.aminmax()
-    amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-12)
-    int8_min, int8_max = iinfo.min, iinfo.max
-    scale = int8_max / amax
-    x_scl_sat = (x * scale).clamp(min=int8_min, max=int8_max)
-    return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
 
 
 def block_dequant(
@@ -235,8 +199,8 @@ def per_token_group_quant_int8(
         device=x.device,
         dtype=torch.float32,
     )
-    # prefer CUDA kernel if available
-    if current_platform.is_cuda():
+    # Prefer native stable kernel on CUDA/ROCm when available.
+    if current_platform.is_cuda_alike():
         torch.ops._C.per_token_group_quant_int8(
             x, x_q, x_s, group_size, eps, float(int8_min), float(int8_max)
         )
@@ -366,7 +330,7 @@ def get_w8a8_block_int8_configs(
 
     # First look up if an optimized configuration is available in the configs
     # directory
-    device_name = current_platform.get_device_name().replace(" ", "_")
+    device_name = get_device_name_as_file_name()
     json_file_name = f"N={N},K={K},device_name={device_name},dtype=int8_w8a8,block_shape=[{block_n}, {block_k}].json"  # noqa: E501
 
     config_file_path = os.path.join(

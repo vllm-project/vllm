@@ -11,8 +11,20 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+DEVICE = current_platform.device_type
+
+pytestmark = pytest.mark.skipif(
+    not (
+        current_platform.is_cuda_alike()
+        or current_platform.is_xpu()
+        or current_platform.is_cpu()
+    ),
+    reason="causal_conv1d Triton kernels require CUDA-alike, XPU, or CPU",
+)
 
 
 def causal_conv1d_ref(
@@ -149,7 +161,7 @@ def causal_conv1d_opcheck_fn(
 @pytest.mark.parametrize("width", [4])
 @pytest.mark.parametrize("dim", [2048, 2048 + 16, 4096])
 def test_causal_conv1d_update(dim, width, seqlen, has_bias, silu_activation, itype):
-    device = "cuda"
+    device = DEVICE
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2
@@ -196,7 +208,7 @@ def test_causal_conv1d_update(dim, width, seqlen, has_bias, silu_activation, ity
 def test_causal_conv1d_update_with_batch_gather(
     batch_size, with_padding, dim, width, seqlen, has_bias, silu_activation, itype
 ):
-    device = "cuda"
+    device = DEVICE
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2
@@ -275,8 +287,9 @@ def test_causal_conv1d_update_with_batch_gather(
 def test_causal_conv1d_varlen(
     batch, with_padding, dim, seqlen, width, has_bias, silu_activation, itype
 ):
-    device = "cuda"
-    torch.accelerator.empty_cache()
+    device = DEVICE
+    if not current_platform.is_cpu():
+        torch.accelerator.empty_cache()
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (3e-3, 5e-3)
     if itype == torch.bfloat16:
         rtol, atol = 1e-2, 5e-2
@@ -341,7 +354,7 @@ def test_causal_conv1d_varlen(
         weight,
         bias=bias,
         conv_states=final_states,
-        query_start_loc=cumsum.cuda(),
+        query_start_loc=cumsum.to(device),
         cache_indices=padded_state_indices,
         has_initial_state=has_initial_states,
         activation=activation,

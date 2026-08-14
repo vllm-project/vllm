@@ -62,6 +62,17 @@ class RotaryEmbeddingBase(CustomOp):
             self.cos_sin_cache: torch.Tensor
             self.register_buffer("cos_sin_cache", cache, persistent=False)
 
+            # Reuse a precomputed bf16 cache for the AITER compile path.
+            if self.use_aiter and cache.dtype != torch.bfloat16:
+                self.cos_sin_cache_bf16: torch.Tensor | None
+                self.register_buffer(
+                    "cos_sin_cache_bf16",
+                    cache.to(torch.bfloat16),
+                    persistent=False,
+                )
+            else:
+                self.cos_sin_cache_bf16 = None
+
         self.apply_rotary_emb = ApplyRotaryEmb(
             is_neox_style=self.is_neox_style,
         )
@@ -100,6 +111,16 @@ class RotaryEmbeddingBase(CustomOp):
             and self.cos_sin_cache.dtype == query.dtype
         ):
             return cos_sin_cache
+
+        # Reuse precomputed bf16 cache in the AITER compile path.
+        if (
+            self.use_aiter
+            and torch.compiler.is_compiling()
+            and query.dtype == torch.bfloat16
+        ):
+            cache_bf16 = getattr(self, "cos_sin_cache_bf16", None)
+            if cache_bf16 is not None and cache_bf16.device == query.device:
+                return cache_bf16
 
         cos_sin_cache = cos_sin_cache.to(query.device, dtype=query.dtype)
         # Avoid mutating buffers during torch.compile (cudagraph) tracing.

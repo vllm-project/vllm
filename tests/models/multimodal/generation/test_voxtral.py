@@ -4,9 +4,9 @@
 import json
 
 import pytest
-from mistral_common.audio import Audio
-from mistral_common.protocol.instruct.chunk import AudioChunk, RawAudio, TextChunk
+from mistral_common.protocol.instruct.chunk import AudioChunk, TextChunk
 from mistral_common.protocol.instruct.messages import UserMessage
+from mistral_common.tokens.tokenizers.audio import Audio
 from transformers import VoxtralForConditionalGeneration
 
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -36,9 +36,7 @@ def _get_prompt(audio_assets: AudioTestAssets, question: str) -> list[int]:
         Audio.from_file(str(asset.get_local_path()), strict=False)
         for asset in audio_assets
     ]
-    audio_chunks = [
-        AudioChunk(input_audio=RawAudio.from_audio(audio)) for audio in audios
-    ]
+    audio_chunks = [AudioChunk.from_audio(audio) for audio in audios]
 
     messages = [
         UserMessage(content=[*audio_chunks, TextChunk(text=question)]).to_openai()

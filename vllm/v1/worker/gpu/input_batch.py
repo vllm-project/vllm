@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
+from vllm.utils.math_utils import cdiv
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.block_table import BlockTables
 
 
 class InputBuffers:
@@ -22,6 +27,7 @@ class InputBuffers:
 
         self.input_ids = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         self.positions = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
+        self.is_padding = torch.zeros(max_num_tokens, dtype=torch.bool, device=device)
         self.query_start_loc = torch.zeros(
             max_num_reqs + 1, dtype=torch.int32, device=device
         )
@@ -48,9 +54,10 @@ class InputBatch:
     expanded_local_pos: torch.Tensor
 
     # [num_reqs]
-    # batch_idx -> num_scheduled_tokens
+    # batch_idx -> num_scheduled_tokens, (upper bound when using adaptive verification)
     num_scheduled_tokens: np.ndarray
-    # sum(num_scheduled_tokens)
+    # number of tokens in the batch,
+    #  may be < sum(num_scheduled_tokens) when using adaptive verification
     num_tokens: int
     num_tokens_after_padding: int
     # Sum of draft tokens scheduled across requests.
@@ -67,13 +74,26 @@ class InputBatch:
     seq_lens_cpu_upper_bound: torch.Tensor
     # [num_reqs]
     dcp_local_seq_lens: torch.Tensor | None
-    # [num_reqs] CPU bool array.
+    # [num_reqs]
+    num_computed_tokens_np: np.ndarray
+    # [num_reqs]
+    prefill_len_np: np.ndarray
+    # [num_reqs]
+    num_computed_prefill_tokens_np: np.ndarray
+    # [num_reqs] CPU bool array == (num_computed_prefill_tokens_np < prefill_len_np).
     is_prefilling_np: np.ndarray
+    # == np.any(is_prefilling_np)
+    has_prefill: bool
+
+    # [num_reqs] only populated when pipeline parallelism is enabled.
+    max_seq_len_np: np.ndarray | None
 
     # [num_tokens_after_padding]
     input_ids: torch.Tensor
     # [num_tokens_after_padding]
     positions: torch.Tensor
+    # [num_tokens_after_padding]
+    is_padding: torch.Tensor
 
     # [total_num_logits]
     logits_indices: torch.Tensor
@@ -84,29 +104,46 @@ class InputBatch:
     # Whether any requests in batch use structured output.
     has_structured_output_reqs: bool
 
+    # [num_reqs] per-request prompt length, only populated for R-SWA.
+    prompt_lens: torch.Tensor | None
+
+    # Longest query the batch may contain. Set when a cudagraph descriptor promises
+    # a query length this batch's own split does not reach, so attention metadata
+    # stays valid for every replay the graph serves.
+    max_query_len: int | None = None
+
     @classmethod
     def make_dummy(
         cls,
         num_reqs: int,
         num_tokens: int,
         input_buffers: InputBuffers,
+        max_query_len: int | None = None,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
 
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
-        idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
-        idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
+        idx_mapping_np = np.arange(num_reqs, dtype=np.intp)
+        idx_mapping = torch.arange(num_reqs, dtype=torch.int64, device=device)
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
-        num_scheduled_tokens = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
-        num_scheduled_tokens[-1] += num_tokens % num_reqs
+        # Distribute the remainder evenly so that no dummy request exceeds
+        # ceil(num_tokens / num_reqs) <= max_model_len tokens. Varlen graphs
+        # accept any split with non-empty slots, so this shape works for them
+        # too; attention metadata is built from the promised max_query_len.
+        base_tokens = num_tokens // num_reqs
+        num_extra = num_tokens % num_reqs
+        assert max_query_len is None or base_tokens + (num_extra > 0) <= max_query_len
+        num_scheduled_tokens = np.full(num_reqs, base_tokens, dtype=np.int32)
+        if num_extra > 0:
+            num_scheduled_tokens[-num_extra:] += 1
         assert int(num_scheduled_tokens.sum()) == num_tokens
 
         # seq_len equals to query_len
-        input_buffers.seq_lens[:num_reqs] = num_tokens // num_reqs
-        input_buffers.seq_lens[num_reqs - 1] += num_tokens % num_reqs
+        input_buffers.seq_lens[: num_reqs - num_extra] = base_tokens
+        input_buffers.seq_lens[num_reqs - num_extra : num_reqs] = base_tokens + 1
         # Pad for full CUDA graph mode.
         input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]
@@ -125,10 +162,14 @@ class InputBatch:
         input_ids = input_buffers.input_ids[:num_tokens].zero_()
         positions = input_buffers.positions[:num_tokens].zero_()
 
+        input_buffers.is_padding[:num_tokens].fill_(True)
+        is_padding = input_buffers.is_padding[:num_tokens]
+
         logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
         cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-        # Dummy: seq_len == query_len (fresh-prefill shape).
+        # Copy so set_dummy_context can add context in place without touching
+        # num_scheduled_tokens.
         seq_lens_cpu_upper_bound = torch.from_numpy(num_scheduled_tokens.copy())
         return cls(
             req_ids=req_ids,
@@ -148,20 +189,73 @@ class InputBatch:
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,
+            num_computed_tokens_np=np.zeros(num_reqs, dtype=np.int32),
+            prefill_len_np=np.zeros(num_reqs, dtype=np.int32),
+            num_computed_prefill_tokens_np=np.zeros(num_reqs, dtype=np.int32),
             is_prefilling_np=np.zeros(num_reqs, dtype=np.bool_),
+            has_prefill=False,
+            max_seq_len_np=None,
             input_ids=input_ids,
             positions=positions,
+            is_padding=is_padding,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=False,
+            prompt_lens=None,
+            max_query_len=max_query_len,
         )
+
+
+def set_dummy_context(
+    input_batch: InputBatch,
+    block_tables: "BlockTables",
+    context_len: int,
+    num_kv_blocks: int,
+    max_model_len: int,
+) -> None:
+    """Give each dummy request context_len of context, used when profiling step cost."""
+    if not block_tables.input_block_tables:
+        # Attention-free models have no KV context to fabricate.
+        return
+    num_reqs = input_batch.num_reqs
+    query_len = input_batch.max_query_len or int(input_batch.num_scheduled_tokens.max())
+    context_len = max(min(context_len, max_model_len - query_len), 0)
+    if not context_len:
+        return
+
+    # Decode-like shape: each request continues after context_len
+    # already-computed tokens.
+    input_batch.seq_lens += context_len
+    input_batch.seq_lens_cpu_upper_bound += context_len
+    input_batch.num_computed_tokens_np.fill(context_len)
+    input_batch.num_computed_prefill_tokens_np.fill(context_len)
+    local_pos = np.arange(input_batch.num_tokens, dtype=np.int64) - np.repeat(
+        input_batch.query_start_loc_np[:-1], input_batch.num_scheduled_tokens
+    )
+    input_batch.positions.copy_(torch.from_numpy(local_pos + context_len))
+
+    seq_len = context_len + query_len
+    for block_table, block_size, bpk in zip(
+        block_tables.input_block_tables,
+        block_tables.kernel_block_sizes,
+        block_tables.blocks_per_kv_block,
+    ):
+        num_blocks = min(cdiv(seq_len, block_size), block_table.shape[1])
+        # Spans are disjoint until the pool runs out, then they wrap and share
+        # blocks: profiling only needs the reads to be realistic, not distinct.
+        block_ids = torch.arange(
+            num_reqs * num_blocks, dtype=block_table.dtype, device=block_table.device
+        ) % (num_kv_blocks * bpk)
+        block_table[:num_reqs, :num_blocks] = block_ids.view(num_reqs, num_blocks)
 
 
 @triton.jit
 def _prepare_prefill_inputs_kernel(
     input_ids_ptr,
     next_prefill_tokens_ptr,
+    next_prefill_tokens_stride,
+    num_lookahead,
     idx_mapping_ptr,
     query_start_loc_ptr,
     all_token_ids_ptr,
@@ -169,6 +263,7 @@ def _prepare_prefill_inputs_kernel(
     prefill_lens_ptr,
     num_computed_tokens_ptr,
     BLOCK_SIZE: tl.constexpr,
+    LOOKAHEAD_BLOCK: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
@@ -189,10 +284,20 @@ def _prepare_prefill_inputs_kernel(
         tokens = tl.load(request_ptr + num_computed + block, mask=mask)
         tl.store(input_ids_ptr + query_start + block, tokens, mask=mask)
 
-    next_pos = num_computed + query_len
-    if next_pos < prefill_len:
-        next_token = tl.load(request_ptr + next_pos)
-        tl.store(next_prefill_tokens_ptr + req_state_idx, next_token)
+    # Store the next num_lookahead prefill tokens.
+    lookahead = tl.arange(0, LOOKAHEAD_BLOCK)
+    pos = num_computed + query_len + lookahead
+    in_lookahead = lookahead < num_lookahead
+    tokens = tl.load(
+        request_ptr + pos, mask=in_lookahead & (pos < prefill_len), other=0
+    )
+    tl.store(
+        next_prefill_tokens_ptr
+        + lookahead * next_prefill_tokens_stride
+        + req_state_idx,
+        tokens,
+        mask=in_lookahead,
+    )
 
 
 def prepare_prefill_inputs(
@@ -205,9 +310,12 @@ def prepare_prefill_inputs(
     num_computed_tokens: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
+    num_lookahead = next_prefill_tokens.shape[0]
     _prepare_prefill_inputs_kernel[(num_reqs,)](
         input_ids,
         next_prefill_tokens,
+        next_prefill_tokens.stride(0),
+        num_lookahead,
         idx_mapping,
         query_start_loc,
         all_token_ids,
@@ -215,6 +323,7 @@ def prepare_prefill_inputs(
         prefill_len,
         num_computed_tokens,
         BLOCK_SIZE=1024,
+        LOOKAHEAD_BLOCK=triton.next_power_of_2(num_lookahead),
     )
 
 
@@ -289,6 +398,7 @@ def _combine_sampled_and_draft_tokens_kernel(
     cu_num_logits_ptr,
     logits_indices_ptr,
     BLOCK_SIZE: tl.constexpr,
+    NUM_NEW_SAMPLED_TOKENS: tl.constexpr = 1,
 ):
     batch_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
@@ -297,7 +407,7 @@ def _combine_sampled_and_draft_tokens_kernel(
     cu_num_logits_start = tl.load(cu_num_logits_ptr + batch_idx)
     cu_num_logits_end = tl.load(cu_num_logits_ptr + batch_idx + 1)
     num_logits = cu_num_logits_end - cu_num_logits_start
-    num_draft_tokens = num_logits - 1
+    num_draft_tokens = num_logits - NUM_NEW_SAMPLED_TOKENS
 
     # Compute the logits indices.
     block = tl.arange(0, BLOCK_SIZE)
@@ -315,9 +425,12 @@ def _combine_sampled_and_draft_tokens_kernel(
         # Handling prefill tokens. No sampled or draft tokens.
         return
 
-    # Write the last sampled token ID to input_ids.
-    last_token_id = tl.load(last_sampled_tokens_ptr + req_state_idx)
-    tl.store(input_ids_ptr + query_end - num_logits, last_token_id)
+    # Keep prompt-tail slots intact; only rewrite generated-token slots.
+    first_logit_seq_pos = seq_len - num_logits
+    if NUM_NEW_SAMPLED_TOKENS > 0 and first_logit_seq_pos >= prefill_len:
+        # Write the last sampled token ID to input_ids.
+        last_token_id = tl.load(last_sampled_tokens_ptr + req_state_idx)
+        tl.store(input_ids_ptr + logits_start, last_token_id)
 
     # Write the draft tokens (if any) to input_ids.
     if num_draft_tokens > 0:
@@ -343,7 +456,11 @@ def combine_sampled_and_draft_tokens(
     draft_tokens: torch.Tensor,
     cu_num_logits: torch.Tensor,
     num_logits: int,
+    num_new_sampled_tokens: int = 1,  # excl accepted draft tokens, a.k.a bonus tokens
 ) -> torch.Tensor:
+    assert num_new_sampled_tokens in (0, 1), (
+        f"num_new_sampled_tokens must be 0 or 1, got {num_new_sampled_tokens}"
+    )
     # use idx_mapping.shape[0] for actual request count
     num_reqs = idx_mapping.shape[0]
     num_speculative_steps = draft_tokens.shape[-1]
@@ -364,9 +481,12 @@ def combine_sampled_and_draft_tokens(
         draft_tokens.stride(0),
         cu_num_logits,
         logits_indices,
-        # NOTE(woosuk): Add 1 to ensure the block can cover the last sampled token
-        # in addition to all draft tokens.
-        BLOCK_SIZE=triton.next_power_of_2(num_speculative_steps + 1),
+        NUM_NEW_SAMPLED_TOKENS=num_new_sampled_tokens,
+        # NOTE(woosuk): Add num_new_sampled_tokens to ensure the block covers the
+        # last sampled token in addition to all draft tokens.
+        BLOCK_SIZE=triton.next_power_of_2(
+            num_speculative_steps + num_new_sampled_tokens
+        ),
     )
     return logits_indices
 
@@ -438,6 +558,9 @@ def _post_update_kernel(
 ):
     req_id = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
+    if req_state_idx < 0:
+        # Filter rows with negative index entries.
+        return
 
     total_len = tl.load(total_len_ptr + req_state_idx)
     num_sampled = tl.load(num_sampled_ptr + req_id)
@@ -464,18 +587,22 @@ def _post_update_kernel(
             count = tl.load(token_ptr)
             tl.store(token_ptr, count + 1)
 
-    query_start = tl.load(query_start_loc_ptr + req_id)
-    query_end = tl.load(query_start_loc_ptr + req_id + 1)
-    query_len = query_end - query_start
+    if query_start_loc_ptr is None:
+        query_len = 0
+    else:
+        query_start = tl.load(query_start_loc_ptr + req_id)
+        query_end = tl.load(query_start_loc_ptr + req_id + 1)
+        query_len = query_end - query_start
     num_rejected = tl.load(num_rejected_ptr + req_id)
 
-    num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
-    num_computed += query_len - num_rejected
-    tl.store(num_computed_tokens_ptr + req_state_idx, num_computed)
+    computed_delta = query_len - num_rejected
+    if computed_delta != 0:
+        num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
+        tl.store(num_computed_tokens_ptr + req_state_idx, num_computed + computed_delta)
 
 
 def post_update(
-    # [num_reqs]
+    # [num_reqs] batch_idx -> req_state_idx; negative index means skip.
     idx_mapping: torch.Tensor,
     # [max_num_reqs]
     num_computed_tokens: torch.Tensor,
@@ -490,7 +617,7 @@ def post_update(
     # [num_reqs]
     num_rejected: torch.Tensor,
     # [num_reqs + 1]
-    query_start_loc: torch.Tensor,
+    query_start_loc: torch.Tensor | None,
     # [max_num_reqs, max_model_len]
     all_token_ids: torch.Tensor,
     # [max_num_reqs]
@@ -516,7 +643,7 @@ def post_update(
 
 
 @triton.jit
-def _post_update_pool_kernel(
+def _post_update_num_computed_tokens_kernel(
     idx_mapping_ptr,
     num_computed_tokens_ptr,
     query_start_loc_ptr,
@@ -531,7 +658,7 @@ def _post_update_pool_kernel(
     tl.store(num_computed_tokens_ptr + req_state_idx, num_computed + query_len)
 
 
-def post_update_pool(
+def post_update_num_computed_tokens(
     # [num_reqs]
     idx_mapping: torch.Tensor,
     # [max_num_reqs]
@@ -540,7 +667,7 @@ def post_update_pool(
     query_start_loc: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
-    _post_update_pool_kernel[(num_reqs,)](
+    _post_update_num_computed_tokens_kernel[(num_reqs,)](
         idx_mapping,
         num_computed_tokens,
         query_start_loc,

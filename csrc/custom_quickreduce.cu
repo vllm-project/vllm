@@ -97,18 +97,28 @@ int64_t qr_max_size() {
                                                   cast_bf2half>;  \
     template struct quickreduce::AllReduceTwoshot<T, Codec<T, 8>, cast_bf2half>;
 
+  // INT3 (CodecQ3) is restricted to TP2 only, so we only instantiate the
+  // world_size == 2 kernel for it.
+  #define INSTANTIATE_FOR_WORLDSIZE_TP2_ONLY(T, Codec, cast_bf2half) \
+    template struct quickreduce::AllReduceTwoshot<T, Codec<T, 2>, cast_bf2half>;
+
 INSTANTIATE_FOR_WORLDSIZE(quickreduce::nv_bfloat16, quickreduce::CodecFP, false)
 INSTANTIATE_FOR_WORLDSIZE(quickreduce::nv_bfloat16, quickreduce::CodecQ4, false)
 INSTANTIATE_FOR_WORLDSIZE(quickreduce::nv_bfloat16, quickreduce::CodecQ6, false)
 INSTANTIATE_FOR_WORLDSIZE(quickreduce::nv_bfloat16, quickreduce::CodecQ8, false)
+INSTANTIATE_FOR_WORLDSIZE_TP2_ONLY(quickreduce::nv_bfloat16,
+                                   quickreduce::CodecQ3, false)
 INSTANTIATE_FOR_WORLDSIZE(quickreduce::nv_bfloat16, quickreduce::CodecFP, true)
 INSTANTIATE_FOR_WORLDSIZE(quickreduce::nv_bfloat16, quickreduce::CodecQ4, true)
 INSTANTIATE_FOR_WORLDSIZE(quickreduce::nv_bfloat16, quickreduce::CodecQ6, true)
 INSTANTIATE_FOR_WORLDSIZE(quickreduce::nv_bfloat16, quickreduce::CodecQ8, true)
+INSTANTIATE_FOR_WORLDSIZE_TP2_ONLY(quickreduce::nv_bfloat16,
+                                   quickreduce::CodecQ3, true)
 
 INSTANTIATE_FOR_WORLDSIZE(half, quickreduce::CodecFP, false)
 INSTANTIATE_FOR_WORLDSIZE(half, quickreduce::CodecQ4, false)
 INSTANTIATE_FOR_WORLDSIZE(half, quickreduce::CodecQ6, false)
 INSTANTIATE_FOR_WORLDSIZE(half, quickreduce::CodecQ8, false)
+INSTANTIATE_FOR_WORLDSIZE_TP2_ONLY(half, quickreduce::CodecQ3, false)
 
 #endif  // USE_ROCM

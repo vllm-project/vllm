@@ -1,0 +1,14 @@
+name: Record CI approval
+
+on:
+  pull_request_review:
+    types: [submitted]
+
+permissions: {}
+
+jobs:
+  approved:
+    if: github.event.review.state == 'approved'
+    runs-on: [self-hosted, linux, x64, vllm-runners]
+    steps:
+      - run: echo "Approval recorded"

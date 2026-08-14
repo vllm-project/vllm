@@ -32,6 +32,9 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
+from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
+    selective_state_update_replayssm_output_only,
+)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
@@ -494,14 +497,35 @@ class MambaMixer2(MambaBase, PluggableLayer):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
-        # The tuple is (conv_state, ssm_state)
-        self.kv_cache = (torch.tensor([]), torch.tensor([]))
 
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
+        self.use_replayssm = (
+            cache_config.use_replayssm if cache_config is not None else False
+        )
+        self.replayssm_buffer_len = (
+            cache_config.replayssm_buffer_len
+            if cache_config is not None and cache_config.use_replayssm
+            else None
+        )
+        self.mamba_config = vllm_config.mamba_config
+        if self.use_replayssm and self.num_heads % self.tp_size != 0:
+            raise ValueError(
+                "--use-replayssm requires tensor-parallel heads to divide evenly"
+            )
+        # The tuple is (conv_state, ssm_state); with the cached (ReplaySSM) decode
+        # kernel enabled it is (conv_state, ssm_state, x_cache, dt_cache, B_cache).
+        _n_state = 5 if self.use_replayssm else 2
+        self.kv_cache = tuple(torch.tensor([]) for _ in range(_n_state))
 
         self.num_spec = vllm_config.num_speculative_tokens
+        if self.num_spec > 0:
+            self.register_buffer(
+                "_decode_state_offsets",
+                torch.arange(1 + self.num_spec, dtype=torch.int32).unsqueeze(0),
+                persistent=False,
+            )
 
         # Pre-compute sizes for forward pass
         self.tped_intermediate_size = self.intermediate_size // self.tp_size
@@ -585,7 +609,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
         # Triton's autotuner includes tensor dtypes in its cache key,
         # so state_dtype must match what real inference uses.
-        _, ssm_state_dtype = self.get_state_dtype()
+        ssm_state_dtype = self.get_state_dtype()[1]
 
         # SSD kernel autotune keys depend on dtype and head dimensions,
         # not on sequence length or batch size, so a single shape suffices.
@@ -696,6 +720,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 else self.kv_cache[0].transpose(-1, -2)
             )
             ssm_state = self.kv_cache[1]
+            if self.use_replayssm:
+                x_cache, dt_cache, B_cache = self.kv_cache[2:]
+            else:
+                x_cache = dt_cache = B_cache = None
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
@@ -755,6 +783,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     dim=0,
                 )
             )
+            if attn_metadata.block_idx_last_scheduled_token_prev_step is not None:
+                block_idx_last_scheduled_token_prev_step_d, _ = torch.split(
+                    attn_metadata.block_idx_last_scheduled_token_prev_step,
+                    [num_decodes, num_prefills],
+                    dim=0,
+                )
+            else:
+                block_idx_last_scheduled_token_prev_step_d = None
             # Prefill-only variables:
             block_idx_first_scheduled_token_p = (
                 attn_metadata.block_idx_first_scheduled_token_p
@@ -766,6 +802,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             block_idx_first_scheduled_token_p = None
             block_idx_last_scheduled_token_d = None
             block_idx_last_computed_token_d = None
+            block_idx_last_scheduled_token_prev_step_d = None
             num_computed_tokens_p = None
 
         preallocated_ssm_out_d, preallocated_ssm_out_p = torch.split(
@@ -944,18 +981,29 @@ class MambaMixer2(MambaBase, PluggableLayer):
         if has_decode:
             assert state_indices_tensor_d is not None
             if is_mamba_cache_all:
-                state_indices_tensor_d_input = state_indices_tensor_d.gather(
-                    1, block_idx_last_computed_token_d.unsqueeze(1)
-                ).squeeze(1)
-                state_indices_tensor_d_output = state_indices_tensor_d.gather(
-                    1, block_idx_last_scheduled_token_d.unsqueeze(1)
-                ).squeeze(1)
-                # for decode:
-                #   block_idx_first_scheduled_token_d ==
-                #       block_idx_last_scheduled_token_d
-                # at block boundaries:
-                #   block_idx_first_scheduled_token_d >
-                #       block_idx_last_computed_token_d
+                if self.num_spec > 0:
+                    assert block_idx_last_scheduled_token_prev_step_d is not None
+                    input_indices = (
+                        block_idx_last_scheduled_token_prev_step_d.unsqueeze(1)
+                        + self._decode_state_offsets
+                    )
+                    output_indices = (
+                        block_idx_last_scheduled_token_d.unsqueeze(1)
+                        + self._decode_state_offsets
+                    )
+                    state_indices_tensor_d_input = state_indices_tensor_d.gather(
+                        1, input_indices
+                    )
+                    state_indices_tensor_d_output = state_indices_tensor_d.gather(
+                        1, output_indices
+                    )
+                else:
+                    state_indices_tensor_d_input = state_indices_tensor_d.gather(
+                        1, block_idx_last_computed_token_d.unsqueeze(1)
+                    ).squeeze(1)
+                    state_indices_tensor_d_output = state_indices_tensor_d.gather(
+                        1, block_idx_last_scheduled_token_d.unsqueeze(1)
+                    ).squeeze(1)
             else:
                 # Without caching, read and write in-place to the same blocks:
                 state_indices_tensor_d_input = state_indices_tensor_d
@@ -1001,37 +1049,78 @@ class MambaMixer2(MambaBase, PluggableLayer):
             # - mamba_cache_params.ssm_state's slots will be selected
             #   using state_indices_tensor_d
             # NOTE: final output is an in-place update of out tensor
-            selective_state_update(
-                ssm_state,
-                hidden_states_d,
-                dt_d,
-                A_d,
-                B_d,
-                C_d,
-                D_d,
-                dt_bias,
-                dt_softplus=True,
-                state_batch_indices=state_indices_tensor_d_input,
-                dst_state_batch_indices=state_indices_tensor_d_output,
-                out=preallocated_ssm_out_d.view(num_decode_tokens, -1, self.head_dim),
-                num_accepted_tokens=num_accepted_tokens,
-                cu_seqlens=query_start_loc_d,
-                is_blackwell=self.is_blackwell,
+            preallocated_ssm_out_d = preallocated_ssm_out_d.view(
+                num_decode_tokens, -1, self.head_dim
             )
+            if self.use_replayssm:
+                assert self.replayssm_buffer_len is not None
+                selective_state_update_replayssm_output_only(
+                    ssm_state,
+                    hidden_states_d,
+                    dt_d,
+                    A_d,
+                    B_d,
+                    C_d,
+                    D_d,
+                    dt_bias,
+                    dt_softplus=True,
+                    x_cache=x_cache,
+                    dt_cache=dt_cache,
+                    B_cache=B_cache,
+                    bc_pre=attn_metadata.bc_pre_scratch,
+                    write_pos=attn_metadata.write_pos_d,
+                    is_flush=attn_metadata.is_flush_d,
+                    max_cache_len=self.replayssm_buffer_len,
+                    state_batch_indices=state_indices_tensor_d_input,
+                    out=preallocated_ssm_out_d,
+                    # Stochastic Rounding for the vanilla decode path is read
+                    # from mamba_config inside ssu_dispatch; the replay kernel
+                    # isn't a dispatch backend, so pass it here.
+                    enable_stochastic_rounding=(
+                        self.mamba_config.enable_stochastic_rounding
+                    ),
+                    cache_philox_rounds=(
+                        self.mamba_config.stochastic_rounding_philox_rounds
+                    ),
+                )
+            else:
+                selective_state_update(
+                    ssm_state,
+                    hidden_states_d,
+                    dt_d,
+                    A_d,
+                    B_d,
+                    C_d,
+                    D_d,
+                    dt_bias,
+                    dt_softplus=True,
+                    state_batch_indices=state_indices_tensor_d_input,
+                    dst_state_batch_indices=state_indices_tensor_d_output,
+                    out=preallocated_ssm_out_d,
+                    num_accepted_tokens=num_accepted_tokens,
+                    cu_seqlens=query_start_loc_d,
+                    is_blackwell=self.is_blackwell,
+                )
 
-    def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None
         assert self.cache_config is not None
-        return MambaStateDtypeCalculator.mamba2_state_dtype(
+        base_dtype = MambaStateDtypeCalculator.mamba2_state_dtype(
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
             self.cache_config.mamba_ssm_cache_dtype,
         )
+        if self.use_replayssm:
+            return MambaStateDtypeCalculator.append_replayssm_ring(
+                base_dtype, self.model_config.dtype
+            )
+        return base_dtype
 
-    def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
-        return MambaStateShapeCalculator.mamba2_state_shape(
+    def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+        tp_world_size = get_tensor_model_parallel_world_size()
+        base_shape = MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=self.intermediate_size,
-            tp_world_size=get_tensor_model_parallel_world_size(),
+            tp_world_size=tp_world_size,
             n_groups=self.n_groups,
             num_heads=self.num_heads,
             head_dim=self.head_dim,
@@ -1039,6 +1128,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
             conv_kernel=self.conv_kernel_size,
             num_spec=self.num_spec,
         )
+        if self.use_replayssm:
+            assert self.replayssm_buffer_len is not None
+            return MambaStateShapeCalculator.append_replayssm_ring(
+                base_shape,
+                self.n_groups,
+                tp_world_size,
+                self.replayssm_buffer_len,
+            )
+        return base_shape
 
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:

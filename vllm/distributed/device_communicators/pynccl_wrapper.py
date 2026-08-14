@@ -51,6 +51,26 @@ class ncclUniqueId(ctypes.Structure):
     _fields_ = [("internal", ctypes.c_byte * 128)]
 
 
+# NCCL 2.30+ ncclCommProperties_t. Only fields through ginType are read;
+# trailing fields keep the layout aligned with NCCL's versioned structure.
+class ncclCommProperties(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_size_t),
+        ("magic", ctypes.c_uint),
+        ("version", ctypes.c_uint),
+        ("rank", ctypes.c_int),
+        ("nRanks", ctypes.c_int),
+        ("cudaDev", ctypes.c_int),
+        ("nvmlDev", ctypes.c_int),
+        ("deviceApiSupport", ctypes.c_bool),
+        ("multimemSupport", ctypes.c_bool),
+        ("ginType", ctypes.c_int),
+        ("nLsaTeams", ctypes.c_int),
+        ("hostRmaSupport", ctypes.c_bool),
+        ("railedGinType", ctypes.c_int),
+    ]
+
+
 cudaStream_t = ctypes.c_void_p
 buffer_type = ctypes.c_void_p
 
@@ -317,6 +337,12 @@ class NCCLLibrary:
         # ncclResult_t ncclCommWindowDeregister(
         #   ncclComm_t comm, ncclWindow_t win);
         Function("ncclCommWindowDeregister", ncclResult_t, [ncclComm_t, ncclWindow_t]),
+        # Query runtime properties of a specific initialized communicator.
+        Function(
+            "ncclCommQueryProperties",
+            ncclResult_t,
+            [ncclComm_t, ctypes.POINTER(ncclCommProperties)],
+        ),
     ]
 
     # class attribute to store the mapping from the path to the library
@@ -375,6 +401,9 @@ class NCCLLibrary:
                             # Having an exception here on ROCm platform is
                             # not allowed during graph capturing
                             continue
+                    elif func.name == "ncclCommQueryProperties":
+                        # Optional on NCCL versions older than 2.29.
+                        continue
                     raise
             NCCLLibrary.path_to_dict_mapping[so_file] = _funcs
         self._funcs = NCCLLibrary.path_to_dict_mapping[so_file]

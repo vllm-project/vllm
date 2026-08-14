@@ -27,14 +27,23 @@
 #include <torch/csrc/stable/tensor.h>
 #include "libtorch_stable/torch_utils.h"
 #include "libtorch_stable/dispatch_utils.h"
-#include "cuda_vec_utils.cuh"
+#include "libtorch_stable/cutlass_extensions/common.hpp"
+#include "../../cuda_vec_utils.cuh"
 #include "cuda_utils.h"
 
 #include "nvfp4_utils.cuh"
+
+#if defined(CUDART_VERSION) && CUDART_VERSION >= 12090
+  #define VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED 1
 static_assert(CVT_FP4_ELTS_PER_THREAD == 16,
               "MXFP4 experts quant requires PACK16 mode (CUDA >= 12.9)");
+#else
+  #define VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED 0
+#endif
 
-#include "launch_bounds_utils.h"
+#include "libtorch_stable/launch_bounds_utils.h"
+
+#if VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED
 
 namespace vllm {
 
@@ -104,7 +113,7 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
                 &input_offset_by_experts[chunk_start + 12]));
         local_offsets[16] = __ldca(&input_offset_by_experts[chunk_start + 16]);
 
-#pragma unroll
+  #pragma unroll
         for (int i = 0; i < 16; i++) {
           if (rowIdx >= local_offsets[i] && rowIdx < local_offsets[i + 1]) {
             rowIdx_in_expert = rowIdx - local_offsets[i];
@@ -309,14 +318,14 @@ void mxfp4_quant_impl(void* output, void* output_scale, void* input,
 
 }  // namespace vllm
 
-/*Quantization entry for mxfp4 experts quantization*/
-#define CHECK_TH_CUDA(x, m) \
-  STD_TORCH_CHECK(x.is_cuda(), m, "must be a CUDA tensor")
-#define CHECK_CONTIGUOUS(x, m) \
-  STD_TORCH_CHECK(x.is_contiguous(), m, "must be contiguous")
-#define CHECK_INPUT(x, m) \
-  CHECK_TH_CUDA(x, m);    \
-  CHECK_CONTIGUOUS(x, m);
+  /*Quantization entry for mxfp4 experts quantization*/
+  #define CHECK_TH_CUDA(x, m) \
+    STD_TORCH_CHECK(x.is_cuda(), m, "must be a CUDA tensor")
+  #define CHECK_CONTIGUOUS(x, m) \
+    STD_TORCH_CHECK(x.is_contiguous(), m, "must be contiguous")
+  #define CHECK_INPUT(x, m) \
+    CHECK_TH_CUDA(x, m);    \
+    CHECK_CONTIGUOUS(x, m);
 
 constexpr auto HALF = torch::headeronly::ScalarType::Half;
 constexpr auto BF16 = torch::headeronly::ScalarType::BFloat16;
@@ -364,12 +373,28 @@ static void validate_mxfp4_experts_quant_inputs(
   STD_TORCH_CHECK(output_scale.size(1) * 4 == padded_k);
 }
 
+#endif  // VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED
+
+static bool mxfp4_experts_quant_sm_supported(int64_t cuda_device_capability) {
+#if VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED
+  return cuda_device_capability >= 100 && cuda_device_capability < 120;
+#else
+  return false;
+#endif
+}
+
 void mxfp4_experts_quant(
     torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
     torch::stable::Tensor const& input,
     torch::stable::Tensor const& input_offset_by_experts,
     torch::stable::Tensor const& output_scale_offset_by_experts,
     int64_t n_experts) {
+#if VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED
+  int32_t sm = get_sm_version_num();
+  STD_TORCH_CHECK(mxfp4_experts_quant_sm_supported(sm),
+                  "No compiled MXFP4 experts quant kernel for SM ", sm,
+                  ". Recompile with SM10x/11x FP4 support and CUDA >= 12.9.");
+
   auto m_topk = input.size(0);
   auto k = input.size(1);
 
@@ -390,6 +415,10 @@ void mxfp4_experts_quant(
             output_scale_offset_by_experts.data_ptr(), m_topk, k, n_experts,
             stream);
       });
+#else
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(false,
+                                  "MXFP4 experts quant requires CUDA >= 12.9.");
+#endif
 }
 
 void silu_and_mul_mxfp4_experts_quant(
@@ -398,6 +427,12 @@ void silu_and_mul_mxfp4_experts_quant(
     torch::stable::Tensor const& input_offset_by_experts,
     torch::stable::Tensor const& output_scale_offset_by_experts,
     int64_t n_experts) {
+#if VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED
+  int32_t sm = get_sm_version_num();
+  STD_TORCH_CHECK(mxfp4_experts_quant_sm_supported(sm),
+                  "No compiled SiLU+Mul MXFP4 experts quant kernel for SM ", sm,
+                  ". Recompile with SM10x/11x FP4 support and CUDA >= 12.9.");
+
   auto m_topk = input.size(0);
   auto k_times_2 = input.size(1);
   STD_TORCH_CHECK(k_times_2 % 2 == 0, "input width must be even (gate || up)");
@@ -420,13 +455,29 @@ void silu_and_mul_mxfp4_experts_quant(
             output_scale_offset_by_experts.data_ptr(), m_topk, k, n_experts,
             stream);
       });
+#else
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
+      false, "SiLU+Mul MXFP4 experts quant requires CUDA >= 12.9.");
+#endif
 }
 
-// Registered here (not torch_bindings.cpp) because VLLM_GPU_FLAGS is applied
-// only under COMPILE_LANGUAGE:CUDA, so ENABLE_NVFP4_SM100 is invisible to
-// .cpp files and cannot gate the registration from there.
+bool mxfp4_experts_quant_supported(int64_t cuda_device_capability) {
+  return mxfp4_experts_quant_sm_supported(cuda_device_capability);
+}
+
+STABLE_TORCH_LIBRARY_FRAGMENT(_C, m) {
+  m.def("mxfp4_experts_quant_supported(int cuda_device_capability) -> bool");
+}
+
+// Registered here so the CUDA 12.8 stub and CUDA 12.9+ implementation stay
+// tied to the same translation unit.
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
   m.impl("mxfp4_experts_quant", TORCH_BOX(&mxfp4_experts_quant));
   m.impl("silu_and_mul_mxfp4_experts_quant",
          TORCH_BOX(&silu_and_mul_mxfp4_experts_quant));
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, m) {
+  m.impl("mxfp4_experts_quant_supported",
+         TORCH_BOX(&mxfp4_experts_quant_supported));
 }

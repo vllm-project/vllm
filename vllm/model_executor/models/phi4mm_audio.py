@@ -586,7 +586,9 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
             seq_len, batch_size, self.chunk_size, self.left_chunk
         )
         device = xs_pad.device
-        enc_streaming_mask = enc_streaming_mask.to(device)
+        enc_streaming_mask = enc_streaming_mask.contiguous().to(
+            device, non_blocking=True
+        )
         xs_pad = xs_pad.to(device)
 
         input_tensor = xs_pad
@@ -605,7 +607,9 @@ class TransformerEncoderBase(abc.ABC, nn.Module):
                 seq_len, batch_size, chunk_size_nc, left_chunk_nc
             )
             if device.type != "cpu":
-                enc_streaming_mask_nc = enc_streaming_mask_nc.to(device)
+                enc_streaming_mask_nc = enc_streaming_mask_nc.contiguous().to(
+                    device, non_blocking=True
+                )
             if masks is not None:
                 hs_mask_nc = masks & enc_streaming_mask_nc
             else:
@@ -917,7 +921,9 @@ class ConformerEncoder(TransformerEncoderBase):
         enc_streaming_mask = self._streaming_mask(
             max_audio_length, batch_size, self.chunk_size, self.left_chunk
         )
-        enc_streaming_mask = enc_streaming_mask.to(device)
+        enc_streaming_mask = enc_streaming_mask.contiguous().to(
+            device, non_blocking=True
+        )
         if mask is None:
             return enc_streaming_mask
 

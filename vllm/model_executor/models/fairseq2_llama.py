@@ -79,10 +79,8 @@ class Fairseq2LlamaForCausalLM(LlamaForCausalLM):
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(
-            (
-                self.reshape_fairseq2_weights(name, loaded_weight, params)
-                for name, loaded_weight in weights
-            )
+            self.reshape_fairseq2_weights(name, loaded_weight, params)
+            for name, loaded_weight in weights
         )
 
     def flag_sharded_weights(self, params: dict[str, Parameter]):

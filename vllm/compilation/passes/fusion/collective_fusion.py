@@ -917,13 +917,13 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
             AllGatherScaledMMPattern(self.model_dtype, self.device).register(
                 self.pm_pass
             )
-
-            CutlassScaledMMReduceScatterPattern(self.model_dtype, self.device).register(
-                self.pm_pass
-            )
-            AllGatherCutlassScaledMMPattern(self.model_dtype, self.device).register(
-                self.pm_pass
-            )
+            if hasattr(torch.ops._C, "cutlass_scaled_mm"):
+                CutlassScaledMMReduceScatterPattern(
+                    self.model_dtype, self.device
+                ).register(self.pm_pass)
+                AllGatherCutlassScaledMMPattern(self.model_dtype, self.device).register(
+                    self.pm_pass
+                )
             with suppress(ImportError):
                 import vllm.utils.flashinfer  # noqa: F401
             if hasattr(torch.ops.vllm, "bmm_fp8"):
@@ -956,6 +956,15 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
                                 a_scale_view=a_scale_view,
                             )
                         )
+                self.register(
+                    FlashInferAllGatherFP4Pattern(
+                        self.model_dtype,
+                        self.device,
+                        "cute-dsl",
+                        use_8x4_sf_layout=False,
+                        a_scale_view="float8",
+                    )
+                )
                 # NVFP4 reduce-scatter does not need scale communication: FP4
                 # scales are consumed by the local GEMM and only BF16 partial
                 # outputs are reduced. Keep this PR scoped to the all-gather

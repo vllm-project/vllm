@@ -44,10 +44,10 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.whisper_utils import (
     ISO639_1_SUPPORTED_LANGS,
 )
+from vllm.model_executor.offloader import get_offloader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
@@ -115,6 +115,10 @@ class WhisperEncoderAttention(MMEncoderAttention):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        # Only used for FlashInfer CuDNN backend.
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Input shape: batch_size x seq_len x hidden_size
@@ -127,7 +131,14 @@ class WhisperEncoderAttention(MMEncoderAttention):
             value = value.unsqueeze(0)
 
         # Call the parent forward method
-        out = super().forward(query, key, value)
+        out = super().forward(
+            query,
+            key,
+            value,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
+        )
 
         if is_2d:
             out = out.squeeze(0)
@@ -241,11 +252,29 @@ class WhisperAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        # Only used for FlashInfer CuDNN backend.
+        sequence_lengths: torch.Tensor | None = None,
     ):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        attn_output = self.attn(q, k, v)
+        if cu_seqlens is None:
+            attn_output = self.attn(q, k, v)
+        else:
+            assert self.attn_type == AttentionType.ENCODER, (
+                "Variable-length attention metadata is only supported for "
+                "encoder self-attention."
+            )
+            attn_output = self.attn(
+                q,
+                k,
+                v,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                sequence_lengths=sequence_lengths,
+            )
 
         output, _ = self.out_proj(attn_output)
 
@@ -382,10 +411,19 @@ class WhisperEncoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        # Only used for FlashInfer CuDNN backend.
+        sequence_lengths: torch.Tensor | None = None,
     ):
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
-        hidden_states = self.self_attn(hidden_states=hidden_states)
+        hidden_states = self.self_attn(
+            hidden_states=hidden_states,
+            cu_seqlens=cu_seqlens,
+            max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
+        )
         hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
@@ -458,7 +496,12 @@ class WhisperDecoderLayer(nn.Module):
 
 class WhisperEncoder(nn.Module):
     def __init__(
-        self, *, vllm_config: VllmConfig, prefix: str = "", init_in_fp32: bool = False
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        init_in_fp32: bool = False,
+        enable_pp: bool = True,
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -475,13 +518,27 @@ class WhisperEncoder(nn.Module):
         self.conv2 = nn.Conv1d(embed_dim, embed_dim, stride=2, kernel_size=3, padding=1)
 
         self.total_stride = self.conv1.stride[0] * self.conv2.stride[0]
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            config.encoder_layers,
-            lambda prefix: WhisperEncoderLayer(
+
+        def create_layer(prefix: str) -> nn.Module:
+            return WhisperEncoderLayer(
                 vllm_config=vllm_config, prefix=f"{prefix}.layers"
-            ),
-            prefix=f"{prefix}.layers",
-        )
+            )
+
+        if enable_pp:
+            self.start_layer, self.end_layer, self.layers = make_layers(
+                config.encoder_layers,
+                create_layer,
+                prefix=f"{prefix}.layers",
+            )
+        else:
+            self.start_layer = 0
+            self.end_layer = config.encoder_layers
+            self.layers = nn.ModuleList(
+                get_offloader().wrap_modules(
+                    create_layer(prefix=f"{prefix}.layers.{idx}")
+                    for idx in range(config.encoder_layers)
+                )
+            )
         self.layer_norm = nn.LayerNorm(config.d_model)
 
         if self.pos_embed_type not in (
@@ -616,42 +673,6 @@ class WhisperModel(nn.Module):
         if input_features is None:
             return None
         return self.encoder(input_features)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
-            (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
-            (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
-            # MergedColumnParallelLinear uses integer indices (0, 1)
-            (".encoder_attn.kv_proj", ".encoder_attn.k_proj", 0),
-            (".encoder_attn.kv_proj", ".encoder_attn.v_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
 
 
 class WhisperProcessingInfo(BaseProcessingInfo):
@@ -808,7 +829,15 @@ class WhisperForConditionalGeneration(
     }
 
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."}
+        orig_to_new_substr={".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."},
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            ".self_attn.q_proj": (".self_attn.qkv_proj", "q"),
+            ".self_attn.k_proj": (".self_attn.qkv_proj", "k"),
+            ".self_attn.v_proj": (".self_attn.qkv_proj", "v"),
+            ".encoder_attn.k_proj": (".encoder_attn.kv_proj", 0),
+            ".encoder_attn.v_proj": (".encoder_attn.kv_proj", 1),
+        },
     )
 
     # Whisper only supports audio-conditioned generation.

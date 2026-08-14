@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
-
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
@@ -39,13 +37,11 @@ class ZeroExpertRouter(BaseRouter):
         renormalize: bool = False,
         routed_scaling_factor: float = 1.0,
         eplb_state: EplbLayerState | None = None,
-        indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            indices_type_getter=indices_type_getter,
         )
         self.e_score_correction_bias = e_score_correction_bias
         self.num_logical_experts = num_logical_experts
@@ -63,6 +59,7 @@ class ZeroExpertRouter(BaseRouter):
             renormalize=self.renormalize,
             num_expert_group=None,
             has_e_score_bias=True,
+            routed_scaling_factor=self.routed_scaling_factor,
         )
 
     def _compute_routing(

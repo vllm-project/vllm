@@ -30,7 +30,7 @@ def wikitext_ppl_test(
 ):
     vllm_extra_kwargs = get_vllm_extra_kwargs(model_info, vllm_extra_kwargs)
 
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="test")
 
     with vllm_runner(
         model_info.name,
@@ -126,3 +126,4 @@ def wikitext_ppl_test(
     # We are not concerned that the vllm PPL is less than Transformers,
     # so we only perform one-sided testing.
     assert differ < atol
+    return vllm_ppl

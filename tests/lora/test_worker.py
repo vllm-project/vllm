@@ -66,7 +66,6 @@ def test_worker_apply_lora(qwen3_lora_files):
             runner_type="generate",
             max_num_batched_tokens=32,
             max_num_seqs=32,
-            max_num_partial_prefills=32,
         ),
         device_config=DeviceConfig(DEVICE_TYPE),
         cache_config=CacheConfig(

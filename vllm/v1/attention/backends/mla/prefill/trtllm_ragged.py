@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TRT-LLM Ragged backend for MLA prefill."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
 import vllm.envs as envs
-from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+from vllm.v1.attention.backends.mla.prefill.base import (
+    MLADimensions,
+    MLAPrefillBackend,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -21,7 +24,18 @@ if TYPE_CHECKING:
 class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
     """TRT-LLM Ragged backend for MLA prefill."""
 
-    requires_r1_mla_dimensions = True
+    supported_mla_dimensions: ClassVar[list[MLADimensions]] = [
+        MLADimensions(
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        ),
+        MLADimensions(
+            qk_nope_head_dim=192,
+            qk_rope_head_dim=64,
+            v_head_dim=256,
+        ),
+    ]
 
     @staticmethod
     def get_name() -> str:
@@ -77,22 +91,29 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
             prefill_metadata.query_start_loc[1:] - prefill_metadata.query_start_loc[:-1]
         )
 
+    def supports_out(self) -> bool:
+        # Output head dim is v.shape[-1] == v_head_dim, so `out` is unpadded.
+        return True
+
     def run_prefill_new_tokens(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         return_softmax_lse: bool,
+        out: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
-        out = torch.empty(
-            q.shape[0],
-            q.shape[1],
-            v.shape[2],
-            device=q.device,
-            dtype=self._prefill_metadata.output_dtype,
-        )
+        if out is None:
+            out = torch.empty(
+                q.shape[0],
+                q.shape[1],
+                v.shape[2],
+                device=q.device,
+                dtype=self._prefill_metadata.output_dtype,
+            )
 
         ret = trtllm_ragged_attention_deepseek(
             query=q,
@@ -117,48 +138,43 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
 
         if isinstance(ret, tuple):
             # Convert from (q_len, num_heads) to (num_heads, q_len)
-            return ret[0], ret[1].transpose(0, 1).contiguous()
+            return ret[0], ret[1].transpose(0, 1)
         return ret
 
     def run_prefill_context_chunk(
         self,
-        chunk_idx: int,
+        chunk: "MLACommonPrefillMetadata.ContextChunk",
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from flashinfer.prefill import trtllm_ragged_attention_deepseek
 
-        assert self._prefill_metadata.chunked_context is not None
-        assert self._prefill_metadata.chunked_context.seq_lens[chunk_idx] is not None
-
-        out = torch.empty(
-            q.shape[0],
-            q.shape[1],
-            v.shape[2],
-            device=q.device,
-            dtype=self._prefill_metadata.output_dtype,
-        )
+        if out is None:
+            out = torch.empty(
+                q.shape[0],
+                q.shape[1],
+                v.shape[2],
+                device=q.device,
+                dtype=self._prefill_metadata.output_dtype,
+            )
 
         attn_out, lse = trtllm_ragged_attention_deepseek(
             query=q,
             key=k,
             value=v,
             workspace_buffer=self._workspace_buffer,
-            seq_lens=self._prefill_metadata.chunked_context.seq_lens[chunk_idx],
-            max_q_len=self._prefill_metadata.max_query_len,
-            max_kv_len=self._prefill_metadata.chunked_context.max_seq_lens[chunk_idx],
+            seq_lens=chunk.seq_lens,
+            max_q_len=chunk.max_query_len,
+            max_kv_len=chunk.max_seq_len,
             bmm1_scale=self.scale,
             bmm2_scale=1.0,
             o_sf_scale=1.0,
-            batch_size=self._prefill_metadata.chunked_context.seq_lens[chunk_idx].shape[
-                0
-            ],
+            batch_size=chunk.num_requests,
             window_left=-1,
-            cum_seq_lens_q=self._prefill_metadata.query_start_loc,
-            cum_seq_lens_kv=self._prefill_metadata.chunked_context.cu_seq_lens[
-                chunk_idx
-            ],
+            cum_seq_lens_q=chunk.query_start_loc,
+            cum_seq_lens_kv=chunk.cu_seq_lens,
             enable_pdl=False,
             is_causal=False,
             return_lse=True,
@@ -166,4 +182,4 @@ class TrtllmRaggedPrefillBackend(MLAPrefillBackend):
         )
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)
-        return attn_out, lse.transpose(0, 1).contiguous()
+        return attn_out, lse.transpose(0, 1)

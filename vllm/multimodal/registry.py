@@ -114,11 +114,18 @@ class MultiModalRegistry:
         try:
             info = self._create_processing_info(model_config, tokenizer=None)
         except ValueError:
-            logger.warning_once(
-                "Model %s is treated as multimodal but has no registered "
-                "multimodal processor; running in text-only mode.",
-                model_config.model,
-            )
+            # Speculative drafters for multimodal targets (e.g. Qwen3_5MTP,
+            # Exaone4_5_MTP, MiMoV2OmniMTP) declare `SupportsMultiModal` so
+            # that they can consume the embeddings merged by the target model,
+            # but they never run a multi-modal processor of their own. Running
+            # in text-only mode is the expected outcome for them, not a
+            # misconfiguration worth warning about.
+            if model_config.runner_type != "draft":
+                logger.warning_once(
+                    "Model %s is treated as multimodal but has no registered "
+                    "multimodal processor; running in text-only mode.",
+                    model_config.model,
+                )
             return False
 
         # Check if all supported modalities have limit == 0

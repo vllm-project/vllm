@@ -52,7 +52,7 @@ __device__ void paged_attention_kernel(
 )
 ```
 
-There are also a list of template arguments above the function
+There is also a list of template arguments above the function
 signature that are determined during compilation time. `scalar_t`
 represents the data type of the query, key, and value data elements,
 such as FP16. `HEAD_SIZE` indicates the number of elements in each
@@ -178,7 +178,7 @@ const scalar_t* k_ptr = k_cache + physical_block_number * kv_block_stride
                     + physical_block_offset * x;
 ```
 
-Unlike to `q_ptr`, `k_ptr` in each thread will point to different
+Unlike `q_ptr`, `k_ptr` in each thread will point to different
 key token at different iterations. As shown above, that `k_ptr`
 points to key token data based on `k_cache` at assigned block,
 assigned head and assigned token.

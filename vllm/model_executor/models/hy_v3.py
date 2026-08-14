@@ -43,7 +43,12 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE, GateLinear
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+    fused_moe_make_expert_params_mapping,
+)
+from vllm.model_executor.layers.hpc import HpcRopeNorm, QkNormPolicy
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -64,10 +69,11 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.hy_v3 import HYV3Config
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -128,7 +134,6 @@ class HYV3MoEFused(nn.Module):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
         if self.tp_size > config.num_experts:
@@ -147,10 +152,6 @@ class HYV3MoEFused(nn.Module):
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
         self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
@@ -172,11 +173,13 @@ class HYV3MoEFused(nn.Module):
         else:
             self.shared_mlp = None
 
-        self.expert_bias = nn.Parameter(torch.empty(config.num_experts))
+        self.expert_bias = nn.Parameter(
+            torch.empty(config.num_experts, dtype=torch.float32)
+        )
         scoring_func = "sigmoid"
         e_score_correction_bias = self.expert_bias
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             num_experts=self.n_routed_experts,
             top_k=top_k,
             hidden_size=config.hidden_size,
@@ -230,6 +233,7 @@ class HYV3Attention(nn.Module):
         dual_chunk_attention_config: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
+        self.dtype = torch.get_default_dtype()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -262,7 +266,7 @@ class HYV3Attention(nn.Module):
             self.total_num_heads,
             self.total_num_kv_heads,
             quant_config=quant_config,
-            bias=None,
+            bias=False,
             prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
@@ -272,11 +276,18 @@ class HYV3Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
+        # When the HPC fused RoPE+QK-Norm path is enabled, the RoPE cos/sin
+        # cache must be float32 to match the HPC kernel's expectations.
+        kv_cache_dtype = cache_config.cache_dtype if cache_config else "auto"
+        rope_support = HpcRopeNorm.support(
+            self.num_heads, self.num_kv_heads, self.head_dim, kv_cache_dtype
+        )
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
             is_neox_style=True,
+            dtype=torch.float32 if rope_support else torch.get_default_dtype(),
         )
         self.attn = Attention(
             self.num_heads,
@@ -291,6 +302,27 @@ class HYV3Attention(nn.Module):
             self.q_norm = RMSNorm(self.head_dim, rms_norm_eps)
             self.k_norm = RMSNorm(self.head_dim, rms_norm_eps)
 
+        # HPC fused RoPE + QK-Norm + KV-Cache-Write (+ optional FP8 Q quant).
+        # HunYuan V3 applies QK-Norm *before* RoPE, so NORM_THEN_ROPE.
+        self.hpc_rope_norm: HpcRopeNorm | None = None
+        if rope_support:
+            self.hpc_rope_norm = HpcRopeNorm(
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                head_dim=self.head_dim,
+                cos_sin_cache=self.rotary_emb.cos_sin_cache,
+                use_qk_norm=self.use_qk_norm,
+                fallback_qnorm=self.q_norm if self.use_qk_norm else None,
+                fallback_knorm=self.k_norm if self.use_qk_norm else None,
+                kv_cache_dtype=kv_cache_dtype,
+                layer_name=self.attn.layer_name,
+                qk_norm_policy=QkNormPolicy.NORM_THEN_ROPE,
+            )
+            # FP8 Q is produced by HpcRopeNorm, so the attention layer must not
+            # re-quantize the query.
+            if self.hpc_rope_norm.use_fp8 and hasattr(self.attn, "query_quant"):
+                self.attn.query_quant = None
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -299,20 +331,28 @@ class HYV3Attention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         output_shape = None
-        if self.use_qk_norm:
-            q_by_head = q.view(
-                *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
-            )
-            q_by_head = self.q_norm(q_by_head)
-            q = q_by_head.view(q.shape)
+        if self.hpc_rope_norm is not None:
+            # HPC handles QK-Norm + RoPE + KV-cache write (+ optional FP8 Q
+            # quant) internally and returns the processed query. K/V are
+            # written into the paged cache by the fused op.
+            q = self.hpc_rope_norm(qkv, self.attn.layer_name)
+            q = q.view(-1, self.num_heads * self.head_dim)
+            attn_output = self.attn(q, k, v, output_shape, self.dtype)
+        else:
+            if self.use_qk_norm:
+                q_by_head = q.view(
+                    *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
+                )
+                q_by_head = self.q_norm(q_by_head)
+                q = q_by_head.view(q.shape)
 
-            k_by_head = k.view(
-                *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
-            )
-            k_by_head = self.k_norm(k_by_head)
-            k = k_by_head.view(k.shape)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, output_shape)
+                k_by_head = k.view(
+                    *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
+                )
+                k_by_head = self.k_norm(k_by_head)
+                k = k_by_head.view(k.shape)
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v, output_shape)
         attn_output = attn_output.view(q.shape[0], -1)
         output, _ = self.o_proj(attn_output)
         return output
@@ -388,7 +428,7 @@ class HYV3DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class HYV3Model(nn.Module):
+class HYV3Model(nn.Module, MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -425,7 +465,6 @@ class HYV3Model(nn.Module):
         )
 
         # Set MoE hyperparameters
-        self.expert_weights = []
         self.num_expert_groups = 1
         self.moe_layers = []
         example_layer = None
@@ -474,7 +513,7 @@ class HYV3Model(nn.Module):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -530,17 +569,6 @@ class HYV3Model(nn.Module):
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
-                continue
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
                 continue
             if "scale" in name:
                 # Remapping the name of FP8 kv-scale.
@@ -618,21 +646,6 @@ class HYV3Model(nn.Module):
         return loaded_params
 
 
-def get_spec_layer_idx_from_weight_name(
-    config: PretrainedConfig, weight_name: str
-) -> int | None:
-    # HYV3MTP is enabled only when num_nextn_predict_layers is greater than 1
-    if (
-        hasattr(config, "num_nextn_predict_layers")
-        and config.num_nextn_predict_layers > 0
-    ):
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(f"model.layers.{layer_idx + i}."):
-                return layer_idx + i
-    return None
-
-
 class HYV3ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -660,7 +673,7 @@ class HYV3ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors

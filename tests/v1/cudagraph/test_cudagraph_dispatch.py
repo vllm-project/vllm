@@ -49,6 +49,7 @@ def _create_vllm_config(
     )
     mock_config.parallel_config = ParallelConfig()
     mock_config.speculative_config = None  # No speculative decoding
+    mock_config.num_speculative_tokens = 0
     if not lora_config:
         mock_config.lora_config = None
     else:

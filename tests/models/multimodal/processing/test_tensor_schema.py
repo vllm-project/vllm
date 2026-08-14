@@ -180,6 +180,7 @@ def test_model_tensor_schema(model_id: str):
         dummy_hf_overrides,
         model_arch=model_arch,
         exist_overrides=model_info.hf_overrides,
+        use_original_num_layers=getattr(model_info, "use_original_num_layers", False),
     )
 
     # ROCm: Detect if model uses AWQ quantization and set appropriate dtype

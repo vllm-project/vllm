@@ -72,6 +72,7 @@ def parse_args():
     parser.add_argument("--max-num-seqs", type=int, default=None)
     parser.add_argument("--parallel-drafting", action="store_true")
     parser.add_argument("--allowed-local-media-path", type=str, default="")
+    parser.add_argument("--use-heterogeneous-vocab", action="store_true")
     return parser.parse_args()
 
 
@@ -135,6 +136,7 @@ def main(args):
             "enforce_eager": args.enforce_eager,
             "max_model_len": args.max_model_len,
             "parallel_drafting": args.parallel_drafting,
+            "use_heterogeneous_vocab": args.use_heterogeneous_vocab,
         }
     elif args.method == "mtp":
         speculative_config = {

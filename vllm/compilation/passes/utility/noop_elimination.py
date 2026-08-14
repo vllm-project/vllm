@@ -108,9 +108,13 @@ class NoOpEliminationPass(VllmInductorPass):
     def dims_equivalent(self, dim: int | SymInt, i_dim: int | SymInt) -> bool:
         """
         This function checks if two dimensions are equivalent.
-        :param dim: The dimension arg to reshape/slice
-        :param i_dim: The corresponding dimension in the input tensor
-        :return: Are the dimensions equivalent?
+
+        Args:
+            dim: The dimension arg to reshape/slice
+            i_dim: The corresponding dimension in the input tensor
+
+        Returns:
+            Are the dimensions equivalent?
 
         There are two cases in which the dimensions are equivalent:
         1. The dimensions are equal (both integers)

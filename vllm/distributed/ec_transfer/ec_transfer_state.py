@@ -40,3 +40,10 @@ def ensure_ec_transfer_initialized(vllm_config: "VllmConfig") -> None:
         _EC_CONNECTOR_AGENT = ECConnectorFactory.create_connector(
             config=vllm_config, role=ECConnectorRole.WORKER
         )
+
+
+def ensure_ec_transfer_shutdown() -> None:
+    global _EC_CONNECTOR_AGENT
+    if _EC_CONNECTOR_AGENT is not None:
+        _EC_CONNECTOR_AGENT.shutdown()
+        _EC_CONNECTOR_AGENT = None

@@ -2,7 +2,9 @@
 #ifndef CPU_TYPES_X86_HPP
 #define CPU_TYPES_X86_HPP
 
+#include <cstring>
 #include <immintrin.h>
+#include <sleef.h>
 #include <torch/all.h>
 
 #ifndef __AVX2__
@@ -592,6 +594,10 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
   FP32Vec16 abs() const { return FP32Vec16(_mm512_abs_ps(reg)); }
 
+  FP32Vec16 tanh() const { return FP32Vec16(Sleef_tanhf16_u10(reg)); }
+
+  FP32Vec16 er() const { return FP32Vec16(Sleef_erff16_u10(reg)); }
+
   float reduce_sum() const { return _mm512_reduce_add_ps(reg); }
 
   float reduce_max() const { return _mm512_reduce_max_ps(reg); }
@@ -789,6 +795,20 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
                      _mm256_andnot_ps(sign_mask, reg_high));
   }
 
+  FP32Vec16 tanh() const {
+    FP32Vec8 low(reg_low);
+    FP32Vec8 high(reg_high);
+    return FP32Vec16(low.tanh().reg, high.tanh().reg);
+  }
+
+  FP32Vec16 exp() const {
+    return FP32Vec16(Sleef_expf8_u10(reg_low), Sleef_expf8_u10(reg_high));
+  }
+
+  FP32Vec16 er() const {
+    return FP32Vec16(Sleef_erff8_u10(reg_low), Sleef_erff8_u10(reg_high));
+  }
+
   FP32Vec16 min(const FP32Vec16& b) const {
     return FP32Vec16(_mm256_min_ps(reg_low, b.reg_low),
                      _mm256_min_ps(reg_high, b.reg_high));
@@ -916,6 +936,30 @@ struct INT8Vec16 : public Vec<INT8Vec16> {
     AliasReg ar;
     ar.reg = reg;
     for (int i = 0; i < elem_num; ++i) ptr[i] = ar.values[i];
+  }
+};
+
+struct INT8Vec64 : public Vec<INT8Vec64> {
+  constexpr static int VEC_ELEM_NUM = 64;
+
+  __m256i reg_low;
+  __m256i reg_high;
+
+  explicit INT8Vec64(const void* ptr)
+      : reg_low(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr))),
+        reg_high(
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr) + 1)) {}
+
+  void save(void* ptr) const {
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(ptr), reg_low);
+    _mm256_storeu_si256(reinterpret_cast<__m256i*>(ptr) + 1, reg_high);
+  }
+
+  void save(int8_t* ptr, const int elem_num) const {
+    TORCH_CHECK(elem_num > 0 && elem_num <= VEC_ELEM_NUM);
+    int8_t values[VEC_ELEM_NUM];
+    save(values);
+    std::memcpy(ptr, values, elem_num);
   }
 };
 #endif
