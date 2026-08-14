@@ -7527,6 +7527,11 @@ class GPUModelRunner(
                         num_blocks = raw_tensor.numel() // spec_page
                     else:
                         num_blocks = self.kv_cache_config.num_blocks
+                        logger.debug(
+                            "Raw tensor size %d not divisible by page "
+                            "size %d for layer %s; using num_blocks=%d",
+                            raw_tensor.numel(), spec_page,
+                            layer_name, num_blocks)
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
                     num_blocks_per_kv_block = (

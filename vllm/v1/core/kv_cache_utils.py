@@ -966,7 +966,7 @@ def _pool_bytes_per_block(
         block_stride, _ = _get_packed_kv_cache_layout(kv_cache_groups)
         return block_stride
     group_size = max(len(g.layer_names) for g in kv_cache_groups)
-    page_size = get_uniform_page_size([g.kv_cache_spec for g in kv_cache_groups])
+    page_size = get_max_page_size([g.kv_cache_spec for g in kv_cache_groups])
     return page_size * group_size
 
 
@@ -990,12 +990,12 @@ def get_num_blocks(
     return may_override_num_blocks(vllm_config, num_blocks)
 
 
-def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
+def get_max_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
     """
-    Get the page size of the KV cache. When specs have non-uniform page
-    sizes (e.g. hidden-state cache specs that exceed the KV cache page),
-    return the maximum page size so allocations are large enough for all
-    groups.
+    Get the maximum page size across all KV cache specs.  When specs have
+    non-uniform page sizes (e.g. hidden-state cache specs that exceed the
+    regular KV cache page), this ensures allocations are large enough for
+    all groups.
     """
     page_sizes = {layer.page_size_bytes for layer in kv_cache_specs}
     assert len(page_sizes) >= 1
@@ -1388,10 +1388,9 @@ def get_kv_cache_config_from_groups(
         # full.1, sw.2: share another Tensor with size=available_memory//2
         group_size = max(len(group.layer_names) for group in kv_cache_groups)
 
-        page_sizes = {
-            group.kv_cache_spec.page_size_bytes for group in kv_cache_groups
-        }
-        page_size = max(page_sizes)
+        page_size = get_max_page_size(
+            [group.kv_cache_spec for group in kv_cache_groups]
+        )
         assert group_size > 0, "group_size must be greater than 0"
         num_blocks = get_num_blocks(
             vllm_config, group_size, available_memory, page_size
@@ -1803,7 +1802,7 @@ def get_kv_cache_groups(
 
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:
-        common_page = get_uniform_page_size([g.kv_cache_spec for g in groups])
+        common_page = get_max_page_size([g.kv_cache_spec for g in groups])
         group_block_size = math.gcd(*(g.kv_cache_spec.block_size for g in groups))
         for name, spec in hidden_specs.items():
             per_token = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
@@ -1930,7 +1929,7 @@ def _max_memory_usage_bytes_from_groups(
     # General case: group_size pools, each shared by one layer per group
     # Memory = group_size * page_size * blocks_for_max_len
     group_size = max(len(group.layer_names) for group in kv_cache_groups)
-    page_size = get_uniform_page_size(
+    page_size = get_max_page_size(
         [group.kv_cache_spec for group in kv_cache_groups]
     )
     blocks_needed = sum(
