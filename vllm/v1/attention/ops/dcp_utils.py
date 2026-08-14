@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MLA DCP collective selection and direct symmetric-memory implementations."""
+"""DCP managers, collective selection, and symmetric-memory implementations."""
 
 from __future__ import annotations
 
@@ -587,6 +587,80 @@ class DCPCombine(Protocol):
         seq_lens: torch.Tensor,
         query_start_loc: torch.Tensor,
     ) -> torch.Tensor: ...
+
+
+class FlashInferDCPManager:
+    """Own persistent buffers and collectives for FlashInfer DCP decode."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        num_heads: int,
+        head_size: int,
+        dtype: torch.dtype,
+    ) -> None:
+        parallel_config = vllm_config.parallel_config
+        scheduler_config = vllm_config.scheduler_config
+        speculative_config = vllm_config.speculative_config
+
+        self.group = get_dcp_group()
+        self.world_size = parallel_config.decode_context_parallel_size
+        self.max_seq_len = scheduler_config.max_num_seqs
+        num_spec_tokens = (
+            speculative_config.num_speculative_tokens
+            if speculative_config is not None
+            else 0
+        )
+        self.max_num_tokens = min(
+            scheduler_config.max_num_batched_tokens,
+            self.max_seq_len * (1 + num_spec_tokens),
+        )
+
+        num_heads_in_dcp = num_heads * self.world_size
+        num_ubatches = max(parallel_config.num_ubatches, 1)
+        self.output = torch.empty(
+            (
+                num_ubatches,
+                self.max_num_tokens,
+                num_heads_in_dcp,
+                head_size,
+            ),
+            dtype=dtype,
+            device="cuda",
+        )
+        self.lse = torch.empty(
+            (num_ubatches, self.max_num_tokens, num_heads_in_dcp),
+            dtype=torch.float32,
+            device="cuda",
+        )
+
+        combine_fn = (
+            dcp_a2a_lse_reduce
+            if parallel_config.dcp_comm_backend == "a2a"
+            else cp_lse_ag_out_rs
+        )
+        self.combine = functools.partial(
+            combine_fn,
+            cp_group=self.group,
+            is_lse_base_on_e=False,
+        )
+
+    def gather_query(self, query: torch.Tensor) -> torch.Tensor:
+        return self.group.all_gather(query.contiguous(), dim=-2)
+
+    def get_decode_buffers(
+        self, num_decode_tokens: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if num_decode_tokens > self.max_num_tokens:
+            raise RuntimeError(
+                "FlashInfer DCP decode batch exceeds the persistent buffer: "
+                f"{num_decode_tokens} > {self.max_num_tokens}."
+            )
+        ubatch_id = dbo_current_ubatch_id()
+        return (
+            self.output[ubatch_id, :num_decode_tokens],
+            self.lse[ubatch_id, :num_decode_tokens],
+        )
 
 
 class MLADCPManager:
