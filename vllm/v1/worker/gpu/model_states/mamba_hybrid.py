@@ -11,7 +11,12 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFuncsByType
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.gdn_attn import (
+    GDNAttentionBackend,
+    GDNAttentionMetadataBuilder,
+    GDNPrecomputedMetadata,
+    gdn_precompute_metadata,
+)
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.short_conv_attn import (
     PleShortConvAttentionMetadataBuilder,
@@ -41,6 +46,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    gdn_precomputed_metadata: GDNPrecomputedMetadata | None = None
 
     def get_extra_common_attn_kwargs(
         self, kv_cache_group_id: int, num_reqs: int
@@ -67,6 +73,7 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             "num_decode_draft_tokens_cpu": None
             if self.num_decode_draft_tokens_cpu is None
             else self.num_decode_draft_tokens_cpu[:num_reqs],
+            "gdn_precomputed_metadata": self.gdn_precomputed_metadata,
         }
 
 
@@ -85,6 +92,7 @@ class MambaHybridModelState(DefaultModelState):
         self.num_accepted_tokens_gpu = torch.ones(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
+        self._contains_gdn_groups: bool | None = None
         # Pre-copy "align" prefix-cache state (V2). The migration of each
         # request's mamba state across block boundaries runs as a fused GPU
         # kernel reusing the postprocess copy machinery, so the per-step src
@@ -175,6 +183,15 @@ class MambaHybridModelState(DefaultModelState):
                 [block_tables[gid] for gid in mamba_group_ids],
             )
         return ctx
+
+    def contains_gdn_groups(self, attn_groups: list[list[AttentionGroup]]) -> bool:
+        if self._contains_gdn_groups is None:
+            self._contains_gdn_groups = any(
+                issubclass(g.backend, GDNAttentionBackend)
+                for groups in attn_groups
+                for g in groups
+            )
+        return self._contains_gdn_groups
 
     def preprocess_state(
         self,
@@ -267,6 +284,7 @@ class MambaHybridModelState(DefaultModelState):
         # compute them during actual (non-capture) forward execution.
         num_accepted_tokens = None
         num_decode_draft_tokens_cpu = None
+        gdn_precomputed_metadata = None
         if not for_capture and self.vllm_config.num_speculative_tokens > 0:
             num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
             num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[
@@ -297,6 +315,16 @@ class MambaHybridModelState(DefaultModelState):
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
+        # Precompute GDN metadata
+        if not for_capture and self.contains_gdn_groups(attn_groups):
+            num_accepted_tokens, gdn_precomputed_metadata = gdn_precompute_metadata(
+                num_decode_draft_tokens_cpu,
+                num_accepted_tokens,
+                input_batch.query_start_loc,
+                query_start_loc_cpu,
+                self.vllm_config.num_speculative_tokens,
+            )
+
         if self._align_mode:
             mamba_group_ids, _ = self._get_mamba_group_info(kv_cache_config)
             aligned_index_builders = []
@@ -319,6 +347,7 @@ class MambaHybridModelState(DefaultModelState):
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            gdn_precomputed_metadata=gdn_precomputed_metadata,
         )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,

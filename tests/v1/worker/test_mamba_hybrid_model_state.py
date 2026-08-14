@@ -31,6 +31,7 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
     state.model_config = SimpleNamespace(max_model_len=8192)
     state._align_mode = False
     state.recoverssm = None
+    state._contains_gdn_groups = None
 
     positions = torch.tensor([1536], dtype=torch.int64)
     input_batch = SimpleNamespace(
