@@ -422,4 +422,4 @@ class TestCohereErrorEnvelope:
             )
         assert r.status_code == HTTPStatus.BAD_REQUEST
         body = r.json()
-        assert body.get("id") == 
+        assert body.get("id") == "req-abc"
