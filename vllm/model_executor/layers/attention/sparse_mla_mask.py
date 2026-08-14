@@ -37,10 +37,7 @@ def dense_mask_mod(
     mask_chunk = mask_chunks[None, (kv_idx >> 5) >> 2]
     loaded = cute.make_rmem_tensor_like(mask_chunk)
     cute.autovec_copy(mask_chunk, loaded)
-    result = cute.make_rmem_tensor(4, dtype=cutlass.Uint32)
-    for i in cutlass.range_constexpr(4):
-        result[i] = cutlass.Uint32(loaded[i])
-    return result.load()
+    return cute.recast_tensor(loaded, cutlass.Uint32).load()
 
 
 dense_mask_mod.__vec_size__ = 128
