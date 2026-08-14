@@ -18,7 +18,6 @@ import torch
 from packaging.version import Version, parse
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
-from setuptools_rust import Binding, RustExtension
 from setuptools_rust.build import build_rust
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
@@ -36,10 +35,16 @@ ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
 
 PRECOMPILED_RUST_FRONTEND_PATH = ROOT_DIR / "vllm" / "vllm-rs"
+# setuptools-rust installs PyO3 artifacts as `<module>.<ext-suffix>`, where the
+# suffix ends with `.so` on Linux and macOS alike (e.g. `_rust_foo.abi3.so`).
+PRECOMPILED_RUST_EXTENSION_MEMBER_REGEX = re.compile(r"vllm/_rust_[^/]*\.so$")
 
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
 envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm", "envs.py"))
+rust_build = load_module_from_path(
+    "rust_build", os.path.join(ROOT_DIR, "tools", "build_rust.py")
+)
 
 VLLM_TARGET_DEVICE = envs.VLLM_TARGET_DEVICE
 USE_PRECOMPILED_EXTENSIONS = envs.VLLM_USE_PRECOMPILED
@@ -52,6 +57,29 @@ USE_PRECOMPILED_RUST_FRONTEND = (
 def should_require_rust_frontend() -> bool:
     value = os.getenv("VLLM_REQUIRE_RUST_FRONTEND", "")
     return value.lower() not in ("", "0", "false", "no")
+
+
+def get_precompiled_rust_extension_paths() -> list[Path]:
+    return sorted((ROOT_DIR / "vllm").glob("_rust_*.so"))
+
+
+def get_missing_precompiled_rust_extension_modules() -> list[str]:
+    present = {
+        path.name.split(".", 1)[0] for path in get_precompiled_rust_extension_paths()
+    }
+    return [
+        module_name
+        for module_name in rust_build.rust_py_extension_module_names()
+        if module_name not in present
+    ]
+
+
+def has_precompiled_rust_extensions() -> bool:
+    return not get_missing_precompiled_rust_extension_modules()
+
+
+def is_metadata_only_build() -> bool:
+    return bool({"egg_info", "dist_info"}.intersection(sys.argv[1:]))
 
 
 if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
@@ -103,7 +131,7 @@ def should_bundle_tcmalloc() -> bool:
     return (
         VLLM_TARGET_DEVICE == "cpu"
         and sys.platform.startswith("linux")
-        and platform.machine() in ("aarch64", "x86_64")
+        and platform.machine() in ("aarch64", "x86_64", "s390x")
     )
 
 
@@ -408,6 +436,30 @@ class cmake_build_ext(build_ext):
                     dirs_exist_ok=True,
                 )
 
+            # copy vendored fmha_sm100 package from build_lib to source tree
+            # for editable installs
+            fmha_sm100_build = os.path.join(
+                self.build_lib, "vllm", "third_party", "fmha_sm100"
+            )
+            if os.path.exists(fmha_sm100_build):
+                print(f"Copying {fmha_sm100_build} to vllm/third_party/fmha_sm100")
+                shutil.copytree(
+                    fmha_sm100_build,
+                    "vllm/third_party/fmha_sm100",
+                    dirs_exist_ok=True,
+                )
+
+            tml_fa4_build = os.path.join(
+                self.build_lib, "vllm", "third_party", "tml_fa4"
+            )
+            if os.path.exists(tml_fa4_build):
+                print(f"Copying {tml_fa4_build} to vllm/third_party/tml_fa4")
+                shutil.copytree(
+                    tml_fa4_build,
+                    "vllm/third_party/tml_fa4",
+                    dirs_exist_ok=True,
+                )
+
 
 class precompiled_build_ext(build_ext):
     """Disables extension building when using precompiled binaries."""
@@ -421,19 +473,31 @@ class precompiled_build_ext(build_ext):
 
 
 class precompiled_build_rust(build_rust):
-    """Skips local Rust builds when the precompiled wheel already ships vllm-rs."""
+    """Skips local Rust builds when all precompiled Rust artifacts are present."""
 
     def run(self) -> None:
-        if PRECOMPILED_RUST_FRONTEND_PATH.exists():
+        missing = []
+        if not PRECOMPILED_RUST_FRONTEND_PATH.exists():
+            missing.append(str(PRECOMPILED_RUST_FRONTEND_PATH))
+        missing_rust_extensions = get_missing_precompiled_rust_extension_modules()
+        if missing_rust_extensions:
+            missing.extend(
+                str(ROOT_DIR / "vllm" / f"{module_name}*.so")
+                for module_name in missing_rust_extensions
+            )
+
+        if not missing:
             logger.info(
-                "Skipping local Rust build: using precompiled %s",
+                "Skipping local Rust build: using precompiled %s and %s",
                 PRECOMPILED_RUST_FRONTEND_PATH,
+                get_precompiled_rust_extension_paths(),
             )
             return
 
         logger.warning(
-            "Precompiled wheel did not provide %s; falling back to local Rust build.",
-            PRECOMPILED_RUST_FRONTEND_PATH,
+            "Precompiled wheel did not provide all Rust artifacts (%s); "
+            "falling back to local Rust build.",
+            ", ".join(missing),
         )
         super().run()
 
@@ -443,20 +507,69 @@ class precompiled_wheel_utils:
 
     @staticmethod
     def fetch_metadata_for_variant(
-        commit: str, variant: str | None
+        commit: str,
+        variant: str | None,
+        *,
+        rocm: bool = False,
     ) -> tuple[list[dict], str]:
         """
         Fetches metadata for a specific variant of the precompiled wheel.
+
+        For non-ROCm, fetches vllm metadata.
+
+        For ROCm, discovers all first-level packages and combines their
+        metadata into a single list.
         """
-        variant_dir = f"{variant}/" if variant is not None else ""
-        repo_url = f"https://wheels.vllm.ai/{commit}/{variant_dir}vllm/"
-        meta_url = repo_url + "metadata.json"
-        print(f"Trying to fetch nightly build metadata from {meta_url}")
+        import json
+        from html.parser import HTMLParser
         from urllib.request import urlopen
 
-        with urlopen(meta_url) as resp:
-            # urlopen raises HTTPError on unexpected status code
-            wheels = json.loads(resp.read().decode("utf-8"))
+        variant_dir = f"{variant}/" if variant is not None else ""
+
+        if not rocm:
+            # Keep original behavior
+            repo_url = f"https://wheels.vllm.ai/{commit}/{variant_dir}vllm/"
+            meta_url = repo_url + "metadata.json"
+            print(f"Trying to fetch nightly build metadata from {meta_url}")
+            with urlopen(meta_url) as resp:
+                wheels = json.loads(resp.read().decode("utf-8"))
+
+            return wheels, repo_url
+
+        # ROCm: discover all packages under the variant directory.
+        repo_url = f"https://wheels.vllm.ai/rocm/{commit}/{variant_dir}"
+
+        class LinkParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.links: list[str] = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag == "a":
+                    href = dict(attrs).get("href")
+                    if href:
+                        self.links.append(href)
+
+        with urlopen(repo_url) as resp:
+            parser = LinkParser()
+            parser.feed(resp.read().decode("utf-8"))
+
+        packages = [
+            href.rstrip("/")
+            for href in parser.links
+            if href.endswith("/")
+            and href not in ("../", "./", "/")
+            and "/" not in href.rstrip("/")
+        ]
+
+        wheels: list[dict] = []
+
+        for package in packages:
+            meta_url = f"{repo_url}{package}/metadata.json"
+            print(f"Trying to fetch nightly build metadata from {meta_url}")
+            with urlopen(meta_url) as resp:
+                package_wheels = json.loads(resp.read().decode("utf-8"))
+            wheels.extend(package_wheels)
         return wheels, repo_url
 
     @staticmethod
@@ -519,6 +632,141 @@ class precompiled_wheel_utils:
         return variant
 
     @staticmethod
+    def rocm_version_to_variant(rocm_version: str) -> str:
+        """Convert a ROCm version string to a wheel variant, e.g. 7.2.3 -> rocm723."""
+        return "rocm" + rocm_version.replace(".", "")
+
+    @staticmethod
+    def detect_system_rocm_variant() -> str | None:
+        """Auto-detect the ROCm wheel variant from the installed ROCm stack."""
+        rocm_version = get_rocm_version()
+        if not rocm_version:
+            try:
+                import torch
+
+                rocm_version = torch.version.hip
+            except Exception:
+                pass
+        if not rocm_version:
+            return None
+        variant = precompiled_wheel_utils.rocm_version_to_variant(rocm_version)
+        print(f"Detected ROCm {rocm_version}, using variant {variant}")
+        return variant
+
+    @staticmethod
+    def fetch_available_rocm_variants(commit: str) -> list[str]:
+        """List ROCm wheel variants published for a commit on wheels.vllm.ai."""
+        from urllib.request import urlopen
+
+        index_url = f"https://wheels.vllm.ai/rocm/{commit}/"
+        print(f"Fetching available ROCm variants from {index_url}")
+        try:
+            with urlopen(index_url) as resp:
+                html = resp.read().decode("utf-8")
+        except Exception as e:
+            logger.warning(
+                "Failed to fetch ROCm variant index for commit %s: %s", commit, e
+            )
+            return []
+        variants = sorted(set(re.findall(r"rocm\d+", html)))
+        print(f"Available ROCm variants for commit {commit}: {variants}")
+        return variants
+
+    @staticmethod
+    def resolve_rocm_wheel_variant(
+        commit: str, variant_override: str | None
+    ) -> str | None:
+        """Resolve a ROCm wheel variant for a commit from wheels.vllm.ai."""
+        env_variant = precompiled_wheel_utils.detect_system_rocm_variant()
+        available = precompiled_wheel_utils.fetch_available_rocm_variants(commit)
+
+        if variant_override is not None:
+            if env_variant and variant_override != env_variant:
+                logger.warning(
+                    "VLLM_PRECOMPILED_WHEEL_VARIANT=%s does not match the "
+                    "detected environment ROCm variant %s; refusing to use a "
+                    "different ROCm patch wheel",
+                    variant_override,
+                    env_variant,
+                )
+                return None
+            if available and variant_override not in available:
+                logger.warning(
+                    "Requested ROCm variant %s is not available for commit %s "
+                    "(available: %s)",
+                    variant_override,
+                    commit,
+                    available,
+                )
+                return None
+            return variant_override
+
+        if env_variant is None:
+            if available:
+                print(
+                    "Could not detect ROCm version from the environment; "
+                    f"available variants for commit {commit}: {available}"
+                )
+            return None
+
+        if env_variant in available:
+            return env_variant
+
+        logger.warning(
+            "Environment ROCm variant %s is not available for commit %s "
+            "(available: %s). Precompiled wheels may not be compatible.",
+            env_variant,
+            commit,
+            available,
+        )
+        return None
+
+    @staticmethod
+    def warn_if_rocm_torch_version_mismatch(
+        wheels: list[dict], repo_url: str, arch: str
+    ) -> None:
+        """Warn if installed torch differs from the custom ROCm build on
+        wheels.vllm.ai and suggest the correct install command."""
+        try:
+            installed = torch.__version__
+        except Exception:
+            return
+
+        def _wheel_version(pkg: str) -> str | None:
+            for w in wheels:
+                if w.get("package_name") == pkg and arch in w.get("platform_tag", ""):
+                    v = w["version"]
+                    if w.get("variant") and "+" not in v:
+                        v = f"{v}+{w['variant']}"
+                    return v
+            return None
+
+        expected = _wheel_version("torch")
+        if expected is None or installed == expected:
+            return
+
+        pkgs = f"torch=={expected}"
+        triton_ver = _wheel_version("triton")
+        if triton_ver:
+            pkgs += f" triton=={triton_ver}"
+
+        logger.warning(
+            "Installed PyTorch %s does not match the custom build %s "
+            "shipped with vLLM ROCm wheels. The ABI may differ from "
+            "official releases. If you hit extension load errors, "
+            "reinstall from the vLLM index:\n"
+            "  pip install %s --extra-index-url %s\n"
+            "  uv pip install %s --extra-index-url %s "
+            "--index-strategy unsafe-best-match",
+            installed,
+            expected,
+            pkgs,
+            repo_url,
+            pkgs,
+            repo_url,
+        )
+
+    @staticmethod
     def find_local_rocm_wheel() -> str | None:
         """Search for a local vllm wheel in common locations."""
         import glob
@@ -575,6 +823,57 @@ class precompiled_wheel_utils:
             print(f"Found local ROCm wheel: {local_wheel}")
             return local_wheel, None
 
+        import platform
+
+        arch = platform.machine()
+        commit = os.getenv("VLLM_PRECOMPILED_WHEEL_COMMIT", "").lower()
+        if not commit or len(commit) != 40:
+            print(
+                f"VLLM_PRECOMPILED_WHEEL_COMMIT not valid: {commit}"
+                ", trying to fetch base commit in main branch"
+            )
+            commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
+        variant = precompiled_wheel_utils.resolve_rocm_wheel_variant(
+            commit, os.getenv("VLLM_PRECOMPILED_WHEEL_VARIANT", None)
+        )
+        print(f"Using precompiled ROCm wheel commit {commit} with variant {variant}")
+        wheels, repo_url = None, None
+        if variant is not None:
+            try:
+                wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
+                    commit, variant, rocm=True
+                )
+                precompiled_wheel_utils.warn_if_rocm_torch_version_mismatch(
+                    wheels, repo_url, arch
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to fetch ROCm wheel metadata for variant %s: %s",
+                    variant,
+                    e,
+                )
+        if wheels is not None and repo_url is not None:
+            from urllib.parse import urljoin
+
+            for wheel in wheels:
+                if wheel.get("package_name") == "vllm" and arch in wheel.get(
+                    "platform_tag", ""
+                ):
+                    print(f"Found precompiled wheel metadata: {wheel}")
+                    if "path" not in wheel:
+                        raise ValueError(f"Wheel metadata missing path: {wheel}")
+                    wheel_url = urljoin(f"{repo_url}vllm/", wheel["path"])
+                    download_filename = wheel.get("filename")
+                    print(f"Using precompiled wheel URL: {wheel_url}")
+                    return wheel_url, download_filename
+            logger.warning(
+                "No precompiled vllm wheel found for architecture %s "
+                "from repo %s. All available wheels: %s",
+                arch,
+                repo_url,
+                wheels,
+            )
+
         # Fall back to AMD's PyPI index
         index_url = os.getenv(
             "VLLM_ROCM_WHEEL_INDEX", "https://pypi.amd.com/vllm-rocm/simple"
@@ -605,8 +904,7 @@ class precompiled_wheel_utils:
             print(f"Using user-specified precompiled wheel location: {wheel_location}")
             return wheel_location, None
         else:
-            # ROCm: use local wheel or AMD's PyPI index
-            # TODO: When we have ROCm nightly wheels, we can update this logic.
+            # ROCm: resolve wheels from wheels.vllm.ai with environment-matched variant
             if precompiled_wheel_utils.is_rocm_system():
                 return precompiled_wheel_utils.determine_wheel_url_rocm()
 
@@ -719,14 +1017,17 @@ class precompiled_wheel_utils:
                         {
                             "vllm/_C.abi3.so",
                             "vllm/_C_stable_libtorch.abi3.so",
-                            "vllm/_moe_C.abi3.so",
+                            "vllm/_moe_C_stable_libtorch.abi3.so",
+                            "vllm/_qutlass_C.abi3.so",
                             "vllm/_flashmla_C.abi3.so",
                             "vllm/_flashmla_extension_C.abi3.so",
+                            "vllm/_flashkda_C.abi3.so",
                             "vllm/_sparse_flashmla_C.abi3.so",
                             "vllm/vllm_flash_attn/_vllm_fa2_C.abi3.so",
                             "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                             "vllm/cumem_allocator.abi3.so",
                             "vllm/spinloop.abi3.so",
+                            "vllm/fs_io_C.abi3.so",
                             # ROCm-specific libraries
                             "vllm/_rocm_C.abi3.so",
                         }
@@ -751,9 +1052,19 @@ class precompiled_wheel_utils:
                 )
                 # DeepGEMM: extract all files (.py, .so, .cuh, .h, .hpp, etc.)
                 deep_gemm_regex = re.compile(r"vllm/third_party/deep_gemm/.*")
+                fmha_sm100_regex = re.compile(r"vllm/third_party/fmha_sm100/.*")
+                tml_fa4_regex = re.compile(r"vllm/third_party/tml_fa4/.*")
                 file_members = []
                 for member in wheel.filelist:
                     if member.filename in exact_members:
+                        file_members.append(member)
+                        continue
+                    if (
+                        extract_rust_frontend
+                        and PRECOMPILED_RUST_EXTENSION_MEMBER_REGEX.match(
+                            member.filename
+                        )
+                    ):
                         file_members.append(member)
                         continue
 
@@ -768,6 +1079,8 @@ class precompiled_wheel_utils:
                         or triton_kernels_regex.match(member.filename)
                         or flashmla_regex.match(member.filename)
                         or deep_gemm_regex.match(member.filename)
+                        or tml_fa4_regex.match(member.filename)
+                        or fmha_sm100_regex.match(member.filename)
                     ):
                         file_members.append(member)
 
@@ -1014,9 +1327,16 @@ def get_requirements() -> list[str]:
                 # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
                 continue
+            if "flashinfer-cubin" in req:
+                # Not on PyPI since 0.6.14 (only https://flashinfer.ai/whl), so
+                # it cannot be a wheel dependency; flashinfer falls back to
+                # fetching cubins at runtime when the package is absent.
+                continue
             if "nvidia-cutlass-dsl[cu13]" in req and cuda_major == "12":
                 # [cu13] extra is the default; strip it on CUDA 12 builds.
                 req = req.replace("nvidia-cutlass-dsl[cu13]", "nvidia-cutlass-dsl")
+            if "humming-kernels[cu13]" in req and cuda_major == "12":
+                req = req.replace("humming-kernels[cu13]", "humming-kernels[cu12]")
             modified_requirements.append(req)
         requirements = modified_requirements
     elif _is_hip():
@@ -1035,13 +1355,14 @@ def get_requirements() -> list[str]:
 ext_modules = []
 
 if _is_cuda() or _is_hip():
-    ext_modules.append(CMakeExtension(name="vllm._moe_C"))
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
     # Optional since this doesn't get built (produce an .so file). This is just
     # copying the relevant .py files from the source repository.
     ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
 
-ext_modules.append(CMakeExtension(name="vllm.spinloop"))
+if not _is_xpu() and sys.version_info >= (3, 11):
+    ext_modules.append(CMakeExtension(name="vllm.spinloop"))
+    ext_modules.append(CMakeExtension(name="vllm.fs_io_C"))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
@@ -1068,12 +1389,21 @@ if _is_cuda():
         ext_modules.append(
             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
         )
+    if USE_PRECOMPILED_EXTENSIONS or (
+        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.0")
+    ):
+        ext_modules.append(CMakeExtension(name="vllm._flashkda_C", optional=True))
     if envs.VLLM_USE_PRECOMPILED or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
     ):
         # DeepGEMM requires CUDA 12.3+ (SM90/SM100)
         # Optional since it won't build on unsupported architectures
         ext_modules.append(CMakeExtension(name="vllm._deep_gemm_C", optional=True))
+        ext_modules.append(CMakeExtension(name="vllm._qutlass_C", optional=True))
+    # fmha_sm100 is a Python/CuTe-DSL package installed into vllm.third_party.
+    ext_modules.append(CMakeExtension(name="vllm.fmha_sm100", optional=True))
+    # tml-fa4 is copied into an isolated vllm.third_party package.
+    ext_modules.append(CMakeExtension(name="vllm.tml_fa4", optional=True))
 
 if _is_cpu():
     import platform
@@ -1086,9 +1416,11 @@ if _is_cpu():
         ext_modules.append(CMakeExtension(name="vllm._C"))
 
 if _build_custom_ops():
-    ext_modules.append(CMakeExtension(name="vllm._C"))
+    if _is_hip():
+        ext_modules.append(CMakeExtension(name="vllm._C"))
     if _is_cuda() or _is_hip():
         ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))
+        ext_modules.append(CMakeExtension(name="vllm._moe_C_stable_libtorch"))
 
 package_data = {
     "vllm": [
@@ -1099,16 +1431,33 @@ package_data = {
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
         "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",
+        "third_party/flash_linear_attention/LICENSE",
         # DeepGEMM JIT include headers (vendored via cmake)
         "third_party/deep_gemm/include/**/*.cuh",
         "third_party/deep_gemm/include/**/*.h",
         "third_party/deep_gemm/include/**/*.hpp",
+        # fmha_sm100 sparse CuTe-DSL helper kernels (vendored via cmake)
+        "third_party/fmha_sm100/csrc/**/*.cu",
+        "third_party/fmha_sm100/csrc/**/*.h",
+        "third_party/fmha_sm100/csrc/**/*.jinja",
+        "third_party/fmha_sm100/csrc/**/*.cu.jinja",
+        "third_party/fmha_sm100/cute/**/*.cu",
+        "third_party/fmha_sm100/cutlass/include/**/*.h",
+        "third_party/fmha_sm100/cutlass/include/**/*.hpp",
+        "third_party/fmha_sm100/cutlass/tools/util/include/**/*.h",
+        "third_party/fmha_sm100/cutlass/tools/util/include/**/*.hpp",
     ]
 }
 
 
-# If using precompiled artifacts, extract and patch package_data in advance.
-if USE_PRECOMPILED_RUST_FRONTEND:
+def add_vllm_package_data(filename: str) -> None:
+    vllm_files = package_data.setdefault("vllm", [])
+    if filename not in vllm_files:
+        vllm_files.append(filename)
+
+
+# PEP 517 invokes setup.py for metadata before invoking the actual build.
+if USE_PRECOMPILED_RUST_FRONTEND and not is_metadata_only_build():
     wheel_url, download_filename = precompiled_wheel_utils.determine_wheel_url()
     patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
         wheel_url,
@@ -1122,9 +1471,9 @@ if USE_PRECOMPILED_RUST_FRONTEND:
 # If the rust frontend binary is already present in the source tree (e.g.,
 # pre-built in a separate Docker build stage), ship it as-is.
 if PRECOMPILED_RUST_FRONTEND_PATH.exists():
-    vllm_files = package_data.setdefault("vllm", [])
-    if "vllm-rs" not in vllm_files:
-        vllm_files.append("vllm-rs")
+    add_vllm_package_data("vllm-rs")
+for rust_extension_path in get_precompiled_rust_extension_paths():
+    add_vllm_package_data(rust_extension_path.name)
 
 if _no_device():
     ext_modules = []
@@ -1137,23 +1486,18 @@ else:
         if USE_PRECOMPILED_EXTENSIONS
         else cmake_build_ext,
     }
-if USE_PRECOMPILED_RUST_FRONTEND or PRECOMPILED_RUST_FRONTEND_PATH.exists():
+if (
+    USE_PRECOMPILED_RUST_FRONTEND
+    or PRECOMPILED_RUST_FRONTEND_PATH.exists()
+    or has_precompiled_rust_extensions()
+):
     cmdclass["build_rust"] = precompiled_build_rust
 
-# Rust frontend binary, built via setuptools-rust and installed into the
-# package directory alongside the Python modules.
-# TODO: we may use `RustBin` to directly install it into `bin` directory, but this
-# requires extra work on using precompiled binaries.
-rust_extensions = [
-    RustExtension(
-        target="vllm.vllm-rs",
-        path="rust/src/cmd/Cargo.toml",
-        args=["--bin", "vllm-rs"],
-        features=["native-tls-vendored"],
-        binding=Binding.Exec,
-        optional=not should_require_rust_frontend(),
-    ),
-]
+# Rust artifacts, built via setuptools-rust and installed into the package
+# directory alongside the Python modules.
+rust_extensions = rust_build.rust_extensions(
+    optional=not should_require_rust_frontend()
+)
 
 setup(
     # static metadata should rather go in pyproject.toml
@@ -1163,27 +1507,30 @@ setup(
     install_requires=get_requirements(),
     extras_require={
         # AMD Zen CPU optimizations via zentorch
-        "zen": [
-            "zentorch-weekly==5.2.1.dev20260408"
-        ],  # Zentorch has weekly releases. This pulls the known-good version.
+        "zen": ["zentorch==2.13.0.0"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
-        "fastsafetensors": ["fastsafetensors >= 0.2.2"],
-        "instanttensor": ["instanttensor >= 0.1.5"],
+        "fastsafetensors": ["fastsafetensors >= 0.3.3"],
+        "instanttensor": ["instanttensor >= 0.1.9"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
             "av",
             "scipy",
             "soundfile",
+            "soxr",
             "mistral_common[audio]",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
+        # NVIDIA DeepStream (NVDEC) GPU video-decode backend. Linux x86-64
+        # only; also needs system GStreamer + libv4l (see docs).
+        "deepstream": ["nvidia-deepstream-videodecode-cu13>=9.0.2"],
         "flashinfer": [],  # Kept for backwards compatibility
+        "b12x": ["b12x==1.2.4"],
         # Optional deps for Helion kernel development
         # NOTE: When updating helion version, also update CI files:
         #   - .buildkite/test_areas/kernels.yaml
         #   - .buildkite/test-amd.yaml
-        "helion": ["helion==1.0.0"],
+        "helion": ["helion==1.4.0"],
         # Optional deps for gRPC server (vllm serve --grpc)
         "grpc": ["smg-grpc-servicer[vllm] >= 0.5.2"],
         # Optional deps for OpenTelemetry tracing
@@ -1193,11 +1540,8 @@ setup(
             "opentelemetry-exporter-otlp>=1.26.0",
             "opentelemetry-semantic-conventions-ai>=0.4.1",
         ],
-        "triton-cpu": [
-            "triton @ "
-            "git+https://github.com/triton-lang/triton-cpu.git@270e696d ; "
-            "platform_machine == 'x86_64'",
-        ],  # Remove after stable release
+        # extra quantization plugin
+        "extra-quant": ["vllm-gguf-plugin>=0.0.2"],
     },
     cmdclass=cmdclass,
     package_data=package_data,

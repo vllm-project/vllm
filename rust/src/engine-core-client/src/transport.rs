@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::ops::Deref;
@@ -18,9 +21,8 @@ use crate::error::{Error, Result, bail_unexpected_handshake_message};
 use crate::protocol::handshake::{
     EngineCoreReadyResponse, HandshakeAddresses, HandshakeInitMessage, ReadyMessage,
 };
-use crate::protocol::{
-    EngineCoreOutputs, decode_engine_core_outputs, decode_msgpack, encode_msgpack,
-};
+use crate::protocol::output::{EngineCoreOutputs, decode_engine_core_outputs};
+use crate::protocol::{decode_msgpack, encode_msgpack};
 
 /// Dedicated single-frame sentinel emitted by Python `EngineCoreProc` when the
 /// engine dies.
@@ -64,8 +66,8 @@ impl EngineId {
 
     /// Construct an engine id from the Python-compatible engine index encoding
     /// (two-byte little-endian).
-    pub fn from_engine_index(value: u32) -> Self {
-        Self(Bytes::copy_from_slice(&(value as u16).to_le_bytes()))
+    pub fn from_engine_index(value: u16) -> Self {
+        Self(Bytes::copy_from_slice(&value.to_le_bytes()))
     }
 }
 
@@ -104,8 +106,8 @@ pub struct ConnectedEngine {
     /// The identity of the connected engine.
     pub engine_id: EngineId,
     /// Post-initialization configuration received from the engine on the input
-    /// socket registration message. `None` until the registration is received.
-    pub ready_response: Option<EngineCoreReadyResponse>,
+    /// socket registration message.
+    pub ready_response: EngineCoreReadyResponse,
 }
 
 /// Represents the connected shared transport plus all registered engines after
@@ -295,18 +297,9 @@ pub async fn connect_handshake(
         }
     }
 
-    // 4. Wait for every engine to connect to the shared input socket and register itself. The
-    //    `ready_response` is a placeholder; it is populated for each engine by
-    //    `wait_for_input_registrations` below.
-    let mut engines: Vec<_> = engines
-        .into_keys()
-        .map(|engine_id| ConnectedEngine {
-            engine_id,
-            ready_response: None,
-        })
-        .collect();
-
-    wait_for_input_registrations(&mut input_socket, &mut engines, ready_timeout).await?;
+    // 6. Wait for every engine to connect to the shared input socket and register itself.
+    let engines =
+        wait_for_input_registrations(&mut input_socket, engines.into_keys(), ready_timeout).await?;
     debug!(
         engine_count = engines.len(),
         "all engines registered on shared input socket"
@@ -336,11 +329,28 @@ pub async fn connect_handshake(
 pub async fn connect_bootstrapped(
     input_address: &str,
     output_address: &str,
+    engine_start_index: u32,
     engine_count: usize,
     ready_timeout: Duration,
 ) -> Result<ConnectedTransport> {
     if engine_count == 0 {
         bail_unexpected_handshake_message!("expected engine_count >= 1");
+    }
+    let engine_start_index =
+        u16::try_from(engine_start_index).map_err(|_| Error::UnexpectedHandshakeMessage {
+            message: "engine_start_index exceeds the two-byte engine identity limit".to_string(),
+        })?;
+    let engine_end_index =
+        usize::from(engine_start_index).checked_add(engine_count).ok_or_else(|| {
+            Error::UnexpectedHandshakeMessage {
+                message: "engine_start_index + engine_count overflows".to_string(),
+            }
+        })?;
+    if engine_end_index > usize::from(u16::MAX) + 1 {
+        return Err(Error::UnexpectedHandshakeMessage {
+            message: "engine_start_index + engine_count exceeds the two-byte engine identity limit"
+                .to_string(),
+        });
     }
 
     let mut input_socket = RouterSocket::new();
@@ -349,15 +359,15 @@ pub async fn connect_bootstrapped(
     let mut output_socket = PullSocket::new();
     let output_address = output_socket.bind(output_address).await?.to_string();
 
-    // TODO: follow start rank
-    let mut engines = (0..engine_count)
-        .map(|index| ConnectedEngine {
-            engine_id: EngineId::from((index as u16).to_le_bytes().to_vec()),
-            ready_response: None,
-        })
-        .collect::<Vec<_>>();
-
-    wait_for_input_registrations(&mut input_socket, &mut engines, ready_timeout).await?;
+    let engines = wait_for_input_registrations(
+        &mut input_socket,
+        (0..engine_count).map(|offset| {
+            let offset = u16::try_from(offset).expect("validated engine offset fits u16");
+            EngineId::from_engine_index(engine_start_index + offset)
+        }),
+        ready_timeout,
+    )
+    .await?;
     info!(
         engine_count = engines.len(),
         "bootstrapped engines connected"
@@ -455,17 +465,14 @@ async fn send_init_message(
 /// Simplify API server handshake"), the payload is a msgpack-encoded
 /// [`EngineCoreReadyResponse`] carrying post-initialization values such as
 /// `max_model_len`.
-///
-/// Older engines sent an empty second frame here just to establish the
-/// ROUTER/DEALER backchannel, with no structured payload on the input socket.
-/// We continue to tolerate that legacy shape so the frontend can still connect
-/// to slightly older local engine checkouts.
 async fn wait_for_input_registrations(
     input_socket: &mut RouterSocket,
-    engines: &mut [ConnectedEngine],
+    expected_engines: impl IntoIterator<Item = EngineId>,
     ready_timeout: Duration,
-) -> Result<()> {
-    let mut pending = engines.iter().map(|e| e.engine_id.clone()).collect::<BTreeSet<_>>();
+) -> Result<Vec<ConnectedEngine>> {
+    let expected_engines = expected_engines.into_iter().collect::<Vec<_>>();
+    let mut pending = expected_engines.iter().cloned().collect::<BTreeSet<_>>();
+    let mut ready_responses = BTreeMap::new();
 
     while !pending.is_empty() {
         let registration = timeout(ready_timeout, input_socket.recv()).await.map_err(|_| {
@@ -489,29 +496,33 @@ async fn wait_for_input_registrations(
             );
         }
 
-        let ready_response = if frames[1].is_empty() {
-            debug!(
-                ?actual_id,
-                "received legacy empty input registration from engine"
+        if frames[1].is_empty() {
+            bail_unexpected_handshake_message!(
+                "expected msgpack EngineCoreReadyResponse for engine input registration, got empty payload from engine id {actual_id:?}"
             );
-            None
-        } else {
-            let ready_response: EngineCoreReadyResponse = decode_msgpack(&frames[1])?;
-            debug!(
-                ?actual_id,
-                ?ready_response,
-                "received input registration from engine"
-            );
-            Some(ready_response)
-        };
-
-        // Store the ready response in the corresponding engine entry.
-        if let Some(engine) = engines.iter_mut().find(|e| e.engine_id == actual_id) {
-            engine.ready_response = ready_response;
         }
+
+        let ready_response: EngineCoreReadyResponse = decode_msgpack(&frames[1])?;
+        debug!(
+            ?actual_id,
+            ?ready_response,
+            "received input registration from engine"
+        );
+        ready_responses.insert(actual_id, ready_response);
     }
 
-    Ok(())
+    Ok(expected_engines
+        .into_iter()
+        .map(|engine_id| {
+            let ready_response = ready_responses
+                .remove(&engine_id)
+                .expect("every expected engine id has a decoded ready response");
+            ConnectedEngine {
+                engine_id,
+                ready_response,
+            }
+        })
+        .collect())
 }
 
 /// Send an encoded message to the engine through the input socket.
@@ -519,14 +530,14 @@ pub async fn send_message(
     input_send: &mut RouterSendHalf,
     engine_id: &EngineId,
     request_type: Bytes,
-    payload: Vec<u8>,
+    payload: Bytes,
+    aux_frames: Vec<Bytes>,
 ) -> Result<()> {
-    let message = ZmqMessage::try_from(vec![
-        engine_id.to_frame(),
-        request_type,
-        Bytes::from(payload),
-    ])
-    .expect("router messages must contain identity and payload");
+    let mut frames = Vec::with_capacity(3 + aux_frames.len());
+    frames.extend([engine_id.to_frame(), request_type, payload]);
+    frames.extend(aux_frames);
+    let message =
+        ZmqMessage::try_from(frames).expect("router messages must contain identity and payload");
 
     trace!(
         ?engine_id,

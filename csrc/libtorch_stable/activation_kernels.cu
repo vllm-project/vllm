@@ -4,17 +4,26 @@
 #include <cmath>
 
 #include "../cuda_compat.h"
-#include "../cuda_vec_utils.cuh"
+#include "cuda_vec_utils.cuh"
 #include "dispatch_utils.h"
 #include "torch_utils.h"
 
 namespace vllm {
 
-template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
+// `alpha` and `beta` are applied to opposite operands:
+//   - alpha lives INSIDE the activation (the activated half): the gated
+//     activation computes act_half * sigmoid(alpha * act_half).
+//   - beta is added to the OTHER (non-activated) half before the multiply.
+// So the result is always ACT(act_half, alpha) * (other_half + beta).
+// Which half is which depends on `act_first` (see below). Defaults
+// alpha=1.0, beta=0.0 reproduce the plain SwiGLU/GeGLU behavior.
+template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&, const float),
           bool act_first, bool HAS_CLAMP>
 __device__ __forceinline__ scalar_t compute(const scalar_t& x,
                                             const scalar_t& y,
-                                            const float limit) {
+                                            const float limit,
+                                            const float alpha,
+                                            const float beta) {
   if constexpr (act_first) {
     scalar_t gate = x;
     scalar_t up = y;
@@ -22,7 +31,9 @@ __device__ __forceinline__ scalar_t compute(const scalar_t& x,
       gate = (scalar_t)fminf((float)gate, limit);
       up = (scalar_t)fmaxf(fminf((float)up, limit), -limit);
     }
-    return ACT_FN(gate) * up;
+    // act_first: gate is the activated half -> alpha applies to gate;
+    // beta is added to up (the non-activated half).
+    return (scalar_t)(ACT_FN(gate, alpha) * ((float)up + beta));
   } else {
     scalar_t gate = x;
     scalar_t up = y;
@@ -30,58 +41,72 @@ __device__ __forceinline__ scalar_t compute(const scalar_t& x,
       gate = (scalar_t)fmaxf(fminf((float)gate, limit), -limit);
       up = (scalar_t)fminf((float)up, limit);
     }
-    return gate * ACT_FN(up);
+    // !act_first: up is the activated half -> alpha applies to up;
+    // beta is added to gate (the non-activated half).
+    return (scalar_t)(((float)gate + beta) * ACT_FN(up, alpha));
   }
 }
 
-template <typename packed_t, packed_t (*PACKED_ACT_FN)(const packed_t&),
+template <typename packed_t,
+          packed_t (*PACKED_ACT_FN)(const packed_t&, const float),
           bool act_first, bool HAS_CLAMP>
 __device__ __forceinline__ packed_t packed_compute(const packed_t& x,
                                                    const packed_t& y,
-                                                   const float limit) {
+                                                   const float limit,
+                                                   const float alpha,
+                                                   const float beta) {
   if constexpr (act_first) {
     packed_t gate = x;
     packed_t up = y;
+    float2 u = cast_to_float2(up);
     if constexpr (HAS_CLAMP) {
       float2 g = cast_to_float2(gate);
-      float2 u = cast_to_float2(up);
       g.x = fminf(g.x, limit);
       g.y = fminf(g.y, limit);
       u.x = fmaxf(fminf(u.x, limit), -limit);
       u.y = fmaxf(fminf(u.y, limit), -limit);
       gate = cast_to_packed<packed_t>(g);
-      up = cast_to_packed<packed_t>(u);
     }
-    return packed_mul(PACKED_ACT_FN(gate), up);
+    // act_first: gate is the activated half -> alpha applies to gate;
+    // beta is added to up (the non-activated half).
+    float2 activated = cast_to_float2(PACKED_ACT_FN(gate, alpha));
+    activated.x *= u.x + beta;
+    activated.y *= u.y + beta;
+    return cast_to_packed<packed_t>(activated);
   } else {
     packed_t gate = x;
     packed_t up = y;
+    float2 g = cast_to_float2(gate);
     if constexpr (HAS_CLAMP) {
-      float2 g = cast_to_float2(gate);
       float2 u = cast_to_float2(up);
       g.x = fmaxf(fminf(g.x, limit), -limit);
       g.y = fmaxf(fminf(g.y, limit), -limit);
       u.x = fminf(u.x, limit);
       u.y = fminf(u.y, limit);
-      gate = cast_to_packed<packed_t>(g);
       up = cast_to_packed<packed_t>(u);
     }
-    return packed_mul(gate, PACKED_ACT_FN(up));
+    // !act_first: up is the activated half -> alpha applies to up;
+    // beta is added to gate (the non-activated half).
+    float2 activated = cast_to_float2(PACKED_ACT_FN(up, alpha));
+    activated.x *= g.x + beta;
+    activated.y *= g.y + beta;
+    return cast_to_packed<packed_t>(activated);
   }
 }
 
 // Activation and gating kernel template.
 template <typename scalar_t, typename packed_t,
-          scalar_t (*ACT_FN)(const scalar_t&),
-          packed_t (*PACKED_ACT_FN)(const packed_t&), bool act_first,
-          bool use_vec, bool HAS_CLAMP, bool use_256b = false>
+          scalar_t (*ACT_FN)(const scalar_t&, const float),
+          packed_t (*PACKED_ACT_FN)(const packed_t&, const float),
+          bool act_first, bool use_vec, bool HAS_CLAMP, bool use_256b = false>
 __global__ void act_and_mul_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., 2, d]
-    const int d, const float limit) {
-  const scalar_t* x_ptr = input + blockIdx.x * 2 * d;
+    const int d, const float limit, const float alpha, const float beta) {
+  const int64_t token_idx = blockIdx.x;
+  const scalar_t* x_ptr = input + token_idx * 2 * d;
   const scalar_t* y_ptr = x_ptr + d;
-  scalar_t* out_ptr = out + blockIdx.x * d;
+  scalar_t* out_ptr = out + token_idx * d;
 
   if constexpr (use_vec) {
     using cuda_t = typename CUDATypeConverter<scalar_t>::Type;
@@ -105,7 +130,7 @@ __global__ void act_and_mul_kernel(
       for (int j = 0; j < pvec_t::NUM_ELTS; j++) {
         x.elts[j] =
             packed_compute<packed_t, PACKED_ACT_FN, act_first, HAS_CLAMP>(
-                x.elts[j], y.elts[j], limit);
+                x.elts[j], y.elts[j], limit, alpha, beta);
       }
       if constexpr (use_256b) {
         st256(x, &out_vec[i]);
@@ -118,29 +143,34 @@ __global__ void act_and_mul_kernel(
     for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
       const scalar_t x = VLLM_LDG(&x_ptr[idx]);
       const scalar_t y = VLLM_LDG(&y_ptr[idx]);
-      out_ptr[idx] =
-          compute<scalar_t, ACT_FN, act_first, HAS_CLAMP>(x, y, limit);
+      out_ptr[idx] = compute<scalar_t, ACT_FN, act_first, HAS_CLAMP>(
+          x, y, limit, alpha, beta);
     }
   }
 }
 
+// Gated activations take an `alpha` argument that scales the sigmoid input
+// (`x * sigmoid(alpha * x)`). alpha defaults to 1.0 at all call sites, which
+// is exactly SiLU; only the clamp path (silu_and_mul_with_clamp) passes a
+// non-default alpha. Activations that do not use alpha simply ignore it.
 template <typename T>
-__device__ __forceinline__ T silu_kernel(const T& x) {
-  // x * sigmoid(x)
-  return (T)(((float)x) / (1.0f + expf((float)-x)));
+__device__ __forceinline__ T silu_kernel(const T& x, const float alpha) {
+  // x * sigmoid(alpha * x)
+  return (T)(((float)x) / (1.0f + expf((float)-x * alpha)));
 }
 
 template <typename packed_t>
-__device__ __forceinline__ packed_t packed_silu_kernel(const packed_t& val) {
-  // x * sigmoid(x)
+__device__ __forceinline__ packed_t packed_silu_kernel(const packed_t& val,
+                                                       const float alpha) {
+  // x * sigmoid(alpha * x)
   float2 fval = cast_to_float2(val);
-  fval.x = fval.x / (1.0f + expf(-fval.x));
-  fval.y = fval.y / (1.0f + expf(-fval.y));
+  fval.x = fval.x / (1.0f + expf(-fval.x * alpha));
+  fval.y = fval.y / (1.0f + expf(-fval.y * alpha));
   return cast_to_packed<packed_t>(fval);
 }
 
 template <typename T>
-__device__ __forceinline__ T gelu_kernel(const T& x) {
+__device__ __forceinline__ T gelu_kernel(const T& x, const float /*alpha*/) {
   // Equivalent to PyTorch GELU with 'none' approximation.
   // Refer to:
   // https://github.com/pytorch/pytorch/blob/8ac9b20d4b090c213799e81acf48a55ea8d437d6/aten/src/ATen/native/cuda/ActivationGeluKernel.cu#L36-L38
@@ -150,7 +180,8 @@ __device__ __forceinline__ T gelu_kernel(const T& x) {
 }
 
 template <typename packed_t>
-__device__ __forceinline__ packed_t packed_gelu_kernel(const packed_t& val) {
+__device__ __forceinline__ packed_t packed_gelu_kernel(const packed_t& val,
+                                                       const float /*alpha*/) {
   // Equivalent to PyTorch GELU with 'none' approximation.
   // Refer to:
   // https://github.com/pytorch/pytorch/blob/8ac9b20d4b090c213799e81acf48a55ea8d437d6/aten/src/ATen/native/cuda/ActivationGeluKernel.cu#L36-L38
@@ -162,7 +193,8 @@ __device__ __forceinline__ packed_t packed_gelu_kernel(const packed_t& val) {
 }
 
 template <typename T>
-__device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
+__device__ __forceinline__ T gelu_tanh_kernel(const T& x,
+                                              const float /*alpha*/) {
   // Equivalent to PyTorch GELU with 'tanh' approximation.
   // Refer to:
   // https://github.com/pytorch/pytorch/blob/8ac9b20d4b090c213799e81acf48a55ea8d437d6/aten/src/ATen/native/cuda/ActivationGeluKernel.cu#L25-L30
@@ -176,7 +208,7 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
 
 template <typename packed_t>
 __device__ __forceinline__ packed_t
-packed_gelu_tanh_kernel(const packed_t& val) {
+packed_gelu_tanh_kernel(const packed_t& val, const float /*alpha*/) {
   // Equivalent to PyTorch GELU with 'tanh' approximation.
   // Refer to:
   // https://github.com/pytorch/pytorch/blob/8ac9b20d4b090c213799e81acf48a55ea8d437d6/aten/src/ATen/native/cuda/ActivationGeluKernel.cu#L25-L30
@@ -202,7 +234,7 @@ packed_gelu_tanh_kernel(const packed_t& val) {
 // clamped (max only) and up input is clamped (both sides) before the
 // activation function is applied.
 #define LAUNCH_ACTIVATION_GATE_KERNEL(KERNEL, PACKED_KERNEL, ACT_FIRST,        \
-                                      HAS_CLAMP, LIMIT)                        \
+                                      HAS_CLAMP, LIMIT, ALPHA, BETA)           \
   auto dtype = input.scalar_type();                                            \
   int d = input.size(-1) / 2;                                                  \
   int64_t num_tokens = input.numel() / input.size(-1);                         \
@@ -230,7 +262,7 @@ packed_gelu_tanh_kernel(const packed_t& val) {
             PACKED_KERNEL<typename vllm::PackedTypeConverter<scalar_t>::Type>, \
             ACT_FIRST, true, HAS_CLAMP, true><<<grid, block, 0, stream>>>(     \
             out.mutable_data_ptr<scalar_t>(),                                  \
-            input.const_data_ptr<scalar_t>(), d, LIMIT);                       \
+            input.const_data_ptr<scalar_t>(), d, LIMIT, ALPHA, BETA);          \
       });                                                                      \
     } else {                                                                   \
       VLLM_STABLE_DISPATCH_FLOATING_TYPES(dtype, "act_and_mul_kernel", [&] {   \
@@ -240,7 +272,7 @@ packed_gelu_tanh_kernel(const packed_t& val) {
             PACKED_KERNEL<typename vllm::PackedTypeConverter<scalar_t>::Type>, \
             ACT_FIRST, true, HAS_CLAMP, false><<<grid, block, 0, stream>>>(    \
             out.mutable_data_ptr<scalar_t>(),                                  \
-            input.const_data_ptr<scalar_t>(), d, LIMIT);                       \
+            input.const_data_ptr<scalar_t>(), d, LIMIT, ALPHA, BETA);          \
       });                                                                      \
     }                                                                          \
   } else {                                                                     \
@@ -252,7 +284,7 @@ packed_gelu_tanh_kernel(const packed_t& val) {
           PACKED_KERNEL<typename vllm::PackedTypeConverter<scalar_t>::Type>,   \
           ACT_FIRST, false, HAS_CLAMP><<<grid, block, 0, stream>>>(            \
           out.mutable_data_ptr<scalar_t>(), input.const_data_ptr<scalar_t>(),  \
-          d, LIMIT);                                                           \
+          d, LIMIT, ALPHA, BETA);                                              \
     });                                                                        \
   }
 
@@ -260,14 +292,18 @@ void silu_and_mul(torch::stable::Tensor& out,    // [..., d]
                   torch::stable::Tensor& input)  // [..., 2 * d]
 {
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, vllm::packed_silu_kernel,
-                                true, false, 0.0f);
+                                true, false, 0.0f, 1.0f, 0.0f);
 }
 
 void silu_and_mul_clamp(torch::stable::Tensor& out,    // [..., d]
                         torch::stable::Tensor& input,  // [..., 2 * d]
-                        double limit) {
+                        double limit, double alpha, double beta) {
+  // out = (gate.clamp(max=limit) * sigmoid(alpha * gate.clamp(max=limit)))
+  //       * (up.clamp(+-limit) + beta)
+  // alpha=1.0, beta=0.0 reduce this to silu(gate) * up.
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, vllm::packed_silu_kernel,
-                                true, true, (float)limit);
+                                true, true, (float)limit, (float)alpha,
+                                (float)beta);
 }
 
 void mul_and_silu(torch::stable::Tensor& out,    // [..., d]
@@ -276,21 +312,22 @@ void mul_and_silu(torch::stable::Tensor& out,    // [..., d]
   // The difference between mul_and_silu and silu_and_mul is that mul_and_silu
   // applies the silu to the latter half of the input.
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel, vllm::packed_silu_kernel,
-                                false, false, 0.0f);
+                                false, false, 0.0f, 1.0f, 0.0f);
 }
 
 void gelu_and_mul(torch::stable::Tensor& out,    // [..., d]
                   torch::stable::Tensor& input)  // [..., 2 * d]
 {
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::gelu_kernel, vllm::packed_gelu_kernel,
-                                true, false, 0.0f);
+                                true, false, 0.0f, 1.0f, 0.0f);
 }
 
 void gelu_tanh_and_mul(torch::stable::Tensor& out,    // [..., d]
                        torch::stable::Tensor& input)  // [..., 2 * d]
 {
-  LAUNCH_ACTIVATION_GATE_KERNEL(
-      vllm::gelu_tanh_kernel, vllm::packed_gelu_tanh_kernel, true, false, 0.0f);
+  LAUNCH_ACTIVATION_GATE_KERNEL(vllm::gelu_tanh_kernel,
+                                vllm::packed_gelu_tanh_kernel, true, false,
+                                0.0f, 1.0f, 0.0f);
 }
 
 namespace vllm {
@@ -317,9 +354,10 @@ template <typename scalar_t, typename packed_t,
 __global__ void act_and_mul_kernel_with_param(
     scalar_t* __restrict__ out, const scalar_t* __restrict__ input, const int d,
     const float param) {
-  const scalar_t* x_ptr = input + blockIdx.x * 2 * d;
+  const int64_t token_idx = blockIdx.x;
+  const scalar_t* x_ptr = input + token_idx * 2 * d;
   const scalar_t* y_ptr = x_ptr + d;
-  scalar_t* out_ptr = out + blockIdx.x * d;
+  scalar_t* out_ptr = out + token_idx * d;
 
   if constexpr (use_vec) {
     using cuda_t = typename CUDATypeConverter<scalar_t>::Type;
@@ -428,6 +466,66 @@ __global__ void swigluoai_and_mul_kernel(
   }
 }
 
+// SITU (Kimi SituGLU) gated activation. Non-interleaved layout:
+// input = [gate(d), up(d)] per token.
+//   gate_out = beta * tanh(gate / beta) * sigmoid(gate)
+//   up_out   = (linear_beta > 0) ? linear_beta * tanh(up / linear_beta) : up
+//   out      = gate_out * up_out
+// Compute is done in fp32 and written straight to `out` -- no intermediate
+// tensors and no full-tensor fp32 upcast (the pure-torch forward_native
+// allocated ~8 fp32 temporaries per call, which blows up MoE profiling).
+template <typename scalar_t>
+__global__ void situ_and_mul_kernel(
+    scalar_t* __restrict__ out,          // [..., d]
+    const scalar_t* __restrict__ input,  // [..., 2, d]
+    const int d, const float beta, const float linear_beta) {
+  const int64_t row = blockIdx.x;
+  const scalar_t* gate_ptr = input + row * 2 * d;
+  const scalar_t* up_ptr = gate_ptr + d;
+  scalar_t* out_ptr = out + row * d;
+  const bool clamp_up = linear_beta > 0.0f;
+  const float inv_beta = 1.0f / beta;
+  const float inv_linear_beta = clamp_up ? 1.0f / linear_beta : 0.0f;
+  for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
+    const float g = (float)VLLM_LDG(&gate_ptr[idx]);
+    const float u = (float)VLLM_LDG(&up_ptr[idx]);
+    const float gate_out = beta * tanhf(g * inv_beta) / (1.0f + expf(-g));
+    const float up_out =
+        clamp_up ? linear_beta * tanhf(u * inv_linear_beta) : u;
+    out_ptr[idx] = (scalar_t)(gate_out * up_out);
+  }
+}
+
+template <typename scalar_t>
+__global__ void masked_situ_and_mul_kernel(
+    scalar_t* __restrict__ out, const scalar_t* __restrict__ input,
+    const int* __restrict__ expert_num_tokens, const int max_num_tokens,
+    const int d, const float beta, const float linear_beta) {
+  const int expert = blockIdx.y;
+  const int num_tokens = expert_num_tokens[expert];
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= d || num_tokens == 0) {
+    return;
+  }
+
+  const bool clamp_up = linear_beta > 0.0f;
+  const float inv_beta = 1.0f / beta;
+  const float inv_linear_beta = clamp_up ? 1.0f / linear_beta : 0.0f;
+  const int64_t expert_row = static_cast<int64_t>(expert) * max_num_tokens;
+  for (int token = 0; token < num_tokens; ++token) {
+    const int64_t row = expert_row + token;
+    const scalar_t* gate_ptr = input + row * 2 * d;
+    const scalar_t* up_ptr = gate_ptr + d;
+    scalar_t* out_ptr = out + row * d;
+    const float g = (float)VLLM_LDG(&gate_ptr[idx]);
+    const float u = (float)VLLM_LDG(&up_ptr[idx]);
+    const float gate_out = beta * tanhf(g * inv_beta) / (1.0f + expf(-g));
+    const float up_out =
+        clamp_up ? linear_beta * tanhf(u * inv_linear_beta) : u;
+    out_ptr[idx] = (scalar_t)(gate_out * up_out);
+  }
+}
+
 }  // namespace vllm
 
 #define LAUNCH_ACTIVATION_GATE_KERNEL_WITH_PARAM(KERNEL, PACKED_KERNEL, PARAM) \
@@ -517,6 +615,54 @@ void swigluoai_and_mul(torch::stable::Tensor& out,    // [..., d]
                        double alpha, double limit) {
   LAUNCH_SIGLUOAI_AND_MUL(vllm::swigluoai_and_mul, alpha, limit);
 }
+
+// Kimi SITU gated activation. `linear_beta <= 0` means "unset" (up passed
+// through), matching SituAndMul(linear_beta=None) on the Python side.
+void situ_and_mul(torch::stable::Tensor& out,    // [..., d]
+                  torch::stable::Tensor& input,  // [..., 2 * d]
+                  double beta, double linear_beta) {
+  int d = input.size(-1) / 2;
+  int64_t num_tokens = input.numel() / input.size(-1);
+  if (num_tokens == 0) {
+    return;
+  }
+  dim3 grid(num_tokens);
+  dim3 block(std::min(d, 1024));
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "situ_and_mul_kernel", [&] {
+        vllm::situ_and_mul_kernel<scalar_t><<<grid, block, 0, stream>>>(
+            out.mutable_data_ptr<scalar_t>(), input.const_data_ptr<scalar_t>(),
+            d, (float)beta, (float)linear_beta);
+      });
+}
+
+void masked_situ_and_mul(torch::stable::Tensor& out,    // [E, T, d]
+                         torch::stable::Tensor& input,  // [E, T, 2 * d]
+                         const torch::stable::Tensor& expert_num_tokens,
+                         double beta, double linear_beta) {
+  int num_experts = input.size(0);
+  int max_num_tokens = input.size(1);
+  int d = input.size(2) / 2;
+  if (num_experts == 0 || max_num_tokens == 0) {
+    return;
+  }
+  constexpr int block_size = 256;
+  dim3 grid((d + block_size - 1) / block_size, num_experts);
+  dim3 block(block_size);
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "masked_situ_and_mul_kernel", [&] {
+        vllm::masked_situ_and_mul_kernel<scalar_t><<<grid, block, 0, stream>>>(
+            out.mutable_data_ptr<scalar_t>(), input.const_data_ptr<scalar_t>(),
+            expert_num_tokens.const_data_ptr<int>(), max_num_tokens, d,
+            (float)beta, (float)linear_beta);
+      });
+}
 namespace vllm {
 
 // Element-wise activation kernel template.
@@ -526,8 +672,9 @@ __global__ void activation_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., d]
     const int d) {
-  const scalar_t* in_ptr = input + blockIdx.x * d;
-  scalar_t* out_ptr = out + blockIdx.x * d;
+  const int64_t token_idx = blockIdx.x;
+  const scalar_t* in_ptr = input + token_idx * d;
+  scalar_t* out_ptr = out + token_idx * d;
 
   if constexpr (use_vec) {
     // Fast path: 128-bit/256-bit vectorized loop
@@ -633,6 +780,14 @@ __device__ __forceinline__ T gelu_quick_kernel(const T& x) {
   return (T)(((float)x) / (1.0f + expf(-1.702f * (float)x)));
 }
 
+template <typename T>
+__device__ __forceinline__ T relu_squared_kernel(const T& x) {
+  // relu(x)^2 — introduced in https://arxiv.org/abs/2109.08668v2
+  const float f = (float)x;
+  const float val = f > 0.0f ? f : 0.0f;
+  return (T)(val * val);
+}
+
 }  // namespace vllm
 
 void gelu_new(torch::stable::Tensor& out,    // [..., d]
@@ -651,4 +806,10 @@ void gelu_quick(torch::stable::Tensor& out,    // [..., d]
                 torch::stable::Tensor& input)  // [..., d]
 {
   LAUNCH_ACTIVATION_KERNEL(vllm::gelu_quick_kernel);
+}
+
+void relu_squared(torch::stable::Tensor& out,    // [..., d]
+                  torch::stable::Tensor& input)  // [..., d]
+{
+  LAUNCH_ACTIVATION_KERNEL(vllm::relu_squared_kernel);
 }

@@ -3,7 +3,6 @@
 import os
 from collections.abc import Callable
 from concurrent.futures import Future
-from functools import cached_property
 from multiprocessing import Lock
 from typing import Any
 
@@ -13,9 +12,16 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
+from vllm.utils.network_utils import (
+    aiter_requires_tcp_store,
+    get_distributed_init_method,
+    get_file_store_init_method,
+    get_ip,
+    get_open_port,
+)
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.vllm_net_devices import set_worker_net_device
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.worker_base import WorkerWrapperBase
@@ -56,6 +62,9 @@ class UniProcExecutor(Executor):
             shared_worker_lock=Lock(),
         )
 
+        # Set net device env vars for the worker if VLLM_GPU_NIC_PCIE_MAPPING is set
+        set_worker_net_device(local_rank, self.vllm_config)
+
         self.driver_worker.init_worker(all_kwargs=[kwargs])
         self.driver_worker.init_device()
 
@@ -67,15 +76,16 @@ class UniProcExecutor(Executor):
 
     def _distributed_args(self) -> tuple[str, int, int]:
         """Return (distributed_init_method, rank, local_rank)."""
-        distributed_init_method = get_distributed_init_method(get_ip(), get_open_port())
+        if aiter_requires_tcp_store():
+            distributed_init_method = get_distributed_init_method(
+                get_ip(), get_open_port()
+            )
+        else:
+            distributed_init_method = get_file_store_init_method()
         # set local rank as the device index if specified
         device_info = self.vllm_config.device_config.device.__str__().split(":")
         local_rank = int(device_info[1]) if len(device_info) > 1 else 0
         return distributed_init_method, 0, local_rank
-
-    @cached_property
-    def max_concurrent_batches(self) -> int:
-        return 2 if self.scheduler_config.async_scheduling else 1
 
     def collective_rpc(  # type: ignore[override]
         self,
@@ -91,6 +101,8 @@ class UniProcExecutor(Executor):
 
         if not non_block:
             result = run_method(self.driver_worker, method, args, kwargs)
+            if isinstance(result, AsyncModelRunnerOutput):
+                result = result.get_output()
             return result if single_value else [result]
 
         try:

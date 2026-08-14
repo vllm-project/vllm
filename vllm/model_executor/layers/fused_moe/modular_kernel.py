@@ -12,6 +12,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
     MoEActivation,
     apply_moe_activation,
 )
@@ -27,7 +28,6 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
-    disable_inplace,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -470,6 +470,12 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
 
 # TODO: add supported activations method (return string)
 class FusedMoEExperts(ABC):
+    # ROCm AITER kernels consume a 0/1 local-expert mask (with a trailing
+    # sentinel slot); every other backend consumes the canonical -1/local-slot
+    # expert_map. RoutedExperts.expert_map reads this flag to pick which to hand
+    # the active experts kernel.
+    consumes_expert_mask: bool = False
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -498,6 +504,9 @@ class FusedMoEExperts(ABC):
 
         self.moe_config = moe_config
         self.quant_config = quant_config
+        self.activation_config = ApplyMoEActivationConfig.from_configs(
+            moe_config, quant_config
+        )
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -752,13 +761,6 @@ class FusedMoEExperts(ABC):
         """
         return False
 
-    @abstractmethod
-    def supports_expert_map(self) -> bool:
-        """
-        A flag indicating whether or not this class supports expert maps
-        """
-        raise NotImplementedError
-
     def supports_packed_ue8m0_act_scales(self) -> bool:
         """
         A flag indicating whether or not this class can process packed ue8m0
@@ -888,9 +890,22 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         return N if not activation.is_gated else N // 2
 
     def activation(
-        self, activation: MoEActivation, output: torch.Tensor, input: torch.Tensor
+        self,
+        activation: MoEActivation,
+        output: torch.Tensor,
+        input: torch.Tensor,
+        *,
+        topk_ids: torch.Tensor | None = None,
+        expert_map: torch.Tensor | None = None,
     ) -> None:
-        apply_moe_activation(activation, output, input)
+        apply_moe_activation(
+            activation,
+            output,
+            input,
+            activation_config=self.activation_config,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+        )
 
     @abstractmethod
     def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:
@@ -989,6 +1004,64 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
     def is_monolithic() -> bool:
         return True
 
+    routing_replay_capture_fn: Callable[[torch.Tensor], None] | None = None
+    _routing_replay_buffer: torch.Tensor | None = None
+
+    def supports_routing_replay_capture(self) -> bool:
+        """Whether this expert supports routing replay capture.
+
+        Subclasses backed by a kernel that exposes routed expert IDs
+        (e.g. FlashInfer's ``routing_replay_out``) should override.
+        """
+        return False
+
+    def set_capture_fn(
+        self,
+        capture_fn: Callable[[torch.Tensor], None] | None,
+    ) -> None:
+        self.routing_replay_capture_fn = capture_fn
+        if capture_fn is None:
+            self._routing_replay_buffer = None
+            return
+        # Allocate for per-rank batches gathered across the DP or EP group.
+        dispatch_group_size = (
+            self.moe_config.ep_size
+            if self.moe_config.use_ep
+            else self.moe_config.dp_size
+        )
+        max_num_replay_tokens = self.moe_config.max_num_tokens * dispatch_group_size
+        self._routing_replay_buffer = torch.empty(
+            (max_num_replay_tokens, self.moe_config.experts_per_token),
+            dtype=torch.int16,
+            device=self.moe_config.device,
+        )
+
+    def _maybe_make_routing_replay_buffer(
+        self,
+        num_tokens: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        if self.routing_replay_capture_fn is None:
+            return None
+        buf = self._routing_replay_buffer
+        assert buf is not None
+        if buf.shape[0] < num_tokens or buf.device != device:
+            raise ValueError(
+                "Routing replay buffer was initialized for "
+                f"{buf.shape[0]} tokens on {buf.device}, but the kernel "
+                f"received {num_tokens} tokens on {device}."
+            )
+        return buf
+
+    def _maybe_dispatch_routing_replay(
+        self,
+        routing_replay_out: torch.Tensor | None,
+        num_tokens: int,
+    ) -> None:
+        if routing_replay_out is None or self.routing_replay_capture_fn is None:
+            return
+        self.routing_replay_capture_fn(routing_replay_out[:num_tokens])
+
     def apply(
         self,
         hidden_states: torch.Tensor,
@@ -1025,11 +1098,10 @@ class FusedMoEKernelModularImpl:
         self,
         prepare_finalize: FusedMoEPrepareAndFinalizeModular,
         fused_experts: FusedMoEExpertsModular,
-        inplace: bool = False,
     ):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
-        self.inplace = inplace
+        self.shared_experts: SharedExperts | None = None
         moe_parallel_config = fused_experts.moe_config.moe_parallel_config
         self.moe_parallel_config = moe_parallel_config
         self.is_dp_ep = (
@@ -1107,8 +1179,9 @@ class FusedMoEKernelModularImpl:
         shared_experts_input: torch.Tensor | None,
     ):
         if shared_experts is not None:
+            assert self.prepare_finalize.supports_async()
             assert shared_experts_input is not None
-            shared_experts.apply(
+            shared_experts(
                 shared_experts_input,
                 SharedExpertsOrder.MK_INTERNAL_OVERLAPPED,
             )
@@ -1132,6 +1205,7 @@ class FusedMoEKernelModularImpl:
         The _prepare method is a wrapper around self.prepare_finalize.prepare
         that handles DBO and async.
         """
+
         if not self.prepare_finalize.supports_async():
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
@@ -1245,6 +1319,14 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
+        use_output_alias = (
+            output_alias is not None
+            and output_alias.shape == fused_out.shape
+            and output_alias.dtype == fused_out.dtype
+            and output_alias.device == fused_out.device
+            and output_alias.is_contiguous()
+        )
+
         # If caller's output buffer already matches fused_out shape/dtype, alias
         # to skip the redundant copy in TopKWeightAndReduceNoOP.apply downstream.
         # This eliminates ~94% of __amd_rocclr_copyBuffer events (Copy 2 of the
@@ -1252,15 +1334,10 @@ class FusedMoEKernelModularImpl:
         if current_platform.is_rocm():
             from vllm._aiter_ops import rocm_aiter_ops
 
-            if (
-                rocm_aiter_ops.is_fused_moe_enabled()
-                and output_alias is not None
-                and output_alias.shape == fused_out.shape
-                and output_alias.dtype == fused_out.dtype
-                and output_alias.device == fused_out.device
-                and output_alias.is_contiguous()
-            ):
+            if use_output_alias and rocm_aiter_ops.is_fused_moe_enabled():
                 fused_out = output_alias
+        elif use_output_alias:
+            fused_out = output_alias
 
         self.fused_experts.apply(
             output=fused_out,
@@ -1392,12 +1469,7 @@ class FusedMoEKernelModularImpl:
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
-        if self.inplace:
-            assert shared_experts is None
-            assert not disable_inplace()
-            output = hidden_states
-        else:
-            output = torch.empty_like(hidden_states)
+        output = torch.empty_like(hidden_states)
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
@@ -1411,6 +1483,13 @@ class FusedMoEKernelModularImpl:
             expert_map,
             apply_router_weight_on_input,
         )
+
+        # Stash the original unquantized hidden states on the LoRA context
+        # so apply_w13_lora sees correct-magnitude activations instead of
+        # the potentially quantized values produced by _prepare().
+        lora_ctx = getattr(self.fused_experts, "_lora_context", None)
+        if lora_ctx is not None:
+            lora_ctx.original_hidden_states = hidden_states
 
         fused_out = self._fused_experts(
             in_dtype=hidden_states.dtype,
@@ -1428,6 +1507,9 @@ class FusedMoEKernelModularImpl:
             expert_tokens_meta=expert_tokens_meta,
             output_alias=output,
         )
+
+        if lora_ctx is not None:
+            lora_ctx.original_hidden_states = None
 
         return self._finalize(
             output,
@@ -1473,7 +1555,6 @@ class FusedMoEKernelMonolithicImpl:
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
         """
 
-        # TODO(rob): add inplace support.
         a1q, a1q_scale, router_logits = self.prepare_finalize.prepare(
             hidden_states,
             router_logits=router_logits,
@@ -1509,7 +1590,6 @@ class FusedMoEKernel:
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         fused_experts: FusedMoEExperts,
-        inplace: bool = False,
     ):
         super().__init__()
 
@@ -1521,13 +1601,11 @@ class FusedMoEKernel:
             self.impl = FusedMoEKernelModularImpl(
                 prepare_finalize,
                 fused_experts,
-                inplace,
             )
 
         elif isinstance(
             prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic
         ) and isinstance(fused_experts, FusedMoEExpertsMonolithic):
-            assert not inplace
             self.impl = FusedMoEKernelMonolithicImpl(
                 prepare_finalize,
                 fused_experts,
@@ -1548,12 +1626,6 @@ class FusedMoEKernel:
             return self.impl.prepare_finalize.supports_async()
         else:
             return False
-
-    @property
-    def inplace(self) -> bool:
-        if isinstance(self.impl, FusedMoEKernelModularImpl):
-            return self.impl.inplace
-        return False
 
     @property
     def is_monolithic(self) -> bool:
@@ -1585,12 +1657,6 @@ class FusedMoEKernel:
             == self.fused_experts.activation_format()
         )
 
-    def supports_expert_map(self) -> bool:
-        """
-        A flag indicating whether or not this class supports expert maps.
-        """
-        return self.fused_experts.supports_expert_map()
-
     def output_is_reduced(self) -> bool:
         """
         Indicates whether or not the output of fused MoE kernel
@@ -1603,7 +1669,7 @@ class FusedMoEKernel:
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-        router_logits: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        router_logits: torch.Tensor,
         activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,

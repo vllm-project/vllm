@@ -50,7 +50,16 @@ FORCE_INLINE void load_row8_B_as_f32<c10::BFloat16>(const c10::BFloat16* p,
   b1 = (__vector float)vec_mergel(zeros, raw);
 }
 
-// Note: c10::Half (FP16) is not supported on PowerPC architecture
+// [3] Half (FP16) Specialization
+template <>
+FORCE_INLINE void load_row8_B_as_f32<c10::Half>(const c10::Half* p,
+                                                __vector float& b0,
+                                                __vector float& b1) {
+  vec_op::FP16Vec8 fp16_vec(p);
+  vec_op::FP32Vec8 fp32_vec(fp16_vec);
+  b0 = fp32_vec.reg.val[0];
+  b1 = fp32_vec.reg.val[1];
+}
 
 template <int32_t M, typename kv_cache_t>
 FORCE_INLINE void gemm_micro_ppc64le_Mx8_Ku4(
@@ -314,8 +323,6 @@ class AttentionImpl<ISA::VSX, scalar_t, head_dim> {
       const int64_t num_blocks_stride, const int64_t cache_head_num_stride,
       const int64_t block_size, const int64_t block_size_stride,
       const float k_inv = 0.0f, const float v_inv = 0.0f) {
-    // k_inv and v_inv are unused on VSX: FP8 KV cache is not supported on
-    // PowerPC. The parameters are present to match the common interface.
 #pragma omp parallel for collapse(2)
     for (int64_t token_idx = 0; token_idx < token_num; ++token_idx) {
       for (int64_t head_idx = 0; head_idx < head_num; ++head_idx) {

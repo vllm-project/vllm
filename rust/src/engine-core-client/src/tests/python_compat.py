@@ -10,6 +10,7 @@
 # ]
 # ///
 
+from dataclasses import dataclass
 from enum import Enum, IntEnum
 
 import msgpack
@@ -30,13 +31,15 @@ class FinishReason(IntEnum):
     REPETITION = 4
 
 
-class EngineCoreSamplingParams(msgspec.Struct, dict=True):
+# Mirror of real SamplingParams; omit_defaults makes fixtures match real maps.
+class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = 0
     seed: int | None = None
-    max_tokens: int = 65536
+    max_tokens: int = 16
     min_tokens: int = 0
+    thinking_token_budget: int | None = None
     min_p: float = 0.0
     frequency_penalty: float = 0.0
     presence_penalty: float = 0.0
@@ -72,6 +75,7 @@ class EngineCoreRequest(
     reasoning_ended: bool | None = None
     reasoning_parser_kwargs: dict[str, object] | None = None
     abort_immediately: bool = False
+    session_id: str | None = None
 
 
 class EngineCoreOutput(
@@ -88,10 +92,13 @@ class EngineCoreOutput(
     stop_reason: int | str | None = None
     events: object | None = None
     kv_transfer_params: object | None = None
+    ec_transfer_params: object | None = None
     trace_headers: object | None = None
     prefill_stats: object | None = None
     routed_experts: object | None = None
     num_nans_in_logits: int = 0
+    mm_cache_miss_hashes: list[str] | None = None
+    new_sampling_mask: object | None = None
 
 
 class EngineCoreOutputs(
@@ -120,6 +127,7 @@ request = EngineCoreRequest(
         seed=None,
         max_tokens=32,
         min_tokens=1,
+        thinking_token_budget=256,
         min_p=0.0,
         frequency_penalty=0.0,
         presence_penalty=0.0,
@@ -132,6 +140,17 @@ request = EngineCoreRequest(
     pooling_params=None,
     arrival_time=42.5,
     client_index=0,
+    session_id="session-1",
+)
+
+# All defaults -> empty map. Regression guard for the sparse-map decode.
+defaults_request = EngineCoreRequest(
+    request_id="req-defaults",
+    prompt_token_ids=[5, 6, 7],
+    mm_features=None,
+    sampling_params=EngineCoreSamplingParams(),
+    pooling_params=None,
+    arrival_time=1.0,
 )
 
 multimodal_tensor = np.array([[1.0, 2.0], [3.5, 4.25]], dtype=np.float32)
@@ -182,6 +201,29 @@ outputs = EngineCoreOutputs(
         )
     ],
     finished_requests={"req-1"},
+)
+
+sampling_mask_wire = [
+    [
+        "<i4",
+        [5],
+        msgpack.ExtType(3, np.array([2, 12, 16, 17, 18], dtype=np.int32).tobytes()),
+    ],
+    [
+        "<i8",
+        [2],
+        msgpack.ExtType(3, np.array([0, 5], dtype=np.int64).tobytes()),
+    ],
+    None,
+]
+outputs_with_sampling_mask = EngineCoreOutputs(
+    outputs=[
+        EngineCoreOutput(
+            request_id="req-mask",
+            new_token_ids=[16],
+            new_sampling_mask=sampling_mask_wire,
+        )
+    ]
 )
 
 
@@ -337,9 +379,74 @@ multipart_prompt_logprobs = engine_outputs_wire(
     )
 )
 
+
+@dataclass
+class KVEventsConfig:
+    enable_kv_cache_events: bool
+    publisher: str
+    endpoint: str
+    replay_endpoint: str | None
+    buffer_steps: int
+    hwm: int
+    max_queue_size: int
+    topic: str
+
+
+@dataclass
+class EngineCoreReadyResponse:
+    max_model_len: int
+    num_gpu_blocks: int
+    block_size: int
+    dp_stats_address: str | None
+    dtype: str
+    vllm_version: str
+    world_size: int
+    data_parallel_size: int
+    tensor_parallel_size: int
+    pipeline_parallel_size: int
+    decode_context_parallel_size: int
+    data_parallel_rank: int
+    max_num_seqs: int
+    max_num_batched_tokens: int
+    instance_id: str
+    kv_cache_size_tokens: int | None = None
+    kv_cache_max_concurrency: float | None = None
+    kv_events_config: KVEventsConfig | None = None
+
+
+ready_response = EngineCoreReadyResponse(
+    max_model_len=32768,
+    num_gpu_blocks=1000,
+    block_size=16,
+    dp_stats_address=None,
+    dtype="float32",
+    vllm_version="0.0.0",
+    data_parallel_size=1,
+    world_size=1,
+    tensor_parallel_size=1,
+    pipeline_parallel_size=1,
+    decode_context_parallel_size=1,
+    data_parallel_rank=0,
+    max_num_seqs=256,
+    max_num_batched_tokens=8192,
+    instance_id="test-instance",
+    kv_events_config=KVEventsConfig(
+        enable_kv_cache_events=True,
+        publisher="zmq",
+        endpoint="tcp://127.0.0.1:5557",
+        replay_endpoint="tcp://127.0.0.1:5558",
+        buffer_steps=10_000,
+        hwm=100_000,
+        max_queue_size=100_000,
+        topic="kv",
+    ),
+)
+
 print(msgspec.msgpack.encode(request).hex())
+print(msgspec.msgpack.encode(defaults_request).hex())
 print(msgpack.packb(multimodal_request_wire, use_bin_type=True).hex())
 print(msgspec.msgpack.encode(outputs).hex())
+print(msgspec.msgpack.encode(outputs_with_sampling_mask).hex())
 print(" ".join(frame.hex() for frame in encode_output_frames(inline_logprobs)))
 print(
     " ".join(
@@ -354,3 +461,4 @@ print(
         for frame in encode_output_frames(multipart_prompt_logprobs, size_threshold=1)
     )
 )
+print(msgspec.msgpack.encode(ready_response).hex())

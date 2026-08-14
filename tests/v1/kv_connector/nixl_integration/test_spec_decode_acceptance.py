@@ -158,6 +158,10 @@ def test_spec_decode_acceptance_length():
             max_tokens=DEFAULT_OUTPUT_LEN,
             temperature=0.0,
             top_p=1.0,
+            # Prompts are already chat-templated (contain BOS); avoid the
+            # completions API prepending a second BOS, which would lower
+            # acceptance ~5% vs the add_special_tokens=False standalone baselines.
+            extra_body={"add_special_tokens": False},
         )
         if i < 3:
             text = resp.choices[0].text.strip()[:100]

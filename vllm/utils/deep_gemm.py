@@ -5,6 +5,7 @@
 Users of vLLM should always import **only** these wrappers.
 """
 
+import contextlib
 import functools
 import importlib
 import os
@@ -37,7 +38,10 @@ def should_auto_disable_deep_gemm(model_type: str | None) -> bool:
     """
     if model_type is None:
         return False
-    if not current_platform.is_device_capability_family(100):
+    if not (
+        current_platform.is_device_capability_family(100)
+        or current_platform.is_device_capability_family(120)
+    ):
         return False
     return model_type in _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES
 
@@ -71,15 +75,29 @@ class DeepGemmQuantScaleFMT(Enum):
 
         cls._oracle_cache = (  # type: ignore
             cls.UE8M0
-            if current_platform.is_device_capability_family(100)
+            if (
+                current_platform.is_device_capability_family(100)
+                or current_platform.is_device_capability_family(120)
+            )
             else cls.FLOAT32_CEIL_UE8M0
         )
 
     @classmethod
     def from_oracle(cls) -> "DeepGemmQuantScaleFMT":
-        """Return the pre-initialized oracle decision"""
+        """Return the oracle decision, initializing it on first use.
+
+        The cache is normally populated by ``_lazy_init()`` (e.g. during
+        engine startup), but standalone consumers such as ``QuantFP8`` with an
+        explicit ``use_ue8m0=True`` can reach this before any DeepGEMM kernel
+        wrapper has run. Resolve the DeepGEMM symbols and initialize the
+        decision here instead of asserting; without DeepGEMM this yields
+        FLOAT32, matching ``is_deep_gemm_e8m0_used()``.
+        """
         cached = getattr(cls, "_oracle_cache", None)
-        assert cached is not None, "DeepGemmQuantScaleFMT oracle cache not initialized"
+        if cached is None:
+            _lazy_init()
+            cls.init_oracle_cache()
+            cached = cls._oracle_cache  # type: ignore[attr-defined]
         return cached
 
 
@@ -120,8 +138,9 @@ def is_deep_gemm_e8m0_used() -> bool:
 def _missing(*_: Any, **__: Any) -> NoReturn:
     """Placeholder for unavailable DeepGEMM backend."""
     raise RuntimeError(
-        "DeepGEMM backend is not available or outdated. Please install or "
-        "update the `deep_gemm` to a newer version to enable FP8 kernels."
+        "DeepGEMM backend is unavailable in the current vLLM environment, "
+        "or the available DeepGEMM package does not provide the required APIs "
+        "for these kernels."
     )
 
 
@@ -137,9 +156,18 @@ _get_paged_mqa_logits_metadata_impl: Callable[..., Any] | None = None
 _tf32_hc_prenorm_gemm_impl: Callable[..., Any] | None = None
 _get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
 _get_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = None
+_get_theoretical_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = (
+    None
+)
 _transform_sf_into_required_layout_impl: Callable[..., Any] | None = None
+_pack_ue8m0_to_int_impl: Callable[..., Any] | None = None
+_get_mn_major_tma_aligned_packed_ue8m0_tensor_impl: Callable[..., Any] | None = None
+_get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl: (
+    Callable[..., Any] | None
+) = None
 
 
+@functools.cache
 def _import_deep_gemm():
     """Import the deep_gemm module.
 
@@ -155,7 +183,7 @@ def _import_deep_gemm():
         logger.debug_once("Imported deep_gemm module from site-packages")
         return module
     except ImportError:
-        logger.debug_once(
+        logger.info_once(
             "deep_gemm not found in site-packages, "
             "trying vendored vllm.third_party.deep_gemm"
         )
@@ -166,13 +194,29 @@ def _import_deep_gemm():
         logger.debug_once("Imported deep_gemm module from vllm.third_party.deep_gemm")
         return module
     except ImportError:
-        logger.debug_once("Vendored deep_gemm not found either")
+        logger.info_once("Vendored deep_gemm not found either")
     except Exception as e:
         # The vendored module may raise RuntimeError during _C.init()
         # if JIT include files are missing (e.g. incomplete wheel).
         logger.warning_once("Failed to import vendored deep_gemm: %s", e)
 
     return None
+
+
+def _apply_pdl(mod, enable: bool = True) -> None:
+    mod_name = getattr(mod, "__name__", str(mod))
+    try:
+        set_pdl_fn = getattr(mod, "set_pdl", None)
+        if set_pdl_fn is None:
+            return
+        set_pdl_fn(enable)
+        logger.info_once(
+            "DeepGEMM PDL %s on %s.",
+            "enabled" if enable else "disabled",
+            mod_name,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning_once("Failed to set DeepGEMM PDL on %s: %s", mod_name, e)
 
 
 def _lazy_init() -> None:
@@ -185,7 +229,11 @@ def _lazy_init() -> None:
     global _tf32_hc_prenorm_gemm_impl
     global _get_mn_major_tma_aligned_tensor_impl
     global _get_mk_alignment_for_contiguous_layout_impl
+    global _get_theoretical_mk_alignment_for_contiguous_layout_impl
     global _transform_sf_into_required_layout_impl
+    global _pack_ue8m0_to_int_impl
+    global _get_mn_major_tma_aligned_packed_ue8m0_tensor_impl
+    global _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl
     # fast path
     if (
         _cublaslt_gemm_nt_impl is not None
@@ -200,6 +248,9 @@ def _lazy_init() -> None:
         or _tf32_hc_prenorm_gemm_impl is not None
         or _get_mk_alignment_for_contiguous_layout_impl is not None
         or _transform_sf_into_required_layout_impl is not None
+        or _pack_ue8m0_to_int_impl is not None
+        or _get_mn_major_tma_aligned_packed_ue8m0_tensor_impl is not None
+        or _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl is not None
     ):
         return
 
@@ -217,6 +268,9 @@ def _lazy_init() -> None:
     if _dg is None:
         return
 
+    # Enable PDL for DeepGEMM on architectures that support it (SM90+).
+    if current_platform.is_arch_support_pdl():
+        _apply_pdl(_dg, True)
     _cublaslt_gemm_nt_impl = getattr(_dg, "cublaslt_gemm_nt", None)
     _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
     _fp8_einsum_impl = getattr(_dg, "fp8_einsum", None)
@@ -237,8 +291,18 @@ def _lazy_init() -> None:
     _get_mk_alignment_for_contiguous_layout_impl = getattr(
         _dg, "get_mk_alignment_for_contiguous_layout", None
     )
+    _get_theoretical_mk_alignment_for_contiguous_layout_impl = getattr(
+        _dg, "get_theoretical_mk_alignment_for_contiguous_layout", None
+    )
     _transform_sf_into_required_layout_impl = getattr(
         _dg, "transform_sf_into_required_layout", None
+    )
+    _pack_ue8m0_to_int_impl = getattr(_dg, "pack_ue8m0_to_int", None)
+    _get_mn_major_tma_aligned_packed_ue8m0_tensor_impl = getattr(
+        _dg, "get_mn_major_tma_aligned_packed_ue8m0_tensor", None
+    )
+    _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl = getattr(
+        _dg, "get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor", None
     )
     DeepGemmQuantScaleFMT.init_oracle_cache()
 
@@ -259,7 +323,6 @@ def set_num_sms(num_sms: int) -> None:
     dg.set_num_sms(num_sms)
 
 
-@functools.cache
 def get_mk_alignment_for_contiguous_layout() -> list[int]:
     _lazy_init()
     if _get_mk_alignment_for_contiguous_layout_impl is None:
@@ -268,12 +331,118 @@ def get_mk_alignment_for_contiguous_layout() -> list[int]:
     return [mk_align_size, mk_align_size]
 
 
+def get_theoretical_mk_alignment_for_contiguous_layout(
+    expected_m: int | None = None,
+    num_groups: int | None = None,
+) -> int:
+    """Per-call optimal M alignment for grouped contiguous GEMMs.
+
+    `expected_m` is the TOTAL routed tokens (sum across experts, typically
+    M × num_topk). `num_groups` is the number of experts on this rank.
+    The helper divides to recover per-expert em and picks an alignment based
+    on data-driven thresholds (see deep_gemm runtime.hpp comments).
+
+    Older callers that omit `num_groups` are interpreted as passing already
+    per-expert em (legacy behaviour preserved for backward compat).
+    """
+    _lazy_init()
+    if _get_theoretical_mk_alignment_for_contiguous_layout_impl is None:
+        return _missing()
+    if num_groups is None:
+        return _get_theoretical_mk_alignment_for_contiguous_layout_impl(expected_m)
+    if num_groups <= 0:
+        raise ValueError(f"num_groups must be positive, got {num_groups}")
+    try:
+        return _get_theoretical_mk_alignment_for_contiguous_layout_impl(
+            expected_m, num_groups
+        )
+    except TypeError:
+        per_group_m = None if expected_m is None else cdiv(expected_m, num_groups)
+        return _get_theoretical_mk_alignment_for_contiguous_layout_impl(per_group_m)
+
+
+def set_mk_alignment_for_contiguous_layout(value: int) -> None:
+    """Set DeepGEMM's BLOCK_M cap for grouped contiguous GEMMs.
+
+    The DG heuristic constrains BLOCK_M ≤ this value when picking a kernel
+    layout. Use this in concert with `compute_aligned_M_and_alignment`'s
+    per-call alignment so the workspace's per-expert padding matches the
+    kernel's BLOCK_M; a mismatch leads to the scheduler reading the wrong
+    expert_id from `m_indices` at `m_block_idx * BLOCK_M` stride and
+    OOB-indexing the B-weights tensor (manifests as IMA under CUDA-graph
+    replay).
+    """
+    _lazy_init()
+    dg = _import_deep_gemm()
+    if dg is None:
+        raise RuntimeError("DeepGEMM is not available")
+    dg.set_mk_alignment_for_contiguous_layout(value)
+
+
+@contextlib.contextmanager
+def mk_alignment_scope(value: int):
+    """Temporarily set DeepGEMM's BLOCK_M cap, restoring on exit.
+
+    Use around a sequence of grouped-contiguous GEMM calls whose workspace
+    is padded to `value` (typically the per_call_align returned by
+    `compute_aligned_M_and_alignment`).
+    """
+    prev = get_mk_alignment_for_contiguous_layout()[0]
+    set_mk_alignment_for_contiguous_layout(value)
+    try:
+        yield
+    finally:
+        set_mk_alignment_for_contiguous_layout(prev)
+
+
 def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
     """Wrapper for DeepGEMM's get_mn_major_tma_aligned_tensor"""
     _lazy_init()
     if _get_mn_major_tma_aligned_tensor_impl is None:
         return _missing()
     return _get_mn_major_tma_aligned_tensor_impl(x)
+
+
+def pack_ue8m0_to_int(x: torch.Tensor) -> torch.Tensor:
+    """Pack 4 UE8M0 (uint8) scales into one int32.
+
+    DeepGEMM's SM100/SM120 FP8/FP4 kernels accept either ``float32`` scales
+    (legacy format, 4 B/scale) or ``int32`` packed UE8M0 scales (1 B/scale
+    after 4:1 packing — 4× smaller than the legacy fp32 representation).
+    """
+    _lazy_init()
+    if _pack_ue8m0_to_int_impl is None:
+        return _missing()
+    return _pack_ue8m0_to_int_impl(x)
+
+
+def get_mn_major_tma_aligned_packed_ue8m0_tensor(x: torch.Tensor) -> torch.Tensor:
+    """Pack UE8M0 (uint8) → int32 with the MN-major TMA-aligned layout the
+    DeepGEMM kernels consume directly. 16× smaller than the fp32 legacy SF
+    format. Use for non-grouped 2D scale tensors.
+    """
+    _lazy_init()
+    if _get_mn_major_tma_aligned_packed_ue8m0_tensor_impl is None:
+        return _missing()
+    return _get_mn_major_tma_aligned_packed_ue8m0_tensor_impl(x)
+
+
+def get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor(
+    sf: torch.Tensor,
+    ks_tensor: torch.Tensor,
+    ks: list[int],
+    gran_k: int,
+) -> torch.Tensor:
+    """Grouped (3D, expert-batched) variant of
+    ``get_mn_major_tma_aligned_packed_ue8m0_tensor``. Use for MoE weight
+    scale tensors of shape ``(num_experts, mn, k_scale)``.
+    """
+    _lazy_init()
+    if _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl is None:
+        return _missing()
+    return _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl(
+        sf, ks_tensor, ks, gran_k
+    )
 
 
 def cublaslt_gemm_nt(*args, **kwargs):
@@ -384,7 +553,10 @@ def fp8_fp4_mqa_logits(
 
 
 def get_paged_mqa_logits_metadata(
-    context_lens: torch.Tensor, block_size: int, num_sms: int
+    context_lens: torch.Tensor,
+    block_size: int,
+    num_sms: int,
+    indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build scheduling metadata for paged MQA logits.
 
@@ -393,6 +565,7 @@ def get_paged_mqa_logits_metadata(
             per batch element.
         block_size: KV-cache block size in tokens (e.g., 64).
         num_sms: Number of SMs available. 132 for Hopper
+        indices: Optional request index for each varlen row.
 
     Returns:
         Backend-specific tensor consumed by `fp8_fp4_paged_mqa_logits` to
@@ -401,7 +574,10 @@ def get_paged_mqa_logits_metadata(
     _lazy_init()
     if _get_paged_mqa_logits_metadata_impl is None:
         return _missing()
-    return _get_paged_mqa_logits_metadata_impl(context_lens, block_size, num_sms)
+    kwargs = {} if indices is None else {"indices": indices}
+    return _get_paged_mqa_logits_metadata_impl(
+        context_lens, block_size, num_sms, **kwargs
+    )
 
 
 def fp8_fp4_paged_mqa_logits(
@@ -413,6 +589,7 @@ def fp8_fp4_paged_mqa_logits(
     schedule_metadata: torch.Tensor,
     max_model_len: int,
     clean_logits: bool,
+    indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute MQA logits using a paged KV-cache.
 
@@ -437,6 +614,7 @@ def fp8_fp4_paged_mqa_logits(
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
         clean_logits: Whether to clean the unfilled logits into `-inf`.
+        indices: Optional request index for each varlen row.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
@@ -445,6 +623,7 @@ def fp8_fp4_paged_mqa_logits(
     _lazy_init()
     if _fp8_fp4_paged_mqa_logits_impl is None:
         return _missing()
+    kwargs = {} if indices is None else {"indices": indices}
     return _fp8_fp4_paged_mqa_logits_impl(
         q,
         kv_cache,
@@ -454,6 +633,7 @@ def fp8_fp4_paged_mqa_logits(
         schedule_metadata,
         max_model_len,
         clean_logits=clean_logits,
+        **kwargs,
     )
 
 
@@ -580,4 +760,8 @@ __all__ = [
     "should_use_deepgemm_for_fp8_linear",
     "get_col_major_tma_aligned_tensor",
     "get_mk_alignment_for_contiguous_layout",
+    "get_theoretical_mk_alignment_for_contiguous_layout",
+    "pack_ue8m0_to_int",
+    "get_mn_major_tma_aligned_packed_ue8m0_tensor",
+    "get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor",
 ]

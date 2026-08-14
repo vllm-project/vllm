@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
-import functools
+import os
+from typing import Literal
 
 import torch
 from einops import rearrange
 from torch import nn
 
+from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import (
@@ -20,16 +22,6 @@ from vllm.distributed import (
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp, PluggableLayer
-from vllm.model_executor.layers.fla.ops import (
-    chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
-)
-from vllm.model_executor.layers.fla.ops import (
-    fused_post_conv_prep,
-    fused_recurrent_gated_delta_rule_packed_decode,
-    fused_sigmoid_gating_delta_rule_update,
-)
-from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
-from vllm.model_executor.layers.fla.ops.utils import FLA_CHUNK_SIZE
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -47,14 +39,24 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
-from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.third_party.flash_linear_attention.ops import (
+    chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
+)
+from vllm.third_party.flash_linear_attention.ops import (
+    fused_post_conv_prep,
+    fused_recurrent_gated_delta_rule_packed_decode,
+    fused_sigmoid_gating_delta_rule_update,
+)
+from vllm.third_party.flash_linear_attention.ops.chunk import l2norm_fwd
+from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import (
@@ -65,11 +67,14 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
-# Optional ROCm AITER Triton kernels for the GDN decode fast-path.
+# Optional ROCm AITER Triton kernels for the GDN decode path.
 # Availability is checked centrally via rocm_aiter_ops; the actual function
 # references are imported here so that they can be called without per-call
 # import overhead.
-GDN_AITER_TRITON_AVAILABLE = rocm_aiter_ops.are_gdn_triton_kernels_available()
+GDN_AITER_TRITON_AVAILABLE = (
+    rocm_aiter_ops.are_gdn_triton_kernels_available()
+    or rocm_aiter_ops.is_rdna_gdn_triton_kernels_available()
+)
 
 if GDN_AITER_TRITON_AVAILABLE:
     from aiter.ops.triton.causal_conv1d_update_single_token import (
@@ -81,124 +86,82 @@ if GDN_AITER_TRITON_AVAILABLE:
 
 logger = init_logger(__name__)
 
-
-# TODO(arpera): remove ``_is_libs_cu13_install_intact`` and its caller in
-# ``_should_use_flashinfer_gdn_prefill`` once the upstream packaging bug is
-# fixed and the broken wheels are yanked / superseded on PyPI:
-#   https://github.com/NVIDIA/cutlass/issues/3170
-#   https://github.com/NVIDIA/cutlass/issues/3259
-@functools.cache
-def _is_libs_cu13_install_intact() -> bool:
-    """Return True if every file installed by ``nvidia-cutlass-dsl-libs-cu13``
-    matches the SHA-256 declared in its wheel ``RECORD``.
-
-    ``nvidia-cutlass-dsl-libs-base`` and ``nvidia-cutlass-dsl-libs-cu13``
-    both ship into the shared ``nvidia_cutlass_dsl/`` namespace and
-    write many of the same on-disk paths (the runtime ``.so``, the MLIR
-    Python bindings, cuTe-DSL Python sources, ...) with different
-    content. Whichever wheel extracts last wins; with a parallel
-    installer (e.g. ``uv``) the order is racy and the resulting venv
-    can end up with a mix of files from both variants. The
-    ``-libs-base`` variant fails MLIR legalization when JIT-compiling
-    the FlashInfer Blackwell GDN prefill kernel, and any other
-    cuTe-DSL-based kernel can break too if on-disk files diverge from
-    what ``-libs-cu13``'s wheel expects. Tracked upstream at:
-
-      * https://github.com/NVIDIA/cutlass/issues/3170
-      * https://github.com/NVIDIA/cutlass/issues/3259
-
-    This helper re-hashes every file the ``-libs-cu13`` wheel claims to
-    own and compares against its declared SHA-256. Returns False on any
-    error (uninstalled, missing RECORD, missing file, hash mismatch).
-    Result is cached per-process.
-    """
-    import hashlib
-    import importlib.metadata
-
-    import pybase64 as base64
-
-    try:
-        dist = importlib.metadata.distribution("nvidia-cutlass-dsl-libs-cu13")
-    except importlib.metadata.PackageNotFoundError:
-        return False
-
-    files = dist.files
-    if not files:
-        return False
-
-    for pkg_path in files:
-        file_hash = pkg_path.hash
-        # Skip RECORD rows without a hash (RECORD itself, generated
-        # ``.pyc`` files, ...) and any non-SHA-256 hash modes.
-        if file_hash is None or not file_hash.value:
-            continue
-        if file_hash.mode != "sha256":
-            continue
-        try:
-            with open(pkg_path.locate(), "rb") as f:
-                digest = hashlib.sha256(f.read()).digest()
-        except OSError:
-            return False
-        actual = base64.urlsafe_b64encode(digest).decode().rstrip("=")
-        if actual != file_hash.value:
-            return False
-
-    return True
+MAX_FUSED_GDN_MTP_TOKENS = 8
+FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
-def _should_use_flashinfer_gdn_prefill(backend: str, head_k_dim: int | None) -> bool:
-    """Whether to use FlashInfer's GDN prefill kernel instead of the
-    Triton/FLA fallback.
+def _resolve_gdn_prefill_backend(
+    vllm_config: VllmConfig,
+) -> tuple[str, Literal["triton", "flashinfer", "cutedsl"]]:
+    """Resolve GDN prefill backend.
 
-    Requirements:
+    FlashInfer's GDN prefill kernel is chosen when:
     * ``requested in ["flashinfer", "auto"]``;
     * ``platform == cuda``;
     * one of the following:
       - Hopper (SM90) — no further constraints;
-      - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``,
-        and an intact ``nvidia-cutlass-dsl-libs-cu13`` install on disk
-        (see :func:`_is_libs_cu13_install_intact`).
+      - Blackwell (SM10.x) with ``head_k_dim == 128``, ``cuda_runtime >= 13``.
+
+    In-tree CuteDSL GDN prefill kernel is chosen when:
+    * "cutedsl" is requested; (opt-in only)
+    * Blackwell (SM10.x) with ``head_k_dim == 128``;
     """
-    if backend not in ["flashinfer", "auto"]:
-        return False
+    additional_config = vllm_config.additional_config
+    backend_cfg = (
+        additional_config.get("gdn_prefill_backend", "auto")
+        if isinstance(additional_config, dict)
+        else "auto"
+    )
+    backend = str(backend_cfg).strip().lower()
+
     if not current_platform.is_cuda():
-        return False
+        return backend, "triton"
+
+    head_k_dim = getattr(
+        vllm_config.model_config.hf_text_config, "linear_key_head_dim", None
+    )
+
+    supports_flashinfer = False
+    supports_cutedsl = False
+
     if current_platform.is_device_capability(90):
-        return True  # Hopper — no further constraints.
-    if not current_platform.is_device_capability_family(100):
-        return False  # Neither Hopper nor Blackwell.
-    if head_k_dim != 128:
-        return False
-    if current_platform.get_cuda_runtime_major() < 13:
-        return False
-    if not _is_libs_cu13_install_intact():
-        logger.warning_once(
-            "FlashInfer Blackwell GDN requires an intact nvidia-cutlass-dsl"
-            "-libs-cu13 install, but some on-disk files do not match the "
-            "SHA-256 declared in its RECORD (install-order race in "
-            "nvidia-cutlass-dsl packaging — see "
-            "https://github.com/NVIDIA/cutlass/issues/3170 and "
-            "https://github.com/NVIDIA/cutlass/issues/3259). Falling back "
-            "to Triton/FLA. Repair with: pip install --force-reinstall "
-            "--no-deps nvidia-cutlass-dsl-libs-cu13"
-        )
-        return False
-    return True
+        supports_flashinfer = True
+    elif (
+        current_platform.is_device_capability_family(100)
+        and head_k_dim == 128
+        and current_platform.get_cuda_runtime_major() >= 13
+    ):
+        supports_flashinfer = True
+        supports_cutedsl = True
+
+    if backend in ["flashinfer", "auto"] and supports_flashinfer:
+        return backend, "flashinfer"
+    if backend == "cutedsl" and supports_cutedsl:
+        return backend, "cutedsl"
+    return backend, "triton"
 
 
 def _log_gdn_backend_decision(
-    backend: str, head_k_dim: int | None, use_flashinfer: bool
+    vllm_config: VllmConfig,
+    requested_backend: str,
+    active_backend: str,
 ) -> None:
     """Log the GDN prefill backend choice in the attention-selector style."""
-    chosen = "FlashInfer" if use_flashinfer else "Triton/FLA"
+    head_k_dim = getattr(
+        vllm_config.model_config.hf_text_config, "linear_key_head_dim", None
+    )
+    chosen = {
+        "flashinfer": "FlashInfer",
+        "cutedsl": "CuteDSL",
+        "triton": "Triton/FLA",
+    }[active_backend]
     logger.info_once(
         "Using %s GDN prefill kernel (requested=%s, head_k_dim=%s).",
         chosen,
-        backend,
+        requested_backend,
         head_k_dim,
     )
-    # JIT-compiled cutlass path is only used on SM90 (Hopper).
-    if use_flashinfer and current_platform.is_device_capability(90):
+    if active_backend == "flashinfer" and current_platform.is_device_capability(90):
         logger.warning_once(
             "FlashInfer GDN prefill is JIT-compiled; first run may take a "
             "while. Set --gdn-prefill-backend triton to skip JIT.",
@@ -256,25 +219,26 @@ def fi_chunk_gated_delta_rule(
 
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
-    def __init__(self, head_k_dim: int | None = None) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        additional_config = get_current_vllm_config().additional_config
-        assert isinstance(additional_config, dict)
-        backend_cfg = additional_config.get("gdn_prefill_backend", "auto")
-        backend = str(backend_cfg).strip().lower()
+        vllm_config = get_current_vllm_config()
+        backend, active_backend = _resolve_gdn_prefill_backend(vllm_config)
+        self.gdn_prefill_backend = active_backend
 
-        use_flashinfer = _should_use_flashinfer_gdn_prefill(backend, head_k_dim)
-        if backend == "flashinfer" and not use_flashinfer:
+        if backend in ("flashinfer", "cutedsl") and active_backend != backend:
             logger.warning_once(
-                "GDN prefill backend 'flashinfer' is selected but "
-                "cannot use this kernel on the current platform. "
-                "Falling back to Triton/FLA."
+                "GDN prefill backend '%s' is selected but cannot use this "
+                "kernel on the current platform. Falling back to Triton/FLA.",
+                backend,
             )
-        _log_gdn_backend_decision(backend, head_k_dim, use_flashinfer)
+        _log_gdn_backend_decision(vllm_config, backend, active_backend)
 
-        self._forward_method = (
-            self.forward_cuda if use_flashinfer else self.forward_native
-        )
+        if active_backend == "flashinfer":
+            self._forward_method = self.forward_cuda
+        elif active_backend == "cutedsl":
+            self._forward_method = self.forward_cutedsl
+        else:
+            self._forward_method = self.forward_native
 
     def forward_cuda(
         self,
@@ -338,6 +302,49 @@ class ChunkGatedDeltaRule(CustomOp):
             core_attn_out=core_attn_out,
         )
 
+    def forward_cutedsl(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        output_final_state: bool,
+        cu_seqlens: torch.Tensor | None = None,
+        chunk_indices: torch.Tensor | None = None,
+        chunk_offsets: torch.Tensor | None = None,
+        use_qk_l2norm_in_kernel: bool = True,
+        core_attn_out: torch.Tensor | None = None,
+    ):
+        from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
+            chunk_gated_delta_rule_cutedsl,
+        )
+
+        if use_qk_l2norm_in_kernel:
+            q = l2norm_fwd(q)
+            k = l2norm_fwd(k)
+
+        assert cu_seqlens is not None
+        assert chunk_indices is not None
+        assert chunk_offsets is not None
+
+        o, final_state = chunk_gated_delta_rule_cutedsl(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+            core_attn_out=core_attn_out,
+        )
+        if not output_final_state:
+            final_state = None
+        return o, final_state
+
 
 @PluggableLayer.register("qwen_gated_delta_net_attention")
 class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -360,6 +367,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         vllm_config: VllmConfig,
         prefix: str = "",
         gqa_interleaved_layout=False,
+        reduce_results: bool = True,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
 
@@ -470,20 +478,60 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.hidden_size,
             bias=False,
             input_is_parallel=True,
+            reduce_results=reduce_results,
             quant_config=self.quant_config,
             prefix=f"{prefix}.out_proj",
         )
 
-        self.chunk_gated_delta_rule = ChunkGatedDeltaRule(head_k_dim=self.head_k_dim)
+        self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
+        self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
         self._prefill_kernels_warmed_up = False
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
+        self.gdn_decode_kernel = envs.VLLM_GDN_DECODE_KERNEL.strip().lower()
+        if self.gdn_decode_kernel == "cuda":
+            reason = self._fused_gdn_decode_unsupported_reason(vllm_config)
+            if reason is not None:
+                if "VLLM_GDN_DECODE_KERNEL" in os.environ:
+                    raise ValueError(
+                        f"VLLM_GDN_DECODE_KERNEL=cuda is not supported: {reason}"
+                    )
+                logger.info_once(
+                    "Falling back to the Triton GDN decode path: %s", reason
+                )
+                self.gdn_decode_kernel = "triton"
+        self.enable_fused_gdn_decode = self.gdn_decode_kernel == "cuda"
+        logger.info_once("GDN decode kernel: %s", self.gdn_decode_kernel)
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    def _fused_gdn_decode_unsupported_reason(
+        self, vllm_config: VllmConfig
+    ) -> str | None:
+        conv_state_dtype, recurrent_state_dtype = self.get_state_dtype()
+        if (
+            self.gqa_interleaved_layout
+            or self.head_k_dim != 128
+            or self.head_v_dim != 128
+            or self.norm.activation != "silu"
+            or vllm_config.model_config.dtype != torch.bfloat16
+            or conv_state_dtype != torch.bfloat16
+            or recurrent_state_dtype not in FUSED_GDN_STATE_DTYPES
+            or not current_platform.has_device_capability(80)
+        ):
+            return (
+                "the fused CUDA kernel requires a BF16 GDN model with "
+                "K=V=128, SiLU gating, non-interleaved GQA layout, BF16 "
+                "convolution cache, BF16 or FP32 recurrent state, and a "
+                "GPU with compute capability 8.0+"
+            )
+        if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
+            return "torch.ops._C.fused_gdn_decode_post_conv_mtp is not built"
+        return None
 
     def create_qkvz_proj(
         self,
@@ -550,7 +598,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         return (
             current_platform.is_cuda()
             and not self.gqa_interleaved_layout
-            and isinstance(quant_config, (AWQMarlinConfig, AutoGPTQConfig, INCConfig))
+            and isinstance(quant_config, (AutoAWQConfig, AutoGPTQConfig, INCConfig))
         )
 
     def split_ba(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -766,17 +814,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
-        self._forward_method(hidden_states, output)
+    ) -> torch.Tensor:
+        return self._forward_method(hidden_states)
 
     def _output_projection(
         self,
         core_attn_out: torch.Tensor,
         z: torch.Tensor,
-        output: torch.Tensor,
-        num_tokens: int,
-    ):
+    ) -> torch.Tensor:
         """Part 3: RMSNormGated + output linear projection.
 
         The RMSNormGated + quant sequence is eligible for fusion
@@ -788,13 +833,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-        output[:num_tokens], _ = self.out_proj(core_attn_out)
+        output, _ = self.out_proj(core_attn_out)
+        return output
 
     def forward_hip(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         """ROCm forward using AITER Triton fused projection+attention when
         available, otherwise falling back to the generic CUDA path."""
         if GDN_AITER_TRITON_AVAILABLE:
@@ -819,19 +864,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 projected_states_ba,
                 z,
                 core_attn_out,
-                fast_kernel=True,
                 layer_name=_encode_layer_name(self.prefix),
+                use_aiter=True,
             )
 
-            self._output_projection(core_attn_out, z, output, num_tokens)
+            return self._output_projection(core_attn_out, z)
         else:
-            self.forward_cuda(hidden_states, output)
+            return self.forward_cuda(hidden_states)
 
     def forward_cuda(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         """
         Forward pass with three parts:
         1. Input projection
@@ -844,6 +888,26 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
         ba, _ = self.in_proj_ba(hidden_states)
+
+        use_fused_gdn_decode = (
+            self.enable_fused_gdn_decode
+            and hidden_states.dtype == torch.bfloat16
+            and self.norm.weight.dtype in (torch.bfloat16, torch.float32)
+        )
+        if use_fused_gdn_decode:
+            core_attn_out = torch.zeros(
+                (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            torch.ops.vllm.qwen_gdn_attention_core_fused_norm_packed(
+                mixed_qkvz,
+                ba,
+                core_attn_out,
+                layer_name=_encode_layer_name(self.prefix),
+            )
+            output, _ = self.out_proj(core_attn_out.flatten(-2))
+            return output
 
         if self.gqa_interleaved_layout:
             # Qwen3-Next: unpack the interleaved GQA layout
@@ -861,8 +925,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
             z = z.reshape(z.size(0), -1, self.head_v_dim)
             b, a = self.split_ba(ba)
-            b = b.contiguous()
-            a = a.contiguous()
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
@@ -877,23 +939,21 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         torch.ops.vllm.qwen_gdn_attention_core(
             mixed_qkv,
-            b,
-            a,
+            b.contiguous(),
+            a.contiguous(),
             core_attn_out,
-            fast_kernel=False,
             layer_name=_encode_layer_name(self.prefix),
         )
 
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        self._output_projection(core_attn_out, z, output, num_tokens)
+        return self._output_projection(core_attn_out, z)
 
     def forward_xpu(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         """
         Forward pass with three parts:
         1. Input projection
@@ -936,13 +996,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-        output[:num_tokens], _ = self.out_proj(core_attn_out)
+        out, _ = self.out_proj(core_attn_out)
+        return out
 
     def forward_cpu(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         assert not hasattr(self, "in_proj_qkv"), "lora isn't supported on CPU."
 
         mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
@@ -986,7 +1046,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
-        output[:num_tokens], _ = self.out_proj(core_attn_out)
+        out, _ = self.out_proj(core_attn_out)
+        return out
 
     def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
         """Warm up GDN prefill kernels during V1 profiling.
@@ -1060,6 +1121,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         cu_seqlens = torch.tensor([0, T], device=device, dtype=torch.int32)
 
+        # CuteDSL kernels require metadata
+        chunk_indices = None
+        chunk_offsets = None
+        if self.gdn_prefill_backend == "cutedsl":
+            from vllm.model_executor.layers.mamba.ops.gdn_chunk_cutedsl import (
+                prepare_metadata_cutedsl,
+            )
+
+            chunk_indices, chunk_offsets = prepare_metadata_cutedsl(cu_seqlens, T)
+
         try:
             self.chunk_gated_delta_rule(
                 q=q,
@@ -1070,6 +1141,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 initial_state=state,
                 output_final_state=True,
                 cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+                chunk_offsets=chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
             )
         except Exception:
@@ -1088,7 +1161,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 self.prefix,
             )
         finally:
-            del dummy_mixed_qkv, q, k, v, dummy_a, dummy_b, g, beta, state, cu_seqlens
+            del (
+                dummy_mixed_qkv,
+                q,
+                k,
+                v,
+                dummy_a,
+                dummy_b,
+                g,
+                beta,
+                state,
+                cu_seqlens,
+                chunk_indices,
+                chunk_offsets,
+            )
 
         torch.accelerator.empty_cache()
 
@@ -1103,7 +1189,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         qkvz/ba layout.
 
         For decode-only (no spec, no prefill) interleaved-GQA layouts,
-        dispatches directly to ``_forward_core_decode_fast``. Otherwise unpacks
+        dispatches directly to ``_forward_core_decode_aiter``. Otherwise unpacks
         the packed layout and falls through to ``_forward_core``.
 
         Args:
@@ -1134,7 +1220,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
         ):
-            return self._forward_core_decode_fast(
+            return self._forward_core_decode_aiter(
                 qkvz=qkvz,
                 ba=ba,
                 z_out=z_out,
@@ -1227,9 +1313,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
+                a_spec = a
+                b_spec = b
                 mixed_qkv_non_spec = None
             else:
                 mixed_qkv_spec = mixed_qkv.index_select(0, spec_token_indx)
+                a_spec = a.index_select(0, spec_token_indx)
+                b_spec = b.index_select(0, spec_token_indx)
                 mixed_qkv_non_spec = mixed_qkv.index_select(0, non_spec_token_indx)
         else:
             mixed_qkv_spec = None
@@ -1288,6 +1378,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv_non_spec = None
 
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+
+        # Split mixed non-spec-decode+prefill to process independently
+        split_non_spec = (
+            spec_sequence_masks is None
+            and attn_metadata.num_prefills > 0
+            and attn_metadata.num_decodes > 0
+        )
+        num_decode_tokens = attn_metadata.num_decode_tokens
+
         if attn_metadata.num_prefills > 0:
             assert mixed_qkv_non_spec is not None, (
                 "mixed_qkv_non_spec must be provided for prefill path"
@@ -1299,6 +1398,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 a_non_spec = a
                 b_non_spec = b
 
+            if split_non_spec:
+                conv_output_prefill = mixed_qkv_non_spec[num_decode_tokens:]
+                a_prefill = a_non_spec[num_decode_tokens:]
+                b_prefill = b_non_spec[num_decode_tokens:]
+            else:
+                conv_output_prefill = mixed_qkv_non_spec
+                a_prefill = a_non_spec
+                b_prefill = b_non_spec
+
             (
                 query_non_spec,
                 key_non_spec,
@@ -1306,9 +1414,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec,
                 beta_non_spec,
             ) = fused_post_conv_prep(
-                conv_output=mixed_qkv_non_spec,
-                a=a_non_spec,
-                b=b_non_spec,
+                conv_output=conv_output_prefill,
+                a=a_prefill,
+                b=b_prefill,
                 A_log=self.A_log,
                 dt_bias=self.dt_bias,
                 num_k_heads=self.num_k_heads // self.tp_size,
@@ -1336,8 +1444,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
-                    a=a,
-                    b=b,
+                    a=a_spec,
+                    b=b_spec,
                     dt_bias=self.dt_bias,
                     q=query_spec,
                     k=key_spec,
@@ -1356,12 +1464,42 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
-        # 2.2: Process the remaining part
+        # 2.2: Process non-spec-decode part
+        if split_non_spec:
+            query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
+                mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
+            )
+            core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
+                A_log=self.A_log,
+                a=a[:num_decode_tokens],
+                b=b[:num_decode_tokens],
+                dt_bias=self.dt_bias,
+                q=query_decode,
+                k=key_decode,
+                v=value_decode,
+                initial_state=ssm_state,
+                inplace_final_state=True,
+                cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
+                    : attn_metadata.num_decodes + 1
+                ],
+                ssm_state_indices=non_spec_state_indices_tensor,
+                use_qk_l2norm_in_kernel=True,
+            )
+        else:
+            core_attn_out_decode = None
+
+        # 2.3: Process the remaining part (prefill chunk, or non-spec decode-only)
         if attn_metadata.num_prefills > 0:
-            assert non_spec_state_indices_tensor is not None
-            initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()  # type: ignore[index]
-            assert has_initial_state is not None
-            initial_state[~has_initial_state, ...] = 0  # type: ignore[operator]
+            # State indices, initial-state mask and cu_seqlens for the chunk
+            # kernel are precomputed by the metadata builder (the prefill tail
+            # when decodes are peeled off, else the full non-spec batch), so they
+            # don't need to be re-derived per layer.
+            prefill_state_indices = attn_metadata.prefill_state_indices
+            prefill_has_initial_state = attn_metadata.prefill_has_initial_state
+            assert prefill_state_indices is not None
+            assert prefill_has_initial_state is not None
+            initial_state = ssm_state[prefill_state_indices]
+            initial_state[~prefill_has_initial_state, ...] = 0
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -1373,15 +1511,20 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta=beta_non_spec,
                 initial_state=initial_state,
                 output_final_state=True,
-                cu_seqlens=non_spec_query_start_loc,
+                cu_seqlens=attn_metadata.prefill_query_start_loc,
                 chunk_indices=attn_metadata.chunk_indices,
                 chunk_offsets=attn_metadata.chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
             )
             # Init cache
-            ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
-                ssm_state.dtype
-            )
+            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+
+            if split_non_spec:
+                # Stitch the peeled decode outputs in front of the prefill
+                # outputs (decode-first order).
+                core_attn_out_non_spec = torch.cat(
+                    [core_attn_out_decode, core_attn_out_non_spec], dim=1
+                )
         elif attn_metadata.num_decodes > 0:
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
@@ -1420,7 +1563,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
-    def _forward_core_decode_fast(
+    def _forward_core_decode_aiter(
         self,
         qkvz: torch.Tensor,
         ba: torch.Tensor,
@@ -1540,23 +1683,228 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         )
         return
 
+    def _forward_core_decode_spec_fused_norm(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        output_gate: torch.Tensor,
+        core_attn_out: torch.Tensor,
+        attn_metadata: GDNAttentionMetadata,
+    ) -> None:
+        state_indices = attn_metadata.spec_state_indices_tensor
+        cu_seqlens = attn_metadata.spec_query_start_loc
+        num_accepted_tokens = attn_metadata.num_accepted_tokens
+        assert state_indices is not None
+        assert cu_seqlens is not None
+        assert num_accepted_tokens is not None
+
+        num_requests = attn_metadata.num_spec_decodes
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        conv_state = (
+            self.kv_cache[0]
+            if is_conv_state_dim_first()
+            else self.kv_cache[0].transpose(-1, -2)
+        )
+        conv_weights = self.conv1d.weight.view(
+            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+        )
+        mixed_qkv = causal_conv1d_update(
+            mixed_qkv[:num_actual_tokens],
+            conv_state,
+            conv_weights,
+            self.conv1d.bias,
+            self.activation,
+            conv_state_indices=state_indices[:num_requests, 0],
+            num_accepted_tokens=num_accepted_tokens[:num_requests],
+            query_start_loc=cu_seqlens[: num_requests + 1],
+            max_query_len=state_indices.size(1),
+            validate_data=False,
+        )
+        self._forward_core_decode_spec_post_conv_fused_norm(
+            mixed_qkv=mixed_qkv,
+            b=b[:num_actual_tokens],
+            a=a[:num_actual_tokens],
+            output_gate=output_gate[:num_actual_tokens],
+            core_attn_out=core_attn_out[:num_actual_tokens],
+            attn_metadata=attn_metadata,
+        )
+
+    def _forward_core_decode_spec_post_conv_fused_norm(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        output_gate: torch.Tensor,
+        core_attn_out: torch.Tensor,
+        attn_metadata: GDNAttentionMetadata,
+    ) -> None:
+        state_indices = attn_metadata.spec_state_indices_tensor
+        cu_seqlens = attn_metadata.spec_query_start_loc
+        num_accepted_tokens = attn_metadata.num_accepted_tokens
+        assert state_indices is not None
+        assert cu_seqlens is not None
+        assert num_accepted_tokens is not None
+
+        num_requests = attn_metadata.num_spec_decodes
+        ops.fused_gdn_decode_post_conv_mtp(
+            mixed_qkv=mixed_qkv,
+            a=a,
+            b=b,
+            A_log=self.A_log,
+            dt_bias=self.dt_bias,
+            state_indices=state_indices[:num_requests],
+            cu_seqlens=cu_seqlens[: num_requests + 1],
+            num_accepted_tokens=num_accepted_tokens[:num_requests],
+            state=self.kv_cache[1],
+            output_gate=output_gate,
+            norm_weight=self.norm.weight,
+            out=core_attn_out,
+            scale=self.head_k_dim**-0.5,
+            norm_eps=self.layer_norm_epsilon,
+        )
+
+    def _forward_core_fused_norm_packed(
+        self,
+        mixed_qkvz: torch.Tensor,
+        ba: torch.Tensor,
+        core_attn_out: torch.Tensor,
+    ) -> None:
+        forward_context = get_forward_context()
+        attn_metadata_raw = forward_context.attn_metadata
+        qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+        if attn_metadata_raw is None:
+            self._warmup_prefill_kernels(mixed_qkvz[:, :qkv_size], 0)
+            return
+
+        assert isinstance(attn_metadata_raw, dict)
+        attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
+        assert isinstance(attn_metadata, GDNAttentionMetadata)
+        mixed_qkv, output_gate_flat = mixed_qkvz.split(
+            [qkv_size, self.value_dim // self.tp_size], dim=-1
+        )
+        output_gate = output_gate_flat.reshape(
+            output_gate_flat.size(0), -1, self.head_v_dim
+        )
+        b, a = self.split_ba(ba)
+        self._forward_core_fused_norm(
+            mixed_qkv=mixed_qkv,
+            b=b,
+            a=a,
+            output_gate=output_gate,
+            core_attn_out=core_attn_out,
+        )
+
+    def _can_use_fused_gdn_mtp_decode(
+        self, attn_metadata: GDNAttentionMetadata
+    ) -> bool:
+        state_indices = attn_metadata.spec_state_indices_tensor
+        return (
+            attn_metadata.spec_sequence_masks is not None
+            and attn_metadata.num_decodes == 0
+            and attn_metadata.num_spec_decodes > 0
+            and self.kv_cache[1].dtype in FUSED_GDN_STATE_DTYPES
+            and self.gdn_decode_kernel == "cuda"
+            and self.num_v_heads == 8 * self.num_k_heads
+            and state_indices is not None
+            and state_indices.size(1) <= MAX_FUSED_GDN_MTP_TOKENS
+            and hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp")
+        )
+
+    def _rms_norm_gated_cuda(
+        self,
+        x: torch.Tensor,
+        output_gate: torch.Tensor,
+        out: torch.Tensor,
+    ) -> None:
+        from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (
+            layer_norm_fwd,
+        )
+
+        x_shape = x.shape
+        assert output_gate.shape == x_shape
+        assert out.shape == x_shape
+        x_2d = x.reshape(-1, x_shape[-1])
+        output_gate_2d = output_gate.reshape(-1, x_shape[-1])
+        out_2d = out.reshape(-1, x_shape[-1])
+        assert x_2d.stride(-1) == 1
+        assert output_gate_2d.stride(-1) == 1
+        assert out_2d.stride(-1) == 1
+        layer_norm_fwd(
+            x_2d,
+            self.norm.weight.contiguous(),
+            self.norm.bias,
+            self.norm.eps,
+            z=output_gate_2d,
+            out=out_2d,
+            group_size=(
+                x_shape[-1] if self.norm.group_size is None else self.norm.group_size
+            ),
+            norm_before_gate=self.norm.norm_before_gate,
+            is_rms_norm=True,
+            activation=self.norm.activation,
+        )
+
+    def _forward_core_fused_norm(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        output_gate: torch.Tensor,
+        core_attn_out: torch.Tensor,
+    ) -> None:
+        forward_context = get_forward_context()
+        attn_metadata_raw = forward_context.attn_metadata
+        if attn_metadata_raw is None:
+            self._warmup_prefill_kernels(mixed_qkv, 0)
+            return
+
+        assert isinstance(attn_metadata_raw, dict)
+        attn_metadata = attn_metadata_raw[self.prefix]  # type: ignore[index]
+        assert isinstance(attn_metadata, GDNAttentionMetadata)
+        if (
+            self._can_use_fused_gdn_mtp_decode(attn_metadata)
+            and attn_metadata.num_prefills == 0
+        ):
+            self._forward_core_decode_spec_fused_norm(
+                mixed_qkv=mixed_qkv,
+                b=b,
+                a=a,
+                output_gate=output_gate,
+                core_attn_out=core_attn_out,
+                attn_metadata=attn_metadata,
+            )
+            return
+        self._forward_core(
+            mixed_qkv=mixed_qkv,
+            b=b.contiguous(),
+            a=a.contiguous(),
+            core_attn_out=core_attn_out,
+        )
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        self._rms_norm_gated_cuda(
+            core_attn_out[:num_actual_tokens],
+            output_gate[:num_actual_tokens],
+            core_attn_out[:num_actual_tokens],
+        )
+
 
 def qwen_gdn_attention_core(
     qkv_or_qkvz: torch.Tensor,
     b_or_ba: torch.Tensor,
     a_or_z_out: torch.Tensor,
     core_attn_out: torch.Tensor,
-    fast_kernel: bool,
     layer_name: LayerNameType,
+    use_aiter: bool = False,
 ) -> None:
     """Custom op dispatching to _forward_core or _forward_core_rocm.
 
     Handles conv1d + recurrent attention only; input/output projections
     are performed by the caller.
 
-    When ``fast_kernel=False`` (standard path):
+    When ``use_aiter=False`` (standard path):
         qkv_or_qkvz is [q, k, v], b_or_ba is b, a_or_z_out is a (read-only).
-    When ``fast_kernel=True`` (AITER Triton fast path, ROCm only):
+    When ``use_aiter=True`` (AITER Triton path, ROCm only):
         qkv_or_qkvz is [q, k, v, z], b_or_ba is [b, a], a_or_z_out is the
         z output buffer (mutated in-place).
 
@@ -1565,7 +1913,7 @@ def qwen_gdn_attention_core(
     layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    if fast_kernel:
+    if use_aiter:
         self._forward_core_rocm(
             qkvz=qkv_or_qkvz,
             ba=b_or_ba,
@@ -1586,8 +1934,8 @@ def gdn_attention_core_fake(
     b_or_ba: torch.Tensor,
     a_or_z_out: torch.Tensor,
     core_attn_out: torch.Tensor,
-    fast_kernel: bool,
     layer_name: LayerNameType,
+    use_aiter: bool = False,
 ) -> None:
     """Fake implementation for torch.compile."""
     return
@@ -1598,6 +1946,39 @@ direct_register_custom_op(
     op_func=qwen_gdn_attention_core,
     mutates_args=["a_or_z_out", "core_attn_out"],
     fake_impl=gdn_attention_core_fake,
+)
+
+
+def qwen_gdn_attention_core_fused_norm_packed(
+    mixed_qkvz: torch.Tensor,
+    ba: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    layer_name = _resolve_layer_name(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    self._forward_core_fused_norm_packed(
+        mixed_qkvz=mixed_qkvz,
+        ba=ba,
+        core_attn_out=core_attn_out,
+    )
+
+
+def gdn_attention_core_fused_norm_packed_fake(
+    mixed_qkvz: torch.Tensor,
+    ba: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="qwen_gdn_attention_core_fused_norm_packed",
+    op_func=qwen_gdn_attention_core_fused_norm_packed,
+    mutates_args=["core_attn_out"],
+    fake_impl=gdn_attention_core_fused_norm_packed_fake,
 )
 
 

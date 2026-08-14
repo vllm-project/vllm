@@ -6,7 +6,7 @@ import lm_eval
 import openai
 
 BASE_URL = "http://localhost:8192/v1"
-NUM_CONCURRENT = 100
+NUM_CONCURRENT = int(os.getenv("NUM_CONCURRENT", "100"))
 TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
 # TODO(#43186): Widened from 0.03 to absorb chunk_scan/SSU numeric jitter
@@ -24,6 +24,9 @@ EXPECTED_VALUES = {
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8": 0.84,
     "ibm-granite/granite-4.0-h-tiny": 0.77,
     "Qwen/Qwen3.5-0.8B": 0.33,
+    "google/gemma-4-E2B-it": 0.485,
+    "ai21labs/AI21-Jamba2-3B": 0.74,
+    "deepseek-ai/DeepSeek-V4-Flash": 0.95,
 }
 
 SIMPLE_PROMPT = (
@@ -33,6 +36,19 @@ SIMPLE_PROMPT = (
 
 # Get model name from environment variable
 MODEL_NAME = os.environ.get("TEST_MODEL", "Qwen/Qwen3-0.6B")
+
+
+def _meets_accuracy_threshold(measured_value: float, expected_value: float) -> bool:
+    return measured_value >= expected_value - RTOL
+
+
+def test_accuracy_threshold_is_one_sided():
+    expected_value = 0.77
+    minimum_value = expected_value - RTOL
+
+    assert _meets_accuracy_threshold(minimum_value, expected_value)
+    assert _meets_accuracy_threshold(expected_value + RTOL + 0.01, expected_value)
+    assert not _meets_accuracy_threshold(minimum_value - 0.01, expected_value)
 
 
 def run_simple_prompt():
@@ -49,30 +65,48 @@ def test_accuracy():
     """Run the end to end accuracy test."""
     run_simple_prompt()
 
-    model_args = (
-        f"model={MODEL_NAME},"
-        f"base_url={BASE_URL}/completions,"
-        f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False"
-    )
-
-    results = lm_eval.simple_evaluate(
-        model="local-completions",
-        model_args=model_args,
-        tasks=TASK,
-    )
+    if "gemma-4" in MODEL_NAME:
+        # Gemma4 is quite sensible to having a chat template applied, so we evaluate
+        # on chat completions.
+        model_args = (
+            f"model={MODEL_NAME},"
+            f"base_url={BASE_URL}/chat/completions,"
+            f"num_concurrent={NUM_CONCURRENT},"
+            "tokenizer_backend=huggingface,"
+            "trust_remote_code=True"
+        )
+        results = lm_eval.simple_evaluate(
+            model="local-chat-completions",
+            model_args=model_args,
+            tasks=TASK,
+            num_fewshot=5,
+            apply_chat_template=True,
+        )
+    else:
+        model_args = (
+            f"model={MODEL_NAME},"
+            f"base_url={BASE_URL}/completions,"
+            f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False,"
+            "trust_remote_code=True"
+        )
+        results = lm_eval.simple_evaluate(
+            model="local-completions",
+            model_args=model_args,
+            tasks=TASK,
+        )
 
     measured_value = results["results"][TASK][FILTER]
     expected_value = EXPECTED_VALUES.get(MODEL_NAME)
 
+    print(f"Measured accuracy value: {measured_value}\n")
     if expected_value is None:
         print(
             f"Warning: No expected value found for {MODEL_NAME}. "
             "Skipping accuracy check."
         )
-        print(f"Measured value: {measured_value}")
         return
 
-    assert (
-        measured_value - RTOL < expected_value
-        and measured_value + RTOL > expected_value
-    ), f"Expected: {expected_value} | Measured: {measured_value}"
+    minimum_value = expected_value - RTOL
+    assert _meets_accuracy_threshold(measured_value, expected_value), (
+        f"Expected at least: {minimum_value} | Measured: {measured_value}"
+    )

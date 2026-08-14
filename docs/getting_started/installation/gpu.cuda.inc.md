@@ -43,7 +43,7 @@ As of now, vLLM's binaries are compiled with CUDA 12.9 and public PyTorch releas
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
 export CUDA_VERSION=130 # or other
 export CPU_ARCH=$(uname -m) # x86_64 or aarch64
-uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_35_${CPU_ARCH}.whl --extra-index-url https://download.pytorch.org/whl/cu${CUDA_VERSION}
+uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_28_${CPU_ARCH}.whl --extra-index-url https://download.pytorch.org/whl/cu${CUDA_VERSION}
 ```
 
 #### Install the latest code
@@ -68,8 +68,8 @@ uv pip install -U vllm \
     If you insist on using `pip`, you have to specify the full URL of the wheel file (which can be obtained from the web page).
 
     ```bash
-    pip install -U https://wheels.vllm.ai/nightly/vllm-0.11.2.dev399%2Bg3c7461c18-cp38-abi3-manylinux_2_31_x86_64.whl # current nightly build (the filename will change!)
-    pip install -U https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-0.11.2.dev399%2Bg3c7461c18-cp38-abi3-manylinux_2_31_x86_64.whl # from specific commit
+    pip install -U https://wheels.vllm.ai/2f3f441f84bd5b35ec8aa9fcfffb540f107da8a7/vllm-0.23.1rc1.dev901%2Bg2f3f441f8-cp38-abi3-manylinux_2_28_x86_64.whl # current nightly build (the filename will change!)
+    pip install -U https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-0.23.1rc1.dev901%2Bg2f3f441f8-cp38-abi3-manylinux_2_28_x86_64.whl # from specific commit
     ```
 
 ##### Install specific revisions
@@ -138,6 +138,15 @@ You can find more information about vLLM's wheels in [Install the latest code](#
     It is recommended to use the same commit ID for the source code as the vLLM wheel you have installed. Please refer to [Install the latest code](#install-the-latest-code) for instructions on how to install a specified wheel.
 
 #### Full build (with compilation) {#full-build}
+
+!!! note "Compiler requirement"
+    Building from source requires GCC/G++ ≥ 11.3. PyTorch's C++20 headers are
+    not compatible with GCC 10 or GCC < 11.3. On Ubuntu 22.04:
+    ```bash
+    sudo apt-get install -y gcc-11 g++-11
+    sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110 \
+        --slave /usr/bin/g++ g++ /usr/bin/g++-11
+    ```
 
 If you want to modify C++ or CUDA code, you'll need to build vLLM from source. This can take several minutes:
 
@@ -312,6 +321,8 @@ You can add any other [engine-args](https://docs.vllm.ai/en/latest/configuration
 
 vLLM's Docker image comes with [CUDA compatibility libraries](https://docs.nvidia.com/deploy/cuda-compatibility/index.html) pre-installed. This allows you to run vLLM on systems with NVIDIA drivers that are older than the CUDA Toolkit version used in the image, but only supports select professional and datacenter NVIDIA GPUs.
 
+For CUDA 13 images, the minimum host kernel is Linux 4.15 when running normally because CUDA 13 requires an R580 or newer driver. Compatibility mode supports R535 and R570 host drivers; R535 lowers the minimum host kernel to Linux 3.10, while R570 still requires Linux 4.15. Upgrading the container userland to Ubuntu 24.04 does not raise these driver-defined kernel requirements. See NVIDIA's [forward compatibility matrix](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html#use-the-right-cuda-forward-compatibility-package), [R535 requirements](https://download.nvidia.com/XFree86/Linux-x86_64/535.104.05/README/minimumrequirements.html), and [R580 requirements](https://download.nvidia.com/XFree86/Linux-x86_64/580.76.05/README/minimumrequirements.html).
+
 To enable this feature, set the `VLLM_ENABLE_CUDA_COMPATIBILITY` environment variable to `1` or `true` when running the container:
 
 ```bash
@@ -375,8 +386,8 @@ A docker container can be built for aarch64 systems such as the Nvidia Grace-Hop
     -t vllm/vllm-gh200-openai:latest \
     --build-arg max_jobs=66 \
     --build-arg nvcc_threads=2 \
-    --build-arg torch_cuda_arch_list="9.0 10.0+PTX" \
-    --build-arg RUN_WHEEL_CHECK=false
+    --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0 \
+    --build-arg torch_cuda_arch_list="9.0 10.0+PTX"
     ```
 
 For (G)B300, we recommend using CUDA 13, as shown in the following command.
@@ -386,10 +397,9 @@ For (G)B300, we recommend using CUDA 13, as shown in the following command.
     ```bash
     DOCKER_BUILDKIT=1 docker build \
     --build-arg CUDA_VERSION=13.0.2 \
-    --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.2-devel-ubuntu22.04 \
+    --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0 \
     --build-arg max_jobs=256 \
     --build-arg nvcc_threads=2 \
-    --build-arg RUN_WHEEL_CHECK=false \
     --build-arg torch_cuda_arch_list='9.0 10.0+PTX' \
     --platform "linux/arm64" \
     --tag vllm/vllm-gb300-openai:latest \

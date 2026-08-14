@@ -468,6 +468,9 @@ def dummy_hf_overrides(
     # Kimi uses `num_expert_group` instead of `n_group`.
     if n_group is None:
         n_group = getattr(text_config, "num_expert_group", None)
+    # InternS1Pro uses `router_n_groups` instead of `n_group`.
+    if n_group is None:
+        n_group = getattr(text_config, "router_n_groups", None)
     num_experts = n_group * 2 if n_group is not None else 2
 
     # we use three layers for Gemma-3n to check
@@ -486,6 +489,8 @@ def dummy_hf_overrides(
                 "Gemma3nForConditionalGeneration",
                 "Gemma4ForCausalLM",
                 "Gemma4ForConditionalGeneration",
+                "Gemma4MTPModel",
+                "DiffusionGemmaForBlockDiffusion",
             )
             else 1
         )
@@ -502,16 +507,32 @@ def dummy_hf_overrides(
         hf_config = _hf_config
         hf_text_config = text_config
 
+        # Keep architecture conversion on the default multimodal path; this
+        # helper only needs HF-derived fields, not deployment MM limits.
+        @staticmethod
+        def _supports_multimodal_for_mm_prefix() -> bool:
+            return True
+
     model_arch_config = ModelConfig.get_model_arch_config(DummyConfig)
     # Only set MoE related config when the model has MoE layers.
     # Otherwise all models detected as MoE by _get_transformers_backend_cls.
     if model_arch_config.num_experts > 0:
+        num_experts_per_tok = 2
+        if model_arch in (
+            "Llama4ForConditionalGeneration",
+            "Llama4ForCausalLM",
+            "EagleLlama4ForCausalLM",
+        ):
+            num_experts_per_tok = 1
+        elif model_arch == "InternS1ProForConditionalGeneration":
+            assert n_group is not None
+            num_experts_per_tok = n_group
         update_dict.update(
             {
                 "num_experts": num_experts,
-                "num_experts_per_tok": 2,
+                "num_experts_per_tok": num_experts_per_tok,
                 # Kimi uses `num_experts_per_token`.
-                "num_experts_per_token": 2,
+                "num_experts_per_token": num_experts_per_tok,
                 "num_local_experts": num_experts,
                 # Otherwise there will not be any expert layers
                 "first_k_dense_replace": 0,
@@ -520,8 +541,13 @@ def dummy_hf_overrides(
             }
         )
 
-    # Update num_hidden_layers for non-Longcat architectures
-    if model_arch != "LongcatFlashForCausalLM" and model_arch != "LongCatFlashMTPModel":
+    # Update num_hidden_layers for non-Longcat architectures (Longcat derives it
+    # from num_layers for its dual-attention layers).
+    if model_arch not in (
+        "LongcatFlashForCausalLM",
+        "LongCatFlashMTPModel",
+        "LongcatFlashNgramForCausalLM",
+    ):
         update_dict["num_hidden_layers"] = num_hidden_layers
 
     text_config.update(update_dict)
@@ -538,15 +564,20 @@ def dummy_hf_overrides(
         )
 
     if hasattr(hf_config, "vision_config"):
-        hf_config.vision_config.update(
+        vision_config = hf_config.vision_config
+        vision_config.update(
             {
                 "num_layers": 1,
                 "num_hidden_layers": 1,
             }
         )
 
+        # Keep per-layer metadata consistent with the reduced layer count.
+        if layer_types := getattr(vision_config, "layer_types", None):
+            vision_config.update({"layer_types": layer_types[:1]})
+
         if model_arch in ("Moondream3ForCausalLM", "HfMoondream"):
-            hf_config.vision_config.update({"enc_n_layers": 1})
+            vision_config.update({"enc_n_layers": 1})
 
     # e.g.: ibm-granite/granite-speech-3.3-2b
     if hasattr(hf_config, "encoder_config"):
@@ -558,7 +589,8 @@ def dummy_hf_overrides(
         )
 
     # e.g.: Qwen/Qwen2-Audio-7B-Instruct
-    if hasattr(hf_config, "audio_config"):
+    # audio_config may exist but be None (e.g. audio-less Gemma4 variants).
+    if getattr(hf_config, "audio_config", None) is not None:
         hf_config.audio_config.update(
             {
                 "num_layers": 1,

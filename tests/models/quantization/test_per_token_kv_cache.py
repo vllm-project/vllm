@@ -31,7 +31,8 @@ from ..utils import check_logprobs_close
     ],
 )
 @pytest.mark.parametrize(
-    "kv_cache_dtype", ["int8_per_token_head", "fp8_per_token_head"]
+    "kv_cache_dtype",
+    ["int4_per_token_head", "int8_per_token_head", "fp8_per_token_head"],
 )
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("enforce_eager", [True])
@@ -51,9 +52,6 @@ def test_per_token_head_kv_cache_accuracy(
 ) -> None:
     """Compare logprobs between bf16 baseline and per-token-head quantized KV
     cache.
-
-    Uses calculate_kv_scales (dynamic scale computation) since there are
-    no per-token-head calibrated checkpoints available yet.
     """
     with monkeypatch.context() as m:
         m.setenv("TOKENIZERS_PARALLELISM", "true")
@@ -79,7 +77,6 @@ def test_per_token_head_kv_cache_accuracy(
             tensor_parallel_size=tensor_parallel_size,
             enforce_eager=enforce_eager,
             kv_cache_dtype=kv_cache_dtype,
-            calculate_kv_scales=True,
             attention_config={"backend": backend},
         ) as vllm_model:
             test_outputs = vllm_model.generate_greedy_logprobs(

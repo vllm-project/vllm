@@ -118,10 +118,8 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
         return info
 
     def touch(self, key: _K) -> None:
-        try:
+        if key in self:
             self._LRUCache__order.move_to_end(key)  # type: ignore
-        except KeyError:
-            self._LRUCache__order[key] = None  # type: ignore
 
     @overload
     def get(self, key: _K, /) -> _V | None: ...
@@ -183,10 +181,6 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
             return
 
         self.popitem(remove_pinned=remove_pinned)
-
-    def _remove_old_if_needed(self) -> None:
-        while self.currsize > self.capacity:
-            self.remove_oldest()
 
     def popitem(self, remove_pinned: bool = False):
         """Remove and return the `(key, value)` pair least recently used."""
