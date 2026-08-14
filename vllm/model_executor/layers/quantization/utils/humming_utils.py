@@ -1078,7 +1078,6 @@ def convert_to_humming_moe_kernel_format(
     layer.input_schemas = {}
     humming_configs = {}
 
-
     for sublayer_name, configs in sublayer_configs.items():
         final_weight_schema, final_input_schema, humming_config = (
             _process_single_sublayer(
