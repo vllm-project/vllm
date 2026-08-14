@@ -1,42 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helpers shared by the sharded-RDT consumer (worker) and producer (trainer)
-engines.
+engines: M:N routing, arena sizing, and the op-chain allowlist. Both sides derive
+them from here so the two cannot drift.
 
-Both sides must agree on the M:N producer/consumer binding and per-group
-routing (``RdtRouter``), the arena byte sizing, and the op-chain allowlist.
-Keeping them here — imported by both
-``sharded_rdt_engine`` (consumer) and ``sharded_rdt_trainer`` (producer) —
-makes that agreement a single source of truth rather than two copies that can
-silently drift.
-
-The gather-group partition itself lives on ``base.layerwise_groups``: it
-defines what a group index means for ``WeightSource``, not just for this
-transport.
+The gather-group partition itself is ``base.layerwise_groups``: it defines what a
+group index means for any ``WeightSource``, not just this transport.
 """
 
 from collections.abc import Callable
 
 import torch
 
-# The op-chain contract, in one place because it has two enforcers.
+# The op-chain contract, with two enforcers. The consumer's ``LazyRDTTensor``
+# intercepts exactly these methods during the bake and records the string name;
+# anything else reaches ``__torch_dispatch__`` and raises, so a loader needing
+# real data fails at init rather than transferring wrong bytes. The producer
+# replays a chain as ``getattr(tensor, op)(...)`` and refuses anything outside
+# ``ALLOWED_OPS``, so a spoofed consumer cannot invoke arbitrary methods.
 #
-# CONSUMER: ``LazyRDTTensor`` intercepts exactly these ``torch.Tensor`` methods
-# during the bake and records the string name in the op chain. Anything else
-# reaches ``__torch_dispatch__`` and raises, so a loader that needs real data
-# (arithmetic, ``.to``, ``.float``, ``.item``, ``.data``, bool-mask indexing)
-# fails loudly at init rather than silently transferring the wrong bytes.
-#
-# PRODUCER: replaying a chain is ``getattr(tensor, op)(*args, **kwargs)`` on a
-# live trainer tensor, so it refuses any op outside ``ALLOWED_OPS`` -- a
-# misbehaving or spoofed consumer must not be able to invoke arbitrary methods.
-#
-# Every entry must be a pure view / shape-only / byte-bounding operation. The two
-# sets are DERIVED from this one table: when they were written out separately
-# they drifted, leaving ``t`` consumer-emittable but producer-rejected (a loader
-# calling ``.t()`` baked at init and then failed at first pull) while
-# ``to``/``split``/``select`` were producer-allowed but unreachable -- and ``to``
-# is exactly the dtype/device escape the bake exists to reject.
+# Every entry must be a pure view. Both sets derive from this one table: written
+# out separately they drifted, leaving ``t`` consumer-emittable but
+# producer-rejected, and ``to`` allowed but unreachable -- ``to`` being exactly
+# the dtype/device escape the bake exists to reject.
 SUPPORTED_OPS: dict[Callable, str] = {
     torch.Tensor.narrow: "narrow",
     torch.Tensor.view: "view",
@@ -50,8 +36,7 @@ SUPPORTED_OPS: dict[Callable, str] = {
     torch.Tensor.flatten: "flatten",
     torch.Tensor.contiguous: "contiguous",
     torch.Tensor.chunk: "chunk",
-    # Multi-return, handled like chunk: the consumer emits one child per output
-    # with a trailing __getitem__(i); the producer replays unbind()[i].
+    # Multi-return like chunk: one child per output, trailing __getitem__(i).
     torch.Tensor.unbind: "unbind",
 }
 
@@ -72,32 +57,24 @@ def assign_producer_indices(
 class RdtRouter:
     """Decides which producer serves each (gather group, ep_rank) pull unit.
 
-    Both engines build this from the same wire-carried data — ``num_producers``,
-    ``num_consumers``, ``group_owners`` and ``producer_ep_ranks`` — so producer
-    and consumer always agree on who serves what. Disagreement is not a wrong
-    answer but a hang or a loud misroute: a pull routed to a producer that never
-    gathered the name trips its served-names guard.
+    Both engines build this from the same wire-carried data, so they always agree
+    on who serves what. Disagreement is not a wrong answer but a hang or a loud
+    misroute: a pull sent to a producer that never gathered the name trips its
+    served-names guard.
 
-    ``group_owners[g]`` lists the producer ranks that gather and publish group
-    ``g``; ``None`` means every producer owns every group (gather-to-all, the
-    layout used when the trainer has no pipeline-parallel split).
+    ``group_owners[g]`` lists the producer ranks that publish group ``g``;
+    ``None`` means every producer owns every group (gather-to-all).
 
-    ``producer_ep_ranks[r]`` is trainer rank r's expert-parallel coordinate —
-    the second of the two stamp lists that must match. The first,
-    ``name_ep_rank``, stamps each weight name with the coordinate holding it and
-    rides the worker init info, not this router. A pull for a name stamped
-    ``k >= 0`` must go to a group owner whose coordinate is ``k``; ``-1`` names
-    match every group owner. ``None`` means no expert sharding (every stamp -1),
-    which keeps the historical routing exactly.
+    ``producer_ep_ranks[r]`` is trainer rank r's expert-parallel coordinate. A
+    pull for a name stamped ``k >= 0`` must go to a group owner whose coordinate
+    is ``k``; ``-1`` matches every owner, and ``None`` means no expert sharding.
+    The matching name stamps ride the worker init info, not this router.
 
-    Each pull unit is served by exactly ONE producer per consumer: splitting one
-    pull across producers only multiplies produce calls, since the consumer's
-    own NIC bounds the pull either way.
+    Exactly one producer serves each unit: splitting a pull only multiplies
+    produce calls, since the consumer's own NIC bounds it either way.
 
-    Freeing does NOT route through this class. Each consumer signals
-    ``free_group(g)`` to EVERY owner of ``g`` (``owners(g)``), and each producer
-    counts signals against the live consumer total handed to ``begin_sync`` —
-    a per-group barrier, not routed ref-counting.
+    Freeing does not route through here. Each consumer signals ``free_group(g)``
+    to every owner, counted against the live total handed to ``begin_sync``.
     """
 
     def __init__(
@@ -117,10 +94,10 @@ class RdtRouter:
         self._ep_ranks = list(producer_ep_ranks) if producer_ep_ranks else None
 
     def owners(self, group_idx: int, ep_rank: int = -1) -> list[int]:
-        """Producer ranks that publish ``group_idx`` — and, for ``ep_rank >= 0``,
-        also hold that expert coordinate. The intersection is valid because
-        Megatron expert-parallel groups never span pipeline stages: a group's
-        owner set always contains every coordinate."""
+        """Producer ranks publishing ``group_idx`` and, for ``ep_rank >= 0``,
+        holding that coordinate. The intersection is valid because Megatron
+        expert-parallel groups never span pipeline stages, so a group's owner set
+        always contains every coordinate."""
         base = (
             list(range(self.num_producers))
             if self._owners is None
@@ -137,15 +114,10 @@ class RdtRouter:
         return [r for r in base if self._ep_ranks[r] == ep_rank]
 
     def producer_for(self, consumer_id: int, group_idx: int, ep_rank: int = -1) -> int:
-        """The single producer ``consumer_id`` pulls (``group_idx``,
-        ``ep_rank``) from.
-
-        Blocks consumers across the unit's owner set with the same rule that
-        binds producers to consumers globally, then rotates by group index. In
-        the gather-to-all layout this reproduces the historical contiguous
-        binding (consumer c and 16 producers -> {2c, 2c+1}, alternating by
-        group), so every producer NIC still carries traffic.
-        """
+        """The single producer ``consumer_id`` pulls (``group_idx``, ``ep_rank``)
+        from. Blocks consumers across the unit's owner set with the same rule that
+        binds producers globally, then rotates by group index, so every producer
+        NIC carries traffic."""
         own = self.owners(group_idx, ep_rank)
         if not own:
             raise ValueError(
@@ -163,10 +135,9 @@ class RdtRouter:
 
         Raises:
             ValueError: a group has no owner, an owner is out of range, or the
-                producer coordinate list does not cover every producer. Empty
-                (group, ep_rank) pull units are caught at plan build instead —
-                ``producer_for`` raises — because only the consumer's baked
-                copies know which units exist.
+                coordinate list does not cover every producer. Empty
+                (group, ep_rank) pull units are caught at plan build instead,
+                since only the consumer's baked copies know which units exist.
         """
         if self._owners is not None and self.num_groups != len(self._owners):
             raise ValueError(
@@ -187,11 +158,9 @@ class RdtRouter:
 
 
 def arena_alloc_bytes(nbytes: int, presize: int = 0) -> int:
-    """Size a NIXL arena / ring slot for ``nbytes``, rounded up so the buffer is
-    allocated ONCE and never regrows: the max of the request, an optional
-    ``presize`` floor, and a coarse 256MB round-up. Sizing once matters beyond
-    perf — Ray's NIXL desc cache is keyed by ``data_ptr`` and its entries outlive
-    their tensors, so repeated small regrowths can false-hit a recycled pointer
-    and skip registering the new extent (see ``arena_presize_gb``). Shared by both
-    sides (consumer receive arenas + producer serve rings)."""
+    """Size a NIXL arena / ring slot for ``nbytes``: the max of the request, an
+    optional ``presize`` floor, and a coarse 256MB round-up, so the buffer is
+    allocated ONCE and never regrows. Regrowth is a correctness hazard, not just a
+    perf one -- see ``arena_presize_gb``. Shared by the consumer's receive arenas
+    and the producer's serve rings."""
     return max(nbytes, presize, -(-nbytes // (256 << 20)) * (256 << 20))
