@@ -8,24 +8,14 @@ from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
-    KimiGatedDeltaNetAttention,
+    KimiGatedDeltaNetAttention as BaseKimiGatedDeltaNetAttention,
 )
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 
-class KimiK3DeltaAttention(KimiGatedDeltaNetAttention):
-    """Kimi-K3 KDA using the fused XPU convolution and recurrence op."""
-
-    def __init__(
-        self,
-        config: KimiLinearConfig,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(config, vllm_config, prefix)
-        if not self.use_full_rank_gate:
-            raise ValueError("XPU Kimi-K3 KDA requires a full-rank gate")
+class XPUKimiGatedDeltaNetAttention(BaseKimiGatedDeltaNetAttention):
+    """Kimi KDA using the fused XPU convolution and recurrence op."""
 
     @eager_break_during_capture
     def _forward(
@@ -103,3 +93,33 @@ class KimiK3DeltaAttention(KimiGatedDeltaNetAttention):
             self.gate_lower_bound,
         )
         core_attn_out.copy_(self.o_norm(core_attn_out, g2))
+
+
+class KimiK3DeltaAttention(XPUKimiGatedDeltaNetAttention):
+    def __init__(
+        self,
+        config: KimiLinearConfig,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(config, vllm_config, prefix)
+        if not self.use_full_rank_gate:
+            raise ValueError("XPU Kimi-K3 KDA requires a full-rank gate")
+        if self.gate_lower_bound is None:
+            raise ValueError("XPU Kimi-K3 KDA requires a bounded sigmoid gate")
+
+
+class KimiLinearDeltaAttention(XPUKimiGatedDeltaNetAttention):
+    def __init__(
+        self,
+        config: KimiLinearConfig,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(config, vllm_config, prefix)
+        if self.use_full_rank_gate:
+            raise ValueError("XPU Kimi-Linear KDA requires a low-rank gate")
+        if self.gate_lower_bound is not None:
+            raise ValueError(
+                "XPU Kimi-Linear KDA requires an unbounded softplus gate"
+            )

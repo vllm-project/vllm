@@ -30,7 +30,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
 
-from .kda import KimiK3DeltaAttention
+from .kda import KimiK3DeltaAttention, KimiLinearDeltaAttention
 from .ops.attn_res import attn_res
 
 
@@ -422,15 +422,19 @@ class KimiDecoderLayer(nn.Module):
 
 		if config.is_kda_layer(layer_idx):
 			kda_config = config.linear_attn_config
-			if not kda_config or not kda_config.get("use_full_rank_gate", False):
-				raise NotImplementedError(
-					"XPU KimiDecoderLayer only supports full-rank KDA layers"
+			assert kda_config is not None
+			if kda_config.get("use_full_rank_gate", False):
+				self.self_attn = KimiK3DeltaAttention(
+					config,
+					vllm_config,
+					prefix=f"{prefix}.self_attn",
 				)
-			self.self_attn = KimiK3DeltaAttention(
-				config,
-				vllm_config,
-				prefix=f"{prefix}.self_attn",
-			)
+			else:
+				self.self_attn = KimiLinearDeltaAttention(
+					config,
+					vllm_config,
+					prefix=f"{prefix}.self_attn",
+				)
 		else:
 			qk_nope_head_dim = config.qk_nope_head_dim
 			qk_rope_head_dim = config.qk_rope_head_dim

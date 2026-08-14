@@ -72,8 +72,17 @@ class _FakeMLA(nn.Module):
         return torch.full((1, 1), 4.0)
 
 
-def test_xpu_kda_adapter_dispatches_native_op(monkeypatch) -> None:
-    attention = object.__new__(kimi_xpu_kda.KimiK3DeltaAttention)
+@pytest.mark.parametrize(
+    ("attention_cls", "gate_lower_bound"),
+    [
+        (kimi_xpu_kda.KimiK3DeltaAttention, -5.0),
+        (kimi_xpu_kda.KimiLinearDeltaAttention, None),
+    ],
+)
+def test_xpu_kda_adapter_dispatches_native_op(
+    monkeypatch, attention_cls, gate_lower_bound
+) -> None:
+    attention = object.__new__(attention_cls)
     nn.Module.__init__(attention)
     attention.prefix = "model.layers.0.self_attn"
     attention.local_num_heads = 2
@@ -83,7 +92,7 @@ def test_xpu_kda_adapter_dispatches_native_op(monkeypatch) -> None:
     attention.conv1d.weight.data = attention.conv1d.weight.data.unsqueeze(1)
     attention.A_log = nn.Parameter(torch.zeros(2, dtype=torch.float32))
     attention.dt_bias = nn.Parameter(torch.zeros(4, dtype=torch.float32))
-    attention.gate_lower_bound = -5.0
+    attention.gate_lower_bound = gate_lower_bound
     attention.o_norm = _GatedAdd()
     conv_state = torch.zeros(1, 12, 1)
     recurrent_state = torch.zeros(1, 2, 2, 2)
@@ -143,7 +152,7 @@ def test_xpu_kda_adapter_dispatches_native_op(monkeypatch) -> None:
     assert args[16] is metadata.has_initial_state
     assert args[17] is metadata.non_spec_query_start_loc
     assert args[19] is metadata.non_spec_state_indices_tensor
-    assert args[24:] == (2, -5.0)
+    assert args[24:] == (2, gate_lower_bound)
     torch.testing.assert_close(output, torch.full_like(output, 5))
 
 
@@ -176,6 +185,50 @@ def test_xpu_decoder_layer_selects_full_rank_kda(monkeypatch) -> None:
             "kda_layers": [1],
             "full_attn_layers": [],
             "use_full_rank_gate": True,
+        },
+    )
+    vllm_config = SimpleNamespace(quant_config=None)
+
+    layer = kimi_xpu.KimiDecoderLayer(
+        config,
+        vllm_config,  # type: ignore[arg-type]
+        prefix="model.layers.0",
+    )
+
+    assert isinstance(layer.self_attn, _FakeKDA)
+    assert layer.self_attn.prefix == "model.layers.0.self_attn"
+
+
+def test_xpu_decoder_layer_selects_low_rank_kimi_linear_kda(monkeypatch) -> None:
+    class _FakeLayer(nn.Module):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__()
+
+    class _FakeKDA(nn.Module):
+        def __init__(
+            self,
+            config: KimiLinearConfig,
+            vllm_config: object,
+            prefix: str,
+        ) -> None:
+            super().__init__()
+            self.config = config
+            self.vllm_config = vllm_config
+            self.prefix = prefix
+
+    monkeypatch.setattr(kimi_xpu, "KimiK3DeltaAttention", _FakeLayer)
+    monkeypatch.setattr(kimi_xpu, "KimiLinearDeltaAttention", _FakeKDA)
+    monkeypatch.setattr(kimi_xpu, "KimiMLP", _FakeLayer)
+    monkeypatch.setattr(kimi_xpu, "RMSNorm", _FakeLayer)
+    config = KimiLinearConfig(
+        hidden_size=4,
+        intermediate_size=8,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        linear_attn_config={
+            "kda_layers": [1],
+            "full_attn_layers": [],
+            "use_full_rank_gate": False,
         },
     )
     vllm_config = SimpleNamespace(quant_config=None)
