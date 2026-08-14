@@ -659,7 +659,9 @@ def test_decode_num_splits_gfx950(monkeypatch) -> None:
         assert mod._decode_gfx950_num_splits(num_queries, 1, 128, 32) == 32
         assert mod._decode_gfx950_num_splits(num_queries, 1, 128, 7812) == 32
 
-    assert mod._decode_gfx950_num_splits(17, 1, 128, 32) == 31
+    assert mod._decode_gfx950_num_splits(17, 1, 128, 32) == 4
+    assert mod._decode_gfx950_num_splits(16, 1, 128, 781) == 13
+    assert mod._decode_gfx950_num_splits(48, 1, 128, 3906) == 10
     for extra_rows in (32, 256):
         assert mod._decode_gfx950_num_splits(64, 1, 128, extra_rows) == 4
     assert mod._decode_gfx950_num_splits(64, 1, 128, 781) == 7

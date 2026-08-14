@@ -2637,12 +2637,19 @@ def _decode_gfx950_num_splits(
         ),
     )
     if (
-        base >= 64
+        base >= 16
         and num_splits > 4
         and _decode_partial_iters(avg_main_len, avg_extra_len, 4, block_k) <= 3
     ):
         return 4
-    if base >= 64 and num_splits > 1:
+    if 16 <= base < 64:
+        one_wave_splits = max(1, cu // base)
+        one_wave_iters = _decode_partial_iters(
+            avg_main_len, avg_extra_len, one_wave_splits, block_k
+        )
+        target_waves = 1 if one_wave_iters <= 9 else 2
+        num_splits = min(num_splits, max(1, target_waves * cu // base))
+    if base >= 16 and num_splits > 1:
         target_waves = (base * num_splits + cu - 1) // cu
         target_iters = _decode_partial_iters(
             avg_main_len, avg_extra_len, num_splits, block_k
