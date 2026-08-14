@@ -630,8 +630,7 @@ class SpeculativeConfig:
             hf_config.model_type = "inkling_mtp"
             hf_config.update(
                 {
-                    # Inkling currently exposes only the first checkpoint depth.
-                    "n_predict": 1,
+                    "n_predict": checkpoint_depths,
                     "num_nextn_predict_layers": checkpoint_depths,
                     "chain_hidden_post_norm": mtp_config.get(
                         "chain_hidden_post_norm", False
@@ -1087,43 +1086,11 @@ class SpeculativeConfig:
                         "`num_speculative_tokens` was not provided"
                     )
 
-                if (
-                    self.draft_model_config.hf_config.model_type == "inkling_mtp"
-                    and self.num_speculative_tokens != 1
-                ):
-                    raise ValueError(
-                        "Inkling MTP currently supports exactly one speculative token"
-                    )
-
                 if self.dspark_draft_topk is not None and self.method != "dspark":
                     raise ValueError("dspark_draft_topk is only supported by DSpark")
 
                 dspark_draft_topk = None
                 if self.method == "dspark":
-                    # DSpark is a semi-autoregressive *block* drafter. A
-                    # speculative length smaller than the checkpoint's block
-                    # feeds the block / Markov-head machinery an unsupported
-                    # layout and yields incorrect (garbled) output rather than
-                    # merely lower acceptance. Require num_speculative_tokens to
-                    # be at least the block size (e.g. 5 or 7 for DeepSeek-V4).
-                    dspark_block_size = getattr(
-                        self.draft_model_config.hf_config,
-                        "dspark_block_size",
-                        None,
-                    )
-                    if (
-                        dspark_block_size is not None
-                        and self.num_speculative_tokens < dspark_block_size
-                    ):
-                        raise ValueError(
-                            "DSpark requires num_speculative_tokens >= "
-                            f"dspark_block_size ({dspark_block_size}); got "
-                            f"{self.num_speculative_tokens}. Smaller values "
-                            "produce incorrect output. Use "
-                            f"num_speculative_tokens={dspark_block_size} or "
-                            "larger (e.g. 7)."
-                        )
-
                     hf_config = self.draft_model_config.hf_config
                     dspark_draft_topk = self.dspark_draft_topk
                     if dspark_draft_topk is None:
