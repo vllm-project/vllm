@@ -94,6 +94,9 @@ message StoppingCriteria {
   bool include_stop_strings = 5;
 
   bool ignore_eos = 6;
+
+  // Defaults to true when omitted.
+  optional bool skip_special_tokens = 7;
 }
 
 message ResponseOptions {

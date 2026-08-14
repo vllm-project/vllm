@@ -158,7 +158,9 @@ pub fn to_text_request(
     }
 
     let decode_options = TextDecodeOptions {
-        skip_special_tokens: true,
+        skip_special_tokens: stopping
+            .and_then(|criteria| criteria.skip_special_tokens)
+            .unwrap_or(true),
         include_stop_str_in_output: stopping.is_some_and(|s| s.include_stop_strings),
         stop_strings: stopping.map(|s| &s.stop_strings).filter(|ss| !ss.is_empty()).cloned(),
         min_tokens: stopping.map_or(0, |s| s.min_new_tokens),
@@ -660,6 +662,33 @@ mod tests {
         assert_eq!(text.sampling_params.skip_reading_prefix_cache, None);
         // Prompt conversion still succeeds and reaches the expected variant.
         assert!(matches!(text.prompt, Prompt::Text(s) if s == "hi"));
+    }
+
+    #[test]
+    fn absent_skip_special_tokens_defaults_to_true() {
+        let req = pb::GenerateRequest {
+            stopping: Some(pb::StoppingCriteria::default()),
+            ..base_request()
+        };
+
+        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+
+        assert!(text.decode_options.skip_special_tokens);
+    }
+
+    #[test]
+    fn explicit_false_skip_special_tokens_is_preserved() {
+        let req = pb::GenerateRequest {
+            stopping: Some(pb::StoppingCriteria {
+                skip_special_tokens: Some(false),
+                ..Default::default()
+            }),
+            ..base_request()
+        };
+
+        let text = to_text_request(req, false, &["test-model".to_string()]).expect("convert ok");
+
+        assert!(!text.decode_options.skip_special_tokens);
     }
 
     fn finished(reason: FinishReason) -> Finished {
