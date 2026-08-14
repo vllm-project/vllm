@@ -30,5 +30,5 @@ steps:
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
     pytest -v -s basic_correctness/test_mem.py || true &&
-    pytest -v -s basic_correctness/test_basic_correctness.py --deselect="tests/basic_correctness/test_basic_correctness.py::test_models[False-uni-True-False-5-FLASH_ATTN-meta-llama/Llama-3.2-1B-Instruct]" || true &&
+    pytest -v -s basic_correctness/test_basic_correctness.py || true &&
     pytest -v -s basic_correctness/test_cpu_offload.py || true'
