@@ -33,7 +33,7 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    FusedMoEFactory,
     GateLinear,
     activation_without_mul,
     fused_moe_make_expert_params_mapping,
@@ -69,6 +69,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsMambaPrefixCaching,
     SupportsPP,
     SupportsQuant,
+    SupportsReplaySSM,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -135,7 +136,6 @@ class NemotronHMoE(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
         self.ep_size = self.ep_group.size()
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
@@ -164,11 +164,6 @@ class NemotronHMoE(nn.Module):
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
 
         if config.n_shared_experts is None or config.n_shared_experts == 0:
             self.shared_experts = None
@@ -208,7 +203,7 @@ class NemotronHMoE(nn.Module):
             self.fc1_latent_proj = None
             self.fc2_latent_proj = None
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
@@ -707,6 +702,7 @@ class NemotronHForCausalLM(
     SupportsQuant,
     MixtureOfExperts,
     SupportsMambaPrefixCaching,
+    SupportsReplaySSM,
 ):
     # Relevant only if self.has_moe is True
     is_non_gated_moe: bool = True
@@ -742,18 +738,24 @@ class NemotronHForCausalLM(
     def get_mamba_state_dtype_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[torch.dtype, torch.dtype]:
-        return MambaStateDtypeCalculator.mamba2_state_dtype(
+    ) -> tuple[torch.dtype, ...]:
+        cache_config = vllm_config.cache_config
+        base_dtype = MambaStateDtypeCalculator.mamba2_state_dtype(
             vllm_config.model_config.dtype,
-            vllm_config.cache_config.mamba_cache_dtype,
-            vllm_config.cache_config.mamba_ssm_cache_dtype,
+            cache_config.mamba_cache_dtype,
+            cache_config.mamba_ssm_cache_dtype,
         )
+        if cache_config.use_replayssm:
+            return MambaStateDtypeCalculator.append_replayssm_ring(
+                base_dtype, vllm_config.model_config.dtype
+            )
+        return base_dtype
 
     @classmethod
     def get_mamba_state_shape_from_config(
         cls,
         vllm_config: "VllmConfig",
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> tuple[tuple[int, ...], ...]:
         """Calculate shapes for Mamba's convolutional and state caches.
 
         Args:
@@ -763,12 +765,14 @@ class NemotronHForCausalLM(
             Tuple containing:
             - conv_state_shape: Shape for convolutional state cache
             - temporal_state_shape: Shape for state space model cache
+            - x_cache/dt_cache/B_cache ring-buffer shapes (use_replayssm only)
         """
         parallel_config = vllm_config.parallel_config
+        cache_config = vllm_config.cache_config
         hf_config = vllm_config.model_config.hf_config
         intermediate_size = hf_config.mamba_num_heads * hf_config.mamba_head_dim
 
-        return MambaStateShapeCalculator.mamba2_state_shape(
+        base_shape = MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=intermediate_size,
             tp_world_size=parallel_config.tensor_parallel_size,
             n_groups=hf_config.n_groups,
@@ -778,6 +782,14 @@ class NemotronHForCausalLM(
             conv_kernel=hf_config.conv_kernel,
             num_spec=vllm_config.num_speculative_tokens,
         )
+        if cache_config.use_replayssm:
+            return MambaStateShapeCalculator.append_replayssm_ring(
+                base_shape,
+                hf_config.n_groups,
+                parallel_config.tensor_parallel_size,
+                cache_config.replayssm_buffer_len,
+            )
+        return base_shape
 
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
