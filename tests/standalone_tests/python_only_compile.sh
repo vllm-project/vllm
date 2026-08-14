@@ -6,7 +6,15 @@ set -e
 
 merge_base_commit=""
 rocm_wheel=""
-if [[ -n "${ROCM_PATH:-}" || -d /opt/rocm ]]; then
+is_rocm=0
+_vllm_target_lower="$(printf '%s' "${VLLM_TARGET_DEVICE:-}" | tr '[:upper:]' '[:lower:]')"
+if [[ "${_vllm_target_lower}" == "rocm" || -n "${ROCM_PATH:-}" || -d /opt/rocm ]] \
+        || command -v rocminfo >/dev/null 2>&1; then
+    is_rocm=1
+fi
+unset -v _vllm_target_lower
+
+if [[ "${is_rocm}" == "1" ]]; then
     # Native CI passes the verified wheel artifact explicitly. Legacy ROCm
     # images carry the same-build wheel in /opt/vllm-wheels.
     if [[ -n "${VLLM_PRECOMPILED_WHEEL_LOCATION:-}" ]]; then
@@ -15,7 +23,7 @@ if [[ -n "${ROCM_PATH:-}" || -d /opt/rocm ]]; then
             echo "ERROR: invalid ROCm wheel location: ${rocm_wheel}" >&2
             exit 1
         fi
-    else
+    elif [[ -d /opt/vllm-wheels ]]; then
         shopt -s nullglob
         rocm_wheels=(/opt/vllm-wheels/vllm-*.whl)
         shopt -u nullglob
@@ -25,7 +33,10 @@ if [[ -n "${ROCM_PATH:-}" || -d /opt/rocm ]]; then
         fi
         rocm_wheel="${rocm_wheels[0]}"
     fi
-    echo "INFO: using same-build ROCm wheel: $rocm_wheel"
+fi
+
+if [[ -n "${rocm_wheel}" ]]; then
+    echo "INFO: using same-build ROCm wheel: ${rocm_wheel}"
 else
     # Some CI images do not include .git under /vllm-workspace. Their wrapper
     # passes CI_STANDALONE_MERGE_BASE from the agent checkout.
@@ -47,9 +58,66 @@ else
         echo "INFO: git show unavailable in this environment; using SHA above for precompiled metadata."
     fi
 
-    # Avoid manual retries while a new main-branch wheel is still publishing.
-    meta_json_url="https://wheels.vllm.ai/$merge_base_commit/vllm/metadata.json"
-    echo "INFO: will use metadata.json from $meta_json_url"
+    # Test whether the metadata.json URL is valid, retry each 5 minutes up to 5 times.
+    # This avoids manual retries while a new main-branch wheel is still publishing.
+    if [[ "${is_rocm}" == "1" ]]; then
+        _rocm_env_variant="$(python3 - <<'PY'
+import ctypes
+import os
+from pathlib import Path
+
+
+def get_rocm_version() -> str | None:
+    rocm_home = os.environ.get("ROCM_HOME") or os.environ.get("ROCM_PATH") or "/opt/rocm"
+    try:
+        librocm_core = Path(rocm_home) / "lib" / "librocm-core.so"
+        if not librocm_core.is_file():
+            return None
+        librocm = ctypes.CDLL(str(librocm_core))
+        get_rocm_core_version = librocm.getROCmVersion
+        major = ctypes.c_uint32()
+        minor = ctypes.c_uint32()
+        patch = ctypes.c_uint32()
+        if get_rocm_core_version(
+            ctypes.byref(major), ctypes.byref(minor), ctypes.byref(patch)
+        ) == 0:
+            return f"{major.value}.{minor.value}.{patch.value}"
+    except Exception:
+        return None
+    return None
+
+
+version = get_rocm_version()
+if version:
+    print(f"rocm{version.replace('.', '')}", end="")
+PY
+)"
+        _available_variants="$(curl -sf "https://wheels.vllm.ai/rocm/${merge_base_commit}/" \
+            | grep -oP 'rocm\d+' | sort -u | tr '\n' ' ' || true)"
+        if [[ -n "${VLLM_PRECOMPILED_WHEEL_VARIANT:-}" ]]; then
+            _rocm_variant="${VLLM_PRECOMPILED_WHEEL_VARIANT}"
+            if [[ -n "${_rocm_env_variant}" && "${_rocm_variant}" != "${_rocm_env_variant}" ]]; then
+                echo "ERROR: VLLM_PRECOMPILED_WHEEL_VARIANT=${_rocm_variant} does not match detected environment ROCm variant ${_rocm_env_variant}" >&2
+                exit 1
+            fi
+        else
+            _rocm_variant="${_rocm_env_variant}"
+        fi
+        if [[ -z "${_rocm_variant}" ]]; then
+            echo "ERROR: Could not detect ROCm variant from the environment for commit ${merge_base_commit}" >&2
+            exit 1
+        fi
+        if [[ -z "${_available_variants}" ]] \
+                || [[ " ${_available_variants} " != *" ${_rocm_variant} "* ]]; then
+            echo "ERROR: Environment ROCm variant '${_rocm_variant}' is not published for commit ${merge_base_commit} (available:${_available_variants:-none})" >&2
+            exit 1
+        fi
+        meta_json_url="https://wheels.vllm.ai/rocm/${merge_base_commit}/${_rocm_variant}/vllm/metadata.json"
+        unset -v _rocm_env_variant _available_variants _rocm_variant
+    else
+        meta_json_url="https://wheels.vllm.ai/${merge_base_commit}/vllm/metadata.json"
+    fi
+    echo "INFO: will use metadata.json from ${meta_json_url}"
 
     for i in {1..5}; do
         echo "Checking metadata.json URL (attempt $i)..."
@@ -58,7 +126,9 @@ else
             # check whether it is valid json by python (printed to stdout)
             if python3 -m json.tool metadata.json; then
                 echo "INFO: metadata.json is valid JSON. Proceeding with the check."
-                # check whether it is for vllm and the current architecture
+                # check whether there is an object in the json matching:
+                # "package_name": "vllm", and "platform_tag" matches the current architecture
+                # see `determine_wheel_url` in setup.py for more details
                 if python3 -c "import platform as p,json as j,sys as s; d = j.load(open('metadata.json')); \
                  s.exit(int(not any(o.get('package_name') == 'vllm' and p.machine() in o.get('platform_tag') \
                  for o in d)))" 2>/dev/null; then
@@ -109,9 +179,11 @@ apt autoremove -y
 rm -f /tmp/changed.file
 echo 'import os; os.system("touch /tmp/changed.file")' >> vllm/__init__.py
 
-# ROCm CI uses setuptools develop for editable installs (see Dockerfile.rocm).
-if [[ -n "$rocm_wheel" ]]; then
-    VLLM_PRECOMPILED_WHEEL_LOCATION="$rocm_wheel" VLLM_USE_PRECOMPILED=1 python3 setup.py develop
+# ROCm CI uses setuptools develop for editable installs (see Dockerfile.rocm and run-amd-test.sh).
+if [[ -n "${rocm_wheel}" ]]; then
+    VLLM_PRECOMPILED_WHEEL_LOCATION="${rocm_wheel}" VLLM_USE_PRECOMPILED=1 python3 setup.py develop
+elif [[ "${is_rocm}" == "1" ]]; then
+    VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 python3 setup.py develop
 else
     VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e .
 fi

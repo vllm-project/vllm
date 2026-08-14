@@ -13,13 +13,13 @@ from vllm import envs
 from vllm.logger import init_logger
 
 from ..video import VIDEO_LOADER_REGISTRY
-from .base import MediaIO
+from .base import MediaIO, MediaWithBytes
 from .image import ImageMediaIO
 
 logger = init_logger(__name__)
 
 
-class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
+class VideoMediaIO(MediaIO[MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]]):
     """Configuration values can be user-provided either by --media-io-kwargs or
     by the runtime API field "media_io_kwargs". Ensure proper validation and
     error handling.
@@ -35,6 +35,7 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
             # Decoder GPU memory is reserved from the startup value.
             runtime_kwargs = dict(runtime_kwargs)
             runtime_kwargs.pop("hw_decoders", None)
+            runtime_kwargs.pop("pool_size", None)
 
             # Block request-level selection of GPU video backends that
             # were not configured (and VRAM-reserved) at startup.
@@ -91,14 +92,17 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         self.kwargs = kwargs
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 
-    def load_bytes(self, data: bytes) -> tuple[npt.NDArray, dict[str, Any]]:
-        return self.video_loader.load_bytes(
+    def load_bytes(
+        self, data: bytes
+    ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
+        video = self.video_loader.load_bytes(
             data, num_frames=self.num_frames, **self.kwargs
         )
+        return MediaWithBytes(video, data)
 
     def load_base64(
         self, media_type: str, data: str
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
+    ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         if media_type.lower() == "video/jpeg":
             load_frame = partial(
                 self.image_io.load_base64,
@@ -160,11 +164,13 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
                 "frames_indices": frames_indices,
                 "do_sample_frames": self.kwargs.get("do_sample_frames", False),
             }
-            return frames, metadata
+            return MediaWithBytes((frames, metadata), data.encode())
 
         return self.load_bytes(pybase64.b64decode(data))
 
-    def load_file(self, filepath: Path) -> tuple[npt.NDArray, dict[str, Any]]:
+    def load_file(
+        self, filepath: Path
+    ) -> MediaWithBytes[tuple[npt.NDArray, dict[str, Any]]]:
         with filepath.open("rb") as f:
             data = f.read()
 

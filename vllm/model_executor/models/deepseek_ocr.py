@@ -49,6 +49,7 @@ from vllm.multimodal.processing import (
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.tokenizers.hf import HfTokenizer
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
@@ -65,6 +66,7 @@ from vllm.v1.sample.logits_processor import (
 from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphCaptureInputs,
     EncoderCudaGraphConfig,
+    EncoderCudaGraphPathConfig,
     EncoderCudaGraphReplayBuffers,
     EncoderItemSpec,
 )
@@ -183,6 +185,7 @@ class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
         )
         if ngram_size is None:
             return None
+        assert isinstance(ngram_size, int) and isinstance(window_size, int)
 
         whitelist_token_ids = set(whitelist_token_ids) if whitelist_token_ids else None
         return NoRepeatNGramLogitsProcessor(
@@ -300,6 +303,7 @@ class DeepseekOCRMultiModalProcessor(
 
         else:
             tokenizer = self.info.get_tokenizer()
+            assert isinstance(tokenizer, HfTokenizer)
             processed_outputs = tokenizer(
                 prompt, add_special_tokens=True, return_tensors="pt"
             )
@@ -341,6 +345,7 @@ class DeepseekOCRMultiModalProcessor(
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 size = images.get_image_size(item_idx)
 
                 num_image_tokens = self.info.get_num_image_tokens(
@@ -458,7 +463,11 @@ class DeepseekOCRForCausalLM(
         images_spatial_crop = kwargs.pop("images_spatial_crop", None)
         images_crop = kwargs.pop("images_crop", None)
 
-        if pixel_values is None or torch.sum(pixel_values).item() == 0:
+        if pixel_values is None:
+            return None
+        assert isinstance(pixel_values, torch.Tensor)
+        assert images_crop is None or isinstance(images_crop, torch.Tensor)
+        if torch.sum(pixel_values).item() == 0:
             return None
 
         # Use actual tensor spatial dim instead of hardcoded
@@ -674,7 +683,8 @@ class DeepseekOCRForCausalLM(
         num_input_tokens = global_input_side**2
 
         if is_tiled:
-            num_patches = image_spatial_crop.prod(dim=-1)
+            assert image_spatial_crop is not None
+            num_patches = int(image_spatial_crop.prod().item())
             num_input_tokens += num_patches * (local_input_side**2)
 
         global_output_token = self.global_image_output_token
@@ -697,9 +707,15 @@ class DeepseekOCRForCausalLM(
             modalities=["image"],
             buffer_keys=["pixel_values"],
             out_hidden_size=self.projector_config.n_embed,
-            enable_dual_path_graph=True,
-            global_token_per_image=self.global_image_output_token,
-            local_token_per_patch=self.single_patch_output_token,
+            paths={
+                "global": EncoderCudaGraphPathConfig(
+                    min_token_budget=self.global_image_output_token
+                ),
+                "local": EncoderCudaGraphPathConfig(
+                    min_token_budget=self.single_patch_output_token,
+                    allow_zero_tokens=True,
+                ),
+            },
         )
 
     def get_encoder_cudagraph_budget_range(
@@ -730,8 +746,10 @@ class DeepseekOCRForCausalLM(
                 EncoderItemSpec(
                     input_size=num_input_tokens,
                     output_tokens=num_output_tokens,
-                    global_output_tokens=global_output_token,
-                    local_output_tokens=local_output_token,
+                    path_output_tokens={
+                        "global": global_output_token,
+                        "local": local_output_token,
+                    },
                 )
             )
         return item_specs
@@ -917,32 +935,34 @@ class DeepseekOCRForCausalLM(
 
     def postprocess_encoder_output(
         self,
-        output: torch.Tensor,
+        outputs: dict[str, torch.Tensor],
         indices: list[int],
         per_item_out_tokens: list[int],
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
-        local_output: torch.Tensor | None = None,
     ) -> None:
         """
         Assemble per-image embeddings from global and local encoder outputs.
 
-        ``output`` contains global-image features with newlines already
+        ``output['global']`` contains global-image features with newlines already
         inserted (from CUDA graph replay or eager fallback):
         ``[B * 272, n_embed]``.
 
-        ``local_output`` contains local-patch features without
+        ``output['local']`` contains local-patch features without
         newlines (from CUDA graph replay or eager fallback):
         ``[P * 100, n_embed]``. May be ``None`` if no patches in batch.
 
         This method:
-        1. Splits ``output`` into per-image global portions.
-        2. Splits ``local_output`` into per-image patch groups.
+        1. Splits ``output['global']`` into per-image global portions.
+        2. Splits ``output['local']`` into per-image patch groups.
         3. For each image: assembles patch grid with newlines via
            ``_assemble_patch_grid``, then concatenates
            ``[local_tiled, global, view_seperator]``.
         """
+        output = outputs["global"]
+        local_output = outputs.get("local")
+        assert batch_mm_kwargs is not None
         bsz = len(indices)
         n_embed = output.shape[-1]
 

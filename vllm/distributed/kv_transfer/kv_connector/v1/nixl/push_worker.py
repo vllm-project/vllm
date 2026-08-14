@@ -39,7 +39,6 @@ from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
 
 import msgspec
-import numpy as np
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
@@ -53,7 +52,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     ReqMeta,
     TransferHandle,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import ReadSpec
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+    ReadSpec,
+    _is_attention_spec,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import get_base_request_id
 from vllm.logger import init_logger
 
@@ -74,6 +76,9 @@ _PUSH_WRITER_POLL_INTERVAL_MS = 1.0
 
 class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     """Push-specific (WRITE) worker logic. See module docstring."""
+
+    # Distinguishes push from pull in the NIXL compatibility hash.
+    _TRANSFER_MODE: str = "push"
 
     def __init__(
         self,
@@ -189,8 +194,15 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         for req_id in metadata.reqs_not_processed:
             self._reqs_to_process.discard(req_id)
             assert req_id not in self._reqs_to_send
+        # Rebase scheduler-clock deadlines onto this worker's clock — see the
+        # equivalent block in pull_worker.start_load_kv for the rationale.
+        now_local = time.perf_counter()
         for req_id, expiration_time in metadata.reqs_to_send.items():
             if req_id in self._reqs_to_process:
+                if metadata.scheduler_clock:
+                    expiration_time = now_local + (
+                        expiration_time - metadata.scheduler_clock
+                    )
                 self._reqs_to_send[req_id] = expiration_time
 
         # Heartbeats still leave from the main thread (base worker behaviour).
@@ -299,8 +311,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             reg_data["remote_port"],
             reg_data["remote_tp_size"],
             pp_size=remote_pp_size,
-            # D never addresses P memory in push mode; just load P's agents.
-            notif_agents_only=remote_pp_size > 1,
+            # D only ever sends PUSH_REG notifs to P and never reads or writes
+            # P's memory in push mode, so it never needs the transfer
+            # descriptors set up by the full add_remote_agent path.
+            notif_agents_only=True,
         )
         if fut is None:
             self._do_send_reg_notif(req_id, reg_data)
@@ -439,11 +453,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
             fut.add_done_callback(_on_handshake)
             return
+        # Keep the engine alive while it is actively receiving pushes, mirroring
+        # how pull-mode transfers touch _engine_last_active in start_load_kv.
+        self._engine_last_active[decode_engine_id] = time.perf_counter()
 
-        # Both sides stay logical here; ``_xfer_blocks_for_req`` converts each
-        # to physical with its own physical-blocks-per-logical ratio -- P uses
-        # ``self._physical_blocks_per_logical_kv_block``, D's is learned during
-        # the NIXL handshake.
         logical_local = self._as_grouped_block_ids(local_block_ids)
         logical_remote = self._as_grouped_block_ids(remote_block_ids)
         physical_local = self._logical_to_kernel_block_ids(
@@ -504,40 +517,36 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         local_block_ids = meta.local_physical_block_ids
         num_groups = len(local_block_ids)
 
-        if self.use_mla and tp_ratio < 0:
-            # MLA latent is replicated across D's TP ranks: the tp-mapping
-            # collapses to one rank (fine for reads), but push must WRITE every
-            # D rank or the rest decode stale KV; only the dst differs per rank.
+        # MLA latent is replicated across D's TP ranks: the tp-mapping
+        # collapses it to one rank (fine for reads), but push must WRITE every
+        # D rank or the rest decode stale KV. For hybrid MLA+SSM the sharded
+        # SSM state already targets every covered D rank, so only the
+        # attention groups need widening; pure MLA writes to all handshaked
+        # ranks (only the dst differs per rank).
+        replicate_attn = self.use_mla and tp_ratio < 0
+        if replicate_attn and not self._has_mamba:
             assert len(plan.all_source_ranks) == 1
-            mla_local_ids = [list(ids) for ids in local_block_ids]
-            mla_remote_ids = [list(ids) for ids in remote_block_ids]
-            read_specs = [
-                ReadSpec(
-                    remote_rank=rank,
-                    local_block_ids=mla_local_ids,
-                    remote_block_ids=mla_remote_ids,
-                )
-                for rank in self.dst_xfer_side_handles[engine_id]
-            ]
+            write_ranks = sorted(self.dst_xfer_side_handles[engine_id])
         else:
-            read_specs = [
-                ReadSpec(
-                    remote_rank=rank,
-                    local_block_ids=[
-                        list(local_block_ids[g])
-                        if rank in plan.source_ranks_per_group[g]
-                        else []
-                        for g in range(num_groups)
-                    ],
-                    remote_block_ids=[
-                        list(remote_block_ids[g])
-                        if rank in plan.source_ranks_per_group[g]
-                        else []
-                        for g in range(num_groups)
-                    ],
-                )
-                for rank in plan.all_source_ranks
+            write_ranks = list(plan.all_source_ranks)
+
+        def group_ids(block_ids: BlockIds, rank: int) -> BlockIds:
+            return [
+                list(block_ids[g])
+                if (replicate_attn and _is_attention_spec(self._group_spec_types[g]))
+                or rank in plan.source_ranks_per_group[g]
+                else []
+                for g in range(num_groups)
             ]
+
+        read_specs = [
+            ReadSpec(
+                remote_rank=rank,
+                local_block_ids=group_ids(local_block_ids, rank),
+                remote_block_ids=group_ids(remote_block_ids, rank),
+            )
+            for rank in write_ranks
+        ]
 
         handles: list[int] = []
         for i, spec in enumerate(read_specs):
@@ -550,9 +559,12 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 remote_block_size,
                 req_id,
             )
-            if tp_ratio < 0 and not self.use_mla:
-                assert remote_block_size == self.block_size
-                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[tp_ratio][i]
+            if tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1):
+                # Multiple targets: write each rank its chunk of local memory.
+                # Hybrid MLA+SSM also lands here: its split handles replicate
+                # the attention descriptors and chunk only the SSM state.
+                split_key = (tp_ratio, remote_block_size)
+                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[split_key][i]
             else:
                 local_xfer_side_handle = self.src_xfer_handles_by_block_size[
                     remote_block_size
@@ -604,18 +616,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             remote_info.remote_block_size
         )
         if block_size_ratio > 1:
-            assert not self._is_hma_required
-            local_block_ids0 = local_block_ids[0] if local_block_ids else []
-            remote_block_ids0 = remote_block_ids[0]
-            local_block_ids_mapped = self.get_mapped_blocks(
-                np.asarray(local_block_ids0), block_size_ratio
-            ).tolist()
-            if len(local_block_ids_mapped) > len(remote_block_ids0):
-                local_block_ids_mapped = local_block_ids_mapped[
-                    : len(remote_block_ids0)
-                ]
-            local_block_ids = [local_block_ids_mapped] if local_block_ids_mapped else []
-            remote_block_ids = [remote_block_ids0]
+            local_block_ids, remote_block_ids = (
+                self._map_block_ids_for_block_size_ratio(
+                    local_block_ids, remote_block_ids, block_size_ratio
+                )
+            )
 
         notif_id = f"{remote_request_id}:{self.world_size}".encode()
 
@@ -623,16 +628,28 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             logger.warning("No blocks to push for request %s", request_id)
             return None
 
-        # Align per-group block counts for push.
+        # Prefix caching: D allocated only uncached blocks, so on a partial hit it
+        # sends fewer than P's. End-trim P's blocks to that same suffix so we WRITE only
+        # the uncomputed tail into D's slots. Runs on kernel ids, post-expansion.
+        remote_block_ids, local_block_ids = self._apply_prefix_caching(
+            decode_block_ids=remote_block_ids,
+            prefill_block_ids=local_block_ids,
+            decode_physical_per_logical=remote_info.remote_physical_blocks_per_logical,
+            prefill_physical_per_logical=self._physical_blocks_per_logical_kv_block,
+        )
+
         local_block_ids = list(local_block_ids)
         remote_block_ids = list(remote_block_ids)
-        for i in range(min(len(local_block_ids), len(remote_block_ids))):
-            num_local = len(local_block_ids[i])
-            num_remote = len(remote_block_ids[i])
-            if num_local > num_remote:
-                local_block_ids[i] = local_block_ids[i][:num_remote]
-            elif num_local < num_remote:
-                remote_block_ids[i] = remote_block_ids[i][:num_local]
+        assert len(local_block_ids) == len(remote_block_ids), (
+            f"push group-count mismatch for {request_id}: {len(local_block_ids)} "
+            f"local vs {len(remote_block_ids)} remote groups"
+        )
+        for i in range(len(local_block_ids)):
+            assert len(local_block_ids[i]) == len(remote_block_ids[i]), (
+                f"push block-count mismatch for {request_id} group {i}: "
+                f"{len(local_block_ids[i])} local vs "
+                f"{len(remote_block_ids[i])} remote blocks"
+            )
 
         # Get descs ids.
         remote_block_descs_ids = self._compute_desc_ids(
