@@ -1,11 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import sys
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
-from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    Mxfp4MoeBackend,
+    convert_k3_situ_weight_to_kernel_format,
+)
 from vllm.model_executor.layers.quantization.quark import quark_moe
 
 
@@ -30,6 +38,7 @@ def test_k3_situ_a8w4_keeps_tp8_intermediate_size():
     method = object.__new__(quark_moe.QuarkOCP_MX_MoEMethod)
     method.is_k3_situ_aiter_a8w4 = True
     method.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
+    method.moe = MagicMock(activation=MoEActivation.SITU)
 
     with patch.object(
         quark_moe.QuarkMoEMethod,
@@ -45,3 +54,75 @@ def test_k3_situ_a8w4_keeps_tp8_intermediate_size():
 
     assert hidden_size == 3584
     assert intermediate_size == 384
+
+
+@pytest.mark.parametrize("guinterleave", [False, True])
+def test_convert_k3_situ_weight_to_kernel_format(monkeypatch, guinterleave):
+    layer = MagicMock()
+    layer.w13_weight = torch.nn.Parameter(
+        torch.zeros((2, 4, 4), dtype=torch.uint8), requires_grad=False
+    )
+    layer.w2_weight = torch.nn.Parameter(
+        torch.zeros((2, 4, 4), dtype=torch.uint8), requires_grad=False
+    )
+    layer.w13_weight_scale = torch.nn.Parameter(
+        torch.zeros((2, 4, 2), dtype=torch.uint8), requires_grad=False
+    )
+    layer.w2_weight_scale = torch.nn.Parameter(
+        torch.zeros((2, 4, 2), dtype=torch.uint8), requires_grad=False
+    )
+
+    shuffled_w13 = torch.empty(1)
+    shuffled_w2 = torch.empty(1)
+    shuffled_w13_scale = torch.empty(1)
+    shuffled_w2_scale = torch.empty(1)
+    e8m0_shuffle = MagicMock(return_value=shuffled_w2_scale)
+    aiter_module = ModuleType("aiter")
+    aiter_utility_module = ModuleType("aiter.utility")
+    fp4_utils_module = ModuleType("aiter.utility.fp4_utils")
+    fp4_utils_module.e8m0_shuffle = e8m0_shuffle
+
+    with (
+        patch.dict(
+            sys.modules,
+            {
+                "aiter": aiter_module,
+                "aiter.utility": aiter_utility_module,
+                "aiter.utility.fp4_utils": fp4_utils_module,
+            },
+        ),
+        patch(
+            "vllm._aiter_ops.rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled",
+            return_value=guinterleave,
+        ),
+        patch(
+            "vllm._aiter_ops.rocm_aiter_ops.shuffle_weight_a16w4",
+            side_effect=[shuffled_w13, shuffled_w2],
+        ) as shuffle_weight,
+        patch(
+            "vllm._aiter_ops.rocm_aiter_ops.shuffle_scale_a16w4",
+            return_value=shuffled_w13_scale,
+        ) as shuffle_scale,
+    ):
+        monkeypatch.delenv("AITER_BF16_FP8_MOE_BOUND", raising=False)
+        converted = convert_k3_situ_weight_to_kernel_format(layer)
+
+    assert all(
+        actual is expected
+        for actual, expected in zip(
+            converted,
+            (
+                shuffled_w13,
+                shuffled_w2,
+                shuffled_w13_scale,
+                shuffled_w2_scale,
+            ),
+        )
+    )
+    assert shuffled_w13.is_shuffled
+    assert shuffled_w2.is_shuffled
+    assert shuffle_weight.call_args_list[0].args[2] is guinterleave
+    assert shuffle_weight.call_args_list[1].args[2] is False
+    assert shuffle_scale.call_args.args[2] is guinterleave
+    e8m0_shuffle.assert_called_once()
+    assert ("AITER_BF16_FP8_MOE_BOUND" in os.environ) is guinterleave

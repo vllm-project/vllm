@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from typing import Any
 
 import torch
@@ -46,6 +45,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     backend_to_kernel_cls,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+    convert_k3_situ_weight_to_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     mxfp4_round_up_hidden_size_and_intermediate_size,
@@ -57,10 +57,7 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
-from vllm.model_executor.layers.quantization.mxfp4 import (
-    _use_k3_situ_aiter,
-    setup_k3_situ_aiter_weights,
-)
+from vllm.model_executor.layers.quantization.mxfp4 import _use_k3_situ_aiter
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
     OCP_MX_Scheme,
@@ -1117,9 +1114,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             # activations to FP8 in AITER's native SiTUv2 A8W4 kernels.
             self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
             self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
-            # Keep all token buckets on A8W4 so layout and compute semantics
-            # cannot silently switch back to A16W4 at low token counts.
-            os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
         elif self.ocp_mx_scheme == "w_mxfp4":
             # W4A16: weight-only MXFP4
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
@@ -1188,14 +1182,13 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         )
         # Round per-partition sizes up to each backend's requirement. Emulation is
         # handled inside the helper too (OCP MX block alignment), so no special-case.
-        if self.is_k3_situ_aiter_a8w4:
-            # K3's TP8 intermediate size is 384. AITER SiTUv2 handles it
-            # natively; generic MXFP4 rounding to 512 wastes memory and can OOM.
-            return hidden_size, intermediate_size_per_partition
         if self.mxfp4_backend is not None:
             hidden_size, intermediate_size_per_partition = (
                 mxfp4_round_up_hidden_size_and_intermediate_size(
-                    self.mxfp4_backend, hidden_size, intermediate_size_per_partition
+                    self.mxfp4_backend,
+                    hidden_size,
+                    intermediate_size_per_partition,
+                    activation=self.moe.activation,
                 )
             )
         return hidden_size, intermediate_size_per_partition
@@ -1323,7 +1316,11 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         self._setup_kernel(layer)
 
     def _setup_kernel_k3_situ(self, layer: RoutedExperts) -> None:
-        setup_k3_situ_aiter_weights(layer)
+        w13, w2, w13_scale, w2_scale = convert_k3_situ_weight_to_kernel_format(layer)
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, "w13_weight_scale", w13_scale)
+        replace_parameter(layer, "w2_weight_scale", w2_scale)
         torch.accelerator.empty_cache()
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
