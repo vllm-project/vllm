@@ -147,13 +147,10 @@ class CacheConfig:
     """ReplaySSM history buffer length B for standard Mamba2 decode. Kimi-K3
     speculative decoding does not use B. Default 16."""
     use_replayssm: bool = False
-    """Use ReplaySSM cached decode. Mamba2 supports standard decode; Kimi-K3
-    KDA supports speculative decode. Requires the Triton Mamba backend. KDA
-    speculative decoding supports mamba_cache_mode 'none' and 'align'; align
-    requires the V2 model runner."""
-    use_replayssm_spec: bool = field(default=False, init=False)
-    """Whether Kimi-K3 KDA uses ReplaySSM speculative decode. Derived from the
-    ReplaySSM and speculative configurations by VllmConfig."""
+    """Use ReplaySSM cached decode. Kimi-K3 speculative decoding uses its
+    RecoverSSM implementation. Requires the Triton Mamba backend."""
+    use_kda_recoverssm: bool = field(default=False, init=False)
+    """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)

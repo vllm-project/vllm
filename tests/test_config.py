@@ -38,11 +38,11 @@ from vllm.v1.attention.backend import AttentionCGSupport
 DEVICE_TYPE = current_platform.device_type
 
 
-def test_replayssm_spec_derivation_is_revalidated():
+def test_kda_recoverssm_derivation_is_revalidated():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
             use_replayssm=True,
-            use_replayssm_spec=False,
+            use_kda_recoverssm=False,
             mamba_cache_mode="none",
         ),
         num_speculative_tokens=3,
@@ -61,7 +61,7 @@ def test_replayssm_spec_derivation_is_revalidated():
 
     VllmConfig.validate_mamba_cached_kernel(config)
     assert config.cache_config.use_replayssm
-    assert config.cache_config.use_replayssm_spec
+    assert config.cache_config.use_kda_recoverssm
 
     config.cache_config.mamba_cache_mode = "align"
     VllmConfig.validate_mamba_cached_kernel(config)

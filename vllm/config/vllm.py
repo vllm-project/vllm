@@ -2511,46 +2511,41 @@ class VllmConfig:
     @model_validator(mode="after")
     def validate_mamba_cached_kernel(self) -> "VllmConfig":
         if not self.cache_config.use_replayssm:
-            self.cache_config.use_replayssm_spec = False
+            self.cache_config.use_kda_recoverssm = False
             return self
-        self.cache_config.use_replayssm_spec = self.num_speculative_tokens > 0
+        self.cache_config.use_kda_recoverssm = self.num_speculative_tokens > 0
 
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
                 "--use-replayssm is not supported for architecture "
                 f"{self.model_config.architecture!r}"
             )
-        if self.cache_config.use_replayssm_spec:
+        if self.cache_config.use_kda_recoverssm:
             if self.model_config is not None and self.model_config.architecture not in (
                 "KimiLinearForCausalLM",
                 "KimiK3ForConditionalGeneration",
             ):
-                raise ValueError(
-                    "ReplaySSM speculative decoding is only supported for Kimi-K3 KDA"
-                )
+                raise ValueError("RecoverSSM is only supported for Kimi-K3 KDA")
             if self.mamba_config.enable_stochastic_rounding:
                 raise ValueError(
-                    "ReplaySSM speculative decoding supports bfloat16/float32 "
+                    "RecoverSSM supports bfloat16/float32 "
                     "SSM state caches, not --enable-mamba-cache-stochastic-"
                     "rounding, which requires an explicit float16 cache"
                 )
             if self.cache_config.mamba_cache_mode not in ("none", "align"):
                 raise ValueError(
-                    "ReplaySSM speculative decoding supports only none and align "
-                    "Mamba cache modes"
+                    "RecoverSSM supports only none and align Mamba cache modes"
                 )
             if (
                 self.cache_config.mamba_cache_mode == "align"
                 and not self.use_v2_model_runner
             ):
                 raise ValueError(
-                    "ReplaySSM speculative decoding with align mode requires "
-                    "VLLM_USE_V2_MODEL_RUNNER=1"
+                    "RecoverSSM with align mode requires VLLM_USE_V2_MODEL_RUNNER=1"
                 )
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError(
-                    "ReplaySSM speculative decoding currently requires "
-                    "pipeline_parallel_size=1"
+                    "RecoverSSM currently requires pipeline_parallel_size=1"
                 )
         elif self.cache_config.mamba_cache_mode == "all":
             raise ValueError(

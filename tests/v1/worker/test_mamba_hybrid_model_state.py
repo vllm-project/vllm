@@ -9,8 +9,8 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mamba_attn import (
-    ReplaySSMAlignCommitMetadata,
-    ReplaySSMSpecMetadata,
+    RecoverSSMAlignCommitMetadata,
+    RecoverSSMMetadata,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
@@ -24,9 +24,9 @@ def test_postprocess_state_scalar_with_int32_mapping(
     state.num_accepted_tokens_gpu = torch.full(
         (4,), 9, dtype=torch.int32, device="cuda"
     )
-    state.cache_config = SimpleNamespace(use_replayssm_spec=False)
+    state.cache_config = SimpleNamespace(use_kda_recoverssm=False)
     state._align_mode = False
-    state._replayssm_align = False
+    state._recoverssm_align = False
     state._mamba_ctx = None
     idx_mapping = torch.tensor([2, -1, 0], dtype=torch.int32, device="cuda")
 
@@ -38,40 +38,40 @@ def test_postprocess_state_scalar_with_int32_mapping(
     torch.testing.assert_close(state.num_accepted_tokens_gpu, expected)
 
 
-def test_replayssm_commits_accepted_window_after_v2_sampling() -> None:
+def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
     state = object.__new__(MambaHybridModelState)
-    state.cache_config = SimpleNamespace(use_replayssm_spec=True)
-    metadata = Mock(spec=ReplaySSMSpecMetadata)
-    metadata.get_replayssm_align_commit_metadata.return_value = None
+    state.cache_config = SimpleNamespace(use_kda_recoverssm=True)
+    metadata = Mock(spec=RecoverSSMMetadata)
+    metadata.get_recoverssm_align_commit_metadata.return_value = None
     num_sampled = torch.tensor([3, 1], dtype=torch.int32)
 
     idx_mapping = torch.tensor([0, 1], dtype=torch.int32)
-    state._replayssm_align = False
-    state._replayssm_step = (metadata,)
-    state._commit_replayssm_state(num_sampled, idx_mapping)
+    state._recoverssm_align = False
+    state._recoverssm_step = (metadata,)
+    state._commit_recoverssm_state(num_sampled, idx_mapping)
 
-    metadata.commit_replayssm_state.assert_called_once_with(num_sampled)
-    assert state._replayssm_step is None
+    metadata.commit_recoverssm_state.assert_called_once_with(num_sampled)
+    assert state._recoverssm_step is None
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 @pytest.mark.parametrize("mixed_batch", [False, True])
-def test_replayssm_align_tracks_final_running_state_and_neutralizes_copy_bias(
+def test_recoverssm_align_tracks_final_running_state_and_neutralizes_copy_bias(
     mixed_batch: bool,
 ) -> None:
     state = object.__new__(MambaHybridModelState)
-    state.cache_config = SimpleNamespace(use_replayssm_spec=True)
-    state._replayssm_align = True
+    state.cache_config = SimpleNamespace(use_kda_recoverssm=True)
+    state._recoverssm_align = True
     state._align_mode = False
     state._mamba_ctx = None
     state._mamba_state_idx_gpu = torch.full((5,), -1, dtype=torch.int32, device="cuda")
-    state._replayssm_committed_gpu = torch.zeros(5, dtype=torch.bool, device="cuda")
+    state._recoverssm_committed_gpu = torch.zeros(5, dtype=torch.bool, device="cuda")
     state.num_accepted_tokens_gpu = torch.full(
         (5,), 9, dtype=torch.int32, device="cuda"
     )
-    metadata = Mock(spec=ReplaySSMSpecMetadata)
-    metadata.get_replayssm_align_commit_metadata.return_value = (
-        ReplaySSMAlignCommitMetadata(
+    metadata = Mock(spec=RecoverSSMMetadata)
+    metadata.get_recoverssm_align_commit_metadata.return_value = (
+        RecoverSSMAlignCommitMetadata(
             num_spec_decodes=1 if mixed_batch else 2,
             request_indices=(
                 torch.tensor([1], dtype=torch.int32, device="cuda")
@@ -86,7 +86,7 @@ def test_replayssm_align_tracks_final_running_state_and_neutralizes_copy_bias(
     num_sampled = torch.tensor([2, 3], dtype=torch.int32, device="cuda")
     idx_mapping = torch.tensor([3, 1], dtype=torch.int32, device="cuda")
 
-    state._replayssm_step = (metadata,)
+    state._recoverssm_step = (metadata,)
 
     state.postprocess_state(idx_mapping, num_sampled)
 
@@ -94,4 +94,4 @@ def test_replayssm_align_tracks_final_running_state_and_neutralizes_copy_bias(
     assert state._mamba_state_idx_gpu.tolist() == expected_state_indices
     expected_accepted = [9, 1, 9, 2 if mixed_batch else 1, 9]
     assert state.num_accepted_tokens_gpu.tolist() == expected_accepted
-    assert not state._replayssm_committed_gpu.any().item()
+    assert not state._recoverssm_committed_gpu.any().item()

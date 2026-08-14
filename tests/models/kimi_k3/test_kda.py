@@ -29,10 +29,10 @@ from vllm.models.kimi_k3.nvidia.kda import (
     is_fused_kda_decode_supported,
 )
 from vllm.models.kimi_k3.nvidia.model import KimiLinearForCausalLM
-from vllm.models.kimi_k3.nvidia.ops import replayssm as replayssm_ops
-from vllm.models.kimi_k3.nvidia.ops.replayssm import (
-    KDAReplaySSMSpecCommitContext,
-    kda_replayssm_spec_decode,
+from vllm.models.kimi_k3.nvidia.ops import recoverssm as recoverssm_ops
+from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
+    KDARecoverSSMCommitContext,
+    kda_recoverssm_verify,
 )
 from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     chunk_kda,
@@ -54,9 +54,9 @@ PACKED_DECODE_IMPLS = {
 }
 
 
-def test_kda_replayssm_tp1_state_layout():
+def test_kda_recoverssm_tp1_state_layout():
     base_dtypes = MambaStateDtypeCalculator.kda_state_dtype(torch.bfloat16, "auto")
-    dtypes = MambaStateDtypeCalculator.append_kda_replayssm_spec_record(
+    dtypes = MambaStateDtypeCalculator.append_kda_recoverssm_record(
         base_dtypes, torch.bfloat16
     )
     assert dtypes == (
@@ -73,7 +73,7 @@ def test_kda_replayssm_tp1_state_layout():
         conv_kernel_size=4,
         num_spec=2,
     )
-    shapes = MambaStateShapeCalculator.append_kda_replayssm_spec_record(
+    shapes = MambaStateShapeCalculator.append_kda_recoverssm_record(
         base_shapes,
         num_heads=4,
         head_dim=32,
@@ -83,7 +83,7 @@ def test_kda_replayssm_tp1_state_layout():
     assert shapes[2:] == ((4, 3, 32), (4, 3, 64))
 
 
-def test_kda_replayssm_config_state_layout():
+def test_kda_recoverssm_config_state_layout():
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
             dtype=torch.bfloat16,
@@ -97,7 +97,7 @@ def test_kda_replayssm_config_state_layout():
         ),
         cache_config=SimpleNamespace(
             mamba_cache_dtype="auto",
-            use_replayssm_spec=True,
+            use_kda_recoverssm=True,
         ),
         parallel_config=SimpleNamespace(tensor_parallel_size=1),
         speculative_config=SimpleNamespace(num_speculative_tokens=2),
@@ -607,7 +607,7 @@ def test_kda_spec_decode_correctness(
 @pytest.mark.parametrize("lower_bound", [-5.0, None])
 @pytest.mark.parametrize("align_mode", [False, True])
 @torch.inference_mode()
-def test_kda_replayssm_verify_and_group_commit(
+def test_kda_recoverssm_verify_and_group_commit(
     monkeypatch: pytest.MonkeyPatch,
     lower_bound: float | None,
     use_request_indices: bool,
@@ -615,7 +615,7 @@ def test_kda_replayssm_verify_and_group_commit(
     align_mode: bool,
 ):
     monkeypatch.setattr(
-        replayssm_ops,
+        recoverssm_ops,
         "is_conv_state_dim_first",
         lambda: conv_state_dim_first,
     )
@@ -745,7 +745,7 @@ def test_kda_replayssm_verify_and_group_commit(
         initial_states.append(checkpoint.clone())
         initial_conv_states.append(conv_state.clone())
 
-        actual_output = kda_replayssm_spec_decode(
+        actual_output = kda_recoverssm_verify(
             q=q,
             k=k,
             v=v,
@@ -831,7 +831,7 @@ def test_kda_replayssm_verify_and_group_commit(
             rtol=3e-2,
         )
 
-    context = KDAReplaySSMSpecCommitContext.create(
+    context = KDARecoverSSMCommitContext.create(
         layers,
         spec_query_len=query_len,
         max_num_reqs=global_num_accepted.shape[0],

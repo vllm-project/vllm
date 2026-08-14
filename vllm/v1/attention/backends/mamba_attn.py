@@ -27,7 +27,7 @@ M = TypeVar("M", bound="BaseMambaAttentionMetadata")
 
 
 @dataclass(frozen=True)
-class ReplaySSMAlignCommitMetadata:
+class RecoverSSMAlignCommitMetadata:
     num_spec_decodes: int
     request_indices: torch.Tensor | None
     block_table: torch.Tensor
@@ -35,14 +35,14 @@ class ReplaySSMAlignCommitMetadata:
     block_size: int
 
 
-class ReplaySSMSpecMetadata(abc.ABC):
+class RecoverSSMMetadata(abc.ABC):
     @abc.abstractmethod
-    def commit_replayssm_state(self, num_accepted_tokens: torch.Tensor) -> None:
+    def commit_recoverssm_state(self, num_accepted_tokens: torch.Tensor) -> None:
         raise NotImplementedError
 
-    def get_replayssm_align_commit_metadata(
+    def get_recoverssm_align_commit_metadata(
         self,
-    ) -> ReplaySSMAlignCommitMetadata | None:
+    ) -> RecoverSSMAlignCommitMetadata | None:
         return None
 
 

@@ -12,7 +12,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
-from vllm.v1.attention.backends.mamba_attn import ReplaySSMSpecMetadata
+from vllm.v1.attention.backends.mamba_attn import RecoverSSMMetadata
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
@@ -81,12 +81,12 @@ class MambaHybridModelState(DefaultModelState):
         # kernel reusing the postprocess copy machinery, so the per-step src
         # columns and the running state_idx are kept GPU-resident.
         self._align_mode = self.cache_config.mamba_cache_mode == "align"
-        self._replayssm_align = (
-            self._align_mode and self.cache_config.use_replayssm_spec
+        self._recoverssm_align = (
+            self._align_mode and self.cache_config.use_kda_recoverssm
         )
-        self._replayssm_step: tuple[ReplaySSMSpecMetadata, ...] | None = None
-        if self._replayssm_align:
-            self._replayssm_committed_gpu = torch.zeros(
+        self._recoverssm_step: tuple[RecoverSSMMetadata, ...] | None = None
+        if self._recoverssm_align:
+            self._recoverssm_committed_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.bool, device=self.device
             )
         if self._align_mode:
@@ -294,14 +294,14 @@ class MambaHybridModelState(DefaultModelState):
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
         )
-        if self.cache_config.use_replayssm_spec and not for_capture:
-            self._replayssm_step = tuple(
+        if self.cache_config.use_kda_recoverssm and not for_capture:
+            self._recoverssm_step = tuple(
                 metadata
                 for groups in attn_groups
                 for group in groups
                 if isinstance(
                     metadata := attn_metadata[group.layer_names[0]],
-                    ReplaySSMSpecMetadata,
+                    RecoverSSMMetadata,
                 )
             )
         return attn_metadata
@@ -312,11 +312,11 @@ class MambaHybridModelState(DefaultModelState):
         num_sampled: torch.Tensor | int,
         num_computed_tokens: torch.Tensor | None = None,
     ) -> None:
-        if self.cache_config.use_replayssm_spec:
+        if self.cache_config.use_kda_recoverssm:
             if isinstance(num_sampled, int):
-                self._replayssm_step = None
+                self._recoverssm_step = None
             else:
-                self._commit_replayssm_state(num_sampled, idx_mapping)
+                self._commit_recoverssm_state(num_sampled, idx_mapping)
 
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
@@ -331,14 +331,14 @@ class MambaHybridModelState(DefaultModelState):
                 idx_mapping,
                 num_sampled,
                 self.num_accepted_tokens_gpu,
-                self._replayssm_committed_gpu if self._replayssm_align else None,
+                self._recoverssm_committed_gpu if self._recoverssm_align else None,
             )
         else:
             # Fill with single value.
             _fill_num_accepted_kernel[(num_reqs,)](
                 idx_mapping,
                 self.num_accepted_tokens_gpu,
-                self._replayssm_committed_gpu if self._replayssm_align else None,
+                self._recoverssm_committed_gpu if self._recoverssm_align else None,
                 max(num_sampled, 1),
             )
 
@@ -359,34 +359,34 @@ class MambaHybridModelState(DefaultModelState):
                 idx_mapping,
             )
 
-    def _commit_replayssm_state(
+    def _commit_recoverssm_state(
         self, num_sampled: torch.Tensor, idx_mapping: torch.Tensor
     ) -> None:
-        step = self._replayssm_step
-        self._replayssm_step = None
+        step = self._recoverssm_step
+        self._recoverssm_step = None
         if step is None:
             return
         for metadata in step:
-            metadata.commit_replayssm_state(num_sampled)
-            align = metadata.get_replayssm_align_commit_metadata()
-            if not self._replayssm_align or align is None:
+            metadata.commit_recoverssm_state(num_sampled)
+            align = metadata.get_recoverssm_align_commit_metadata()
+            if not self._recoverssm_align or align is None:
                 continue
             # Preprocess follows the optimistic verify length. Commit restores
             # the running column to the accepted length.
-            _mark_replayssm_align_commit_kernel[(align.num_spec_decodes,)](
+            _mark_recoverssm_align_commit_kernel[(align.num_spec_decodes,)](
                 idx_mapping,
                 num_sampled,
                 align.request_indices,
                 align.num_computed_tokens,
                 self._mamba_state_idx_gpu,
-                self._replayssm_committed_gpu,
+                self._recoverssm_committed_gpu,
                 MAMBA_BLOCK_SIZE=align.block_size,
                 BLOCK_TABLE_WIDTH=align.block_table.shape[1],
             )
 
 
 @triton.heuristics(
-    {"HAS_REPLAYSSM_COMMIT": lambda args: args["committed_ptr"] is not None}
+    {"HAS_RECOVERSSM_COMMIT": lambda args: args["committed_ptr"] is not None}
 )
 @triton.jit
 def _scatter_num_accepted_kernel(
@@ -394,14 +394,14 @@ def _scatter_num_accepted_kernel(
     num_sampled_ptr,  # [num_reqs]
     num_accepted_ptr,  # [max_num_reqs]
     committed_ptr,
-    HAS_REPLAYSSM_COMMIT: tl.constexpr,
+    HAS_RECOVERSSM_COMMIT: tl.constexpr,
 ):
     row = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + row)
     if req_state_idx < 0:
         return
     num_sampled = tl.load(num_sampled_ptr + row)
-    if HAS_REPLAYSSM_COMMIT:
+    if HAS_RECOVERSSM_COMMIT:
         committed = tl.load(committed_ptr + req_state_idx)
         num_sampled = tl.where(committed, 1, num_sampled)
         tl.store(committed_ptr + req_state_idx, False)
@@ -409,7 +409,7 @@ def _scatter_num_accepted_kernel(
 
 
 @triton.heuristics(
-    {"HAS_REPLAYSSM_COMMIT": lambda args: args["committed_ptr"] is not None}
+    {"HAS_RECOVERSSM_COMMIT": lambda args: args["committed_ptr"] is not None}
 )
 @triton.jit
 def _fill_num_accepted_kernel(
@@ -417,13 +417,13 @@ def _fill_num_accepted_kernel(
     num_accepted_ptr,  # [max_num_reqs]
     committed_ptr,
     num_sampled,
-    HAS_REPLAYSSM_COMMIT: tl.constexpr,
+    HAS_RECOVERSSM_COMMIT: tl.constexpr,
 ):
     row = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + row)
     if req_state_idx < 0:
         return
-    if HAS_REPLAYSSM_COMMIT:
+    if HAS_RECOVERSSM_COMMIT:
         committed = tl.load(committed_ptr + req_state_idx)
         num_sampled = tl.where(committed, 1, num_sampled)
         tl.store(committed_ptr + req_state_idx, False)
@@ -434,7 +434,7 @@ def _fill_num_accepted_kernel(
     {"HAS_REQUEST_INDICES": lambda args: args["request_indices_ptr"] is not None}
 )
 @triton.jit
-def _mark_replayssm_align_commit_kernel(
+def _mark_recoverssm_align_commit_kernel(
     idx_mapping_ptr,
     num_sampled_ptr,
     request_indices_ptr,

@@ -25,8 +25,8 @@ from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.mamba_attn import (
-    ReplaySSMAlignCommitMetadata,
-    ReplaySSMSpecMetadata,
+    RecoverSSMAlignCommitMetadata,
+    RecoverSSMMetadata,
 )
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
@@ -36,8 +36,8 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import MambaSpec
 
 if TYPE_CHECKING:
-    from vllm.models.kimi_k3.nvidia.ops.replayssm import (
-        KDAReplaySSMSpecCommitContext,
+    from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
+        KDARecoverSSMCommitContext,
     )
 
 
@@ -240,41 +240,41 @@ def stage_spec_decode_metadata(
 
 
 @dataclass
-class KDAReplaySSMAlignMetadata:
+class KDARecoverSSMAlignMetadata:
     block_table: torch.Tensor
     num_computed_tokens: torch.Tensor
     block_size: int
 
 
 @dataclass
-class KDAReplaySSMCommitMetadata:
+class KDARecoverSSMCommitMetadata:
     state_indices: torch.Tensor
     query_start_loc: torch.Tensor
     request_indices: torch.Tensor | None
-    align: KDAReplaySSMAlignMetadata | None
+    align: KDARecoverSSMAlignMetadata | None
 
 
-class KDAReplaySSMSpecCommitter:
+class KDARecoverSSMCommitter:
     def __init__(self, layer_names: list[str], vllm_config: VllmConfig) -> None:
         self.layer_names = tuple(layer_names)
         self.vllm_config = vllm_config
-        self._context: KDAReplaySSMSpecCommitContext | None = None
+        self._context: KDARecoverSSMCommitContext | None = None
 
     def commit(
         self,
         attn_metadata: "KimiK3KDAMetadata",
         num_accepted_tokens: torch.Tensor,
     ) -> None:
-        metadata = attn_metadata.replayssm_commit
+        metadata = attn_metadata.recoverssm_commit
         assert metadata is not None
         if self._context is None:
-            from vllm.models.kimi_k3.nvidia.ops.replayssm import (
-                KDAReplaySSMSpecCommitContext,
+            from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
+                KDARecoverSSMCommitContext,
             )
 
             forward_context = self.vllm_config.compilation_config.static_forward_context
             layers = [forward_context[layer_name] for layer_name in self.layer_names]
-            self._context = KDAReplaySSMSpecCommitContext.create(
+            self._context = KDARecoverSSMCommitContext.create(
                 layers,
                 spec_query_len=1 + self.vllm_config.num_speculative_tokens,
                 max_num_reqs=self.vllm_config.scheduler_config.max_num_seqs,
@@ -295,26 +295,26 @@ class KDAReplaySSMSpecCommitter:
 
 
 @dataclass
-class KimiK3KDAMetadata(GDNAttentionMetadata, ReplaySSMSpecMetadata):
-    replayssm_commit: KDAReplaySSMCommitMetadata | None = None
-    _replayssm_committer: KDAReplaySSMSpecCommitter | None = field(
+class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
+    recoverssm_commit: KDARecoverSSMCommitMetadata | None = None
+    _recoverssm_committer: KDARecoverSSMCommitter | None = field(
         default=None, repr=False, compare=False
     )
 
-    def commit_replayssm_state(self, num_accepted_tokens: torch.Tensor) -> None:
+    def commit_recoverssm_state(self, num_accepted_tokens: torch.Tensor) -> None:
         if self.num_spec_decodes == 0:
             return
-        assert self._replayssm_committer is not None
-        self._replayssm_committer.commit(self, num_accepted_tokens)
+        assert self._recoverssm_committer is not None
+        self._recoverssm_committer.commit(self, num_accepted_tokens)
 
-    def get_replayssm_align_commit_metadata(
+    def get_recoverssm_align_commit_metadata(
         self,
-    ) -> ReplaySSMAlignCommitMetadata | None:
-        commit = self.replayssm_commit
+    ) -> RecoverSSMAlignCommitMetadata | None:
+        commit = self.recoverssm_commit
         if commit is None or commit.align is None:
             return None
         align = commit.align
-        return ReplaySSMAlignCommitMetadata(
+        return RecoverSSMAlignCommitMetadata(
             num_spec_decodes=self.num_spec_decodes,
             request_indices=commit.request_indices,
             block_table=align.block_table,
@@ -332,22 +332,22 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         device: torch.device,
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.use_replayssm_spec = vllm_config.cache_config.use_replayssm_spec
-        self.spec_state_slots = 1 if self.use_replayssm_spec else self.num_spec + 1
-        self.replayssm_num_accepted_tokens: torch.Tensor | None = None
-        self._replayssm_committer = (
-            KDAReplaySSMSpecCommitter(layer_names, vllm_config)
-            if self.use_replayssm_spec
+        self.use_recoverssm = vllm_config.cache_config.use_kda_recoverssm
+        self.spec_state_slots = 1 if self.use_recoverssm else self.num_spec + 1
+        self.recoverssm_num_accepted_tokens: torch.Tensor | None = None
+        self._recoverssm_committer = (
+            KDARecoverSSMCommitter(layer_names, vllm_config)
+            if self.use_recoverssm
             else None
         )
-        if self.use_replayssm_spec:
+        if self.use_recoverssm:
             max_num_reqs = vllm_config.scheduler_config.max_num_seqs
             self.spec_state_indices_tensor = torch.empty(
                 (max_num_reqs, 1),
                 dtype=torch.int32,
                 device=device,
             )
-            self.replayssm_num_accepted_tokens = torch.ones(
+            self.recoverssm_num_accepted_tokens = torch.ones(
                 max_num_reqs,
                 dtype=torch.int32,
                 device=device,
@@ -383,9 +383,9 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         else:
             spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
             # Native KDA can use its regular decode path when no draft token
-            # was scheduled. ReplaySSM must preserve its extended conv window.
+            # was scheduled. RecoverSSM must preserve its extended conv window.
             if (
-                not self.use_replayssm_spec
+                not self.use_recoverssm
                 and num_decode_draft_tokens_cpu[spec_sequence_masks_cpu].sum().item()
                 == 0
             ):
@@ -414,13 +414,13 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             assert num_accepted_tokens is not None
             query_lens_cpu = query_start_loc_cpu.diff()
             if (
-                self.use_replayssm_spec
+                self.use_recoverssm
                 and torch.any(
                     query_lens_cpu[spec_sequence_masks_cpu] > self.num_spec + 1
                 ).item()
             ):
                 raise ValueError(
-                    "KDA ReplaySSM speculative decode query length exceeds "
+                    "KDA RecoverSSM speculative decode query length exceeds "
                     f"its activation capacity ({self.num_spec + 1})"
                 )
             num_query_tokens = query_start_loc_cpu[-1].item()
@@ -473,7 +473,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 spec_sequence_masks_gpu = async_tensor_h2d(
                     spec_sequence_masks_cpu, device=query_start_loc.device
                 )
-                if self.use_replayssm_spec:
+                if self.use_recoverssm:
                     spec_request_indices = async_tensor_h2d(
                         spec_sequence_masks_cpu.nonzero(as_tuple=True)[0],
                         dtype=torch.int32,
@@ -491,7 +491,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 non_spec_token_indx = index[:num_non_spec_tokens]
                 spec_token_indx = index[num_non_spec_tokens:]
 
-                # Native spec uses one state slot per step. ReplaySSM keeps
+                # Native spec uses one state slot per step. RecoverSSM keeps
                 # only the current checkpoint slot.
                 spec_state_indices_tensor = block_table_tensor[
                     spec_sequence_masks_cpu, : self.spec_state_slots
@@ -540,9 +540,9 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
 
                 num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
 
-            if self.use_replayssm_spec:
-                assert self.replayssm_num_accepted_tokens is not None
-                num_accepted_tokens = self.replayssm_num_accepted_tokens[
+            if self.use_recoverssm:
+                assert self.recoverssm_num_accepted_tokens is not None
+                num_accepted_tokens = self.recoverssm_num_accepted_tokens[
                     :num_spec_decodes
                 ]
 
@@ -609,18 +609,18 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 :batch_size
             ]
 
-        replayssm_commit = None
-        if self.use_replayssm_spec and num_spec_decodes > 0:
+        recoverssm_commit = None
+        if self.use_recoverssm and num_spec_decodes > 0:
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
             align = None
             if self.kv_cache_spec.mamba_cache_mode == "align":
-                align = KDAReplaySSMAlignMetadata(
+                align = KDARecoverSSMAlignMetadata(
                     block_table=m.block_table_tensor,
                     num_computed_tokens=m.compute_num_computed_tokens(),
                     block_size=self.kv_cache_spec.block_size,
                 )
-            replayssm_commit = KDAReplaySSMCommitMetadata(
+            recoverssm_commit = KDARecoverSSMCommitMetadata(
                 state_indices=spec_state_indices_tensor,
                 query_start_loc=spec_query_start_loc,
                 request_indices=spec_request_indices,
@@ -644,9 +644,9 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
-            replayssm_commit=replayssm_commit,
-            _replayssm_committer=(
-                self._replayssm_committer if replayssm_commit is not None else None
+            recoverssm_commit=recoverssm_commit,
+            _recoverssm_committer=(
+                self._recoverssm_committer if recoverssm_commit is not None else None
             ),
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,

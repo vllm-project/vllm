@@ -137,12 +137,11 @@ class MambaStateDtypeCalculator:
         return (state_dtype, torch.float32)
 
     @classmethod
-    def append_kda_replayssm_spec_record(
+    def append_kda_recoverssm_record(
         cls,
         base_dtypes: tuple[torch.dtype, ...],
         model_dtype: ModelDType | torch.dtype,
     ) -> tuple[torch.dtype, ...]:
-        """Append KDA correction and input-record dtypes."""
         activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
         return (*base_dtypes, torch.float32, activation_dtype)
 
@@ -304,7 +303,7 @@ class MambaStateShapeCalculator:
         return (conv_state_shape, recurrent_state_shape)
 
     @classmethod
-    def append_kda_replayssm_spec_record(
+    def append_kda_recoverssm_record(
         cls,
         base_shapes: tuple[tuple[int, int], tuple[int, int, int]],
         num_heads: int,
@@ -317,7 +316,6 @@ class MambaStateShapeCalculator:
         tuple[int, int, int],
         tuple[int, int, int],
     ]:
-        """Append KDA correction and packed key/gate record shapes."""
         local_num_heads = divide(num_heads, tp_world_size)
         return (
             *base_shapes,

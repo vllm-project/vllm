@@ -295,8 +295,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         base_dtypes = MambaStateDtypeCalculator.kda_state_dtype(
             self.model_config.dtype, self.cache_config.mamba_cache_dtype
         )
-        if self.cache_config.use_replayssm_spec:
-            return MambaStateDtypeCalculator.append_kda_replayssm_spec_record(
+        if self.cache_config.use_kda_recoverssm:
+            return MambaStateDtypeCalculator.append_kda_recoverssm_record(
                 base_dtypes, self.model_config.dtype
             )
         return base_dtypes
@@ -311,13 +311,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             conv_kernel_size=self.conv_size,
             num_spec=self.num_spec,
         )
-        if self.cache_config.use_replayssm_spec:
-            return MambaStateShapeCalculator.append_kda_replayssm_spec_record(
+        if self.cache_config.use_kda_recoverssm:
+            return MambaStateShapeCalculator.append_kda_recoverssm_record(
                 base_shapes,
                 self.num_heads,
                 self.head_dim,
-                self.tp_size,
-                1 + self.num_spec,
+                tp_world_size=self.tp_size,
+                spec_query_len=1 + self.num_spec,
             )
         return base_shapes
 
@@ -328,8 +328,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         prefix: str = "",
     ) -> None:
         super().__init__(config, vllm_config, prefix)
-        self.use_replayssm_spec = self.cache_config.use_replayssm_spec
-        if self.cache_config.use_replayssm and not self.use_replayssm_spec:
+        self.use_recoverssm = self.cache_config.use_kda_recoverssm
+        if self.cache_config.use_replayssm and not self.use_recoverssm:
             raise ValueError(
                 "Kimi-K3 supports --use-replayssm only with speculative decoding"
             )
@@ -563,7 +563,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
 
-        conv_state, recurrent_state, *replayssm_records = self.kv_cache
+        conv_state, recurrent_state, *recoverssm_records = self.kv_cache
         # The convolution kernels consume (..., dim, width - 1).
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
@@ -632,7 +632,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             spec_conv_indices = spec_state_indices_tensor[:, 0][: m.num_spec_decodes]
             spec_max_query_len = (
                 self.spec_query_len
-                if self.use_replayssm_spec
+                if self.use_recoverssm
                 else spec_state_indices_tensor.size(-1)
             )
             spec_conv_out = torch.empty_like(mixed_qkv_spec)
@@ -659,16 +659,16 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 if m.num_prefills == 0 and m.num_decodes == 0
                 else None
             )
-            if self.use_replayssm_spec:
-                from vllm.models.kimi_k3.nvidia.ops.replayssm import (
-                    kda_replayssm_spec_decode,
+            if self.use_recoverssm:
+                from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
+                    kda_recoverssm_verify,
                 )
 
-                if len(replayssm_records) != 2:
+                if len(recoverssm_records) != 2:
                     raise ValueError(
-                        "KDA ReplaySSM requires correction and key/gate buffers"
+                        "KDA RecoverSSM requires correction and key/gate buffers"
                     )
-                core_attn_out_spec = kda_replayssm_spec_decode(
+                core_attn_out_spec = kda_recoverssm_verify(
                     q=q_spec,
                     k=k_spec,
                     v=v_spec,
@@ -678,8 +678,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     dt_bias=self.dt_bias,
                     lower_bound=self.gate_lower_bound,
                     checkpoint_state=recurrent_state,
-                    correction_cache=replayssm_records[0],
-                    kg_cache=replayssm_records[1],
+                    correction_cache=recoverssm_records[0],
+                    kg_cache=recoverssm_records[1],
                     query_start_loc=spec_cu_seqlens,
                     state_indices=spec_state_indices_tensor[: m.num_spec_decodes, 0],
                     spec_query_len=self.spec_query_len,
