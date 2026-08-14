@@ -133,6 +133,24 @@ def test_idx_mapping_indirection_and_negative_skip():
 # --------------------------- TraceReplayState -----------------------------
 
 
+def test_state_skips_work_before_any_trace(monkeypatch: pytest.MonkeyPatch):
+    """State operations return before touching buffers without a trace."""
+    state = _trace_state(1)
+
+    def fail_if_called(*_args, **_kwargs):
+        pytest.fail("trace replay work must be skipped before any trace request")
+
+    monkeypatch.setattr(type(state.trace_len), "copy_to_uva", fail_if_called)
+    monkeypatch.setattr(type(state.trace_token_ids), "apply_write", fail_if_called)
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.sample.trace_replay.apply_trace_tokens",
+        fail_if_called,
+    )
+
+    state.apply_staged_writes()
+    state.apply_trace(_i64([7]), _i32([0]), _i32([0]), _i32([0]))
+
+
 def test_state_end_to_end():
     """add_request -> apply_staged_writes -> apply_trace overwrites correctly."""
     state = _trace_state(4)
@@ -148,8 +166,8 @@ def test_state_end_to_end():
     assert sampled.tolist() == [22, -1]
 
 
-def test_state_skips_when_no_trace_in_batch():
-    """apply_trace is a no-op when no batched request replays a trace."""
+def test_state_leaves_non_trace_batch_unchanged():
+    """Requests with trace_len == 0 remain unchanged after a trace was seen."""
     state = _trace_state(4)
     state.add_request(0, SamplingParams(trace_decode_token_ids=[11, 22]))
     state.add_request(1, SamplingParams())
@@ -162,6 +180,18 @@ def test_state_skips_when_no_trace_in_batch():
     total_len = _i32([0, 7, 0, 0])
     state.apply_trace(sampled, idx_mapping, total_len, prompt_len)
     assert sampled.tolist() == [555]
+
+
+def test_any_trace_is_sticky_after_slot_reuse():
+    """The O(1) guard remains enabled after a trace request leaves its slot."""
+    state = _trace_state(1)
+    assert not state.any_trace
+
+    state.add_request(0, SamplingParams(trace_decode_token_ids=[11, 22]))
+    assert state.any_trace
+
+    state.add_request(0, SamplingParams())
+    assert state.any_trace
 
 
 def test_slot_reuse_clears_trace():
@@ -179,4 +209,3 @@ def test_slot_reuse_clears_trace():
     total_len = _i32([3, 0])
     state.apply_trace(sampled, idx_mapping, total_len, prompt_len)
     assert sampled.tolist() == [888]
-    assert state.any_trace
