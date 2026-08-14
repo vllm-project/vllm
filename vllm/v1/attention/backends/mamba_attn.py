@@ -222,16 +222,19 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             scratch_bs = max(
                 self.decode_cudagraph_max_bs, scheduler_config.max_num_seqs
             )
-            # checkpointing_ssu ring_start / prev_num_accepted are per cache
-            # slot; for decode metadata we keep per-row views sized to the
-            # CG batch (indexed via state_batch_indices inside the kernel).
-            self.decode_ring_start_d = torch.empty(
-                (scratch_bs,),
+            # checkpointing_ssu indexes these tensors by state_batch_indices,
+            # so they cover cache slots rather than decode rows.
+            num_cache_slots = vllm_config.cache_config.num_gpu_blocks
+            if num_cache_slots is None:
+                # Unit-test builders run before cache sizing.
+                num_cache_slots = scratch_bs
+            self.decode_ring_start_d = torch.zeros(
+                (num_cache_slots,),
                 dtype=torch.int32,
                 device=device,
             )
-            self.decode_prev_num_accepted_d = torch.empty(
-                (scratch_bs,),
+            self.decode_prev_num_accepted_d = torch.zeros(
+                (num_cache_slots,),
                 dtype=torch.int32,
                 device=device,
             )
@@ -574,6 +577,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
         write_pos_d = None
         is_flush_d = None
+        ring_start_d = None
+        prev_num_accepted_d = None
+        cb_scaled = None
+        cumAdt_vec = None
+        cb_old = None
 
         if self.vllm_config.cache_config.mamba_cache_mode == "all":
             num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
@@ -661,12 +669,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 ]
 
         if self.use_replayssm and num_decodes > 0:
-            if self.use_flashinfer_replayssm:
-                raise NotImplementedError(
-                    "FlashInfer ReplaySSM metadata is not implemented yet. "
-                    "Fill ring_start_d / prev_num_accepted_d (CG buffers and "
-                    "two-kernel scratch are already allocated)."
-                )
             decode_base_cpu = common_attn_metadata.replayssm_decode_base_cpu
             num_computed_tokens_cpu = common_attn_metadata._num_computed_tokens_cpu
             if decode_base_cpu is None or num_computed_tokens_cpu is None:
@@ -720,16 +722,35 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     & ((num_computed_d + query_lens_cpu) % block_size == 0)
                 )
             is_flush_cpu = is_flush_cpu.to(torch.int8)
-            write_pos_d = async_tensor_h2d(
-                write_pos_cpu.to(torch.int32).tolist(),
-                dtype=torch.int32,
-                device=common_attn_metadata.query_start_loc.device,
-            )
-            is_flush_d = async_tensor_h2d(
-                is_flush_cpu.tolist(),
-                dtype=torch.int8,
-                device=common_attn_metadata.query_start_loc.device,
-            )
+            if self.use_flashinfer_replayssm:
+                assert self.decode_ring_start_d is not None
+                assert self.decode_prev_num_accepted_d is not None
+                assert self.decode_cb_scaled is not None
+                assert self.decode_cumAdt_vec is not None
+                assert self.decode_cb_old is not None
+                ring_start_d = self.decode_ring_start_d
+                prev_num_accepted_d = self.decode_prev_num_accepted_d
+                state_slots = state_indices_tensor_d[:num_decodes, 0].long()
+                prev_num_accepted = async_tensor_h2d(
+                    write_pos_cpu.to(torch.int32).tolist(),
+                    dtype=torch.int32,
+                    device=common_attn_metadata.query_start_loc.device,
+                )
+                prev_num_accepted_d.index_copy_(0, state_slots, prev_num_accepted)
+                cb_scaled = self.decode_cb_scaled[:num_decodes]
+                cumAdt_vec = self.decode_cumAdt_vec[:num_decodes]
+                cb_old = self.decode_cb_old[:num_decodes]
+            else:
+                write_pos_d = async_tensor_h2d(
+                    write_pos_cpu.to(torch.int32).tolist(),
+                    dtype=torch.int32,
+                    device=common_attn_metadata.query_start_loc.device,
+                )
+                is_flush_d = async_tensor_h2d(
+                    is_flush_cpu.tolist(),
+                    dtype=torch.int8,
+                    device=common_attn_metadata.query_start_loc.device,
+                )
 
         bc_pre_scratch = None
         if (
@@ -751,6 +772,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             write_pos_d=write_pos_d,
             is_flush_d=is_flush_d,
             bc_pre_scratch=bc_pre_scratch,
+            ring_start_d=ring_start_d,
+            prev_num_accepted_d=prev_num_accepted_d,
+            cb_scaled=cb_scaled,
+            cumAdt_vec=cumAdt_vec,
+            cb_old=cb_old,
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc_d=query_start_loc_d,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
@@ -788,6 +814,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         write_pos_d = metadata.write_pos_d
         is_flush_d = metadata.is_flush_d
         bc_pre_scratch = metadata.bc_pre_scratch
+        ring_start_d = metadata.ring_start_d
+        prev_num_accepted_d = metadata.prev_num_accepted_d
+        cb_scaled = metadata.cb_scaled
+        cumAdt_vec = metadata.cumAdt_vec
+        cb_old = metadata.cb_old
         if (
             metadata.num_prefills == 0
             and metadata.num_decodes <= self.decode_cudagraph_max_bs
@@ -868,6 +899,15 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
                 if self.decode_bc_pre_scratch is not None:
                     bc_pre_scratch = self.decode_bc_pre_scratch[:padded_bs]
+            elif self.use_flashinfer_replayssm:
+                assert ring_start_d is not None
+                assert prev_num_accepted_d is not None
+                assert self.decode_cb_scaled is not None
+                assert self.decode_cumAdt_vec is not None
+                assert self.decode_cb_old is not None
+                cb_scaled = self.decode_cb_scaled[:padded_bs]
+                cumAdt_vec = self.decode_cumAdt_vec[:padded_bs]
+                cb_old = self.decode_cb_old[:padded_bs]
 
         return replace(
             metadata,
@@ -877,6 +917,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             write_pos_d=write_pos_d,
             is_flush_d=is_flush_d,
             bc_pre_scratch=bc_pre_scratch,
+            ring_start_d=ring_start_d,
+            prev_num_accepted_d=prev_num_accepted_d,
+            cb_scaled=cb_scaled,
+            cumAdt_vec=cumAdt_vec,
+            cb_old=cb_old,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
             block_idx_last_computed_token=block_idx_last_computed_token,
             block_idx_last_scheduled_token_prev_step=(
