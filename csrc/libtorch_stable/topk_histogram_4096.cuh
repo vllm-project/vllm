@@ -73,15 +73,46 @@ __device__ __forceinline__ auto convert_to_uint32_v2(float x) -> uint32_t {
   return (bits & 0x80000000u) ? ~bits : (bits | 0x80000000u);
 }
 
+template <uint32_t BlockSize, uint32_t VecSize, typename Visit>
+__device__ __forceinline__ void scan_scores_vectorized(
+    const float* __restrict__ scores, uint32_t length, Visit visit) {
+  static_assert(VecSize == 2 || VecSize == 4);
+  const uint32_t tx = threadIdx.x;
+  const uint32_t aligned_length = length - length % VecSize;
+
+  for (uint32_t base = tx * VecSize; base < aligned_length;
+       base += BlockSize * VecSize) {
+    if constexpr (VecSize == 4) {
+      const float4 values =
+          *reinterpret_cast<const float4*>(scores + base);
+      visit(base, values.x);
+      visit(base + 1, values.y);
+      visit(base + 2, values.z);
+      visit(base + 3, values.w);
+    } else {
+      const float2 values =
+          *reinterpret_cast<const float2*>(scores + base);
+      visit(base, values.x);
+      visit(base + 1, values.y);
+    }
+  }
+
+  for (uint32_t idx = aligned_length + tx; idx < length; idx += BlockSize) {
+    visit(idx, scores[idx]);
+  }
+}
+
 // Exact, bounded-memory fallback for candidate-buffer overflow. Each radix
 // round rescans the full row, so correctness does not depend on how many
 // values share a coarse histogram bin. This is intentionally slower than the
 // buffered paths and is entered only after an overflow is detected.
-template <uint32_t TopK, uint32_t BlockSize>
+template <uint32_t TopK, uint32_t BlockSize, bool FuseOutputScan = false,
+          uint32_t VecSize = 1>
 __device__ void exact_topk_rescan(const float* __restrict__ scores,
                                   int32_t* __restrict__ output,
                                   uint32_t length, void* _smem) {
   static_assert(BlockSize >= RADIX);
+  static_assert(VecSize == 1 || VecSize == 2 || VecSize == 4);
   struct ExactSmem {
     uint32_t histogram[RADIX];
     uint32_t prefix;
@@ -108,11 +139,21 @@ __device__ void exact_topk_rescan(const float* __restrict__ scores,
         (round == 0) ? 0u : (~0u << (32 - round * 8));
     const uint32_t prefix = smem->prefix;
 
-    for (uint32_t idx = tx; idx < length; idx += BlockSize) {
-      const uint32_t ordered = convert_to_uint32_v2(scores[idx]);
-      if ((ordered & mask) == prefix) {
-        atomicAdd(&smem->histogram[(ordered >> shift) & 0xFF], 1);
+    if constexpr (VecSize == 1) {
+      for (uint32_t idx = tx; idx < length; idx += BlockSize) {
+        const uint32_t ordered = convert_to_uint32_v2(scores[idx]);
+        if ((ordered & mask) == prefix) {
+          atomicAdd(&smem->histogram[(ordered >> shift) & 0xFF], 1);
+        }
       }
+    } else {
+      scan_scores_vectorized<BlockSize, VecSize>(
+          scores, length, [&](uint32_t, float score) {
+            const uint32_t ordered = convert_to_uint32_v2(score);
+            if ((ordered & mask) == prefix) {
+              atomicAdd(&smem->histogram[(ordered >> shift) & 0xFF], 1);
+            }
+          });
     }
     __syncthreads();
 
@@ -131,25 +172,70 @@ __device__ void exact_topk_rescan(const float* __restrict__ scores,
     __syncthreads();
   }
 
-  if (tx == 0) smem->output_counter = 0;
-  __syncthreads();
-
   const uint32_t pivot = smem->prefix;
-  for (uint32_t idx = tx; idx < length; idx += BlockSize) {
-    if (convert_to_uint32_v2(scores[idx]) > pivot) {
-      const uint32_t pos = atomicAdd(&smem->output_counter, 1);
-      if (pos < TopK) output[pos] = static_cast<int32_t>(idx);
+  if constexpr (FuseOutputScan) {
+    static_assert(VecSize == 1);
+    if (tx == 0) {
+      smem->output_counter = 0;
+      smem->histogram[0] = 0;
     }
-  }
-  __syncthreads();
+    __syncthreads();
 
-  for (uint32_t idx = tx; idx < length; idx += BlockSize) {
-    if (convert_to_uint32_v2(scores[idx]) == pivot) {
-      const uint32_t pos = atomicAdd(&smem->output_counter, 1);
-      if (pos < TopK) output[pos] = static_cast<int32_t>(idx);
+    const uint32_t equal_count = smem->remaining;
+    const uint32_t equal_base = TopK - equal_count;
+    for (uint32_t idx = tx; idx < length; idx += BlockSize) {
+      const uint32_t ordered = convert_to_uint32_v2(scores[idx]);
+      if (ordered > pivot) {
+        const uint32_t pos = atomicAdd(&smem->output_counter, 1);
+        output[pos] = static_cast<int32_t>(idx);
+      } else if (ordered == pivot) {
+        const uint32_t pos = atomicAdd(&smem->histogram[0], 1);
+        if (pos < equal_count) {
+          output[equal_base + pos] = static_cast<int32_t>(idx);
+        }
+      }
     }
+    __syncthreads();
+  } else {
+    if (tx == 0) smem->output_counter = 0;
+    __syncthreads();
+
+    if constexpr (VecSize == 1) {
+      for (uint32_t idx = tx; idx < length; idx += BlockSize) {
+        if (convert_to_uint32_v2(scores[idx]) > pivot) {
+          const uint32_t pos = atomicAdd(&smem->output_counter, 1);
+          if (pos < TopK) output[pos] = static_cast<int32_t>(idx);
+        }
+      }
+    } else {
+      scan_scores_vectorized<BlockSize, VecSize>(
+          scores, length, [&](uint32_t idx, float score) {
+            if (convert_to_uint32_v2(score) > pivot) {
+              const uint32_t pos = atomicAdd(&smem->output_counter, 1);
+              if (pos < TopK) output[pos] = static_cast<int32_t>(idx);
+            }
+          });
+    }
+    __syncthreads();
+
+    if constexpr (VecSize == 1) {
+      for (uint32_t idx = tx; idx < length; idx += BlockSize) {
+        if (convert_to_uint32_v2(scores[idx]) == pivot) {
+          const uint32_t pos = atomicAdd(&smem->output_counter, 1);
+          if (pos < TopK) output[pos] = static_cast<int32_t>(idx);
+        }
+      }
+    } else {
+      scan_scores_vectorized<BlockSize, VecSize>(
+          scores, length, [&](uint32_t idx, float score) {
+            if (convert_to_uint32_v2(score) == pivot) {
+              const uint32_t pos = atomicAdd(&smem->output_counter, 1);
+              if (pos < TopK) output[pos] = static_cast<int32_t>(idx);
+            }
+          });
+    }
+    __syncthreads();
   }
-  __syncthreads();
 }
 
 // Converts each score to a 12-bit bin (FP16 sign-magnitude -> top 12 bits ->
