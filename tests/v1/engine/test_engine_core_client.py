@@ -1292,6 +1292,7 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         mock_executor.get_kv_cache_specs.return_value = [{"default": mock_spec}]
         mock_executor.determine_available_memory.return_value = [1024 * 1024 * 1024]
         mock_executor.initialize_from_config.return_value = None
+        mock_executor.supports_draft_weight_updates.return_value = False
 
         return mock_executor
 
