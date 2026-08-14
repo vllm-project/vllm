@@ -40,6 +40,30 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 STARTUP_POLL_PERIOD_MS = 10000
+ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S = 60.0
+
+
+def get_engine_process_shutdown_timeout(
+    request_timeout: float | None,
+    process_timeout: float | None,
+) -> float | None:
+    """Return the EngineCore process-manager shutdown timeout.
+
+    ``VllmConfig.shutdown_timeout`` controls how long in-flight requests may
+    drain. A value of zero therefore tells EngineCore to abort requests as soon
+    as it receives SIGTERM. The parent process manager still needs a separate
+    window in which the EngineCore can release device resources before it is
+    force-killed. ROCm teardown can take longer than the generic best-effort
+    window, and force-killing during teardown can leave VRAM resident.
+
+    ``process_timeout`` may be a remaining budget computed by an outer process
+    manager. Keep it unchanged unless both values are zero: a zero remaining
+    budget for a positive request timeout must not receive a fresh grace period
+    because EngineCore relies on that deadline to enforce request draining.
+    """
+    if request_timeout == 0 and process_timeout == 0 and current_platform.is_rocm():
+        return ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S
+    return process_timeout
 
 
 class CoreEngineState(Enum):
@@ -136,6 +160,7 @@ class CoreEngineProcManager:
         client_handshake_address: str | None = None,
         tensor_queue: Queue | None = None,
     ):
+        self._request_shutdown_timeout = vllm_config.shutdown_timeout
         context = get_mp_context()
         common_kwargs = {
             "vllm_config": vllm_config,
@@ -217,7 +242,16 @@ class CoreEngineProcManager:
         """Shutdown engine core processes with configurable timeout."""
         self.manager_stopped.set()
         if self._finalizer.detach() is not None:
-            shutdown(self.processes, timeout=timeout)
+            process_timeout = get_engine_process_shutdown_timeout(
+                self._request_shutdown_timeout, timeout
+            )
+            if process_timeout != timeout:
+                logger.info(
+                    "[shutdown] EngineCore process manager: using %ss ROCm "
+                    "cleanup grace after immediate request abort",
+                    process_timeout,
+                )
+            shutdown(self.processes, timeout=process_timeout)
 
     def monitor_engine_liveness(self) -> None:
         """Monitor engine core process liveness."""

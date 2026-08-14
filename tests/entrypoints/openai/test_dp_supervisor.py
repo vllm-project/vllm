@@ -243,6 +243,34 @@ def test_handles_shutdown_event():
 
 
 @pytest.mark.asyncio
+async def test_shutdown_children_uses_engine_process_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    supervisor = DPSupervisor(_make_unit_args(shutdown_timeout=0.0))
+    supervisor._processes = [
+        SimpleNamespace(name="APIServer_DPRank_4", pid=None, is_alive=lambda: False)
+    ]
+    calls = []
+
+    monkeypatch.setattr(
+        dp_sup,
+        "get_engine_process_shutdown_timeout",
+        lambda request_timeout, manager_timeout: 60.0,
+    )
+    monkeypatch.setattr(
+        dp_sup,
+        "_join_processes_with_timeout",
+        lambda processes, timeout: calls.append((processes, timeout)),
+    )
+
+    await supervisor._shutdown_children()
+
+    assert calls == [
+        (supervisor._processes, 60.0 + CHILD_EXIT_GRACE_S),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_handles_child_exit(
     monkeypatch: pytest.MonkeyPatch,
 ):
