@@ -364,6 +364,5 @@ class Qwen3DSparkForCausalLM(DFlashQwen3ForCausalLM):
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
         loader = AutoWeightsLoader(self)
         loader.load_weights(model_weights.items(), mapper=mapper)
-        # The fused-KV buffers are built lazily on first use (after the loader
-        # has called ``process_weights_after_loading``), so quantized weights
+        # Fused-KV buffers are built lazily on first use so quantized weights
         # are in their final layout.
