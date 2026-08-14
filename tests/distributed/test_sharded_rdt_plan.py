@@ -1114,7 +1114,7 @@ class TestArenaAllocBytes:
 
 
 class TestLayerwiseGroups:
-    def test_partition_is_pre_then_one_group_per_layer_then_post(self):
+    def test_partition_is_one_group_per_layer_between_unindexed_blocks(self):
         names = [
             "embed.weight",
             "model.layers.0.a",
@@ -1130,13 +1130,13 @@ class TestLayerwiseGroups:
         ]
 
     def test_flattening_a_partition_returns_the_input_order(self):
-        """The partition is by POSITION relative to the first layer name, not by
-        name class — so a post-block name that looks like a pre-block name still
-        lands in post. Group index therefore means the same thing on every rank."""
+        """Un-indexed names group by POSITION, not by name class — so one that
+        looks like a pre-block name still lands after the layers it follows.
+        Group index therefore means the same thing on every rank."""
         names = [
             "embed.weight",
             "model.layers.0.a",
-            "embed.weight.tied",  # after the layers => post, despite the name
+            "embed.weight.tied",  # after the layers => its own trailing block
         ]
         groups = layerwise_groups(names)
         assert [n for g in groups for n in g] == names
@@ -1148,12 +1148,125 @@ class TestLayerwiseGroups:
             ["model.layers.10.a"],
         ]
 
+    def test_stacks_keep_prefix_appearance_order_and_sort_within(self):
+        """Two stacks stay in the order they appear — the vision tower before the
+        text stack — while each sorts by index internally."""
+        names = [
+            "visual.blocks.1.w",
+            "visual.blocks.0.w",
+            "model.language_model.layers.1.w",
+            "model.language_model.layers.0.w",
+        ]
+        assert layerwise_groups(names) == [
+            ["visual.blocks.0.w"],
+            ["visual.blocks.1.w"],
+            ["model.language_model.layers.0.w"],
+            ["model.language_model.layers.1.w"],
+        ]
+
+    def test_the_post_block_lands_last_however_early_it_arrives(self):
+        """Megatron-Bridge streams the last pipeline stage's output block before
+        its layers. Sweeping un-indexed names after the first layer into a
+        trailing group is what lets the gather loop walk groups ascending."""
+        names = ["model.layers.0.w", "model.norm.weight", "model.layers.1.w"]
+        assert layerwise_groups(names) == [
+            ["model.layers.0.w"],
+            ["model.layers.1.w"],
+            ["model.norm.weight"],
+        ]
+
+    def test_names_sharing_a_layer_coalesce_when_the_source_interleaves(self):
+        """A raw-checkpoint source may yield in shard-packing order. Coalescing on
+        the key keeps that from shattering one layer into many groups."""
+        names = [
+            "model.layers.0.a",
+            "model.layers.1.a",
+            "model.layers.0.b",
+        ]
+        assert layerwise_groups(names) == [
+            ["model.layers.0.a", "model.layers.0.b"],
+            ["model.layers.1.a"],
+        ]
+
     def test_no_empty_groups(self):
         for names in ([], ["only.pre"], ["model.layers.0.a"]):
             assert all(g for g in layerwise_groups(names))
 
     def test_a_model_with_no_layers_is_one_pre_group(self):
         assert layerwise_groups(["a", "b"]) == [["a", "b"]]
+
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            "model.layers.",  # Llama, Qwen3, GLM-4.5, DeepSeek, Mixtral
+            "model.language_model.layers.",  # Qwen3.5/3.6, Qwen2.5-VL, Gemma3
+            "language_model.layers.",  # Kimi-K2.5, Nemotron-VL
+            "thinker.model.layers.",  # Qwen2.5/3-Omni
+            "transformer.h.",  # GPT-2, GPT-J, Bloom, Falcon
+            "transformer.blocks.",  # MPT, DBRX
+            "transformer.encoder.layers.",  # ChatGLM
+            "backbone.layers.",  # Mamba, Mamba2
+            "gpt_neox.layers.",  # GPT-NeoX
+            "model.decoder.layers.",  # OPT
+            "model.h.",  # Exaone
+            "model.layers.layers.",  # Plamo3
+            "bert.encoder.layer.",  # BERT, RoBERTa
+            "visual.blocks.",  # Qwen-VL vision tower
+            "vision_tower.vision_model.encoder.layers.",  # SigLIP/CLIP towers
+            "audio_tower.layers.",  # Whisper-style audio towers
+        ],
+    )
+    def test_every_supported_naming_convention_partitions_per_layer(self, prefix):
+        """One decoder layer per group under any prefix, with no per-architecture
+        table. A literal `model.layers.` match silently yields one whole-model
+        group for most of these."""
+        names = [f"{prefix}{i}.self_attn.q_proj.weight" for i in range(3)]
+        assert layerwise_groups(names) == [[n] for n in names]
+
+    def test_a_moe_layer_stays_whole(self):
+        """The OUTERMOST index wins, so per-expert names group by layer. Splitting
+        on the expert would cut FusedMoE — one leaf module — across groups."""
+        names = [
+            "model.layers.0.mlp.experts.0.w1.weight",
+            "model.layers.0.mlp.experts.1.w1.weight",
+            "model.layers.1.mlp.experts.0.w1.weight",
+        ]
+        assert layerwise_groups(names) == [
+            [
+                "model.layers.0.mlp.experts.0.w1.weight",
+                "model.layers.0.mlp.experts.1.w1.weight",
+            ],
+            ["model.layers.1.mlp.experts.0.w1.weight"],
+        ]
+
+    def test_a_vlm_partitions_the_vision_tower_and_the_text_stack(self):
+        """Qwen-VL layout. Today's literal `model.layers.` match puts every one of
+        these in ONE group — the whole model — because the text stack ships as
+        `model.language_model.layers.`."""
+        names = [
+            "visual.patch_embed.proj.weight",
+            "visual.blocks.0.attn.qkv.weight",
+            "visual.blocks.1.attn.qkv.weight",
+            "visual.merger.mlp.weight",
+            "model.language_model.layers.0.self_attn.q_proj.weight",
+            "lm_head.weight",
+        ]
+        assert layerwise_groups(names) == [
+            ["visual.patch_embed.proj.weight"],
+            ["visual.blocks.0.attn.qkv.weight"],
+            ["visual.blocks.1.attn.qkv.weight"],
+            ["model.language_model.layers.0.self_attn.q_proj.weight"],
+            ["visual.merger.mlp.weight", "lm_head.weight"],
+        ]
+
+    def test_two_stacks_sharing_an_index_do_not_merge(self):
+        """The key carries the prefix, so vision block 0 and text layer 0 are
+        different groups even though both are index 0."""
+        names = [
+            "visual.blocks.0.attn.qkv.weight",
+            "model.language_model.layers.0.self_attn.q_proj.weight",
+        ]
+        assert layerwise_groups(names) == [[n] for n in names]
 
 
 class TestDtypeFromName:

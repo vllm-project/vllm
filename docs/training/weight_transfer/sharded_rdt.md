@@ -35,7 +35,7 @@ The engine drives [layerwise reload](../layerwise.md) itself, in `start_weight_u
 
 The trainer usually cannot serve its parameters as they sit: FSDP shards them, and even an EP-split trainer has to assemble a whole expert. So each sync still runs gather collectives — but a layer at a time, not a model at a time.
 
-**A gather group is one decoder layer.** The parameter list is cut on `model.layers.<N>.` boundaries, which leaves everything before the first layer (the embeddings) and everything after the last (the final norm, `lm_head`) as one group each:
+**A gather group is one decoder layer.** The parameter list is keyed on the outermost index segment of each name, which leaves runs of un-indexed names — the embeddings before the first layer, the final norm and `lm_head` after the last — as groups of their own:
 
 ```text
 group 0     model.embed_tokens.weight
@@ -47,7 +47,7 @@ group N+1   model.norm.weight, lm_head.weight
 
 The layer is the unit of everything that follows: the trainer gathers a layer, publishes it (immediately pullable), and moves on to the next while the consumers pull the one it just published. Once every consumer has signalled that it is done with a layer, the trainer drops it and gains a credit to gather another. `gather_lookahead` is how far ahead of the consumers that loop may run, so at most `gather_lookahead + 1` layers are resident on the trainer at a time. The default of 1 keeps the next layer gathered and pullable while the current one is being pulled — enough to hide the handoff without doubling trainer memory. Raise it only if one layer's gather is slower than its pulls.
 
-Because a layer is also the unit the consumers free and the unit the receive buffers are sized against, it is what keeps memory bounded on both sides: without it the whole model would be one transfer, and both sides would have to hold their full share of it at once. Sources can control the partition; see [gather groups](base.md#gather-groups).
+Because a layer is also the unit the consumers free and the unit the receive buffers are sized against, it is what keeps memory bounded on both sides: without it the whole model would be one transfer, and both sides would have to hold their full share of it at once. Keying on the index rather than a fixed `model.layers.` prefix is what makes that hold across naming conventions — a VLM's `model.language_model.layers.`, GPT-2's `transformer.h.`, a vision tower's `visual.blocks.`. Sources can control the partition; see [gather groups](base.md#gather-groups).
 
 ### Ownership
 

@@ -150,10 +150,10 @@ Three requirements come with overriding it:
 #### Gather groups
 
 Some backends transfer a layer at a time rather than a model at a time, so they
-partition `metadata()` into **gather groups**. `layerwise_groups` cuts the name
-list on `model.layers.<N>.` boundaries, so **a group is one decoder layer**, plus
-one group for everything before the first layer (the embeddings) and one for
-everything after the last (the final norm, `lm_head`):
+partition `metadata()` into **gather groups**. `layerwise_groups` keys each name
+on the **outermost index segment** it contains, so **a group is one decoder
+layer**, with runs of un-indexed names (the embeddings, the final norm,
+`lm_head`) forming groups of their own where they appear:
 
 ```text
 group 0     model.embed_tokens.weight
@@ -163,11 +163,23 @@ group 2     model.layers.1.*
 group N+1   model.norm.weight, lm_head.weight
 ```
 
-The cut is by *position* relative to the first layer name, not by name pattern,
-so flattening the partition always reproduces `metadata()` order and group index
-*g* means the same layer on every rank and every consumer. That agreement is what
-lets a backend bound its buffers to one layer and free a layer once everyone is
-done with it.
+Keying on the index rather than a literal prefix means no per-architecture table:
+`model.layers.0.`, `model.language_model.layers.0.` (recent Qwen text
+checkpoints), `transformer.h.0.` (GPT-2, Falcon), `backbone.layers.0.` (Mamba)
+and a vision tower's `visual.blocks.0.` all partition the same way. The index
+taken is the *outermost* one, which keeps a MoE layer whole — a per-expert name
+like `model.layers.3.mlp.experts.7.w1` keys on the layer, not the expert.
+
+Group index *g* means the same layer on every rank and every consumer, because
+every side derives it from one rank's `metadata()`. That agreement is what lets a
+backend bound its buffers to one layer and free a layer once everyone is done
+with it.
+
+!!! warning "A leaf module's sources must all fall in one group"
+    The sharded-RDT engine frees a group as soon as its last chunk lands, so a
+    module split across groups would park a pull until the stall watchdog fires.
+    The default partition guarantees this; a `groups()` override must preserve
+    it.
 
 Two hooks follow from this, both with working defaults:
 
@@ -180,8 +192,8 @@ Two hooks follow from this, both with working defaults:
   materializing is usually a collective, and driving it per group rather than per
   tensor turns ~37k generator resumes into ~95 on a per-expert MoE model.
 
-Because `metadata()` order defines the partition, **every `model.layers.<N>.*`
-block must be contiguous in it**. A source whose natural export order interleaves
+Because `metadata()` order defines the partition, **all names sharing a layer
+index must be contiguous in it**. A source whose natural export order interleaves
 layers — bucketing all the MoE experts together, say — has to reorder before
 returning. Sharded RDT rejects a source that does not, at `trainer_init`.
 

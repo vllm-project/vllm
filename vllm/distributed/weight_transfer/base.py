@@ -33,38 +33,71 @@ TTrainerInitInfo = TypeVar("TTrainerInitInfo", bound="TrainerInitInfo")
 # channel. The built-in `ModuleSource` uses `materialize_full_tensor`.
 
 
+def _stack_key(name: str) -> tuple[str, int] | None:
+    """``(prefix, index)`` of the OUTERMOST integer segment, or None if there is
+    none.
+
+    Outermost is what keeps a MoE layer whole:
+    ``model.layers.3.mlp.experts.7.w1`` keys on the layer, not the expert.
+    """
+    parts = name.split(".")
+    for i, part in enumerate(parts):
+        if part.isdigit():
+            return ".".join(parts[:i]), int(part)
+    return None
+
+
 def layerwise_groups(names: list[str]) -> list[list[str]]:
-    """Partition flat parameter names into the pre block, one group per decoder
-    layer, then the post block (keys on ``model.layers.<N>.``).
+    """Partition flat parameter names into one group per decoder layer, keyed on
+    the outermost index segment of each name.
 
     This defines what a *group index* means for `WeightSource.groups` and
     `WeightSource.iter_groups`: index *g* names the same group on every trainer
     rank and every consumer, because it is derived from one rank's `metadata()`
-    order. The split is by POSITION relative to the first layer name, not by name
-    class, so flattening a partition always reproduces the input order.
+    order.
+
+    Keying on the index rather than a literal prefix needs no per-architecture
+    naming table: ``model.layers.0.``, ``model.language_model.layers.0.``,
+    ``transformer.h.0.``, ``backbone.layers.0.`` and a vision tower's
+    ``visual.blocks.0.`` all partition alike. Matching one fixed prefix does not,
+    and its failure is silent — every name lands in a single group holding the
+    whole model, which defeats the per-layer bound below.
+
+    Un-indexed names split by POSITION relative to the first indexed one: the pre
+    block (embeddings) and the post block (the final norm, `lm_head`, and any
+    inter-stack projector). Post lands last however early it arrived, which is
+    what a pipeline-parallel source needs — Megatron-Bridge streams the last
+    stage's output block *before* its layers.
+
+    Stacks come out in first-appearance order of their prefix and ascending index
+    within it, whatever order the source yielded them, so a source can normalize
+    an arbitrary export order by flattening this partition.
 
     Backends that gather and free per group (sharded RDT) also use it as the unit
     of transfer, which bounds their arena sizes: without it a whole model becomes
     one chunk.
     """
     pre: list[str] = []
-    layers: dict[int, list[str]] = {}
     post: list[str] = []
-    seen = False
-    for n in names:
-        if n.startswith("model.layers."):
-            seen = True
-            idx = int(n[len("model.layers.") :].split(".", 1)[0])
-            layers.setdefault(idx, []).append(n)
-        elif not seen:
-            pre.append(n)
-        else:
-            post.append(n)
-    groups: list[list[str]] = []
-    if pre:
-        groups.append(pre)
-    for i in sorted(layers):
-        groups.append(layers[i])
+    stacks: dict[tuple[str, int], list[str]] = {}
+    order: list[tuple[str, int]] = []
+    for name in names:
+        key = _stack_key(name)
+        if key is None:
+            (post if order else pre).append(name)
+            continue
+        if key not in stacks:
+            stacks[key] = []
+            order.append(key)
+        stacks[key].append(name)
+
+    prefix_rank: dict[str, int] = {}
+    for key in order:
+        prefix_rank.setdefault(key[0], len(prefix_rank))
+    order.sort(key=lambda key: (prefix_rank[key[0]], key[1]))
+
+    groups: list[list[str]] = [pre] if pre else []
+    groups += [stacks[key] for key in order]
     if post:
         groups.append(post)
     return groups
