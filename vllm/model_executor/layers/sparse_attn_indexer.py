@@ -292,6 +292,55 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
+def _fp8_paged_mqa_logits_torch(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_model_len: int,
+) -> torch.Tensor:
+    """Deterministic fallback for the broken SM90 BI metadata kernel."""
+    batch_size, next_n, num_heads, head_dim = q.shape
+    assert next_n == 1
+    block_size = kv_cache.shape[1]
+    pages = block_tables[:batch_size]
+    cache = kv_cache[pages]
+    cache_value = (
+        cache[..., :head_dim]
+        .contiguous()
+        .view(current_platform.fp8_dtype())
+        .to(torch.float32)
+        .reshape(batch_size, -1, head_dim)
+    )
+    cache_scale = (
+        cache[..., head_dim:]
+        .contiguous()
+        .view(torch.float32)
+        .reshape(batch_size, -1)
+    )
+    scores = torch.einsum(
+        "btd,bhd->bth",
+        cache_value,
+        q[:, 0].to(torch.float32),
+    )
+    scores = torch.relu(scores)
+    scores *= weights[:batch_size].to(torch.float32).unsqueeze(1)
+    scores = scores.sum(dim=-1) * cache_scale
+
+    width = min(scores.shape[1], max_model_len)
+    positions = torch.arange(width, device=q.device)
+    valid = positions.unsqueeze(0) < context_lens.reshape(batch_size, -1)[:, -1:]
+    logits = torch.full(
+        (batch_size, max_model_len),
+        float("-inf"),
+        dtype=torch.float32,
+        device=q.device,
+    )
+    logits[:, :width] = torch.where(valid, scores[:, :width], float("-inf"))
+    return logits
+
+
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -597,6 +646,15 @@ def sparse_attn_indexer(
                 seq_lens_xpu,
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
+                max_model_len,
+            )
+        elif envs.VLLM_BATCH_INVARIANT and not use_fp4_cache:
+            logits = _fp8_paged_mqa_logits_torch(
+                padded_q_quant_cast,
+                kv_cache,
+                weights[:num_padded_tokens],
+                seq_lens,
+                decode_metadata.block_table,
                 max_model_len,
             )
         else:

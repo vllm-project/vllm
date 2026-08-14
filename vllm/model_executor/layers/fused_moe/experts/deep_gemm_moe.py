@@ -44,6 +44,7 @@ from vllm.utils.deep_gemm import (
     m_grouped_fp8_fp4_gemm_nt_contiguous,
     m_grouped_fp8_gemm_nt_contiguous,
     mk_alignment_scope,
+    supports_deep_gemm_batch_invariance,
 )
 from vllm.utils.import_utils import has_deep_gemm
 
@@ -155,6 +156,10 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_current_device() -> bool:
         return is_deep_gemm_supported()
+
+    @staticmethod
+    def _supports_batch_invariance() -> bool:
+        return supports_deep_gemm_batch_invariance()
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:

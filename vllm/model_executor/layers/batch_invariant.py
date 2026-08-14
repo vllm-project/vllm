@@ -906,6 +906,12 @@ def enable_batch_invariant_mode():
     if _batch_invariant_MODE:
         return
 
+    # Configure optional kernel libraries through their vLLM compatibility
+    # wrappers before advertising the process-wide mode as enabled.
+    from vllm.utils.deep_gemm import enable_deep_gemm_batch_invariance
+
+    enable_deep_gemm_batch_invariance()
+
     _batch_invariant_MODE = True
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 

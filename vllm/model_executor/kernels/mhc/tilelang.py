@@ -1,8 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+
 import torch
 
 from vllm.utils.torch_utils import direct_register_custom_op
+
+
+def _batch_invariant_enabled() -> bool:
+    return os.environ.get("VLLM_BATCH_INVARIANT") == "1"
 
 
 def _torch_hc_prenorm_gemm(
@@ -126,6 +132,28 @@ def mhc_pre_tilelang(
         comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
         layer_input: shape (..., hidden_size), dtype torch.bfloat16
     """
+    if _batch_invariant_enabled() and residual.ndim == 3 and residual.shape[0] > 1:
+        token_outputs = [
+            mhc_pre_tilelang(
+                residual[index : index + 1],
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                n_splits,
+                norm_weight,
+                norm_eps,
+            )
+            for index in range(residual.shape[0])
+        ]
+        return tuple(
+            torch.cat(parts, dim=0) for parts in zip(*token_outputs, strict=True)
+        )
+
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         compute_num_split,
         mhc_pre_big_fuse_tilelang,
@@ -316,6 +344,29 @@ def mhc_pre_broadcast_tilelang(
     fn_broadcast: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """First-layer mHC pre for a residual broadcast from ``(T, H)``."""
+    if _batch_invariant_enabled() and residual.shape[0] > 1:
+        token_outputs = [
+            mhc_pre_broadcast_tilelang(
+                residual[index : index + 1],
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                n_splits,
+                norm_weight,
+                norm_eps,
+                fn_broadcast,
+            )
+            for index in range(residual.shape[0])
+        ]
+        return tuple(
+            torch.cat(parts, dim=0) for parts in zip(*token_outputs, strict=True)
+        )
+
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         compute_num_split,
         mhc_pre_big_fuse_broadcast_with_norm_tilelang,
@@ -461,6 +512,32 @@ def mhc_fused_post_pre_tilelang(
         comb_mix_cur: shape (..., hc_mult, hc_mult)
         layer_input_cur: shape (..., hidden_size)
     """
+
+    if _batch_invariant_enabled() and x.shape[0] > 1:
+        token_outputs = [
+            mhc_fused_post_pre_tilelang(
+                x[index : index + 1],
+                residual[index : index + 1],
+                post_layer_mix[index : index + 1],
+                comb_res_mix[index : index + 1],
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+                n_splits,
+                tile_n,
+                norm_weight,
+                norm_eps,
+            )
+            for index in range(x.shape[0])
+        ]
+        return tuple(
+            torch.cat(parts, dim=0) for parts in zip(*token_outputs, strict=True)
+        )
 
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         compute_num_split,

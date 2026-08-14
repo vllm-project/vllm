@@ -49,6 +49,19 @@ def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch)
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5799
 
 
+def test_ds4_decode_kernel_defaults_and_validation(monkeypatch: pytest.MonkeyPatch):
+    getter = environment_variables["VLLM_DS4_DECODE_KERNEL"]
+    monkeypatch.delenv("VLLM_DS4_DECODE_KERNEL", raising=False)
+    assert getter() == "paged"
+
+    monkeypatch.setenv("VLLM_DS4_DECODE_KERNEL", "sparse")
+    assert getter() == "sparse"
+
+    monkeypatch.setenv("VLLM_DS4_DECODE_KERNEL", "invalid")
+    with pytest.raises(ValueError, match="VLLM_DS4_DECODE_KERNEL"):
+        getter()
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")

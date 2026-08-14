@@ -1104,6 +1104,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         else:
             self._mtp_hidden_buffer = None
 
+        # Dummy-load rollouts bypass CausalLM.load_weights(), but vLLM runs a
+        # profiling forward before VERL synchronizes actor weights. Materialize
+        # the derived first-layer MHC tensor for that forward; real weight loads
+        # refresh it again in DeepseekV4ForCausalLM.load_weights().
+        self.finalize_mhc_broadcast_weights()
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 

@@ -92,6 +92,14 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
             moe_parallel_config
         ) and fallback_cls._supports_parallel_config(moe_parallel_config)
 
+    @classmethod
+    def _supports_batch_invariance(cls) -> bool:
+        experts_cls, fallback_cls = cls.get_clses()
+        return (
+            experts_cls._supports_batch_invariance()
+            and fallback_cls._supports_batch_invariance()
+        )
+
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         e_war = self.experts.finalize_weight_and_reduce_impl()
         fbe_war = self.fallback_experts.finalize_weight_and_reduce_impl()

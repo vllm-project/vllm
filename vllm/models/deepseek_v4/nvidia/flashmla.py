@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
+from vllm import envs
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
@@ -160,6 +161,26 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         swa_only: bool,
         output: torch.Tensor,
     ) -> None:
+        decode_kernel = envs.VLLM_DS4_DECODE_KERNEL.lower()
+        if decode_kernel == "sparse":
+            self._forward_decode_sparse(
+                q=q,
+                compressed_k_cache=kv_cache,
+                swa_k_cache=self.swa_cache_layer.kv_cache,
+                swa_metadata=swa_metadata,
+                attn_metadata=attn_metadata,
+                swa_only=swa_only,
+                output=output,
+            )
+            return
+        if decode_kernel != "paged":
+            # envs validates this eagerly; keep the dispatch fail-closed if a
+            # test or embedding overrides the value after initialization.
+            raise ValueError(
+                "VLLM_DS4_DECODE_KERNEL must be 'paged' or 'sparse', "
+                f"got {decode_kernel!r}"
+            )
+
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
@@ -244,6 +265,166 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             extra_indices_in_kvcache=topk_indices,
             extra_topk_length=topk_lens,
             out=output.unsqueeze(1),
+        )
+
+    def _forward_decode_sparse(
+        self,
+        q: torch.Tensor,
+        compressed_k_cache: torch.Tensor | None,
+        swa_k_cache: torch.Tensor,
+        swa_metadata: "DeepseekSparseSWAMetadata",
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
+        swa_only: bool,
+        output: torch.Tensor,
+    ) -> None:
+        """Run real decode requests through the prefill sparse FlashMLA kernel."""
+        num_decodes = swa_metadata.num_decodes
+        num_decode_tokens = swa_metadata.num_decode_tokens
+        if num_decodes <= 0 or num_decode_tokens <= 0:
+            raise RuntimeError("decode-sparse requires at least one decode request")
+        if swa_metadata.decode_swa_indices is None:
+            raise RuntimeError("decode-sparse requires decode SWA indices")
+        if swa_metadata.decode_swa_indices.shape[-1] != self.window_size:
+            raise RuntimeError(
+                "decode-sparse only supports causal SWA metadata with width "
+                f"{self.window_size}, got {swa_metadata.decode_swa_indices.shape[-1]}"
+            )
+        if (
+            swa_metadata.seq_lens is None
+            or swa_metadata.seq_lens_cpu is None
+            or swa_metadata.query_start_loc is None
+            or swa_metadata.query_start_loc_cpu is None
+            or swa_metadata.is_valid_token is None
+        ):
+            raise RuntimeError("decode-sparse requires finalized scheduler metadata")
+
+        seq_lens = swa_metadata.seq_lens[:num_decodes]
+        seq_lens_cpu = swa_metadata.seq_lens_cpu[:num_decodes]
+        query_start_loc = swa_metadata.query_start_loc[: num_decodes + 1]
+        query_start_loc_cpu = swa_metadata.query_start_loc_cpu[: num_decodes + 1]
+        query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        prefix_lens_cpu = seq_lens_cpu - query_lens_cpu
+        gather_lens_cpu = query_lens_cpu + torch.clamp(
+            prefix_lens_cpu, min=0, max=self.window_size - 1
+        )
+        query_lens = query_start_loc[1:] - query_start_loc[:-1]
+        prefix_lens = seq_lens - query_lens
+        gather_lens = query_lens + torch.clamp(
+            prefix_lens, min=0, max=self.window_size - 1
+        )
+
+        if int(query_lens_cpu.sum().item()) != num_decode_tokens:
+            raise RuntimeError(
+                "decode-sparse query metadata does not match decode token count"
+            )
+
+        if swa_only:
+            assert self.topk_indices_buffer is not None
+            local_topk = self.topk_indices_buffer[:num_decode_tokens]
+            top_k = 0
+            max_compressed = 0
+        else:
+            if attn_metadata is None or compressed_k_cache is None:
+                raise RuntimeError(
+                    "compressed decode-sparse requires attention metadata and KV cache"
+                )
+            if self.compress_ratio == 4:
+                assert self.topk_indices_buffer is not None
+                local_topk = self.topk_indices_buffer[:num_decode_tokens]
+                top_k = local_topk.shape[-1]
+            elif self.compress_ratio == 128:
+                if attn_metadata.c128a_global_decode_topk_indices is None:
+                    raise RuntimeError(
+                        "C128 decode-sparse requires finalized top-k metadata"
+                    )
+                top_k = attn_metadata.c128a_global_decode_topk_indices.shape[-1]
+                local_topk = None
+            else:
+                raise ValueError(
+                    f"Unsupported compress_ratio={self.compress_ratio}; "
+                    "expected 1, 4, or 128."
+                )
+            max_compressed = int(
+                torch.div(
+                    seq_lens_cpu,
+                    self.compress_ratio,
+                    rounding_mode="floor",
+                )
+                .max()
+                .item()
+            )
+
+        max_gather = int(gather_lens_cpu.max().item())
+        workspace_width = max_compressed + max_gather
+        combined_topk = round_up(top_k + self.window_size, 128)
+        specs: list[tuple[tuple[int, ...], torch.dtype]] = [
+            ((num_decodes, workspace_width, q.shape[-1]), torch.bfloat16),
+            ((num_decode_tokens, combined_topk), torch.int32),
+            ((num_decode_tokens,), torch.int32),
+        ]
+        if not swa_only and self.compress_ratio == 128:
+            specs.append(((num_decode_tokens, top_k), torch.int32))
+        workspace = current_workspace_manager().get_simultaneous(*specs)
+        kv, combined_indices_out, combined_lens_out = workspace[:3]
+
+        if not swa_only:
+            assert attn_metadata is not None
+            assert compressed_k_cache is not None
+            dequantize_and_gather_k_cache(
+                kv,
+                compressed_k_cache,
+                seq_lens=torch.div(
+                    seq_lens, self.compress_ratio, rounding_mode="floor"
+                ),
+                gather_lens=None,
+                block_table=attn_metadata.block_table[:num_decodes],
+                block_size=attn_metadata.block_size // self.compress_ratio,
+                offset=0,
+            )
+        dequantize_and_gather_k_cache(
+            kv,
+            swa_k_cache,
+            seq_lens=seq_lens,
+            gather_lens=gather_lens,
+            block_table=swa_metadata.block_table[:num_decodes],
+            block_size=swa_metadata.block_size,
+            offset=max_compressed,
+        )
+
+        if not swa_only and self.compress_ratio == 128:
+            local_topk = workspace[3]
+            torch.arange(
+                top_k,
+                dtype=torch.int32,
+                device=q.device,
+                out=local_topk[0],
+            )
+            if num_decode_tokens > 1:
+                local_topk[1:].copy_(local_topk[0])
+        assert local_topk is not None
+        combined_indices, combined_lens = combine_topk_swa_indices(
+            local_topk,
+            query_start_loc,
+            seq_lens,
+            gather_lens,
+            self.window_size,
+            self.compress_ratio,
+            top_k,
+            workspace_width,
+            max_compressed,
+            out=(combined_indices_out, combined_lens_out),
+        )
+        combined_lens.masked_fill_(
+            ~swa_metadata.is_valid_token[:num_decode_tokens], 0
+        )
+        flash_mla_sparse_fwd(
+            q=q,
+            kv=kv.view(-1, 1, q.shape[-1]),
+            indices=combined_indices.unsqueeze(1),
+            sm_scale=self.scale,
+            attn_sink=self.attn_sink,
+            topk_length=combined_lens,
+            out=output,
         )
 
     def _forward_prefill(
