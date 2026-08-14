@@ -162,7 +162,7 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
     [
         (
             SimpleNamespace(
-                model="Qwen/Qwen3-1.7B-Base",
+                model="Qwen/Qwen3-32B",
                 architectures=["Qwen3ForCausalLM"],
                 runner_type="generate",
                 is_moe=False,
@@ -172,8 +172,8 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ),
         (
             SimpleNamespace(
-                model="Qwen/Qwen3-32B",
-                architectures=["Qwen3ForCausalLM"],
+                model="Qwen/Qwen2-7B-Instruct",
+                architectures=["Qwen2ForCausalLM"],
                 runner_type="generate",
                 is_moe=False,
                 is_quantized=False,
@@ -234,6 +234,16 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
             SimpleNamespace(
                 model="deepseek-ai/DeepSeek-V2-Chat",
                 architectures=["DeepseekV2ForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="deepseek-ai/DeepSeek-V3",
+                architectures=["DeepseekV3ForCausalLM"],
                 runner_type="generate",
                 is_moe=True,
                 is_quantized=False,
@@ -308,7 +318,7 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
                 is_moe=True,
                 is_quantized=False,
             ),
-            False,
+            True,
         ),
         (
             SimpleNamespace(
@@ -329,7 +339,7 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
                 is_quantized=False,
                 is_hybrid=True,
             ),
-            False,
+            True,
         ),
         (
             SimpleNamespace(
@@ -340,7 +350,7 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
                 is_quantized=False,
                 is_attention_free=True,
             ),
-            False,
+            True,
         ),
         (
             SimpleNamespace(
