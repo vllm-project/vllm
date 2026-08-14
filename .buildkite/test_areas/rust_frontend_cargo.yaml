@@ -14,21 +14,6 @@ steps:
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
   commands:
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
-  mirror:
-    amd:
-      device: mi250_1
-      no_gpu: true
-      working_dir: "/vllm-workspace"
-      timeout_in_minutes: 25
-      depends_on:
-      - image-build-amd
-      source_file_dependencies:
-      - rust/
-      - rust-toolchain.toml
-      - .buildkite/test_areas/rust_frontend_cargo.yaml
-      - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
-      commands:
-      - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
 
 - label: Rust Frontend Cargo Tests
   key: rust-frontend-cargo-tests
@@ -43,18 +28,3 @@ steps:
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
   commands:
   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh test
-  mirror:
-    amd:
-      device: mi250_1
-      no_gpu: true
-      working_dir: "/vllm-workspace"
-      timeout_in_minutes: 25
-      depends_on:
-      - image-build-amd
-      source_file_dependencies:
-      - rust/
-      - rust-toolchain.toml
-      - .buildkite/test_areas/rust_frontend_cargo.yaml
-      - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
-      commands:
-      - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh test

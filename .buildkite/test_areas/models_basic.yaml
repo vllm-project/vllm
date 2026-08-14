@@ -96,17 +96,3 @@ steps:
   device: cpu-small
   commands:
     - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/transformers/fusers/
-  mirror:
-    amd:
-      device: mi250_1
-      no_gpu: true
-      working_dir: "/vllm-workspace/tests"
-      timeout_in_minutes: 25
-      depends_on:
-      - image-build-amd
-      source_file_dependencies:
-      - vllm/
-      - tests/models/test_utils.py
-      - tests/models/test_vision.py
-      commands:
-      - pytest -v -s models/test_utils.py models/test_vision.py
