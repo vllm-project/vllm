@@ -82,6 +82,8 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 - Attention backend
 - KV cache dtype (`cache_dtype`)
 - EAGLE/MTP-style speculative method and draft-model configuration
+- NIXL transfer mode (push vs pull) — a push (WRITE) connector and a pull (READ)
+  connector use incompatible transfer protocols and must never be paired
 
 !!! warning
     Disable the hash check with `--kv-transfer-config '{"kv_connector_extra_config": {"enforce_handshake_compat": false}}'` at your own risk.
