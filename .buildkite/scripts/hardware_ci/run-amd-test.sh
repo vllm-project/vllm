@@ -78,6 +78,37 @@ export PYTHONFAULTHANDLER
 # depend on their current working directory.
 export PYTHONPATH="${PYTHONPATH:-..}"
 
+ci_started_at=$SECONDS
+amd_ci_script_dir=$(
+  cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P
+) || {
+  echo "Unable to locate AMD CI teardown helpers" >&2
+  exit 1
+}
+# shellcheck source=amd_ci_teardown.sh
+source "${amd_ci_script_dir}/amd_ci_teardown.sh" || exit 1
+
+# Keep environment input as inert strings until it has been validated and
+# normalized below. In particular, never interpolate an untrusted value into
+# a Bash arithmetic expression.
+container_timeout_s_raw="${CONTAINER_TIMEOUT_S:-0}"
+teardown_grace_s_raw="${VLLM_CI_TEARDOWN_GRACE_S:-3}"
+docker_command_timeout_s_raw="${VLLM_CI_DOCKER_COMMAND_TIMEOUT_S:-}"
+docker_cleanup_timeout_s_raw="${VLLM_CI_DOCKER_CLEANUP_TIMEOUT_S:-5}"
+container_timeout_s=0
+teardown_grace_s=3
+docker_command_timeout_s=5
+docker_cleanup_timeout_s=5
+ci_job_id=""
+ci_docker_label=""
+artifact_work_dir=""
+image_name=""
+native_process_token=""
+ci_docker_cleanup_enabled=0
+ci_docker_launch_in_progress=0
+ci_cleanup_started=0
+remaining_timeout_s=0
+
 ###############################################################################
 # Helper Functions
 ###############################################################################
@@ -110,7 +141,12 @@ clear_ci_orchestration_env() {
     VLLM_CI_K8S_POD_NAME \
     VLLM_CI_USE_ARTIFACTS \
     VLLM_CI_RESULTS_ROOT \
-    VLLM_ALLOW_DEPRECATED_BEAM_SEARCH
+    VLLM_ALLOW_DEPRECATED_BEAM_SEARCH \
+    VLLM_CI_PROCESS_TOKEN \
+    CONTAINER_TIMEOUT_S \
+    VLLM_CI_TEARDOWN_GRACE_S \
+    VLLM_CI_DOCKER_COMMAND_TIMEOUT_S \
+    VLLM_CI_DOCKER_CLEANUP_TIMEOUT_S
 }
 
 cleanup_network() {
@@ -123,6 +159,16 @@ cleanup_network() {
   if docker network ls | grep -q docker-net; then
     docker network rm docker-net || true
   fi
+}
+
+refresh_ci_timeout() {
+  local elapsed=0
+
+  remaining_timeout_s="${container_timeout_s}"
+  ((container_timeout_s == 0)) && return 0
+  elapsed=$((SECONDS - ci_started_at))
+  ((elapsed < container_timeout_s)) || return 1
+  remaining_timeout_s=$((container_timeout_s - elapsed))
 }
 
 prepare_artifact_image() {
@@ -1246,9 +1292,6 @@ handle_pytest_exit() {
     echo "Pytest exit code 5 (no tests collected) - treating as success."
     exit 0
   fi
-  if [[ "${exit_code}" -ne 0 ]]; then
-    collect_amd_ci_failure_diagnostics "${exit_code}"
-  fi
   exit "$exit_code"
 }
 
@@ -1416,9 +1459,109 @@ handle_amd_runner_exit() {
   return 0
 }
 
-# Catch both test failures and wrapper/setup failures. Runtime-specific cleanup
-# traps below replace this trap but call the same handler before cleaning up.
-trap handle_amd_runner_exit EXIT
+initialize_ci_teardown() {
+  vllm_ci_parse_bounded_integer \
+    "CONTAINER_TIMEOUT_S" "${container_timeout_s_raw}" \
+    0 604800 container_timeout_s || return 1
+  vllm_ci_parse_bounded_integer \
+    "VLLM_CI_TEARDOWN_GRACE_S" "${teardown_grace_s_raw}" \
+    1 30 teardown_grace_s || return 1
+  if [[ -n "${docker_command_timeout_s_raw}" ]]; then
+    vllm_ci_parse_bounded_integer \
+      "VLLM_CI_DOCKER_COMMAND_TIMEOUT_S" \
+      "${docker_command_timeout_s_raw}" \
+      1 60 docker_command_timeout_s || return 1
+  else
+    docker_command_timeout_s=$((teardown_grace_s + 2))
+  fi
+  vllm_ci_parse_bounded_integer \
+    "VLLM_CI_DOCKER_CLEANUP_TIMEOUT_S" \
+    "${docker_cleanup_timeout_s_raw}" \
+    1 60 docker_cleanup_timeout_s || return 1
+  vllm_ci_require_process_tools || return 1
+
+  ci_job_id=$(
+    vllm_ci_sanitize_resource_id \
+      "${BUILDKITE_JOB_ID:-local-${BASHPID}}"
+  )
+  ci_docker_label="io.vllm.ci.job=${ci_job_id}"
+}
+
+# shellcheck disable=SC2317  # Called indirectly by the EXIT trap.
+cleanup_ci_job() {
+  local status=$?
+  local cleanup_failed=0
+  local required_empty_observations=1
+  local remove_test_image=0
+
+  # Do not let a second cancellation interrupt the bounded cleanup and
+  # diagnostics path. SIGKILL remains able to enforce the agent's hard limit.
+  trap - EXIT
+  trap ':' HUP INT TERM
+  if ((ci_cleanup_started)); then
+    exit "${status}"
+  fi
+  ci_cleanup_started=1
+
+  # shellcheck disable=SC2153  # Initialized by the sourced teardown helper.
+  vllm_ci_terminate_process_group \
+    "${VLLM_CI_ACTIVE_PGID}" "${teardown_grace_s}" || cleanup_failed=1
+  if [[ -n "${VLLM_CI_ACTIVE_PID}" ]] \
+    && ! vllm_ci_process_is_live "${VLLM_CI_ACTIVE_PID}"; then
+    wait "${VLLM_CI_ACTIVE_PID}" 2>/dev/null || true
+  fi
+  vllm_ci_terminate_tagged_processes \
+    "${native_process_token}" "${teardown_grace_s}" || cleanup_failed=1
+
+  if ((ci_docker_cleanup_enabled)); then
+    # A signal can arrive between invoking the Docker client and the daemon
+    # making the labeled container visible. Require a short stable-empty
+    # window only for that launch race; completed commands need one check.
+    ((ci_docker_launch_in_progress)) && required_empty_observations=10
+    vllm_ci_cleanup_labeled_containers \
+      "${ci_docker_label}" \
+      "${teardown_grace_s}" \
+      "${docker_command_timeout_s}" \
+      "${docker_cleanup_timeout_s}" \
+      "${required_empty_observations}" || cleanup_failed=1
+    if [[ "${VLLM_CI_REMOVE_TEST_IMAGE:-0}" == "1" \
+      && -n "${image_name}" ]]; then
+      remove_test_image=1
+    elif [[ -n "${image_name}" ]]; then
+      echo "Keeping ROCm test image locally: ${image_name}"
+    fi
+  fi
+
+  ((status == 0 && cleanup_failed)) && status=1
+
+  # Upload diagnostics once the workload and labeled containers have stopped,
+  # before supplemental local cleanup can consume the remaining agent grace.
+  # Cgroup peak/OOM counters persist, and cleanup-caused failures are included.
+  handle_amd_runner_exit "${status}"
+
+  if ((remove_test_image)); then
+    (
+      vllm_ci_run_tracked_command "${docker_command_timeout_s}" 1 \
+        docker image rm -f "${image_name}"
+    ) >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${artifact_work_dir}" ]] \
+    && ! rm -rf -- "${artifact_work_dir}" >/dev/null 2>&1; then
+    cleanup_failed=1
+  fi
+  if ((status == 0 && cleanup_failed)); then
+    status=1
+    # On a previously successful run, make a late cleanup failure observable.
+    handle_amd_runner_exit "${status}"
+  fi
+  exit "${status}"
+}
+
+trap cleanup_ci_job EXIT
+trap 'vllm_ci_request_exit 129' HUP
+trap 'vllm_ci_request_exit 130' INT
+trap 'vllm_ci_request_exit 143' TERM
+initialize_ci_teardown || exit 1
 
 ###############################################################################
 # Main
@@ -1426,17 +1569,6 @@ trap handle_amd_runner_exit EXIT
 
 if is_native_runtime; then
   echo "--- Native in-pod ROCm CI (AMD_CI_RUNTIME=${AMD_CI_RUNTIME:-unset}, NATIVE_CI=${NATIVE_CI:-unset})"
-  artifact_work_dir=""
-
-  # shellcheck disable=SC2317  # Called indirectly by the EXIT trap.
-  cleanup_native_workspace() {
-    local exit_code=$?
-    handle_amd_runner_exit "${exit_code}"
-    if [[ -n "${artifact_work_dir}" ]]; then
-      rm -rf "${artifact_work_dir}"
-    fi
-  }
-  trap cleanup_native_workspace EXIT
 
   if [[ -n "${VLLM_TEST_COMMANDS:-}" ]]; then
     commands="${VLLM_TEST_COMMANDS}"
@@ -1480,8 +1612,15 @@ if is_native_runtime; then
   run_native_preflight || exit 1
   # Keep AMD CI orchestration variables out of vLLM's runtime environment.
   clear_ci_orchestration_env
-  /bin/bash -o pipefail -c "${commands}"
-  handle_pytest_exit "$?"
+  native_process_token="${ci_job_id}-${BASHPID}-${RANDOM}"
+  exit_code=0
+  refresh_ci_timeout || handle_pytest_exit 124
+  vllm_ci_run_tracked_command \
+    "${remaining_timeout_s}" \
+    "${teardown_grace_s}" \
+    env "VLLM_CI_PROCESS_TOKEN=${native_process_token}" \
+    /bin/bash -o pipefail -c "${commands}" || exit_code=$?
+  handle_pytest_exit "${exit_code}"
 fi
 
 # --- GPU initialization for legacy Docker execution ---
@@ -1494,27 +1633,8 @@ report_docker_usage
 # --- Pull test image ---
 echo "--- Pulling container"
 image_name="${VLLM_CI_FALLBACK_IMAGE:-rocm/vllm-ci:${BUILDKITE_COMMIT:-local}}"
-artifact_work_dir=""
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
-
-# shellcheck disable=SC2317  # Called indirectly by the EXIT trap.
-remove_docker_container() {
-  local exit_code=$?
-  handle_amd_runner_exit "${exit_code}"
-  if docker container inspect "${container_name}" >/dev/null 2>&1; then
-    docker rm -f "${container_name}" || true
-  fi
-  if [[ "${VLLM_CI_REMOVE_TEST_IMAGE:-0}" == "1" ]]; then
-    docker image rm -f "${image_name}" || true
-  else
-    # Keep images by default so later jobs on the same AMD node can reuse layers.
-    echo "Keeping ROCm test image locally: ${image_name}"
-  fi
-  if [[ -n "${artifact_work_dir}" ]]; then
-    rm -rf "${artifact_work_dir}"
-  fi
-}
-trap remove_docker_container EXIT
+ci_docker_cleanup_enabled=1
 
 # python_only_compile.sh runs `python setup.py develop` and needs the full repo tree
 # under /vllm-workspace (Dockerfile.rocm test stage: mkdir src && mv vllm).
@@ -1709,14 +1829,22 @@ else
     echo "ROCm debug agent not enabled, coredumps are disabled in the test container."
   fi
 
-  docker run \
+  exit_code=0
+  refresh_ci_timeout || handle_pytest_exit 124
+  ci_docker_launch_in_progress=1
+  vllm_ci_run_tracked_command \
+    "${remaining_timeout_s}" \
+    "${teardown_grace_s}" \
+    docker run \
     "${docker_run_terminal_args[@]}" \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
     --network=host \
     --shm-size=16gb \
     --group-add "$render_gid" \
+    --init \
     --rm \
+    --label "${ci_docker_label}" \
     $coredump_flags \
     -e HF_TOKEN \
     -e "HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT}" \
@@ -1745,8 +1873,9 @@ else
     "${standalone_merge_base_env[@]}" \
     --name "${container_name}" \
     "${image_name}" \
-    /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}"
-
-  exit_code=$?
-  handle_pytest_exit "$exit_code"
+    /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}" || exit_code=$?
+  # A deferred signal or abnormal launch leaves the tracked PID populated.
+  # Keep the launch-race settling window enabled in that case.
+  [[ -z "${VLLM_CI_ACTIVE_PID}" ]] && ci_docker_launch_in_progress=0
+  handle_pytest_exit "${exit_code}"
 fi
