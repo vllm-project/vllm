@@ -46,6 +46,17 @@ else:
 logger = init_logger(__name__)
 
 
+def _normalize_ray_node_ip(node_ip: str) -> str:
+    """Strip brackets from a Ray node IP.
+
+    ``ray.util.get_node_ip_address()`` may return an IPv6 address wrapped in
+    brackets (e.g. ``[fe80::1]``). MessageQueue expects a bare address so its
+    ``is_valid_ipv6_address`` check passes and it can re-bracket the address
+    itself.
+    """
+    return node_ip.strip("[]")
+
+
 @dataclass
 class RayWorkerHandle:
     """Handle for a Ray worker actor, compatible with MultiprocExecutor."""
@@ -188,7 +199,7 @@ class RayWorkerProc(WorkerProc):
         self.worker_response_mq = MessageQueue(
             n_reader=1,
             n_local_reader=n_local,
-            connect_ip=ray.util.get_node_ip_address(),
+            connect_ip=_normalize_ray_node_ip(ray.util.get_node_ip_address()),
         )
         self.peer_response_handles: list[dict] = []
 
@@ -343,7 +354,7 @@ class RayExecutorV2(MultiprocExecutor):
             self.world_size,
             n_local,
             max_chunk_bytes=max_chunk_bytes,
-            connect_ip=ray.util.get_node_ip_address(),
+            connect_ip=_normalize_ray_node_ip(ray.util.get_node_ip_address()),
         )
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
