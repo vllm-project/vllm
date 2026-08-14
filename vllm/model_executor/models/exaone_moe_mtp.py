@@ -81,7 +81,7 @@ class ExaoneMoeMultiTokenPredictor(nn.Module):
                 vllm_config.model_config.hf_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.layers.{idx}",
-                mtp_layer=True,
+                is_mtp=True,
             )
             for idx in range(self.num_mtp_layers)
         )
@@ -159,7 +159,7 @@ class ExaoneMoeMTP(nn.Module):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(
             self.unpadded_vocab_size, config.vocab_size
         )

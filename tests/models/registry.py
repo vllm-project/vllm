@@ -213,6 +213,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "BailingMoeV2_5ForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ring-2.5-1T", trust_remote_code=True
     ),
+    "BailingMoeV3ForCausalLM": _HfExamplesInfo(
+        "inclusionAI/Ling-3.0-flash", trust_remote_code=True
+    ),
     "BloomForCausalLM": _HfExamplesInfo(
         "bigscience/bloom-560m", {"1b": "bigscience/bloomz-1b1"}
     ),
@@ -267,7 +270,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct", trust_remote_code=True
     ),
     "Exaone4ForCausalLM": _HfExamplesInfo("LGAI-EXAONE/EXAONE-4.0-32B"),
-    "ExaoneMoEForCausalLM": _HfExamplesInfo(
+    "ExaoneMoeForCausalLM": _HfExamplesInfo(
         "LGAI-EXAONE/K-EXAONE-236B-A23B", min_transformers_version="5.1.0"
     ),
     "Fairseq2LlamaForCausalLM": _HfExamplesInfo("mgleize/fairseq2-dummy-Llama-3.2-1B"),
@@ -376,6 +379,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "guard": "meta-llama/Llama-Guard-3-1B",
             "hermes": "NousResearch/Hermes-3-Llama-3.1-8B",
             "fp8": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
+            "fp8_1b": "RedHatAI/Llama-3.2-1B-Instruct-FP8",
             "tiny": "hmellor/tiny-random-LlamaForCausalLM",
         },
     ),
@@ -498,7 +502,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
     "Qwen3_5ForCausalLM": _HfExamplesInfo("codecho/Qwen3.5-0.8B-text-only"),
-    "Qwen3_5MoeForCausalLM": _HfExamplesInfo("codecho/Qwen3.5-35B-A3B-text-only"),
+    "Qwen3_5MoeForCausalLM": _HfExamplesInfo(
+        "codecho/Qwen3.5-35B-A3B-text-only",
+        extras={"native-prefix": "imdatta0/small_qwen3_5_20b"},
+        max_model_len=4096,
+    ),
     "MellumForCausalLM": _HfExamplesInfo("JetBrains/Mellum2-12B-A2.5B-Base"),
     "Qwen3NextForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-Next-80B-A3B-Instruct",
@@ -831,6 +839,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "DeepseekOCR2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-OCR-2",
     ),
+    "Dots3NoteForCausalLM": _HfExamplesInfo(
+        "rednote-hilab/dots3.note",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "UnlimitedOCRForCausalLM": _HfExamplesInfo(
         "baidu/Unlimited-OCR",
     ),
@@ -987,6 +1000,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "InternS1ProForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1-Pro",
         trust_remote_code=True,
+        max_transformers_version="5.14.1",
+        transformers_version_reason={
+            "vllm": (
+                "Remote video processor code imports "
+                "`BASE_VIDEO_PROCESSOR_DOCSTRING`, removed in Transformers 5.15."
+            )
+        },
+    ),
+    "InternS2MobiusForConditionalGeneration": _HfExamplesInfo(
+        "internlm/Intern-S2-Mobius",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "InternS2PreviewForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S2-Preview",
@@ -1103,14 +1128,15 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "4.0": "openbmb/MiniCPM-V-4",
             "4.5": "openbmb/MiniCPM-V-4_5",
         },
+        trust_remote_code=True,
         max_transformers_version="4.57",
         transformers_version_reason={
-            "vllm": (
-                "MiniCPMVBatchFeature is incompatible with its base class in "
-                "Transformers v5. See https://huggingface.co/openbmb/MiniCPM-Llama3-V-2_5/discussions/78"
+            "hf": (
+                "MiniCPMV.__init__ does not call self.post_init(), so "
+                "`all_tied_weights_keys` is never set; Transformers v5 requires "
+                "this attribute in _move_missing_keys_from_meta_to_device."
             )
         },
-        trust_remote_code=True,
     ),
     "MiniCPMV4_6ForConditionalGeneration": _HfExamplesInfo(
         "openbmb/MiniCPM-V-4_6",
@@ -1613,6 +1639,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         is_available_online=False,
     ),
+    "BailingMoeV3MTPModel": _HfExamplesInfo(
+        "inclusionAI/Ling-3.0-flash",
+        speculative_model="inclusionAI/Ling-3.0-flash",
+        trust_remote_code=True,
+    ),
     "DeepSeekMTPModel": _HfExamplesInfo(
         "luccafong/deepseek_mtp_main_random",
         speculative_model="luccafong/deepseek_mtp_draft_random",
@@ -1621,6 +1652,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "DeepSeekV4MTPModel": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Flash",
         speculative_model="deepseek-ai/DeepSeek-V4-Flash",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
+    "Dots3NoteMTPModel": _HfExamplesInfo(
+        "rednote-hilab/dots3.note",
+        speculative_model="rednote-hilab/dots3.note",
         trust_remote_code=True,
         is_available_online=False,
     ),
@@ -1675,6 +1712,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         tokenizer_mode="inkling",
         trust_remote_code=True,
         max_model_len=4096,
+    ),
+    "InternS2MobiusMTP": _HfExamplesInfo(
+        "internlm/Intern-S2-Mobius",
+        trust_remote_code=True,
+        speculative_model="internlm/Intern-S2-Mobius",
+        is_available_online=False,
     ),
     "KimiK3MTPModel": _HfExamplesInfo(
         "moonshotai/Kimi-K3",

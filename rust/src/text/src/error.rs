@@ -15,6 +15,8 @@ pub enum Error {
     Tokenizer(String),
     #[error("text request `{request_id}` must contain at least one prompt token ID")]
     EmptyPromptTokenIds { request_id: String },
+    #[error("text request `{request_id}` stop strings cannot be empty")]
+    EmptyStopString { request_id: String },
     #[error(
         "this model's maximum context length is {max_model_len} tokens, \
          but the prompt contains {prompt_len} input tokens"
@@ -51,6 +53,7 @@ impl Error {
         match self {
             Self::PromptTooLong { .. }
             | Self::EmptyPromptTokenIds { .. }
+            | Self::EmptyStopString { .. }
             | Self::Logprobs(_)
             | Self::TokenIds(_)
             | Self::SamplingParams(_)
@@ -59,7 +62,10 @@ impl Error {
             | Self::InvalidRepetitionDetection { .. }
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
-            | Self::Llm(LlmError::EmptyPromptTokenIds { .. }) => true,
+            | Self::Llm(LlmError::EmptyPromptTokenIds { .. })
+            | Self::Llm(LlmError::EngineCoreClient(
+                EngineCoreError::InvalidDataParallelRank { .. },
+            )) => true,
             _ => false,
         }
     }

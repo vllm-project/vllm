@@ -455,12 +455,14 @@ def triton_mrope(
 def apply_interleaved_rope(x: torch.Tensor, mrope_section: list[int]) -> torch.Tensor:
     """Apply interleaved MRoPE to 3D rotary embeddings.
     Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
-    interleaved [THTHWHTHW...TT], preserving frequency continuity.
+    interleaved [THWTHWTHW...TT], preserving frequency continuity.
     """
-    x_t = x[0].clone()
-    x_t[..., 1 : mrope_section[1] * 3 : 3] = x[1, ..., 1 : mrope_section[1] * 3 : 3]
-    x_t[..., 2 : mrope_section[2] * 3 : 3] = x[2, ..., 2 : mrope_section[2] * 3 : 3]
-    return x_t
+    channels = torch.arange(x.shape[-1], device=x.device)
+    is_height = (channels % 3 == 1) & (channels < mrope_section[1] * 3)
+    is_width = (channels % 3 == 2) & (channels < mrope_section[2] * 3)
+
+    result = torch.where(is_height, x[1], x[0])
+    return torch.where(is_width, x[2], result)
 
 
 class MRotaryEmbedding(RotaryEmbeddingBase):

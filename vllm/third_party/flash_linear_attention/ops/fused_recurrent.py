@@ -285,9 +285,13 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     BV: tl.constexpr,
     SOFTPLUS_THRESHOLD: tl.constexpr,
     USE_QK_L2NORM_IN_KERNEL: tl.constexpr,
+    SPLIT_BATCH_HEAD_GRID: tl.constexpr,
 ):
-    i_v, i_nh = tl.program_id(0), tl.program_id(1)
-    i_n, i_hv = i_nh // HV, i_nh % HV
+    if SPLIT_BATCH_HEAD_GRID:
+        i_v, i_hv, i_n = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    else:
+        i_v, i_nh = tl.program_id(0), tl.program_id(1)
+        i_n, i_hv = i_nh // HV, i_nh % HV
     i_h = i_hv // (HV // H)
 
     o_k = tl.arange(0, BK)
@@ -392,6 +396,7 @@ class PackedGdnDecodeKernel(VllmJitKernel["PackedGdnDecodeKernel.CompileKey"]):
         BV: int
         SOFTPLUS_THRESHOLD: float
         USE_QK_L2NORM_IN_KERNEL: bool
+        SPLIT_BATCH_HEAD_GRID: bool
 
     kernel = fused_recurrent_gated_delta_rule_packed_decode_kernel
 
@@ -427,6 +432,7 @@ class PackedGdnDecodeKernel(VllmJitKernel["PackedGdnDecodeKernel.CompileKey"]):
         BK: int,
         BV: int,
         use_qk_l2norm_in_kernel: bool,
+        split_batch_head_grid: bool,
     ) -> CompileKey:
         input_variant = TritonPointerInputVariant.from_alignment(
             mixed_qkv=mixed_qkv_aligned,
@@ -462,13 +468,21 @@ class PackedGdnDecodeKernel(VllmJitKernel["PackedGdnDecodeKernel.CompileKey"]):
             BV=BV,
             SOFTPLUS_THRESHOLD=20.0,
             USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
+            SPLIT_BATCH_HEAD_GRID=split_batch_head_grid,
         )
 
     def get_warmup_keys(
         self, configs: Iterable[PackedGdnDecodeWarmupConfig]
     ) -> list[CompileKey]:
         keys: list[PackedGdnDecodeKernel.CompileKey] = []
-        for config in configs:
+        # The batch size is unknown at warmup time and the grid layout is a
+        # constexpr, so warm both variants.
+        config_variants = [
+            (config, split_batch_head_grid)
+            for config in configs
+            for split_batch_head_grid in (False, True)
+        ]
+        for config, split_batch_head_grid in config_variants:
             keys.extend(
                 self._trace_dispatch(self.dispatch)(
                     mixed_qkv_dtype=config.mixed_qkv_dtype,
@@ -500,6 +514,7 @@ class PackedGdnDecodeKernel(VllmJitKernel["PackedGdnDecodeKernel.CompileKey"]):
                     BK=triton.next_power_of_2(config.K),
                     BV=min(triton.next_power_of_2(config.V), 32),
                     use_qk_l2norm_in_kernel=config.use_qk_l2norm_in_kernel,
+                    split_batch_head_grid=split_batch_head_grid,
                 )
             )
         return list(dict.fromkeys(keys))
@@ -531,9 +546,14 @@ class PackedGdnDecodeKernel(VllmJitKernel["PackedGdnDecodeKernel.CompileKey"]):
             BV=compile_key.BV,
             SOFTPLUS_THRESHOLD=compile_key.SOFTPLUS_THRESHOLD,
             USE_QK_L2NORM_IN_KERNEL=compile_key.USE_QK_L2NORM_IN_KERNEL,
+            SPLIT_BATCH_HEAD_GRID=compile_key.SPLIT_BATCH_HEAD_GRID,
             num_warps=1,
             num_stages=3,
-            grid=(triton.cdiv(compile_key.V, compile_key.BV), compile_key.HV),
+            grid=(
+                (triton.cdiv(compile_key.V, compile_key.BV), compile_key.HV, 1)
+                if compile_key.SPLIT_BATCH_HEAD_GRID
+                else (triton.cdiv(compile_key.V, compile_key.BV), compile_key.HV)
+            ),
         )
 
     def __call__(
@@ -584,8 +604,16 @@ class PackedGdnDecodeKernel(VllmJitKernel["PackedGdnDecodeKernel.CompileKey"]):
             BK=triton.next_power_of_2(K),
             BV=min(triton.next_power_of_2(V), 32),
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+            # CUDA limits grid Y/Z dimensions to 65535.
+            split_batch_head_grid=mixed_qkv.size(0) * HV > 65535,
         )
-        self.kernel[(triton.cdiv(V, key.BV), mixed_qkv.size(0) * HV)](
+        num_v_blocks = triton.cdiv(V, key.BV)
+        grid = (
+            (num_v_blocks, HV, mixed_qkv.size(0))
+            if key.SPLIT_BATCH_HEAD_GRID
+            else (num_v_blocks, mixed_qkv.size(0) * HV)
+        )
+        self.kernel[grid](
             mixed_qkv=mixed_qkv,
             a=a,
             b=b,
@@ -610,6 +638,7 @@ class PackedGdnDecodeKernel(VllmJitKernel["PackedGdnDecodeKernel.CompileKey"]):
             BV=key.BV,
             SOFTPLUS_THRESHOLD=key.SOFTPLUS_THRESHOLD,
             USE_QK_L2NORM_IN_KERNEL=key.USE_QK_L2NORM_IN_KERNEL,
+            SPLIT_BATCH_HEAD_GRID=key.SPLIT_BATCH_HEAD_GRID,
             num_warps=1,
             num_stages=3,
         )

@@ -700,10 +700,10 @@ class CompilationConfig:
         [1, 2, 4] + list(range(8, 256, 8)) + list(
         range(256, max_cudagraph_capture_size + 1, 16))
 
-    If not specified, max_cudagraph_capture_size is set to min(max_num_seqs*2,
-    512) by default. This voids OOM in tight memory scenarios with small
-    max_num_seqs, and prevents capture of many large graphs (>512) that would
-    greatly increase startup time with limited performance benefit.
+    If not specified, max_cudagraph_capture_size is capped at 512 by default,
+    or 1024 on data center Blackwell GPUs. This avoids OOM in tight memory
+    scenarios with small max_num_seqs, and limits capture of large graphs that
+    increase startup time and memory usage.
     """
 
     dynamic_shapes_config: DynamicShapesConfig = field(
@@ -769,6 +769,7 @@ class CompilationConfig:
         "vllm::short_conv",
         "vllm::linear_attention",
         "vllm::qwen_gdn_attention_core",
+        "vllm::qwen_gdn_attention_core_fused_norm_packed",
         "vllm::gdn_attention_core_xpu",
         "vllm::olmo_hybrid_gdn_full_forward",
         "vllm::sparse_attn_indexer",

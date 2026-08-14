@@ -795,6 +795,7 @@ async def benchmark(
     ready_check_timeout_sec: int = 600,
     ssl_context: ssl.SSLContext | bool | None = None,
     self_timed: bool = False,
+    probe_request_rate: float = 0.0,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -971,6 +972,30 @@ async def benchmark(
                 request_func_input=request_func_input, session=session, pbar=pbar
             )
 
+    probe_outputs: list[RequestFuncOutput] = []
+    probe_stop = asyncio.Event()
+
+    async def probe_loop():
+        probe_input = replace(
+            test_input,
+            prompt="Hi",
+            prompt_len=1,
+            output_len=1,
+            multi_modal_content=None,
+            chat_messages=None,
+        )
+        interval = 1 / probe_request_rate
+        while not probe_stop.is_set():
+            probe_outputs.append(
+                await request_func(request_func_input=probe_input, session=session)
+            )
+            await asyncio.sleep(interval)
+
+    probe_task: asyncio.Task | None = None
+    if probe_request_rate > 0:
+        print(f"Probe request rate: {probe_request_rate} req/s")
+        probe_task = asyncio.create_task(probe_loop())
+
     benchmark_start_time = time.perf_counter()
     tasks: list[asyncio.Task] = []
 
@@ -1041,6 +1066,10 @@ async def benchmark(
             )
         )
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
+
+    if probe_task is not None:
+        probe_stop.set()
+        await probe_task
 
     if pbar is not None:
         pbar.close()
@@ -1189,6 +1218,44 @@ async def benchmark(
             )
         )
 
+    probe_stats: dict[str, Any] | None = None
+    if probe_task is not None:
+        probe_lats = [o.latency for o in probe_outputs if o.success]
+        if probe_lats:
+            probe_stats = {
+                "probe_completed": len(probe_lats),
+                "probe_failed": len(probe_outputs) - len(probe_lats),
+                "probe_median_e2el_ms": float(np.median(probe_lats)) * 1000,
+                "probe_p99_e2el_ms": float(np.percentile(probe_lats, 99)) * 1000,
+                "probe_max_e2el_ms": float(max(probe_lats)) * 1000,
+            }
+            print("{s:{c}^{n}}".format(s="Probe Requests", n=50, c="-"))
+            print(
+                "{:<40} {:<10}".format(
+                    "Probe requests completed:", probe_stats["probe_completed"]
+                )
+            )
+            print(
+                "{:<40} {:<10}".format(
+                    "Probe requests failed:", probe_stats["probe_failed"]
+                )
+            )
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "Median probe E2EL (ms):", probe_stats["probe_median_e2el_ms"]
+                )
+            )
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "P99 probe E2EL (ms):", probe_stats["probe_p99_e2el_ms"]
+                )
+            )
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "Max probe E2EL (ms):", probe_stats["probe_max_e2el_ms"]
+                )
+            )
+
     result: dict[str, Any]
     if isinstance(metrics, BenchmarkMetrics):
         result = {
@@ -1222,6 +1289,9 @@ async def benchmark(
             "input_lens": [output.prompt_len for output in outputs],
             "errors": [output.error for output in outputs],
         }
+
+    if probe_stats is not None:
+        result.update(probe_stats)
 
     if rps_change_events:
         result["rps_change_events"] = rps_change_events
@@ -1604,6 +1674,15 @@ def add_cli_args(parser: FlexibleArgumentParser):
         "A lower burstiness value (0 < burstiness < 1) results in more "
         "bursty requests. A higher burstiness value (burstiness > 1) "
         "results in a more uniform arrival of requests.",
+    )
+    parser.add_argument(
+        "--probe-request-rate",
+        type=float,
+        default=0.0,
+        help="If positive, send single-token text-only probe requests at "
+        "this rate (req/s) alongside the main workload, bypassing "
+        "--max-concurrency, and report their latency separately. Useful "
+        "for measuring how the main workload stalls unrelated requests.",
     )
     parser.add_argument(
         "--disable-tqdm",
@@ -2018,6 +2097,11 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         args.ignore_eos = True
 
     if args.dataset_name == "timed_trace":
+        if args.backend not in ("vllm", "openai"):
+            raise ValueError(
+                "timed_trace dataset passes pre-tokenized prompts (list[int])"
+                " and requires a completions backend ('vllm' or 'openai')."
+            )
         # timed_trace carries per-request timestamps;
         # ignore EOS so generation runs to the trace's specified output length,
         # and default to using those timestamps for scheduling unless the user
@@ -2121,6 +2205,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ready_check_timeout_sec=args.ready_check_timeout_sec,
         ssl_context=ssl_context,
         self_timed=args.self_timed,
+        probe_request_rate=args.probe_request_rate,
     )
 
     # Save config and results to json
