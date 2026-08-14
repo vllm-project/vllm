@@ -18,10 +18,10 @@ from fastapi.exceptions import RequestValidationError
 
 from vllm.exceptions import VLLMError
 
-from .handler.exception import exception_handler
-from .handler.http import http_exception_handler
-from .handler.validation import validation_exception_handler
-from .handler.vllm_error import vllm_error_handler
+from .handlers.exception import exception_handler
+from .handlers.http import http_exception_handler
+from .handlers.validation import validation_exception_handler
+from .handlers.vllm_error import vllm_error_handler
 
 
 def init_exception_handler(app: FastAPI):

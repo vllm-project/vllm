@@ -44,7 +44,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     PromptTokenUsageInfo,
     UsageInfo,
 )
-from vllm.entrypoints.serve.exception_handler.handler.validation import (
+from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     validation_exception_handler,
 )
 

@@ -5,7 +5,7 @@ from fastapi import FastAPI
 
 from vllm.logger import init_logger
 
-from .exception_handler.error_response import create_error_response
+from .exception_handling.error_response import create_error_response
 
 logger = init_logger(__name__)
 

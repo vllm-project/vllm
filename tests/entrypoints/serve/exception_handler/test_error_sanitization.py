@@ -10,7 +10,7 @@ speech-to-text WebSocket paths.
 
 import pytest
 
-from vllm.entrypoints.serve.exception_handler.utils import sanitize_message
+from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 
 
 def test_sanitize_message():
