@@ -190,6 +190,11 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             'import nvidia; from pathlib import Path; print(Path(next(iter(nvidia.__path__))) / "cu13")') \
         && test -x "${CUDA_PYPI_ROOT}/bin/nvcc" \
         && test -x "${CUDA_PYPI_ROOT}/bin/ptxas" \
+        && CUDA_DRIVER_STUB=$(find -H /usr/local/cuda \
+            -path '*/stubs/libcuda.so' -print -quit) \
+        && test -n "${CUDA_DRIVER_STUB}" \
+        && mkdir -p "${CUDA_PYPI_ROOT}/lib/stubs" \
+        && cp "${CUDA_DRIVER_STUB}" "${CUDA_PYPI_ROOT}/lib/stubs/libcuda.so" \
         && if [ ! -e "${CUDA_PYPI_ROOT}/lib64" ]; then \
             ln -s lib "${CUDA_PYPI_ROOT}/lib64"; \
         fi \
