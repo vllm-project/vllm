@@ -11,6 +11,7 @@ from typing import Any, ClassVar, NamedTuple
 import numpy as np
 import torch
 from flashinfer import (
+    BatchAttentionWithAttentionSinkWrapper,
     BatchDecodeWithPagedKVCacheWrapper,
     BatchPrefillWithPagedKVCacheWrapper,
     BatchPrefillWithRaggedKVCacheWrapper,
@@ -542,6 +543,12 @@ class FlashInferBackend(AttentionBackend):
     @classmethod
     def supports_non_causal(cls) -> bool:
         return True
+
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        # The wrappers are planned from qo_indptr_cpu, so the CPU query offsets
+        # have to be the ones the kernel runs on.
+        return False
 
     @classmethod
     def supports_sliding_window(cls) -> bool:
@@ -1551,13 +1558,31 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     "NVFP4 KV cache."
                 )
             if self._noncausal_prefill_wrapper is None:
-                self._noncausal_prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                    self._get_workspace_buffer(
-                        self._native_initial_workspace_buffer_size()
-                    ),
-                    get_kv_cache_layout(),
-                    backend="auto",
-                )
+                if self.has_sinks and current_platform.is_device_capability_family(120):
+                    self._noncausal_prefill_wrapper = (
+                        BatchAttentionWithAttentionSinkWrapper(
+                            self._get_workspace_buffer(
+                                self._native_initial_workspace_buffer_size()
+                            ),
+                            get_kv_cache_layout(),
+                            backend="auto",
+                            q_data_type=self.q_data_type_prefill,
+                            kv_data_type=self.kv_cache_dtype,
+                            head_dim_qk=self.head_dim,
+                            head_dim_vo=self.head_dim,
+                            window_left=self.window_left,
+                        )
+                    )
+                else:
+                    self._noncausal_prefill_wrapper = (
+                        BatchPrefillWithPagedKVCacheWrapper(
+                            self._get_workspace_buffer(
+                                self._native_initial_workspace_buffer_size()
+                            ),
+                            get_kv_cache_layout(),
+                            backend="auto",
+                        )
+                    )
                 self._register_workspace_wrapper(self._noncausal_prefill_wrapper)
             return self._noncausal_prefill_wrapper
 
@@ -1568,16 +1593,31 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     dcp_a2a=self.dcp_a2a,
                 )
             else:
-                # NVFP4 KV cache requires the trtllm-gen backend inside
-                # the wrapper; fa2/fa3 do not support nvfp4.
-                backend = "trtllm-gen" if self.is_kvcache_nvfp4 else "auto"
-                self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                    self._get_workspace_buffer(
-                        self._native_initial_workspace_buffer_size()
-                    ),
-                    get_kv_cache_layout(),
-                    backend=backend,
-                )
+                if self.has_sinks and current_platform.is_device_capability_family(120):
+                    assert not self.is_kvcache_nvfp4
+                    self._prefill_wrapper = BatchAttentionWithAttentionSinkWrapper(
+                        self._get_workspace_buffer(
+                            self._native_initial_workspace_buffer_size()
+                        ),
+                        get_kv_cache_layout(),
+                        backend="auto",
+                        q_data_type=self.q_data_type_prefill,
+                        kv_data_type=self.kv_cache_dtype,
+                        head_dim_qk=self.head_dim,
+                        head_dim_vo=self.head_dim,
+                        window_left=self.window_left,
+                    )
+                else:
+                    # NVFP4 KV cache requires the trtllm-gen backend inside
+                    # the wrapper; fa2/fa3 do not support nvfp4.
+                    backend = "trtllm-gen" if self.is_kvcache_nvfp4 else "auto"
+                    self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                        self._get_workspace_buffer(
+                            self._native_initial_workspace_buffer_size()
+                        ),
+                        get_kv_cache_layout(),
+                        backend=backend,
+                    )
                 self._register_workspace_wrapper(self._prefill_wrapper)
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
@@ -2913,16 +2953,28 @@ class FlashInferImpl(AttentionImpl):
                     else:
                         out_prefill = output[num_decode_tokens:]
 
-                    prefill_wrapper.run(
-                        prefill_query,
-                        kv_cache_for_fi,
-                        q_scale=layer._q_scale_float,
-                        k_scale=layer._k_scale_float,
-                        v_scale=layer._v_scale_float,
-                        out=out_prefill,
-                        kv_cache_sf=kv_cache_sf,
-                        sinks=self.sinks,
-                    )
+                    if isinstance(
+                        prefill_wrapper, BatchAttentionWithAttentionSinkWrapper
+                    ):
+                        assert self.sinks is not None
+                        prefill_wrapper.run(
+                            prefill_query,
+                            kv_cache_for_fi,
+                            self.sinks,
+                            self.scale * layer._q_scale_float * layer._k_scale_float,
+                            v_scale=layer._v_scale_float,
+                            out=out_prefill,
+                        )
+                    else:
+                        prefill_wrapper.run(
+                            prefill_query,
+                            kv_cache_for_fi,
+                            q_scale=layer._q_scale_float,
+                            k_scale=layer._k_scale_float,
+                            v_scale=layer._v_scale_float,
+                            out=out_prefill,
+                            kv_cache_sf=kv_cache_sf,
+                        )
 
                     if needs_fp8_out_prefill:
                         output[

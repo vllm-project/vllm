@@ -406,6 +406,7 @@ class SamplingParams(
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
         logprob_token_ids: list[int] | None = None,
+        routed_experts_prompt_start: int = 0,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -468,6 +469,7 @@ class SamplingParams(
             extra_args=extra_args,
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
+            routed_experts_prompt_start=routed_experts_prompt_start,
         )
 
     def __post_init__(self) -> None:
@@ -908,6 +910,20 @@ class SamplingParams(
         if speculative_config is None:
             return
 
+        # Adaptive verification compacts logits after the forward pass, while
+        # compute_topk_scores uses the scheduled layout in cu_num_logits_np.
+        # TODO(lucas): lift this restriction. The true boundaries exist on device as
+        # cu_num_logits; cu_num_generated_tokens is only read host-side after
+        # the logprobs D2H, so it could ride along on that copy.
+        if (
+            speculative_config.enable_adaptive_verification
+            and self.num_logprobs is not None
+        ):
+            raise ValueError(
+                "Output logprobs are not supported with DSpark confidence-based "
+                "verification."
+            )
+
         # Some sampling parameters are not yet compatible with spec decoding.
         if self.min_p > _SAMPLING_EPS or self.logit_bias:
             raise VLLMValidationError(
@@ -1012,6 +1028,15 @@ class SamplingParams(
             raise VLLMValidationError(
                 "structured_outputs.json_object must be True if set; omit "
                 "structured_outputs to disable structured outputs"
+            )
+        # Reject a regex containing a NUL byte early, in every backend mode. A
+        # NUL is never meaningful in a regex pattern and is not handled by the
+        # regex-to-grammar conversion. Checked here, before backend selection,
+        # so it is a clean 400 rather than a silent fallback in the default
+        # "auto" mode.
+        if self.structured_outputs.regex and "\x00" in self.structured_outputs.regex:
+            raise VLLMValidationError(
+                "structured_outputs.regex must not contain a NUL character ('\\x00')"
             )
 
         from vllm.v1.structured_output.backend_guidance import (
