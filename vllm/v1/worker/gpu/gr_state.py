@@ -54,10 +54,10 @@ class GRState:
         uids = gr_params.get("uid")
         candidate_num = gr_params.get("candidate_num")
         request_stage = gr_params.get("request_stage", 2)
-        if request_stage not in (0, 2):
+        if request_stage not in (2):
             raise NotImplementedError(
                 "Generative recommendation currently supports request_stage "
-                "0 or 2 only; PD-separated stage 1 is not supported."
+                "2 only; PD-separated stage 0 or 1 is not supported."
             )
         if not isinstance(uids, list) or not uids:
             raise ValueError("gr_params['uid'] must be a non-empty list.")
