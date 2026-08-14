@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import CrossAttention, EncoderOnlyAttention
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 
@@ -28,7 +28,7 @@ def init_model_state(
         return EncoderDecoderModelState(vllm_config, model, encoder_cache, device)
 
     # Encoder-only models (BERT/RoBERTa): non-causal self-attention, no KV cache.
-    if any(isinstance(m, EncoderOnlyAttention) for m in model.modules()):
+    if get_layers_from_vllm_config(vllm_config, EncoderOnlyAttention):
         from vllm.v1.worker.gpu.model_states.encoder_only import EncoderOnlyModelState
 
         return EncoderOnlyModelState(vllm_config, model, encoder_cache, device)

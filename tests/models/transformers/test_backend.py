@@ -263,7 +263,8 @@ def test_embed_loading(vllm_runner, model):
 @pytest.mark.parametrize(
     "arch", ["TransformersEmbeddingModel", "TransformersForSequenceClassification"]
 )
-def test_pooling(hf_runner, vllm_runner, example_prompts, arch):
+def test_pooling(hf_runner, vllm_runner, example_prompts, arch, monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     model = get_model(arch)
 
     vllm_kwargs = dict(max_model_len=None, model_impl="transformers")
@@ -290,6 +291,7 @@ def test_pooling(hf_runner, vllm_runner, example_prompts, arch):
     ):
         model_config = vllm_model.llm.llm_engine.model_config
         assert model_config.using_transformers_backend()
+        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
 
         if arch == "TransformersEmbeddingModel":
             vllm_outputs = vllm_model.embed(example_prompts)
