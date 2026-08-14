@@ -65,25 +65,12 @@ class SharedExperts(torch.nn.Module):
             logger.debug_once("Disabling MoE shared_experts cuda stream")
             self._stream = None
         else:
-            # TODO(rob): enable shared expert overlap with non-cuda-alike.
-            # aux_stream() returns None on non-cuda-alike platforms.
             self._stream = aux_stream()
             if self._stream is not None:
                 logger.debug_once("Enabled separate cuda stream for MoE shared_experts")
-
-        if self._stream is not None:
-            # One pair per DBO ubatch id. `_input_ready_event` forks the aux
-            # stream (aux waits until the main stream has produced the input);
-            # `_output_ready_event` joins it back before the output is consumed.
-            # Both the aux stream and the routed path only READ the shared input,
-            # so no snapshot is taken here: the routed path copies the input
-            # before its in-place kernel overwrites it (see
-            # MoERunner._maybe_copy_routed_input). Ordering is via CUDA events
-            # (record()/wait()), which are capture-safe; record_stream()/
-            # wait_stream() are illegal under HIP/CUDA graph capture and are
-            # deliberately avoided.
-            self._input_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
-            self._output_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
+                # One pair per DBO ubatch id to sync aux and main stream.
+                self._input_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
+                self._output_ready_event = [torch.cuda.Event(), torch.cuda.Event()]
 
     # TODO(bnell): Hack for elastic_ep. Get rid of this
     def _set_moe_config(self, new_moe_config: FusedMoEConfig):
@@ -156,13 +143,6 @@ class SharedExperts(torch.nn.Module):
         idx = self._output_idx
         assert self._output[idx] is None
 
-        # The aux stream reads ``shared_experts_input`` directly -- no snapshot.
-        # Some models (e.g. Qwen3.5) alias this tensor with hidden_states and the
-        # routed kernel overwrites it in place, but the routed path copies its
-        # input first (MoERunner._maybe_copy_routed_input), so nothing ever
-        # writes this tensor while the aux stream reads it. Only the fork
-        # (input_ready) and join (output_ready) events are needed; keeping the
-        # copy off both streams' waits is what preserves the overlap.
         self._input_ready_event[idx].record(current_stream())
         with torch.cuda.stream(self._stream):
             self._input_ready_event[idx].wait(self._stream)
