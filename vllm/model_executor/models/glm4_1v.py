@@ -546,14 +546,6 @@ class Glm4vVisionEmbeddings(nn.Module):
                 0, hidden_size, device=device, dtype=pos_embed_weight.dtype
             )
         else:
-            # Convert inputs to tensors if needed
-            if isinstance(lengths, list):
-                lengths = async_tensor_h2d(lengths, device=device, dtype=torch.long)
-            if not isinstance(image_shapes, torch.Tensor):
-                image_shapes = async_tensor_h2d(
-                    image_shapes, device=device, dtype=torch.long
-                )
-
             # Prepare 2D position embedding
             orig_size_sq = pos_embed_weight.shape[0]
             orig_size = int(orig_size_sq**0.5)
@@ -564,32 +556,23 @@ class Glm4vVisionEmbeddings(nn.Module):
                 .to(device=device, dtype=torch.float32)
             )
 
-            # Calculate target dimensions for each patch
-            # Add bounds checking for data parallel mode
-            if len(lengths) > image_shapes.shape[0]:
-                # In data parallel mode, some GPUs might not have all
-                # image shapes
-                # Use available image shapes, cycling if necessary
-                target_h_list = []
-                target_w_list = []
-                for i in range(len(lengths)):
-                    # Cycle through available shapes
-                    shape_idx = i % image_shapes.shape[0]
-                    target_h_list.append(image_shapes[shape_idx, 1].repeat(lengths[i]))
-                    target_w_list.append(image_shapes[shape_idx, 2].repeat(lengths[i]))
-                target_h = torch.cat(target_h_list).to(
-                    device=device, dtype=torch.float32
-                )
-                target_w = torch.cat(target_w_list).to(
-                    device=device, dtype=torch.float32
-                )
-            else:
-                target_h = torch.cat(
-                    [image_shapes[i, 1].repeat(lengths[i]) for i in range(len(lengths))]
-                ).to(device=device, dtype=torch.float32)
-                target_w = torch.cat(
-                    [image_shapes[i, 2].repeat(lengths[i]) for i in range(len(lengths))]
-                ).to(device=device, dtype=torch.float32)
+            # Calculate target dimensions for each patch. `lengths` and
+            # `image_shapes` are host data, so expand them with numpy and move
+            # the result across once rather than per-image.
+            # Shapes are cycled: in data parallel mode some GPUs might not
+            # have all image shapes.
+            shapes_np = np.asarray(image_shapes)
+            shape_idx = np.arange(len(lengths)) % shapes_np.shape[0]
+            target_h = async_tensor_h2d(
+                np.repeat(shapes_np[shape_idx, 1], lengths),
+                device=device,
+                dtype=torch.float32,
+            )
+            target_w = async_tensor_h2d(
+                np.repeat(shapes_np[shape_idx, 2], lengths),
+                device=device,
+                dtype=torch.float32,
+            )
 
             # Normalize coordinates to [-1, 1] range for grid_sample
             h_coords = h_coords.to(device=device, dtype=torch.float32)
@@ -818,9 +801,7 @@ class Glm4vVisionTransformer(nn.Module):
             )
 
             lengths = [h * w] * t
-            image_shapes = async_tensor_h2d(
-                [[t, h, w]], dtype=torch.long, device=device
-            )
+            image_shapes = [[t, h, w]]
 
             # Build the coordinates on the host (cheap integer math) but move
             # them across pinned + non-blocking, so the consumer's

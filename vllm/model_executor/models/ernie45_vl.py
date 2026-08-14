@@ -72,6 +72,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .ernie45_vl_moe import Ernie4_5_VLMoeForCausalLM
@@ -446,6 +447,9 @@ class Ernie4_5_VisionTransformer(nn.Module):
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = grid_thw[:, 1:].max()
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
+        # `pos_ids` is built on the host; stage it over non-blocking so the
+        # gather below doesn't index a device tensor with a CPU one.
+        pos_ids = pos_ids.to(rotary_pos_emb_full.device, non_blocking=True)
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
@@ -530,7 +534,7 @@ class Ernie4_5_VisionTransformer(nn.Module):
         else:
             max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 
-        cu_seqlens = cu_seqlens.to(device)
+        cu_seqlens = cu_seqlens.to(device, non_blocking=True)
 
         return {
             "rotary_pos_emb": rotary_pos_emb,
@@ -806,8 +810,8 @@ class VariableResolutionResamplerModel(nn.Module):
                             b_offset + (temp_offset + 1) * spatial_size,
                         )
                     )
-            slice_offsets = torch.tensor(np.concatenate(slice_offsets, axis=-1)).to(
-                x.device
+            slice_offsets = async_tensor_h2d(
+                np.concatenate(slice_offsets, axis=-1), device=x.device
             )
 
             slice_offsets2 = []
@@ -823,8 +827,8 @@ class VariableResolutionResamplerModel(nn.Module):
                             b_offset + (temp_offset + 1) * spatial_size,
                         )
                     )
-            slice_offsets2 = torch.tensor(np.concatenate(slice_offsets2, axis=-1)).to(
-                x.device
+            slice_offsets2 = async_tensor_h2d(
+                np.concatenate(slice_offsets2, axis=-1), device=x.device
             )
 
             x_timestep_1 = torch.index_select(x, dim=0, index=slice_offsets)
