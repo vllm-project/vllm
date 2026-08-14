@@ -222,6 +222,7 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
+from vllm.v1.worker.gpu.event_utils import wait_for_gpu_event
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
@@ -307,7 +308,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._invalid_req_indices = invalid_req_indices
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
-        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
+        # Preserve the efficient blocking fallback when the timeout is disabled.
         self.async_copy_ready_event = torch.cuda.Event(blocking=True)
 
         # Keep a reference to the device tensor to avoid it being
@@ -352,7 +353,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         This function blocks until the copy is finished.
         """
         max_gen_len = self.sampled_token_ids_cpu.shape[-1]
-        self.async_copy_ready_event.synchronize()
+        wait_for_gpu_event(self.async_copy_ready_event, "V1 generation output copy")
 
         # Release the device tensors once the copy has completed.
         del self._logprobs_tensors
@@ -455,7 +456,7 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         self._model_runner_output = model_runner_output
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
-        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
+        # Preserve the efficient blocking fallback when the timeout is disabled.
         self.async_copy_ready_event = torch.cuda.Event(blocking=True)
 
         # Keep a reference to the device tensors to avoid them being
@@ -476,7 +477,7 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         """Copy the device tensors to the host and return a ModelRunnerOutput.
         This function blocks until the copy is finished.
         """
-        self.async_copy_ready_event.synchronize()
+        wait_for_gpu_event(self.async_copy_ready_event, "V1 pooling output copy")
 
         # Release the device tensors once the copy has completed.
         del self._raw_pooler_output
