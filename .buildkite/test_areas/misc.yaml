@@ -358,24 +358,27 @@ steps:
   - tests/transformers_utils
   - tests/config
   device: cpu-small
-  parallelism: 3
+  parallelism: 4
   commands:
-  # Timing-balanced static split (measured on build 83851): shard 0 ~17.1m,
-  # shard 1 ~17.1m, shard 2 ~16.8m. tokenizers_ (~16.5m) anchors shard 0.
-  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || python3 standalone_tests/lazy_imports.py
-  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s test_envs.py
-  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s test_inputs.py
-  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s test_outputs.py
+  # Timing-balanced static split (remeasured on build 83920). Total command
+  # time ~53m + ~1.9m setup means even a perfect 3-way split floors at ~19.6m,
+  # so tokenizers_ (17.4m, 1369 nodes, longest node 0.20m) is pytest-sharded
+  # across shards 0-1 and everything else is grouped for ~13m/shard.
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || python3 standalone_tests/lazy_imports.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s test_envs.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s test_inputs.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s test_outputs.py
   - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s test_pooling_params.py
-  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s test_ray_env.py
-  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s test_sampling_params.py
-  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -m 'cpu_test' multimodal
-  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s renderers
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s test_ray_env.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s test_sampling_params.py
+  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -m 'cpu_test' multimodal
+  - test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest -v -s renderers
   - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s reasoning
-  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s tool_parsers
-  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s tokenizers_
-  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s parser
-  - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s transformers_utils
+  - test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest -v -s tool_parsers
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s tokenizers_ --num-shards=2 --shard-id=0
+  - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s tokenizers_ --num-shards=2 --shard-id=1
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s parser
+  - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s transformers_utils
   - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s config
 
 - label: Batch Invariance (A100)
