@@ -55,6 +55,26 @@ else
   configs=("${tp_configs[@]}")
 fi
 
+# Opt-in CI sharding: CONFIG_INDICES selects a comma-separated subset of the
+# chosen config array by zero-based index; unset means run everything, so all
+# existing callers are unchanged. CONFIG_EXPECTED_COUNT fails the run loudly
+# when the array size changes, instead of letting a newly added config be
+# silently skipped by stale shard index lists.
+if [[ -n "${CONFIG_EXPECTED_COUNT:-}" && "${#configs[@]}" -ne "${CONFIG_EXPECTED_COUNT}" ]]; then
+  echo "Selected config set has ${#configs[@]} entries, expected ${CONFIG_EXPECTED_COUNT}."
+  echo "Rebalance the CONFIG_INDICES shard lists in .buildkite/test_areas for this job."
+  exit 1
+fi
+if [[ -n "${CONFIG_INDICES:-}" ]]; then
+  IFS=',' read -r -a shard_indices <<< "${CONFIG_INDICES}"
+  shard_configs=()
+  for idx in "${shard_indices[@]}"; do
+    shard_configs+=("${configs[$idx]}")
+  done
+  configs=("${shard_configs[@]}")
+  echo "CONFIG_INDICES=${CONFIG_INDICES}: running ${#configs[@]} of the selected configs"
+fi
+
 run_tests() {
   local label=$1
   local extra_args=$2
