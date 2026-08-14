@@ -38,6 +38,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     CacheConfig,
     TensorEntry,
+    check_ipc_quant_support,
     ensure_private_socket_dir,
     get_physical_device_id,
     get_socket_path,
@@ -280,6 +281,9 @@ def main() -> None:
             "The weight cache daemon itself must load from disk; use the "
             "default --load-format"
         )
+    # Checked before loading anything: an unsupported quantization method would
+    # otherwise only surface in the engine, after a full load.
+    check_ipc_quant_support(vllm_config.model_config, where="daemon")
     parallel_config = vllm_config.parallel_config
     if parallel_config.pipeline_parallel_size > 1:
         raise ValueError(

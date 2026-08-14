@@ -49,6 +49,78 @@ class CacheConfigMismatchError(Exception):
     """Raised when the daemon's cached weights don't match the engine."""
 
 
+class UnsupportedQuantForIPCError(Exception):
+    """Raised when a quantization method is not verified for IPC weight sharing."""
+
+
+# The daemon exports tensor data only, so sharing is correct just for methods
+# whose post-load effect is either fully captured by that data or rebuilt by
+# init_kernels_after_ipc_load. Methods that repack weights into shapes the
+# meta-initialized client cannot reproduce (per-tensor FP8 transposes
+# layer.weight; Marlin/AWQ/GPTQ reorder) or that stamp Python-side state
+# without a rebuild hook would serve silently-wrong numerics, so anything
+# absent from this registry hard-errors. Extend it only after an end-to-end
+# check against a disk-loaded baseline.
+
+
+def _quant_config_field(quant_config: Any, key: str) -> Any:
+    if quant_config is None:
+        return None
+    if isinstance(quant_config, dict):
+        return quant_config.get(key)
+    return getattr(quant_config, key, None)
+
+
+def _fp8_round_trips_via_ipc(quant_config: Any) -> bool:
+    """Only block-wise FP8 is verified.
+
+    Block-wise FP8 preserves the weight shape, while per-tensor FP8 transposes
+    ``layer.weight`` during post-processing -- a shape the client's
+    meta-initialized model cannot reproduce.
+    """
+    return _quant_config_field(quant_config, "weight_block_size") is not None
+
+
+# quantization name -> predicate(quant_config) -> True when verified safe.
+IPC_QUANT_ALLOWLIST: dict[str | None, Any] = {
+    None: lambda _quant_config: True,  # unquantized
+    "fp8": _fp8_round_trips_via_ipc,
+}
+
+
+def is_ipc_quant_supported(quantization: str | None, quant_config: Any) -> bool:
+    predicate = IPC_QUANT_ALLOWLIST.get(quantization)
+    return False if predicate is None else bool(predicate(quant_config))
+
+
+def check_ipc_quant_support(model_config: ModelConfig, *, where: str) -> None:
+    """Hard-error unless the model's quantization is verified for IPC sharing.
+
+    Args:
+        model_config: Model configuration to inspect.
+        where: Short tag ("daemon"/"engine") used in the error message.
+
+    Raises:
+        UnsupportedQuantForIPCError: If the quantization method is not on the
+            verified allowlist.
+    """
+    quantization = model_config.quantization
+    quant_config = getattr(model_config.hf_config, "quantization_config", None)
+    if is_ipc_quant_supported(quantization, quant_config):
+        return
+    verified = ", ".join(
+        "unquantized" if name is None else repr(name) for name in IPC_QUANT_ALLOWLIST
+    )
+    raise UnsupportedQuantForIPCError(
+        f"[weight_cache:{where}] quantization {quantization!r} is not verified "
+        f"for CUDA IPC weight sharing: its post-load processing may repack "
+        f"weights into shapes the client cannot reproduce or stamp Python-side "
+        f"state that tensor export cannot carry, which would silently serve "
+        f"wrong numerics. Verified: {verified} (FP8 only with weight_block_size "
+        f"set, i.e. block-wise). Use the default --load-format for this model."
+    )
+
+
 def get_physical_device_id(device_index: int) -> int | None:
     """Map a local CUDA device index to the physical GPU id.
 

@@ -15,7 +15,9 @@ from vllm.model_executor.model_loader.weight_cache import (
     CacheConfigMismatchError,
     IpcModelLoader,
     TensorEntry,
+    UnsupportedQuantForIPCError,
     WeightCacheUnavailableError,
+    is_ipc_quant_supported,
 )
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     recv_msg,
@@ -198,6 +200,116 @@ def test_apply_entries_restores_tied_identity():
 
     assert dst.lm_head.weight is dst.embed.weight
     assert torch.equal(dst.embed.weight, src.embed.weight)
+
+
+class _SharedModuleModel(torch.nn.Module):
+    """Tied head that reuses the embedding *module*, as vLLM models do."""
+
+    def __init__(self):
+        super().__init__()
+        self.embed = torch.nn.Embedding(4, 3)
+        self.lm_head = self.embed
+
+
+def test_apply_entries_handles_shared_module_alias():
+    from vllm.model_executor.model_loader.weight_cache.daemon import export_entries
+
+    src = _SharedModuleModel()
+    entries, aliases = export_entries(src)
+    assert aliases == {"lm_head.weight": "embed.weight"}
+
+    dst = _SharedModuleModel()
+    loader = IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    # "lm_head" is absent from the deduplicated named_modules view, so this
+    # used to fail with "Cached tensor lm_head.weight has no matching module".
+    loader._apply_entries(dst, entries, aliases, device_index=0)
+
+    assert dst.lm_head.weight is dst.embed.weight
+    assert torch.equal(dst.embed.weight, src.embed.weight)
+
+
+@pytest.mark.parametrize(
+    "quantization,quant_config,expected",
+    [
+        (None, None, True),
+        ("fp8", {"weight_block_size": [128, 128]}, True),
+        ("fp8", {}, False),  # per-tensor FP8 transposes layer.weight
+        ("awq", {}, False),
+        ("compressed-tensors", {}, False),
+    ],
+)
+def test_ipc_quant_allowlist(quantization, quant_config, expected):
+    assert is_ipc_quant_supported(quantization, quant_config) is expected
+
+
+def test_check_supported_rejects_unverified_quant():
+    from types import SimpleNamespace
+
+    loader = IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    model_config = SimpleNamespace(
+        quantization="awq", hf_config=SimpleNamespace(quantization_config={})
+    )
+    vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="auto"))
+
+    with pytest.raises(UnsupportedQuantForIPCError, match="awq"):
+        loader._check_supported(vllm_config, model_config)
+
+
+def test_check_supported_rejects_quantized_kv_cache():
+    from types import SimpleNamespace
+
+    loader = IpcModelLoader(LoadConfig(load_format="ipc_cache"))
+    model_config = SimpleNamespace(
+        quantization=None, hf_config=SimpleNamespace(quantization_config=None)
+    )
+    vllm_config = SimpleNamespace(cache_config=SimpleNamespace(cache_dtype="fp8"))
+
+    with pytest.raises(UnsupportedQuantForIPCError, match="kv cache dtype"):
+        loader._check_supported(vllm_config, model_config)
+
+
+def test_init_kernels_reports_unsupported_layer():
+    from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+    from vllm.model_executor.model_loader.weight_cache.ipc_loader import (
+        _init_kernels_after_ipc_load,
+    )
+
+    class _Method(QuantizeMethodBase):
+        def create_weights(self, *args, **kwargs):
+            pass
+
+        def apply(self, *args, **kwargs):
+            pass
+
+        def init_kernels_after_ipc_load(self, layer):
+            raise NotImplementedError("kernel is built during post-load")
+
+    model = torch.nn.Module()
+    model.experts = torch.nn.Module()
+    model.experts.quant_method = _Method()
+
+    with pytest.raises(UnsupportedQuantForIPCError, match="experts"):
+        _init_kernels_after_ipc_load(model)
+
+
+def test_init_kernels_is_noop_for_stateless_methods():
+    from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+    from vllm.model_executor.model_loader.weight_cache.ipc_loader import (
+        _init_kernels_after_ipc_load,
+    )
+
+    class _Method(QuantizeMethodBase):
+        def create_weights(self, *args, **kwargs):
+            pass
+
+        def apply(self, *args, **kwargs):
+            pass
+
+    model = torch.nn.Module()
+    model.linear = torch.nn.Module()
+    model.linear.quant_method = _Method()
+
+    _init_kernels_after_ipc_load(model)
 
 
 def _ipc_producer(conn, done) -> None:

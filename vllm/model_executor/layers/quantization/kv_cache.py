@@ -193,3 +193,14 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         del layer.v_scale
         del layer.q_scale
         del layer.prob_scale
+
+    def init_kernels_after_ipc_load(self, layer: torch.nn.Module) -> None:
+        # process_weights_after_loading consumes the checkpoint scale
+        # parameters and deletes them, so a weight cache daemon never exports
+        # them and the client is left with empty placeholders. Drop those; the
+        # derived _q/_k/_v/_prob scales keep the unquantized defaults from
+        # Attention.__init__, which is why the IPC loader only supports
+        # kv_cache_dtype="auto".
+        for name in ("k_scale", "v_scale", "q_scale", "prob_scale"):
+            if hasattr(layer, name):
+                delattr(layer, name)

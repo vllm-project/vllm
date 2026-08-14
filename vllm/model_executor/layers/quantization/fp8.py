@@ -415,6 +415,14 @@ class Fp8LinearMethod(LinearMethodBase):
 
         self.fp8_linear.process_weights_after_loading(layer)
 
+    def init_kernels_after_ipc_load(self, layer: torch.nn.Module) -> None:
+        # The block-quant kernels only transform tensors, which the daemon
+        # already exported. The one piece tensor export cannot carry is the
+        # `input_scale = None` stamp that dynamic activation quantization
+        # relies on, since create_weights never registered that parameter.
+        if not self.act_q_static and not hasattr(layer, "input_scale"):
+            layer.input_scale = None
+
     def apply(
         self,
         layer: torch.nn.Module,
@@ -675,6 +683,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
+        self._init_moe_kernel(layer)
+
+    def _init_moe_kernel(self, layer: RoutedExperts) -> None:
+        """Build the MoE kernel from the layer's current (converted) weights."""
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
         assert self.experts_cls is not None
@@ -685,6 +697,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+
+    def init_kernels_after_ipc_load(self, layer: RoutedExperts) -> None:
+        # The daemon exported weights already in kernel format, so only the
+        # kernel itself has to be rebuilt.
+        self._init_moe_kernel(layer)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         # Allow for accessing weights and scales in standard way.

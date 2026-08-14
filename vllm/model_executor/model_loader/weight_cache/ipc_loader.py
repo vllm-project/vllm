@@ -13,6 +13,7 @@ import torch.nn as nn
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.utils import initialize_model
@@ -20,7 +21,9 @@ from vllm.model_executor.model_loader.weight_cache.protocol import (
     CacheConfig,
     CacheConfigMismatchError,
     TensorEntry,
+    UnsupportedQuantForIPCError,
     WeightCacheUnavailableError,
+    check_ipc_quant_support,
     get_physical_device_id,
     get_socket_path,
     recv_msg,
@@ -112,6 +115,9 @@ class IpcModelLoader(BaseModelLoader):
     def load_model(
         self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:
+        # Unsupported quantization is a permanent misconfiguration rather than a
+        # transient daemon outage, so it is raised even when fallback is on.
+        self._check_supported(vllm_config, model_config)
         try:
             entries, aliases = self._fetch_entries(model_config)
             return self._build_model(
@@ -160,6 +166,13 @@ class IpcModelLoader(BaseModelLoader):
                     prefix=prefix,
                 )
             self._apply_entries(model, entries, aliases, device_index)
+            # process_weights_after_loading is intentionally skipped: the daemon
+            # exports the already-processed state. Only the state that tensor
+            # export cannot carry is rebuilt. This runs before materializing
+            # leftovers so that placeholders for parameters the daemon-side
+            # post-processing consumed are dropped rather than filled with
+            # uninitialized memory.
+            _init_kernels_after_ipc_load(model)
             _materialize_remaining_meta_tensors(
                 model, torch.device(target_device.type, device_index)
             )
@@ -170,9 +183,20 @@ class IpcModelLoader(BaseModelLoader):
             len(entries),
             self.mode,
         )
-        # process_weights_after_loading is intentionally skipped: the daemon
-        # exports the already-processed state.
         return model.eval()
+
+    @staticmethod
+    def _check_supported(vllm_config: VllmConfig, model_config: ModelConfig) -> None:
+        check_ipc_quant_support(model_config, where="engine")
+        cache_dtype = vllm_config.cache_config.cache_dtype
+        if cache_dtype != "auto":
+            # BaseKVCacheMethod.process_weights_after_loading turns the loaded
+            # k/v scale parameters into plain float attributes, which the
+            # tensor-only export cannot reproduce.
+            raise UnsupportedQuantForIPCError(
+                f"[weight_cache:engine] kv cache dtype {cache_dtype!r} is not "
+                "supported by the weight cache; use --kv-cache-dtype auto."
+            )
 
     def _apply_entries(
         self,
@@ -181,7 +205,10 @@ class IpcModelLoader(BaseModelLoader):
         aliases: dict[str, str],
         device_index: int,
     ) -> None:
-        modules = dict(model.named_modules())
+        # remove_duplicate=False keeps tied module aliases reachable by name:
+        # a tied lm_head *is* the embedding module, so the deduplicated view
+        # would not contain "lm_head" at all.
+        modules = dict(model.named_modules(remove_duplicate=False))
         registered: dict[str, torch.Tensor] = {}
 
         def _register(name: str, tensor: torch.Tensor, is_param: bool) -> None:
@@ -327,6 +354,29 @@ class IpcModelLoader(BaseModelLoader):
         return loader.load_model(
             vllm_config=vllm_config, model_config=model_config, prefix=prefix
         )
+
+
+def _init_kernels_after_ipc_load(model: nn.Module) -> None:
+    """Rebuild the per-layer state that tensor export cannot carry.
+
+    Kernel selection and derived Python attributes normally happen in
+    `process_weights_after_loading`, which this loader must skip to avoid
+    processing the daemon's already-processed tensors a second time.
+
+    Raises:
+        UnsupportedQuantForIPCError: If a quantization method keeps state that
+            it cannot rebuild.
+    """
+    for name, module in model.named_modules():
+        quant_method = getattr(module, "quant_method", None)
+        if not isinstance(quant_method, QuantizeMethodBase):
+            continue
+        try:
+            quant_method.init_kernels_after_ipc_load(module)
+        except NotImplementedError as e:
+            raise UnsupportedQuantForIPCError(
+                f"[weight_cache:engine] layer {name or '<root>'}: {e}"
+            ) from e
 
 
 def _materialize_remaining_meta_tensors(model: nn.Module, device: torch.device) -> None:
