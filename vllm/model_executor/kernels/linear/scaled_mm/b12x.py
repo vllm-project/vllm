@@ -179,12 +179,7 @@ def _apply_b12x_tensor_fp8_packed_linear(
     bias: torch.Tensor | None,
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
-    packed_weight = getattr(layer, "b12x_tensor_fp8_packed_weight", None)
-    if packed_weight is None:
-        raise RuntimeError(
-            "b12x tensor FP8 packed weights are missing; "
-            "process_weights_after_loading did not run for this layer"
-        )
+    packed_weight = layer.b12x_tensor_fp8_packed_weight
 
     tensor_fp8 = _import_b12x_tensor_fp8()
     assert tensor_fp8 is not None
@@ -246,21 +241,12 @@ class B12xTensorFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight, weight_scale, input_scale, _ = self._get_layer_params(layer)
-        if weight.dtype != torch.float8_e4m3fn:
-            raise ValueError(
-                f"b12x tensor FP8 requires float8_e4m3fn weight, got {weight.dtype}"
-            )
-        if weight_scale.numel() != 1 or input_scale is None or input_scale.numel() != 1:
-            raise ValueError(
-                "b12x tensor FP8 requires scalar weight and activation scales"
-            )
+        assert weight.dtype == torch.float8_e4m3fn
+        assert input_scale is not None
+        assert weight_scale.numel() == input_scale.numel() == 1
 
         out_features, in_features = map(int, self.config.weight_shape)
-        if tuple(weight.shape) != (in_features, out_features):
-            raise ValueError(
-                "b12x tensor FP8 expects the processed weight in [K,N] layout, "
-                f"got {tuple(weight.shape)} for N={out_features}, K={in_features}"
-            )
+        assert tuple(weight.shape) == (in_features, out_features)
 
         tensor_fp8 = _import_b12x_tensor_fp8()
         assert tensor_fp8 is not None
@@ -319,8 +305,7 @@ class B12xTensorFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if not isinstance(x, torch.Tensor):
-            raise TypeError("b12x tensor FP8 linear requires a Tensor input")
+        assert isinstance(x, torch.Tensor)
         _, _, input_scale, input_scale_ub = self._get_layer_params(layer)
         input_2d = x.reshape(-1, x.shape[-1])
         x_q, _ = self.quant_fp8(input_2d, input_scale, input_scale_ub)

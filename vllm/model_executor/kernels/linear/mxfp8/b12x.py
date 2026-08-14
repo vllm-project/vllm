@@ -26,12 +26,7 @@ def _apply_b12x_mxfp8_packed_linear(
     x: torch.Tensor,
     bias: torch.Tensor | None,
 ) -> torch.Tensor:
-    packed_weight = getattr(layer, "b12x_mxfp8_packed_weight", None)
-    if packed_weight is None:
-        raise RuntimeError(
-            "b12x MXFP8 packed weights are missing; "
-            "process_weights_after_loading did not run for this layer"
-        )
+    packed_weight = layer.b12x_mxfp8_packed_weight
 
     input_2d = x.reshape(-1, x.shape[-1]).contiguous()
     output_shape = [*x.shape[:-1], int(packed_weight.out_features)]

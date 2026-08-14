@@ -30,8 +30,7 @@ def _collect_warmup_units(
         if not callable(get_unit):
             continue
         unit = get_unit(layer, token_counts, output_dtype)
-        if not isinstance(unit, B12xWarmupUnit):
-            raise TypeError("get_b12x_warmup_unit must return a B12xWarmupUnit")
+        assert isinstance(unit, B12xWarmupUnit)
         units.setdefault(unit.key, unit)
     return units.values()
 
