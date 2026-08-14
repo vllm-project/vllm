@@ -20,8 +20,15 @@ vice versa, so the registries stay independent.
 
 ### WeightSource
 
-A `WeightSource` is a **re-iterable** source of the trainer's weights with two
-channels:
+**This is the adapter for whatever shape your trainer's weights are in.**
+`WeightSource` is the seam where a framework is adapted once, after which *every*
+weight transfer backend works against it unchanged.
+
+What an engine gets is always the same: HF-format parameter names, and tensors
+already materialized to their full (unsharded) shape. Whatever gathering,
+re-fusing, dequantizing or renaming that takes belongs inside the source.
+
+A `WeightSource` is **re-iterable** and has two required channels:
 
 - **`metadata() -> list[ParamMeta]`** — the name, wire dtype, and full shape of
   every parameter, *without transferring anything*. Cheap when shapes are known
@@ -51,9 +58,7 @@ class ParamMeta:
 Materializing is typically a collective, so **every trainer rank must iterate the
 same source in the same order, in lockstep**, or ranks deadlock. `metadata()` can
 itself be a collective for custom producers, so it too runs on every rank — only
-the sender ships the result. Under pipeline parallelism a rank may not own a
-parameter at all; iterating still drives the collective, and the yielded tensor
-is only meaningful on the sender.
+the sender ships the result.
 
 `iter(source)` must yield a *fresh* pass each round.
 
@@ -70,34 +75,115 @@ from vllm.distributed.weight_transfer import ModuleSource
 source = ModuleSource(model)
 ```
 
-#### Custom Sources
+#### Custom sources
 
-Subclass `WeightSource` when the weights you want to send require additional processing to convert to a HF compatible format.
+Subclass `WeightSource` when the weights need work to reach HF format — a
+framework-specific export, a re-fusing step, a dtype cast.
 
 ```python
 from vllm.distributed.weight_transfer import ParamMeta, WeightSource
-from vllm.distributed.weight_transfer.base import materialize_full_tensor
 
 
-class MyExportSource(WeightSource):
-    def __init__(self, model):
-        self._model = model
+class MegatronBridgeSource(WeightSource):
+    """Megatron model -> HF names, via a bridge that gathers TP/PP/EP internally
+    and returns full tensors on every rank."""
+
+    def __init__(self, bridge, module, dtype):
+        self._bridge, self._module, self._dtype = bridge, module, dtype
         self._meta: list[ParamMeta] | None = None
+
+    def _export(self):
+        return self._bridge.export_hf_weights(self._module)
 
     def metadata(self) -> list[ParamMeta]:
         # Cache: for producers that must materialize to learn shapes, this is
         # the expensive channel. Runs on every rank (it may be a collective).
         if self._meta is None:
             self._meta = [
-                ParamMeta(name, t.dtype, tuple(t.shape)) for name, t in self._export()
+                ParamMeta(name, self._dtype, tuple(t.shape))
+                for name, t in self._export()
             ]
         return self._meta
 
     def __iter__(self):
         # Must yield exactly what metadata() declared, in the same order.
         for name, tensor in self._export():
-            yield name, materialize_full_tensor(tensor)
+            yield name, tensor.to(self._dtype).detach().contiguous()
 ```
+
+#### `held_names()`: partial ownership
+
+By default every rank is assumed to be able to produce every parameter — which is
+what the source above does, since its bridge gathers across all parallelism before
+yielding. That is simple and always correct, but it means the gather cost is paid
+in full on every rank.
+
+Override `held_names()` when the ranks are split so each holds only part of the
+model, and you would rather *not* gather across that split. It returns the
+parameter names this rank holds (or `None`, the default, for all of them):
+
+```python
+def held_names(self):
+    # This pipeline stage's layers, and within them only this EP rank's experts.
+    return self._my_stage_names - self._foreign_expert_names
+```
+
+One declaration covers every layout — pipeline stages (a rank holds some layers),
+expert parallelism (a rank holds some experts), both at once, or a shape that fits
+neither. Backends that can route per parameter (see
+[sharded RDT](sharded_rdt.md)) then pull each name from a rank that actually
+holds it. Backends that broadcast ignore it.
+
+Three requirements come with overriding it:
+
+- **`metadata()` must still describe the whole model on every rank.** Only the
+  sender's metadata reaches the inference side, so a rank that reported just its
+  own share would leave the rest silently un-transferred. Sharded RDT cross-checks
+  this across ranks at init.
+- **Every name must be held by at least one rank**, or it can never be served.
+  The engine raises at init naming the first orphan.
+- **Iteration yields `None` for a name this rank does not hold.** The name still
+  appears, in metadata order, so the order check stays aligned across ranks — only
+  the data is absent. Claiming a name and then yielding `None` for it is an error
+  the engine reports by name.
+
+#### Gather groups
+
+Some backends transfer a layer at a time rather than a model at a time, so they
+partition `metadata()` into **gather groups**. `layerwise_groups` cuts the name
+list on `model.layers.<N>.` boundaries, so **a group is one decoder layer**, plus
+one group for everything before the first layer (the embeddings) and one for
+everything after the last (the final norm, `lm_head`):
+
+```text
+group 0     model.embed_tokens.weight
+group 1     model.layers.0.*          <- one decoder layer
+group 2     model.layers.1.*
+...
+group N+1   model.norm.weight, lm_head.weight
+```
+
+The cut is by *position* relative to the first layer name, not by name pattern,
+so flattening the partition always reproduces `metadata()` order and group index
+*g* means the same layer on every rank and every consumer. That agreement is what
+lets a backend bound its buffers to one layer and free a layer once everyone is
+done with it.
+
+Two hooks follow from this, both with working defaults:
+
+- **`groups()`** — this rank's groups, in metadata order. The default is
+  `layerwise_groups(metadata())` restricted to the groups holding at least one
+  held name. A group with nothing held here is skipped entirely.
+- **`iter_groups()`** — the same stream, batched one group at a time. The default
+  drives `__iter__` and batches its output, checking that names arrive in metadata
+  order. Override it when your framework can produce a whole group in one step:
+  materializing is usually a collective, and driving it per group rather than per
+  tensor turns ~37k generator resumes into ~95 on a per-expert MoE model.
+
+Because `metadata()` order defines the partition, **every `model.layers.<N>.*`
+block must be contiguous in it**. A source whose natural export order interleaves
+layers — bucketing all the MoE experts together, say — has to reorder before
+returning. Sharded RDT rejects a source that does not, at `trainer_init`.
 
 ### VLLMWeightSyncClient
 

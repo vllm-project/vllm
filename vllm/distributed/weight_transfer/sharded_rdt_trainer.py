@@ -463,9 +463,9 @@ class _RDTProducerServer:
         # of a 7.5ms 384-spec 235B group.
         #
         # The key is the LAYOUT, not the spec names: a name can appear in two
-        # requests with different op chains (per-ep_rank chunking splits one
-        # name's copies across chunks), and serving the second through the first's
-        # views would write the wrong bytes with nothing downstream to catch it.
+        # requests with different op chains (one name's copies can split across
+        # owner-class chunks), and serving the second through the first's views
+        # would write the wrong bytes with nothing downstream to catch it.
         dst_key = (
             consumer_id,
             idx,
@@ -748,15 +748,14 @@ class ShardedRDTTrainerWeightTransferEngine(
         self._held_names = held_set
 
     def _validate_held_yields(self, gi: int, names, tensors) -> None:
-        """Stamps must be truthful against yields (the ABC contract's first
-        invariant), and this is the one place both sit side by side. Without
-        this check, a source that stamps a name as held but yields ``None`` for
-        it produces a 300s stall-watchdog death (consumers route pulls here,
-        the pull passes the served-names guard, and the cache wait never
-        completes) instead of an immediate, named error. It also discharges
-        the interchangeability invariant: if every rank's yields match the
-        rank-identical stamps, same-coordinate ranks hold identical sets by
-        construction. Cost: one set lookup per name per sync."""
+        """Check ``held_names()`` against what the source actually yields — the
+        one place both sit side by side.
+
+        Without it, a source that claims a name but yields ``None`` for it dies
+        by stall watchdog 300s later: consumers route pulls here, the pull
+        passes the served-names guard, and the cache wait never completes. With
+        it, that is an immediate error naming the weight. One set lookup per
+        name per sync."""
         if self._held_names is None:
             return
         for name, tensor in zip(names, tensors):

@@ -92,7 +92,6 @@ class RdtRouter:
             else [list(range(self.num_producers))]
         )
         names = list(names or [])
-        self.num_groups = len(group_lens) if group_lens else 0
         classes = list(name_owner_class or [])
         self._class_of = {
             n: (classes[i] if i < len(classes) else 0) for i, n in enumerate(names)

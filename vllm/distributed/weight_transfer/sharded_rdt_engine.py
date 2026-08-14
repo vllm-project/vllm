@@ -14,7 +14,8 @@ arenas, scatter them into freshly materialized params, then quant and
 kernel-copy. A live name with no recorded plan fails the plan build: there
 is no fallback load.
 
-Only valid with ``is_checkpoint_format=True`` (layerwise reload).
+Weights arrive in checkpoint format: the engine drives layerwise reload itself,
+in ``start_weight_update`` / ``finish_weight_update``.
 
 Data flow
 ---------
@@ -83,10 +84,10 @@ logger = init_logger(__name__)
 class _Chunk:
     """One packed pull plus its post-processing (see Data flow).
 
-    A module's copies span chunks when its experts live on several producer
-    coordinates, so ``materialize`` fires on its FIRST chunk and ``quant`` on its
-    LAST -- materialize-once by construction, not by a runtime counter.
-    ``pack_layout`` mirrors the producer's rule byte-exactly.
+    A module's copies span chunks when its experts sit in several owner classes,
+    so ``materialize`` fires on its FIRST chunk and ``quant`` on its LAST --
+    materialize-once by construction, not by a runtime counter. ``pack_layout``
+    mirrors the producer's rule byte-exactly.
     """
 
     scatters: "list[_Scatter]"
@@ -150,12 +151,10 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
 
     trainer_actor_names: list[str] = field(default_factory=list)
     """Names of all trainer Ray actors exposing the producer method (set via
-    ``.options(name=...)``), ordered by trainer rank. ``RdtRouter`` picks which
-    one serves each pull: the group's owners (pipeline-stage ownership), narrowed
-    to a matching expert coordinate, then rotated by group index so consumers
-    spread across them rather than funneling through rank 0. Every actor is bound
-    regardless, because ``free_group`` fans out to every owner. Must be
-    non-empty; a single-producer trainer passes a one-element list."""
+    ``.options(name=...)``), ordered by trainer rank. ``RdtRouter`` picks one of
+    them per pull, out of the name's owner set. Every actor is bound regardless,
+    because ``free_group`` fans out to every owner. Must be non-empty; a
+    single-producer trainer passes a one-element list."""
 
     trainer_actor_namespace: str | None = None
     """Optional Ray namespace the trainer actor(s) live in."""
@@ -226,9 +225,14 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     Multi-engine deployments run several INDEPENDENT inference engines, each with
     its own self-contained parallel config, so every engine's
     ``_global_worker_index`` restarts at 0 and would collide across engines. The
-    driver assigns each engine a distinct ``replica_rank`` (with identical
+    driver gives each engine a distinct ``replica_rank`` (with identical
     ``num_replicas``) so the engine offsets its consumers into a globally distinct
-    range for the M:N block assignment. Default 0 (single engine) is unchanged."""
+    range for the M:N block assignment.
+
+    The trainer ships one payload for the whole fleet, so these two are the
+    driver's to set: take ``get_worker_init_payload()`` and override them per
+    engine before calling ``init_weight_transfer_engine``. Default 0/1 (single
+    engine) needs no override."""
 
     num_replicas: int = 1
     """Number of independent inference engines in the fleet. Default 1 => the
@@ -237,7 +241,8 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     behavior). When > 1, ``workers_per_replica = num_consumers // num_replicas``
     and this engine's consumers occupy
     ``replica_rank * workers_per_replica + _global_worker_index()``. Assumes a
-    uniform fleet (every replica has the same worker count)."""
+    uniform fleet (every replica has the same worker count). Set alongside
+    ``replica_rank``, by the driver."""
 
 
 @dataclass
@@ -262,10 +267,10 @@ class ShardedRDTWeightTransferEngine(
     consumes.
 
     Requires ``distributed_executor_backend="ray"``, ``nixl`` in the shared env,
-    ``is_checkpoint_format=True``, a named trainer actor exposing a
-    ``@ray.method(tensor_transport="nixl")`` producer, and weight loaders that
-    stay inside ``SUPPORTED_OPS`` — anything needing real data (``.to``,
-    ``.item``, arithmetic, bool-mask indexing) raises during the bake.
+    a named trainer actor exposing a ``@ray.method(tensor_transport="nixl")``
+    producer, and weight loaders that stay inside ``SUPPORTED_OPS`` — anything
+    needing real data (``.to``, ``.item``, arithmetic, bool-mask indexing)
+    raises during the bake.
 
     The plan is baked once at ``init_transfer_engine`` into one scatter list
     per fully-loaded leaf module, indexed by source name; every
@@ -623,13 +628,14 @@ class ShardedRDTWeightTransferEngine(
         The chunk/free plan is STATIC across syncs — a pure function of the baked
         plan and the driver's group partition — so it was built once at init and
         every sync just re-runs the pipeline over its self-describing chunks, with
-        no per-sync bookkeeping and an empty ``update_info``. Residual names with
-        no baked plan — attention scales, padded/partial layers — take the plain
-        per-slice load; ``load_weights`` is used only by that path.
+        no per-sync bookkeeping and an empty ``update_info``.
 
-        Assumes each baked module's source names fall within one gather group
-        (true for the per-layer / pre / post partition); if not, the pull
-        fails loudly on the missing slice rather than loading wrong data.
+        Assumes each baked module's source names fall within one gather group,
+        which the per-layer / pre / post partition guarantees (a leaf module's
+        sources all live in one decoder layer). A module that did span groups
+        would be planned once per group and could pull a name whose group the
+        pipeline already freed, which parks the pull until the producer's stall
+        watchdog fires.
         """
         del update_info  # the plan is static; nothing arrives per sync
         if self._router is None:

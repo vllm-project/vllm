@@ -3,12 +3,13 @@
 """Tests for the sharded-RDT trainer-side engine.
 
 The trainer engine's own surface: init info and factory registration, the
-send_weights round trip against an in-process fake producer server, group
-ownership and the metadata it ships to the workers, `RdtRouter`'s M:N routing,
-and the producer's packed destination-view cache.
+send_weights round trip against an in-process fake producer server, the
+ownership table it resolves and ships to the workers, and the producer's packed
+destination-view cache.
 
-The plan/replay half lives in test_sharded_rdt_plan.py and the producer
-server's protocol in test_sharded_rdt_producer.py.
+The plan/replay half (including `RdtRouter`, which is consumer-side) lives in
+test_sharded_rdt_plan.py; the producer server's protocol in
+test_sharded_rdt_producer.py.
 """
 
 from dataclasses import asdict
@@ -572,7 +573,7 @@ def test_serve_does_not_reuse_packed_views_of_another_shape():
 
     The producer caches the destination views it carves into a serve ring slot.
     Keyed by name alone, the second request is packed through the first's views.
-    Reachable when one name's copies split across (group, ep_rank) chunks.
+    Reachable when one name's copies split across owner-class chunks.
     """
     name = "model.layers.0.w"
     src = torch.arange(64, dtype=torch.bfloat16, device="cuda").reshape(8, 8)
@@ -593,12 +594,17 @@ def test_serve_does_not_reuse_packed_views_of_another_dtype():
     """The SILENT case of the same cache: two requests whose slices have the same
     name and the same shape but different dtypes pack at identical offsets, so
     reusing the stale views raises nothing — ``copy_`` just casts, and the blob
-    carries the wrong bytes with no check downstream."""
+    carries the wrong bytes with no check downstream.
+
+    ``view(dtype)`` rather than ``to(dtype)`` because the chain is replayed under
+    ``ALLOWED_OPS``, which rejects ``to``: same-itemsize dtypes keep the byte
+    length identical, which is exactly what makes the stale view fit.
+    """
     name = "model.layers.0.w"
     src = torch.arange(64, dtype=torch.bfloat16, device="cuda").reshape(8, 8)
     _srv, serve = _serve_ring_server(name, src)
 
-    serve((("to", (torch.float16,), ()),))  # same shape, fp16
+    serve((("view", (torch.float16,), ()),))  # same shape and bytes, fp16
     blob = serve(())  # same name and shape, bf16
 
     got = blob[: src.numel() * src.element_size()].view(src.dtype).reshape(8, 8)

@@ -32,6 +32,15 @@ def _freeze_kwargs(kwargs: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
     return tuple(sorted(kwargs.items()))
 
 
+class _UnsupportedLazyOp(NotImplementedError):
+    """Raised when a weight loader does something to a LazyRDTTensor that cannot
+    be expressed as a slice request.
+
+    Surfaced as NotImplementedError so callers can distinguish "this backend
+    can't handle this loader" from genuine bugs.
+    """
+
+
 @dataclass
 class _Scatter:
     """One recorded scatter: pull ``src``, copy it into ``layer``'s
@@ -43,11 +52,11 @@ class _Scatter:
     -- ``layer`` is resolved to a param at replay time, never baked, since every
     sync re-materializes fresh tensors.
 
-    ``dtype``/``nbytes`` describe the slice ON THE WIRE and feed the packed
-    layout, so ``dtype`` is the PRODUCED dtype (the lazy's after its op chain),
-    not the source name's: ``view(dtype)`` is allowlisted, and taking the
-    source's would size the slice with the wrong itemsize and carve the packed
-    blob differently on the two sides.
+    ``shape`` and ``dtype`` also size the slice ON THE WIRE, so ``dtype`` is the
+    PRODUCED dtype (the lazy's after its op chain), not the source name's:
+    ``view(dtype)`` is allowlisted, and taking the source's would size the slice
+    with the wrong itemsize and carve the packed blob differently on the two
+    sides.
     """
 
     layer: Any
@@ -57,7 +66,6 @@ class _Scatter:
     shape: tuple[int, ...]
     stride: tuple[int, ...]
     dtype: torch.dtype
-    nbytes: int
 
 
 def _meta_copy_(dest: torch.Tensor, src: "LazyRDTTensor") -> torch.Tensor:
@@ -105,6 +113,20 @@ class BakeSink:
         self.copied_names.add(src._name)
         if self.current is not None:
             layer, param_name = self.current
+            if dest.numel() != src.numel():
+                # The packed layout sizes each slice from the DESTINATION shape,
+                # while the producer packs what the replayed chain produces. A
+                # broadcasting copy_ makes those two lengths differ, and neither
+                # side can notice: the consumer's arena view is exactly
+                # prod(dest.shape) elements, so it reshapes cleanly over bytes
+                # the producer laid out at different offsets. Refuse at bake.
+                raise _UnsupportedLazyOp(
+                    f"LazyRDTTensor: broadcasting copy_ into {param_name!r} of "
+                    f"{type(layer).__name__} ({src.numel()} elements from "
+                    f"{src._name!r} into {dest.numel()}). The sharded RDT "
+                    "backend sends exactly the slice the loader asks for, so "
+                    "the source and destination must have equal numel."
+                )
             self.copies_by_layer[layer].append(
                 _Scatter(
                     layer=layer,
@@ -114,18 +136,9 @@ class BakeSink:
                     shape=tuple(dest.shape),
                     stride=tuple(dest.stride()),
                     dtype=src.dtype,
-                    nbytes=src.numel() * src.dtype.itemsize,
                 )
             )
         return _meta_copy_(dest, src)
-
-
-class _UnsupportedLazyOp(NotImplementedError):
-    """Raised when a weight loader calls an op we don't support on a LazyRDTTensor.
-
-    Surfaced as NotImplementedError so callers can distinguish "this backend
-    can't handle this loader" from genuine bugs.
-    """
 
 
 class LazyRDTTensor(torch.Tensor):

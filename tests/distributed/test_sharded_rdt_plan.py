@@ -13,6 +13,8 @@ silently shipping different bytes.
 side; `test_sharded_rdt_producer.py` covers its serve-actor protocol.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -26,6 +28,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
 )
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     ShardedRDTWeightTransferEngine,
+    ShardedRDTWeightTransferInitInfo,
     _dtype_from_name,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_lazy import (
@@ -81,8 +84,6 @@ def _copy(
             int(torch.empty(shape, device=META).stride()[i]) for i in range(len(shape))
         )
     )
-    from math import prod
-
     return _Scatter(
         layer=layer,
         param_name=layer_param,
@@ -91,7 +92,6 @@ def _copy(
         shape=tuple(shape),
         stride=stride,
         dtype=dtype,
-        nbytes=prod(shape) * dtype.itemsize,
     )
 
 
@@ -359,10 +359,79 @@ class TestBakeRecording:
 
         (recorded,) = rec.copies_by_layer[layer]
         assert recorded.dtype is torch.float32, "recorded the source dtype"
-        assert recorded.nbytes == 2 * torch.float32.itemsize == 8
+        assert recorded.shape == (2,)
         # What the source name alone would have said, and what the producer
         # would NOT have sent.
-        assert 2 * torch.bfloat16.itemsize == 4
+        assert 2 * torch.float32.itemsize == 8 != 2 * torch.bfloat16.itemsize
+
+    def test_a_broadcasting_copy_is_refused_at_bake(self):
+        """The packed layout sizes each slice from the DESTINATION shape while
+        the producer packs what the chain yields, and nothing downstream can
+        catch a mismatch — the consumer's arena view is exactly prod(dest.shape)
+        elements, so it reshapes cleanly over bytes laid out at other offsets.
+        So the bake refuses rather than recording a slice it cannot carve."""
+        rec, lazy = self._recorder_and_lazy(shape=(1, 6))
+        rec.current = (_FakeLayer("broadcast"), "weight")
+        param = torch.empty((4, 6), dtype=torch.bfloat16, device=META)
+        with pytest.raises(_UnsupportedLazyOp, match="broadcasting"):
+            param.copy_(lazy)
+
+
+# ---------------------------------------------------------------------------
+# Consumer identity
+# ---------------------------------------------------------------------------
+
+
+class TestConsumerIdentity:
+    """Every worker in the fleet needs a DISTINCT id in 0..C-1: it selects the
+    worker's producer block and keys the producer's per-consumer serve ring, so
+    a collision silently serves two workers out of one ring."""
+
+    def _engine(self, *, dp_index, rank, world_size):
+        eng = object.__new__(ShardedRDTWeightTransferEngine)
+        eng.parallel_config = SimpleNamespace(
+            data_parallel_index=dp_index, rank=rank, world_size=world_size
+        )
+        return eng
+
+    def _ids(self, *, num_consumers, workers, replica_rank=0, num_replicas=1):
+        """Consumer ids for a DP-only engine whose workers are ``dp_index``es."""
+        info = ShardedRDTWeightTransferInitInfo(
+            num_consumers=num_consumers,
+            replica_rank=replica_rank,
+            num_replicas=num_replicas,
+        )
+        out = []
+        for dp_index in workers:
+            eng = self._engine(dp_index=dp_index, rank=0, world_size=1)
+            eng._num_consumers_override = num_consumers
+            out.append(eng._resolve_consumer_id(info))
+        return out
+
+    def test_one_engine_indexes_by_dp_and_tp(self):
+        """dense-via-TP and MoE-via-DP+EP both flatten to 0..C-1."""
+        eng = self._engine(dp_index=0, rank=3, world_size=8)
+        eng._num_consumers_override = 8
+        info = ShardedRDTWeightTransferInitInfo(num_consumers=8)
+        assert eng._resolve_consumer_id(info) == 3
+
+        eng = self._engine(dp_index=5, rank=0, world_size=1)
+        eng._num_consumers_override = 8
+        assert eng._resolve_consumer_id(info) == 5
+
+    def test_independent_engines_offset_into_distinct_ranges(self):
+        """A fleet of separate engines restarts _global_worker_index at 0 in
+        each, so without the replica offset every engine would claim 0..w-1.
+        The driver sets replica_rank on the payload; these are the ids it buys."""
+        ids = [
+            self._ids(num_consumers=8, workers=range(4), replica_rank=r, num_replicas=2)
+            for r in (0, 1)
+        ]
+        assert ids == [[0, 1, 2, 3], [4, 5, 6, 7]]
+        assert len(set(ids[0] + ids[1])) == 8, "every worker distinct fleet-wide"
+
+    def test_the_default_is_a_single_engine_with_no_offset(self):
+        assert self._ids(num_consumers=4, workers=range(4)) == [0, 1, 2, 3]
 
 
 # ---------------------------------------------------------------------------
@@ -594,9 +663,9 @@ class TestPackedLayout:
 
 
 class TestChunkModuleScatters:
-    """The chunk cut: one chunk per distinct producer ep_rank present in the
-    copies — ``-1`` (replicated) first, then ascending. Derived purely from the
-    bake plus the name stamps, so vLLM's expert placement needs no cases."""
+    """The chunk cut: one chunk per distinct owner class present in the copies,
+    ascending by class index. Derived purely from the bake plus the ownership
+    table, so vLLM's expert placement needs no cases."""
 
     def test_unstamped_copies_form_one_chunk(self):
         layer = _FakeLayer("l")
@@ -661,7 +730,7 @@ class TestChunkModuleScatters:
             (2, ["a1", "b1"]),
         ]
 
-    def test_scatters_carry_their_own_dtype_and_nbytes(self):
+    def test_scatters_carry_their_own_dtype(self):
         """dtype rides the record from the bake, where it is the lazy's dtype
         AFTER its op chain — not a plan-time lookup of the source name, which
         would be wrong for any chain that reinterprets dtype."""
@@ -672,7 +741,6 @@ class TestChunkModuleScatters:
         )
         (sc,) = scatters
         assert sc.dtype is torch.float32
-        assert sc.nbytes == 40
         assert sc.layer is layer
 
 
@@ -704,7 +772,7 @@ class TestBuildCallPlan:
 
     def test_materialize_fires_on_a_modules_first_chunk_only(self):
         """Empty HF params are allocated once per module, by construction —
-        including a FusedMoE-like module whose copies span ep_rank chunks."""
+        including a FusedMoE-like module whose copies span owner-class chunks."""
         layer = _FakeLayer("spanning")
         names = [f"w{i}" for i in range(4)]
         copies = [_copy(n, shape=(4,)) for n in names]
@@ -737,7 +805,7 @@ class TestBuildCallPlan:
         assert [c.free for c in plan.chunks] == [[0], [1], [2], [3]]
 
     def test_free_signal_waits_for_a_groups_last_chunk_when_it_is_split(self):
-        """The load-bearing case: with the group cut across ep_rank chunks the
+        """The load-bearing case: with the group cut across owner-class chunks the
         signal must hang off the LAST one. Signaling earlier lets the producers
         drop the gather buffers while a later chunk's RDMA is still reading."""
         layer = _FakeLayer("l")
@@ -754,7 +822,7 @@ class TestBuildCallPlan:
         assert [c.free for c in plan.chunks] == [[], [], [0]]
 
     def test_free_signal_timing_across_two_split_groups(self):
-        """Two groups x 2 ep_rank chunks each: signals land on each group's
+        """Two groups x 2 owner-class chunks each: signals land on each group's
         last chunk only."""
         names_a = [f"model.layers.0.w{i}" for i in range(4)]
         names_b = [f"model.layers.1.w{i}" for i in range(4)]
@@ -991,13 +1059,13 @@ class TestSignalCompleteness:
         assert self._signals(plan) == list(range(len(group_lens)))
 
     def test_placement_changes_only_the_chunk_count_never_the_signals(self):
-        """linear experts 0-3 hit 2 producer coordinates; round_robin 0,2,4,6
+        """linear experts 0-3 hit 2 owner classes; round_robin 0,2,4,6
         hits all 4. More chunks per group, identical signal set."""
         plans = {}
         for label, experts in (("linear", [0, 1, 2, 3]), ("round_robin", [0, 2, 4, 6])):
             eng, names, group_lens = self._moe_planner(worker_experts=experts)
             plans[label] = eng._build_call_plan(names, group_lens)
-        # per MoE group: norm chunk (-1) + one chunk per coordinate present
+        # per MoE group: the replicated chunk + one per owner class present
         assert (
             len(plans["linear"].chunks) == 2 + 2 * 3
         )  # embed+head + 2 layers x (1 + 2)
@@ -1005,7 +1073,7 @@ class TestSignalCompleteness:
         assert self._signals(plans["linear"]) == self._signals(plans["round_robin"])
 
     def test_the_fused_module_materializes_first_and_quants_last_across_chunks(self):
-        """The FusedMoE shape: one module's copies span every ep_rank chunk of
+        """The FusedMoE shape: one module's copies span every owner-class chunk of
         its group; materialize on its first, quant on its last."""
         eng, names, group_lens = self._moe_planner(
             worker_experts=[0, 2, 4, 6], n_layers=1
