@@ -41,7 +41,12 @@ class PagedShmServer:
     """Server‑side wrapper that exposes PagedShmManager over ZMQ."""
 
     def __init__(self, size: int, block_size: int):
+        self._resources = contextlib.ExitStack()
+        self._finalizer = weakref.finalize(self, self._resources.close)
+
         self.storage = PagedShmStorage(size, block_size, pin=False)
+        self._resources.callback(self.storage.close)
+
         self.manager = PagedShmManager(size, block_size)
 
         self.size = self.storage.size
@@ -129,7 +134,7 @@ class PagedShmServer:
 
     def close(self):
         """Close the shared memory storage."""
-        self.storage.close()
+        self._resources.close()
 
 
 def _zmq_server(size: int, block_size: int, conn, stop_event: Event):

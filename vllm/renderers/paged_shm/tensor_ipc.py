@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
+import weakref
+from contextlib import ExitStack
 from dataclasses import asdict
 
 import torch
@@ -43,6 +45,9 @@ def format_size(
 
 class PagedShmTensorIPC:
     def __init__(self, model_config: ModelConfig, pin: bool = False):
+        self._resources = ExitStack()
+        self._finalizer = weakref.finalize(self, self._resources.close)
+
         self.is_paged_shm_enabled = False
         self.model_config = model_config
         self.multimodal_config = model_config.multimodal_config
@@ -61,12 +66,16 @@ class PagedShmTensorIPC:
     def connect(self):
         if not self.is_paged_shm_enabled:
             return
+        if self.client_async is not None:
+            return
 
         self.client_async = AsyncPagedShmClient.from_model_config(
             self.model_config, pin=self.pin
         )
-        assert self.client_async is not None
-        self.client_sync = self.client_async.sync_client
+
+        if self.client_async is not None:
+            self.client_sync = self.client_async.sync_client
+            self._resources.callback(self.client_async.close)
 
     def write(self, mm_inputs: MultiModalInput) -> None:
         if not self.is_paged_shm_enabled:
@@ -154,6 +163,4 @@ class PagedShmTensorIPC:
             return None
         if self.client_async is None:
             return None
-
-        self.client_sync = None
-        self.client_async.shutdown()
+        self._resources.close()

@@ -14,6 +14,7 @@ import contextlib
 import json
 import logging
 import queue
+import weakref
 from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -216,14 +217,21 @@ class PagedShmClient(_BaseClient):
     ):
         self._pin = pin
         self._address = address
-        self._ctx = zmq.Context()
-        self._pool: queue.Queue = queue.Queue()
 
+        self._resources = contextlib.ExitStack()
+        self._finalizer = weakref.finalize(self, self._resources.close)
+
+        self._ctx = zmq.Context()
+        self._resources.callback(self._ctx.destroy, linger=0)
+
+        self._pool: queue.Queue = queue.Queue()
         for _ in range(init_pool_size):
             sock = self._init_sock()
             self._pool.put(sock)
+        self._resources.callback(_close_sock_pool, self._pool)
 
         self._executor: Executor = ThreadPoolExecutor(max_workers=pool_workers)
+        self._resources.callback(self._executor.shutdown, wait=False)
 
         # Retrieve storage metadata and attach to the shared memory segment
         info = json.loads(self._request(GET_STORAGE_INFO))["data"]
@@ -233,6 +241,7 @@ class PagedShmClient(_BaseClient):
             name=info["name"],
             pin=self._pin,
         )
+        self._resources.callback(self._storage.close)
 
     @classmethod
     def from_model_config(cls, model_config: ModelConfig | None, pin: bool = False):
@@ -439,29 +448,7 @@ class PagedShmClient(_BaseClient):
         return json.loads(resp)
 
     def close(self) -> None:
-        """
-        Close all ZMQ sockets, terminate the context, and detach from
-        the shared memory segment.
-        """
-
-        # 1. Close all pooled sockets
-        while not self._pool.empty():
-            try:
-                sock = self._pool.get_nowait()
-                sock.close(linger=0)
-            except queue.Empty:
-                break
-
-        # 2. Destroy context
-        self._ctx.destroy(linger=0)
-
-        # 3. Detach shared memory
-        if hasattr(self, "_storage"):
-            self._storage.close()
-            logger.debug("Shared memory storage closed.")
-
-    def shutdown(self):
-        self.close()
+        self._resources.close()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -497,3 +484,12 @@ class PagedShmClient(_BaseClient):
             raise
         else:
             self._pool.put(sock)
+
+
+def _close_sock_pool(pool: queue.Queue):
+    while not pool.empty():
+        try:
+            sock = pool.get_nowait()
+            sock.close(linger=0)
+        except queue.Empty:
+            break

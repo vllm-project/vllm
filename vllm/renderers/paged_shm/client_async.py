@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import weakref
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import Any
@@ -185,15 +186,22 @@ class AsyncPagedShmClient(_AsyncBaseClient):
     ):
         self._pin = pin
         self._address = address
+
+        self._resources = contextlib.ExitStack()
+        self._finalizer = weakref.finalize(self, self._resources.close)
+
         self._ctx = zmq.asyncio.Context()
+        self._resources.callback(self._ctx.destroy, linger=0)
+
         self._pool: asyncio.Queue = asyncio.Queue()
         self._pool_size = pool_size
-
         for _ in range(pool_size):
             sock = self._init_sock()
             self._pool.put_nowait(sock)
+        self._resources.callback(_close_sock_pool, self._pool)
 
         self.sync_client = PagedShmClient(address, pin, pool_size)
+        self._resources.callback(self.sync_client.close)
 
         self._storage = self.sync_client._storage
         self._executor = self.sync_client._executor
@@ -319,25 +327,7 @@ class AsyncPagedShmClient(_AsyncBaseClient):
         return json.loads(resp)
 
     def close(self) -> None:
-        """Close all async sockets, terminate context,
-        and close sync client."""
-
-        # 1. Close all pooled sockets
-        while not self._pool.empty():
-            try:
-                sock = self._pool.get_nowait()
-                sock.close()
-            except asyncio.QueueEmpty:
-                break
-
-        # 2. Destroy context without blocking the event loop
-        self._ctx.destroy(linger=0)
-
-        # 3. close sync client
-        self.sync_client.close()
-
-    def shutdown(self):
-        self.close()
+        self._resources.close()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -372,3 +362,12 @@ class AsyncPagedShmClient(_AsyncBaseClient):
             raise
         else:
             self._pool.put_nowait(sock)
+
+
+def _close_sock_pool(pool: asyncio.Queue):
+    while not pool.empty():
+        try:
+            sock = pool.get_nowait()
+            sock.close(linger=0)
+        except asyncio.QueueEmpty:
+            break

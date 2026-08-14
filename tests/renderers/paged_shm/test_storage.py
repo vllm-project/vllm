@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 from unittest.mock import patch
 
 import numpy as np
@@ -20,8 +19,6 @@ def _create_storage(size=1024, block_size=256, pin=False):
 
 def _cleanup(storage):
     storage.close()
-    with contextlib.suppress(FileNotFoundError):
-        storage.unlink()
 
 
 # ---------------------------------------------------------------------------

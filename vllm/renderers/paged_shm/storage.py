@@ -8,6 +8,8 @@ iterators and read/write methods supporting both CPU and GPU direct (batch)
 transfers.
 """
 
+import weakref
+from contextlib import ExitStack
 from multiprocessing import shared_memory
 from unittest.mock import patch
 
@@ -32,6 +34,9 @@ class PagedShmStorage:
 
         self._created = name is None
 
+        self._resources = ExitStack()
+        self._finalizer = weakref.finalize(self, self._resources.close)
+
         if self._created:
             self._shm = shared_memory.SharedMemory(create=True, size=self.size)
         else:
@@ -47,6 +52,7 @@ class PagedShmStorage:
                     raise FileNotFoundError(
                         f"Shared memory '{name}' not found"
                     ) from None
+        self._resources.callback(_close_shm, self._shm, self._created)
         assert self._shm.buf is not None, "Buffer was not created"
 
         self.name = self._shm.name
@@ -58,10 +64,11 @@ class PagedShmStorage:
         # Pin memory if requested and the global flag allows it
         self.is_pinned = False
         if pin and PIN_MEMORY:
-            from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
+            from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor, unpin_tensor
 
             pin_tensor(self._shm_tensor)
             self.is_pinned = True
+            self._resources.callback(unpin_tensor, self._shm_tensor)
 
     def get_iterator_numpy(self, size: int, blocks: list[int]):
         """Return a callable that yields (block_array, valid_length) tuples as numpy
@@ -246,25 +253,10 @@ class PagedShmStorage:
         return output_tensor
 
     def close(self):
-        if getattr(self, "is_pinned", False) and hasattr(self, "_shm_tensor"):
-            from vllm.v1.simple_kv_offload.cuda_mem_ops import unpin_tensor
+        self._resources.close()
 
-            unpin_tensor(self._shm_tensor)
 
-        if hasattr(self, "_shm_tensor"):
-            del self._shm_tensor
-
-        if hasattr(self, "_shm_np"):
-            del self._shm_np
-
-        if hasattr(self, "_shm"):
-            self._shm.close()
-
-    def unlink(self):
-        if self._created and hasattr(self, "_shm"):
-            self._shm.unlink()
-            del self._shm
-
-    def __del__(self):
-        self.close()
-        self.unlink()
+def _close_shm(shm: shared_memory.SharedMemory, created: bool = False):
+    if created:
+        shm.unlink()
+    shm.close()
