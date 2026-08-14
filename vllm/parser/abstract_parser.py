@@ -504,7 +504,7 @@ class DelegatingParser(Parser):
                     or (isinstance(content, str) and not content.strip())
                 ):
                     return [], None
-                return None, content
+                return None, tool_call_info.content if self._engine_based else content
 
         return tool_calls, content
 
