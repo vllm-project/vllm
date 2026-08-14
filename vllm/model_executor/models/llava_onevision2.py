@@ -1279,6 +1279,7 @@ class LlavaOnevision2ProcessingInfo(BaseProcessingInfo):
         return LlavaOnevision2MultiModalDataParser(
             self.get_hf_config().vision_config.spatial_merge_size,
             video_needs_metadata=True,
+            embeds_from_ec_connector=self.embeds_from_ec_connector,
         )
 
     def get_hf_processor(self, **kwargs: object):
@@ -1510,6 +1511,11 @@ class LlavaOnevision2DummyInputsBuilder(
 
 
 class LlavaOnevision2MultiModalDataParser(MultiModalDataParser):
+    # The patch grid is what sizes the placeholder range.
+    embedding_fields = {
+        "image": {"image_embeds": "values", "image_grid_thw": "metadata"},
+    }
+
     def __init__(self, spatial_merge_size: int, *args, **kwargs):
         self._spatial_merge_size = spatial_merge_size
         super().__init__(*args, **kwargs)
@@ -1519,10 +1525,12 @@ class LlavaOnevision2MultiModalDataParser(MultiModalDataParser):
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("image")
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields={"image_embeds", "image_grid_thw"},
+                required_fields=required,
+                optional_fields=optional,
                 fields_factory=_create_field_factory(self._spatial_merge_size),
             )
         return super()._parse_image_data(data)

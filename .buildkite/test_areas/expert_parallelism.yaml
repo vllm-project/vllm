@@ -47,6 +47,7 @@ steps:
   num_devices: 4
   source_file_dependencies:
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/executor/
   - vllm/compilation/

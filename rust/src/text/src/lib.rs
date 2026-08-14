@@ -78,6 +78,29 @@ impl TextRequestProcessor {
         self.max_model_len
     }
 
+    fn tokenize_prompt(
+        tokenizer: &DynTokenizer,
+        prompt: Prompt,
+        add_special_tokens: bool,
+    ) -> Result<Vec<u32>> {
+        match prompt {
+            Prompt::Text(text) => tokenizer.encode(&text, add_special_tokens).map_err(Into::into),
+            // Pre-tokenized prompts are the main completions-side escape hatch that lets benchmark
+            // and infra workloads bypass chat rendering and tokenizer overhead entirely.
+            Prompt::TokenIds(token_ids) => Ok(token_ids),
+        }
+    }
+
+    /// Tokenize one request without generation-specific lowering.
+    pub fn tokenize(&self, request: TextRequest) -> Result<Vec<u32>> {
+        request.validate()?;
+        Self::tokenize_prompt(
+            &self.backend.tokenizer(),
+            request.prompt,
+            request.add_special_tokens,
+        )
+    }
+
     /// Tokenize and lower one request without submitting it to an engine.
     pub fn prepare(&self, mut request: TextRequest) -> Result<PreparedTextRequest> {
         request.validate()?;
@@ -87,12 +110,11 @@ impl TextRequestProcessor {
         }
 
         let tokenizer = self.backend.tokenizer();
-        let prompt_token_ids = match take(&mut request.prompt) {
-            Prompt::Text(text) => tokenizer.encode(&text, request.add_special_tokens)?,
-            // Pre-tokenized prompts are the main completions-side escape hatch that lets benchmark
-            // and infra workloads bypass chat rendering and tokenizer overhead entirely.
-            Prompt::TokenIds(token_ids) => token_ids,
-        };
+        let prompt_token_ids = Self::tokenize_prompt(
+            &tokenizer,
+            take(&mut request.prompt),
+            request.add_special_tokens,
+        )?;
         let sampling_hints = self.backend.sampling_hints()?;
         let sampling_limits = SamplingLimits {
             max_model_len: self.max_model_len,
@@ -151,6 +173,11 @@ impl TextLlm {
     /// calls.
     pub fn engine_core_client(&self) -> &EngineCoreClient {
         self.llm.engine_core_client()
+    }
+
+    /// Return the text request processor.
+    pub fn request_processor(&self) -> &TextRequestProcessor {
+        &self.processor
     }
 
     /// Return the tokenizer used by this text backend.

@@ -25,6 +25,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingHistogramMetadata,
 )
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
+from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 
 LOAD_BYTES = _TransferMetricName.LOAD_BYTES
 LOAD_TIME = _TransferMetricName.LOAD_TIME
@@ -101,10 +102,15 @@ class _FakeMetric:
 
 
 class _FakeVllmConfig:
-    def __init__(self, store_threshold: int = 2):
-        self.kv_transfer_config = SimpleNamespace(
-            kv_connector_extra_config={"store_threshold": store_threshold}
-        )
+    def __init__(
+        self,
+        store_threshold: int = 2,
+        extra_config: dict[str, Any] | None = None,
+    ):
+        config = {"store_threshold": store_threshold}
+        if extra_config is not None:
+            config.update(extra_config)
+        self.kv_transfer_config = SimpleNamespace(kv_connector_extra_config=config)
 
 
 def _spec_cls_with_metric_definitions(
@@ -677,6 +683,30 @@ def test_prom_metrics_uses_configured_manager_metrics():
     )
 
     assert STORES_SKIPPED not in prom_metrics._offloading_metric_metadata
+
+
+def test_prom_metrics_registers_tiering_metrics_from_spec():
+    prom_metrics = OffloadPromMetrics(
+        vllm_config=_FakeVllmConfig(
+            store_threshold=0,
+            extra_config={
+                "spec_name": "TieringOffloadingSpec",
+                "secondary_tiers": [],
+            },
+        ),  # type: ignore[arg-type]
+        metric_types={
+            Gauge: _FakeMetric,
+            Counter: _FakeMetric,
+            Histogram: _FakeMetric,
+        },
+        labelnames=["model_name", "engine"],
+        per_engine_labelvalues={0: ["model", "0"]},
+    )
+
+    metric = prom_metrics._offloading_metric_defs[
+        TieringOffloadingMetrics.BLOCK_QUERIES
+    ]
+    assert metric.kwargs["labelnames"] == ["model_name", "engine", "tier"]
 
 
 def test_aggregate_into_empty_stats():

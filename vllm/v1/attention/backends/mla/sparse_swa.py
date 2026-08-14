@@ -61,8 +61,10 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
         dtype: torch.dtype,
         prefix: str,
         cache_config: CacheConfig,
+        backend_cls: "type[AttentionBackend] | None" = None,
     ):
         super().__init__()
+        self.backend_cls = backend_cls or DeepseekSparseSWABackend
         self.kv_cache = torch.tensor([])
         self.head_dim = head_dim
         self.window_size = window_size
@@ -104,7 +106,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
     def forward(self): ...
 
     def get_attn_backend(self) -> type[AttentionBackend]:
-        return DeepseekSparseSWABackend
+        return self.backend_cls
 
 
 class DeepseekSparseSWABackend(AttentionBackend):
@@ -183,6 +185,7 @@ class DeepseekSparseSWAMetadata:
     num_prefills: int = 0
     num_decode_tokens: int = 0
     num_prefill_tokens: int = 0
+    max_decode_query_len: int = 1
 
     # Pre-computed prefill metadata shared across all DeepseekV4 attention layers.
     prefill_seq_lens: torch.Tensor | None = None
@@ -400,6 +403,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
     reorder_batch_threshold: int | None = None
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    supports_draft_decode_metadata_update = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -643,11 +647,52 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             num_prefills=num_prefills,
             num_decode_tokens=num_decode_tokens,
             num_prefill_tokens=num_prefill_tokens,
+            # Upper bound on decode-split rows for the kernel's max_q_len
+            # hint. common max_query_len bounds every row (scheduled max under
+            # adaptive verification), clamped to what the split can admit so a
+            # mixed batch's prefill max does not inflate decode scheduling.
+            max_decode_query_len=min(
+                common_attn_metadata.max_query_len, self.decode_threshold
+            ),
             tile_sched_swaonly=tile_sched[_LAYER_TYPE_SWAONLY],
             tile_sched_c4a=tile_sched[_LAYER_TYPE_C4A],
             tile_sched_c128a=tile_sched[_LAYER_TYPE_C128A],
             **deepseek_v4_fields,  # type: ignore[arg-type]
         )
+
+    def update_draft_decode_metadata(
+        self,
+        metadata: DeepseekSparseSWAMetadata,
+    ) -> None:
+        if metadata.num_decode_tokens == 0:
+            return
+        assert metadata.query_start_loc is not None
+        assert metadata.seq_lens is not None
+        assert metadata.token_to_req_indices is not None
+        assert metadata.is_valid_token is not None
+        assert metadata.decode_swa_indices is not None
+        assert metadata.decode_swa_lens is not None
+
+        _compute_swa_indices_and_lens_kernel[(metadata.num_decode_tokens,)](
+            metadata.decode_swa_indices,
+            metadata.decode_swa_indices.stride(0),
+            metadata.decode_swa_lens,
+            metadata.decode_swa_indices.shape[-1],
+            metadata.query_start_loc,
+            metadata.seq_lens,
+            metadata.token_to_req_indices,
+            metadata.is_valid_token,
+            metadata.block_table,
+            metadata.block_table.stride(0),
+            self.block_size,
+            token_offset=0,
+            TRITON_BLOCK_SIZE=1024,
+        )
+        tile_sched = self.build_tile_scheduler(metadata.num_decode_tokens)
+        metadata.tile_sched_swaonly = tile_sched[_LAYER_TYPE_SWAONLY]
+        metadata.tile_sched_c4a = tile_sched[_LAYER_TYPE_C4A]
+        metadata.tile_sched_c128a = tile_sched[_LAYER_TYPE_C128A]
+        metadata.flashinfer_sparse_index_cache.clear()
 
     def build_tile_scheduler(
         self, num_decode_tokens: int
@@ -752,6 +797,14 @@ def _compute_swa_indices_and_lens_kernel(
     is_valid = tl.load(is_valid_token_ptr + token_idx)
     if not is_valid:
         tl.store(swa_lens_ptr + pid, 0)
+        # Clear the row so a padded token cannot gather through stale indices.
+        for i in range(0, window_size, TRITON_BLOCK_SIZE):
+            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+            tl.store(
+                swa_indices_ptr + pid * swa_indices_stride + offset,
+                -1,
+                mask=offset < window_size,
+            )
         return
 
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)
@@ -818,6 +871,14 @@ def _compute_dspark_noncausal_swa_indices_kernel(
     is_valid = tl.load(is_valid_token_ptr + token_idx)
     if not is_valid:
         tl.store(swa_lens_ptr + pid, 0)
+        # Clear the row so a padded token cannot gather through stale indices.
+        for i in range(0, index_width, TRITON_BLOCK_SIZE):
+            offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+            tl.store(
+                swa_indices_ptr + pid * swa_indices_stride + offset,
+                -1,
+                mask=offset < index_width,
+            )
         return
 
     req_idx = tl.load(token_to_req_indices_ptr + token_idx)

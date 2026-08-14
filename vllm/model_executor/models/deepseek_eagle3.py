@@ -3,7 +3,6 @@
 
 """Eagle3 speculative decoding model for DeepseekV2/V3 with MLP (no MoE)."""
 
-import copy
 from collections.abc import Iterable
 
 import torch
@@ -58,7 +57,6 @@ class DeepseekV2Eagle3DecoderLayer(nn.Module):
         quant_config = get_draft_quant_config(vllm_config)
 
         self.hidden_size = config.hidden_size
-        rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
 
         self.layer_idx = layer_idx
@@ -68,13 +66,6 @@ class DeepseekV2Eagle3DecoderLayer(nn.Module):
         qk_rope_head_dim = getattr(config, "qk_rope_head_dim", 0)
         v_head_dim = getattr(config, "v_head_dim", 0)
         kv_lora_rank = getattr(config, "kv_lora_rank", 0)
-        config = copy.copy(config)
-        if rope_scaling:
-            rope_params = rope_scaling.copy()
-            rope_params["rope_type"] = "deepseek_yarn"
-        else:
-            rope_params = {"rope_type": "default"}
-        config.rope_parameters = rope_params
         self.self_attn = DeepseekV2MLAAttention(
             vllm_config=vllm_config,
             config=config,
@@ -168,6 +159,7 @@ class DeepseekV2Eagle3Model(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
 
@@ -285,6 +277,7 @@ class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
+        assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
 
         # Ensure draft_vocab_size is set
@@ -327,7 +320,7 @@ class Eagle3DeepseekV2ForCausalLM(LocalArgmaxMixin, DeepseekV2ForCausalLM):
     ) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,

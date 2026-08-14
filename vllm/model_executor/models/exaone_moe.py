@@ -76,7 +76,6 @@ class ExaoneMoe(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
 
@@ -112,11 +111,6 @@ class ExaoneMoe(nn.Module):
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
 
         if getattr(config, "num_shared_experts", 0) > 0:
             intermediate_size = config.moe_intermediate_size * config.num_shared_experts
@@ -528,7 +522,7 @@ class ExaoneMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 quant_config=quant_config,
             )
             if config.tie_word_embeddings:
-                self.lm_head.weight = self.model.embed_tokens.weight
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
             logit_scale = getattr(config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(

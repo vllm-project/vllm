@@ -213,6 +213,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "BailingMoeV2_5ForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ring-2.5-1T", trust_remote_code=True
     ),
+    "BailingMoeV3ForCausalLM": _HfExamplesInfo(
+        "inclusionAI/Ling-3.0-flash", trust_remote_code=True
+    ),
     "BloomForCausalLM": _HfExamplesInfo(
         "bigscience/bloom-560m", {"1b": "bigscience/bloomz-1b1"}
     ),
@@ -376,6 +379,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "guard": "meta-llama/Llama-Guard-3-1B",
             "hermes": "NousResearch/Hermes-3-Llama-3.1-8B",
             "fp8": "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
+            "fp8_1b": "RedHatAI/Llama-3.2-1B-Instruct-FP8",
             "tiny": "hmellor/tiny-random-LlamaForCausalLM",
         },
     ),
@@ -498,7 +502,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
     "Qwen3_5ForCausalLM": _HfExamplesInfo("codecho/Qwen3.5-0.8B-text-only"),
-    "Qwen3_5MoeForCausalLM": _HfExamplesInfo("codecho/Qwen3.5-35B-A3B-text-only"),
+    "Qwen3_5MoeForCausalLM": _HfExamplesInfo(
+        "codecho/Qwen3.5-35B-A3B-text-only",
+        extras={"native-prefix": "imdatta0/small_qwen3_5_20b"},
+        max_model_len=4096,
+    ),
     "MellumForCausalLM": _HfExamplesInfo("JetBrains/Mellum2-12B-A2.5B-Base"),
     "Qwen3NextForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-Next-80B-A3B-Instruct",
@@ -817,7 +825,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Cosmos3EdgeForConditionalGeneration": _HfExamplesInfo(
         "nvidia/Cosmos3-Edge",
         max_model_len=4096,
-        is_available_online=False,
+        min_transformers_version="5.15",
+        use_original_num_layers=True,
+        hf_overrides={
+            "text_config": {
+                "num_hidden_layers": 2,
+                "hybrid_override_pattern": "*-",
+            }
+        },
     ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",
@@ -830,6 +845,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "DeepseekOCR2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-OCR-2",
+    ),
+    "Dots3NoteForCausalLM": _HfExamplesInfo(
+        "dots-studio/dots3-note-prev",
+        is_available_online=False,
     ),
     "UnlimitedOCRForCausalLM": _HfExamplesInfo(
         "baidu/Unlimited-OCR",
@@ -987,6 +1006,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "InternS1ProForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1-Pro",
         trust_remote_code=True,
+        max_transformers_version="5.14.1",
+        transformers_version_reason={
+            "vllm": (
+                "Remote video processor code imports "
+                "`BASE_VIDEO_PROCESSOR_DOCSTRING`, removed in Transformers 5.15."
+            )
+        },
+    ),
+    "InternS2MobiusForConditionalGeneration": _HfExamplesInfo(
+        "internlm/Intern-S2-Mobius",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "InternS2PreviewForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S2-Preview",
@@ -1103,14 +1134,15 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "4.0": "openbmb/MiniCPM-V-4",
             "4.5": "openbmb/MiniCPM-V-4_5",
         },
+        trust_remote_code=True,
         max_transformers_version="4.57",
         transformers_version_reason={
-            "vllm": (
-                "MiniCPMVBatchFeature is incompatible with its base class in "
-                "Transformers v5. See https://huggingface.co/openbmb/MiniCPM-Llama3-V-2_5/discussions/78"
+            "hf": (
+                "MiniCPMV.__init__ does not call self.post_init(), so "
+                "`all_tied_weights_keys` is never set; Transformers v5 requires "
+                "this attribute in _move_missing_keys_from_meta_to_device."
             )
         },
-        trust_remote_code=True,
     ),
     "MiniCPMV4_6ForConditionalGeneration": _HfExamplesInfo(
         "openbmb/MiniCPM-V-4_6",
@@ -1165,6 +1197,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         # required by current PrefixLM implementation
         max_num_batched_tokens=31872,
+    ),
+    "MuseGlimmerForConditionalGeneration": _HfExamplesInfo(
+        "meta-models/Muse-Glimmer-30B",
+    ),
+    "MuseGlimmerForCausalLM": _HfExamplesInfo(
+        "meta-models/Muse-Glimmer-30B",
     ),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
     "Llama_Nemotron_Nano_VL": _HfExamplesInfo(
@@ -1463,6 +1501,18 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_num_seqs=32,
         min_transformers_version="4.56.3",  # Required for Qwen3Next
     ),
+    "MuseGlimmerAssistantModel": _HfExamplesInfo(
+        "meta-models/Muse-Glimmer-30B",
+        speculative_model="meta-models/Muse-Glimmer-30B-assistant",
+        max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
+        max_num_seqs=32,
+    ),
+    "DFlashMuseGlimmerAssistantModel": _HfExamplesInfo(
+        "meta-models/Muse-Glimmer-30B",
+        speculative_model="meta-models/Muse-Glimmer-30B-assistant",
+        max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
+        max_num_seqs=32,
+    ),
     # [DSpark]
     "DSparkDraftModel": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Pro-DSpark",
@@ -1613,6 +1663,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         is_available_online=False,
     ),
+    "BailingMoeV3MTPModel": _HfExamplesInfo(
+        "inclusionAI/Ling-3.0-flash",
+        speculative_model="inclusionAI/Ling-3.0-flash",
+        trust_remote_code=True,
+    ),
     "DeepSeekMTPModel": _HfExamplesInfo(
         "luccafong/deepseek_mtp_main_random",
         speculative_model="luccafong/deepseek_mtp_draft_random",
@@ -1622,6 +1677,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "deepseek-ai/DeepSeek-V4-Flash",
         speculative_model="deepseek-ai/DeepSeek-V4-Flash",
         trust_remote_code=True,
+        is_available_online=False,
+    ),
+    "Dots3NoteMTPModel": _HfExamplesInfo(
+        "dots-studio/dots3-note-prev",
+        speculative_model="dots-studio/dots3-note-prev",
         is_available_online=False,
     ),
     "Gemma4MTPModel": _HfExamplesInfo(
@@ -1675,6 +1735,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         tokenizer_mode="inkling",
         trust_remote_code=True,
         max_model_len=4096,
+    ),
+    "InternS2MobiusMTP": _HfExamplesInfo(
+        "internlm/Intern-S2-Mobius",
+        trust_remote_code=True,
+        speculative_model="internlm/Intern-S2-Mobius",
+        is_available_online=False,
     ),
     "KimiK3MTPModel": _HfExamplesInfo(
         "moonshotai/Kimi-K3",

@@ -178,6 +178,7 @@ class Cohere2MoeAttention(nn.Module):
         self.max_position_embeddings = getattr(
             config, "model_max_length", None
         ) or getattr(config, "max_position_embeddings", 8192)
+        assert isinstance(self.max_position_embeddings, int)
         self.qkv_proj = QKVParallelLinear(
             self.hidden_size,
             self.head_dim,
@@ -283,6 +284,7 @@ class Cohere2Moe(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
+        self.shared_experts: Cohere2MoeMLP | None
         if hasattr(config, "num_shared_experts") and config.num_shared_experts > 0:
             self.shared_experts = Cohere2MoeMLP(
                 config=config,

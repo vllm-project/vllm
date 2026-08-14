@@ -31,7 +31,7 @@ import torch
 from vllm.model_executor.layers.mamba import mamba_utils as layer_mamba_utils
 from vllm.platforms import current_platform
 from vllm.v1.worker import mamba_utils as worker_mamba_utils
-from vllm.v1.worker.mamba_utils import precopy_mamba_align_fused_kernel
+from vllm.v1.worker.mamba_utils import _TEMPORAL_TILES, precopy_mamba_align_fused_kernel
 
 _parametrize: Callable[..., Callable[[Any], Any]]
 
@@ -150,9 +150,14 @@ def _reference(convs, ssms, bt, src_col, dst_col, bias, num_reqs, conv_dim_first
 @_parametrize("num_reqs", [1, 4, 16])
 @_parametrize("token_bias", [0, 1, 2])
 @_parametrize("has_idx_mapping", [True, False])
+@_parametrize("temporal_tiles", [1, _TEMPORAL_TILES])
 @_cuda_required
 def test_precopy_matches_v1_copy_specs(
-    num_reqs, token_bias, has_idx_mapping, conv_state_dim_first
+    num_reqs,
+    token_bias,
+    has_idx_mapping,
+    conv_state_dim_first,
+    temporal_tiles,
 ):
     device = torch.device("cuda")
     torch.manual_seed(0)
@@ -191,7 +196,7 @@ def test_precopy_matches_v1_copy_specs(
     )
     bt_ptrs = torch.tensor([bt.data_ptr()], dtype=torch.int64, device=device)
     idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
-    grid = (num_reqs, NUM_LAYERS * 2)
+    grid = (num_reqs, NUM_LAYERS * 2, temporal_tiles)
     precopy_mamba_align_fused_kernel[grid](
         dst_col,
         src_col,
@@ -211,6 +216,7 @@ def test_precopy_matches_v1_copy_specs(
         COPY_BLOCK_SIZE=1024,
         CONV_STATE_DIM_FIRST=conv_state_dim_first,
         HAS_IDX_MAPPING=has_idx_mapping,
+        TEMPORAL_TILES=temporal_tiles,
     )
     torch.accelerator.synchronize()
 
@@ -413,12 +419,18 @@ def test_preprocess_fused_align_matches_scalar_bookkeeping(monkeypatch, token_bi
 
 
 if __name__ == "__main__":
-    for nr in (1, 4, 16):
-        for tb in (0, 1, 2):
-            for mapping in (True, False):
-                for dim_first in (False, True):
-                    test_precopy_matches_v1_copy_specs(nr, tb, mapping, dim_first)
-                    print(
-                        f"OK num_reqs={nr} token_bias={tb} "
-                        f"has_idx_mapping={mapping} conv_dim_first={dim_first}"
-                    )
+    from itertools import product
+
+    _CASES = product(
+        (1, 4, 16),  # num_reqs
+        (0, 1, 2),  # token_bias
+        (True, False),  # has_idx_mapping
+        (False, True),  # conv_state_dim_first
+        (1, _TEMPORAL_TILES),  # temporal_tiles
+    )
+    for nr, tb, mapping, dim_first, tt in _CASES:
+        test_precopy_matches_v1_copy_specs(nr, tb, mapping, dim_first, tt)
+        print(
+            f"OK num_reqs={nr} token_bias={tb} has_idx_mapping={mapping} "
+            f"conv_dim_first={dim_first} temporal_tiles={tt}"
+        )

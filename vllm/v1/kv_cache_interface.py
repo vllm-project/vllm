@@ -5,10 +5,11 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
+from collections.abc import Collection
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
 from math import prod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import torch
 from typing_extensions import Self
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 logger = init_logger(__name__)
+
+_SpecT = TypeVar("_SpecT", bound="KVCacheSpec")
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +76,7 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
         return KVQuantMode.INT8_PER_TOKEN_HEAD
     if kv_cache_dtype == "fp8_per_token_head":
         return KVQuantMode.FP8_PER_TOKEN_HEAD
-    if kv_cache_dtype == "nvfp4":
+    if kv_cache_dtype.startswith("nvfp4"):
         return KVQuantMode.NVFP4
     if isinstance(kv_cache_dtype, str) and kv_cache_dtype.startswith("turboquant_"):
         return KVQuantMode.TURBOQUANT
@@ -84,6 +87,28 @@ def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return get_kv_quant_mode(kv_cache_dtype) != KVQuantMode.NONE
+
+
+def replace_as(
+    spec: KVCacheSpec,
+    target_cls: type[_SpecT],
+    *,
+    drop: Collection[str] = (),
+    **changes,
+) -> _SpecT:
+    """``dataclasses.replace``, but rebuilding *spec* as *target_cls*
+      e.g. ``SlidingWindowSpec`` -> ``FullAttentionSpec``
+
+    Every field of *spec* must exist on *target_cls* unless named in *drop*;
+    fields only *target_cls* has keep their default values.
+    """
+    kwargs = {
+        f.name: getattr(spec, f.name)
+        for f in fields(spec)
+        if f.init and f.name not in drop
+    }
+    kwargs.update(changes)
+    return target_cls(**kwargs)
 
 
 def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
@@ -559,6 +584,12 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
 class SlidingWindowSpec(AttentionSpec):
     sliding_window: int
     head_size_v: int = None  # type: ignore[assignment]
+    # The trailing edge of the window is extended by ``extra_retained_tokens``
+    # so that those extra trailing tokens' blocks are retained (but not
+    # attended). This is needed for multi-module spec decoding which can
+    # re-prefill the last num_spec_prefill_tokens - 1 tokens from the end
+    # of the sequence, and thus needs to delay freeing/caching of blocks.
+    extra_retained_tokens: int = 0
 
     def __post_init__(self):
         if self.head_size_v is None:
@@ -600,8 +631,13 @@ class SlidingWindowSpec(AttentionSpec):
         """
         # During chunked prefill, we hold KV for the last `sliding_window-1`
         # computed tokens plus the in-flight tokens (frees happen on the
-        # processed-token basis); never more than `max_model_len`.
-        num_tokens = min(self.sliding_window - 1 + max_in_flight_tokens, max_model_len)
+        # processed-token basis); never more than `max_model_len`. An additional
+        # `extra_retained_tokens` trailing tokens are kept alive below the
+        # window for multi-module spec decoding, and must be accounted here too.
+        num_tokens = min(
+            self.sliding_window - 1 + self.extra_retained_tokens + max_in_flight_tokens,
+            max_model_len,
+        )
         # +1 because the sliding window may not start from the beginning of
         # the block. E.g. block size 4 and num_token 4 needs two blocks
         # [XXCD][EF] to store the 6-token window [CDEF].
@@ -672,16 +708,18 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         model_version_set = set(spec.model_version for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
         block_stride_set = set(spec.indexes_kv_by_block_stride for spec in specs)
+        extra_retained_set = set(spec.extra_retained_tokens for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(compress_ratio_set) == 1
             and len(model_version_set) == 1
             and len(sliding_window_set) == 1
             and len(block_stride_set) == 1
+            and len(extra_retained_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
             "quantization method, compress ratio, model version, sliding "
-            "window size, and KV block stride indexing."
+            "window size, KV block stride indexing, and retained token count."
         )
         return cls(
             block_size=specs[0].block_size,
@@ -691,6 +729,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             page_size_padded=specs[0].page_size_padded,
             indexes_kv_by_block_stride=block_stride_set.pop(),
             sliding_window=sliding_window_set.pop(),
+            extra_retained_tokens=extra_retained_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
@@ -920,6 +959,15 @@ def get_kv_cache_spec_kind(kv_cache_spec: KVCacheSpec) -> KVCacheSpecKind:
         }
         if len(inner_kinds) == 1:
             return next(iter(inner_kinds))
+        # A group is only formed when all members share one registered
+        # uniform_type_base_spec, so UNKNOWN would discard what the merge
+        # already established.
+        base_specs = {
+            KVCacheSpecRegistry.get_uniform_type_base_spec(spec)
+            for spec in kv_cache_spec.kv_cache_specs.values()
+        }
+        if len(base_specs) == 1 and next(iter(base_specs)) is FullAttentionSpec:
+            return KVCacheSpecKind.FULL_ATTENTION
         return KVCacheSpecKind.UNKNOWN
     # Keep subclass checks before base classes so specialized specs keep their
     # more precise kind.

@@ -7,16 +7,25 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.config.compilation import CompilationMode
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
+    RoutedExpertsManager,
     bind_routed_experts_capturer,
     get_routed_experts_attn_gid,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.transformers_utils.model_arch_config_convertor import (
+    ModelArchConfigConvertorBase,
+)
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -74,6 +83,72 @@ def _make_modular_routed_experts():
     return types.SimpleNamespace(
         quant_method=types.SimpleNamespace(is_monolithic=False),
     )
+
+
+def _make_model_config(hf_config):
+    num_experts_per_token = ModelArchConfigConvertorBase(
+        hf_config, hf_config
+    ).get_num_experts_per_token()
+    model_config = SimpleNamespace(
+        hf_text_config=hf_config,
+        model_arch_config=SimpleNamespace(
+            num_experts_per_token=num_experts_per_token,
+        ),
+    )
+    model_config.get_num_experts = lambda: hf_config.num_experts
+    model_config.get_num_experts_per_tok = lambda: (
+        ModelConfig.get_num_experts_per_tok(model_config)
+    )
+    model_config.get_total_num_hidden_layers = lambda: hf_config.num_hidden_layers
+    return model_config
+
+
+def test_routed_experts_manager_uses_gemma4_top_k_experts():
+    hf_config = SimpleNamespace(
+        num_experts=8,
+        top_k_experts=2,
+        num_hidden_layers=3,
+    )
+    vllm_config = SimpleNamespace(model_config=_make_model_config(hf_config))
+    kv_cache_spec = FullAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
+    )
+
+    manager = RoutedExpertsManager(vllm_config, kv_cache_config)
+
+    assert manager.routed_experts_by_slot.shape == (8, 3, 2)
+
+
+def test_routed_experts_manager_uses_kimi_k3_experts_per_token():
+    hf_config = SimpleNamespace(
+        num_experts=8,
+        num_experts_per_token=2,
+        num_hidden_layers=3,
+    )
+    vllm_config = SimpleNamespace(model_config=_make_model_config(hf_config))
+    kv_cache_spec = FullAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
+    )
+
+    manager = RoutedExpertsManager(vllm_config, kv_cache_config)
+
+    assert manager.routed_experts_by_slot.shape == (8, 3, 2)
 
 
 def test_base_router_capture_pre_eplb_mapping():

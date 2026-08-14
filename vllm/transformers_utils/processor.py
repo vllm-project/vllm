@@ -142,10 +142,10 @@ def _merge_mm_kwargs(
     return allowed_kwargs
 
 
-def get_processor_cls_name_from_config(
+def get_processor_config(
     processor_name: str,
     revision: str | None = "main",
-) -> str | None:
+) -> dict:
     config_file = [
         "processor_config.json",
         "preprocessor_config.json",
@@ -154,8 +154,20 @@ def get_processor_cls_name_from_config(
     for file in config_file:
         config = get_hf_file_to_dict(file, processor_name, revision=revision)
         if config and "processor_class" in config:
-            return config["processor_class"]
-    return None
+            return config
+    return {}
+
+
+def get_processor_cls_name_from_config(
+    processor_name: str,
+    revision: str | None = "main",
+) -> str | None:
+    config = get_processor_config(processor_name, revision=revision)
+
+    if not config:
+        return None
+
+    return config["processor_class"]
 
 
 def get_video_processor_cls_name_from_config(

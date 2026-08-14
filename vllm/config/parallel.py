@@ -140,8 +140,8 @@ class ParallelConfig:
     """Local rank of the data parallel group, set only in SPMD mode."""
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
-    data_parallel_rpc_port: int = 29550
-    """Port for data parallel messaging."""
+    data_parallel_rpc_port: int = Field(default=29550, ge=1, le=65535)
+    """Fixed port for data parallel messaging, shared by all nodes."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
     data_parallel_backend: DataParallelBackend = "mp"
@@ -1034,3 +1034,14 @@ class ParallelConfig:
             )
 
         return self
+
+    def reconfigure_for_independent_dp_rank(self) -> None:
+        """Reconfigure for a single independent non-MoE DP rank."""
+        # Capture these before changing DP fields.
+        nnodes = self.nnodes_within_dp
+        node_rank = self.node_rank_within_dp
+        self.data_parallel_size = 1
+        self.data_parallel_size_local = 1
+        self.data_parallel_rank = 0
+        self.nnodes = nnodes
+        self.node_rank = node_rank

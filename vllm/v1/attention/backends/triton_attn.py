@@ -100,6 +100,8 @@ class TritonAttentionMetadata:
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+    # Step-dependent fields reference persistent input buffers directly.
+    supports_draft_decode_metadata_update = True
 
     def __init__(
         self,
@@ -266,6 +268,9 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             attn_metadata.rswa_window = self.rswa_window
 
         return attn_metadata
+
+    def update_draft_decode_metadata(self, _metadata: TritonAttentionMetadata) -> None:
+        pass
 
 
 class TritonAttentionBackend(AttentionBackend):

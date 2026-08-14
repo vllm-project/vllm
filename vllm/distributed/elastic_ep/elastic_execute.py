@@ -35,7 +35,6 @@ from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.parallel_state import (
     _replace_active_groups,
     get_eplb_group,
-    prepare_communication_buffer_for_model,
 )
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
@@ -485,7 +484,6 @@ class ElasticEPScalingExecutor:
             for module in moe_modules:
                 if getattr(module._quant_method, "wraps_legacy_quant_method", False):
                     module._replace_quant_method(module._quant_method.old_quant_method)
-            prepare_communication_buffer_for_model(self.worker.model_runner.model)
 
         eplb_model_state.expert_buffer = [
             torch.empty_like(w) for w in model.expert_weights[0]
@@ -651,10 +649,6 @@ class ElasticEPScalingExecutor:
             num_logical_experts,
             old_num_physical_experts,
         )
-
-    def prepare_new_worker(self) -> None:
-        with set_current_vllm_config(self.worker.vllm_config):
-            prepare_communication_buffer_for_model(self.worker.model_runner.get_model())
 
     def warmup_local_kernels(self) -> None:
         with set_current_vllm_config(self.worker.vllm_config):

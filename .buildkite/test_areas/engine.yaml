@@ -98,6 +98,7 @@ steps:
     - vllm/compilation/
     - vllm/config/
     - vllm/distributed/
+    - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
     - vllm/envs.py
     - vllm/forward_context.py

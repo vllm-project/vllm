@@ -472,6 +472,12 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64" AND VLLM_RVV_VLEN AND
         ${VLLM_EXT_SRC})
 endif()
 
+if (S390_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/cpu_wna16.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
 if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"

@@ -23,7 +23,7 @@ from typing_extensions import TypeVar
 
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
-from vllm.utils.jsontree import json_map_leaves
+from vllm.utils.jsontree import json_iter_leaves, json_map_leaves
 
 from .media import MediaWithBytes
 
@@ -286,6 +286,13 @@ def nested_tensors_equal(
     return a == b
 
 
+def _nested_tensors_are_cpu(tensors: NestedTensors) -> bool:
+    """Whether every tensor in `tensors` lives in host memory."""
+    return not any(
+        isinstance(x, torch.Tensor) and not x.is_cpu for x in json_iter_leaves(tensors)
+    )
+
+
 def _nested_tensors_h2d(
     tensors: NestedTensors,
     device: torch.types.Device,
@@ -478,6 +485,11 @@ class BaseMultiModalField(ABC):
             pin_memory = False
 
         batch = [elem.data for elem in elems]
+        if pin_memory and not _nested_tensors_are_cpu(batch):
+            # Data already sits on an accelerator (e.g. a device-side HF
+            # processor handed it over by IPC). Pinning is a host-memory
+            # concept, and `pin_memory()` rejects device tensors outright.
+            pin_memory = False
         out = self._reduce_data(batch, pin_memory=pin_memory)
         return _nested_tensors_h2d(out, device=device)
 
