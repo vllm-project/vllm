@@ -27,6 +27,9 @@ from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
+from vllm.v1.attention.backends.recoverssm_metadata import (
+    RecoverSSMPostprocessMetadata,
+)
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     mamba_get_block_table_tensor,
@@ -257,7 +260,10 @@ def test_mixed_regular_and_spec_decode_excludes_request_padding():
     torch.testing.assert_close(actual.spec_token_indx, torch.tensor([1, 2, 3]))
 
 
-def test_recoverssm_spec_uses_one_state_slot_and_current_window():
+@pytest.mark.parametrize("mamba_cache_mode", ["none", "align"])
+def test_recoverssm_spec_uses_one_state_slot_and_current_window(
+    mamba_cache_mode: str,
+):
     batch = BatchSpec(seq_lens=[100, 65, 20], query_lens=[1, 1, 3])
     common_attn_metadata = create_common_attn_metadata(
         batch, BLOCK_SIZE, DEVICE
@@ -266,6 +272,7 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window():
         KimiK3KDAMetadataBuilder,
         num_speculative_tokens=2,
         full_cuda_graph=False,
+        mamba_cache_mode=mamba_cache_mode,
         use_recoverssm=True,
     )
     assert isinstance(builder, KimiK3KDAMetadataBuilder)
@@ -288,12 +295,24 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window():
     torch.testing.assert_close(
         commit_metadata.request_indices, torch.tensor([2], dtype=torch.int32)
     )
-    assert commit_metadata.align is None
     assert actual.recoverssm_context is context
     num_accepted_tokens = torch.tensor([3, 2, 1], dtype=torch.int32)
 
-    actual.commit_recoverssm_state(num_accepted_tokens)
+    postprocess = actual.commit_recoverssm_state(num_accepted_tokens)
 
+    if mamba_cache_mode == "none":
+        assert commit_metadata.align is None
+        assert postprocess is None
+    else:
+        assert isinstance(postprocess, RecoverSSMPostprocessMetadata)
+        assert postprocess.num_spec_decodes == 1
+        assert postprocess.request_indices is commit_metadata.request_indices
+        assert postprocess.block_table is common_attn_metadata.block_table_tensor
+        assert (
+            postprocess.num_computed_tokens
+            is common_attn_metadata.compute_num_computed_tokens()
+        )
+        assert postprocess.block_size == BLOCK_SIZE
     args = context.commit.call_args.args
     assert args[0] is num_accepted_tokens
     torch.testing.assert_close(args[1], commit_metadata.state_indices[:, 0])

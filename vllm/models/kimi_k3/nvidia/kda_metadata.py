@@ -24,9 +24,9 @@ from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
-from vllm.v1.attention.backends.mamba_attn import (
-    RecoverSSMAlignCommitMetadata,
+from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMMetadata,
+    RecoverSSMPostprocessMetadata,
 )
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
@@ -261,10 +261,12 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
         default=None, repr=False, compare=False
     )
 
-    def commit_recoverssm_state(self, num_accepted_tokens: torch.Tensor) -> None:
+    def commit_recoverssm_state(
+        self, num_accepted_tokens: torch.Tensor
+    ) -> RecoverSSMPostprocessMetadata | None:
         commit = self.recoverssm_commit
         if commit is None:
-            return
+            return None
         context = self.recoverssm_context
         assert context is not None
         align = commit.align
@@ -279,15 +281,9 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
             ),
             mamba_block_size=align.block_size if align is not None else None,
         )
-
-    def get_recoverssm_align_commit_metadata(
-        self,
-    ) -> RecoverSSMAlignCommitMetadata | None:
-        commit = self.recoverssm_commit
-        if commit is None or commit.align is None:
+        if align is None:
             return None
-        align = commit.align
-        return RecoverSSMAlignCommitMetadata(
+        return RecoverSSMPostprocessMetadata(
             num_spec_decodes=self.num_spec_decodes,
             request_indices=commit.request_indices,
             block_table=align.block_table,

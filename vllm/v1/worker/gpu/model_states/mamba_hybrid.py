@@ -12,7 +12,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
-from vllm.v1.attention.backends.mamba_attn import RecoverSSMMetadata
+from vllm.v1.attention.backends.recoverssm_metadata import RecoverSSMMetadata
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
@@ -367,21 +367,20 @@ class MambaHybridModelState(DefaultModelState):
         if step is None:
             return
         for metadata in step:
-            metadata.commit_recoverssm_state(num_sampled)
-            align = metadata.get_recoverssm_align_commit_metadata()
-            if not self._recoverssm_align or align is None:
+            postprocess_meta = metadata.commit_recoverssm_state(num_sampled)
+            if not self._recoverssm_align or postprocess_meta is None:
                 continue
             # Preprocess follows the optimistic verify length. Commit restores
             # the running column to the accepted length.
-            _mark_recoverssm_align_commit_kernel[(align.num_spec_decodes,)](
+            _mark_recoverssm_align_commit_kernel[(postprocess_meta.num_spec_decodes,)](
                 idx_mapping,
                 num_sampled,
-                align.request_indices,
-                align.num_computed_tokens,
+                postprocess_meta.request_indices,
+                postprocess_meta.num_computed_tokens,
                 self._mamba_state_idx_gpu,
                 self._recoverssm_committed_gpu,
-                MAMBA_BLOCK_SIZE=align.block_size,
-                BLOCK_TABLE_WIDTH=align.block_table.shape[1],
+                MAMBA_BLOCK_SIZE=postprocess_meta.block_size,
+                BLOCK_TABLE_WIDTH=postprocess_meta.block_table.shape[1],
             )
 
 

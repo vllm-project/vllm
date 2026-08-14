@@ -8,9 +8,9 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.mamba_attn import (
-    RecoverSSMAlignCommitMetadata,
+from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMMetadata,
+    RecoverSSMPostprocessMetadata,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
@@ -42,7 +42,7 @@ def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
     state = object.__new__(MambaHybridModelState)
     state.cache_config = SimpleNamespace(use_kda_recoverssm=True)
     metadata = Mock(spec=RecoverSSMMetadata)
-    metadata.get_recoverssm_align_commit_metadata.return_value = None
+    metadata.commit_recoverssm_state.return_value = None
     num_sampled = torch.tensor([3, 1], dtype=torch.int32)
 
     idx_mapping = torch.tensor([0, 1], dtype=torch.int32)
@@ -70,18 +70,14 @@ def test_recoverssm_align_tracks_final_running_state_and_neutralizes_copy_bias(
         (5,), 9, dtype=torch.int32, device="cuda"
     )
     metadata = Mock(spec=RecoverSSMMetadata)
-    metadata.get_recoverssm_align_commit_metadata.return_value = (
-        RecoverSSMAlignCommitMetadata(
-            num_spec_decodes=1 if mixed_batch else 2,
-            request_indices=(
-                torch.tensor([1], dtype=torch.int32, device="cuda")
-                if mixed_batch
-                else None
-            ),
-            num_computed_tokens=torch.tensor([6, 7], dtype=torch.int32, device="cuda"),
-            block_size=8,
-            block_table=torch.zeros((2, 4), dtype=torch.int32, device="cuda"),
-        )
+    metadata.commit_recoverssm_state.return_value = RecoverSSMPostprocessMetadata(
+        num_spec_decodes=1 if mixed_batch else 2,
+        request_indices=(
+            torch.tensor([1], dtype=torch.int32, device="cuda") if mixed_batch else None
+        ),
+        num_computed_tokens=torch.tensor([6, 7], dtype=torch.int32, device="cuda"),
+        block_size=8,
+        block_table=torch.zeros((2, 4), dtype=torch.int32, device="cuda"),
     )
     num_sampled = torch.tensor([2, 3], dtype=torch.int32, device="cuda")
     idx_mapping = torch.tensor([3, 1], dtype=torch.int32, device="cuda")
