@@ -190,9 +190,17 @@ class PoolingRunner:
         #     BEFORE the head — hence type(...) is AllPool, not isinstance.
         projected_batch = None
         cursor = pooling_metadata.pooling_cursor
+        # Gate on a SCORE_DOC request in THIS batch (not just globally
+        # pending docs): a step carrying only queries or unrelated pooling
+        # requests must not pay the full-batch projection or its memory.
+        batch_has_docs = any(
+            p.late_interaction_params is not None
+            and p.late_interaction_params.mode == LATE_INTERACTION_MODE_SCORE_DOC
+            for p in pooling_metadata.pooling_params
+        )
         use_zerocopy = (
             self._flash_late_interaction_enabled
-            and self.late_interaction_runner.has_pending_docs
+            and batch_has_docs
             and not os.environ.get("VLLM_DISABLE_ZEROCOPY")
             and hasattr(self.model.pooler, "head")
             and hasattr(self.model.pooler.head, "project_batch")
