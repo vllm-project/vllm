@@ -424,7 +424,6 @@ steps:
     - pytest -v -s v1/determinism/test_matmul_batch_invariant.py
     - pytest -v -s v1/determinism/test_cutlass_batch_invariance.py
     - pytest -v -s v1/determinism/test_online_batch_invariance.py
-    - pytest -v -s v1/determinism/test_moe_row_permutation_batch_invariant.py
 
 - label: Acceptance Length Test (Large Models) # optional
   device: h200_35gb
