@@ -71,7 +71,7 @@ def test_save_kimi_k3_fp8_calibration(tmp_path: Path, monkeypatch) -> None:
         "get_pp_group",
         lambda: _FakeGroup(rank=0, size=1),
     )
-    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
 
     kimi_k3_fp8_scales.save_kimi_k3_fp8_calibration(config)
 
