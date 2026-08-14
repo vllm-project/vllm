@@ -16,9 +16,6 @@ try:
 except ImportError:
     HAS_FLASHINFER_CHECKPOINTING_SSU = False
 
-# Flip when FlashInfer ReplaySSM metadata is implemented in mamba_attn.
-FLASHINFER_REPLAYSSM_METADATA_READY = False
-
 # Mamba2 (Nemotron-3) hybrid.
 MAMBA2_MODEL = "nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16"
 MODELS = [
@@ -82,10 +79,6 @@ def test_replayssm_decode_matches_baseline_tp2(vllm_runner, model_name):
     not HAS_FLASHINFER_CHECKPOINTING_SSU,
     reason="flashinfer.mamba.checkpointing_ssu not available",
 )
-@pytest.mark.skipif(
-    not FLASHINFER_REPLAYSSM_METADATA_READY,
-    reason="FlashInfer ReplaySSM metadata not implemented yet",
-)
 @pytest.mark.parametrize("model_name", MODELS)
 def test_replayssm_flashinfer_decode_matches_baseline(vllm_runner, model_name):
     _check_replayssm_parity(
@@ -99,10 +92,6 @@ def test_replayssm_flashinfer_decode_matches_baseline(vllm_runner, model_name):
 @pytest.mark.skipif(
     not HAS_FLASHINFER_CHECKPOINTING_SSU,
     reason="flashinfer.mamba.checkpointing_ssu not available",
-)
-@pytest.mark.skipif(
-    not FLASHINFER_REPLAYSSM_METADATA_READY,
-    reason="FlashInfer ReplaySSM metadata not implemented yet",
 )
 @pytest.mark.parametrize("model_name", MODELS)
 def test_replayssm_flashinfer_matches_triton_replayssm(vllm_runner, model_name):
