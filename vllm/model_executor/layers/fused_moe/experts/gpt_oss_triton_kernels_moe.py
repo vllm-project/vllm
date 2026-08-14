@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
     LoRAExpertsMixin,
 )
+from vllm.model_executor.layers.fused_moe.modular_kernel import W13Layout
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -908,6 +909,14 @@ class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
         raise NotImplementedError
 
     @staticmethod
+    def _expected_w13_layout(
+        activation: MoEActivation,
+        weight_key: "QuantKey | None" = None,
+        activation_key: "QuantKey | None" = None,
+    ) -> W13Layout:
+        return W13Layout.INTERLEAVED_W1W3
+
+    @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
@@ -1062,6 +1071,16 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
             MoEActivation.SWIGLUSTEP,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
+
+    @staticmethod
+    def _expected_w13_layout(
+        activation: MoEActivation,
+        weight_key: "QuantKey | None" = None,
+        activation_key: "QuantKey | None" = None,
+    ) -> W13Layout:
+        if activation == MoEActivation.SWIGLUOAI:
+            return W13Layout.INTERLEAVED_W1W3
+        return W13Layout.CONTIGUOUS_W1W3
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -1325,6 +1344,14 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
         return activation == MoEActivation.SWIGLUOAI
+
+    @staticmethod
+    def _expected_w13_layout(
+        activation: MoEActivation,
+        weight_key: "QuantKey | None" = None,
+        activation_key: "QuantKey | None" = None,
+    ) -> W13Layout:
+        return W13Layout.INTERLEAVED_W1W3
 
     @staticmethod
     def _supports_parallel_config(

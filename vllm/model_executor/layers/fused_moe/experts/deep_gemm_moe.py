@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_utils import (
     deepgemm_moe_permute,
     deepgemm_unpermute_and_reduce,
 )
+from vllm.model_executor.layers.fused_moe.modular_kernel import W13Layout
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -452,6 +453,14 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
             MoEActivation.SWIGLUSTEP,
             MoEActivation.SITU,
         ]
+
+    @staticmethod
+    def _expected_w13_layout(
+        activation: MoEActivation,
+        weight_key: "QuantKey | None" = None,
+        activation_key: "QuantKey | None" = None,
+    ) -> W13Layout:
+        return W13Layout.CONTIGUOUS_W1W3
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:

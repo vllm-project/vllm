@@ -14,6 +14,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.modular_kernel import W13Layout
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -27,6 +28,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kMxfp4Dynamic,
     kMxfp4Static,
+    kMxfp8Dynamic,
 )
 
 
@@ -488,6 +490,23 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
+
+    @staticmethod
+    def _expected_w13_layout(
+        activation: MoEActivation,
+        weight_key: "QuantKey | None" = None,
+        activation_key: "QuantKey | None" = None,
+    ) -> W13Layout:
+        if weight_key == kMxfp4Static and activation_key is None:
+            # W4A16: The kernel expects interleaved layout. However,
+            # shuffle_weight_a16w4 handles interleaving internally
+            # (is_guinterleave=True), so it expects contiguous input.
+            return W13Layout.CONTIGUOUS_W1W3
+        if weight_key == kMxfp4Static and activation_key == kMxfp4Dynamic:
+            return W13Layout.CONTIGUOUS_W1W3
+        if weight_key == kMxfp4Static and activation_key == kMxfp8Dynamic:
+            return W13Layout.INTERLEAVED_W1W3
+        return W13Layout.CONTIGUOUS_W1W3
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:

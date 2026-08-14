@@ -81,6 +81,15 @@ logger = init_logger(__name__)
 #
 
 
+class W13Layout(Enum):
+    """Layout of the fused gate/up (w13) weight tensor."""
+
+    CONTIGUOUS_W1W3 = "contiguous_w1w3"
+    CONTIGUOUS_W3W1 = "contiguous_w3w1"
+    INTERLEAVED_W1W3 = "interleaved_w1w3"
+    INTERLEAVED_W3W1 = "interleaved_w3w1"
+
+
 class FusedMoEActivationFormat(Enum):
     """
     The standard activation format (num_tokens, hidden dim).
@@ -623,6 +632,22 @@ class FusedMoEExperts(ABC):
         Whether the kernel supports a particular act function.
         """
         raise NotImplementedError
+
+    @staticmethod
+    def _expected_w13_layout(
+        activation: MoEActivation,
+        weight_key: QuantKey | None = None,
+        activation_key: QuantKey | None = None,
+    ) -> W13Layout:
+        """W13 layout the kernel expects for a given activation.
+
+        Default: INTERLEAVED_W1W3 for SWIGLUOAI, CONTIGUOUS_W1W3 otherwise.
+        Backends with fused activations or quant-scheme-dependent layouts
+        should override this.
+        """
+        if activation == MoEActivation.SWIGLUOAI:
+            return W13Layout.INTERLEAVED_W1W3
+        return W13Layout.CONTIGUOUS_W1W3
 
     @staticmethod
     @abstractmethod
