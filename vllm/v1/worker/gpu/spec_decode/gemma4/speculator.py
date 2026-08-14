@@ -23,6 +23,23 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
 logger = init_logger(__name__)
 
 
+def _copy_target_kv_scales(attn: nn.Module, target_attn: nn.Module) -> None:
+    """Copy target KV scales while preserving their tensor representation.
+
+    Default attention scales are scalar buffers, while some quantization
+    methods replace them with length-one or per-head parameters. Re-register
+    cloned buffers on the draft layer so the shared KV cache is interpreted
+    with the target's values and shapes without aliasing target parameters.
+    """
+    for scale_name in ("_k_scale", "_v_scale"):
+        target_scale = getattr(target_attn, scale_name)
+        attn.register_buffer(scale_name, target_scale.detach().clone())
+    for scale_name in ("_k_scale_float", "_v_scale_float"):
+        setattr(attn, scale_name, getattr(target_attn, scale_name))
+    for scale_name in ("_k_scale_cpu", "_v_scale_cpu"):
+        getattr(attn, scale_name).copy_(getattr(target_attn, scale_name))
+
+
 class Gemma4Speculator(AutoRegressiveSpeculator):
     @property
     def advance_draft_positions(self) -> bool:
@@ -76,7 +93,7 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
         model: nn.Module,
         target_attn_layer_names: set[str],
     ) -> None:
-        """Wire draft layers to share KV with the target model.
+        """Wire draft layers to share KV and KV scales with the target model.
 
         Each draft decoder layer is mapped to the last non-KV-shared
         target layer of the same attention type (sliding or full).
@@ -92,15 +109,19 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
 
         target_num_kv_shared = getattr(target_text_config, "num_kv_shared_layers", 0)
         num_non_shared = len(target_layer_types) - target_num_kv_shared
-        type_to_target_indices: dict[str, list[int]] = defaultdict(list)
-        for idx, lt in enumerate(target_layer_types[:num_non_shared]):
-            type_to_target_indices[lt].append(idx)
-
-        target_prefix = "model.layers"
+        target_names_by_index: dict[int, str] = {}
         for name in target_attn_layer_names:
-            if ".layers." in name:
-                target_prefix = name.split(".layers.")[0] + ".layers"
-                break
+            _, separator, layer_suffix = name.partition(".layers.")
+            if not separator:
+                continue
+            layer_index, _, _ = layer_suffix.partition(".")
+            if layer_index.isdigit():
+                target_names_by_index[int(layer_index)] = name
+
+        type_to_target_names: dict[str, list[str]] = defaultdict(list)
+        for idx, lt in enumerate(target_layer_types[:num_non_shared]):
+            if target_name := target_names_by_index.get(idx):
+                type_to_target_names[lt].append(target_name)
 
         draft_layer_types = getattr(draft_text_config, "layer_types", [])
         for draft_idx, layer in enumerate(model.model.layers):
@@ -115,7 +136,7 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
                 if draft_idx < len(draft_layer_types)
                 else "full_attention"
             )
-            candidates = type_to_target_indices.get(draft_layer_type, [])
+            candidates = type_to_target_names.get(draft_layer_type, [])
             if not candidates:
                 logger.warning(
                     "No target layer of type '%s' for draft layer %d",
@@ -124,9 +145,19 @@ class Gemma4Speculator(AutoRegressiveSpeculator):
                 )
                 continue
 
-            target_idx = candidates[-1]
-            target_layer_name = f"{target_prefix}.{target_idx}.self_attn.attn"
+            target_layer_name = candidates[-1]
             attn.kv_sharing_target_layer_name = target_layer_name
+
+            # KV-cache sharing aliases the cache tensor during allocation, but
+            # the quantization scales live on the Attention modules themselves.
+            # The BF16 draft model has no quantization config, so its K/V scales
+            # otherwise remain at the default 1.0 while it reads the target's
+            # calibrated FP8 cache.
+            target_attn = self.vllm_config.compilation_config.static_forward_context[
+                target_layer_name
+            ]
+            _copy_target_kv_scales(attn, target_attn)
+
             logger.info(
                 "Gemma4 MTP: draft layer %d (%s) -> %s",
                 draft_idx,
