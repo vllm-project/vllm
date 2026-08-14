@@ -45,6 +45,8 @@ steps:
     # requires multi-GPU testing for validation.
     # Timing-balanced static split (measured on build 83851): shard 0 ~15.2m,
     # shard 1 ~15.3m, shard 2 ~14.3m.
+    # An index outside 0-2 would skip every guard and pass empty; fail it instead.
+    - case "$$BUILDKITE_PARALLEL_JOB" in 0|1|2) ;; *) echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" && exit 1;; esac
     - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_chatglm3_tp.py
     - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -x lora/test_llama_tp.py
     - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_qwen3_with_multi_loras.py
