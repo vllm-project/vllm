@@ -152,6 +152,19 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
             # Never fail server startup over the fingerprint.
             self.system_fingerprint = None
 
+    def _preflight(self, n: int = 1) -> None:
+        """Engine checks that must run before a response is started.
+
+        This is required for the streaming case, where we return a success
+        status before we actually start generating text :).
+
+        Args:
+            n: Number of sequences the request will occupy.
+        """
+        if self.engine_client.errored:
+            raise self.engine_client.dead_error
+        self.engine_client.check_admission(n)
+
     def create_streaming_error_response(
         self,
         message: str | Exception,
