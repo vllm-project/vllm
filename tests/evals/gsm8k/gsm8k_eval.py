@@ -13,12 +13,15 @@ import tempfile
 import time
 from collections.abc import Generator
 from dataclasses import asdict, dataclass
-from typing import Any, Literal
+from functools import cache
+from pathlib import Path
+from typing import Any, Literal, TypedDict, cast
 
 import aiohttp
 import numpy as np
 import regex as re
 import requests
+import yaml
 from tqdm.asyncio import tqdm
 
 from vllm.assets.base import VLLM_S3_BUCKET_URL
@@ -27,6 +30,99 @@ INVALID = -9999999
 GSM8K_TASK = "gsm8k"
 STRICT_MATCH = "exact_match,strict-match"
 FLEXIBLE_EXTRACT = "exact_match,flexible-extract"
+GSM8K_EVALS_PATH = Path(__file__).with_name("configs") / "evals.yaml"
+
+
+class IsolatedEvalKwargs(TypedDict):
+    num_questions: int
+    num_shots: int
+    max_tokens: int
+
+
+@dataclass(frozen=True)
+class GSM8KEvalSpec:
+    """YAML-owned definition of a GSM8K evaluation."""
+
+    suite: str
+    id: str
+    source: str
+    profile: Literal["isolated-v1", "lm-eval-v3"]
+    metric: str
+    accuracy_threshold: float
+    tolerance: float
+    num_questions: int
+    num_fewshot: int
+    max_tokens: int
+    model: str | None = None
+
+    @property
+    def name(self) -> str:
+        return f"{self.suite}.{self.id}"
+
+    def isolated_kwargs(self) -> IsolatedEvalKwargs:
+        return {
+            "num_questions": self.num_questions,
+            "num_shots": self.num_fewshot,
+            "max_tokens": self.max_tokens,
+        }
+
+    def lm_eval_kwargs(self) -> dict[str, int]:
+        return {"num_fewshot": self.num_fewshot}
+
+
+@cache
+def load_gsm8k_eval_specs(suite: str) -> tuple[GSM8KEvalSpec, ...]:
+    """Load one suite's evaluation definitions from the common manifest."""
+    with open(GSM8K_EVALS_PATH) as config_file:
+        manifest = yaml.safe_load(config_file)
+
+    try:
+        suite_data = manifest["suites"][suite]
+    except (KeyError, TypeError) as exc:
+        raise KeyError(f"Unknown GSM8K eval suite {suite!r}") from exc
+
+    profile_name = suite_data["profile"]
+    try:
+        profile_defaults = manifest["profiles"][profile_name]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(
+            f"GSM8K eval suite {suite!r} has unknown profile {profile_name!r}"
+        ) from exc
+
+    specs = []
+    for case_id, case_data in suite_data["cases"].items():
+        values = profile_defaults | suite_data.get("defaults", {}) | case_data
+        tolerance = float(values["tolerance"])
+        accuracy_threshold = float(values["accuracy_threshold"])
+        if tolerance < 0:
+            raise ValueError(f"{suite}.{case_id} has a negative tolerance")
+        if not 0 <= accuracy_threshold <= 1:
+            raise ValueError(f"{suite}.{case_id} has an invalid accuracy threshold")
+
+        specs.append(
+            GSM8KEvalSpec(
+                suite=suite,
+                id=case_id,
+                source=suite_data["source"],
+                profile=cast(Literal["isolated-v1", "lm-eval-v3"], profile_name),
+                metric=values["metric"],
+                accuracy_threshold=accuracy_threshold,
+                tolerance=tolerance,
+                num_questions=int(values["num_questions"]),
+                num_fewshot=int(values["num_fewshot"]),
+                max_tokens=int(values["max_tokens"]),
+                model=values.get("model"),
+            )
+        )
+    return tuple(specs)
+
+
+def get_gsm8k_eval_spec(suite: str, case_id: str) -> GSM8KEvalSpec:
+    """Return one named evaluation from the common manifest."""
+    try:
+        return next(spec for spec in load_gsm8k_eval_specs(suite) if spec.id == case_id)
+    except StopIteration as exc:
+        raise KeyError(f"Unknown GSM8K eval {suite}.{case_id}") from exc
 
 
 @dataclass(frozen=True)
@@ -68,6 +164,26 @@ def assert_min_accuracy(
             f"{result.accuracy:.4f} < {minimum:.4f} "
             f"(expected {expected:.4f}, tolerance {tolerance:.4f})"
         )
+
+
+def assert_gsm8k_result(
+    result: GSM8KResult,
+    spec: GSM8KEvalSpec,
+    *,
+    context: str | None = None,
+) -> None:
+    """Validate a result against its YAML-owned profile and accuracy floor."""
+    if (result.profile, result.metric) != (spec.profile, spec.metric):
+        raise AssertionError(
+            f"{spec.name}: expected {spec.profile}/{spec.metric}, got "
+            f"{result.profile}/{result.metric}"
+        )
+    assert_min_accuracy(
+        result,
+        spec.accuracy_threshold,
+        tolerance=spec.tolerance,
+        context=context or spec.name,
+    )
 
 
 def result_from_lm_eval(
@@ -439,14 +555,30 @@ def main() -> None:
         type=int,
         help="Maximum number of concurrent requests",
     )
+    parser.add_argument(
+        "--eval-spec",
+        help="Evaluation ID from configs/evals.yaml, formatted as suite.case",
+    )
     parser.add_argument("--save-results", type=str, help="Save results to JSON file")
 
     args = parser.parse_args()
+    gsm8k_spec = None
+    eval_kwargs: IsolatedEvalKwargs = {
+        "num_questions": args.num_questions,
+        "num_shots": args.num_shots,
+        "max_tokens": args.max_tokens,
+    }
+    if args.eval_spec:
+        suite, separator, case_id = args.eval_spec.partition(".")
+        if not separator:
+            parser.error("--eval-spec must be formatted as suite.case")
+        gsm8k_spec = get_gsm8k_eval_spec(suite, case_id)
+        if gsm8k_spec.profile != "isolated-v1":
+            parser.error("the server CLI only supports isolated-v1 eval specs")
+        eval_kwargs = gsm8k_spec.isolated_kwargs()
 
     result = evaluate_gsm8k(
-        num_questions=args.num_questions,
-        num_shots=args.num_shots,
-        max_tokens=args.max_tokens,
+        **eval_kwargs,
         host=args.host,
         port=args.port,
         temperature=args.temperature,
@@ -468,6 +600,9 @@ def main() -> None:
         with open(args.save_results, "w") as f:
             json.dump(result.to_dict(), f, indent=2)
         print(f"Results saved to {args.save_results}")
+
+    if gsm8k_spec is not None:
+        assert_gsm8k_result(result, gsm8k_spec)
 
 
 if __name__ == "__main__":

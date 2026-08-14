@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
 set -euxo pipefail
 
-# args: [THRESHOLD] [NUM_QUESTIONS] [START_PORT] [DATA_PARALLEL_SIZE] [TENSOR_PARALLEL_SIZE]
-THRESHOLD=${1:-0.8}
-NUM_Q=${2:-1319}
-PORT=${3:-8020}
-DATA_PARALLEL_SIZE=${4:-2}
-TENSOR_PARALLEL_SIZE=${5:-2}
+# args: [START_PORT] [DATA_PARALLEL_SIZE] [TENSOR_PARALLEL_SIZE]
+PORT=${1:-8020}
+DATA_PARALLEL_SIZE=${2:-2}
+TENSOR_PARALLEL_SIZE=${3:-2}
 OUT_DIR=${OUT_DIR:-/tmp/vllm-scheduled}
 mkdir -p "${OUT_DIR}"
 
@@ -60,12 +58,7 @@ for BACK in "${BACKENDS[@]}"; do
 
   TAG=$(echo "$MODEL" | tr '/: \\n' '_____')
   OUT="${OUT_DIR}/${TAG}_${BACK}.json"
-  python3 tests/evals/gsm8k/gsm8k_eval.py --host http://127.0.0.1 --port "$PORT" --num-questions "${NUM_Q}" --save-results "${OUT}"
-  python3 - <<PY
-import json; acc=json.load(open('${OUT}'))['accuracy']
-print(f"${MODEL} ${BACK}: accuracy {acc:.3f}")
-assert acc >= ${THRESHOLD}, f"${MODEL} ${BACK} accuracy {acc}"
-PY
+  python3 tests/evals/gsm8k/gsm8k_eval.py --host http://127.0.0.1 --port "$PORT" --eval-spec scheduled_integration.qwen3-30b-fp8-block-ep-eplb --save-results "${OUT}"
 
   cleanup
   SERVER_PID=

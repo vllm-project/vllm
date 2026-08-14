@@ -2,17 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+from pathlib import Path
 
 import lm_eval
 import pytest
 
 from .gsm8k_eval import (
+    GSM8K_EVALS_PATH,
     STRICT_MATCH,
     GSM8KResult,
     _score_gsm8k,
+    assert_gsm8k_result,
     assert_min_accuracy,
     call_vllm_api,
     evaluate_gsm8k_lm_eval,
+    get_gsm8k_eval_spec,
+    load_gsm8k_eval_specs,
     result_from_lm_eval,
 )
 
@@ -90,6 +95,55 @@ def test_min_accuracy_is_one_sided():
     assert_min_accuracy(at_floor, 0.8, tolerance=0.08)
     with pytest.raises(AssertionError, match="lm-eval-v3/exact_match,strict-match"):
         assert_min_accuracy(regressed, 0.8, tolerance=0.08)
+
+
+def test_common_manifest_loads_all_scattered_suites():
+    expected_suites = {
+        "context_parallel",
+        "elastic_ep",
+        "eplb_spec_decode",
+        "llm_entrypoint",
+        "openai_entrypoint",
+        "kv_offloading",
+        "quark",
+        "dbo",
+        "dflash",
+        "dspark",
+        "spec_decode",
+        "spec_decode_speculators",
+        "ngram_suffix",
+        "mtp",
+        "eagle",
+        "draft_model",
+        "nixl",
+        "mooncake",
+        "speculators",
+        "scheduled_integration",
+    }
+    specs = [spec for suite in expected_suites for spec in load_gsm8k_eval_specs(suite)]
+    repo_root = Path(__file__).parents[3]
+
+    assert len(specs) == 68
+    assert all((repo_root / spec.source).exists() for spec in specs)
+    assert GSM8K_EVALS_PATH.is_file()
+
+
+def test_yaml_spec_validates_profile_metric_and_floor():
+    spec = get_gsm8k_eval_spec("llm_entrypoint", "qwen3-1.7b")
+    passing = GSM8KResult(
+        accuracy=spec.accuracy_threshold,
+        profile=spec.profile,
+        metric=spec.metric,
+    )
+    wrong_profile = GSM8KResult(
+        accuracy=1.0,
+        profile="isolated-v1",
+        metric="last-number-exact-match",
+    )
+
+    assert_gsm8k_result(passing, spec)
+    with pytest.raises(AssertionError, match="expected lm-eval-v3"):
+        assert_gsm8k_result(wrong_profile, spec)
 
 
 def test_http_errors_fail_evaluation():

@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from tests.evals.gsm8k.gsm8k_eval import GSM8KEvalSpec, get_gsm8k_eval_spec
 from tests.utils import single_gpu_only
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
@@ -19,14 +20,18 @@ from ..utils import (
 
 
 @pytest.mark.parametrize(
-    ["model_setup", "mm_enabled", "expected_accuracy_threshold"],
+    ["model_setup", "mm_enabled", "gsm8k_spec"],
     [
         # Reference accuracy: 65%-70%.
-        (("mtp", "XiaomiMiMo/MiMo-7B-Base", 1, None), False, 0.5),
+        (
+            ("mtp", "XiaomiMiMo/MiMo-7B-Base", 1, None),
+            False,
+            get_gsm8k_eval_spec("mtp", "mimo"),
+        ),
         pytest.param(
             ("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1, None),
             False,
-            0.0,
+            get_gsm8k_eval_spec("mtp", "deepseek-dummy"),
             marks=pytest.mark.skipif(
                 current_platform.is_device_capability_family(100),
                 reason="DeepSeek MTP: TRTLLM MoE top_k check fails on Blackwell",
@@ -35,12 +40,12 @@ from ..utils import (
         (
             ("mtp", "Qwen/Qwen3.5-0.8B-Base", 1, None),
             False,
-            0.20,
+            get_gsm8k_eval_spec("mtp", "qwen3.5-hybrid"),
         ),  # hybrid + MTP, ref: ~34%-35%
         (
             ("mtp", "google/gemma-4-E4B-it", 1, "google/gemma-4-E4B-it-assistant"),
             False,
-            0.50,
+            get_gsm8k_eval_spec("mtp", "gemma4-e4b"),
         ),  # gemma4 MTP with assistant model, ref: ~62%
     ],
     ids=["mimo", "deepseek", "qwen3_5-hybrid", "gemma4-e4b"],
@@ -51,7 +56,7 @@ def test_mtp_correctness(
     sampling_config: SamplingParams,
     model_setup: tuple[str, str, int, str | None],
     mm_enabled: bool,
-    expected_accuracy_threshold: float,
+    gsm8k_spec: GSM8KEvalSpec,
     vllm_runner,
 ):
     """
@@ -62,6 +67,7 @@ def test_mtp_correctness(
     reference threshold for each model.
     """
     method, model_name, tp_size, draft_model = model_setup
+    assert gsm8k_spec.model == model_name
     _skip_if_insufficient_gpus_for_tp(tp_size)
 
     # Generate test prompts inside the function instead of using fixture
@@ -100,10 +106,7 @@ def test_mtp_correctness(
             **extra_kwargs,
         ) as ref_runner:
             ref_outputs = ref_runner.llm.chat(test_prompts, sampling_config)
-            evaluate_llm_for_gsm8k(
-                ref_runner.llm,
-                expected_accuracy_threshold=expected_accuracy_threshold,
-            )
+            evaluate_llm_for_gsm8k(ref_runner.llm, gsm8k_spec)
 
         speculative_config: dict[str, Any] = {
             "method": method,
@@ -134,10 +137,7 @@ def test_mtp_correctness(
                 f"Expected async scheduling for {method}: target={model_name}, "
                 f"draft={draft_model}; got {has_async}"
             )
-            evaluate_llm_for_gsm8k(
-                spec_runner.llm,
-                expected_accuracy_threshold=expected_accuracy_threshold,
-            )
+            evaluate_llm_for_gsm8k(spec_runner.llm, gsm8k_spec)
             spec_outputs = spec_runner.llm.chat(test_prompts, sampling_config)
 
         # Heuristic: expect at least 80% of the prompts to match exactly

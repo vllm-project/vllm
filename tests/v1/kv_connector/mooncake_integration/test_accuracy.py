@@ -5,17 +5,17 @@ import os
 import openai
 
 from tests.evals.gsm8k.gsm8k_eval import (
-    assert_min_accuracy,
+    assert_gsm8k_result,
     evaluate_gsm8k_lm_eval,
+    load_gsm8k_eval_specs,
 )
 
 BASE_URL = "http://localhost:8192/v1"
 NUM_CONCURRENT = 100
-RTOL = 0.05
-
-# Model-specific expected values
-EXPECTED_VALUES = {
-    "Qwen/Qwen3-0.6B": 0.41,
+GSM8K_SPECS = {
+    spec.model: spec
+    for spec in load_gsm8k_eval_specs("mooncake")
+    if spec.model is not None
 }
 
 SIMPLE_PROMPT = (
@@ -42,6 +42,8 @@ def run_simple_prompt():
 def test_accuracy():
     """Run the end to end accuracy test."""
     run_simple_prompt()
+    gsm8k_spec = GSM8K_SPECS.get(MODEL_NAME)
+    eval_kwargs = gsm8k_spec.lm_eval_kwargs() if gsm8k_spec else {}
 
     model_args = (
         f"model={MODEL_NAME},"
@@ -51,17 +53,17 @@ def test_accuracy():
     result = evaluate_gsm8k_lm_eval(
         model="local-completions",
         model_args=model_args,
+        **eval_kwargs,
     )
 
     measured_value = result.accuracy
-    expected_value = EXPECTED_VALUES.get(MODEL_NAME)
 
     print(f"Measured accuracy value: {measured_value}\n")
-    if expected_value is None:
+    if gsm8k_spec is None:
         print(
             f"Warning: No expected value found for {MODEL_NAME}. "
             "Skipping accuracy check."
         )
         return
 
-    assert_min_accuracy(result, expected_value, tolerance=RTOL, context=MODEL_NAME)
+    assert_gsm8k_result(result, gsm8k_spec, context=MODEL_NAME)

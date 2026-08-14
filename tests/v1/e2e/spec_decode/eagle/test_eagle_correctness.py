@@ -3,6 +3,7 @@
 
 import pytest
 
+from tests.evals.gsm8k.gsm8k_eval import GSM8KEvalSpec, get_gsm8k_eval_spec
 from tests.utils import (
     get_attn_backend_list_based_on_platform,
     single_gpu_only,
@@ -24,7 +25,7 @@ from .utils import _run_eagle_correctness
         "mm_enabled",
         "enable_chunked_prefill",
         "model_impl",
-        "expected_accuracy_threshold",
+        "gsm8k_spec",
     ],
     [
         (
@@ -37,7 +38,7 @@ from .utils import _run_eagle_correctness
             False,
             False,
             "auto",
-            0.0,
+            get_gsm8k_eval_spec("eagle", "deepseek-eagle-dummy"),
         ),
     ],
     ids=["deepseek_eagle"],
@@ -48,7 +49,7 @@ def test_eagle_correctness_light(
     sampling_config: SamplingParams,
     model_setup: tuple[str, str, str, int],
     mm_enabled: bool,
-    expected_accuracy_threshold: float,
+    gsm8k_spec: GSM8KEvalSpec,
     enable_chunked_prefill: bool,
     model_impl: str,
     attn_backend: str,
@@ -59,7 +60,7 @@ def test_eagle_correctness_light(
         sampling_config,
         model_setup,
         mm_enabled,
-        expected_accuracy_threshold,
+        gsm8k_spec,
         enable_chunked_prefill,
         model_impl,
         attn_backend,
@@ -74,7 +75,7 @@ def test_eagle_correctness_light(
         "mm_enabled",
         "enable_chunked_prefill",
         "model_impl",
-        "expected_accuracy_threshold",
+        "gsm8k_spec",
     ],
     [
         (
@@ -82,14 +83,14 @@ def test_eagle_correctness_light(
             False,
             False,
             "auto",
-            0.8,
+            get_gsm8k_eval_spec("eagle", "qwen3-eagle3"),
         ),
         pytest.param(
             ("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1),
             False,
             False,
             "transformers",
-            0.8,
+            get_gsm8k_eval_spec("eagle", "qwen3-eagle3-transformers"),
             # TODO(hmellor): figure out why memory usage is so high
             marks=pytest.mark.skipif(
                 not current_platform.is_rocm(),
@@ -106,7 +107,7 @@ def test_eagle_correctness_light(
             False,
             False,
             "auto",
-            0.8,
+            get_gsm8k_eval_spec("eagle", "qwen3-vl-eagle3"),
         ),
         pytest.param(
             (
@@ -118,7 +119,7 @@ def test_eagle_correctness_light(
             False,
             False,
             "auto",
-            0.7,
+            get_gsm8k_eval_spec("eagle", "qwen2.5-vl-eagle3"),
             # TODO: Re-measure the reference threshold when re-enabling this case.
             # Text-only mode starts but loses target correctness with ROCm/TRITON;
             # full multimodal profiling currently fails during engine startup.
@@ -136,7 +137,7 @@ def test_eagle_correctness_light(
             False,
             False,
             "auto",
-            0.7,
+            get_gsm8k_eval_spec("eagle", "llama3-eagle3"),
         ),
     ],
     ids=[
@@ -153,7 +154,7 @@ def test_eagle_correctness_medium(
     sampling_config: SamplingParams,
     model_setup: tuple[str, str, str, int],
     mm_enabled: bool,
-    expected_accuracy_threshold: float,
+    gsm8k_spec: GSM8KEvalSpec,
     enable_chunked_prefill: bool,
     model_impl: str,
     attn_backend: str,
@@ -164,7 +165,7 @@ def test_eagle_correctness_medium(
         sampling_config,
         model_setup,
         mm_enabled,
-        expected_accuracy_threshold,
+        gsm8k_spec,
         enable_chunked_prefill,
         model_impl,
         attn_backend,

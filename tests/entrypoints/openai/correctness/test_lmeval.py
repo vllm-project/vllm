@@ -10,17 +10,18 @@ AsyncLLMEngine are working correctly.
 """
 
 from tests.evals.gsm8k.gsm8k_eval import (
-    assert_min_accuracy,
+    assert_gsm8k_result,
     evaluate_gsm8k_lm_eval,
+    get_gsm8k_eval_spec,
 )
 from vllm.platforms import current_platform
 
 from ....utils import RemoteOpenAIServer
 
-MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"
+GSM8K_SPEC = get_gsm8k_eval_spec("openai_entrypoint", "qwen2-1.5b-instruct")
+assert GSM8K_SPEC.model is not None
+MODEL_NAME = GSM8K_SPEC.model
 NUM_CONCURRENT = 500
-RTOL = 0.03
-EXPECTED_VALUE = 0.54
 DEFAULT_ARGS = ["--max-model-len", "4096"]
 MORE_ARGS_LIST = [
     [],  # Default
@@ -56,9 +57,10 @@ def run_test(more_args):
         result = evaluate_gsm8k_lm_eval(
             model="local-completions",
             model_args=model_args,
+            **GSM8K_SPEC.lm_eval_kwargs(),
         )
 
-        assert_min_accuracy(result, EXPECTED_VALUE, tolerance=RTOL)
+        assert_gsm8k_result(result, GSM8K_SPEC)
 
 
 def test_lm_eval_accuracy_v1_engine():

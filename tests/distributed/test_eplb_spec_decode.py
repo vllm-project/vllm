@@ -5,8 +5,9 @@ from __future__ import annotations
 import pytest
 
 from tests.evals.gsm8k.gsm8k_eval import (
-    assert_min_accuracy,
+    assert_gsm8k_result,
     evaluate_gsm8k_lm_eval,
+    get_gsm8k_eval_spec,
 )
 from tests.utils import large_gpu_mark
 from vllm.platforms import current_platform
@@ -58,16 +59,15 @@ pytestmark = pytest.mark.skipif(
     "model_setup",
     [
         pytest.param(
-            ("mtp", "Qwen/Qwen3-Next-80B-A3B-Instruct", None, 4, 0.86),
+            ("mtp", "qwen3-next-mtp", None, 4),
             marks=large_gpu_mark(min_gb=80),
         ),
         pytest.param(
             (
                 "eagle",
-                "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+                "llama4-scout-eagle",
                 "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
                 4,
-                0.92,
             ),
             marks=pytest.mark.skip(reason="Skipping due to CI OOM issues"),
         ),
@@ -76,18 +76,18 @@ pytestmark = pytest.mark.skipif(
 )
 def test_eplb_spec_decode(
     monkeypatch: pytest.MonkeyPatch,
-    model_setup: tuple[str, str, str, int, float],
+    model_setup: tuple[str, str, str | None, int],
 ):
     """
     Test the correctness of EPLB speculative decoding with GSM8K dataset.
     Applicable to MoE models with mtp or eagle spec decode.
     """
-    method, model_name, spec_model_name, tp_size, expected_gsm8k_value = model_setup
-
-    RTOL = 0.03
+    method, eval_id, spec_model_name, tp_size = model_setup
+    gsm8k_spec = get_gsm8k_eval_spec("eplb_spec_decode", eval_id)
+    assert gsm8k_spec.model is not None
 
     model_args = get_model_args(
-        model_name=model_name,
+        model_name=gsm8k_spec.model,
         spec_model_name=spec_model_name,
         spec_method=method,
         tp_size=tp_size,
@@ -98,9 +98,9 @@ def test_eplb_spec_decode(
         model="vllm",
         model_args=model_args,
         batch_size=64,
-        num_fewshot=8,
+        **gsm8k_spec.lm_eval_kwargs(),
     )
-    assert_min_accuracy(result, expected_gsm8k_value, tolerance=RTOL)
+    assert_gsm8k_result(result, gsm8k_spec)
 
 
 @large_gpu_mark(min_gb=80)
@@ -109,11 +109,11 @@ def test_eplb_spec_decode_qwen3_next_mtp_async() -> None:
     Ensure async EPLB works with MTP speculative decoding for Qwen3-Next.
     """
 
-    RTOL = 0.03
-    expected_gsm8k_value = 0.86
+    gsm8k_spec = get_gsm8k_eval_spec("eplb_spec_decode", "qwen3-next-mtp-async")
+    assert gsm8k_spec.model is not None
 
     model_args = get_model_args(
-        model_name="Qwen/Qwen3-Next-80B-A3B-Instruct",
+        model_name=gsm8k_spec.model,
         spec_model_name=None,
         spec_method="mtp",
         tp_size=4,
@@ -125,6 +125,6 @@ def test_eplb_spec_decode_qwen3_next_mtp_async() -> None:
         model="vllm",
         model_args=model_args,
         batch_size=64,
-        num_fewshot=8,
+        **gsm8k_spec.lm_eval_kwargs(),
     )
-    assert_min_accuracy(result, expected_gsm8k_value, tolerance=RTOL)
+    assert_gsm8k_result(result, gsm8k_spec)

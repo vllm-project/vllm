@@ -3,6 +3,7 @@
 
 import pytest
 
+from tests.evals.gsm8k.gsm8k_eval import GSM8KEvalSpec, get_gsm8k_eval_spec
 from tests.utils import single_gpu_only
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
@@ -22,24 +23,31 @@ def disable_vllm_compile_cache_on_rocm(request: pytest.FixtureRequest) -> None:
 
 
 @pytest.mark.parametrize(
-    "speculative_config",
+    ("speculative_config", "gsm8k_spec"),
     [
-        {
-            "method": "ngram",
-            "prompt_lookup_max": 5,
-            "prompt_lookup_min": 3,
-            "num_speculative_tokens": 3,
-        },
-        {
-            "method": "suffix",
-            "suffix_decoding_max_spec_factor": 2.0,
-        },
+        (
+            {
+                "method": "ngram",
+                "prompt_lookup_max": 5,
+                "prompt_lookup_min": 3,
+                "num_speculative_tokens": 3,
+            },
+            get_gsm8k_eval_spec("ngram_suffix", "ngram"),
+        ),
+        (
+            {
+                "method": "suffix",
+                "suffix_decoding_max_spec_factor": 2.0,
+            },
+            get_gsm8k_eval_spec("ngram_suffix", "suffix"),
+        ),
     ],
 )
 @pytest.mark.usefixtures("disable_vllm_compile_cache_on_rocm")
 @single_gpu_only
 def test_ngram_and_suffix_correctness(
     speculative_config: dict,
+    gsm8k_spec: GSM8KEvalSpec,
     model_name: str,
     vllm_runner,
 ):
@@ -55,7 +63,7 @@ def test_ngram_and_suffix_correctness(
         # this, VllmRunner injects its reduced test-only capture sizes.
         compilation_config=CompilationConfig(),
     ) as runner:
-        evaluate_llm_for_gsm8k(runner.llm)
+        evaluate_llm_for_gsm8k(runner.llm, gsm8k_spec)
 
 
 @pytest.mark.parametrize("async_scheduling", [True], ids=["async"])
@@ -90,7 +98,10 @@ def test_ngram_gpu_default_with_async_scheduling(
             spec_runner.llm.llm_engine.vllm_config.scheduler_config.async_scheduling
             == async_scheduling
         )
-        evaluate_llm_for_gsm8k(spec_runner.llm, expected_accuracy_threshold=0.8)
+        evaluate_llm_for_gsm8k(
+            spec_runner.llm,
+            get_gsm8k_eval_spec("ngram_suffix", "qwen3-ngram-gpu-async"),
+        )
 
 
 @single_gpu_only

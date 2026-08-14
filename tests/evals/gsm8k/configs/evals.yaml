@@ -1,0 +1,350 @@
+version: 1
+
+# This is the inventory for GSM8K evaluations whose launchers live outside
+# tests/evals/gsm8k. Topology-specific settings stay with their owning tests;
+# benchmark profile, sample size, few-shot count, and accuracy floor live here.
+profiles:
+  isolated-v1:
+    metric: last-number-exact-match
+    num_questions: 1319
+    num_fewshot: 5
+    max_tokens: 512
+    tolerance: 0.0
+  lm-eval-v3:
+    metric: exact_match,strict-match
+    num_questions: 1319
+    num_fewshot: 5
+    max_tokens: 0
+    tolerance: 0.0
+
+suites:
+  context_parallel:
+    source: tests/distributed/test_context_parallel.py
+    profile: lm-eval-v3
+    cases:
+      deepseek-v2-lite-chat:
+        model: deepseek-ai/DeepSeek-V2-Lite-Chat
+        accuracy_threshold: 0.64
+      qwen2.5-1.5b-instruct:
+        model: Qwen/Qwen2.5-1.5B-Instruct
+        accuracy_threshold: 0.52
+      qwen3.5-0.8b:
+        model: Qwen/Qwen3.5-0.8B
+        accuracy_threshold: 0.33
+
+  elastic_ep:
+    source: tests/distributed/test_elastic_ep.py
+    profile: isolated-v1
+    defaults:
+      num_questions: 256
+    cases:
+      deepseek-v2-lite-chat:
+        model: deepseek-ai/DeepSeek-V2-Lite-Chat
+        accuracy_threshold: 0.58
+
+  eplb_spec_decode:
+    source: tests/distributed/test_eplb_spec_decode.py
+    profile: lm-eval-v3
+    defaults:
+      num_fewshot: 8
+      tolerance: 0.03
+    cases:
+      qwen3-next-mtp:
+        model: Qwen/Qwen3-Next-80B-A3B-Instruct
+        accuracy_threshold: 0.86
+      llama4-scout-eagle:
+        model: meta-llama/Llama-4-Scout-17B-16E-Instruct
+        accuracy_threshold: 0.92
+      qwen3-next-mtp-async:
+        model: Qwen/Qwen3-Next-80B-A3B-Instruct
+        accuracy_threshold: 0.86
+
+  llm_entrypoint:
+    source: tests/entrypoints/llm/test_accuracy.py
+    profile: lm-eval-v3
+    defaults:
+      tolerance: 0.03
+    cases:
+      qwen3-1.7b:
+        model: Qwen/Qwen3-1.7B
+        accuracy_threshold: 0.68
+      gemma3-1b-it:
+        model: google/gemma-3-1b-it
+        accuracy_threshold: 0.25
+      qwen3-1.7b-fp8-kv:
+        model: Qwen/Qwen3-1.7B
+        accuracy_threshold: 0.68
+
+  openai_entrypoint:
+    source: tests/entrypoints/openai/correctness/test_lmeval.py
+    profile: lm-eval-v3
+    defaults:
+      tolerance: 0.03
+    cases:
+      qwen2-1.5b-instruct:
+        model: Qwen/Qwen2-1.5B-Instruct
+        accuracy_threshold: 0.54
+
+  kv_offloading:
+    source: tests/evals/gsm8k/test_gsm8k_offloading.py
+    profile: isolated-v1
+    defaults:
+      num_questions: 200
+      tolerance: 0.05
+    cases:
+      offloading-nemotron-h-8b:
+        model: nvidia/Nemotron-H-8B-Base-8K
+        accuracy_threshold: 0.39
+      offloading-gemma-4-e4b-it:
+        model: google/gemma-4-E4B-it
+        accuracy_threshold: 0.55
+      offloading-qwen3.5-35b:
+        model: Qwen/Qwen3.5-35B-A3B
+        accuracy_threshold: 0.75
+      offloading-deepseek-v4-flash:
+        model: deepseek-ai/DeepSeek-V4-Flash
+        accuracy_threshold: 0.90
+      offloading-deepseek-v2-lite-tiering-tp2:
+        model: deepseek-ai/DeepSeek-V2-Lite
+        accuracy_threshold: 0.35
+      simple-nemotron-h-8b:
+        model: nvidia/Nemotron-H-8B-Base-8K
+        accuracy_threshold: 0.45
+      simple-gemma-4-e4b-it:
+        model: google/gemma-4-E4B-it
+        accuracy_threshold: 0.55
+      simple-qwen3.5-35b:
+        model: Qwen/Qwen3.5-35B-A3B
+        accuracy_threshold: 0.75
+      simple-deepseek-v4-flash:
+        model: deepseek-ai/DeepSeek-V4-Flash
+        accuracy_threshold: 0.90
+
+  quark:
+    source: tests/quantization/test_quark.py
+    profile: lm-eval-v3
+    defaults:
+      num_fewshot: 8
+      tolerance: 0.03
+    cases:
+      deepseek-r1-mxfp4:
+        model: amd/DeepSeek-R1-WMXFP4-AMXFP4-Scale-UINT8-MoE-Quant
+        accuracy_threshold: 0.96
+
+  dbo:
+    source: tests/v1/distributed/test_dbo.py
+    profile: isolated-v1
+    defaults:
+      num_questions: 256
+    cases:
+      deepseek-v2-lite-chat:
+        model: deepseek-ai/DeepSeek-V2-Lite-Chat
+        accuracy_threshold: 0.62
+
+  dflash:
+    source: tests/v1/e2e/spec_decode/acceptance_rates/dflash/test_dflash.py
+    profile: isolated-v1
+    cases:
+      qwen3-mrv1:
+        model: Qwen/Qwen3-8B
+        accuracy_threshold: 0.80
+      qwen3-mrv2:
+        model: Qwen/Qwen3-8B
+        accuracy_threshold: 0.80
+      laguna-nvfp4-mrv2:
+        model: poolside/Laguna-XS-2.1-NVFP4
+        accuracy_threshold: 0.70
+        num_questions: 200
+
+  dspark:
+    source: tests/v1/e2e/spec_decode/acceptance_rates/dspark/test_dspark.py
+    profile: isolated-v1
+    defaults:
+      max_tokens: 256
+    cases:
+      qwen3-deepspec:
+        model: Qwen/Qwen3-4B-FP8
+        accuracy_threshold: 0.76095
+      gemma4-deepspec:
+        model: RedHatAI/gemma-4-12B-it-NVFP4
+        accuracy_threshold: 0.874
+        num_questions: 200
+      qwen3.6-speculators:
+        model: RedHatAI/Qwen3.6-35B-A3B-NVFP4
+        accuracy_threshold: 0.8075
+        num_questions: 200
+
+  spec_decode:
+    source: tests/v1/e2e/spec_decode/utils.py
+    profile: isolated-v1
+    cases:
+      default-sanity:
+        accuracy_threshold: 0.70
+
+  spec_decode_speculators:
+    source: tests/v1/e2e/spec_decode/speculators/test_speculators.py
+    profile: isolated-v1
+    cases:
+      llama3-eagle3:
+        model: RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3
+        accuracy_threshold: 0.72
+      qwen3-eagle3:
+        model: RedHatAI/Qwen3-8B-speculator.eagle3
+        accuracy_threshold: 0.84
+
+  ngram_suffix:
+    source: tests/v1/e2e/spec_decode/ngram_suffix/test_ngram_suffix.py
+    profile: isolated-v1
+    cases:
+      ngram:
+        accuracy_threshold: 0.70
+      suffix:
+        accuracy_threshold: 0.70
+      qwen3-ngram-gpu-async:
+        model: Qwen/Qwen3-8B
+        accuracy_threshold: 0.80
+
+  mtp:
+    source: tests/v1/e2e/spec_decode/mtp/test_mtp.py
+    profile: isolated-v1
+    cases:
+      mimo:
+        model: XiaomiMiMo/MiMo-7B-Base
+        accuracy_threshold: 0.50
+      deepseek-dummy:
+        model: ZixiQi/DeepSeek-V3-4layers-MTP-FP8
+        accuracy_threshold: 0.0
+      qwen3.5-hybrid:
+        model: Qwen/Qwen3.5-0.8B-Base
+        accuracy_threshold: 0.20
+      gemma4-e4b:
+        model: google/gemma-4-E4B-it
+        accuracy_threshold: 0.50
+
+  eagle:
+    source: tests/v1/e2e/spec_decode/eagle/test_eagle_correctness.py
+    profile: isolated-v1
+    cases:
+      deepseek-eagle-dummy:
+        model: eagle618/deepseek-v3-random
+        accuracy_threshold: 0.0
+      qwen3-eagle3:
+        model: Qwen/Qwen3-8B
+        accuracy_threshold: 0.80
+      qwen3-eagle3-transformers:
+        model: Qwen/Qwen3-8B
+        accuracy_threshold: 0.80
+      qwen3-vl-eagle3:
+        model: Qwen/Qwen3-VL-8B-Instruct
+        accuracy_threshold: 0.80
+      qwen2.5-vl-eagle3:
+        model: Qwen/Qwen2.5-VL-7B-Instruct
+        accuracy_threshold: 0.70
+      llama3-eagle3:
+        model: meta-llama/Llama-3.1-8B-Instruct
+        accuracy_threshold: 0.70
+
+  draft_model:
+    source: tests/v1/e2e/spec_decode/draft_model/test_draft_model.py
+    profile: isolated-v1
+    cases:
+      qwen3-0.6b-self-draft:
+        model: Qwen/Qwen3-0.6B
+        accuracy_threshold: 0.25
+      qwen3-1.7b-draft-0.6b:
+        model: Qwen/Qwen3-1.7B
+        accuracy_threshold: 0.50
+      qwen3-1.7b-tp2:
+        model: Qwen/Qwen3-1.7B
+        accuracy_threshold: 0.50
+
+  nixl:
+    source: tests/v1/kv_connector/nixl_integration/test_accuracy.py
+    profile: lm-eval-v3
+    defaults:
+      tolerance: 0.05
+    cases:
+      qwen3-0.6b:
+        model: Qwen/Qwen3-0.6B
+        accuracy_threshold: 0.41
+      deepseek-vl2-small:
+        model: deepseek-ai/deepseek-vl2-small
+        accuracy_threshold: 0.59
+      deepseek-vl2-tiny:
+        model: deepseek-ai/deepseek-vl2-tiny
+        accuracy_threshold: 0.19
+      deepseek-v2-lite-chat:
+        model: deepseek-ai/DeepSeek-V2-Lite-Chat
+        accuracy_threshold: 0.65
+      gemma3-4b-it:
+        model: google/gemma-3-4b-it
+        accuracy_threshold: 0.74
+      nemotron3-nano-fp8:
+        model: nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8
+        accuracy_threshold: 0.84
+      granite4-h-tiny:
+        model: ibm-granite/granite-4.0-h-tiny
+        accuracy_threshold: 0.77
+      qwen3.5-0.8b:
+        model: Qwen/Qwen3.5-0.8B
+        accuracy_threshold: 0.33
+      gemma4-e2b-it:
+        model: google/gemma-4-E2B-it
+        accuracy_threshold: 0.485
+      jamba2-3b:
+        model: ai21labs/AI21-Jamba2-3B
+        accuracy_threshold: 0.74
+      deepseek-v4-flash:
+        model: deepseek-ai/DeepSeek-V4-Flash
+        accuracy_threshold: 0.95
+
+  mooncake:
+    source: tests/v1/kv_connector/mooncake_integration/test_accuracy.py
+    profile: lm-eval-v3
+    defaults:
+      tolerance: 0.05
+    cases:
+      qwen3-0.6b:
+        model: Qwen/Qwen3-0.6B
+        accuracy_threshold: 0.41
+
+  speculators:
+    source: tests/v1/spec_decode/test_speculators_correctness.py
+    profile: isolated-v1
+    cases:
+      dflash:
+        model: nm-testing/dflash-qwen3-8b-speculators
+        accuracy_threshold: 0.85845
+      peagle:
+        model: nm-testing/qwen3-8b-peagle-speculators
+        accuracy_threshold: 0.836
+      qwen3arch-eagle3:
+        model: inference-optimization/Qwen3-8B-from-Qwen3-8B_regen-speculators.eagle3-qwen3arch-ckpt1
+        accuracy_threshold: 0.836
+      qwen3arch-peagle:
+        model: inference-optimization/Qwen3-8B-speculators.peagle-qwen3arch-ckpt4
+        accuracy_threshold: 0.836
+
+  scheduled_integration:
+    source: .buildkite/scripts/scheduled_integration_test
+    profile: isolated-v1
+    defaults:
+      num_questions: 200
+      max_tokens: 256
+    cases:
+      qwen3-next-mtp-async-eplb:
+        model: Qwen/Qwen3-Next-80B-A3B-Instruct
+        accuracy_threshold: 0.80
+        num_questions: 1319
+      qwen3-30b-fp8-dp4-async-eplb:
+        model: Qwen/Qwen3-30B-A3B-FP8
+        accuracy_threshold: 0.80
+      qwen3-30b-fp8-block-ep-eplb:
+        model: QWen/Qwen3-30B-A3B-FP8
+        accuracy_threshold: 0.80
+      deepseek-v2-lite-prefetch-offload:
+        model: deepseek-ai/DeepSeek-V2-Lite
+        accuracy_threshold: 0.25
+      deepseek-v2-lite-ep-eplb:
+        model: deepseek-ai/DeepSeek-V2-lite
+        accuracy_threshold: 0.25
