@@ -8,8 +8,9 @@ This is a self-contained MLA layer that owns the full attention path:
       -> fused pre-attention ops (fused_qkv_a_proj / norms / q_b_proj)
       -> explicit prefill / decode split
            prefill: fused key-concat + cache-insert kernel -> run_prefill_new_tokens
-                    (+ chunked-context merge); dispatched by cache dtype
-                    (bf16 / plain fp8 / fp8_ds_mla)
+                    (+ chunked-context merge, whose per-chunk gather -> kv_b_proj
+                    -> fused K/V pack loop this layer owns); dispatched by cache
+                    dtype (bf16 / plain fp8 / fp8_ds_mla)
            decode : W_UK absorb (BMM1) -> fused q-concat + cache-insert kernel
                     -> impl.forward_mqa -> W_UV up-proj (MQA)
       -> optional output gate
@@ -34,6 +35,7 @@ from typing import TYPE_CHECKING, cast
 import torch
 from torch import nn
 
+from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     CacheConfig,
@@ -47,6 +49,12 @@ from vllm.model_executor.layers.attention.attention import (
     _init_kv_cache_quant,
     set_default_quant_scales,
     should_load_quant_weights,
+)
+from vllm.model_executor.layers.attention.mla_attention import (
+    _get_kv_b_proj_input_dtype,
+    accumulate_mla_context_chunk,
+    init_mla_context_partial,
+    neutralize_empty_context_partials,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -67,6 +75,8 @@ from vllm.models.kimi_k3.nvidia.ops.fused_mla_key_concat_kv_cache import (
     fused_mla_decode_q_concat_kv_cache_insert,
     fused_mla_key_concat_ds_mla_insert,
     fused_mla_key_concat_kv_cache_insert,
+    fused_mla_kv_concat,
+    fused_mla_kv_concat_quant_fp8,
     fused_mla_qkv_quant_kv_cache_fp8_insert,
 )
 from vllm.platforms import current_platform
@@ -124,6 +134,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         aux_stream: torch.cuda.Stream | None = None,
         use_rope: bool = False,
         non_causal_multi_token_decode: bool = False,
+        run_gemm_rs: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -260,6 +271,16 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
+        self.run_gemm_rs = run_gemm_rs
+        if self.run_gemm_rs:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
+
+            self.run_gemm_rs = get_gemm_rs().can_run(self.o_proj)
+            if not self.run_gemm_rs:
+                logger.warning_once(
+                    "GEMM-RS is disabled for %s due to an incompatible projection.",
+                    prefix,
+                )
 
         # ---- Attention backend / impl / KV cache ----
         self.quant_config = quant_config
@@ -531,10 +552,13 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         if gate is not None:
             attn_out = _gate_sigmoid_mul(attn_out, gate)
 
-        # ``o_proj`` (RowParallelLinear + out-of-place all-reduce) returns a
-        # fresh private tensor, so return it directly rather than copying into a
-        # caller buffer -- the previous ``output[:] = ...`` convention forced an
-        # extra [num_tokens, hidden] copy per layer.
+        if self.run_gemm_rs:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
+
+            gemm_rs = get_gemm_rs()
+            if gemm_rs.should_run(attn_out):
+                return gemm_rs(attn_out, self.o_proj.weight)
+
         return self.o_proj(attn_out)[0]
 
     @eager_break_during_capture
@@ -696,6 +720,181 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             cos_sin_cache=cos_sin_cache,
         )
 
+    def _compute_prefill_context(
+        self,
+        q: torch.Tensor,
+        attn_metadata: "MLACommonMetadata",
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Chunked-context prefill, K3-fused. Replaces the impl's version.
+
+        Per chunk the impl gathers the paged latent, up-projects it, then casts
+        and concatenates K (and casts V) in two or three more launches. Here that
+        tail is one fused kernel per chunk -- ``fused_mla_kv_concat`` for a bf16
+        query, ``fused_mla_kv_concat_quant_fp8`` when the query is fp8 -- reading
+        the strided ``kv_b_proj`` output in place and writing a contiguous key, so
+        only the gather and ``kv_b_proj`` remain.
+
+        The impl's query cast is gone as well: ``q`` already carries
+        ``prefill.q_data_type`` because the new-token epilogue quantized it. The
+        gathered latent still gets the impl's cast to whatever ``kv_b_proj``
+        consumes -- free (a no-op ``.to``) for a checkpoint whose ``kv_b_proj``
+        takes the fp8 latent directly, and required for a bf16 one, which is
+        what a stock K3 checkpoint carries. Its output is bf16 either way.
+
+        The gathered ``k_pe`` is likewise used as-is (fp8 for a plain fp8 cache)
+        and needs no RoPE: it was rotated on the way in.
+
+        Chunk partials are written straight into the accumulating context partial
+        when the prefill backend honors ``out``, so only the (64x smaller) lse is
+        copied per chunk.
+
+        Decode context parallelism keeps using
+        ``impl._context_parallel_compute_prefill_context``; its extra allgather
+        and reorg are not fused here.
+        """
+        prefill = attn_metadata.prefill
+        assert prefill is not None
+        prefill_backend = prefill.prefill_backend
+        assert prefill_backend is not None
+        chunked_context = prefill.chunked_context
+        assert chunked_context is not None
+        assert q.dtype == prefill.q_data_type, (
+            "Kimi-K3 chunked context expects the new-token epilogue to have "
+            f"produced a {prefill.q_data_type} query; got {q.dtype}."
+        )
+
+        fp8_prefill = q.dtype == current_platform.fp8_dtype()
+        workspace = chunked_context.workspace
+        kv_cache = self._attn_read_kv_cache()
+        kv_b_proj_input_dtype = _get_kv_b_proj_input_dtype(self.kv_b_proj, fp8_prefill)
+
+        def run_chunk(
+            chunk, out: torch.Tensor | None = None
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            self._gather_context_latent(chunk, kv_cache, prefill, fp8_prefill)
+            gathered = workspace[: chunk.num_context_tokens]
+            kv_c_normed = gathered[..., : self.kv_lora_rank]
+            if kv_b_proj_input_dtype is not None:
+                kv_c_normed = kv_c_normed.to(kv_b_proj_input_dtype)
+            kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+                -1, self.num_local_heads, self.qk_nope_head_dim + self.v_head_dim
+            )
+            k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            k_pe = gathered[..., self.kv_lora_rank :]
+            if fp8_prefill:
+                k, v = fused_mla_kv_concat_quant_fp8(k_nope, k_pe, v)
+            else:
+                k = fused_mla_kv_concat(k_nope, k_pe)
+            attn_output, attn_lse = prefill_backend.run_prefill_context_chunk(
+                chunk=chunk, q=q[chunk.token_slice], k=k, v=v, out=out
+            )
+            assert out is None or attn_output.data_ptr() == out.data_ptr(), (
+                f"{prefill_backend.get_name()} reports supports_out() but did not "
+                "write the context chunk into the `out` it was given."
+            )
+            return attn_output, attn_lse
+
+        chunks = chunked_context.chunks
+        if len(chunks) == 1 and not chunked_context.empty_token_slices:
+            # One chunk covering every prefill token: its partial *is* the context
+            # partial, so it needs neither an accumulator nor a copy.
+            return run_chunk(chunks[0])
+
+        # A backend honoring `out` writes each chunk's partial straight into the
+        # accumulator, so the per-chunk output copy disappears -- and because that
+        # contract fixes the trailing shape, the accumulator can be sized before
+        # any chunk runs. Otherwise the shape is only knowable from a real partial,
+        # so the first chunk runs ahead of the loop and is copied in.
+        writes_out = prefill_backend.supports_out()
+        if writes_out:
+            assert prefill.output_dtype is not None
+            output = torch.empty(
+                (q.shape[0], self.num_local_heads, self.v_head_dim),
+                dtype=prefill.output_dtype,
+                device=q.device,
+            )
+            output_lse = torch.empty(
+                (self.num_local_heads, q.shape[0]),
+                dtype=torch.float32,
+                device=q.device,
+            )
+            neutralize_empty_context_partials(chunked_context, output, output_lse)
+        else:
+            attn_output, attn_lse = run_chunk(chunks[0])
+            output, output_lse = init_mla_context_partial(
+                chunked_context, attn_output, attn_lse, num_tokens=q.shape[0]
+            )
+            accumulate_mla_context_chunk(
+                chunks[0], attn_output, attn_lse, output, output_lse
+            )
+            chunks = chunks[1:]
+
+        for chunk in chunks:
+            # A continuation chunk's leading tokens have to be merged with the
+            # partial already sitting there, so it cannot write in place.
+            out = (
+                output[chunk.token_slice]
+                if writes_out and not chunk.is_continuation
+                else None
+            )
+            attn_output, attn_lse = run_chunk(chunk, out=out)
+            accumulate_mla_context_chunk(
+                chunk,
+                attn_output,
+                attn_lse,
+                output,
+                output_lse,
+                output_written=out is not None,
+            )
+        return output, output_lse
+
+    def _gather_context_latent(
+        self,
+        chunk,
+        kv_cache: torch.Tensor,
+        prefill,
+        fp8_prefill: bool,
+    ) -> None:
+        """Gather one chunk's paged context latent into the workspace.
+
+        Dispatched exactly as in ``impl._compute_prefill_context``: an fp8 query
+        reads the plain fp8 cache in its stored layout, anything else lands in the
+        workspace as the model dtype.
+        """
+        workspace = prefill.chunked_context.workspace
+        toks = chunk.num_context_tokens
+        block_table = prefill.block_table[chunk.request_slice]
+        if self.kv_cache_dtype == "fp8_ds_mla":
+            ops.cp_gather_and_upconvert_fp8_kv_cache(
+                src_cache=kv_cache,
+                dst=workspace[:toks],
+                block_table=block_table,
+                workspace_starts=chunk.cu_seq_lens,
+                batch_size=chunk.num_requests,
+                seq_starts=chunk.starts,
+            )
+        elif not fp8_prefill:
+            ops.gather_and_maybe_dequant_cache(
+                src_cache=kv_cache,
+                dst=workspace,
+                block_table=block_table,
+                cu_seq_lens=chunk.cu_seq_lens,
+                token_to_seq=chunk.token_to_seq,
+                num_tokens=toks,
+                kv_cache_dtype=self.kv_cache_dtype,
+                scale=self._k_scale,
+                seq_starts=chunk.starts,
+            )
+        else:
+            ops.cp_gather_cache(
+                src_cache=kv_cache,
+                dst=workspace[:toks],
+                block_table=block_table,
+                cu_seq_lens=chunk.cu_seq_lens,
+                batch_size=chunk.num_requests,
+                seq_starts=chunk.starts,
+            )
+
     def _forward_prefill_fused(
         self,
         q: torch.Tensor,
@@ -710,8 +909,9 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         """Prefill using the fused key-concat + cache-insert kernel.
 
         Replaces ``_concat_k_nope_k_pe`` and the prefill cache write with one
-        fused kernel launch, dispatched by cache dtype. The chunked context
-        gather + online-softmax merge are delegated to the impl.
+        fused kernel launch, dispatched by cache dtype. Chunked context runs
+        through this layer's ``_compute_prefill_context``, except under DCP where
+        it is delegated to the impl.
 
         Supported configs (K3 fp8 policy):
           - bf16 cache        -> bf16 prefill query
@@ -812,8 +1012,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                     )
                 )
             else:
-                context_output, context_lse = self.impl._compute_prefill_context(  # type: ignore[attr-defined]
-                    q, self._attn_read_kv_cache(), attn_metadata, self._k_scale
+                context_output, context_lse = self._compute_prefill_context(
+                    q, attn_metadata
                 )
             suffix_output, suffix_lse = output_prefill
             out = out.view(-1, self.num_local_heads, self.v_head_dim)

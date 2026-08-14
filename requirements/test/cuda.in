@@ -71,7 +71,7 @@ gpt-oss >= 0.0.7; python_version > '3.11'
 
 perceptron # required for isaac test
 kaldi-native-fbank >= 1.18.7 # required for fireredasr2 test
-cohere_melody>=0.9.0 # required for cohere command reasoning parser test
+cohere_melody>=0.11.1 # required for cohere command reasoning/tool parser tests
 cohere>=7.0.0 # required for cohere chat v2 api tests (protocol/serving import cohere.types)
 
 # Newer versions of datasets require torchcoded, that makes the tests fail in CI because of a missing library.
