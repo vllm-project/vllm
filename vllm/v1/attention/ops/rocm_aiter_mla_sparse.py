@@ -1022,6 +1022,26 @@ def _validate_dsv4_sparse_dims(
 
 
 @triton.jit
+def _build_ragged_indptr_kernel(
+    lengths_ptr,
+    indptr_ptr,
+    num_rows,
+    max_width,
+    BLOCK_SIZE: tl.constexpr,
+):
+    offsets = tl.arange(0, BLOCK_SIZE)
+    mask = offsets < num_rows
+    lengths = tl.load(lengths_ptr + offsets, mask=mask, other=0).to(tl.int32)
+    # Keep this clamp in sync with _pack_dense_prefix_to_ragged_kernel so
+    # indptr and payload agree for out-of-range dense lengths.
+    lengths = tl.minimum(tl.maximum(lengths, 0), max_width)
+    inclusive_prefix = tl.cumsum(lengths, axis=0)
+
+    tl.store(indptr_ptr, 0)
+    tl.store(indptr_ptr + offsets + 1, inclusive_prefix, mask=mask)
+
+
+@triton.jit
 def _pack_dense_prefix_to_ragged_kernel(
     indices_ptr,
     lengths_ptr,
@@ -1037,6 +1057,9 @@ def _pack_dense_prefix_to_ragged_kernel(
     offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
 
     row_len = tl.load(lengths_ptr + row_idx)
+    # Keep this clamp in sync with _build_ragged_indptr_kernel so indptr and
+    # payload agree for out-of-range dense lengths.
+    row_len = tl.minimum(tl.maximum(row_len, 0), row_width)
     if block_idx * BLOCK_SIZE >= row_len:
         return
 
@@ -1052,6 +1075,72 @@ def _pack_dense_prefix_to_ragged_kernel(
 
     out_start = tl.load(indptr_ptr + row_idx)
     tl.store(out_ptr + out_start + offsets, vals, mask=mask)
+
+
+def build_ragged_indices_from_dense_out(
+    indices: torch.Tensor,
+    lengths: torch.Tensor,
+    out_indices: torch.Tensor,
+    out_indptr: torch.Tensor,
+    num_rows: int = -1,
+) -> None:
+    """Pack dense row prefixes directly into caller-owned output buffers.
+
+    This path performs no tensor-storage allocation, making it suitable for
+    metadata updates captured inside a FULL decode graph. Inputs and outputs
+    are intentionally required to already have the kernel's dtype/layout so
+    implicit ``to()`` or ``contiguous()`` temporaries cannot be introduced.
+    """
+    assert indices.dtype == torch.int32
+    assert indices.is_contiguous()
+    assert lengths.dtype == torch.int32 and lengths.ndim == 1
+    assert lengths.is_contiguous()
+    assert out_indices.dtype == torch.int32 and out_indices.ndim == 1
+    assert out_indices.is_contiguous()
+    assert out_indptr.dtype == torch.int32 and out_indptr.ndim == 1
+    assert out_indptr.is_contiguous()
+    assert (
+        indices.device == lengths.device
+        and indices.device == out_indices.device
+        and indices.device == out_indptr.device
+    )
+
+    indices = indices.reshape(indices.shape[0], -1)
+    num_dense_rows = indices.shape[0]
+    max_width = indices.shape[1]
+    assert lengths.numel() == num_dense_rows, (
+        f"Expected one length per row, got {lengths.shape} for indices {indices.shape}"
+    )
+    assert out_indptr.numel() >= num_dense_rows + 1
+    assert out_indices.numel() >= num_dense_rows * max_width
+
+    if num_dense_rows == 0:
+        out_indptr.zero_()
+        return
+
+    indptr_block_size = triton.next_power_of_2(num_dense_rows)
+    _build_ragged_indptr_kernel[(1,)](
+        lengths,
+        out_indptr,
+        num_dense_rows,
+        max_width,
+        BLOCK_SIZE=indptr_block_size,
+    )
+
+    if max_width > 0:
+        block_size = 128
+        _pack_dense_prefix_to_ragged_kernel[
+            (num_dense_rows, triton.cdiv(max_width, block_size))
+        ](
+            indices,
+            lengths,
+            out_indptr,
+            out_indices,
+            indices.stride(0),
+            int(num_rows),
+            max_width,
+            BLOCK_SIZE=block_size,
+        )
 
 
 def build_ragged_indices_from_dense(

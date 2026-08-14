@@ -29,6 +29,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     build_ragged_indices_from_dense,
+    build_ragged_indices_from_dense_out,
     rocm_inv_rope_einsum,
     rocm_sparse_attn_decode,
     rocm_sparse_attn_prefill,
@@ -372,9 +373,7 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBui
 
 
 class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
-    # Keep fused multi-step decode disabled until update_draft_decode_metadata()
-    # also refreshes the ROCm-specific ragged SWA indices and indptrs.
-    supports_draft_decode_metadata_update = False
+    supports_draft_decode_metadata_update = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -432,6 +431,32 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
             **vars(base),
             decode_swa_ragged_indices=ragged_indices,
             decode_swa_ragged_indptr=ragged_indptr,
+        )
+
+    def update_draft_decode_metadata(
+        self,
+        metadata: DeepseekSparseSWAMetadata,
+    ) -> None:
+        super().update_draft_decode_metadata(metadata)
+        if metadata.num_decode_tokens == 0:
+            return
+        rocm_metadata = cast(DeepseekV4ROCMAiterSparseSWAMetadata, metadata)
+
+        assert rocm_metadata.decode_swa_indices is not None
+        assert rocm_metadata.decode_swa_lens is not None
+        assert rocm_metadata.decode_swa_ragged_indices is not None
+        assert rocm_metadata.decode_swa_ragged_indptr is not None
+
+        # FULL decode graphs capture kernel argument addresses. Pack directly
+        # into the persistent buffers returned by build(), without allocating
+        # temporary flat/indptr tensors or replacing their storage.
+        build_ragged_indices_from_dense_out(
+            rocm_metadata.decode_swa_indices.reshape(
+                rocm_metadata.num_decode_tokens, -1
+            ),
+            rocm_metadata.decode_swa_lens,
+            rocm_metadata.decode_swa_ragged_indices,
+            rocm_metadata.decode_swa_ragged_indptr,
         )
 
 
