@@ -1567,13 +1567,15 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
             parent_ref = self.get_language_model()
         elif hasattr(self, "language_model"):
             parent_ref = self.language_model
-        assert hasattr(parent_ref, "model"), (
-            "Model instance must have 'model' attribute to set number of layers"
-        )
-        assert isinstance(parent_ref.model, EagleModelMixin), (
+        # A multimodal model that builds its decoder inside
+        # `_mark_language_model` has get_language_model() return the inner
+        # decoder itself, which IS the EagleModelMixin and has no further
+        # `.model`. Unwrap only when there is something to unwrap.
+        holder = getattr(parent_ref, "model", parent_ref)
+        assert isinstance(holder, EagleModelMixin), (
             "Model instance must inherit from EagleModelMixin to set auxiliary layers"
         )
-        parent_ref.model._set_aux_hidden_state_layers(layers)
+        holder._set_aux_hidden_state_layers(layers)
 
     def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
         """
@@ -1590,13 +1592,12 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
             parent_ref = self.get_language_model()
         elif hasattr(self, "language_model"):
             parent_ref = self.language_model
-        assert hasattr(parent_ref, "model"), (
-            "Model instance must have 'model' attribute to get number of layers"
-        )
-        assert hasattr(parent_ref.model, "layers"), (
+        # Same unwrap-only-if-needed rule as set_aux_hidden_state_layers.
+        holder = getattr(parent_ref, "model", parent_ref)
+        assert hasattr(holder, "layers"), (
             "Model instance must have 'layers' attribute to get number of layers"
         )
-        num_layers = len(parent_ref.model.layers)
+        num_layers = len(holder.layers)
         return (2, num_layers // 2, num_layers - 3)
 
 

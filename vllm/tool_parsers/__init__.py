@@ -154,6 +154,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "olmo3_tool_parser",
         "Olmo3PythonicToolParser",
     ),
+    "muse_glimmer": (
+        "muse_glimmer_tool_parser",
+        "MuseGlimmerToolParser",
+    ),
     "openai": (
         "gptoss_tool_parser",
         "GptOssToolParser",
