@@ -198,6 +198,88 @@ def _ragged_from_rows(
     )
 
 
+@pytest.fixture
+def sparse_decode_mod():
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    mod._resolve_rocm_sparse_attn_decode.cache_clear()
+    yield mod
+    mod._resolve_rocm_sparse_attn_decode.cache_clear()
+
+
+def test_sparse_decode_resolver_defaults_to_triton(
+    monkeypatch, sparse_decode_mod
+) -> None:
+    mod = sparse_decode_mod
+    monkeypatch.setattr(
+        mod,
+        "envs",
+        SimpleNamespace(VLLM_ROCM_USE_AITER_SPARSE_MLA_GLUON=False),
+    )
+
+    assert (
+        mod._resolve_rocm_sparse_attn_decode()
+        is mod._rocm_sparse_attn_decode_ragged_triton
+    )
+
+
+def test_sparse_decode_resolver_rejects_unsupported_gpu(
+    monkeypatch, sparse_decode_mod
+) -> None:
+    mod = sparse_decode_mod
+    monkeypatch.setattr(
+        mod,
+        "envs",
+        SimpleNamespace(VLLM_ROCM_USE_AITER_SPARSE_MLA_GLUON=True),
+    )
+    monkeypatch.setattr(mod, "_ON_GFX950", False)
+
+    with pytest.raises(RuntimeError, match="requires an AMD gfx950 GPU"):
+        mod._resolve_rocm_sparse_attn_decode()
+
+
+def test_sparse_decode_resolver_rejects_missing_aiter_kernel(
+    monkeypatch, sparse_decode_mod
+) -> None:
+    mod = sparse_decode_mod
+    monkeypatch.setattr(
+        mod,
+        "envs",
+        SimpleNamespace(VLLM_ROCM_USE_AITER_SPARSE_MLA_GLUON=True),
+    )
+    monkeypatch.setattr(mod, "_ON_GFX950", True)
+
+    def raise_import_error():
+        raise ImportError("pa_decode_sparse is unavailable")
+
+    monkeypatch.setattr(mod, "_load_aiter_pa_decode_sparse", raise_import_error)
+
+    with pytest.raises(RuntimeError, match="requires an AITER build"):
+        mod._resolve_rocm_sparse_attn_decode()
+
+
+def test_sparse_decode_resolver_selects_gluon(
+    monkeypatch, sparse_decode_mod
+) -> None:
+    mod = sparse_decode_mod
+    fake_pa_decode_sparse = object()
+    monkeypatch.setattr(
+        mod,
+        "envs",
+        SimpleNamespace(VLLM_ROCM_USE_AITER_SPARSE_MLA_GLUON=True),
+    )
+    monkeypatch.setattr(mod, "_ON_GFX950", True)
+    monkeypatch.setattr(
+        mod, "_load_aiter_pa_decode_sparse", lambda: fake_pa_decode_sparse
+    )
+    monkeypatch.setattr(mod.logger, "info_once", lambda *args, **kwargs: None)
+
+    decode_impl = mod._resolve_rocm_sparse_attn_decode()
+
+    assert decode_impl.func is mod._rocm_sparse_attn_decode_gluon
+    assert decode_impl.args == (fake_pa_decode_sparse,)
+
+
 @torch.inference_mode()
 def test_paged_mqa_logits_do_not_contain_nan(monkeypatch) -> None:
     from vllm._aiter_ops import rocm_aiter_ops

@@ -3,6 +3,7 @@
 import functools
 import importlib
 import math
+from collections.abc import Callable
 from importlib.util import find_spec
 
 import torch
@@ -11,6 +12,7 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType
@@ -23,6 +25,8 @@ if current_platform.is_rocm():
 else:
     _ON_GFX942 = False
     _ON_GFX950 = False
+
+logger = init_logger(__name__)
 
 
 @triton.jit
@@ -2197,58 +2201,59 @@ def _rocm_sparse_attn_decode_ragged_triton(
     return out
 
 
-def _rocm_sparse_attn_decode_triton(
+def _load_aiter_pa_decode_sparse() -> Callable[..., torch.Tensor]:
+    from aiter.ops.triton.attention.pa_decode_sparse import pa_decode_sparse
+
+    return pa_decode_sparse
+
+
+def _rocm_sparse_attn_decode_gluon(
+    pa_decode_sparse: Callable[..., torch.Tensor],
     q: torch.Tensor,
     main_cache: torch.Tensor,
     main_indices: torch.Tensor,
+    main_indptr: torch.Tensor,
     scale: float,
     attn_sink: torch.Tensor | None,
     nope_head_dim: int,
     rope_head_dim: int,
-    extra_cache: torch.Tensor | None = None,
-    extra_indices: torch.Tensor | None = None,
-    main_lengths: torch.Tensor | None = None,
-    extra_lengths: torch.Tensor | None = None,
-    main_ragged_indices: torch.Tensor | None = None,
-    main_ragged_indptr: torch.Tensor | None = None,
-    extra_ragged_indices: torch.Tensor | None = None,
-    extra_ragged_indptr: torch.Tensor | None = None,
+    extra_cache: torch.Tensor | None,
+    extra_indices: torch.Tensor | None,
+    extra_indptr: torch.Tensor | None,
 ) -> torch.Tensor:
-    if main_ragged_indices is None or main_ragged_indptr is None:
-        main_ragged_indices, main_ragged_indptr = build_ragged_indices_from_dense(
-            main_indices,
-            main_lengths
-            if main_lengths is not None
-            else (main_indices >= 0).sum(dim=-1, dtype=torch.int32),
-            num_rows=main_cache.shape[0] * main_cache.shape[1],
-        )
-
-    if (
-        (extra_ragged_indices is None or extra_ragged_indptr is None)
-        and extra_cache is not None
-        and extra_indices is not None
-    ):
-        extra_ragged_indices, extra_ragged_indptr = build_ragged_indices_from_dense(
-            extra_indices,
-            extra_lengths
-            if extra_lengths is not None
-            else (extra_indices >= 0).sum(dim=-1, dtype=torch.int32),
-            num_rows=extra_cache.shape[0] * extra_cache.shape[1],
-        )
-
-    return _rocm_sparse_attn_decode_ragged_triton(
-        q=q,
-        main_cache=main_cache,
-        main_indices=main_ragged_indices,
-        main_indptr=main_ragged_indptr,
-        scale=scale,
-        attn_sink=attn_sink,
-        nope_head_dim=nope_head_dim,
-        rope_head_dim=rope_head_dim,
+    """Run the packed fp8_ds_mla decode on aiter's gfx950 gluon kernel."""
+    del nope_head_dim, rope_head_dim
+    return pa_decode_sparse(
+        q,
+        main_cache,
+        main_indices,
+        main_indptr,
+        attn_sink,
+        scale,
+        has_invalid=True,
         extra_cache=extra_cache,
-        extra_indices=extra_ragged_indices,
-        extra_indptr=extra_ragged_indptr,
+        extra_indices=extra_indices,
+        extra_indptr=extra_indptr,
     )
+
+
+@functools.cache
+def _resolve_rocm_sparse_attn_decode() -> Callable[..., torch.Tensor]:
+    if not envs.VLLM_ROCM_USE_AITER_SPARSE_MLA_GLUON:
+        return _rocm_sparse_attn_decode_ragged_triton
+    if not _ON_GFX950:
+        raise RuntimeError(
+            "VLLM_ROCM_USE_AITER_SPARSE_MLA_GLUON requires an AMD gfx950 GPU."
+        )
+    try:
+        pa_decode_sparse = _load_aiter_pa_decode_sparse()
+    except ImportError as exc:
+        raise RuntimeError(
+            "VLLM_ROCM_USE_AITER_SPARSE_MLA_GLUON requires an AITER build "
+            "providing aiter.ops.triton.attention.pa_decode_sparse."
+        ) from exc
+    logger.info_once("Using AITER gfx950 Gluon kernel for sparse MLA decode.")
+    return functools.partial(_rocm_sparse_attn_decode_gluon, pa_decode_sparse)
 
 
 def rocm_sparse_attn_prefill(
@@ -2348,21 +2353,44 @@ def rocm_sparse_attn_decode(
         if topk_indices is not None:
             extra_indices = topk_indices.reshape(topk_indices.shape[0], -1)
 
-    attn_out = _rocm_sparse_attn_decode_triton(
+    if swa_ragged_indices is None or swa_ragged_indptr is None:
+        swa_ragged_indices, swa_ragged_indptr = build_ragged_indices_from_dense(
+            main_indices,
+            swa_lens,
+            num_rows=swa_k_cache.shape[0] * swa_k_cache.shape[1],
+        )
+
+    if (
+        (topk_ragged_indices is None or topk_ragged_indptr is None)
+        and extra_cache is not None
+        and extra_indices is not None
+    ):
+        topk_ragged_indices, topk_ragged_indptr = build_ragged_indices_from_dense(
+            extra_indices,
+            topk_lens
+            if topk_lens is not None
+            else (extra_indices >= 0).sum(dim=-1, dtype=torch.int32),
+            num_rows=extra_cache.shape[0] * extra_cache.shape[1],
+        )
+
+    assert swa_ragged_indices is not None
+    assert swa_ragged_indptr is not None
+    if extra_cache is not None:
+        assert topk_ragged_indices is not None
+        assert topk_ragged_indptr is not None
+
+    decode_impl = _resolve_rocm_sparse_attn_decode()
+    attn_out = decode_impl(
         q=q,
         main_cache=swa_k_cache,
-        main_indices=main_indices,
+        main_indices=swa_ragged_indices,
+        main_indptr=swa_ragged_indptr,
         scale=scale,
         attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
         nope_head_dim=nope_head_dim,
         rope_head_dim=rope_head_dim,
         extra_cache=extra_cache,
-        extra_indices=extra_indices,
-        main_lengths=swa_lens,
-        extra_lengths=topk_lens,
-        main_ragged_indices=swa_ragged_indices,
-        main_ragged_indptr=swa_ragged_indptr,
-        extra_ragged_indices=topk_ragged_indices,
-        extra_ragged_indptr=topk_ragged_indptr,
+        extra_indices=topk_ragged_indices,
+        extra_indptr=topk_ragged_indptr,
     )
     output.copy_(attn_out.to(output.dtype))

@@ -28,6 +28,7 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWAMetadataBuilder,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    _resolve_rocm_sparse_attn_decode,
     build_ragged_indices_from_dense,
     rocm_inv_rope_einsum,
     rocm_sparse_attn_decode,
@@ -452,6 +453,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        _resolve_rocm_sparse_attn_decode()
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None

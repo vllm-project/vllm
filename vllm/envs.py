@@ -139,6 +139,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4: bool = False
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
+    VLLM_ROCM_USE_AITER_SPARSE_MLA_GLUON: bool = False
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
@@ -1278,6 +1279,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")
+    ),
+    # Whether to use AITER's gluon kernel for sparse MLA decode.
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_SPARSE_MLA_GLUON": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_SPARSE_MLA_GLUON", "False").lower()
+        in ("true", "1")
     ),
     # Small-head (<16) AITER MLA decode kernel selection. Small head counts
     # (e.g. Kimi-K3: 12 heads/rank at TP8, 6 at TP16) can decode either through
