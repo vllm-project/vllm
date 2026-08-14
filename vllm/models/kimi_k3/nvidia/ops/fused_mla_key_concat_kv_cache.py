@@ -12,6 +12,9 @@ mirror ``fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_{bf16,fp8}_insert``.
 - ``fused_mla_qkv_quant_kv_cache_fp8_insert`` (fp8): additionally quantize
   ``q``/``k``/``v`` to E4M3 with ``q_scale`` / ``k_scale`` / ``v_scale`` (the
   cache shares ``k_scale``, as in ``concat_and_cache_mla``).
+- ``fused_mla_kv_concat`` / ``fused_mla_kv_concat_quant_fp8`` (chunked context):
+  the same K concat (plus the fp8 K/V cast) without the cache insert, for context
+  chunks whose latent was gathered back out of the paged cache.
 
 The optional ``positions`` / ``cos_sin_cache`` pair enables GPT-J-style RoPE
 inside the epilogue. Omitting both keeps the K3 NoPE fast path. The kernels use
@@ -154,6 +157,59 @@ def fused_mla_qkv_quant_kv_cache_fp8_insert(
         cos_sin_cache,
     )
     return q_fp8, k_fp8, v_fp8
+
+
+def _empty_full_key(
+    k_nope: torch.Tensor, k_pe: torch.Tensor, dtype: torch.dtype
+) -> torch.Tensor:
+    num_tokens, num_heads, qk_nope_head_dim = k_nope.shape
+    return torch.empty(
+        (num_tokens, num_heads, qk_nope_head_dim + k_pe.shape[1]),
+        dtype=dtype,
+        device=k_nope.device,
+    )
+
+
+def fused_mla_kv_concat(
+    k_nope: torch.Tensor,  # [T, H, qk_nope_head_dim], may be strided
+    k_pe: torch.Tensor,  # [T, rope] or [T, 1, rope], same dtype as k_nope
+) -> torch.Tensor:
+    """Concat ``k = [k_nope | k_pe]`` into a contiguous key, in one launch.
+
+    The chunked-context counterpart of ``fused_mla_key_concat_kv_cache_insert``:
+    no query, no cache insert and no RoPE (the gathered ``k_pe`` is already
+    rotated). ``k_nope`` is a strided half of one ``kv_b_proj`` output and
+    ``k_pe`` a strided view of the gather workspace, so neither has to be made
+    contiguous first.
+    """
+    k_pe = k_pe.reshape(k_pe.shape[0], k_pe.shape[-1])
+    k = _empty_full_key(k_nope, k_pe, k_nope.dtype)
+    if k.shape[0]:
+        torch.ops._C.fused_kimi_k3_mla_kv_concat(k_nope, k_pe, k)
+    return k
+
+
+def fused_mla_kv_concat_quant_fp8(
+    k_nope: torch.Tensor,  # [T, H, qk_nope_head_dim], may be strided
+    k_pe: torch.Tensor,  # [T, rope] or [T, 1, rope], k_nope's dtype or fp8
+    v: torch.Tensor,  # [T, H, v_head_dim], may be strided
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``fused_mla_kv_concat`` plus an fp8 cast of the key and of ``v``.
+
+    ``k_pe`` may already be fp8: a plain fp8 cache is gathered without
+    dequantizing, and those bytes are copied through as-is.
+
+    Returns contiguous ``(k_fp8, v_fp8)``.
+    """
+    k_pe = k_pe.reshape(k_pe.shape[0], k_pe.shape[-1])
+    fp8 = torch.float8_e4m3fn
+    k_fp8 = _empty_full_key(k_nope, k_pe, fp8)
+    v_fp8 = torch.empty(v.shape, dtype=fp8, device=v.device)
+    if k_fp8.shape[0]:
+        torch.ops._C.fused_kimi_k3_mla_kv_concat_quant_fp8(
+            k_nope, k_pe, v, k_fp8, v_fp8
+        )
+    return k_fp8, v_fp8
 
 
 def fused_mla_decode_q_concat_kv_cache_insert(

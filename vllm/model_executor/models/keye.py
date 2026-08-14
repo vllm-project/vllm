@@ -59,6 +59,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -608,7 +609,9 @@ class KeyeSiglipEncoder(nn.Module):
                 [height_position_ids, width_position_ids],
                 dim=-1,
             )
-            max_grid_size = pids.max() + 1
+            # The ids are built from the grids above, so `h`/`w` bound them
+            # and the table size is known on the host.
+            max_grid_size = max(max(h, w) for _, h, w in flatten_image_grid_thw)
             rope_emb_max_grid = self.rotary_pos_emb(max_grid_size)
             rope_emb = rope_emb_max_grid[pids].flatten(1)
             rope_emb = rope_emb.repeat(1, 2)
@@ -694,19 +697,19 @@ class KeyeSiglipVisionTransformer(nn.Module):
 
         last_hidden_state = self.post_layernorm(last_hidden_state)
 
-        sample_hidden_state = list()
         if cu_seqlens is None:
             raise ValueError(
                 "cu_seqlens cannot be None for "
                 "SiglipVisionTransformer output processing."
             )
-        for i in range(cu_seqlens.shape[0] - 1):
-            start = cu_seqlens[i]
-            end = cu_seqlens[i + 1]
-            tensor = last_hidden_state[:, start:end, :].squeeze(0)
-            sample_hidden_state.append(tensor)
-
-        return sample_hidden_state
+        # `cu_seqlens` is the running sum of the per-image `t * h * w`, so the
+        # split sizes are known on the host and slicing needs no device read.
+        split_sizes = [
+            int(np.prod(thw)) for thw in self.encoder.flatten_list(image_grid_thw)
+        ]
+        return [
+            tensor.squeeze(0) for tensor in last_hidden_state.split(split_sizes, dim=1)
+        ]
 
 
 class KeyeSiglipVisionModel(nn.Module):
@@ -871,12 +874,12 @@ def _keye_field_config(
     return dict(
         pixel_values=MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
         image_embeds=MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
-        image_grid_thw=MultiModalFieldConfig.batched("image"),
+        image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
             "video", video_grid_sizes
         ),
         video_embeds=MultiModalFieldConfig.flat_from_sizes("video", video_grid_sizes),
-        video_grid_thw=MultiModalFieldConfig.batched("video"),
+        video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
     )
 
 
@@ -1291,8 +1294,9 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
         image_grid_thw = image_input["image_grid_thw"]
         assert image_grid_thw.ndim == 2
 
-        for idx, thaw in enumerate(image_grid_thw):
-            thw_tuple = tuple(thaw.detach().cpu().numpy().tolist())
+        image_grid_thw_list = image_grid_thw.tolist()
+        for idx, thw in enumerate(image_grid_thw_list):
+            thw_tuple = tuple(thw)
             numel = np.prod(thw_tuple)
             image_grid_hws.append(thw_tuple)
             image_position_ids = torch.arange(numel) % np.prod(thw_tuple[1:])
@@ -1306,13 +1310,17 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
             )
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+            # These are all built on the host, so stage them over
+            # non-blocking rather than forcing a sync per transfer.
             siglip_position_ids = torch.concat(siglip_position_ids, dim=0).to(
-                pixel_values.device
+                pixel_values.device, non_blocking=True
             )
-            cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32).to(
-                pixel_values.device
+            cu_seqlens = async_tensor_h2d(
+                cu_seqlens, dtype=torch.int32, device=pixel_values.device
             )
-            sample_indices = torch.concat(sample_indices, dim=0).to(pixel_values.device)
+            sample_indices = torch.concat(sample_indices, dim=0).to(
+                pixel_values.device, non_blocking=True
+            )
 
             image_embeds = self.visual(
                 pixel_values=pixel_values,
@@ -1356,14 +1364,15 @@ class BaseKeyeModule(nn.Module, SupportsMultiModal):
             )
         else:
             pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
+            # These are host-built; stage them over non-blocking.
             siglip_position_ids = torch.concat(siglip_position_ids, dim=0).to(
-                pixel_values_videos.device
+                pixel_values_videos.device, non_blocking=True
             )
-            cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32).to(
-                pixel_values_videos.device
+            cu_seqlens = async_tensor_h2d(
+                cu_seqlens, dtype=torch.int32, device=pixel_values_videos.device
             )
             sample_indices = torch.concat(sample_indices, dim=0).to(
-                pixel_values_videos.device
+                pixel_values_videos.device, non_blocking=True
             )
 
             video_embeds = self.visual(

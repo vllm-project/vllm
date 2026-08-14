@@ -31,6 +31,7 @@ from vllm.model_executor.models.bailing_moe_v3 import (
     BailingMoeV3MoE,
     _configure_ling_fp8_quant_config,
     _maybe_pad_block_fp8_shared_expert_checkpoint_tensor,
+    _maybe_remap_ling_mxfp4_weight_names,
 )
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
@@ -231,7 +232,7 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
         super().__init__()
         self.config = _get_draft_hf_config(vllm_config)
         self.quant_config = vllm_config.quant_config
-        _configure_ling_fp8_quant_config(self.quant_config)
+        _configure_ling_fp8_quant_config(self.quant_config, self.config)
         self.model = BailingMoeV3MultiTokenPredictor(
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "model"),
@@ -281,6 +282,7 @@ class BailingMoeV3MTPModel(nn.Module, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = self.hf_to_vllm_mapper.apply(weights)
+        weights = _maybe_remap_ling_mxfp4_weight_names(weights, self.quant_config)
         stacked_params_mapping = [
             (".fused_qkv_a_proj", ".q_a_proj", 0),
             (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),

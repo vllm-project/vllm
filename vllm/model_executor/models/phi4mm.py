@@ -270,8 +270,7 @@ class Phi4MMImageEncoder(nn.Module):
         pixel_values = pixel_values.flatten(0, 1)
 
         img_features = self.get_img_features(
-            pixel_values,
-            image_attention_mask.type(torch.BoolTensor).flatten(0, 1).to(target_device),
+            pixel_values, image_attention_mask.bool().flatten(0, 1)
         )
 
         base_feat_height_target = self.base_feat_height_target
@@ -906,7 +905,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         return dict(
             input_image_embeds=MultiModalFieldConfig.batched("image"),
             image_attention_mask=MultiModalFieldConfig.batched("image"),
-            image_sizes=MultiModalFieldConfig.batched("image"),
+            image_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             num_img_tokens=MultiModalFieldConfig.batched("image"),
             input_audio_embeds=MultiModalFieldConfig.batched("audio"),
         )

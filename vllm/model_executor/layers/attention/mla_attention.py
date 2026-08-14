@@ -204,7 +204,7 @@ import itertools
 import math
 from abc import abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from math import lcm
 from typing import ClassVar, Generic, TypeVar, cast
@@ -270,6 +270,7 @@ from vllm.utils.torch_utils import (
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
+    get_dtype_size,
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
     np_to_pinned_tensor,
@@ -298,7 +299,9 @@ from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
+    KVQuantMode,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
     get_kv_quant_mode,
 )
 
@@ -406,6 +409,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         indexer: object | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
         non_causal_multi_token_decode: bool = False,
+        sliding_window: int | None = None,
+        prefill_backend_cls: type[MLAPrefillBackend] | None = None,
         **extra_impl_args,
     ):
         super().__init__()
@@ -423,6 +428,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.layer_name = prefix
         self.indexer = indexer
         self.non_causal_multi_token_decode = non_causal_multi_token_decode
+        self.sliding_window = sliding_window
         self.num_kv_heads = 1
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
 
@@ -515,7 +521,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             scale=self.scale,
             num_kv_heads=1,
             alibi_slopes=None,
-            sliding_window=None,
+            sliding_window=sliding_window,
             kv_cache_dtype=self.kv_cache_dtype,
             logits_soft_cap=None,
             attn_type=AttentionType.DECODER,
@@ -551,7 +557,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.prefill_backend = None
         else:
             try:
-                prefill_backend_cls = get_mla_prefill_backend(vllm_config)
+                prefill_backend_cls = prefill_backend_cls or get_mla_prefill_backend(
+                    vllm_config
+                )
             except ValueError:
                 if (
                     not self.impl.is_sparse
@@ -1139,13 +1147,24 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
-        return MLAAttentionSpec(
+        common_kwargs = dict(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+            # fp8_ds_mla: 656-byte custom layout (kv_lora_rank=512 +
+            # qk_rope_head_dim=64, head_size=576). See flashmla_sparse.py.
+            state_content_bytes=656 if self.kv_cache_dtype == "fp8_ds_mla" else None,
+        )
+        if self.sliding_window is not None:
+            return SlidingWindowMLASpec(
+                **common_kwargs,
+                sliding_window=self.sliding_window,
+            )
+        return MLAAttentionSpec(
+            **common_kwargs,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
 
@@ -1356,6 +1375,20 @@ class _DecodeConcatQuantFP8(QuantFP8):
 
 
 class MLACommonBackend(AttentionBackend):
+    @classmethod
+    def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
+        """Per-token-head modes pack an inline fp32 scale pair after the
+        latent data (single-sided: ``head_size_v == 0`` for MLA)."""
+        mode = spec.kv_quant_mode
+        if spec.state_content_bytes is not None or not mode.is_per_token_head:
+            return spec
+        head_size = spec.head_size
+        if mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            head_size //= 2
+        scale_bytes = get_dtype_size(torch.float32)
+        content = head_size * get_dtype_size(spec.dtype) + 2 * scale_bytes
+        return replace(spec, state_content_bytes=content)
+
     @staticmethod
     def get_name() -> str:
         return "TRITON_MLA"
@@ -2056,7 +2089,15 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.num_heads = get_num_attention_heads_from_layers(
             vllm_config, layer_names
         ) or self.model_config.get_num_attention_heads(parallel_config)
-        self.mla_dims = get_mla_dims(self.model_config)
+        # Hybrid MLA models may use different latent dimensions per KV group.
+        layer = self.compilation_config.static_forward_context[layer_names[0]]
+        self.mla_dims = MLADims(
+            q_lora_rank=layer.q_lora_rank,
+            kv_lora_rank=layer.kv_lora_rank,
+            qk_nope_head_dim=layer.qk_nope_head_dim,
+            qk_rope_head_dim=layer.qk_rope_head_dim,
+            v_head_dim=layer.v_head_dim,
+        )
         self.aot_schedule = current_platform.is_cuda()
 
         self.kv_cache_spec = kv_cache_spec
@@ -2092,7 +2133,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 (
                     self.chunked_prefill_workspace_size
                     + self.chunked_prefill_workspace_size // self.dcp_world_size,
-                    self.model_config.get_head_size(),
+                    self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim,
                 ),
                 dtype=torch.bfloat16
                 if use_packed_fp8_cache
@@ -2109,7 +2150,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self.chunked_prefill_workspace = torch.empty(
                 (
                     self.chunked_prefill_workspace_size,
-                    self.model_config.get_head_size(),
+                    self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim,
                 ),
                 dtype=torch.bfloat16 if use_packed_fp8_cache else self.q_data_type,
                 device=device,
@@ -2392,6 +2433,22 @@ def reorg_kvcache(
     return reorganized_kv_c_normed, reorganized_k_pe
 
 
+def neutralize_empty_context_partials(
+    chunked_context: "MLACommonPrefillMetadata.ChunkedContextMetadata",
+    output: torch.Tensor,
+    output_lse: torch.Tensor,
+) -> None:
+    """Neutralize the partial of every prefill that no chunk covers.
+
+    A prefill without context is never gathered, so nothing would write its rows;
+    a zero output with an ``-inf`` lse carries no weight into the final merge
+    against the suffix partial.
+    """
+    for token_slice in chunked_context.empty_token_slices:
+        output[token_slice].zero_()
+        output_lse[:, token_slice].fill_(float("-inf"))
+
+
 def init_mla_context_partial(
     chunked_context: "MLACommonPrefillMetadata.ChunkedContextMetadata",
     attn_output: torch.Tensor,
@@ -2401,7 +2458,9 @@ def init_mla_context_partial(
     """Allocate the running context partial over all prefill tokens.
 
     Laid out like the chunk partials so the final whole-batch merge against the
-    suffix partial sees matching head strides.
+    suffix partial sees matching head strides. Callers whose backend honors an
+    ``out`` tensor already know that layout and can allocate directly, pairing it
+    with ``neutralize_empty_context_partials``.
     """
     output = torch.empty(
         (num_tokens, *attn_output.shape[1:]),
@@ -2413,10 +2472,7 @@ def init_mla_context_partial(
         dtype=attn_softmax_lse.dtype,
         device=attn_softmax_lse.device,
     )
-    # No chunk covers a prefill without context, so neutralize its partial.
-    for token_slice in chunked_context.empty_token_slices:
-        output[token_slice].zero_()
-        output_lse[:, token_slice].fill_(float("-inf"))
+    neutralize_empty_context_partials(chunked_context, output, output_lse)
     return output, output_lse
 
 
@@ -2426,16 +2482,26 @@ def accumulate_mla_context_chunk(
     attn_softmax_lse: torch.Tensor,
     output: torch.Tensor,
     output_lse: torch.Tensor,
+    output_written: bool = False,
 ) -> None:
     """Fold one chunk's partial into the running context partial.
 
     Only the first request may be a continuation; its tokens are merged and the
     remaining token range is initialized.
+
+    Args:
+        output_written: The chunk's attention output already landed in
+            ``output[chunk.token_slice]`` because the backend was handed it as
+            ``out``, leaving only the lse to fold. Invalid for a continuation
+            chunk, whose leading tokens must be merged rather than overwritten.
     """
     token_start = chunk.token_slice.start
     token_end = chunk.token_slice.stop
     init_start = token_start
     if chunk.is_continuation:
+        assert not output_written, (
+            "a continuation chunk must not write over the partial it merges with"
+        )
         init_start = chunk.continuation_token_end
         num_merged = init_start - token_start
         merge_attn_states(
@@ -2448,7 +2514,8 @@ def accumulate_mla_context_chunk(
         )
     if init_start < token_end:
         written = init_start - token_start
-        output[init_start:token_end].copy_(attn_output[written:])
+        if not output_written:
+            output[init_start:token_end].copy_(attn_output[written:])
         output_lse[:, init_start:token_end].copy_(attn_softmax_lse[:, written:])
 
 

@@ -20,6 +20,8 @@ import regex as re
 import requests
 from tqdm.asyncio import tqdm
 
+from vllm.assets.base import VLLM_S3_BUCKET_URL
+
 INVALID = -9999999
 
 
@@ -44,8 +46,8 @@ def download_and_cache_file(url: str, filename: str | None = None) -> str:
 
 def load_gsm8k_data() -> tuple[list[dict], list[dict]]:
     """Load GSM8K train and test data"""
-    train_url = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/train.jsonl"
-    test_url = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl"
+    train_url = f"{VLLM_S3_BUCKET_URL}/ci-datasets/gsm8k/train.jsonl"
+    test_url = f"{VLLM_S3_BUCKET_URL}/ci-datasets/gsm8k/test.jsonl"
 
     train_file = download_and_cache_file(train_url)
     test_file = download_and_cache_file(test_url)
