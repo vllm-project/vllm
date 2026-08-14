@@ -110,6 +110,11 @@ class SingleTypeKVCacheManager(ABC):
         # determining the attention groups.
         self.use_eagle = False
 
+        # Whether the engine runs an EAGLE/MTP drafter at all. Unlike
+        # ``use_eagle`` this is not per-group: the drop is applied to the draft
+        # attention group, but Mamba must still publish where it lands.
+        self.engine_uses_eagle = False
+
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
@@ -462,6 +467,7 @@ class SingleTypeKVCacheManager(ABC):
             use_eagle=self.use_eagle,
             retention_interval=retention_interval,
             reachable_boundaries=reachable_boundaries,
+            unreachable_boundaries=self._unreachable_boundaries(request),
         )
         self.block_pool.cache_full_blocks(
             request=request,
@@ -485,6 +491,7 @@ class SingleTypeKVCacheManager(ABC):
         use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
+        unreachable_boundaries: Sequence[int] = (),
     ) -> list[bool] | None:
         """Per-block mask for ``cache_full_blocks``. ``None`` means cache
         every (non-null) block — the default for full attention.
@@ -492,9 +499,14 @@ class SingleTypeKVCacheManager(ABC):
         Subclasses with sparse hit semantics (SWA / Mamba) override this to skip
         blocks that can never serve a hit at any alignment-aligned prefix length.
         ``reachable_boundaries`` are token positions whose reachable tail must be
-        retained; the base (dense) policy ignores them.
+        retained and ``unreachable_boundaries`` positions proven dead; the base
+        (dense) policy ignores both.
         """
         return None
+
+    def _unreachable_boundaries(self, request: Request) -> Sequence[int]:
+        """Token boundaries no lookup can land on, so not worth caching."""
+        return ()
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         """
@@ -1012,6 +1024,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
+        unreachable_boundaries: Sequence[int] = (),
     ) -> list[bool] | None:
         assert isinstance(kv_cache_spec, SlidingWindowSpec)
         if alignment_tokens is None:
@@ -1375,6 +1388,7 @@ class MambaManager(SingleTypeKVCacheManager):
         use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
+        unreachable_boundaries: Sequence[int] = (),
     ) -> list[bool] | None:
         """Sparse Mamba state-snapshot retention.
 
@@ -1387,12 +1401,26 @@ class MambaManager(SingleTypeKVCacheManager):
         ``reachable_boundaries`` are proven reuse points (the replay boundary and
         any cross-request shared-prefix junction, Marconi-style APC); their
         boundary state is always kept so sparse retention does not defeat reuse.
+        ``unreachable_boundaries`` are the converse and are dropped from every
+        retention mode, dense included.
         """
-        if retention_interval is None or alignment_tokens is None:
-            # Dense caching (default) or no alignment constraint imposed.
-            return None
         assert isinstance(kv_cache_spec, MambaSpec)
         block_size = kv_cache_spec.block_size
+
+        def drop_unreachable(mask: list[bool] | None) -> list[bool] | None:
+            if not unreachable_boundaries:
+                return mask
+            if mask is None:
+                mask = [True] * (end_block - start_block)
+            for boundary_tokens in unreachable_boundaries:
+                block = boundary_tokens // block_size - 1
+                if start_block <= block < end_block:
+                    mask[block - start_block] = False
+            return mask
+
+        if retention_interval is None or alignment_tokens is None:
+            # Dense caching (default) or no alignment constraint imposed.
+            return drop_unreachable(None)
         mask = [False] * (end_block - start_block)
 
         # (1) Segment-boundary states. A Mamba hit needs exactly the single
@@ -1404,7 +1432,7 @@ class MambaManager(SingleTypeKVCacheManager):
             per_segment = segment_tokens // block_size
             if per_segment <= 1:
                 # Interval at/below the block size: every block is a boundary.
-                return None
+                return drop_unreachable(None)
             first_boundary = (
                 start_block + per_segment
             ) // per_segment * per_segment - 1
@@ -1421,7 +1449,7 @@ class MambaManager(SingleTypeKVCacheManager):
             if start_block <= boundary_block < end_block:
                 mask[boundary_block - start_block] = True
 
-        return mask
+        return drop_unreachable(mask)
 
     def remove_skipped_blocks(
         self,
@@ -1708,6 +1736,47 @@ class MambaManager(SingleTypeKVCacheManager):
                     continue
                 self.cached_blocks_this_step.add(block.block_hash)
 
+    def _state_boundary(self, request: Request) -> int:
+        """Sub-block position whose state this prompt publishes, and where a
+        replay of it looks."""
+        hash_block_size = self.block_pool.hash_block_size
+        if self.engine_uses_eagle:
+            # A replay is rewound one hash unit, so the snapshot belongs there
+            # rather than at the prompt's tail.
+            return mamba_state_cache_position(
+                request.num_prompt_tokens, self.block_size, hash_block_size
+            )
+        return request.num_prompt_tokens // hash_block_size * hash_block_size
+
+    def _unreachable_boundaries(self, request: Request) -> Sequence[int]:
+        """A block-aligned prompt end, once the state below it is published.
+
+        No lookup can land at or past this prompt's own end: its deepest key is
+        that end, and the drafter rewinds one hash unit off whatever the EAGLE
+        group matched. The state there is therefore dead, while the rewound one
+        below it is where consumers land. Guarded on the latter being cached so
+        a prompt is never left without a state.
+        """
+        num_prompt_tokens = request.num_prompt_tokens
+        if (
+            self.mamba_cache_mode != "align"
+            or not self.engine_uses_eagle
+            or num_prompt_tokens % self.block_size != 0
+        ):
+            return ()
+        boundary = self._state_boundary(request)
+        idx = boundary // self.block_pool.hash_block_size - 1
+        if not 0 <= idx < len(request.block_hashes):
+            return ()
+        if (
+            self.block_pool.get_cached_block(
+                request.block_hashes[idx], [self.kv_cache_group_id]
+            )
+            is None
+        ):
+            return ()
+        return (num_prompt_tokens,)
+
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
 
@@ -1723,17 +1792,7 @@ class MambaManager(SingleTypeKVCacheManager):
             return None
         if num_tokens % hash_block_size != 0:
             return None
-        if self.use_eagle:
-            # Spec decode replays from one unit below the consumer's match, so
-            # the snapshot belongs there rather than at the prompt's tail.
-            boundary = mamba_state_cache_position(
-                request.num_prompt_tokens, self.block_size, hash_block_size
-            )
-        else:
-            boundary = (
-                request.num_prompt_tokens // hash_block_size
-            ) * hash_block_size
-        if num_tokens != boundary:
+        if num_tokens != self._state_boundary(request):
             return None
 
         block_idx = num_tokens // self.block_size
