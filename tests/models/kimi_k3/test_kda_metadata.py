@@ -315,6 +315,36 @@ def test_kimi_k3_kda_backend_uses_private_metadata_builder():
     assert issubclass(KimiK3KDAMetadataBuilder, GDNAttentionMetadataBuilder)
 
 
+def test_kimi_k3_metadata_uses_precomputed_aligned_state_indices():
+    batch = BatchSpec(seq_lens=[40, 30], query_lens=[1, 1])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, DEVICE
+    ).replace(is_prefilling=torch.tensor([False, False]))
+    builder = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=2,
+        full_cuda_graph=False,
+        mamba_cache_mode="align",
+    )
+    assert isinstance(builder, KimiK3KDAMetadataBuilder)
+    precomputed_indices = torch.tensor(
+        [
+            [101, 102, 103],
+            [201, 202, 203],
+            [301, 302, 303],
+        ],
+        dtype=torch.int32,
+    )
+    builder.mamba_aligned_state_indices = precomputed_indices
+
+    metadata = builder.build(0, common_attn_metadata)
+
+    torch.testing.assert_close(
+        metadata.non_spec_state_indices_tensor,
+        precomputed_indices[: batch.batch_size, 0],
+    )
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_stage_spec_decode_metadata_matches_pytorch():
     device = torch.device("cuda")

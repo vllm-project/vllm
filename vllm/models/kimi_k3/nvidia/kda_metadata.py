@@ -234,6 +234,8 @@ class KimiK3KDAMetadata(GDNAttentionMetadata):
 
 
 class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
+    mamba_aligned_state_indices: torch.Tensor | None = None
+
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
@@ -251,12 +253,13 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         #   offsets = torch.arange(1 + num_speculative_blocks, dtype=torch.int32)
         #   indices = (start[:, None] + offsets).to(torch.int64)
         #   block_table_tensor = torch.gather(block_table, 1, indices)
-        block_table_tensor = _mamba_get_block_table_tensor(
-            m.block_table_tensor,
-            m.seq_lens,
-            self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
-        )
+        if self.vllm_config.cache_config.mamba_cache_mode == "align":
+            assert self.mamba_aligned_state_indices is not None, (
+                "Aligned Mamba state indices must be precomputed"
+            )
+            block_table_tensor = self.mamba_aligned_state_indices[: m.num_reqs]
+        else:
+            block_table_tensor = m.block_table_tensor
 
         if not self.use_spec_decode or num_decode_draft_tokens_cpu is None:
             spec_sequence_masks_cpu = None
