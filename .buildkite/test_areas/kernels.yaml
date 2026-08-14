@@ -375,7 +375,7 @@ steps:
   - tests/quantization/reference_mxfp4.py
   - tests/quantization/test_auto_round.py
   commands:
-  - uv pip install --system b12x==1.2.6
+  - uv pip install --system b12x==1.3.0
   - pytest -v -s model_executor/kernels/test_b12x_linear.py
       model_executor/test_b12x_warmup.py
       kernels/quantization/test_block_fp8.py
