@@ -14,6 +14,10 @@ from tests.kernels.quant_utils import (
 )
 from tests.kernels.utils import fp8_ulp_distance
 from vllm.config import VllmConfig
+from vllm.model_executor.kernels.linear.scaled_mm.b12x_block import (
+    B12xFp8BlockScaledMMKernel,
+    _run_b12x_fp8_block_scaled_mm,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -353,3 +357,54 @@ def test_w8a8_block_fp8_flashinfer_matmul(M, N, K, block_size, out_dtype, seed):
         torch.abs(out.to(torch.bfloat16) - ref_out.to(torch.bfloat16))
     ) / torch.mean(torch.abs(ref_out.to(torch.bfloat16)))
     assert rel_diff < 0.001
+
+
+@pytest.mark.parametrize(
+    "M,N,K",
+    [(1, 128, 256), (8, 256, 512), (129, 256, 256), (2, 4096, 4096)],
+)
+@torch.inference_mode()
+def test_w8a8_block_fp8_b12x_matmul(M, N, K):
+    supported, reason = B12xFp8BlockScaledMMKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+
+    torch.manual_seed(M)
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    A_bf16 = (torch.rand(M, K, dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
+    B_bf16 = (torch.rand(N, K, dtype=torch.bfloat16) - 0.5) * 2 * fp8_max
+    A_fp8, As = per_token_group_quant_fp8(A_bf16, 128, use_ue8m0=False)
+    B_fp8, Bs = per_block_cast_to_fp8(
+        B_bf16,
+        block_size=[128, 128],
+        use_ue8m0=False,
+    )
+    As = As.float()
+    Bs = Bs.float()
+
+    ref_out = native_w8a8_block_matmul(
+        A_fp8,
+        B_fp8,
+        As,
+        Bs,
+        [128, 128],
+        torch.bfloat16,
+    )
+    out = _run_b12x_fp8_block_scaled_mm(
+        A_fp8,
+        B_fp8,
+        As,
+        Bs,
+        torch.bfloat16,
+    )
+
+    rel_diff = torch.mean(torch.abs(out.float() - ref_out.float())) / torch.mean(
+        torch.abs(ref_out.float())
+    )
+    cosine = torch.nn.functional.cosine_similarity(
+        out.float().flatten(),
+        ref_out.float().flatten(),
+        dim=0,
+    )
+    assert rel_diff < 0.002
+    assert cosine >= 0.9999
