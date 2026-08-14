@@ -339,9 +339,9 @@ steps:
     # e2e
     - pytest -v -s tests/models/quantization/test_nvfp4.py
 
-- label: B12X Linear Kernels (DGX Spark) Nightly
-  key: b12x-linear-kernels-dgx-spark-nightly
-  timeout_in_minutes: 30
+- label: b12x Linear and MoE Kernels (DGX Spark) Nightly
+  key: b12x-kernels-dgx-spark-nightly
+  timeout_in_minutes: 60
   device: dgx-spark
   optional: true
   num_devices: 1
@@ -350,8 +350,13 @@ steps:
   source_file_dependencies:
   - setup.py
   - vllm/model_executor/kernels/linear/
+  - vllm/model_executor/layers/fused_moe/b12x.py
+  - vllm/model_executor/layers/fused_moe/oracle/mxfp4.py
+  - vllm/model_executor/layers/fused_moe/oracle/nvfp4.py
+  - vllm/model_executor/layers/quantization/utils/b12x_moe.py
   - vllm/model_executor/warmup/b12x_warmup.py
   - vllm/utils/b12x.py
+  - tests/kernels/moe/test_b12x.py
   - tests/model_executor/kernels/test_b12x_linear.py
   - tests/model_executor/test_b12x_warmup.py
   - tests/kernels/quantization/test_block_fp8.py
@@ -359,7 +364,8 @@ steps:
   - uv pip install --system b12x==1.2.4
   - pytest -v -s model_executor/kernels/test_b12x_linear.py
       model_executor/test_b12x_warmup.py
-      kernels/quantization/test_block_fp8.py -k b12x
+      kernels/quantization/test_block_fp8.py
+      kernels/moe/test_b12x.py -k b12x
 
 - label: Kernels Helion Test
   key: kernels-helion-test
