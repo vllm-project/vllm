@@ -218,8 +218,9 @@ class ServingTokens(GenerateBaseServing):
 
         if self.force_no_detokenize:
             sampling_params.detokenize = False
-        if request.stream:
-            sampling_params.output_kind = RequestOutputKind.DELTA
+        sampling_params.output_kind = (
+            RequestOutputKind.DELTA if request.stream else RequestOutputKind.FINAL_ONLY
+        )
 
         self._log_inputs(
             request_id,
