@@ -30,16 +30,12 @@ from vllm.utils.import_utils import has_humming
 
 def test_mxfp4_weight_with_block_fp8_activation_is_supported():
     """MXFP4 weight + block-FP8 (group-128) activation is an allowed pair."""
-    assert HummingExpertsBase._supports_quant_scheme(
-        kMxfp4Static, kFp8Dynamic128Sym
-    )
+    assert HummingExpertsBase._supports_quant_scheme(kMxfp4Static, kFp8Dynamic128Sym)
 
 
 def test_mxfp4_weight_with_per_token_fp8_activation_still_supported():
     """The pre-existing per-token FP8 pairing must keep working."""
-    assert HummingExpertsBase._supports_quant_scheme(
-        kMxfp4Static, kFp8DynamicTokenSym
-    )
+    assert HummingExpertsBase._supports_quant_scheme(kMxfp4Static, kFp8DynamicTokenSym)
 
 
 @pytest.mark.skipif(not has_humming(), reason="humming is not installed")
