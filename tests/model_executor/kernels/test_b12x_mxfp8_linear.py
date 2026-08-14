@@ -46,7 +46,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
 )
-from vllm.platforms import PlatformEnum
+from vllm.platforms import PlatformEnum, current_platform
 from vllm.utils.b12x import b12x_warmup_token_counts
 
 
@@ -100,6 +100,7 @@ def test_b12x_backend_does_not_intercept_unquantized_bf16(
     dist_init,
 ) -> None:
     default_vllm_config.kernel_config.linear_backend = "b12x"
+    device = current_platform.device_type
     layer = ReplicatedLinear(
         128,
         64,
@@ -107,9 +108,9 @@ def test_b12x_backend_does_not_intercept_unquantized_bf16(
         params_dtype=torch.bfloat16,
         quant_config=None,
         prefix="bf16_linear",
-    ).cuda()
+    ).to(device)
     layer.weight.data.normal_()
-    x = torch.randn(8, 128, device="cuda", dtype=torch.bfloat16)
+    x = torch.randn(8, 128, device=device, dtype=torch.bfloat16)
 
     output, output_bias = layer(x)
     expected = torch.nn.functional.linear(x, layer.weight)
