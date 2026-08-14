@@ -5,12 +5,19 @@
 import functools
 import importlib
 import importlib.util
-from collections.abc import Iterable
-from dataclasses import fields, is_dataclass
+from collections.abc import Callable, Hashable, Iterable
+from dataclasses import dataclass, fields, is_dataclass
 from types import ModuleType
 from typing import Any
 
 import torch
+
+
+@dataclass(frozen=True)
+class B12xWarmupUnit:
+    name: str
+    key: Hashable
+    compile: Callable[[], None]
 
 
 @functools.cache
