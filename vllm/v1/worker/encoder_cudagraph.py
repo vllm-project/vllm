@@ -203,6 +203,10 @@ class EncoderCudaGraphManager:
         """Check if a modality is supported by this manager."""
         return modality in self.config.modalities
 
+    def is_captured(self) -> bool:
+        """Return whether a CUDA graph pool is active."""
+        return self.graph_pool is not None
+
     def clear(self) -> None:
         """Release captured encoder CUDA graphs and the manager-local pool."""
         for graph_set in self.budget_graphs.values():
