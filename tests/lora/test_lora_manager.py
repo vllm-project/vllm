@@ -317,22 +317,23 @@ def test_target_modules_fail_closed_on_unsupported_matched_modules(
     model = dummy_model
     model.add_module("unsupported", UnsupportedContainer())
 
-    with pytest.raises(ValueError, match="unsupported.dense1"):
-        LoRAModelManager(
-            model,
-            1,
-            1,
-            1,
-            LoRAConfig(
-                max_lora_rank=8,
-                max_cpu_loras=8,
-                max_loras=8,
-                lora_dtype=DEFAULT_DTYPE,
-                target_modules=["dense1"],
-            ),
-            torch.device(DEVICES[0]),
-            default_vllm_config,
-        )
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8,
+            max_cpu_loras=8,
+            max_loras=8,
+            lora_dtype=DEFAULT_DTYPE,
+            target_modules=["dense1"],
+        ),
+        torch.device(DEVICES[0]),
+        default_vllm_config,
+    )
+
+    assert "unsupported.dense1" not in manager.modules
 
 
 def test_get_dummy_lora_warmup_rank_for_fully_sharded_moe():

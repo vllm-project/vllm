@@ -418,7 +418,7 @@ class LoRAModelManager:
             if isinstance(module, PPMissingLayer):
                 continue
 
-            if not self._match_target_modules(module_name):
+            if not self._match_target_modules(module_name, module):
                 continue
 
             punica_wrapper = self._get_punica_wrapper(module_name)
@@ -565,7 +565,7 @@ class LoRAModelManager:
         model = LoRAModel(lora_id, rank, {})
         for module_name, module in self.model.named_modules():
             if (
-                not self._match_target_modules(module_name)
+                not self._match_target_modules(module_name, module)
                 or not isinstance(module, BaseLayerWithLoRA)
                 or self._get_punica_wrapper(module_name) is None
             ):
@@ -701,7 +701,7 @@ class LoRAModelManager:
             )
         return adjusted_rank
 
-    def _match_target_modules(self, module_name: str) -> bool:
+    def _match_target_modules(self, module_name: str, module: nn.Module) -> bool:
         """Check if a module should have LoRA applied.
 
         This method first checks if the module is in vLLM's supported LoRA
@@ -711,11 +711,16 @@ class LoRAModelManager:
         Args:
             module_name: Full dot-separated module name (e.g.,
                 "model.layers.0.self_attn.o_proj")
+            module: Runtime module associated with ``module_name``.
 
         Returns:
             True if LoRA should be applied to this module, False otherwise.
         """
-        if not is_supported_lora_module(module_name, self.supported_lora_modules):
+        if not is_supported_lora_module(
+            module_name,
+            module,
+            self.supported_lora_modules,
+        ):
             return False
         return is_in_target_modules(
             module_name,
