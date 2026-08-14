@@ -1252,6 +1252,18 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             hidden_states = None
             residual = block_residual
 
+        # Under attn-res the model's output hidden state is not `prefix_sum +
+        # hidden_states`: it is produced after the loop by `attn_res`, which
+        # folds the block-residual bank in through `output_attn_res_norm` /
+        # `output_attn_res_proj`. Aux layer id `end_layer` is documented as the
+        # last layer's output, so on the last PP rank capture it after that
+        # combination instead of inside the loop.
+        capture_final_after_attn_res = (
+            self.use_attn_res
+            and get_pp_group().is_last_rank
+            and self.end_layer in self.aux_hidden_state_layers
+        )
+
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer],
             start=self.start_layer,
@@ -1262,7 +1274,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 prefix_sum=prefix_sum,
                 residual=residual,
             )
-            if (layer_idx + 1) in self.aux_hidden_state_layers:
+            if (layer_idx + 1) in self.aux_hidden_state_layers and not (
+                capture_final_after_attn_res and layer_idx + 1 == self.end_layer
+            ):
                 if self.use_attn_res:
                     assert prefix_sum is not None
                     aux_hidden_state = prefix_sum + hidden_states
@@ -1315,6 +1329,11 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             else:
                 hidden_states = sp_all_gather(hidden_states)
                 hidden_states = hidden_states[:full_num_tokens]
+
+        if capture_final_after_attn_res:
+            # `end_layer` is the largest aux id, so appending here keeps
+            # aux_hidden_states ordered by layer id.
+            aux_hidden_states.append(hidden_states)
 
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.

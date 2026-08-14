@@ -815,6 +815,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             block_residual[:, : residual.size(1), :].copy_(residual)
         residual = block_residual
 
+        # See the NVIDIA backend: `_apply_attn_res` below, not the loop, produces
+        # the model's output hidden state, so aux id `end_layer` is captured
+        # after it.
+        capture_final_after_attn_res = (
+            get_pp_group().is_last_rank
+            and self.end_layer in self.aux_hidden_state_layers
+        )
+
         for layer_idx, layer in enumerate(
             self.layers[self.start_layer : self.end_layer],
             start=self.start_layer,
@@ -824,7 +832,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
                 hidden_states=hidden_states,
                 residual=residual,
             )
-            if (layer_idx + 1) in self.aux_hidden_state_layers:
+            if (layer_idx + 1) in self.aux_hidden_state_layers and not (
+                capture_final_after_attn_res and layer_idx + 1 == self.end_layer
+            ):
                 # AMD attn-res layer already returns prefix_sum + MLP delta as
                 # hidden_states; the override drops the block bank in residual.
                 self._maybe_add_hidden_state(
@@ -843,6 +853,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             self.output_attn_res_norm,
             attn_res_block_num,
         )
+        if capture_final_after_attn_res:
+            # `end_layer` is the largest aux id, so appending here keeps
+            # aux_hidden_states ordered by layer id.
+            aux_hidden_states.append(hidden_states)
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
         if aux_hidden_states:

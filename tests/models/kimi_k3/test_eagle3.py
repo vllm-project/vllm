@@ -135,5 +135,53 @@ def test_kimi_linear_forward_extracts_attn_res_aux_hidden_states(monkeypatch):
 
     torch.testing.assert_close(output, final_hidden_states)
     torch.testing.assert_close(aux_hidden_states[0], initial_hidden_states)
-    torch.testing.assert_close(aux_hidden_states[1], prefix_sum + layer_hidden_states)
+    # Aux id `end_layer` is the last layer's *output*, which under attn-res is
+    # produced by the post-loop combination, not by `prefix_sum + hidden_states`.
+    torch.testing.assert_close(aux_hidden_states[1], final_hidden_states)
     assert final_attn_res.call_args.args[2] is block_residual
+
+
+def test_kimi_linear_attn_res_intermediate_aux_uses_prefix_sum(monkeypatch):
+    """Only the final aux id moves; intermediate ids keep prefix_sum + delta."""
+    model = _make_kimi_linear_model()
+    initial_hidden_states = torch.tensor([[1.0, 2.0]])
+    layer_hidden_states = torch.tensor([[3.0, 4.0]])
+    prefix_sum = torch.tensor([[5.0, 6.0]])
+    block_residual = torch.tensor([[[7.0, 8.0]]])
+    final_hidden_states = torch.tensor([[9.0, 10.0]])
+
+    object.__setattr__(model, "start_layer", 0)
+    object.__setattr__(model, "end_layer", 2)
+    layer = Mock(return_value=(layer_hidden_states, prefix_sum, block_residual))
+    object.__setattr__(model, "layers", [layer, layer])
+    object.__setattr__(model, "aux_hidden_state_layers", (1, 2))
+    object.__setattr__(model, "use_attn_res", True)
+    object.__setattr__(model, "num_attn_res_blocks", 1)
+    object.__setattr__(
+        model,
+        "output_attn_res_norm",
+        SimpleNamespace(weight=torch.ones(2), variance_epsilon=1e-5),
+    )
+    object.__setattr__(
+        model,
+        "output_attn_res_proj",
+        SimpleNamespace(weight=torch.ones(1, 2)),
+    )
+    monkeypatch.setattr(
+        kimi_model,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(kimi_model, "attn_res", Mock(return_value=final_hidden_states))
+
+    output, aux_hidden_states = model.forward(
+        input_ids=None,
+        positions=torch.tensor([0]),
+        intermediate_tensors=None,
+        inputs_embeds=initial_hidden_states,
+    )
+
+    assert len(aux_hidden_states) == 2
+    torch.testing.assert_close(aux_hidden_states[0], prefix_sum + layer_hidden_states)
+    torch.testing.assert_close(aux_hidden_states[1], final_hidden_states)
+    torch.testing.assert_close(output, final_hidden_states)
