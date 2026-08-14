@@ -20,10 +20,9 @@ import torch
 # replays a chain as ``getattr(tensor, op)(...)`` and refuses anything outside
 # ``ALLOWED_OPS``, so a spoofed consumer cannot invoke arbitrary methods.
 #
-# Every entry must be a pure view. Both sets derive from this one table: written
-# out separately they drifted, leaving ``t`` consumer-emittable but
-# producer-rejected, and ``to`` allowed but unreachable -- ``to`` being exactly
-# the dtype/device escape the bake exists to reject.
+# Every entry must be a pure view; ``to`` in particular must never be added, as
+# it is the dtype/device escape the bake exists to reject. Both sets derive from
+# this one table so they cannot disagree.
 SUPPORTED_OPS: dict[Callable, str] = {
     torch.Tensor.narrow: "narrow",
     torch.Tensor.view: "view",
@@ -63,10 +62,9 @@ class RdtRouter:
     determines both its owner set and its gather group, so neither appears in the
     routing API. Empty tables mean every producer holds everything.
 
-    That subsumes the coordinate schemes it replaced: pipeline-stage ownership is
-    "the names of these groups have this owner set", expert parallelism is "these
-    expert names have this one-rank owner set", and layouts that fit neither
-    (a group produced by two stages) are expressible for free.
+    Any placement is expressible this way: a pipeline stage is a set of names
+    sharing one owner set, an expert is a name whose owner set is a single rank,
+    and a group produced by two stages is just two classes inside one group.
 
     Both engines derive the same tables from the same wire data, so they agree on
     who serves what. Disagreement is not a wrong answer but a hang or a loud
@@ -96,8 +94,9 @@ class RdtRouter:
         names = list(names or [])
         self.num_groups = len(group_lens) if group_lens else 0
         classes = list(name_owner_class or [])
-        self._class_of = {n: (classes[i] if i < len(classes) else 0)
-                          for i, n in enumerate(names)}
+        self._class_of = {
+            n: (classes[i] if i < len(classes) else 0) for i, n in enumerate(names)
+        }
         # name -> gather group, and the per-group owner union the free barrier
         # fans out to. Both are pure functions of the tables, so precompute once.
         self._group_of: dict[str, int] = {}

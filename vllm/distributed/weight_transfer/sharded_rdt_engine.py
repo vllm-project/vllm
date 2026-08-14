@@ -206,7 +206,7 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     worker's distinct index comes from ``_global_worker_index``."""
 
     num_rdt_buffers: int = 2
-    """[RDT-RING] Depth of the consumer receive-arena ring. Must match the
+    """Depth of the consumer receive-arena ring. Must match the
     producer's — ``_run_chunk_pipeline``'s slot-safety argument rests on it. 2 =
     double buffer: chunk i+1's serve overlaps chunk i's RDMA, and scatter(i-1)
     overlaps RDMA(i) in the other slot. Keep depth x chunk_bytes under the
@@ -214,7 +214,7 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     cluster, where K=3 measurably hurt)."""
 
     arena_presize_gb: float = 0.0
-    """[RDT-RING] Pre-size each packed receive-arena slot to this many GiB
+    """Pre-size each packed receive-arena slot to this many GiB
     (0 = size to the first chunk + coarse 256MB round-up). Set it to cover the
     model's largest atomic chunk (e.g. an untied lm_head). Sizing arenas ONCE
     matters beyond perf -- see the doc's "Sizing arenas once matters beyond
@@ -316,8 +316,8 @@ class ShardedRDTWeightTransferEngine(
         # arenas once matters beyond throughput" for why they rarely grow.
         #
         # Ring depth is both the slot count and the in-flight pull count, one
-        # quantity from ``num_rdt_buffers``. Decoupling them with a spare slot was
-        # measured twice to make the wall worse; see the doc.
+        # quantity from ``num_rdt_buffers``. Decoupling them with a spare slot
+        # measurably slows the sync; see the doc before trying it.
         self._ring_depth = 1
         self._dest_arenas: list[dict[torch.dtype, torch.Tensor]] = [{}]
         self._slot_read_done: list[Any] = []  # one torch.cuda.Event per slot
@@ -326,11 +326,11 @@ class ShardedRDTWeightTransferEngine(
         self._slot_done: list[int] = []
         self._slot_cv: Any = None
         self._pull_slot = 0
-        # [RDT-PULL-TARGETS] (id(chunk), slot) -> (arena data_ptr, per-key views).
+        # (id(chunk), slot) -> (arena data_ptr, per-key views).
         # Lives on the engine, not on the _Chunk: the plan is static and shared
         # across syncs, so a per-slot runtime cache has no business inside it.
         self._targets_cache: dict[tuple[int, int], tuple[int, list[torch.Tensor]]] = {}
-        self._arena_presize = 0  # [RDT-RING] bytes; set from init_info
+        self._arena_presize = 0  # bytes; set from init_info
         self._pending_frees: list[Any] = []  # free_group signal refs, drained per sync
         # The STATIC plan: built once — at init from init_info.group_lens, else
         # lazily on the first update_weights — and reused. Non-None means
@@ -392,7 +392,7 @@ class ShardedRDTWeightTransferEngine(
         self._ensure_proc_worker()
 
     def _configure_ring(self, init_info: ShardedRDTWeightTransferInitInfo) -> None:
-        """[RDT-RING] Ring depth K.
+        """Ring depth K.
 
         Must run before ``_ensure_proc_worker`` creates the per-slot events and
         counters, and before any arena is grown (both happen on the first pull).
@@ -690,7 +690,7 @@ class ShardedRDTWeightTransferEngine(
                     self._slot_cv.wait(timeout=1.0)
             self._slot_read_done[slot].synchronize()
 
-        # [RDT-PACK] Every slice is byte-packed into ONE uint8 arena, 16B-aligned in
+        # Every slice is byte-packed into ONE uint8 arena, 16B-aligned in
         # keys order, under one NIXL descriptor. ``chunk.pack_layout`` mirrors the
         # producer's rule byte-exactly; ``targets`` carves the dtype views back out.
         keys = chunk.keys
@@ -725,7 +725,7 @@ class ShardedRDTWeightTransferEngine(
     def _pull_targets(
         self, chunk: "_Chunk", slot: int, arena: torch.Tensor
     ) -> "list[torch.Tensor]":
-        """[RDT-PULL-TARGETS] Per-key dtype views into ``slot``'s arena.
+        """Per-key dtype views into ``slot``'s arena.
 
         The packed layout is static, so the views are built once per (chunk, slot)
         rather than once per pull -- rebuilding them cost ~1150 Python ops per pull
@@ -794,9 +794,7 @@ class ShardedRDTWeightTransferEngine(
             # the single load pass runs the loaders on meta and records via the
             # lazy's copy_ — with no inline _layerwise_process, no deferral.
             self._install_recording_stamps(model, recorder)
-            model.load_weights(
-                self._build_lazy_weights(names, recorder, self.device)
-            )
+            model.load_weights(self._build_lazy_weights(names, recorder, self.device))
             # Keep only fully-loaded modules (copied numel >= loadable size, the
             # test online_process_loader uses): a partial module leaves unwritten
             # regions that finalize would init, so baking it scatters garbage.
@@ -1010,7 +1008,7 @@ class ShardedRDTWeightTransferEngine(
         if self._quant_stream is not None:
             self._quant_stream.synchronize()
         self._raise_proc_error()
-        # [RDT-SINGLE-CALL] Ensure every fired free_group signal has EXECUTED on
+        # Ensure every fired free_group signal has EXECUTED on
         # the producer before the sync ends: ``begin_sync`` resets the producer's
         # per-group signal counts, so a signal landing after the next sync
         # started would credit a group it does not belong to, over-crediting the
@@ -1058,7 +1056,7 @@ class ShardedRDTWeightTransferEngine(
         return [(ci, by_class[ci]) for ci in sorted(by_class)]
 
     def _build_call_plan(self, names: list[str], group_lens: list[int]) -> "_CallPlan":
-        """[RDT-SINGLE-CALL] Build the STATIC plan for one whole-sync call.
+        """Build the STATIC plan for one whole-sync call.
 
         Pure — no pulls, no engine state touched — so the result is cached and
         reused every sync. Three passes:
@@ -1178,7 +1176,7 @@ class ShardedRDTWeightTransferEngine(
         self._pending_frees.extend(self._router.free_group(group_idx))
 
     def _run_chunk_pipeline(self, plan: "_CallPlan") -> None:
-        """[RDT-RING] Pipelined chunk pulls over the ring of receive slots.
+        """Pipelined chunk pulls over the ring of receive slots.
 
         Issues up to ``ring_depth`` produce RPCs ahead of the blocking gets, so
         while chunk i's RDMA streams the producer serves i+1 into its own ring
@@ -1291,10 +1289,9 @@ class ShardedRDTWeightTransferEngine(
             # PASS 2 — param readers only: quant / kernel-copy / reset for the
             # modules whose LAST scatter is in this chunk. Handed to the
             # DEDICATED quant thread (own CUDA stream, event-chained after this
-            # chunk's scatters) so it never delays this thread's next pass-1 — an
-            # in-order pass 2 here was measured to stall the RPC thread's slot
-            # handshake ~0.5-0.75s/iter (every group's quant postponed the next
-            # item's publication).
+            # chunk's scatters) so it never delays this thread's next pass-1.
+            # Running it in order here stalls the RPC thread's slot handshake by
+            # ~0.5-0.75s/iter, since every group's quant delays the next publish.
             if chunk.quant:
                 ready = torch.cuda.Event()
                 ready.record(self._proc_stream)

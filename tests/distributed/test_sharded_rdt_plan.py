@@ -62,8 +62,16 @@ def _module(layer, copies):
     return copies
 
 
-def _copy(name, layer_param="weight", *, offset=0, shape=(4,), ops=(), layer=None,
-          dtype=torch.bfloat16):
+def _copy(
+    name,
+    layer_param="weight",
+    *,
+    offset=0,
+    shape=(4,),
+    ops=(),
+    layer=None,
+    dtype=torch.bfloat16,
+):
     """A `_Scatter` as the bake would record it: source key, owning layer, and
     the meta destination region."""
     stride = (
@@ -357,16 +365,21 @@ class TestBakeRecording:
         assert 2 * torch.bfloat16.itemsize == 4
 
 
-
 # ---------------------------------------------------------------------------
 # RdtRouter: per-name ownership -> one producer per pull
 # ---------------------------------------------------------------------------
 
 
-def _router(num_producers, num_consumers, owner_sets=None, name_owner_class=None,
-            names=None, group_lens=None):
+def _router(
+    num_producers,
+    num_consumers,
+    owner_sets=None,
+    name_owner_class=None,
+    names=None,
+    group_lens=None,
+):
     """A router over ``n`` single-name groups unless told otherwise, so a test
-    can talk in group indices the way the old coordinate router did."""
+    can state expectations in group indices."""
     if names is None:
         n = len(name_owner_class or []) or (len(group_lens or []) or 1)
         names = [f"g{i}" for i in range(n)]
@@ -392,10 +405,10 @@ class TestRdtRouter:
         assert all(r.producer_for(3, f"g{g}") == 3 for g in range(6))
         assert all(r.producer_for(c, "g0") == c for c in range(8))
 
-    def test_gather_to_all_keeps_the_historical_binding(self):
+    def test_every_producer_nic_carries_traffic(self):
         """16 producers / 8 consumers: the block rule spreads each consumer's
-        pulls over its block, alternating by group, and every producer NIC still
-        carries traffic. Plain `consumer_id % len(owners)` would idle half."""
+        pulls over its block, alternating by group, so no producer sits idle.
+        Plain `consumer_id % len(owners)` would idle half of them."""
         r = _router(16, 8, group_lens=[1] * 95)
         names = [f"g{i}" for i in range(95)]
         for c in range(8):
@@ -429,7 +442,7 @@ class TestRdtRouter:
 
     def test_expert_names_route_to_the_holding_ranks(self):
         """A name held by only some ranks routes to those; a replicated name
-        keeps the full set. Under the old scheme this took two stamp lists."""
+        keeps the full set."""
         r = RdtRouter(
             8,
             4,
@@ -457,11 +470,8 @@ class TestRdtRouter:
 
     def test_a_group_frees_at_every_owner_of_any_of_its_names(self):
         """The free barrier is per group, so its fan-out is the UNION over the
-        group's names — narrower than the old per-group owner list only when a
-        rank holds none of the group's names."""
-        r = RdtRouter(
-            4, 2, [[0, 1], [2, 3]], [0, 1, 0], ["a", "b", "c"], [2, 1]
-        )
+        group's names: a rank holding none of them is not signalled."""
+        r = RdtRouter(4, 2, [[0, 1], [2, 3]], [0, 1, 0], ["a", "b", "c"], [2, 1])
         assert r.group_owners(0) == [0, 1, 2, 3]
         assert r.group_owners(1) == [0, 1]
 
@@ -637,10 +647,8 @@ class TestChunkModuleScatters:
         module-then-bake order."""
         a, b = _FakeLayer("a"), _FakeLayer("b")
         mods = [
-            _module(a, [_copy("a0", shape=(4,)), _copy("a1", shape=(4,))]
-            ),
-            _module(b, [_copy("b0", shape=(4,)), _copy("b1", shape=(4,))]
-            ),
+            _module(a, [_copy("a0", shape=(4,)), _copy("a1", shape=(4,))]),
+            _module(b, [_copy("b0", shape=(4,)), _copy("b1", shape=(4,))]),
         ]
         eng = _planner(
             {},
@@ -753,8 +761,7 @@ class TestBuildCallPlan:
         baked, name_meta, stamps = {}, {}, {}
         for names in (names_a, names_b):
             layer = _FakeLayer(names[0])
-            mod_plan = _module(layer, [_copy(n, shape=(4,)) for n in names]
-            )
+            mod_plan = _module(layer, [_copy(n, shape=(4,)) for n in names])
             for i, n in enumerate(names):
                 baked[n] = mod_plan
                 name_meta[n] = ("bfloat16", [4])
@@ -893,9 +900,8 @@ class TestCallPlanRouting:
 
     def test_an_expert_name_routes_to_the_rank_holding_it(self):
         """PP ∩ EP: stage 0 = ranks 0-1, stage 1 = ranks 2-3, and one expert
-        name inside a stage-1 group is held by rank 3 alone. Under the old
-        scheme this needed a coordinate list on both sides; now the name's own
-        owner set says it."""
+        name inside a stage-1 group is held by rank 3 alone. The name's own owner
+        set is what routes it."""
         eng, names, group_lens = self._routed_planner(
             [[0, 1], [0, 1], [2, 3], [2, 3]],
             1,
@@ -945,9 +951,10 @@ class TestSignalCompleteness:
             group_lens.append(1 + n_experts)
             name_meta[norm] = ("bfloat16", [4])
             live.add(norm)
-            baked[norm] = _module(_FakeLayer(f"norm{li}"), [_copy(norm, shape=(4,))]
-            )
-            fused = _module(_FakeLayer(f"moe{li}"), [
+            baked[norm] = _module(_FakeLayer(f"norm{li}"), [_copy(norm, shape=(4,))])
+            fused = _module(
+                _FakeLayer(f"moe{li}"),
+                [
                     _copy(f"model.layers.{li}.experts.{e}.w", shape=(4,))
                     for e in worker_experts
                 ],
@@ -1100,9 +1107,9 @@ class TestOpAllowlistAgreement:
     replays a chain only if every op is in ``ALLOWED_OPS``. The two must describe
     the same contract, so they are derived from one table.
 
-    They used to be written out twice and had drifted: ``t`` was
-    consumer-emittable but producer-rejected, so a loader calling ``.t()`` baked
-    successfully at init and then failed at first pull with "disallowed op 't'".
+    A divergence is silent until first pull: an op the consumer can emit but the
+    producer rejects bakes fine at init, then fails a whole sync later with
+    "disallowed op".
     """
 
     def test_the_two_allowlists_describe_the_same_contract(self):

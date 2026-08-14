@@ -138,10 +138,9 @@ class TestPublishAndRebuild:
         assert server._inflight_groups == [GI_A]
 
     def test_the_default_lookahead_is_one(self):
-        """Under gather crediting, 1 is the sweet spot: group N+1 is gathered
-        AND published while N is being pulled (the overlap that lookahead=2 had
-        to buy under publish parking), with resident memory at its floor of 2
-        groups — the bound the larger-model runs size against."""
+        """1 is the sweet spot: group N+1 is gathered AND pullable while N is
+        being pulled, with resident memory at its floor of 2 groups — the bound
+        the larger-model runs size against."""
         assert DEFAULT_GATHER_LOOKAHEAD == 1
 
 
@@ -281,11 +280,11 @@ def _loop_engine(server, n_groups, *, lookahead):
 
 
 class TestGatherCredit:
-    """The memory bound moved from parking publishes to gating gathers: a
-    gathered group is published (serveable) immediately, and the ENGINE's loop
-    stops gathering while more than `gather_lookahead` groups are unfreed. So
-    at most `lookahead + 1` groups are resident — at the default of 1, AT MOST
-    TWO — while group N+1 is already pulled the instant N's pulls finish."""
+    """The memory bound gates GATHERS, not publishes: a gathered group is
+    serveable immediately, and the ENGINE's loop stops gathering while more than
+    `gather_lookahead` groups are unfreed. So at most `lookahead + 1` groups are
+    resident — two at the default — while group N+1 is pulled the instant N's
+    pulls finish."""
 
     @pytest.fixture
     def gather_engine(self, monkeypatch):
@@ -560,7 +559,7 @@ class TestServedNamesGuard:
 
 
 class TestStallWatchdog:
-    """The bound on the three waits that used to be unbounded.
+    """The liveness bound on the producer's three blocking waits.
 
     Engine-death detection is generation-driven, and no generation is in flight
     during a weight sync, so a consumer that dies INSIDE the sync window has no

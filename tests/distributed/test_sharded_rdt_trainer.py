@@ -63,7 +63,7 @@ class _FakeProducerServer:
         self.free_counts: dict[int, int] = {}
         self._pending_freed: list[int] = []
 
-    # kept under the old name for tests that inspect in-flight groups
+    # Alias for tests that inspect in-flight groups.
     @property
     def inflight(self):
         return self._inflight_groups

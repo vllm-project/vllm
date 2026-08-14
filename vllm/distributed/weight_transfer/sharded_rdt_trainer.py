@@ -57,7 +57,7 @@ logger = init_logger(__name__)
 # group's gather is slower than its pulls.
 DEFAULT_GATHER_LOOKAHEAD = 1
 
-# [RDT-STALL-WATCHDOG] Seconds with no publish, produce or free before the
+# Seconds with no publish, produce or free before the
 # producer declares the sync dead. A consumer that dies mid-sync never signals
 # ``free_group``, so the group is never released and the waits below block
 # forever — which stops this rank iterating its WeightSource, a collective, and
@@ -135,7 +135,7 @@ class _RDTProducerServer:
         self._cache_cond = threading.Condition()
         self._gather_error: BaseException | None = None
 
-        # [RDT-STALL-WATCHDOG] Monotonic stamp of the last forward step of the
+        # Monotonic stamp of the last forward step of the
         # publish -> serve -> free loop. The waits below poll it instead of
         # blocking forever, so a dead consumer fails the sync with a real error.
         self._stall_timeout = float(stall_timeout_s)
@@ -145,7 +145,7 @@ class _RDTProducerServer:
         # instead of blocking forever in the cache wait. None = serve anything.
         self._served_names = set(served_names) if served_names is not None else None
 
-        # [RDT-FREE-BARRIER] Every live consumer signals free_group(gi) at every
+        # Every live consumer signals free_group(gi) at every
         # owner, once per sync; the group frees when the count reaches
         # begin_sync's live total — one uniform target, no routed per-producer
         # ones. Signals may precede the publish, which completes them.
@@ -154,7 +154,7 @@ class _RDTProducerServer:
         # gi -> the names this producer published for it (what release drops).
         self._group_names: dict[int, list[str]] = {}
 
-        # [RDT-GATHER-CREDIT] Published-but-unfreed groups, plus freed ones not
+        # Published-but-unfreed groups, plus freed ones not
         # yet handed back. The memory gate lives in the ENGINE's gather loop; this
         # side only accounts — free_group moves a group from _inflight_groups to
         # _freed_pending, which the engine collects via wait_freed / end_sync to
@@ -163,7 +163,7 @@ class _RDTProducerServer:
         self._inflight_groups: list[int] = []
         self._freed_pending: list[int] = []
 
-        # [RDT-RING] Per-consumer ring of packed serve arenas, rotated per pull.
+        # Per-consumer ring of packed serve arenas, rotated per pull.
         self._nring = max(1, num_rdt_buffers)
         self._serve_rings: dict[int, list[torch.Tensor | None]] = {}
         self._serve_idx: dict[int, int] = {}
@@ -172,14 +172,14 @@ class _RDTProducerServer:
         self._reg_lock = threading.Lock()
         self._arena_presize = int(arena_presize_gb * (1 << 30))
 
-        # [RDT-PACK-DSTS] (consumer_id, ring idx, packed layout) ->
+        # (consumer_id, ring idx, packed layout) ->
         # (arena data_ptr, destination views). Keyed on the arena pointer too, so
         # a ring regrow invalidates rather than writing into a freed buffer. See
         # the serve path for why the layout, not the spec names, is the key.
         self._pack_dsts: dict[tuple, tuple[int, list[torch.Tensor]]] = {}
 
         # Freeze the static post-init object graph so gen-2 GC never stops the
-        # world mid-serve (measured straggler fix in the old producer).
+        # world mid-serve, which shows up as serve stragglers.
         gc.collect()
         gc.freeze()
 
@@ -284,7 +284,7 @@ class _RDTProducerServer:
 
         NEVER blocks: a gathered group is serveable immediately. The memory bound
         lives in the engine's gather loop, which stops GATHERING (not publishing)
-        past ``gather_lookahead`` unfreed groups — see [RDT-GATHER-CREDIT].
+        past ``gather_lookahead`` unfreed groups.
 
         ``entries`` is ``(storages, views)``: one CUDA-IPC export per storage,
         plus per-name ``(sid, dtype_name, shape, stride, storage_offset)`` rebuilt
@@ -457,7 +457,7 @@ class _RDTProducerServer:
                 register_nixl_memory(arena)
             rings[idx] = arena
 
-        # [RDT-PACK-DSTS] The destination views are a pure function of the packed
+        # The destination views are a pure function of the packed
         # layout, which is byte-identical every sync, so build them once per
         # (consumer, ring slot, layout) and reuse — rebuilding per call cost 5.2ms
         # of a 7.5ms 384-spec 235B group.
@@ -721,9 +721,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         class_of_owners: dict[tuple[int, ...], int] = {}
         name_owner_class: list[int] = []
         for i, n in enumerate(names):
-            owners = tuple(
-                r for r, m in enumerate(masks) if m[i >> 3] & (1 << (i & 7))
-            )
+            owners = tuple(r for r, m in enumerate(masks) if m[i >> 3] & (1 << (i & 7)))
             if not owners:
                 raise ValueError(
                     f"no trainer rank holds {n!r}; every name in metadata() must "
@@ -956,7 +954,7 @@ class ShardedRDTTrainerWeightTransferEngine(
         # rather than at end_sync.
         _PUBLISH_WINDOW = 2
         pending_publish: list = []
-        # [RDT-GATHER-CREDIT] The memory bound: gate BEFORE gathering while more
+        # The memory bound: gate BEFORE gathering while more
         # than `bound` groups are unfreed, so at most bound + 1 are resident. The
         # count is exact — `_inflight` gains its entry right after each gather and
         # only wait_freed/end_sync shrinks it, so a group freed server-side but not

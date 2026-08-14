@@ -412,8 +412,7 @@ def main():
             _sync_t0 = time.perf_counter()
             ray.get([w.sync_weights.remote() for w in workers])
             print(
-                f"[sync] iter {sync_iter} took "
-                f"{time.perf_counter() - _sync_t0:.3f}s",
+                f"[sync] iter {sync_iter} took {time.perf_counter() - _sync_t0:.3f}s",
                 flush=True,
             )
 
