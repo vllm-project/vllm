@@ -28,11 +28,23 @@ from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
     _fused_kv_compress_norm_rope_insert_indexer_attn,
     _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn,
     _launch_two_stage_sparse_attn_compressor,
+    compress_norm_rope_store_triton,
 )
 from vllm.models.deepseek_v4.compressor import _get_c128_boundary
 from vllm.platforms import current_platform
 
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
+
+
+def _on_gfx950() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    try:
+        from vllm.platforms.rocm import _ON_GFX950
+
+        return _ON_GFX950
+    except Exception:
+        return False
 
 
 def test_compute_global_topk_reuses_output_buffers():
@@ -76,6 +88,129 @@ def _ue8m0_reference(x: torch.Tensor, block_size: int, fp8_max: float):
         x_fp8[start:end] = quantized.to(torch.float8_e4m3fn)
 
     return x_fp8, scales
+
+
+def _decode_dsv4_cache_row(
+    cache: torch.Tensor, block_size: int, scrub_nan: bool
+) -> torch.Tensor:
+    flat = cache.flatten()
+    nope = flat[:448].view(torch.float8_e4m3fn).to(torch.bfloat16)
+    encoded = flat[block_size * 576 : block_size * 576 + 7]
+    scales = torch.exp2(encoded.to(torch.float32) - 127.0).to(torch.bfloat16)
+    nope = nope * scales.repeat_interleave(64)
+    rope = flat[448:576].view(torch.bfloat16)
+    decoded = torch.cat((nope, rope))
+    if scrub_nan:
+        decoded = torch.where(decoded == decoded, decoded, 0.0)
+    return decoded
+
+
+def _assert_nan_free_cache_matches_legacy_scrub(
+    cache: torch.Tensor, block_size: int
+) -> None:
+    flat = cache.flatten()
+    scale_base = block_size * 576
+    scale_codes = flat[scale_base : scale_base + 8]
+    assert scale_codes[0].item() == 254
+    assert scale_codes[1].item() == 247
+    assert scale_codes[:7].max().item() <= 254
+    nope_bytes = flat[:448]
+    assert not ((nope_bytes == 0x7F) | (nope_bytes == 0xFF)).any()
+
+    rope = flat[448:576].view(torch.bfloat16)
+    assert not torch.isnan(rope).any()
+    assert torch.isposinf(rope[0])
+    assert torch.equal(rope[1:4], torch.zeros_like(rope[1:4]))
+
+    legacy_cache = cache.clone()
+    legacy_flat = legacy_cache.flatten()
+    legacy_flat[scale_base] = 255
+    legacy_rope = legacy_flat[448:576].view(torch.bfloat16)
+    legacy_rope[1:4] = float("nan")
+    canonical = _decode_dsv4_cache_row(cache, block_size, scrub_nan=False)
+    legacy = _decode_dsv4_cache_row(legacy_cache, block_size, scrub_nan=True)
+    torch.testing.assert_close(canonical, legacy, rtol=0, atol=0)
+    assert torch.isinf(canonical[0])
+    assert torch.isposinf(canonical[64])
+
+
+@pytest.mark.skipif(
+    not _on_gfx950(),
+    reason="NaN-free fp8_ds_mla compressed-cache contract is gfx950-only",
+)
+@pytest.mark.parametrize("writer", ["single_pass", "two_stage_finalizer"])
+def test_gfx950_compressed_cache_canonicalizes_nonfinite(writer: str) -> None:
+    head_dim = 512
+    rope_dim = 64
+    block_size = 4
+    device = "cuda"
+
+    positions = torch.zeros(1, dtype=torch.int64, device=device)
+    slot_mapping = torch.zeros(1, dtype=torch.int64, device=device)
+    rms_weight = torch.ones(head_dim, dtype=torch.bfloat16, device=device)
+    rms_weight[0] = float("inf")
+    rms_weight[64] = torch.finfo(torch.bfloat16).max
+    rms_weight[448] = float("inf")
+    rms_weight[450] = float("nan")
+    cos_sin_cache = torch.zeros(1, rope_dim, dtype=torch.float32, device=device)
+    cos_sin_cache[:, : rope_dim // 2] = 1.0
+    cache = torch.zeros(1, block_size, 584, dtype=torch.uint8, device=device)
+
+    state_cache = torch.zeros(1, 1, 2 * head_dim, dtype=torch.float32, device=device)
+    state_cache[..., :head_dim] = 1.0
+    token_to_req = torch.zeros(1, dtype=torch.int32, device=device)
+    block_table = torch.zeros(1, 1, dtype=torch.int32, device=device)
+
+    if writer == "single_pass":
+        compress_norm_rope_store_triton(
+            state_cache=state_cache,
+            num_actual=1,
+            token_to_req_indices=token_to_req,
+            positions=positions,
+            slot_mapping=slot_mapping,
+            block_table=block_table,
+            block_size=1,
+            state_width=head_dim,
+            cos_sin_cache=cos_sin_cache,
+            kv_cache=cache,
+            k_cache_metadata=SimpleNamespace(slot_mapping=slot_mapping),
+            pdl_kwargs={},
+            head_dim=head_dim,
+            rope_head_dim=rope_dim,
+            compress_ratio=1,
+            overlap=False,
+            use_fp4_cache=False,
+            rms_norm_weight=rms_weight,
+            rms_norm_eps=1e-6,
+            quant_block=64,
+            token_stride=576,
+            scale_dim=8,
+        )
+    else:
+        _launch_two_stage_sparse_attn_compressor(
+            state_cache,
+            token_to_req,
+            positions,
+            slot_mapping,
+            block_table,
+            1,
+            head_dim,
+            1,
+            cos_sin_cache,
+            cache,
+            slot_mapping,
+            rms_weight,
+            1e-6,
+            64,
+            576,
+            8,
+            head_dim,
+            rope_dim,
+            1,
+            torch.empty(1, head_dim, dtype=torch.float32, device=device),
+        )
+
+    _assert_nan_free_cache_matches_legacy_scrub(cache, block_size)
 
 
 @pytest.mark.parametrize(

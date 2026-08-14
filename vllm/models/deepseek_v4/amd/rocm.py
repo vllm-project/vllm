@@ -19,6 +19,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4SparseMLAMetadataBuilder,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
@@ -34,6 +35,19 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_sparse_attn_prefill,
 )
 from vllm.v1.worker.workspace import current_workspace_manager
+
+
+def _trust_dsv4_extra_cache_nan_free(
+    kv_cache_dtype: str,
+    has_kv_transfer: bool,
+    has_extra_cache: bool,
+) -> bool:
+    return (
+        _ON_GFX950
+        and kv_cache_dtype == "fp8_ds_mla"
+        and not has_kv_transfer
+        and has_extra_cache
+    )
 
 
 def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
@@ -451,7 +465,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     backend_cls = DeepseekV4ROCMAiterMLASparseBackend
 
     def __init__(self, *args, **kwargs):
+        vllm_config = args[0] if args else kwargs["vllm_config"]
         super().__init__(*args, **kwargs)
+        self._has_kv_transfer = vllm_config.kv_transfer_config is not None
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
@@ -666,6 +682,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             nope_head_dim=self.nope_head_dim,
             rope_head_dim=self.rope_head_dim,
             output=output,
+            extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
+                self.kv_cache_dtype,
+                self._has_kv_transfer,
+                not swa_only and kv_cache is not None,
+            ),
         )
 
     def _forward_prefill(
