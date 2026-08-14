@@ -235,6 +235,20 @@ class RequestStateStats:
     # Track if this request is corrupted (NaNs in logits)
     is_corrupted: bool = False
 
+    # OTel GenAI operation name for the originating endpoint
+    # (e.g. "chat", "text_completion", "embeddings").
+    operation_name: str | None = None
+
+
+# Default Prometheus label when the request did not come from a known
+# OpenAI-compatible endpoint (e.g. offline LLM.generate).
+UNKNOWN_OPERATION_NAME = "unknown"
+
+
+def resolve_operation_name(operation_name: str | None) -> str:
+    """Return a Prometheus-safe operation label value."""
+    return operation_name if operation_name else UNKNOWN_OPERATION_NAME
+
 
 @dataclass
 class FinishedRequestStats:
@@ -253,6 +267,7 @@ class FinishedRequestStats:
     mean_time_per_output_token: float = 0.0
     is_corrupted: bool = False
     num_cached_tokens: int = 0
+    operation_name: str | None = None
 
 
 @dataclass
@@ -357,8 +372,9 @@ class IterationStats:
         self.finished_requests: list[FinishedRequestStats] = []
         self.max_num_generation_tokens_iter: list[int] = []
         self.n_params_iter: list[int] = []
-        self.time_to_first_tokens_iter: list[float] = []
-        self.inter_token_latencies_iter: list[float] = []
+        # (latency_seconds, operation_name) pairs for Prometheus labeling.
+        self.time_to_first_tokens_iter: list[tuple[float, str | None]] = []
+        self.inter_token_latencies_iter: list[tuple[float, str | None]] = []
         self.num_corrupted_reqs: int = 0
 
     def __repr__(self) -> str:
@@ -391,7 +407,9 @@ class IterationStats:
                 self.prompt_token_stats.update_from_output(output.prefill_stats)
 
             first_token_latency = self._time_since(req_stats.arrival_time)
-            self.time_to_first_tokens_iter.append(first_token_latency)
+            self.time_to_first_tokens_iter.append(
+                (first_token_latency, req_stats.operation_name)
+            )
             req_stats.first_token_latency = first_token_latency
 
         req_stats.num_generation_tokens += num_new_generation_tokens
@@ -421,7 +439,7 @@ class IterationStats:
             req_stats.first_token_ts = engine_core_timestamp
         else:
             itl = engine_core_timestamp - req_stats.last_token_ts
-            self.inter_token_latencies_iter.append(itl)
+            self.inter_token_latencies_iter.append((itl, req_stats.operation_name))
 
         req_stats.last_token_ts = engine_core_timestamp
 
@@ -496,6 +514,7 @@ class IterationStats:
             mean_time_per_output_token=mean_time_per_output_token,
             is_corrupted=req_stats.is_corrupted,
             num_cached_tokens=num_cached_tokens,
+            operation_name=req_stats.operation_name,
         )
         self.finished_requests.append(finished_req)
 

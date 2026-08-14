@@ -32,9 +32,9 @@ In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/met
 - `vllm:request_success_total` (Counter) - Number of finished requests (by finish reason).
 - `vllm:request_prompt_tokens` (Histogram) - Histogram of input prompt token counts.
 - `vllm:request_generation_tokens` (Histogram) - Histogram of generation token counts.
-- `vllm:time_to_first_token_seconds` (Histogram) - Time to first token (TTFT).
-- `vllm:inter_token_latency_seconds` (Histogram) - Inter-token latency.
-- `vllm:e2e_request_latency_seconds` (Histogram) - End-to-end request latency.
+- `vllm:time_to_first_token_seconds` (Histogram) - Time to first token (TTFT). Labeled by `operation` (`chat` / `text_completion` / `embeddings` / `unknown`).
+- `vllm:inter_token_latency_seconds` (Histogram) - Inter-token latency. Labeled by `operation`.
+- `vllm:e2e_request_latency_seconds` (Histogram) - End-to-end request latency. Labeled by `operation`.
 - `vllm:request_prefill_time_seconds` (Histogram) - Request prefill time.
 - `vllm:request_decode_time_seconds` (Histogram) - Request decode time.
 

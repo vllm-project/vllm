@@ -186,6 +186,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
                     reasoning_ended=None,
+                    operation_name="chat",
                 )
             )
 

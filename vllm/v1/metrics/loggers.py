@@ -21,11 +21,13 @@ from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
+    UNKNOWN_OPERATION_NAME,
     CachingMetrics,
     IterationStats,
     MultiModalCacheStats,
     PromptTokenStats,
     SchedulerStats,
+    resolve_operation_name,
 )
 from vllm.v1.metrics.utils import create_metric_per_engine
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
@@ -35,6 +37,15 @@ logger = init_logger(__name__)
 # User-facing reason labels for waiting request breakdown
 WAITING_REASON_CAPACITY = "capacity"
 WAITING_REASON_DEFERRED = "deferred"
+
+# Bounded OTel GenAI operation.name values for latency histograms.
+# "unknown" covers offline / non-OpenAI entrypoints.
+LATENCY_OPERATION_LABELS = (
+    "chat",
+    "text_completion",
+    "embeddings",
+    UNKNOWN_OPERATION_NAME,
+)
 
 PerEngineStatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
 AggregateStatLoggerFactory = type["AggregateStatLoggerBase"]
@@ -793,7 +804,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         #
         # Histogram of timing intervals
         #
-        histogram_time_to_first_token = self._histogram_cls(
+        # These carry an `operation` label (OTel GenAI operation.name) so a
+        # collector can emit gen_ai.server.* metrics with required attributes.
+        # Label children are created lazily on observe to avoid empty series.
+        self._latency_model_name = model_name
+        latency_labelnames = labelnames + ["operation"]
+
+        self._histogram_time_to_first_token = self._histogram_cls(
             name="vllm:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
             buckets=[
@@ -820,13 +837,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 640.0,
                 2560.0,
             ],
-            labelnames=labelnames,
-        )
-        self.histogram_time_to_first_token = create_metric_per_engine(
-            histogram_time_to_first_token, per_engine_labelvalues
+            labelnames=latency_labelnames,
         )
 
-        histogram_inter_token_latency = self._histogram_cls(
+        self._histogram_inter_token_latency = self._histogram_cls(
             name="vllm:inter_token_latency_seconds",
             documentation="Histogram of inter-token latency in seconds.",
             buckets=[
@@ -850,13 +864,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 40.0,
                 80.0,
             ],
-            labelnames=labelnames,
-        )
-        self.histogram_inter_token_latency = create_metric_per_engine(
-            histogram_inter_token_latency, per_engine_labelvalues
+            labelnames=latency_labelnames,
         )
 
-        histogram_request_time_per_output_token = self._histogram_cls(
+        self._histogram_request_time_per_output_token = self._histogram_cls(
             name="vllm:request_time_per_output_token_seconds",
             documentation="Histogram of time_per_output_token_seconds per request.",
             buckets=[
@@ -880,10 +891,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 40.0,
                 80.0,
             ],
-            labelnames=labelnames,
-        )
-        self.histogram_request_time_per_output_token = create_metric_per_engine(
-            histogram_request_time_per_output_token, per_engine_labelvalues
+            labelnames=latency_labelnames,
         )
 
         request_latency_buckets = [
@@ -909,14 +917,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             1920.0,
             7680.0,
         ]
-        histogram_e2e_time_request = self._histogram_cls(
+        self._histogram_e2e_time_request = self._histogram_cls(
             name="vllm:e2e_request_latency_seconds",
             documentation="Histogram of e2e request latency in seconds.",
             buckets=request_latency_buckets,
-            labelnames=labelnames,
-        )
-        self.histogram_e2e_time_request = create_metric_per_engine(
-            histogram_e2e_time_request, per_engine_labelvalues
+            labelnames=latency_labelnames,
         )
 
         histogram_queue_time_request = self._histogram_cls(
@@ -1213,17 +1218,25 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
         for n_param in iteration_stats.n_params_iter:
             self.histogram_n_request[engine_idx].observe(n_param)
-        for ttft in iteration_stats.time_to_first_tokens_iter:
-            self.histogram_time_to_first_token[engine_idx].observe(ttft)
-        for itl in iteration_stats.inter_token_latencies_iter:
-            self.histogram_inter_token_latency[engine_idx].observe(itl)
+        for ttft, operation in iteration_stats.time_to_first_tokens_iter:
+            self._observe_operation_histogram(
+                self._histogram_time_to_first_token, engine_idx, operation, ttft
+            )
+        for itl, operation in iteration_stats.inter_token_latencies_iter:
+            self._observe_operation_histogram(
+                self._histogram_inter_token_latency, engine_idx, operation, itl
+            )
 
         for finished_request in iteration_stats.finished_requests:
             self.counter_request_success[finished_request.finish_reason][
                 engine_idx
             ].inc()
-            self.histogram_e2e_time_request[engine_idx].observe(
-                finished_request.e2e_latency
+            operation = finished_request.operation_name
+            self._observe_operation_histogram(
+                self._histogram_e2e_time_request,
+                engine_idx,
+                operation,
+                finished_request.e2e_latency,
             )
             self.histogram_queue_time_request[engine_idx].observe(
                 finished_request.queued_time
@@ -1250,13 +1263,31 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_num_generation_tokens_request[engine_idx].observe(
                 finished_request.num_generation_tokens
             )
-            self.histogram_request_time_per_output_token[engine_idx].observe(
-                finished_request.mean_time_per_output_token
+            self._observe_operation_histogram(
+                self._histogram_request_time_per_output_token,
+                engine_idx,
+                operation,
+                finished_request.mean_time_per_output_token,
             )
             if finished_request.max_tokens_param:
                 self.histogram_max_tokens_request[engine_idx].observe(
                     finished_request.max_tokens_param
                 )
+
+    def _observe_operation_histogram(
+        self,
+        histogram: Histogram,
+        engine_idx: int,
+        operation_name: str | None,
+        value: float,
+    ) -> None:
+        """Observe a latency histogram with the GenAI operation label."""
+        operation = resolve_operation_name(operation_name)
+        if operation not in LATENCY_OPERATION_LABELS:
+            operation = UNKNOWN_OPERATION_NAME
+        histogram.labels(self._latency_model_name, str(engine_idx), operation).observe(
+            value
+        )
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         awake = 1

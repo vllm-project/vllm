@@ -215,6 +215,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
                     session_id=session_id,
+                    operation_name="text_completion",
                 )
 
             generators.append(generator)

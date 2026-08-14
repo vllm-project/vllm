@@ -288,3 +288,34 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+def test_resolve_operation_name():
+    from vllm.v1.metrics.stats import UNKNOWN_OPERATION_NAME, resolve_operation_name
+
+    assert resolve_operation_name("chat") == "chat"
+    assert resolve_operation_name("text_completion") == "text_completion"
+    assert resolve_operation_name("embeddings") == "embeddings"
+    assert resolve_operation_name(None) == UNKNOWN_OPERATION_NAME
+    assert resolve_operation_name("") == UNKNOWN_OPERATION_NAME
+
+
+def test_finished_request_carries_operation_name():
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0, operation_name="chat")
+    req_stats.scheduled_ts = 0.1
+    req_stats.first_token_ts = 0.5
+    req_stats.last_token_ts = 2.0
+    req_stats.num_generation_tokens = 10
+
+    iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.STOP,
+        request_id="chat-req",
+        num_prompt_tokens=20,
+        max_tokens_param=10,
+        req_stats=req_stats,
+        num_cached_tokens=0,
+    )
+
+    finished_req = iteration_stats.finished_requests[0]
+    assert finished_req.operation_name == "chat"
