@@ -180,6 +180,12 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 )
             self.weight_block_size = list(block_size)
         self.block_quant = self.weight_block_size is not None
+        # Block-quantized checkpoints name their per-block scales `weight_scale_inv`
+        # (the deepseek-v3 convention Quark follows), unlike the per-tensor/per-channel
+        # `weight_scale`. The parameter has to match so the loader can find it.
+        self.weight_scale_name = (
+            "weight_scale_inv" if self.block_quant else "weight_scale"
+        )
 
         if per_channel:
             self.act_quant_group_shape = GroupShape.PER_TOKEN
@@ -349,7 +355,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 ),
                 requires_grad=False,
             )
-            layer.register_parameter("w13_weight_scale", w13_weight_scale)
+            layer.register_parameter(f"w13_{self.weight_scale_name}", w13_weight_scale)
             w2_weight_scale = torch.nn.Parameter(
                 torch.ones(
                     num_experts,
@@ -359,7 +365,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 ),
                 requires_grad=False,
             )
-            layer.register_parameter("w2_weight_scale", w2_weight_scale)
+            layer.register_parameter(f"w2_{self.weight_scale_name}", w2_weight_scale)
             # Add PER-BLOCK quantization for RoutedExperts.weight_loader.
             extra_weight_attrs.update(
                 {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value}
@@ -430,27 +436,35 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             )
 
         if current_platform.is_fp8_fnuz():
+            w13_scale_name = f"w13_{self.weight_scale_name}"
+            w2_scale_name = f"w2_{self.weight_scale_name}"
             # Normalize the weights and scales
             w13_weight, w13_weight_scale, w13_input_scale = (
                 normalize_e4m3fn_to_e4m3fnuz(
-                    layer.w13_weight, layer.w13_weight_scale, layer.w13_input_scale
+                    layer.w13_weight,
+                    getattr(layer, w13_scale_name),
+                    layer.w13_input_scale,
                 )
             )
             w2_weight, w2_weight_scale, w2_input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                layer.w2_weight, layer.w2_weight_scale, layer.w2_input_scale
+                layer.w2_weight, getattr(layer, w2_scale_name), layer.w2_input_scale
             )
             # Reset the parameter
             layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
-            layer.w13_weight_scale = torch.nn.Parameter(
-                w13_weight_scale, requires_grad=False
+            setattr(
+                layer,
+                w13_scale_name,
+                torch.nn.Parameter(w13_weight_scale, requires_grad=False),
             )
             if w13_input_scale is not None:
                 layer.w13_input_scale = torch.nn.Parameter(
                     w13_input_scale, requires_grad=False
                 )
             layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
-            layer.w2_weight_scale = torch.nn.Parameter(
-                w2_weight_scale, requires_grad=False
+            setattr(
+                layer,
+                w2_scale_name,
+                torch.nn.Parameter(w2_weight_scale, requires_grad=False),
             )
             if w2_input_scale is not None:
                 layer.w2_input_scale = torch.nn.Parameter(
@@ -516,15 +530,15 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             layer=layer,
             w13=layer.w13_weight,
             w2=layer.w2_weight,
-            w13_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
+            w13_scale=getattr(layer, f"w13_{self.weight_scale_name}"),
+            w2_scale=getattr(layer, f"w2_{self.weight_scale_name}"),
             w13_input_scale=layer.w13_input_scale,
             w2_input_scale=layer.w2_input_scale,
         )
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w2_weight", w2)
-        replace_parameter(layer, "w13_weight_scale", w13_scale)
-        replace_parameter(layer, "w2_weight_scale", w2_scale)
+        replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
+        replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         assert self.moe_quant_config is not None
@@ -540,8 +554,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         return make_fp8_moe_quant_config(
             fp8_backend=self.fp8_backend,
-            w1_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
+            w1_scale=getattr(layer, f"w13_{self.weight_scale_name}"),
+            w2_scale=getattr(layer, f"w2_{self.weight_scale_name}"),
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             w1_bias=getattr(layer, "w13_bias", None),
