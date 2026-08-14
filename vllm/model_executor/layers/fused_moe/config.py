@@ -1311,6 +1311,13 @@ class FusedMoEConfig:
     # Only honored on the non-reduced (late-AR) TP path. Default False.
     skip_final_all_reduce: bool = False
 
+    # When True, experts that can stop after GEMM2 are allowed to hand back an
+    # UnfinalizedMoEOutput instead of finalized states, leaving the top-k
+    # reduction to fuse into the consumer. Set by layers that have such a
+    # consumer; read through `use_deferred_moe_finalize`, which applies the
+    # guards. Kernels without the capability ignore it. Default False.
+    defer_moe_finalize: bool = False
+
     # SwiGLU clamp limit. When set, backends that do not implement the clamp
     # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
     # cannot silently select one and drop the clamp.
@@ -1427,6 +1434,18 @@ class FusedMoEConfig:
     @property
     def use_ep(self):
         return self.moe_parallel_config.use_ep
+
+    @property
+    def use_deferred_moe_finalize(self) -> bool:
+        """Whether experts may return an unfinalized output on this deployment.
+
+        Evaluated on read rather than in ``__post_init__`` because
+        ``defer_moe_finalize`` is set after construction, like
+        ``skip_final_all_reduce``.
+        """
+        # Without TP there is no all-reduce for the top-k reduction to fuse
+        # into, so the deferred form buys nothing.
+        return self.defer_moe_finalize and self.tp_size > 1
 
     @property
     def use_deepep_ht_kernels(self):

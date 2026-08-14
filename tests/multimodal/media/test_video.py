@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import io
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import numpy.typing as npt
@@ -19,6 +21,7 @@ from vllm.multimodal.media import ImageMediaIO, VideoMediaIO
 from vllm.multimodal.video import (
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
+    PyNvVideoCodecVideoBackend,
     VideoLoader,
     _pynvvc_frames_to_nhwc,
 )
@@ -362,6 +365,31 @@ def test_load_base64_jpeg_raises_on_zero_num_frames():
 
     with pytest.raises(ValueError, match="num_frames must be greater than 0 or -1"):
         videoio.load_base64("video/jpeg", data)
+
+
+def test_pynvvideocodec_unrelated_error_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakePyNvVCException(Exception):
+        pass
+
+    fake_nvc = SimpleNamespace(PyNvVCException=FakePyNvVCException)
+    monkeypatch.setitem(sys.modules, "PyNvVideoCodec", fake_nvc)
+    original_error = RuntimeError("GPU decoder unavailable")
+
+    def raise_unrelated_error(cls, file_path, nvc):
+        raise original_error
+
+    monkeypatch.setattr(
+        PyNvVideoCodecVideoBackend,
+        "_read_source_metadata",
+        classmethod(raise_unrelated_error),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        PyNvVideoCodecVideoBackend.decode_frames_pynvvideocodec(b"video", None)
+
+    assert exc_info.value is original_error
 
 
 # ---------------------------------------------------------------------------

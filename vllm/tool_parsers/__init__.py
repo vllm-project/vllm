@@ -22,6 +22,10 @@ Example:
 
 
 _TOOL_PARSERS_TO_REGISTER = {
+    "dots": (
+        "dots_tool_parser",
+        "DotsToolParser",
+    ),
     "deepseek_v3": (  # name
         "deepseekv3_tool_parser",  # filename
         "DeepSeekV3ToolParser",  # class_name
@@ -149,6 +153,10 @@ _TOOL_PARSERS_TO_REGISTER = {
     "olmo3": (
         "olmo3_tool_parser",
         "Olmo3PythonicToolParser",
+    ),
+    "muse_glimmer": (
+        "muse_glimmer_tool_parser",
+        "MuseGlimmerToolParser",
     ),
     "openai": (
         "gptoss_tool_parser",

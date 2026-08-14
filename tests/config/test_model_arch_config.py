@@ -7,6 +7,7 @@ from copy import copy
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 from transformers import PretrainedConfig
@@ -136,6 +137,32 @@ def test_head_size_falls_back_when_head_dim_is_zero():
     convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
 
     assert convertor.get_head_size() == 128
+
+
+def test_qk_rope_head_dim_recovery_uses_model_revision(monkeypatch: pytest.MonkeyPatch):
+    hf_config = PretrainedConfig(
+        model_type="deepseek_v2",
+        qk_rope_head_dim=128,
+        qk_nope_head_dim=128,
+    )
+    hf_config.name_or_path = "org/model"
+    get_hf_file_to_dict = Mock(return_value={"qk_rope_head_dim": 64})
+
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.get_hf_file_to_dict",
+        get_hf_file_to_dict,
+    )
+
+    convertor = ModelArchConfigConvertorBase(
+        hf_config,
+        hf_config,
+        revision="pinned-revision",
+    )
+
+    assert convertor._get_qk_rope_head_dim() == 64
+    get_hf_file_to_dict.assert_called_once_with(
+        "config.json", "org/model", "pinned-revision"
+    )
 
 
 @pytest.mark.parametrize(
@@ -344,19 +371,17 @@ def test_gemma4_uniform_head_dims_are_homogeneous():
 
 
 class _HeterogeneousConfig(PretrainedConfig):
-    """A stand-in for the Transformers >= 5.15.0 heterogeneous config API.
+    """A heterogeneous config with no convertor of its own.
 
-    No released Transformers has it, so the default per-layer seam has no other
-    way to be exercised. Mirrors the parts vLLM uses: per-layer configs are
-    shallow copies with the varying attributes applied and heterogeneity
-    stripped, so they do not recurse.
-    """
+    Mirrors the parts vLLM uses: per-layer configs are shallow copies with the
+    varying attributes applied and heterogeneity stripped, so they do not recurse."""
 
     is_heterogeneous = True
 
     def __init__(self, per_layer: dict[str, list], **kwargs):
-        super().__init__(**kwargs)
+        # Set before `super().__init__` because it validates `per_layer_config`
         self._per_layer = per_layer
+        super().__init__(**kwargs)
 
     @property
     def per_layer_config(self) -> list[PretrainedConfig]:

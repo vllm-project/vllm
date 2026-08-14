@@ -397,7 +397,28 @@ def flash_attn_varlen_func(
                 "instead of passing None"
             )
 
+        # FA4 only accepts descales for FP8 inputs. The attention backends
+        # initialize these tensors even when the inputs are not quantized.
+        if v.dtype not in (torch.float8_e4m3fn, torch.float8_e5m2):
+            q_descale = k_descale = v_descale = None
+
         from vllm.vllm_flash_attn.cute.interface import _flash_attn_fwd
+
+        # SM90 FA4 fp8-KV path: fp8 e4m3 paged K/V dequantized and the K/V descale folded
+        # in-kernel; accepts bf16/fp16 Q and writes O in its native dtype (no Q cast, no
+        # output copy). Only the (batch, num_kv_heads) f32 K/V descales are forwarded.
+        fa4_fp8_kv_dequant = (
+            k.dtype == torch.float8_e4m3fn
+            and torch.cuda.get_device_capability()[0] == 9
+        )
+        if fa4_fp8_kv_dequant:
+            fa4_q_descale = None
+            fa4_k_descale = k_descale
+            fa4_v_descale = v_descale
+        else:
+            fa4_q_descale = None
+            fa4_k_descale = None
+            fa4_v_descale = None
 
         out, softmax_lse, _, _ = _flash_attn_fwd(
             q,
@@ -423,7 +444,11 @@ def flash_attn_varlen_func(
             block_sparse_tensors=block_sparse_tensors,
             aux_tensors=aux_tensors,
             aux_tensor_leading_dims=aux_tensor_leading_dims,
+            q_descale=fa4_q_descale,
+            k_descale=fa4_k_descale,
+            v_descale=fa4_v_descale,
             output_scale=output_scale,
+            fp8_kv_dequant=fa4_fp8_kv_dequant,
         )
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")

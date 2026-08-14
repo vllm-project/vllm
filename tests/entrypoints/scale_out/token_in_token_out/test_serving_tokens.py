@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-import os
 
 import httpx
 import pytest
 import pytest_asyncio
 from transformers import AutoTokenizer
 
+import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 from vllm.config import ModelConfig
 from vllm.config.utils import getattr_iter
@@ -79,11 +79,7 @@ def server(request):
             else [str(extra_args)]
         )
 
-    envs = os.environ.copy()
-    # See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3888060787
-    envs["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
-
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=envs) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -112,6 +108,49 @@ async def test_generate_endpoint(client):
     resp.raise_for_status()
     data = resp.json()
     assert "choices" in data
+    assert data["choices"][0].get("sampling_mask") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="sampling mask output is not supported by the Rust frontend",
+)
+@pytest.mark.parametrize(
+    "server",
+    [["--return-sampling-mask", "--logprobs-mode", "processed_logprobs"]],
+    indirect=True,
+)
+async def test_generate_sampling_mask(client):
+    top_k = 5
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {
+            "max_tokens": 5,
+            "temperature": 0.8,
+            "top_k": top_k,
+            "top_p": 0.9,
+            "ignore_eos": True,
+            "seed": 0,
+        },
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    choice = resp.json()["choices"][0]
+
+    token_ids = choice["token_ids"]
+    sampling_mask = choice["sampling_mask"]
+    assert sampling_mask is not None
+    assert len(token_ids) == len(sampling_mask)
+
+    vocab_size = get_vocab_size(MODEL_NAME)
+    for token_id, support in zip(token_ids, sampling_mask):
+        assert support
+        assert len(support) == len(set(support))
+        assert all(0 <= support_token_id < vocab_size for support_token_id in support)
+        assert token_id in support
 
 
 @pytest.mark.asyncio

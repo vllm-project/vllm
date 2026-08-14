@@ -17,7 +17,7 @@ MVP limitations:
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 from typing_extensions import Self
@@ -226,22 +226,6 @@ class SparseNCCLWeightTransferEngine(
     def shutdown(self) -> None:
         if self.model_update_group is not None:
             self.model_update_group = None
-
-    @staticmethod
-    def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
-        """Removed. Use the stateful `SparseNCCLTrainerWeightTransferEngine`.
-
-        Transitional stub kept only to satisfy the (still abstract)
-        `WeightTransferEngine.trainer_send_weights`; that member is dropped from
-        the worker ABC once every backend has migrated to the trainer engine.
-        """
-        raise NotImplementedError(
-            "The static sparse NCCL trainer path has been replaced by "
-            "SparseNCCLTrainerWeightTransferEngine. Build it via "
-            "WeightTransferTrainerFactory.trainer_init("
-            "SparseNCCLTrainerInitInfo(...), client=..., source=...) and drive "
-            "it with send_weights()."
-        )
 
 
 class SparseNCCLTrainerWeightTransferEngine(

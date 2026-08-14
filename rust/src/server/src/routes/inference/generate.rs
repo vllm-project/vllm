@@ -45,14 +45,31 @@ use crate::utils::resolve_request_context;
 pub async fn generate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<GenerateRequest>,
+    ValidatedJson(mut body): ValidatedJson<GenerateRequest>,
 ) -> Response {
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let lora_resolution = state.resolve_model_with_loras(body.model.as_deref()).await;
-    let prepared = match prepare_generate_request(body, &lora_resolution, request_context) {
-        Ok(prepared) => prepared,
-        Err(error) => return error.into_response(),
+
+    let mm_features = if let Some(parts) = body.content_parts.take() {
+        match state.chat.prepare_media(parts, &mut body.token_ids).await {
+            Ok(features) => features,
+            Err(e) => {
+                return ApiError::invalid_request(
+                    format!("failed to resolve content_parts: {}", e.as_report()),
+                    Some("content_parts"),
+                )
+                .into_response();
+            }
+        }
+    } else {
+        None
     };
+
+    let prepared =
+        match prepare_generate_request(body, &lora_resolution, request_context, mm_features) {
+            Ok(prepared) => prepared,
+            Err(error) => return error.into_response(),
+        };
     let request_span = tracing::info_span!(
         "generate",
         request_id = %prepared.request_id,

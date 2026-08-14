@@ -67,6 +67,43 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
 
 
 @pytest.mark.parametrize(
+    "cudagraph_mode",
+    [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE],
+)
+def test_deepseek_v4_rejects_mrv1_piecewise_cudagraph(cudagraph_mode):
+    config = SimpleNamespace(
+        use_v2_model_runner=False,
+        model_config=SimpleNamespace(architectures=["DeepseekV4ForCausalLM"]),
+        compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode),
+    )
+
+    with pytest.raises(ValueError, match="DeepSeek V4 does not support PIECEWISE"):
+        VllmConfig._validate_mrv1_piecewise_cudagraph(config)
+
+
+@pytest.mark.parametrize(
+    ("use_v2_model_runner", "architecture", "cudagraph_mode"),
+    [
+        (True, "DeepseekV4ForCausalLM", CUDAGraphMode.PIECEWISE),
+        (False, "DeepseekV4ForCausalLM", CUDAGraphMode.NONE),
+        (False, "DeepseekV4ForCausalLM", CUDAGraphMode.FULL),
+        (False, "DeepseekV4ForCausalLM", CUDAGraphMode.FULL_DECODE_ONLY),
+        (False, "LlamaForCausalLM", CUDAGraphMode.PIECEWISE),
+    ],
+)
+def test_mrv1_piecewise_cudagraph_allowed(
+    use_v2_model_runner, architecture, cudagraph_mode
+):
+    config = SimpleNamespace(
+        use_v2_model_runner=use_v2_model_runner,
+        model_config=SimpleNamespace(architectures=[architecture]),
+        compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode),
+    )
+
+    VllmConfig._validate_mrv1_piecewise_cudagraph(config)
+
+
+@pytest.mark.parametrize(
     ("use_v2_model_runner", "expected_capture_sizes"),
     [
         (False, [4, 8, 12, 16]),
@@ -176,6 +213,16 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
                 runner_type="generate",
                 is_moe=True,
                 is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="deepseek-ai/DeepSeek-V4-Flash",
+                architectures=["DeepseekV4ForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=True,
             ),
             True,
         ),
@@ -441,6 +488,30 @@ def test_draft_model_enables_async_scheduling_by_default():
     )
 
     assert cfg.scheduler_config.async_scheduling is True
+
+
+@pytest.mark.parametrize(
+    ("method", "parallel_drafting", "expected_slots"),
+    [
+        pytest.param("eagle3", False, 0, id="eagle3"),
+        pytest.param("eagle3", True, 7, id="p-eagle"),
+        pytest.param("dflash", True, 8, id="dflash"),
+        pytest.param("dspark", True, 7, id="dspark"),
+        pytest.param("mtp", False, 0, id="mtp"),
+        pytest.param("ngram", False, 0, id="ngram"),
+        pytest.param("draft_model", False, 1, id="draft-model"),
+        pytest.param("draft_model", True, 8, id="pard"),
+    ],
+)
+def test_max_num_new_slots_for_drafting(method, parallel_drafting, expected_slots):
+    speculative_config = SpeculativeConfig(
+        model="ngram",
+        num_speculative_tokens=8,
+    )
+    speculative_config.method = method
+    speculative_config.parallel_drafting = parallel_drafting
+
+    assert speculative_config.max_num_new_slots_for_drafting == expected_slots
 
 
 @dataclass

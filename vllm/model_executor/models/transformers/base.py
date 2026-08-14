@@ -18,9 +18,11 @@
 
 import os
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
+from functools import cached_property
 from itertools import chain
 from operator import attrgetter
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import regex as re
 import torch
@@ -85,6 +87,12 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+class PreTrainedModelClasses(NamedTuple):
+    decoder: type["PreTrainedModel"]
+    encoders: dict[str, type["PreTrainedModel"]]
+    """Modality -> encoder class, for each modality that has one."""
+
+
 class Base(
     nn.Module,
     VllmModel,
@@ -147,14 +155,13 @@ class Base(
                 )
 
         self._patch_config()
-        from_config_kwargs = dict(
-            config=self.config,
-            dtype=self.model_config.dtype,
-            trust_remote_code=self.model_config.trust_remote_code,
-        )
-        self._decorate_for_torch_compile(**from_config_kwargs)
+        self._decorate_for_torch_compile()
         # Init on "meta" to delay allocating GPU tensors
-        with init_on_device_without_buffers("meta"):
+        with (
+            self._mark_model_components(vllm_config),
+            init_on_device_without_buffers("meta"),
+        ):
+            from_config_kwargs = self._from_config_kwargs
             self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
 
         # Create weight name to module qualname mapper
@@ -196,22 +203,47 @@ class Base(
         self.text_config._attn_implementation = "vllm"
         self.config.dtype = torch.get_default_dtype()
 
-    def _get_decoder_cls(self, **kwargs: dict) -> type["PreTrainedModel"]:
+    @contextmanager
+    def _mark_model_components(self, vllm_config: "VllmConfig"):
+        """Mark language model and tower submodules as `self.model` is created.
+
+        Nothing to do in `Base`, `MultiModalMixin` will override."""
+        yield
+
+    @cached_property
+    def _from_config_kwargs(self) -> dict[str, Any]:
+        """The kwargs used to create `self.model`."""
+        return dict(
+            config=self.config,
+            dtype=self.model_config.dtype,
+            trust_remote_code=self.model_config.trust_remote_code,
+        )
+
+    def _find_encoder_classes(
+        self, model: "PreTrainedModel"
+    ) -> dict[str, type["PreTrainedModel"]]:
+        """Find the encoder class of each modality `model` has one for.
+
+        Text models have none. Multi-modal ones override this.
         """
-        Get the decoder class from the model.
+        return {}
 
-        Args:
-            kwargs: The kwargs to create the model.
+    @cached_property
+    def _pre_trained_model_classes(self) -> PreTrainedModelClasses:
+        """The decoder class and the encoder class of each modality that has one.
 
-        Returns:
-            The decoder class.
+        Both come from a single throwaway model, since building one is not cheap.
         """
         with torch.device("meta"):
-            model: PreTrainedModel = AutoModel.from_config(**kwargs)
-        decoder_cls = type(model.get_decoder())
-        logger.debug("Identified decoder class as: %s", decoder_cls)
+            model: PreTrainedModel = AutoModel.from_config(**self._from_config_kwargs)
+        model_classes = PreTrainedModelClasses(
+            decoder=type(model.get_decoder()),
+            encoders=self._find_encoder_classes(model),
+        )
         del model
-        return decoder_cls
+
+        logger.debug("Identified model classes as: %s", model_classes)
+        return model_classes
 
     def _decorate_cls_for_torch_compile(
         self,
@@ -246,17 +278,11 @@ class Base(
             is_encoder=is_encoder,
         )(cls)
 
-    def _decorate_for_torch_compile(self, **kwargs: dict):
-        """
-        Decorate the model's decoder class to indicate to vLLM that it supports torch
-        compile if `can_enable_torch_compile` is True.
-
-        Args:
-            kwargs: The kwargs to create the model, which are needed to get the decoder
-                class.
-        """
+    def _decorate_for_torch_compile(self):
+        """Decorate the model's decoder class to indicate to vLLM that it
+        supports torch compile if `can_enable_torch_compile` is True."""
         self._decorate_cls_for_torch_compile(
-            cls=self._get_decoder_cls(**kwargs),
+            cls=self._pre_trained_model_classes.decoder,
             # Applied to a PreTrainedModel so the batch dimension will exist
             dynamic_arg_dims=dict[str, int](
                 input_ids=1,  # shape: [1, seq_len]

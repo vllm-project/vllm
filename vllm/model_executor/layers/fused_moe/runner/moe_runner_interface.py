@@ -47,11 +47,6 @@ class MoERunnerInterface(PluggableLayer, ABC):
 
     @property
     @abstractmethod
-    def is_internal_router(self) -> bool:
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
     def _quant_method(self) -> FusedMoEMethodBase:
         raise NotImplementedError
 

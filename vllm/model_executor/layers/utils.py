@@ -134,11 +134,15 @@ def rocm_unquantized_gemm_impl(
     GrpsShrB = min(N_p2 // 16, 4)
     # Given the above, how many CUs would we need?
     CuNeeded = rndup_cus * GrpsShrB
-    # candidate for atomic reduce count splitk?
+    # Deterministic reduction stores one float workspace value per K shard.
     fits_wvsplitkrc = (
         N_p2 * m * ((k + 512 - 1) // 512)
     ) <= 128 * 1024 * 12  # deterministic
     fits_wvsplitkrc &= CuNeeded <= cu_count
+
+    skinny_operands_compatible = weight.is_contiguous() and (
+        bias is None or bias.is_contiguous()
+    )
 
     use_skinny_reduce_counting = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
@@ -151,12 +155,13 @@ def rocm_unquantized_gemm_impl(
             and k > 512
             and m % 16 == 0
             and fits_wvsplitkrc
-            and weight.is_contiguous()
+            and skinny_operands_compatible
         )
     )
 
     if use_skinny_reduce_counting:
-        return ops.wvSplitKrc(x, weight, cu_count, bias)
+        x_view = x.reshape(-1, x.size(-1)).contiguous()
+        return ops.wvSplitKrc(x_view, weight, cu_count, bias)
 
     # gfx1250's aiter gemm_a16w16 uses the gluon backend, which requires
     # K % 256 == 0 (it walks K with fixed-size descriptors and won't pad a
@@ -174,10 +179,13 @@ def rocm_unquantized_gemm_impl(
         # TODO GFX1250: Include once skinny GEMM is supported on gfx1250
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
+        and skinny_operands_compatible
     )
 
     if use_skinny:
-        x_view = x.reshape(-1, x.size(-1))
+        # The skinny kernels assume contiguous K elements. A shape-preserving
+        # reshape can retain a transposed activation's non-contiguous strides.
+        x_view = x.reshape(-1, x.size(-1)).contiguous()
         if m > 8 and 0 < n <= 5:
             cu_count = num_compute_units()
             out = ops.wvSplitK(weight, x_view, cu_count, bias)

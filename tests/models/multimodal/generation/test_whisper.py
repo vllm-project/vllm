@@ -129,7 +129,6 @@ def check_model_available(model: str) -> None:
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("beam_width", [1, 2])
 def test_beam_search_encoder_decoder(
-    monkeypatch,
     hf_runner,
     vllm_runner,
     dtype: str,
@@ -138,9 +137,6 @@ def test_beam_search_encoder_decoder(
     resampled_assets,
 ) -> None:
     """Test beam search with encoder-decoder models (Whisper)."""
-    if current_platform.is_rocm():
-        monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "0")
-
     model = "openai/whisper-large-v3-turbo"
     check_model_available(model)
 
