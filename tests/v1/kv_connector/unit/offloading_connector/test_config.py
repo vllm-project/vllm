@@ -397,13 +397,17 @@ def test_dcp_scales_uniform_type_group_alongside_mamba(spec_kind, expected):
     )
 
 
-def test_preserves_data_parallel_index():
+def test_preserves_data_parallel_config():
     config = _make_vllm_config()
     config.parallel_config.data_parallel_index = 2
+    config.parallel_config.data_parallel_size = 4
+    config.parallel_config.data_parallel_rank_local = 1
 
     offloading_config = build_offloading_config(config, _make_kv_cache_config())
 
     assert offloading_config.parallel.data_parallel_index == 2
+    assert offloading_config.parallel.data_parallel_size == 4
+    assert offloading_config.parallel.data_parallel_rank_local == 1
 
 
 def test_resolves_heterogeneous_hybrid_block_sizes():
