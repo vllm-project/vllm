@@ -35,10 +35,25 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             thinking_mode = "thinking" if thinking_enabled else "chat"
 
             conversation = kwargs.get("conversation", messages)
-            messages = conversation.copy()
+            messages = list(conversation)
             if tools is not None and len(tools) > 0:
-                messages.insert(0, {"role": "system"})
-                messages[0]["tools"] = tools  # type: ignore[typeddict-unknown-key]
+                # Attach request-level tools to the leading system/developer message so the
+                # prompt reads `{content}\n\n## Tools ...`, which is what the reference
+                # encoding produces and what the golden outputs shipped with the checkpoint
+                # contain. Inserting a fresh message instead renders the entire tools block
+                # *ahead* of the system prompt.
+                #
+                # Request-level tools take precedence over tools already present on that
+                # message; rendering both would emit the tools block twice.
+                if messages and messages[0].get("role") in ("system", "developer"):
+                    head = dict(messages[0])
+                    head["tools"] = tools  # type: ignore[typeddict-unknown-key]
+                    messages[0] = head
+                else:
+                    messages.insert(
+                        0,
+                        {"role": "system", "tools": tools},  # type: ignore[typeddict-unknown-key]
+                    )
 
             reasoning_effort = kwargs.get("reasoning_effort")
             if not isinstance(reasoning_effort, str):

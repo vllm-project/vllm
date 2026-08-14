@@ -315,3 +315,93 @@ def test_deepseek_v4_matches_reference_golden_fixtures(case_id, kwargs):
 
     expected = (FIXTURES_DIR / f"test_output_{case_id}.txt").read_text()
     assert prompt == expected
+
+
+_ONE_TOOL = [
+    {
+        "type": "function",
+        "function": {
+            "name": "tool_beta",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+]
+
+
+def test_deepseek_v4_tools_render_after_the_system_prompt():
+    """Request-level tools attach to the existing system message, not a new one.
+
+    The reference layout is `{system_content}\n\n## Tools ...`; inserting a fresh
+    system message renders the whole tools block ahead of the system prompt.
+    """
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {"role": "system", "content": "SYSTEM_MARKER"},
+            {"role": "user", "content": "Weather?"},
+        ],
+        tools=_ONE_TOOL,
+        tokenize=False,
+        thinking=True,
+    )
+
+    assert prompt.count("## Tools") == 1
+    assert prompt.index("SYSTEM_MARKER") < prompt.index("## Tools")
+    assert "SYSTEM_MARKER\n\n## Tools" in prompt
+
+
+def test_deepseek_v4_tools_render_after_a_developer_prompt():
+    """A leading developer message carries tools the same way a system message does."""
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {"role": "developer", "content": "DEVELOPER_MARKER"},
+            {"role": "user", "content": "Weather?"},
+        ],
+        tools=_ONE_TOOL,
+        tokenize=False,
+        thinking=True,
+    )
+
+    assert prompt.count("## Tools") == 1
+    assert prompt.index("DEVELOPER_MARKER") < prompt.index("## Tools")
+
+
+def test_deepseek_v4_tools_still_rendered_without_a_leading_system_message():
+    """With no system/developer message to attach to, one is inserted."""
+    prompt = _tokenizer().apply_chat_template(
+        [{"role": "user", "content": "Weather?"}],
+        tools=_ONE_TOOL,
+        tokenize=False,
+        thinking=True,
+    )
+
+    assert prompt.count("## Tools") == 1
+    assert '"name": "tool_beta"' in prompt
+
+
+def test_deepseek_v4_request_tools_replace_message_tools():
+    """Request-level tools win; rendering both would emit the block twice."""
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {
+                "role": "system",
+                "content": "SYSTEM_MARKER",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "tool_alpha",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
+            },
+            {"role": "user", "content": "Weather?"},
+        ],
+        tools=_ONE_TOOL,
+        tokenize=False,
+        thinking=True,
+    )
+
+    assert prompt.count("## Tools") == 1
+    assert "tool_beta" in prompt
+    assert "tool_alpha" not in prompt
