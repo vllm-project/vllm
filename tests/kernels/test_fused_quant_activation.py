@@ -13,7 +13,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
 )
@@ -104,14 +103,6 @@ class MockLinearFp8Dynamic128(torch.nn.Module):
         self.input_quant_key = kFp8Dynamic128Sym
 
 
-class MockLinearFp8Dynamic64(torch.nn.Module):
-    """Mock linear layer advertising kFp8Dynamic64Sym."""
-
-    def __init__(self):
-        super().__init__()
-        self.input_quant_key = kFp8Dynamic64Sym
-
-
 class MockLinearNoQuant(torch.nn.Module):
     """Mock linear layer with no input_quant_key (no fusion)."""
 
@@ -152,38 +143,28 @@ def test_maybe_fused_act_quant_fp8_static(
 @pytest.mark.parametrize("num_tokens", [1, 16, 128])
 @pytest.mark.parametrize("hidden_size", [128, 512, 1024])
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("group_size", [64, 128])
 @torch.inference_mode()
 def test_maybe_fused_act_quant_fp8_dynamic_block(
     default_vllm_config,
     num_tokens: int,
     hidden_size: int,
     dtype: torch.dtype,
-    group_size: int,
 ) -> None:
     """Test maybe_fused_act_quant with FP8 dynamic per-block quantization."""
-    if hidden_size % group_size != 0:
-        pytest.skip(
-            f"hidden_size {hidden_size} not divisible by group_size {group_size}"
-        )
+    group_size = 128  # We only support 128 for now
 
     device = "cuda:0"
     torch.set_default_device(device)
 
     act_fn = SiluAndMul()
-    if group_size == 128:
-        linear = MockLinearFp8Dynamic128()
-        expected_key = kFp8Dynamic128Sym
-    else:
-        linear = MockLinearFp8Dynamic64()
-        expected_key = kFp8Dynamic64Sym
+    linear = MockLinearFp8Dynamic128()
 
     scale = 1 / hidden_size
     x = torch.randn(num_tokens, hidden_size * 2, dtype=dtype, device=device) * scale
     result = maybe_fused_act_quant(act_fn, x, linear)
 
     assert isinstance(result, QuantizedActivation)
-    assert result.quant_key == expected_key
+    assert result.quant_key == kFp8Dynamic128Sym
     assert result.data.dtype == current_platform.fp8_dtype()
     assert result.orig_dtype == dtype
     assert result.orig_shape == (num_tokens, hidden_size)
