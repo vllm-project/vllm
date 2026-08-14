@@ -16,10 +16,15 @@ from tests.v1.attention.utils import (
     create_common_attn_metadata,
     create_vllm_config,
 )
+from vllm.config.mamba import MambaBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
+
+# Flip when FlashInfer ReplaySSM metadata (ring_start / prev_num_accepted) is
+# implemented in BaseMambaAttentionMetadataBuilder.
+FLASHINFER_REPLAYSSM_METADATA_READY = False
 
 
 @dataclass
@@ -203,16 +208,20 @@ def _make_mamba_spec(buffer_len: int) -> MambaSpec:
 
 
 def _create_replayssm_builder(
-    buffer_len: int, mamba_cache_mode: str = "none"
+    buffer_len: int,
+    mamba_cache_mode: str = "none",
+    *,
+    mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON,
 ) -> MockMambaBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B", block_size=BLOCK_SIZE
     )
     # Set the flags after construction to skip validate_mamba_cached_kernel
-    # (it requires a Triton backend) on the mock model.
+    # (it requires a real SupportsReplaySSM model) on the mock model.
     vllm_config.cache_config.use_replayssm = True
     vllm_config.cache_config.replayssm_buffer_len = buffer_len
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
+    vllm_config.mamba_config.backend = mamba_backend
     return MockMambaBuilder(
         _make_mamba_spec(buffer_len), ["layer0"], vllm_config, DEVICE
     )
@@ -254,3 +263,34 @@ def test_resumed_request_differs_from_fresh():
 
     assert meta.write_pos_d.tolist()[:2] == [5, 0]
     assert meta.is_flush_d.tolist()[:2] == [0, 0]
+
+
+def test_flashinfer_replayssm_metadata_pending():
+    """FlashInfer path must not silently reuse Triton write_pos metadata."""
+    builder = _create_replayssm_builder(
+        16, mamba_backend=MambaBackendEnum.FLASHINFER
+    )
+    case = REPLAYSSM_BUILD_CASES["fresh_decode"]
+    with pytest.raises(NotImplementedError, match="FlashInfer ReplaySSM metadata"):
+        _build(builder, case)
+
+
+@pytest.mark.skipif(
+    not FLASHINFER_REPLAYSSM_METADATA_READY,
+    reason="FlashInfer ReplaySSM metadata not implemented yet",
+)
+def test_flashinfer_replayssm_ring_metadata_fresh_decode():
+    """Fresh decode: ring_start / prev_num_accepted for checkpointing_ssu."""
+    builder = _create_replayssm_builder(
+        16, mamba_backend=MambaBackendEnum.FLASHINFER
+    )
+    meta = _build(builder, REPLAYSSM_BUILD_CASES["fresh_decode"])
+
+    assert meta.ring_start_d is not None
+    assert meta.prev_num_accepted_d is not None
+    assert meta.write_pos_d is None
+    assert meta.is_flush_d is None
+    assert meta.bc_pre_scratch is None
+    # Fill in expected ring_start / prev_num_accepted once the FI schedule is
+    # defined; until then this test stays skipped via the flag above.
+    raise NotImplementedError("set expected ring_start / prev_num_accepted")
