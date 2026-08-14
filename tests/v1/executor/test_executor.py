@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable
 from concurrent.futures import Future
 from typing import Any
+from unittest.mock import Mock as UnitTestMock
 
 import pytest
 
@@ -15,15 +16,29 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.executor import multiproc_executor as multiproc_executor_module
+from vllm.v1.executor import uniproc_executor as uniproc_executor_module
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.executor.uniproc_executor import (
     ExecutorWithExternalLauncher,
     UniProcExecutor,
 )
+from vllm.v1.outputs import (
+    AsyncModelRunnerOutput,
+    KVConnectorOutput,
+    ModelRunnerOutput,
+)
 
 
 class Mock: ...
+
+
+class DeferredModelRunnerOutput(AsyncModelRunnerOutput):
+    def __init__(self, output: ModelRunnerOutput):
+        self.output = output
+
+    def get_output(self) -> ModelRunnerOutput:
+        return self.output
 
 
 def test_supports_async_scheduling_base_executor():
@@ -42,6 +57,42 @@ def test_supports_async_scheduling_executor_with_external_launcher():
 
 def test_supports_async_scheduling_multiproc_executor():
     assert MultiprocExecutor.supports_async_scheduling() is True
+
+
+@pytest.mark.parametrize("non_block", [False, True])
+def test_uniproc_executor_pairs_receive_failure_with_completion(monkeypatch, non_block):
+    executor = UniProcExecutor.__new__(UniProcExecutor)
+    executor.driver_worker = Mock()
+    executor.kv_output_aggregator = KVOutputAggregator(expected_finished_count=1)
+
+    failure = ModelRunnerOutput.with_kv_conn_output_only(
+        KVConnectorOutput(failed_recving={"req"})
+    )
+    completion = ModelRunnerOutput.with_kv_conn_output_only(
+        KVConnectorOutput(finished_recving={"req"})
+    )
+    monkeypatch.setattr(
+        uniproc_executor_module,
+        "run_method",
+        UnitTestMock(
+            side_effect=[
+                DeferredModelRunnerOutput(failure),
+                DeferredModelRunnerOutput(completion),
+            ]
+        ),
+    )
+
+    first = executor.execute_model(Mock(), non_block=non_block)
+    if non_block:
+        first = first.result()
+    assert not first.kv_connector_output.failed_recving
+    assert not first.kv_connector_output.finished_recving
+
+    second = executor.execute_model(Mock(), non_block=non_block)
+    if non_block:
+        second = second.result()
+    assert second.kv_connector_output.failed_recving == {"req"}
+    assert second.kv_connector_output.finished_recving == {"req"}
 
 
 class _FakeClock:
