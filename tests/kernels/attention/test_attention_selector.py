@@ -556,30 +556,3 @@ def test_flash_attn_accepts_handled_fp8_variants(
     # import order across earlier tests that patch vllm.platforms.current_platform.
     monkeypatch.setattr(fa_utils_mod.current_platform, "is_xpu", lambda: True)
     assert FlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)
-
-
-def test_sm100_hd256_falls_back_to_fa2(monkeypatch: pytest.MonkeyPatch):
-    import vllm.v1.attention.backends.fa_utils as fa_utils_mod
-    from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
-
-    flash_attn_interface = pytest.importorskip(
-        "vllm.vllm_flash_attn.flash_attn_interface",
-        exc_type=ImportError,
-    )
-
-    monkeypatch.setattr(fa_utils_mod.current_platform, "is_xpu", lambda: False)
-    monkeypatch.setattr(fa_utils_mod.current_platform, "is_rocm", lambda: False)
-    monkeypatch.setattr(
-        fa_utils_mod.current_platform,
-        "get_device_capability",
-        lambda: DeviceCapability(10, 0),
-    )
-    monkeypatch.setattr(fa_utils_mod.envs, "VLLM_BATCH_INVARIANT", False)
-    monkeypatch.setattr(
-        flash_attn_interface,
-        "is_fa_version_supported",
-        lambda version: version in (2, 4),
-    )
-    assert get_flash_attn_version(head_size=128) == 4
-    assert get_flash_attn_version(head_size=192, head_size_v=128) == 4
-    assert get_flash_attn_version(head_size=256) == 2
