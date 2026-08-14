@@ -29,6 +29,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Static128BlockSym,
     kFp8StaticTensorSym,
     kMxfp8Dynamic,
     kMxfp8Static,
@@ -184,6 +185,7 @@ def test_modelopt_linear_algos_table_matches_resolve():
         "FP8",
         "FP8_PER_CHANNEL_PER_TOKEN",
         "FP8_PB_WO",
+        "FP8_PB",
     )
     assert algos_owned_by("modelopt_fp4") == ("NVFP4", "W4A16_NVFP4")
     assert algos_owned_by("modelopt_mxfp8") == ("MXFP8",)
@@ -808,3 +810,133 @@ def test_modelopt_mixed_precision_builds_w4a16_sibling_config():
 
     assert config.nvfp4_config.quant_method == "NVFP4"
     assert config.w4a16_nvfp4_config.quant_method == "W4A16_NVFP4"
+
+
+def _block_fp8_layer(
+    out_features: int, *, block_scale_deepseek: bool, in_features: int = 256
+):
+    """Run the per-block FP8 weight scheme over one layer's geometry."""
+    from vllm.model_executor.layers.quantization import modelopt as m
+
+    layer = torch.nn.Module()
+    m.SCHEME_FOR[kFp8Static128BlockSym].create_weights(
+        layer,
+        m.WEIGHT,
+        m.CkptCtx(block_scale_deepseek=block_scale_deepseek),
+        m.Shapes([out_features], in_features, torch.bfloat16),
+        Mock(),
+    )
+    return layer
+
+
+def test_modelopt_fp8_pb_scale_allows_partial_block(dist_init):
+    """FP8_PB sizes ``weight_scale_inv`` by ceiling division, so a partition
+    that ends in a partial block is representable. 2624 is GLM-5.2's
+    fused_qkv_a_proj (q_a 2048 + kv_a 576): not a multiple of 128, and the
+    layer is replicated, so no TP degree makes it block-aligned.
+    """
+    layer = _block_fp8_layer(2624, block_scale_deepseek=True)
+
+    assert not hasattr(layer, "weight_scale")
+    assert layer.weight_scale_inv.shape == (21, 2)
+
+
+def test_modelopt_fp8_pb_wo_scale_requires_exact_block(dist_init):
+    """FP8_PB_WO's 4-D layout cannot express a partial block, so it keeps
+    rejecting partitions that are not block-aligned."""
+    layer = _block_fp8_layer(2560, block_scale_deepseek=False)
+
+    assert not hasattr(layer, "weight_scale_inv")
+    assert layer.weight_scale.shape == (20, 1, 2, 1)
+
+    with pytest.raises(ValueError, match="divisible by 128"):
+        _block_fp8_layer(2624, block_scale_deepseek=False)
+
+
+@pytest.mark.parametrize(
+    "block_scale_deepseek, scale_name, expected_shape",
+    [(True, "weight_scale_inv", (21, 2)), (False, "weight_scale", (20, 2))],
+)
+def test_modelopt_block_fp8_process_normalises_scale(
+    dist_init, block_scale_deepseek, scale_name, expected_shape
+):
+    """``process`` hands the kernel a 2-D scale either way: it squeezes
+    ModelOpt's 4-D ``weight_scale`` and leaves DeepSeek's 2-D
+    ``weight_scale_inv`` alone.
+    """
+    from vllm.model_executor.layers.quantization import modelopt as m
+
+    out_features = 2624 if block_scale_deepseek else 2560
+    layer = _block_fp8_layer(out_features, block_scale_deepseek=block_scale_deepseek)
+
+    m.SCHEME_FOR[kFp8Static128BlockSym].process(layer, m.WEIGHT)
+
+    assert getattr(layer, scale_name).shape == expected_shape
+    assert layer.weight.shape == (out_features, 256)
+
+
+@pytest.mark.parametrize(
+    "algo, expected",
+    [("FP8_PB", True), ("FP8_PB_WO", True), ("FP8", False), ("MXFP8", False)],
+)
+def test_modelopt_mixed_precision_has_blocked_weights(algo, expected):
+    """``has_blocked_weights()`` gates "+quant_fp8" in ``VllmConfig``.
+
+    It must be True as soon as one layer is per-block: without the op QuantFP8
+    falls back to forward_native, which emits unpacked fp32 group scales where
+    Blackwell DeepGEMM wants them UE8M0-packed, and the model serves NaN logits.
+    It must stay False otherwise — enabling the op changes compilation for
+    checkpoints that never needed it.
+    """
+    config = _mixed_precision_config({"model.layers.0.a": {"quant_algo": algo}})
+
+    assert config.has_blocked_weights() is expected
+
+
+def test_modelopt_mixed_precision_rejects_non_128_block_size():
+    """``kFp8Static128BlockSym`` and the kernel behind it are 128x128. A
+    checkpoint declaring another group_size would load and silently mis-scale,
+    so the config rejects it instead."""
+    from vllm.model_executor.layers.quantization import modelopt as m
+
+    hf_quant_config: dict[str, Any] = {
+        "quantization": {
+            "quant_algo": "MIXED_PRECISION",
+            "kv_cache_quant_algo": None,
+            "exclude_modules": [],
+            "quantized_layers": {
+                "model.layers.0.a": {"quant_algo": "FP8_PB", "group_size": 64},
+            },
+        }
+    }
+
+    with pytest.raises(ValueError, match="group_size=64"):
+        m.ModelOptMixedPrecisionConfig.from_config(hf_quant_config)
+
+
+@pytest.mark.parametrize("algo", ["FP8_PB", "FP8_PB_WO"])
+def test_modelopt_fp8_rejects_non_128_block_size(algo):
+    """The same guard has to cover homogeneous checkpoints, not just mixed ones.
+    ModelOptFp8Config carries no group_size of its own, so without this the
+    value is silently dropped and the layer mis-scales against a 128x128 key.
+    """
+    from vllm.model_executor.layers.quantization import modelopt as m
+
+    def build(group_size):
+        return m.ModelOptFp8Config.from_config(
+            {
+                "quantization": {
+                    "quant_algo": algo,
+                    "kv_cache_quant_algo": None,
+                    "exclude_modules": [],
+                    "group_size": group_size,
+                }
+            }
+        )
+
+    with pytest.raises(ValueError, match="group_size=64"):
+        build(64)
+
+    # 128 and an absent group_size are both fine.
+    assert build(128).quant_method == algo
+    assert build(None).quant_method == algo

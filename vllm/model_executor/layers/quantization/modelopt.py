@@ -99,6 +99,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -121,6 +122,8 @@ LINEAR_ALGOS: dict[str, tuple[str, str]] = {
     "FP8_PER_CHANNEL_PER_TOKEN": ("modelopt", "fp8_config"),
     # FP8 128x128 per-block weight (ModelOpt may emit this lowercase).
     "FP8_PB_WO": ("modelopt", "fp8_config"),
+    # Same scheme as FP8_PB_WO, DeepSeek's 2-D weight_scale_inv on disk.
+    "FP8_PB": ("modelopt", "fp8_config"),
     # NVFP4 W4A4: 4-bit float weights AND 4-bit float activations.
     "NVFP4": ("modelopt_fp4", "nvfp4_config"),
     # W4A16 NVFP4: 4-bit float weights, fp16/bf16 activations.
@@ -128,6 +131,26 @@ LINEAR_ALGOS: dict[str, tuple[str, str]] = {
     # MXFP8: e4m3 weights with per-32-block e8m0 scales.
     "MXFP8": ("modelopt_mxfp8", "mxfp8_config"),
 }
+
+# Algos whose weights carry per-block scales. Gates "+quant_fp8" in VllmConfig
+# via has_blocked_weights(); missing an entry here is a silent NaN, not an error.
+BLOCK_FP8_ALGOS = frozenset({"FP8_PB_WO", "FP8_PB"})
+
+
+def reject_non_128_block(algo: str | None, group_size: Any, where: str) -> None:
+    """Per-block FP8 is 128x128 in vLLM: that is what kFp8Static128BlockSym
+    means and what the kernel behind it implements. A checkpoint declaring any
+    other group_size would load without complaint and silently mis-scale, so
+    refuse it instead. Supporting another size needs its own QuantKey and
+    SCHEME_FOR entry, not a config field.
+    """
+    if str(algo or "").upper() not in BLOCK_FP8_ALGOS:
+        return
+    if group_size not in (None, 128):
+        raise ValueError(
+            f"Per-block FP8 {where} declares group_size={group_size}; "
+            "vLLM only supports 128."
+        )
 
 # MIXED_PRECISION is not a linear algo; it selects a per-layer algo from the
 # table above.
@@ -411,11 +434,11 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
             )
 
     def has_blocked_weights(self) -> bool:
-        # Gates "+quant_fp8" in VllmConfig. FP8_PB_WO runs the block-scaled
-        # kernels, whose DeepGEMM path needs UE8M0-packed group scales; without
-        # the op enabled QuantFP8 falls back to forward_native, which emits
-        # unpacked fp32 scales and the GEMM fails to launch.
-        return self.quant_method == "FP8_PB_WO"
+        # Gates "+quant_fp8" in VllmConfig. The per-block algos run the
+        # block-scaled kernels, whose DeepGEMM path needs UE8M0-packed group
+        # scales; without the op enabled QuantFP8 falls back to forward_native,
+        # which emits unpacked fp32 scales and the GEMM fails to launch.
+        return self.quant_method in BLOCK_FP8_ALGOS
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt"
@@ -447,6 +470,8 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
         **kwargs: Any,
     ) -> "ModelOptFp8Config":
         is_checkpoint_fp8_serialized = "FP8" in quant_method
+        # Homogeneous FP8_PB / FP8_PB_WO; the mixed config checks per layer.
+        reject_non_128_block(quant_method, kwargs.get("group_size"), "checkpoint")
 
         return cls(
             quant_method,
@@ -1472,6 +1497,14 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         self.w4a16_nvfp4_config = w4a16_nvfp4_config
         self.mxfp8_config = mxfp8_config
 
+    def has_blocked_weights(self) -> bool:
+        # Same gate as ModelOptFp8Config.has_blocked_weights, resolved per
+        # layer: "+quant_fp8" must be on as soon as *any* layer is per-block.
+        return any(
+            str(info.get("quant_algo", "")).upper() in BLOCK_FP8_ALGOS
+            for info in self.quantized_layers.values()
+        )
+
     def get_name(self) -> QuantizationMethods:
         return "modelopt_mixed"
 
@@ -1520,6 +1553,11 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             raise ValueError(
                 "MIXED_PRECISION quant_algo requires a non-empty "
                 "'quantized_layers' mapping in the quantization config."
+            )
+
+        for name, info in quantized_layers.items():
+            reject_non_128_block(
+                info.get("quant_algo"), info.get("group_size"), f"layer {name}"
             )
 
         # Determine group_size from the first NVFP4-family entry if not
@@ -1769,6 +1807,10 @@ class CkptCtx:
     """Per-checkpoint facts a QuantKey cannot carry."""
 
     group_size: int | None = None
+    # Per-block FP8 only: the scale is DeepSeek's 2-D ``weight_scale_inv``
+    # rather than ModelOpt's 4-D ``weight_scale``. Same QuantKey either way,
+    # so the layout cannot live in the key.
+    block_scale_deepseek: bool = False
 
 
 @dataclass(frozen=True)
@@ -2039,55 +2081,74 @@ class KFp8StaticChannel(QuantKeyScheme):
 
 
 class KFp8Block128(QuantKeyScheme):
-    """128x128 block-static FP8 weight ('PbWo'). Weight-role only. ModelOpt
-    exports the scale 4-D [out_blk,1,in_blk,1]; process squeezes to 2-D.
-    No transpose (block kernel keeps [out,in])."""
+    """128x128 block-static FP8 weight. Weight-role only. No transpose (the
+    block kernel keeps [out,in]).
+
+    Serves both per-block algos -- same scheme, two on-disk scale layouts:
+
+    * FP8_PB_WO: ModelOpt's 4-D ``weight_scale`` [out_blk,1,in_blk,1]. Every
+      partition must be block-aligned; ``process`` squeezes it to 2-D.
+    * FP8_PB (``ctx.block_scale_deepseek``): DeepSeek's 2-D ``weight_scale_inv``,
+      sized by ceiling division, so a partition may end in a partial block.
+      GLM-5.2 needs this: fused_qkv_a_proj is 2624 wide (q_a 2048 + kv_a 576)
+      and is replicated, so no TP degree makes it a multiple of 128.
+
+    ``Fp8BlockScaledMMLinearKernel`` reads whichever scale name is present.
+    """
 
     key = kFp8Static128BlockSym
 
     def create_weights(self, layer, role, ctx, shapes, wl) -> None:
         if role is not WEIGHT:
             self.reject(role)
-        if (
-            shapes.output_size_per_partition % 128 != 0
-            or shapes.input_size_per_partition % 128 != 0
-        ):
+        out, inp = shapes.output_size_per_partition, shapes.input_size_per_partition
+        if not ctx.block_scale_deepseek and (out % 128 != 0 or inp % 128 != 0):
             raise ValueError(
-                f"FP8_PB_WO requires out/in divisible by 128, got "
-                f"{shapes.output_size_per_partition}x{shapes.input_size_per_partition}"
+                f"FP8_PB_WO requires out/in divisible by 128, got {out}x{inp}"
             )
         self.register_params(
             layer,
             "weight",
-            (shapes.output_size_per_partition, shapes.input_size_per_partition),
+            (out, inp),
             torch.float8_e4m3fn,
             ModelWeightParameter,
             wl,
             input_dim=1,
             output_dim=0,
         )
-        ob, ib = (
-            shapes.output_size_per_partition // 128,
-            shapes.input_size_per_partition // 128,
-        )
-        self.register_params(
-            layer,
-            "weight_scale",
-            (ob, 1, ib, 1),
-            torch.float32,
-            BlockQuantScaleParameter,
-            wl,
-            input_dim=2,
-            output_dim=0,
-            init=FP8_SCALE_SENTINEL,
-        )
+        if ctx.block_scale_deepseek:
+            self.register_params(
+                layer,
+                "weight_scale_inv",
+                (cdiv(out, 128), cdiv(inp, 128)),
+                torch.float32,
+                BlockQuantScaleParameter,
+                wl,
+                input_dim=1,
+                output_dim=0,
+                init=FP8_SCALE_SENTINEL,
+            )
+        else:
+            self.register_params(
+                layer,
+                "weight_scale",
+                (out // 128, 1, inp // 128, 1),
+                torch.float32,
+                BlockQuantScaleParameter,
+                wl,
+                input_dim=2,
+                output_dim=0,
+                init=FP8_SCALE_SENTINEL,
+            )
         layer.weight_block_size = [128, 128]
 
     def process(self, layer, role) -> None:
         if role is not WEIGHT:
             self.reject(role)
         layer.weight = Parameter(layer.weight.data, requires_grad=False)
-        s = layer.weight_scale
+        s = getattr(layer, "weight_scale", None)
+        if s is None:
+            return  # block_scale_deepseek: already 2-D, the kernel packs it
         if s.dim() == 4:
             s = s.squeeze(1).squeeze(-1)  # [ob,1,ib,1] -> [ob,ib]
         elif s.dim() != 2:
@@ -2369,11 +2430,12 @@ def resolve(algo: str, subcfg, prefix: str):
             ctx,
             None,
         )
-    if algo == "FP8_PB_WO":
-        # PbWo: 128x128 block-static weight, dynamic per-block activation (W8A8).
+    if algo in BLOCK_FP8_ALGOS:
+        # 128x128 block-static weight, dynamic per-block activation (W8A8).
         # The block kernel's post-load runs here; CompressedTensors block-FP8
-        # is the reference for this path.
-        ctx = CkptCtx()
+        # is the reference for this path. FP8_PB differs from FP8_PB_WO only in
+        # the on-disk scale layout, which KFp8Block128 reads off the ctx.
+        ctx = CkptCtx(block_scale_deepseek=algo == "FP8_PB")
         return (
             QuantSpec(weight=kFp8Static128BlockSym, activation=kFp8Dynamic128Sym),
             ctx,
