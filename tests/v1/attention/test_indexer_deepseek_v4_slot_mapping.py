@@ -8,6 +8,7 @@ import torch
 
 from tests.v1.attention.utils import create_vllm_config
 from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.mla import indexer as indexer_module
 from vllm.v1.attention.backends.mla.indexer import (
     BuildPrefillChunkMetadataKernel,
     DeepseekV32IndexerMetadataBuilder,
@@ -31,6 +32,74 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
     keys = BuildPrefillChunkMetadataKernel().get_warmup_keys(config)
 
     assert {key.COMPRESS_RATIO for key in keys} == {1, 4, 128}
+
+
+def test_zero_token_pcp_rank_participates_in_compressed_mapping_gather(monkeypatch):
+    builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
+    builder.compress_ratio = 4
+    builder.pcp_world_size = 4
+    builder.kv_cache_spec = SimpleNamespace(storage_block_size=64)
+    builder.compressed_slot_mapping_buffer = torch.zeros(8, dtype=torch.int64)
+
+    def fake_get_compressed_slot_mapping(
+        num_tokens,
+        query_start_loc,
+        seq_lens,
+        block_table,
+        block_size,
+        compress_ratio,
+        out,
+    ):
+        assert num_tokens == 0
+        assert block_size == 64
+        assert compress_ratio == 4
+        out.fill_(-1)
+        return out[:num_tokens]
+
+    gathered_slot_mapping = torch.tensor([123, -1, -1, -1], dtype=torch.int64)
+
+    class FakePCPGroup:
+        def __init__(self):
+            self.calls = 0
+
+        def all_gather(self, tensor, dim=0):
+            self.calls += 1
+            assert dim == 0
+            torch.testing.assert_close(tensor, torch.tensor([-1]))
+            return gathered_slot_mapping
+
+    fake_pcp_group = FakePCPGroup()
+    monkeypatch.setattr(
+        indexer_module,
+        "get_compressed_slot_mapping",
+        fake_get_compressed_slot_mapping,
+    )
+    monkeypatch.setattr(indexer_module, "get_pcp_group", lambda: fake_pcp_group)
+
+    query_start_loc = torch.tensor([0, 0], dtype=torch.int32)
+    seq_lens = torch.tensor([16], dtype=torch.int32)
+    common = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens,
+        num_reqs=1,
+        num_actual_tokens=0,
+        max_query_len=0,
+        max_seq_len=16,
+        block_table_tensor=torch.tensor([[0]], dtype=torch.int32),
+        slot_mapping=torch.tensor([11, 22, 33, 44], dtype=torch.int64),
+        causal=True,
+    )
+
+    metadata = builder.build(common_prefix_len=0, common_attn_metadata=common)
+
+    assert fake_pcp_group.calls == 1
+    assert metadata.num_decodes == 0
+    assert metadata.num_decode_tokens == 0
+    assert metadata.num_prefills == 0
+    assert metadata.num_prefill_tokens == 0
+    torch.testing.assert_close(metadata.slot_mapping, gathered_slot_mapping)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
