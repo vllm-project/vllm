@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -63,14 +62,29 @@ def test_combined_task_with_plugin_uses_plugin_processor(monkeypatch):
     assert isinstance(processors["plugin"], PluginWithIOProcessorPlugins)
 
 
-def test_combined_task_plain_pooling_request_has_actionable_error():
+def test_combined_task_plain_pooling_request_has_actionable_error(monkeypatch):
+    from vllm.entrypoints.pooling.pooling.protocol import PoolingCompletionRequest
     from vllm.entrypoints.pooling.pooling.serving import ServingPooling
 
-    serving = object.__new__(ServingPooling)
-    serving.pooling_task = "embed&token_classify"
-    serving.supported_tasks = ("embed", "embed&token_classify")
-    serving.io_processors = {"plugin": MagicMock()}
-    request = SimpleNamespace(task=None, dimensions=None)
+    vllm_config, renderer, chat_template_config = _bge_m3_config("bge_m3_sparse_plugin")
+    monkeypatch.setattr(factories, "has_io_processor", lambda *_: True)
+    monkeypatch.setattr(
+        "vllm.entrypoints.pooling.pooling.io_processor.get_io_processor",
+        lambda *_: MagicMock(),
+    )
 
+    engine_client = MagicMock(renderer=renderer, vllm_config=vllm_config)
+    models = MagicMock(model_config=vllm_config.model_config)
+    serving = ServingPooling(
+        engine_client,
+        models,
+        supported_tasks=("embed", "embed&token_classify"),
+        request_logger=None,
+        chat_template_config=chat_template_config,
+    )
+    request = PoolingCompletionRequest(model="BAAI/bge-m3", input=["hola"])
+
+    assert serving.io_processors.keys() == {"embed&token_classify", "plugin"}
+    io_processor = serving.get_io_processor(request)
     with pytest.raises(ValueError, match="plugin request with a 'data' field"):
-        serving.get_io_processor(request)
+        io_processor.create_pooling_params(request)
