@@ -30,6 +30,7 @@ from contextlib import suppress
 from typing import Any, Literal, cast
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.triton_utils.importing import HAS_TRITON
 
 logger = init_logger(__name__)
@@ -74,7 +75,12 @@ def activate(*, mode: JitMonitorMode = "warn", verbose: bool = False) -> None:
     _setup_triton_autotuning_print()
     _setup_triton_jit_hook()
     _setup_cutedsl_jit_hook()
-    _setup_tilelang_jit_hook()
+
+    # Refer to #51159. tilelang ships broken symbols
+    # on rocm.
+    # TODO: Remove the guard once tilelang upstream is fixed.
+    if not current_platform.is_rocm():
+        _setup_tilelang_jit_hook()
 
     logger.info(
         "Kernel JIT monitor activated; monitored JIT compilations during "
