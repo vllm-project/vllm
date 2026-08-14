@@ -135,6 +135,15 @@ class KVConnectorPromMetrics:
         """
         raise NotImplementedError
 
+    def record_config_info(
+        self, config_info: dict[str, dict[str, str]], engine_idx: int = 0
+    ):
+        """
+        Emit the connector's static config as Info-style gauges once at engine
+        startup, mapping ``metric_name -> {label: value}`` (each set to 1).
+        Default no-op; connectors with startup config override this.
+        """
+
 
 class KVConnectorProm:
     """
@@ -173,3 +182,10 @@ class KVConnectorProm:
         if self.prom_metrics is None:
             return
         self.prom_metrics.observe(transfer_stats_data, engine_idx)
+
+    def record_config_info(
+        self, config_info: dict[str, dict[str, str]], engine_idx: int = 0
+    ):
+        if self.prom_metrics is None:
+            return
+        self.prom_metrics.record_config_info(config_info, engine_idx)
