@@ -59,9 +59,10 @@ class CausalMixin(VllmModelForTextGeneration):
                         self.lm_head = self.lm_head.tie_weights(module)
                         break
 
-            logit_scale = getattr(self.text_config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(
-                self.text_config.vocab_size, scale=logit_scale
+                self.text_config.vocab_size,
+                scale=getattr(self.text_config, "logit_scale", 1.0),
+                soft_cap=getattr(self.text_config, "final_logit_softcapping", None),
             )
         else:
             self.lm_head = PPMissingLayer()

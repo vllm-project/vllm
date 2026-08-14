@@ -725,21 +725,22 @@ class BlockPool:
                 priority.
         """
         # Identify blocks with hash (LRU cache) and without it (never match APC)
-        blocks_with_hash = []
-        blocks_without_hash = []
+        blocks_to_evict_last = []
+        blocks_to_evict_first = []
         for block in ordered_blocks:
             block.ref_cnt -= 1
             if block.ref_cnt == 0 and not block.is_null:
-                # When caching is disabled we always append for better
-                # GPU cache locality from reusing recently used blocks
-                if block.block_hash is None and self.enable_caching:
-                    blocks_without_hash.append(block)
+                if block.block_hash is None or not self.enable_caching:
+                    # LIFO reuse of non-cached blocks for better GPU locality.
+                    blocks_to_evict_first.append(block)
                 else:
-                    blocks_with_hash.append(block)
+                    # FIFO reuse of cached blocks for LRU eviction behavior.
+                    blocks_to_evict_last.append(block)
 
-        # Blocks without hash get evicted first - prepend them last to the tail
-        self.free_block_queue.prepend_n(blocks_without_hash)
-        self.free_block_queue.append_n(blocks_with_hash)
+        # Blocks to reuse first are prepended to the front of the free queue.
+        self.free_block_queue.prepend_n(blocks_to_evict_first)
+        # Blocks to reuse last are appended to the end of the free queue.
+        self.free_block_queue.append_n(blocks_to_evict_last)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

@@ -22,7 +22,7 @@ from vllm.v1.worker.gpu.sample.logprob import (
     LogprobTokenIdsState,
     compute_topk_scores,
 )
-from vllm.v1.worker.gpu.sample.output import SamplerOutput
+from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
@@ -41,6 +41,7 @@ class Sampler:
         num_speculative_tokens: int = 1,
         use_fp64_gumbel: bool = False,
         reasoning_config: ReasoningConfig | None = None,
+        return_sampling_mask: bool = False,
     ):
         self.logprobs_mode = logprobs_mode
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
@@ -55,7 +56,10 @@ class Sampler:
         self.thinking_budget_state = ThinkingBudgetState(req_states, reasoning_config)
         self.trace_replay_state = TraceReplayState(req_states)
         self.num_speculative_tokens = num_speculative_tokens
-        self.use_flashinfer = flashinfer_sampler_supported()
+        self.return_sampling_mask = return_sampling_mask
+        self.use_flashinfer = (
+            not return_sampling_mask and flashinfer_sampler_supported()
+        )
 
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
@@ -152,6 +156,12 @@ class Sampler:
             self.req_states.prefill_len.gpu,
         )
 
+        sampling_mask_tensors = None
+        if self.return_sampling_mask:
+            sampling_mask_tensors = SamplingMaskTensors.from_logits(
+                processed_logits, num_sampled
+            )
+
         # These are GPU tensors.
         sampler_output = SamplerOutput(
             # The sampled tokens are expanded to 2D tensor with shape
@@ -162,6 +172,7 @@ class Sampler:
             num_nans=num_nans,
             num_sampled=num_sampled,
             num_rejected=num_rejected,
+            sampling_mask_tensors=sampling_mask_tensors,
         )
         return sampler_output
 
