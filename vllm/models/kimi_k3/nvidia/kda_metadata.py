@@ -254,58 +254,31 @@ class KDARecoverSSMCommitMetadata:
     align: KDARecoverSSMAlignMetadata | None
 
 
-class KDARecoverSSMCommitter:
-    def __init__(self, layer_names: list[str], vllm_config: VllmConfig) -> None:
-        self.layer_names = tuple(layer_names)
-        self.vllm_config = vllm_config
-        self._context: KDARecoverSSMCommitContext | None = None
+@dataclass
+class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
+    recoverssm_commit: KDARecoverSSMCommitMetadata | None = None
+    recoverssm_context: "KDARecoverSSMCommitContext | None" = field(
+        default=None, repr=False, compare=False
+    )
 
-    def commit(
-        self,
-        attn_metadata: "KimiK3KDAMetadata",
-        num_accepted_tokens: torch.Tensor,
-    ) -> None:
-        metadata = attn_metadata.recoverssm_commit
-        assert metadata is not None
-        if self._context is None:
-            from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
-                KDARecoverSSMCommitContext,
-            )
-
-            forward_context = self.vllm_config.compilation_config.static_forward_context
-            layers = [forward_context[layer_name] for layer_name in self.layer_names]
-            self._context = KDARecoverSSMCommitContext.create(
-                layers,
-                spec_query_len=1 + self.vllm_config.num_speculative_tokens,
-                max_num_reqs=self.vllm_config.scheduler_config.max_num_seqs,
-            )
-
-        align = metadata.align
-        self._context.commit(
+    def commit_recoverssm_state(self, num_accepted_tokens: torch.Tensor) -> None:
+        commit = self.recoverssm_commit
+        if commit is None:
+            return
+        context = self.recoverssm_context
+        assert context is not None
+        align = commit.align
+        context.commit(
             num_accepted_tokens,
-            metadata.state_indices[: attn_metadata.num_spec_decodes, 0],
-            metadata.query_start_loc[: attn_metadata.num_spec_decodes + 1],
-            request_indices=metadata.request_indices,
+            commit.state_indices[: self.num_spec_decodes, 0],
+            commit.query_start_loc[: self.num_spec_decodes + 1],
+            request_indices=commit.request_indices,
             block_table=align.block_table if align is not None else None,
             num_computed_tokens=(
                 align.num_computed_tokens if align is not None else None
             ),
             mamba_block_size=align.block_size if align is not None else None,
         )
-
-
-@dataclass
-class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
-    recoverssm_commit: KDARecoverSSMCommitMetadata | None = None
-    _recoverssm_committer: KDARecoverSSMCommitter | None = field(
-        default=None, repr=False, compare=False
-    )
-
-    def commit_recoverssm_state(self, num_accepted_tokens: torch.Tensor) -> None:
-        if self.num_spec_decodes == 0:
-            return
-        assert self._recoverssm_committer is not None
-        self._recoverssm_committer.commit(self, num_accepted_tokens)
 
     def get_recoverssm_align_commit_metadata(
         self,
@@ -335,11 +308,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         self.use_recoverssm = vllm_config.cache_config.use_kda_recoverssm
         self.spec_state_slots = 1 if self.use_recoverssm else self.num_spec + 1
         self.recoverssm_num_accepted_tokens: torch.Tensor | None = None
-        self._recoverssm_committer = (
-            KDARecoverSSMCommitter(layer_names, vllm_config)
-            if self.use_recoverssm
-            else None
-        )
+        self.recoverssm_context: KDARecoverSSMCommitContext | None = None
         if self.use_recoverssm:
             max_num_reqs = vllm_config.scheduler_config.max_num_seqs
             self.spec_state_indices_tensor = torch.empty(
@@ -352,6 +321,25 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
                 dtype=torch.int32,
                 device=device,
             )
+
+    def _get_recoverssm_context(self) -> "KDARecoverSSMCommitContext":
+        context = self.recoverssm_context
+        if context is not None:
+            return context
+
+        from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
+            KDARecoverSSMCommitContext,
+        )
+
+        forward_context = self.vllm_config.compilation_config.static_forward_context
+        layers = [forward_context[layer_name] for layer_name in self.layer_names]
+        context = KDARecoverSSMCommitContext.create(
+            layers,
+            spec_query_len=1 + self.vllm_config.num_speculative_tokens,
+            max_num_reqs=self.vllm_config.scheduler_config.max_num_seqs,
+        )
+        self.recoverssm_context = context
+        return context
 
     def build(  # type: ignore[override]
         self,
@@ -645,8 +633,10 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
             recoverssm_commit=recoverssm_commit,
-            _recoverssm_committer=(
-                self._recoverssm_committer if recoverssm_commit is not None else None
+            recoverssm_context=(
+                self._get_recoverssm_context()
+                if recoverssm_commit is not None
+                else None
             ),
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,

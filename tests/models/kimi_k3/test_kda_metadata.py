@@ -49,7 +49,7 @@ def _assert_matches_shared_gdn(
     reference: GDNAttentionMetadata, actual: KimiK3KDAMetadata
 ):
     assert actual.recoverssm_commit is None
-    assert actual._recoverssm_committer is None
+    assert actual.recoverssm_context is None
     for field in fields(GDNAttentionMetadata):
         actual_value = getattr(actual, field.name)
         expected_value = getattr(reference, field.name)
@@ -100,7 +100,7 @@ def _make_builder(
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     vllm_config.cache_config.use_replayssm = use_recoverssm
     vllm_config.cache_config.use_kda_recoverssm = use_recoverssm
-    return builder_cls(
+    builder = builder_cls(
         kv_cache_spec=MambaSpec(
             block_size=BLOCK_SIZE,
             shapes=((16, 64),),
@@ -112,6 +112,10 @@ def _make_builder(
         vllm_config=vllm_config,
         device=device,
     )
+    if use_recoverssm:
+        assert isinstance(builder, KimiK3KDAMetadataBuilder)
+        builder.recoverssm_context = Mock()
+    return builder
 
 
 @pytest.mark.parametrize(
@@ -258,12 +262,16 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window():
     common_attn_metadata = create_common_attn_metadata(
         batch, BLOCK_SIZE, DEVICE
     ).replace(is_prefilling=torch.tensor([False, False, False]))
-    actual = _make_builder(
+    builder = _make_builder(
         KimiK3KDAMetadataBuilder,
         num_speculative_tokens=2,
         full_cuda_graph=False,
         use_recoverssm=True,
-    ).build(
+    )
+    assert isinstance(builder, KimiK3KDAMetadataBuilder)
+    context = builder.recoverssm_context
+    assert context is not None
+    actual = builder.build(
         0,
         common_attn_metadata,
         num_decode_draft_tokens_cpu=torch.tensor([-1, -1, 2], dtype=torch.int32),
@@ -281,10 +289,7 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window():
         commit_metadata.request_indices, torch.tensor([2], dtype=torch.int32)
     )
     assert commit_metadata.align is None
-    committer = actual._recoverssm_committer
-    assert committer is not None
-    context = Mock()
-    committer._context = context
+    assert actual.recoverssm_context is context
     num_accepted_tokens = torch.tensor([3, 2, 1], dtype=torch.int32)
 
     actual.commit_recoverssm_state(num_accepted_tokens)
