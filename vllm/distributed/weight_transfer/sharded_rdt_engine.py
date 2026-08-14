@@ -152,38 +152,26 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     """Initialization info for the sharded RDT backend."""
 
     trainer_actor_names: list[str] = field(default_factory=list)
-    """Names of all trainer Ray actors that expose the producer method (set via
-    ``.options(name=...)``), ordered by trainer rank. Every rank that gathers a
-    layer can serve NIXL pulls for it, so workers spread their pulls across this
-    list to parallelize the trainer-side clone + NIC egress instead of funneling
-    through rank 0. ``RdtRouter`` decides which of them serves each pull unit
-    for this worker (see ``group_owners`` and ``name_ep_rank``); every actor is
-    bound regardless, because the per-group ``free_group`` signal fans out to
-    every owner. Must be non-empty; a single-producer trainer passes a
-    one-element list."""
+    """Names of all trainer Ray actors exposing the producer method (set via
+    ``.options(name=...)``), ordered by trainer rank. ``RdtRouter`` picks which
+    one serves each pull: the group's owners (pipeline-stage ownership), narrowed
+    to a matching expert coordinate, then rotated by group index so consumers
+    spread across them rather than funneling through rank 0. Every actor is bound
+    regardless, because ``free_group`` fans out to every owner. Must be
+    non-empty; a single-producer trainer passes a one-element list."""
 
     trainer_actor_namespace: str | None = None
     """Optional Ray namespace the trainer actor(s) live in."""
 
     produce_method_name: str = "rdt_produce_weights_batched"
-    """Name of the trainer-side producer method (implemented by the serve actor
-    the trainer engine spawns; see
-    vllm/distributed/weight_transfer/sharded_rdt_trainer.py). Must be decorated
-    with
-    ``@ray.method(tensor_transport="nixl")``. Contract: given a batched specs
-    list ``[(name, [(op_name, args, kwargs_items), ...]), ...]``, replay each
-    chain on the named tensor and return ONE contiguous uint8 blob with every
-    slice byte-packed at 16B-aligned offsets in specs order (the engine
-    computes the identical layout and carves dtype views back out; a one-spec
-    request is that slice at offset 0). The trainer must also expose
-    ``free_group(group_idx)`` (may be a no-op when it has no gather plan)."""
+    """Name of the trainer-side producer method. It and the rest of the serve
+    surface (``free_group``, ``reserve_serve_arena``) are documented where they
+    are implemented, on ``_RDTProducerServer`` in ``sharded_rdt_trainer.py``."""
 
     names: list[str] = field(default_factory=list)
-    """The full, flat list of parameters to transfer (the trainer's complete
-    param name list). The engine bakes a replay plan once at
-    ``init_transfer_engine`` by driving ``model.load_weights`` over all of these
-    against meta params, then keys the plan by source name. ``update_weights``
-    later passes the subset of these names it gathered for that call."""
+    """The trainer's complete, flat param name list. The bake drives
+    ``model.load_weights`` over all of them once and keys the plan by source
+    name."""
 
     dtype_names: list[str] = field(default_factory=list)
     """Dtype name (e.g. 'bfloat16') for each entry of ``names``."""
@@ -223,23 +211,18 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     together with ``name_ep_rank``) whenever any name stamp is >= 0."""
 
     num_consumers: int = 0
-    """Total inference-worker (consumer) count across the whole fleet, for the M:N
-    producer/consumer routing (see ``RdtRouter``). The
-    driver knows it (``tensor_parallel_size * data_parallel_size``). Authoritative
-    when > 0; when 0 the engine infers it from ``parallel_config`` (correct for the
-    supported serving modes — dense→TP, MoE→DP+EP). Set it explicitly for M:N so
-    the count is never guessed. Each worker's DISTINCT index comes from
-    ``data_parallel_index * world_size + rank`` (see ``_global_worker_index``)."""
+    """Total consumer count across the fleet, for M:N routing. Authoritative when
+    > 0; at 0 the engine infers it from ``parallel_config``, which is correct for
+    the supported serving modes but worth setting explicitly under M:N. Each
+    worker's distinct index comes from ``_global_worker_index``."""
 
     num_rdt_buffers: int = 2
-    """[RDT-RING] Depth of the consumer receive-arena ring. The producer mirrors
-    it from ``ShardedRDTTrainerInitInfo.num_rdt_buffers`` and the two MUST agree
-    (the producer-ring safety argument in ``_run_chunk_pipeline`` rests on it).
-    2 = double buffer: chunk i+1's produce/serve overlaps chunk i's RDMA read,
-    and scatter(i-1) overlaps RDMA(i) in the other slot. Keep depth x
-    chunk_bytes under the fabric's address-translation reach (~2-3 GB/flow on
-    the reference 8xB200 RoCE cluster, where K=3 measurably HURT) or the
-    transfer drops out of the fast regime."""
+    """[RDT-RING] Depth of the consumer receive-arena ring. Must match the
+    producer's — ``_run_chunk_pipeline``'s slot-safety argument rests on it. 2 =
+    double buffer: chunk i+1's serve overlaps chunk i's RDMA, and scatter(i-1)
+    overlaps RDMA(i) in the other slot. Keep depth x chunk_bytes under the
+    fabric's address-translation reach (~2-3 GB/flow on the reference 8xB200 RoCE
+    cluster, where K=3 measurably hurt)."""
 
     arena_presize_gb: float = 0.0
     """[RDT-RING] Pre-size each packed receive-arena slot to this many GiB
