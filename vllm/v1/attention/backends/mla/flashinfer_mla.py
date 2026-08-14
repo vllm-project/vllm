@@ -5,7 +5,12 @@ from typing import ClassVar
 
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+from flashinfer.utils import (
+    get_device_sm_count,
+    get_trtllm_gen_multi_ctas_kv_counter_bytes,
+)
 
+from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -26,6 +31,37 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 logger = init_logger(__name__)
+
+
+def _trtllm_gen_mla_decode_supports_num_heads(num_heads: int) -> bool:
+    """True if trtllm-gen's MLA decode kernel supports this query head count.
+
+    The kernel groups Q heads into CTAs of ``min(num_heads, tileSizeQ)`` and
+    requires ``num_heads`` divisible by that, else raises "The
+    numHeadsQ/numHeadsKv is not supported" (flashinfer fmhaKernels.cuh).
+    ``tileSizeQ`` is 8/16 for ``num_heads <= 8``/``<= 32`` (SwapsMmaAb) else 64;
+    treat ``> 32`` as tile 64 (safe bound). E.g. 96/24 -> False, 48/64/128 -> True.
+    """
+    if num_heads <= 8:
+        tile = 8
+    elif num_heads <= 32:
+        tile = 16
+    else:
+        tile = 64
+    return num_heads % min(num_heads, tile) == 0
+
+
+def _select_mla_decode_backend(num_heads: int) -> str | None:
+    """cute-dsl for head counts trtllm-gen cannot tile, else None (=> auto)."""
+    if not _trtllm_gen_mla_decode_supports_num_heads(num_heads):
+        logger.warning_once(
+            "trtllm-gen MLA decode does not support num_heads=%d "
+            "(query/kv head ratio); falling back to the cute-dsl backend.",
+            num_heads,
+        )
+        return "cute-dsl"
+    return None
+
 
 FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 FLASHINFER_MLA_LSE_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
@@ -48,9 +84,39 @@ def _get_workspace_buffer(return_lse: bool) -> torch.Tensor:
     return _fi_workspace
 
 
+_fi_multi_ctas_kv_counter: torch.Tensor | None = None
+
+
+def _get_multi_ctas_kv_counter_buffer(
+    min_bytes: int, device: torch.device
+) -> torch.Tensor:
+    """Persistent, zero-initialized trtllm-gen multi-CTA-KV counter buffer.
+
+    trtllm-gen's multi-CTA-KV MLA decode kernel resets these semaphores to zero
+    at the end of every launch, so the buffer only needs zeroing once. The
+    public ``trtllm_batch_decode_with_kv_cache_mla`` entry point builds a fresh
+    runner per call, so without a caller-owned buffer it re-allocates and
+    re-zeros this counter on every decode step (a tiny ``FillFunctor<uint8>``
+    launch right before the FMHA). Owning it here and passing it in removes that
+    per-step launch. ``min_bytes`` is sized to the worst-case batch so the
+    buffer is allocated once and never reallocated after CUDA-graph capture.
+    """
+    global _fi_multi_ctas_kv_counter
+    if (
+        _fi_multi_ctas_kv_counter is None
+        or _fi_multi_ctas_kv_counter.numel() < min_bytes
+    ):
+        _fi_multi_ctas_kv_counter = torch.zeros(
+            min_bytes, dtype=torch.uint8, device=device
+        )
+    return _fi_multi_ctas_kv_counter
+
+
 class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
+    # Non-causal DSpark blocks are flattened to single-token rows in forward_mqa.
+    supports_non_causal_multi_token_decode: ClassVar[bool] = True
 
 
 class FlashInferMLABackend(MLACommonBackend):
@@ -90,6 +156,10 @@ class FlashInferMLABackend(MLACommonBackend):
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability.major == 10
+
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
 
     @classmethod
     def supports_combination(
@@ -179,6 +249,16 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
+        # Worst-case decode batch for the persistent trtllm-gen multi-CTA-KV
+        # counter buffer (see _get_multi_ctas_kv_counter_buffer). Captured here
+        # (config is in scope during construction) so the byte size can be
+        # resolved once on the first decode and never grows after CUDA-graph
+        # capture. The impl has no _vllm_config, hence get_current_vllm_config().
+        _sched = get_current_vllm_config().scheduler_config
+        self._mla_counter_max_batch: int = (
+            _sched.max_num_batched_tokens or _sched.max_num_seqs
+        )
+        self._mla_counter_bytes: int | None = None
 
     def forward_mqa(
         self,
@@ -194,8 +274,20 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             q_nope, q_pe = q
             q = torch.cat([q_nope, q_pe], dim=-1)
 
+        block_table = attn_metadata.decode.block_table
+        seq_lens = attn_metadata.decode.seq_lens
+
+        if not attn_metadata.causal:
+            # Non-causal DSpark block: flatten to single-token decode rows with
+            # per-row context seq_lens (trtllm-gen has no causal flag and would
+            # otherwise mask the block causally).
+            query_len = attn_metadata.num_decode_tokens // attn_metadata.num_decodes
+            q = q.unsqueeze(1)
+            if query_len > 1:
+                block_table = block_table.repeat_interleave(query_len, dim=0)
+                seq_lens = seq_lens.repeat_interleave(query_len)
         # trtllm API requires extra dimension q_len_per_request for MTP
-        if attn_metadata.num_decode_tokens % attn_metadata.num_decodes != 0:
+        elif attn_metadata.num_decode_tokens % attn_metadata.num_decodes != 0:
             logger.warning_once(
                 """FlashInferMLAImpl got a query of uneven length.
                 This usually indicates an issue in batch reordering
@@ -217,6 +309,31 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         return_lse = self.need_to_return_lse_for_decode
         workspace_buffer = _get_workspace_buffer(return_lse)
+        # Parallel gathers can change the runtime Q heads from TP-local num_heads.
+        runtime_num_heads = q.shape[-2]
+        # trtllm-gen rejects MLA head counts it can't tile (e.g. 96);
+        # fall back to cute-dsl for those.
+        decode_backend = _select_mla_decode_backend(runtime_num_heads)
+        extra_kwargs = {}
+        if decode_backend:
+            extra_kwargs["backend"] = decode_backend
+        elif kv_c_and_k_pe_cache.shape[-2] in (32, 64):
+            # The auto path can dispatch to trtllm-gen, whose multi-CTA-KV decode
+            # kernel self-resets its semaphore counter after each launch (so it
+            # only needs zeroing once). Pass a persistent counter buffer to skip
+            # the per-step re-allocate + re-zero the public entry point would
+            # otherwise do. Guarded to configs where a trtllm-gen runner is
+            # eligible (page/block size in {32, 64}); the arg is rejected when
+            # only a cute-dsl runner can run.
+            if self._mla_counter_bytes is None:
+                self._mla_counter_bytes = get_trtllm_gen_multi_ctas_kv_counter_bytes(
+                    self._mla_counter_max_batch,
+                    runtime_num_heads,
+                    get_device_sm_count(q.device),
+                )
+            extra_kwargs["multi_ctas_kv_counter_buffer"] = (
+                _get_multi_ctas_kv_counter_buffer(self._mla_counter_bytes, q.device)
+            )
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=q,
             kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
@@ -224,12 +341,13 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
-            block_tables=attn_metadata.decode.block_table,
-            seq_lens=attn_metadata.decode.seq_lens,
+            block_tables=block_table,
+            seq_lens=seq_lens,
             max_seq_len=attn_metadata.max_seq_len,
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
             return_lse=return_lse,
+            **extra_kwargs,
         )
         if return_lse:
             o, lse = kernel_out

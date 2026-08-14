@@ -211,8 +211,6 @@ void scaled_fp4_quant_sm1xxa(torch::stable::Tensor const& output,
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
   auto stream = get_current_cuda_stream(input.get_device_index());
-  auto* device_props = get_device_prop();
-  int const sm_version = device_props->major * 10 + device_props->minor;
 
   int output_sf_n_unpadded = int(output_n / CVT_FP4_SF_VEC_SIZE);
 
@@ -244,7 +242,7 @@ void scaled_fp4_quant_sm1xxa(torch::stable::Tensor const& output,
           cudaLaunchAttribute attrs[1];
           attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
           attrs[0].val.programmaticStreamSerializationAllowed = 1;
-          config.numAttrs = (sm_version >= 90) ? 1 : 0;
+          config.numAttrs = 1;
           config.attrs = attrs;
           cudaLaunchKernelEx(&config, vllm::cvt_fp16_to_fp4<cuda_type, false>,
                              m, n, output_n, num_padded_cols, input_ptr,
@@ -271,7 +269,7 @@ void scaled_fp4_quant_sm1xxa(torch::stable::Tensor const& output,
           cudaLaunchAttribute attrs[1];
           attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
           attrs[0].val.programmaticStreamSerializationAllowed = 1;
-          config.numAttrs = (sm_version >= 90) ? 1 : 0;
+          config.numAttrs = 1;
           config.attrs = attrs;
           cudaLaunchKernelEx(
               &config, vllm::cvt_fp16_to_fp4_sf_major<cuda_type, false>, m, n,

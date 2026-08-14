@@ -25,6 +25,10 @@ pub trait Tokenizer: Send + Sync {
     /// Encode one prompt string into token IDs.
     fn encode(&self, text: &str, add_special_tokens: bool) -> Result<Vec<u32>>;
 
+    /// Equivalent to `encode(text, false)`, except that every added,
+    /// special, and control-token matcher is bypassed.
+    fn encode_ordinary(&self, text: &str) -> Result<Vec<u32>>;
+
     /// Decode one token sequence into text.
     fn decode(&self, token_ids: &[u32], skip_special_tokens: bool) -> Result<String>;
 

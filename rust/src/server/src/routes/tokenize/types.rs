@@ -7,8 +7,9 @@ use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::{Validate, ValidationErrors};
-use vllm_chat::{ChatOptions, ChatRequest, ChatToolChoice, SamplingParams};
+use vllm_chat::{ChatOptions, ChatRequest, ResolvedToolContext, SamplingParams};
 use vllm_text::output::TextDecodeOptions;
+use vllm_text::{Prompt, TextRequest};
 
 use crate::error::ApiError;
 use crate::routes::openai::chat_completions::convert::{
@@ -35,6 +36,28 @@ pub struct TokenizeCompletionRequest {
     pub add_special_tokens: bool,
     #[serde(default)]
     pub return_token_strs: bool,
+}
+
+impl TokenizeCompletionRequest {
+    /// Lower this tokenize body into a [`TextRequest`] for prompt tokenization.
+    pub fn into_text_request(self, request_id: String) -> TextRequest {
+        TextRequest {
+            request_id,
+            prompt: Prompt::Text(self.prompt),
+            mm_features: None,
+            sampling_params: SamplingParams::default(),
+            decode_options: TextDecodeOptions::default(),
+            intermediate: false,
+            priority: 0,
+            cache_salt: None,
+            add_special_tokens: self.add_special_tokens,
+            data_parallel_rank: None,
+            session_id: None,
+            reasoning_parser_kwargs: None,
+            lora_request: None,
+            arrival_time: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Validate)]
@@ -74,6 +97,11 @@ impl TokenizeChatRequest {
             &messages,
         )?;
 
+        let tool_context =
+            ResolvedToolContext::new(&messages, convert_tools(self.tools)?, None, true).map_err(
+                |error| crate::error::chat_submit_error("failed to resolve request tools", error),
+            )?;
+
         Ok(ChatRequest {
             request_id,
             messages,
@@ -82,11 +110,10 @@ impl TokenizeChatRequest {
                 generation_prompt_mode,
                 chat_template: self.chat_template,
                 reasoning_effort: None,
+                response_format: None,
                 template_kwargs: self.chat_template_kwargs.unwrap_or_default(),
             },
-            tools: convert_tools(self.tools)?,
-            tool_choice: ChatToolChoice::Auto,
-            parallel_tool_calls: true,
+            tool_context,
             decode_options: TextDecodeOptions::default(),
             intermediate: false,
             priority: 0,
@@ -94,6 +121,7 @@ impl TokenizeChatRequest {
             cache_salt: None,
             add_special_tokens: self.add_special_tokens,
             data_parallel_rank: None,
+            session_id: None,
             lora_request: None,
         })
     }
@@ -174,7 +202,7 @@ mod tests {
             req.into_chat_request("tokenize-test".to_string()).expect("request is valid");
 
         assert_eq!(
-            chat_request.tools,
+            chat_request.initial_tools(),
             vec![ChatTool {
                 name: "get_weather".to_string(),
                 description: Some("Get weather".to_string()),

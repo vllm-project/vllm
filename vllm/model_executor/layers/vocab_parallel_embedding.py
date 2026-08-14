@@ -232,6 +232,7 @@ class VocabParallelEmbedding(PluggableLayer):
         padding_size: padding size for the vocabulary.
         quant_config: quant config for the layer
         prefix: full name of the layer in the state dict
+        disable_tp: If true, tensor parallelism will be disabled for this layer.
     """  # noqa: E501
 
     # --8<-- [end:vocab_parallel_embedding]
@@ -245,12 +246,19 @@ class VocabParallelEmbedding(PluggableLayer):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        disable_tp: bool = False,
     ):
         super().__init__()
 
         # Keep the input dimensions.
-        tp_rank = get_tensor_model_parallel_rank()
-        self.tp_size = get_tensor_model_parallel_world_size()
+        self.disable_tp = disable_tp
+        if disable_tp:
+            tp_rank, self.tp_size = 0, 1
+        else:
+            tp_rank = get_tensor_model_parallel_rank()
+            self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = tp_rank
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
         self.org_vocab_size = org_num_embeddings or num_embeddings
@@ -282,7 +290,7 @@ class VocabParallelEmbedding(PluggableLayer):
         # If we are making an embedding layer, then our quantization linear
         # method must implement the embedding operation. If we are another
         # layer type like ParallelLMHead, this is not important.
-        is_embedding_layer = type(self) is VocabParallelEmbedding
+        is_embedding_layer = not isinstance(self, ParallelLMHead)
         quant_method_implements_embedding = method_has_implemented_embedding(
             type(quant_method)
         )
@@ -323,6 +331,13 @@ class VocabParallelEmbedding(PluggableLayer):
             params_dtype=params_dtype,
             weight_loader=self.weight_loader,
         )
+        self.update_param_tp_status()
+
+    def update_param_tp_status(self):
+        for param in self.parameters():
+            if isinstance(param, BasevLLMParameter):
+                param.tp_rank = self.tp_rank
+                param.tp_size = self.tp_size
 
     @classmethod
     def _get_indices(
@@ -487,12 +502,13 @@ class VocabParallelEmbedding(PluggableLayer):
         # Mask the output embedding.
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
-        # Reduce across all the model parallel GPUs.
-        output = tensor_model_parallel_all_reduce(output_parallel)
-        return output
+            # Reduce across all the model parallel GPUs.
+            return tensor_model_parallel_all_reduce(output_parallel)
+        return output_parallel
 
     def extra_repr(self) -> str:
-        s = f"num_embeddings={self.num_embeddings_per_partition}"
+        s = f"num_embeddings={self.num_embeddings}"
+        s += f", num_embeddings_per_partition={self.num_embeddings_per_partition}"
         s += f", embedding_dim={self.embedding_dim}"
         s += f", org_vocab_size={self.org_vocab_size}"
         s += f", num_embeddings_padded={self.num_embeddings_padded}"
@@ -516,6 +532,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         params_dtype: type of the parameters.
         org_num_embeddings: original vocabulary size (without LoRA).
         padding_size: padding size for the vocabulary.
+        disable_tp: If true, tensor parallelism will be disabled for this layer.
     """
 
     # --8<-- [end:parallel_lm_head]
@@ -530,6 +547,8 @@ class ParallelLMHead(VocabParallelEmbedding):
         padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        disable_tp: bool = False,
     ):
         super().__init__(
             num_embeddings,
@@ -539,6 +558,7 @@ class ParallelLMHead(VocabParallelEmbedding):
             padding_size,
             quant_config,
             prefix,
+            disable_tp=disable_tp,
         )
         self.quant_config = quant_config
         if bias:

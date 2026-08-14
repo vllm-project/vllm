@@ -1,6 +1,7 @@
 /*
  * Adapted from
  * https://github.com/NVIDIA/TensorRT-LLM/blob/v1.3.0rc2/cpp/tensorrt_llm/kernels/moeTopKFuncs.cuh
+ * https://github.com/flashinfer-ai/flashinfer/blob/06400d062a2d51564bbe781f6f811d0b75ca593e/include/flashinfer/trtllm/fused_moe/RoutingKernelTopK.cuh
  * Copyright (c) 2026, The vLLM team.
  * SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION. All rights
  * reserved. SPDX-License-Identifier: Apache-2.0
@@ -23,6 +24,9 @@
 #include <cooperative_groups/reduce.h>
 #include <cub/cub.cuh>
 
+#include <cstdint>
+#include <type_traits>
+
 namespace vllm {
 namespace moe {
 namespace reduce_topk {
@@ -38,11 +42,10 @@ struct TopKRedType {
       "Top K reduction only implemented for int, float, float16 and bfloat16");
 
   using TypeCmp = std::conditional_t<sizeof(T) == 4, uint64_t, uint32_t>;
-  using IdxT = std::conditional_t<sizeof(T) == 4, int32_t, int16_t>;
 
   static constexpr int kMoveBits = (sizeof(T) == 4) ? 32 : 16;
   static constexpr int kMaxIdx = 65535;
-  TypeCmp compValIdx;
+  TypeCmp compVal;
 
   static __host__ __device__ inline TypeCmp makeCmpVal(T val, int32_t idx = 0) {
     auto valueBits = cub::Traits<T>::TwiddleIn(
@@ -69,69 +72,175 @@ struct TopKRedType {
   __host__ __device__ TopKRedType() = default;
 
   __host__ __device__ TopKRedType(T val, int32_t idx)
-      : compValIdx(makeCmpVal(val, idx)) {}
+      : compVal(makeCmpVal(val, idx)) {}
 
-  __host__ __device__ operator TypeCmp() const noexcept { return compValIdx; }
+  __host__ __device__ operator TypeCmp() const noexcept { return compVal; }
 
   __device__ inline TypeCmp reduce(
       cg::thread_block_tile<kWARP_SIZE> const& warp) {
-    return cg::reduce(warp, compValIdx, cg::greater<TypeCmp>{});
+#ifdef __CUDA_ARCH__
+    static constexpr bool kHAS_FAST_REDUX = (__CUDA_ARCH__ / 100) >= 10;
+#else
+    static constexpr bool kHAS_FAST_REDUX = false;
+#endif
+    if constexpr (!kHAS_FAST_REDUX) {
+      return cg::reduce(warp, compVal, cg::greater<TypeCmp>{});
+    } else if constexpr (sizeof(TypeCmp) == 8) {
+      uint32_t hi = static_cast<uint32_t>(compVal >> 32);
+      uint32_t lo = static_cast<uint32_t>(compVal & 0xffffffffu);
+      uint32_t maxHi;
+      asm volatile("redux.sync.max.u32 %0, %1, 0xffffffff;\n"
+                   : "=r"(maxHi)
+                   : "r"(hi));
+      uint32_t loContrib = hi == maxHi ? lo : 0u;
+      uint32_t maxLo;
+      asm volatile("redux.sync.max.u32 %0, %1, 0xffffffff;\n"
+                   : "=r"(maxLo)
+                   : "r"(loContrib));
+      return (static_cast<TypeCmp>(maxHi) << 32) | static_cast<TypeCmp>(maxLo);
+    } else {
+      TypeCmp result;
+      asm volatile("redux.sync.max.u32 %0, %1, 0xffffffff;\n"
+                   : "=r"(result)
+                   : "r"(compVal));
+      return result;
+    }
   }
 };
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-template <int K_, bool Enable_>
-struct TopKIdx {
-  // by default, empty
+template <int N>
+struct IsPowerOf2 {
+  static constexpr bool value = N > 0 && (N & (N - 1)) == 0;
 };
 
-template <int K_>
-struct TopKIdx<K_, true> {
-  static constexpr int K = K_;
-  int32_t val[K];
+template <int N>
+struct NextPow2 {
+ private:
+  static constexpr unsigned u = static_cast<unsigned>(N - 1);
+  static constexpr unsigned s1 = u | (u >> 1);
+  static constexpr unsigned s2 = s1 | (s1 >> 2);
+  static constexpr unsigned s3 = s2 | (s2 >> 4);
+  static constexpr unsigned s4 = s3 | (s3 >> 8);
+  static constexpr unsigned s5 = s4 | (s4 >> 16);
+
+ public:
+  static constexpr int value = N <= 1 ? 1 : static_cast<int>(s5 + 1);
 };
 
-////////////////////////////////////////////////////////////////////////////////////////////////////
-
-#define TOPK_SWAP(I, J)                                         \
-  {                                                             \
-    auto pairMin = min(topK[I].compValIdx, topK[J].compValIdx); \
-    auto pairMax = max(topK[I].compValIdx, topK[J].compValIdx); \
-    topK[I].compValIdx = pairMax;                               \
-    topK[J].compValIdx = pairMin;                               \
+template <int A, int B, int Size, typename T>
+__device__ __forceinline__ void topkCompareSwap(T* a) {
+  if constexpr (A < Size && B < Size) {
+    if (a[A] < a[B]) {
+      T tmp = a[A];
+      a[A] = a[B];
+      a[B] = tmp;
+    }
+  } else {
+    (void)a;
   }
+}
+
+template <int I, int End, int Step, int PairStride, int Size, typename T>
+__device__ __forceinline__ void topkMergePairs(T* a) {
+  if constexpr (I + Step < End) {
+    topkCompareSwap<I, I + Step, Size, T>(a);
+    topkMergePairs<I + PairStride, End, Step, PairStride, Size, T>(a);
+  } else {
+    (void)a;
+  }
+}
+
+template <int Lo, int N, int R, int Size, typename T>
+__device__ __forceinline__ void topkOEM(T* a) {
+  constexpr int M = R * 2;
+  if constexpr (M < N) {
+    topkOEM<Lo, N, M, Size, T>(a);
+    topkOEM<Lo + R, N - R, M, Size, T>(a);
+    topkMergePairs<Lo + R, Lo + N, R, M, Size, T>(a);
+  } else if constexpr (R < N) {
+    topkCompareSwap<Lo, Lo + R, Size, T>(a);
+  } else {
+    (void)a;
+  }
+}
+
+template <int Lo, int N, int Size, typename T>
+__device__ __forceinline__ void topkSortBatcher(T* a) {
+  if constexpr (N > 1) {
+    constexpr int Half = N / 2;
+    topkSortBatcher<Lo, Half, Size, T>(a);
+    topkSortBatcher<Lo + Half, N - Half, Size, T>(a);
+    topkOEM<Lo, N, 1, Size, T>(a);
+  } else {
+    (void)a;
+  }
+}
 
 template <int N, typename RedType>
-struct Sort;
+struct Sort {
+  static_assert(N > 0 && N <= 64, "Sort only supports N in range [1, 64]");
+
+  static __device__ void run(RedType* topK) {
+    if constexpr (IsPowerOf2<N>::value) {
+#pragma unroll
+      for (int k = 2; k <= N; k *= 2) {
+#pragma unroll
+        for (int j = k / 2; j > 0; j /= 2) {
+#pragma unroll
+          for (int i = 0; i < N; ++i) {
+            int ixj = i ^ j;
+            if (ixj > i) {
+              if ((i & k) == 0) {
+                if (topK[i].compVal < topK[ixj].compVal) {
+                  auto tmp = topK[i].compVal;
+                  topK[i].compVal = topK[ixj].compVal;
+                  topK[ixj].compVal = tmp;
+                }
+              } else {
+                if (topK[i].compVal > topK[ixj].compVal) {
+                  auto tmp = topK[i].compVal;
+                  topK[i].compVal = topK[ixj].compVal;
+                  topK[ixj].compVal = tmp;
+                }
+              }
+            }
+          }
+        }
+      }
+    } else {
+      constexpr int P = NextPow2<N>::value;
+      topkSortBatcher<0, P, N, RedType>(topK);
+    }
+  }
+};
 
 template <typename RedType>
 struct Sort<1, RedType> {
-  static __device__ void run(RedType* topK) {}
+  static __device__ void run(RedType*) {}
 };
 
 template <typename RedType>
 struct Sort<2, RedType> {
-  static __device__ void run(RedType* topK) { TOPK_SWAP(0, 1); }
+  static __device__ void run(RedType* topK) { topkCompareSwap<0, 1, 2>(topK); }
 };
 
 template <typename RedType>
 struct Sort<3, RedType> {
   static __device__ void run(RedType* topK) {
-    TOPK_SWAP(0, 1);
-    TOPK_SWAP(1, 2);
-    TOPK_SWAP(0, 1);
+    topkCompareSwap<0, 1, 3>(topK);
+    topkCompareSwap<1, 2, 3>(topK);
+    topkCompareSwap<0, 1, 3>(topK);
   }
 };
 
 template <typename RedType>
 struct Sort<4, RedType> {
   static __device__ void run(RedType* topK) {
-    TOPK_SWAP(0, 2);
-    TOPK_SWAP(1, 3);
-    TOPK_SWAP(0, 1);
-    TOPK_SWAP(2, 3);
-    TOPK_SWAP(1, 2);
+    topkCompareSwap<0, 2, 4>(topK);
+    topkCompareSwap<1, 3, 4>(topK);
+    topkCompareSwap<0, 1, 4>(topK);
+    topkCompareSwap<2, 3, 4>(topK);
+    topkCompareSwap<1, 2, 4>(topK);
   }
 };
 
@@ -147,46 +256,8 @@ __forceinline__ __device__ void reduceTopK(
   typename RedType::TypeCmp packedMax{};
 #pragma unroll
   for (int kk = 0; kk < actualK; ++kk) {
-    topK =
-        kk > 0 && packedMax == topK.compValIdx ? RedType{minValue, idx} : topK;
-    // get the next largest value
+    topK = kk > 0 && packedMax == topK.compVal ? RedType{minValue, idx} : topK;
     packedMax = topK.reduce(warp);
-    RedType::unpack(out[kk], outIdx[kk], packedMax);
-  }
-};
-
-template <int K, typename Type, int N, bool IsSorted = false>
-__device__ void reduceTopKFunc(cg::thread_block_tile<kWARP_SIZE> const& warp,
-                               Type (&out)[K], int32_t (&outIdx)[K],
-                               Type (&value)[N], int32_t (&idx)[N],
-                               Type minValue, int actualK = K) {
-  static_assert(K > 0, "Top K must have K > 0");
-  static_assert(K < kWARP_SIZE, "Top K must have K < kWARP_SIZE");
-  static_assert(N > 0, "Top K must have N > 0");
-  static_assert(N < 5,
-                "Only support candidates number less than or equal to 128");
-  using RedType = TopKRedType<Type>;
-  RedType topK[N];
-#pragma unroll
-  for (int nn = 0; nn < N; ++nn) {
-    topK[nn] = RedType{value[nn], idx[nn]};
-  }
-
-  if constexpr (!IsSorted) {
-    Sort<N, RedType>::run(topK);
-  }
-  typename RedType::TypeCmp packedMax{};
-#pragma unroll
-  for (int kk = 0; kk < actualK; ++kk) {
-    bool update = kk > 0 && packedMax == topK[0].compValIdx;
-#pragma unroll
-    for (int nn = 0; nn < N; ++nn) {
-      topK[nn] = update && nn == N - 1 ? RedType{minValue, idx[nn]}
-                 : update              ? topK[nn + 1]
-                                       : topK[nn];
-    }
-    // get the next largest value
-    packedMax = topK[0].reduce(warp);
     RedType::unpack(out[kk], outIdx[kk], packedMax);
   }
 };
@@ -197,60 +268,100 @@ __forceinline__ __device__ void reduceTopK(
     int32_t (&outIdx)[K], Type (&value)[N], int32_t (&idx)[N],
     Type const minValue, int actualK = K) {
   static_assert(K > 0, "Top K must have K > 0");
-  static_assert(K < kWARP_SIZE, "Top K must have K < kWARP_SIZE");
+  static_assert(K <= kWARP_SIZE, "Top K must have K <= kWARP_SIZE");
   static_assert(N > 0, "Top K must have N > 0");
-  static_assert(
-      N <= 16,
-      "Only support candidates number less than or equal to 16*32=512");
-  static_assert(N <= 4 || N % 4 == 0,
-                "Only support candidates number is a multiple of 4*32=128 or "
-                "less than or equal to 4");
+  static_assert(N <= 64,
+                "Only support candidates number less than or equal to "
+                "64*32=2048");
   using RedType = TopKRedType<Type>;
+  RedType topK[N];
+#pragma unroll
+  for (int nn = 0; nn < N; ++nn) {
+    topK[nn] = RedType{value[nn], idx[nn]};
+  }
 
-  if constexpr (N <= 4) {
-    reduceTopKFunc<K, Type, N>(warp, out, outIdx, value, idx, minValue,
-                               actualK);
-  } else {
-    constexpr int numLoops = N / 4;
-    constexpr int numResults = (numLoops * K - 1) / kWARP_SIZE + 1;
+  Sort<N, RedType>::run(topK);
 
-    Type topKBufferValue[numResults];
-    int32_t topKBufferIdx[numResults];
-    int32_t laneIdx = threadIdx.x % kWARP_SIZE;
-
-    for (int ii = 0; ii < numResults; ++ii) {
-      topKBufferValue[ii] = minValue;
-      topKBufferIdx[ii] = ii * kWARP_SIZE - 1;
+  typename RedType::TypeCmp packedMax{};
+  for (int kk = 0; kk < actualK; ++kk) {
+    bool update = kk > 0 && packedMax == topK[0].compVal;
+#pragma unroll
+    for (int nn = 0; nn < N; ++nn) {
+      topK[nn] = update && nn == N - 1 ? RedType{minValue, idx[nn]}
+                 : update              ? topK[nn + 1]
+                                       : topK[nn];
     }
-    for (int loop = 0; loop < numLoops; ++loop) {
-      int start = loop * 4;
-      Type topKValue[K];
-      int32_t topKIdx[K];
-      Type inValue[4];
-      int32_t inIdx[4];
-      for (int i = 0; i < 4; ++i) {
-        inValue[i] = value[start + i];
-        inIdx[i] = idx[start + i];
-      }
-      reduceTopKFunc<K, Type, 4>(warp, topKValue, topKIdx, inValue, inIdx,
-                                 minValue, actualK);
-      int inOffset = laneIdx % K;
-      if (laneIdx >= loop * K && laneIdx < (loop + 1) * K) {
-        topKBufferValue[0] = topKValue[inOffset];
-        topKBufferIdx[0] = topKIdx[inOffset];
-      }
-      if (loop == numLoops - 1 && (laneIdx < (numLoops * K - kWARP_SIZE))) {
-        topKBufferValue[1] = topKValue[inOffset];
-        topKBufferIdx[1] = topKIdx[inOffset];
-      }
-    }
-
-    reduceTopKFunc<K, Type, numResults>(warp, out, outIdx, topKBufferValue,
-                                        topKBufferIdx, minValue, actualK);
+    packedMax = topK[0].reduce(warp);
+    RedType::unpack(out[kk], outIdx[kk], packedMax);
   }
 };
 
-#undef TOPK_SWAP
+template <int NumExperts, int NumTopExperts, int MinExperts, int MaxExperts,
+          int MinTopExperts, int MaxTopExperts>
+struct LaneOwnedTopKRange {
+  static_assert(MinExperts > 0 && MinExperts <= MaxExperts);
+  static_assert(MinTopExperts > 0 && MinTopExperts <= MaxTopExperts);
+  static constexpr bool kEnabled =
+      NumExperts >= MinExperts && NumExperts <= MaxExperts &&
+      NumTopExperts >= MinTopExperts && NumTopExperts <= MaxTopExperts;
+};
+
+static constexpr int kHIGH_EXPERT_LANE_OWNED_TOPK_MIN_EXPERTS = 512;
+static constexpr int kHIGH_EXPERT_LANE_OWNED_TOPK_MAX_EXPERTS = 1024;
+static constexpr int kHIGH_EXPERT_LANE_OWNED_TOPK_MIN_TOP_EXPERTS = 9;
+static constexpr int kHIGH_EXPERT_LANE_OWNED_TOPK_MAX_TOP_EXPERTS = 16;
+
+template <int NumExperts, int NumTopExperts>
+using HighExpertLaneOwnedTopKRange =
+    LaneOwnedTopKRange<NumExperts, NumTopExperts,
+                       kHIGH_EXPERT_LANE_OWNED_TOPK_MIN_EXPERTS,
+                       kHIGH_EXPERT_LANE_OWNED_TOPK_MAX_EXPERTS,
+                       kHIGH_EXPERT_LANE_OWNED_TOPK_MIN_TOP_EXPERTS,
+                       kHIGH_EXPERT_LANE_OWNED_TOPK_MAX_TOP_EXPERTS>;
+
+template <int K, typename Type, int N>
+__forceinline__ __device__ void reduceTopKForLane(
+    cg::thread_block_tile<kWARP_SIZE> const& warp, Type& out, int32_t& outIdx,
+    Type (&value)[N], int32_t (&idx)[N], Type const minValue, int32_t laneIdx) {
+  static_assert(K > 0, "Top K must have K > 0");
+  static_assert(K <= kWARP_SIZE, "Top K must have K <= kWARP_SIZE");
+  static_assert(N > 0, "Top K must have N > 0");
+  static_assert(N <= 64,
+                "Only support candidates number less than or equal to "
+                "64*32=2048");
+  using RedType = TopKRedType<Type>;
+  RedType topK[N];
+#pragma unroll
+  for (int nn = 0; nn < N; ++nn) {
+    topK[nn] = RedType{value[nn], idx[nn]};
+  }
+
+  Sort<N, RedType>::run(topK);
+
+  typename RedType::TypeCmp packedMax{};
+  typename RedType::TypeCmp lanePacked{};
+#pragma unroll
+  for (int kk = 0; kk < K; ++kk) {
+    bool update = kk > 0 && packedMax == topK[0].compVal;
+#pragma unroll
+    for (int nn = 0; nn < N; ++nn) {
+      topK[nn] = update && nn == N - 1 ? RedType{minValue, idx[nn]}
+                 : update              ? topK[nn + 1]
+                                       : topK[nn];
+    }
+    packedMax = topK[0].reduce(warp);
+    if (laneIdx == kk) {
+      lanePacked = packedMax;
+    }
+  }
+
+  if (laneIdx < K) {
+    RedType::unpack(out, outIdx, lanePacked);
+  } else {
+    out = minValue;
+    outIdx = -1;
+  }
+}
 
 }  // namespace reduce_topk
 }  // namespace moe

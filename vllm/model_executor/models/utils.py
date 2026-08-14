@@ -27,7 +27,6 @@ from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
-    async_tensor_h2d,
     direct_register_custom_op,
 )
 
@@ -673,17 +672,6 @@ def _merge_multimodal_embeddings(
     return inputs_embeds
 
 
-def isin_list(
-    elements: torch.Tensor,
-    test_elements_list: list[int],
-) -> torch.Tensor:
-    test_elements = async_tensor_h2d(
-        test_elements_list, dtype=torch.int64, device=elements.device
-    )
-
-    return torch.isin(elements, test_elements)
-
-
 class StageMissingLayer(nn.Module):
     def __init__(self, stage_name: str, module: nn.Module | None = None) -> None:
         super().__init__()
@@ -1074,3 +1062,25 @@ def scatter_output_slices(
         sliced = output[offset : offset + n_tok]
         dest[idx] = sliced.clone() if clone else sliced
         offset += n_tok
+
+
+def parse_diarized_timestamp(marker: str) -> float | None:
+    if (
+        not marker
+        or not marker.isascii()
+        or marker.count(".") > 1
+        or not marker.replace(".", "").isdigit()
+    ):
+        return None
+    return float(marker)
+
+
+def parse_diarized_speaker(speaker: str) -> str | None:
+    if (
+        len(speaker) < 2
+        or speaker[0] != "S"
+        or not speaker[1:].isascii()
+        or not speaker[1:].isdigit()
+    ):
+        return None
+    return speaker

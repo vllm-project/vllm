@@ -174,12 +174,33 @@ class KVConnectorBase_V1(ABC):
     """
 
     @property
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        """Whether external hits can complete divergent local hybrid hits.
+
+        A capable connector restores lagging recurrent state when the local
+        full-attention group reaches a deeper boundary. Defaults to False.
+        """
+        return False
+
+    @property
     def prefer_cross_layer_blocks(self) -> bool:
         """
         Indicates whether this connector prefers KV blocks that hold KV data for all
         layers, which can speed up KV data transfers. Defaults to False.
         """
         return False
+
+    @property
+    def requires_kv_delivery(self) -> bool:
+        """Whether this connector hands off KV that must be reliably delivered.
+
+        If True, a request preempted while its hand-off is still pending is
+        recomputed rather than allowed to finish and hand off blocks that the
+        preemption already freed. Defaults to the producer role, since only a
+        producer hands KV off when a request completes. Best-effort caches
+        return False, as a dropped save is just a future cache miss.
+        """
+        return self._kv_transfer_config.is_kv_producer
 
     def __init__(
         self,

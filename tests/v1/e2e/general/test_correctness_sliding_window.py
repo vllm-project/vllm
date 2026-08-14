@@ -83,6 +83,34 @@ def test_sliding_window_retrieval(
         )
 
 
+@pytest.mark.parametrize("model", ["google/gemma-3-1b-it"])
+def test_hybrid_kv_cache_manager_output_equivalence(model, vllm_runner):
+    """Disabling the hybrid KV cache manager must not change what the model
+    computes: it promotes the sliding-window layers to full-attention *storage*
+    only, so the global layers must keep attending globally.
+
+    Guards against the group's KV cache spec, which then covers windowed and
+    global layers alike, imposing its window on the global layers too.
+    """
+    prompts, _, _ = prep_prompts(2, ln_range=model_config[model].ln_range)
+    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
+    enforce_eager = current_platform.is_rocm()
+
+    outputs = []
+    for disable_hybrid in (False, True):
+        with vllm_runner(
+            model,
+            max_model_len=None,
+            enable_chunked_prefill=None,
+            disable_hybrid_kv_cache_manager=disable_hybrid,
+            enforce_eager=enforce_eager,
+        ) as runner:
+            responses = runner.get_llm().generate(prompts, sampling_params)
+            outputs.append([response.outputs[0].text for response in responses])
+
+    assert outputs[0] == outputs[1]
+
+
 def check_length(prompts: list[str], llm: LLM, sliding_window: int):
     """
     Check if the prompt length is valid, i.e., longer than the sliding window

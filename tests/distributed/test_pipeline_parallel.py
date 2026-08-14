@@ -121,7 +121,6 @@ TEXT_GENERATION_MODELS = {
     "ibm/PowerMoE-3b": PPTestSettings.fast(),
     "internlm/internlm2-chat-7b": PPTestSettings.fast(),
     "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
-    "pfnet/plamo-2-1b": PPTestSettings.fast(),
     "pfnet/plamo-3-nict-2b-base": PPTestSettings.fast(),
     "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.detailed(),
     # Tests TransformersForCausalLM

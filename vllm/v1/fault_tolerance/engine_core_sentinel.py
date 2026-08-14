@@ -1,0 +1,197 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""EngineCoreSentinel and fault_tolerant_wrapper for the engine core."""
+
+import json
+import threading
+from collections.abc import Callable
+from typing import TYPE_CHECKING
+
+import msgspec
+
+from vllm.config import set_current_vllm_config
+from vllm.distributed import stateless_destroy_torch_distributed_process_group
+from vllm.distributed.utils import stateless_init_torch_distributed_process_group
+from vllm.logger import init_logger
+from vllm.utils.network_utils import get_open_port
+from vllm.v1.engine import (
+    FT_STATUS_CALL_ID,
+    EngineCoreOutputs,
+    EngineStatusType,
+    UtilityOutput,
+)
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
+from vllm.v1.request import RequestStatus
+from vllm.v1.serial_utils import UtilityResult, run_method
+
+if TYPE_CHECKING:
+    from vllm.v1.engine.core import EngineCoreProc
+
+logger = init_logger(__name__)
+
+FT_UTILITY_METHOD = "handle_fault_tolerance"
+
+
+class EngineCoreSentinel:
+    """Manages fault tolerance state for a single engine core."""
+
+    def __init__(self, engine: "EngineCoreProc", parallel_config):
+        self.engine = engine
+        self.engine_index = engine.engine_index
+        self.parallel_config = parallel_config
+        ft_config = parallel_config.fault_tolerance_config
+        self.engine_recovery_timeout_sec = ft_config.engine_recovery_timeout_sec
+
+        self.resumed = threading.Event()
+        self.resumed.set()
+        self.status_type = EngineStatusType.HEALTHY
+        self.fault_info: str | None = None
+        self._dp_reinit_epoch = 0
+
+    def handle_command(self, client_idx: int, call_id: int, ft_args: dict):
+        """Dispatch an FT command by instruction name."""
+        ft_request = FaultToleranceRequest(**ft_args)
+        if self.status_type != EngineStatusType.UNHEALTHY:
+            reason = (
+                f"[FT] Rejecting {ft_request.instruction} on engine "
+                f"{self.engine_index}: status is {self.status_type.name}"
+            )
+            logger.warning(reason)
+            result = FaultToleranceResult(
+                request_id=ft_request.request_id,
+                success=False,
+                reason=reason,
+            )
+        else:
+            try:
+                result = run_method(self, ft_request.instruction, (ft_request,), {})
+            except Exception as e:
+                logger.exception("[FT] Instruction '%s' failed", ft_request.instruction)
+                result = FaultToleranceResult(
+                    request_id=ft_request.request_id, success=False, reason=str(e)
+                )
+
+        uo = UtilityOutput(call_id)
+        uo.result = UtilityResult(msgspec.structs.asdict(result))
+        self.engine.output_queue.put_nowait(
+            (client_idx, EngineCoreOutputs(utility_output=uo))
+        )
+
+    def on_fault(self, exc: Exception):
+        """Called by the wrapper when the busy loop raises an exception."""
+        self.resumed.clear()
+        logger.warning(
+            "[FT] Busy loop raised %s. Waiting for recovery.", type(exc).__name__
+        )
+
+        engine = self.engine
+        aborted = engine.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+        engine._send_abort_outputs(aborted)
+        if engine.batch_queue is not None:
+            engine.batch_queue.clear()
+        if (
+            hasattr(engine.model_executor, "is_failed")
+            and engine.model_executor.is_failed
+        ):
+            self.status_type = EngineStatusType.DEAD
+        else:
+            self.status_type = EngineStatusType.UNHEALTHY
+        self.fault_info = f"{type(exc).__name__}"
+        logger.info(
+            "[FT] Engine %d status -> %s:",
+            self.engine_index,
+            self.status_type.name,
+            exc_info=exc,
+        )
+        self._push_status()
+
+    def _push_status(self):
+        """Push current health to the client so it can refresh its cache."""
+        payload = {"id": self.engine_index, "status": self.status_type.name.lower()}
+        if self.status_type == EngineStatusType.UNHEALTHY:
+            payload["fault_info"] = self.fault_info
+        outputs = EngineCoreOutputs(
+            utility_output=UtilityOutput(
+                call_id=FT_STATUS_CALL_ID,
+                result=UtilityResult(payload),
+            )
+        )
+        outputs.engine_index = self.engine_index
+        self.engine.output_queue.put_nowait((0, outputs))
+
+    def retry(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
+        engine = self.engine
+        executor = engine.model_executor
+
+        with set_current_vllm_config(engine.vllm_config):
+            ft_request.params.update(self._reinit_dp_group())
+        if hasattr(engine, "step_counter"):
+            engine.step_counter = 0
+
+        executor.collective_rpc("handle_ft_command", args=(ft_request,))
+
+        self.status_type = EngineStatusType.HEALTHY
+        logger.info("[FT] Engine %d status -> HEALTHY", self.engine_index)
+        self.resumed.set()
+        self._push_status()
+        return FaultToleranceResult(request_id=ft_request.request_id, success=True)
+
+    def _reinit_dp_group(self) -> dict:
+        """Reinit DP process group if in DP mode. Returns worker params."""
+        engine = self.engine
+        if not hasattr(engine, "dp_group") or not hasattr(engine, "dp_store"):
+            return {}
+
+        parallel_config = engine.vllm_config.parallel_config
+        worker_key = f"ft_worker_dp_ports_{self._dp_reinit_epoch}"
+        engine_key = f"ft_engine_dp_port_{self._dp_reinit_epoch}"
+        self._dp_reinit_epoch += 1
+
+        if parallel_config.data_parallel_rank == 0:
+            worker_ports = [get_open_port() for _ in range(parallel_config.world_size)]
+            engine_port = get_open_port()
+            engine.dp_store.set(worker_key, json.dumps(worker_ports).encode())
+            engine.dp_store.set(engine_key, str(engine_port).encode())
+        else:
+            worker_ports = json.loads(engine.dp_store.get(worker_key).decode())
+            engine_port = int(engine.dp_store.get(engine_key).decode())
+
+        stateless_destroy_torch_distributed_process_group(engine.dp_group)
+        engine.dp_group, engine.dp_store = (
+            stateless_init_torch_distributed_process_group(
+                parallel_config.data_parallel_master_ip,
+                engine_port,
+                parallel_config.data_parallel_rank,
+                parallel_config.data_parallel_size,
+                backend="gloo",
+                return_store=True,
+            )
+        )
+        return {"new_stateless_dp_group_ports": worker_ports}
+
+
+def fault_tolerant_wrapper(busy_loop_func: Callable):
+    """Wrap the busy loop to catch faults and delegate recovery."""
+
+    def run_with_fault_tolerance(self: "EngineCoreProc"):
+        while True:
+            try:
+                busy_loop_func(self)
+            except SystemExit:
+                raise
+            except Exception as exc:
+                if not self.enable_fault_tolerance:
+                    raise
+                self.ft_sentinel.on_fault(exc)
+                recovered = self.ft_sentinel.resumed.wait(
+                    timeout=self.ft_sentinel.engine_recovery_timeout_sec
+                )
+                if recovered:
+                    continue
+                logger.error(
+                    "[FT] No recovery within %ds timeout.",
+                    self.ft_sentinel.engine_recovery_timeout_sec,
+                )
+                raise
+
+    return run_with_fault_tolerance

@@ -814,6 +814,8 @@ def nvfp4_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     is_scale_swizzled: bool = True,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
@@ -833,6 +835,8 @@ def nvfp4_moe_quant_config(
         per_out_ch_quant=False,
         block_shape=None,
         is_scale_swizzled=is_scale_swizzled,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
@@ -1134,9 +1138,9 @@ class FusedMoEParallelConfig:
         level's of parallelism to use in the fused moe layer.
 
         Args:
-            tp_size_ (int): `tp_size` passed into the FusedMoE constructor.
-            pcp_size_ (int): `pcp_size` passed into the FusedMoE constructor.
-            dp_size_ (int): `dp_size` passed into the FusedMoE constructor.
+            tp_size_ (int): `tp_size` passed into the FusedMoEFactory constructor.
+            pcp_size_ (int): `pcp_size` passed into the FusedMoEFactory constructor.
+            dp_size_ (int): `dp_size` passed into the FusedMoEFactory constructor.
             vllm_parallel_config (ParallelConfig): vLLM's parallel config
                 object which contains the `enable_expert_parallel` flag.
 
@@ -1307,12 +1311,23 @@ class FusedMoEConfig:
     # Only honored on the non-reduced (late-AR) TP path. Default False.
     skip_final_all_reduce: bool = False
 
+    # When True, experts that can stop after GEMM2 are allowed to hand back an
+    # UnfinalizedMoEOutput instead of finalized states, leaving the top-k
+    # reduction to fuse into the consumer. Set by layers that have such a
+    # consumer; read through `use_deferred_moe_finalize`, which applies the
+    # guards. Kernels without the capability ignore it. Default False.
+    defer_moe_finalize: bool = False
+
     # SwiGLU clamp limit. When set, backends that do not implement the clamp
     # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
     # cannot silently select one and drop the clamp.
     swiglu_limit: float | None = None
     swiglu_alpha: float | None = None
     swiglu_beta: float | None = None
+
+    # SituGLU parameters used by Kimi sit(u/v2) activations.
+    activation_situ_beta: float | None = None
+    activation_situ_linear_beta: float | None = None
 
     max_capture_size: int = 0
 
@@ -1372,6 +1387,11 @@ class FusedMoEConfig:
         return self.activation.is_gated
 
     @property
+    def w13_num_shards(self) -> int:
+        """Number of shards fused into w13: gate and up for gated, up only."""
+        return 2 if self.is_act_and_mul else 1
+
+    @property
     def tp_size(self):
         return self.moe_parallel_config.tp_size
 
@@ -1414,6 +1434,18 @@ class FusedMoEConfig:
     @property
     def use_ep(self):
         return self.moe_parallel_config.use_ep
+
+    @property
+    def use_deferred_moe_finalize(self) -> bool:
+        """Whether experts may return an unfinalized output on this deployment.
+
+        Evaluated on read rather than in ``__post_init__`` because
+        ``defer_moe_finalize`` is set after construction, like
+        ``skip_final_all_reduce``.
+        """
+        # Without TP there is no all-reduce for the top-k reduction to fuse
+        # into, so the deferred form buys nothing.
+        return self.defer_moe_finalize and self.tp_size > 1
 
     @property
     def use_deepep_ht_kernels(self):

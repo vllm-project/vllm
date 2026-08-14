@@ -11,8 +11,15 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe import (
+    ApplyMoEActivationConfig,
+    fused_experts,
+    fused_topk,
+)
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+    apply_moe_activation_supported,
+)
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -24,8 +31,11 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsFp4,
     CutlassExpertsFp8,
+    CutlassExpertsMxfp4,
+    CutlassExpertsW4A8Fp8,
     run_cutlass_moe_fp8,
 )
+from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -53,10 +63,72 @@ MNK_FACTORS = [
 vllm_config = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
 
 
-def test_cutlass_moe_supports_gelu_tanh_activation_metadata():
-    assert CutlassExpertsFp8._supports_activation(MoEActivation.GELU_TANH)
-    assert CutlassExpertsFp4._supports_activation(MoEActivation.GELU_TANH)
-    assert CutlassExpertsFp4._supports_activation(MoEActivation.GELU_TANH_NO_MUL)
+@pytest.mark.parametrize(
+    "experts_cls",
+    [
+        CutlassExpertsFp8,
+        CutlassExpertsFp4,
+        CutlassExpertsMxfp4,
+        CutlassExpertsW4A8Fp8,
+    ],
+)
+@pytest.mark.parametrize("activation", list(MoEActivation))
+def test_cutlass_moe_activation_metadata_tracks_shared_apply(
+    experts_cls: type[mk.FusedMoEExperts], activation: MoEActivation
+):
+    supports_shape = experts_cls._supports_no_act_and_mul() or activation.is_gated
+    expected = supports_shape and apply_moe_activation_supported(activation)
+
+    assert experts_cls._supports_activation(activation) == expected
+
+
+def test_cutlass_moe_forwards_shared_activation_parameters():
+    moe_config = make_dummy_moe_config()
+    moe_config.swiglu_limit = 7.0
+    moe_config.swiglu_alpha = 1.5
+    moe_config.swiglu_beta = 0.25
+    moe_config.activation_situ_beta = 2.0
+    moe_config.activation_situ_linear_beta = 3.0
+    quant_config = FusedMoEQuantConfig.make(gemm1_alpha=1.75)
+
+    assert ApplyMoEActivationConfig.from_configs(
+        moe_config, quant_config
+    ) == ApplyMoEActivationConfig(
+        clamp_limit=7.0,
+        alpha=1.75,
+        beta=0.25,
+        activation_situ_beta=2.0,
+        activation_situ_linear_beta=3.0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("backend", "expected"),
+    [
+        ("cutlass", nvfp4_oracle.NvFp4MoeBackend.VLLM_CUTLASS),
+        ("humming", nvfp4_oracle.NvFp4MoeBackend.HUMMING),
+    ],
+)
+def test_nvfp4_clamp_allows_shared_activation_backends(
+    monkeypatch, backend: str, expected: nvfp4_oracle.NvFp4MoeBackend
+):
+    class SupportedExperts:
+        @staticmethod
+        def is_supported_config(*args, **kwargs):
+            return True, None
+
+    monkeypatch.setattr(
+        nvfp4_oracle, "backend_to_kernel_cls", lambda backend: [SupportedExperts]
+    )
+    moe_config = make_dummy_moe_config()
+    moe_config.moe_backend = backend
+    moe_config.swiglu_limit = 7.0
+
+    selected, _ = nvfp4_oracle.select_nvfp4_moe_backend(
+        moe_config, weight_key=None, activation_key=None
+    )
+
+    assert selected == expected
 
 
 @dataclasses.dataclass

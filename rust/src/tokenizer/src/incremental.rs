@@ -199,6 +199,10 @@ mod tests {
             unreachable!()
         }
 
+        fn encode_ordinary(&self, _text: &str) -> Result<Vec<u32>> {
+            unreachable!()
+        }
+
         fn decode(&self, token_ids: &[u32], _skip_special_tokens: bool) -> Result<String> {
             let bytes = token_ids.iter().map(|id| *id as u8).collect::<Vec<_>>();
             Ok(String::from_utf8_lossy(&bytes).into_owned())
@@ -270,6 +274,10 @@ mod tests {
 
     impl Tokenizer for SpecialTokenBackend {
         fn encode(&self, _text: &str, _add_special_tokens: bool) -> Result<Vec<u32>> {
+            unreachable!()
+        }
+
+        fn encode_ordinary(&self, _text: &str) -> Result<Vec<u32>> {
             unreachable!()
         }
 
@@ -407,6 +415,10 @@ mod tests {
 
     impl Tokenizer for NonMonotonicBackend {
         fn encode(&self, _text: &str, _add_special_tokens: bool) -> Result<Vec<u32>> {
+            unreachable!()
+        }
+
+        fn encode_ordinary(&self, _text: &str) -> Result<Vec<u32>> {
             unreachable!()
         }
 

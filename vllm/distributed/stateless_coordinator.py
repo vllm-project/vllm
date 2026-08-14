@@ -79,6 +79,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
         host: str = "127.0.0.1",
         global_rank: int = 0,
         global_world_size: int = 1,
+        use_all2all: bool = False,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -191,6 +192,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
                 global_ranks=self.ranks,
                 global_world_size=global_world_size,
                 tcp_store_group=self.tcp_store_group,
+                use_all2all=use_all2all,
             )
 
         self.mq_broadcaster = None

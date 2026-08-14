@@ -21,9 +21,9 @@ HEADER_SAGEMAKER_NEW_SESSION_ID = "X-Amzn-SageMaker-New-Session-Id"
 @pytest.fixture(scope="session")
 def smollm2_lora_files():
     """Download LoRA files once per test session."""
-    from huggingface_hub import snapshot_download
+    from vllm.transformers_utils.repo_utils import hf_api
 
-    return snapshot_download(repo_id=LORA_ADAPTER_NAME_SMOLLM)
+    return hf_api().snapshot_download(repo_id=LORA_ADAPTER_NAME_SMOLLM)
 
 
 @pytest.fixture(scope="module")

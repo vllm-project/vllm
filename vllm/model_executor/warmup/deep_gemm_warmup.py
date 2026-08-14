@@ -108,7 +108,7 @@ def _extract_data_from_fused_moe_module(
     m_: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """
-    Extract weights, weight scales and num_topk from FusedMoE module.
+    Extract weights, weight scales and num_topk from MoERunner module.
     """
     assert isinstance(m_, MoERunner)
     m = m_.routed_experts
@@ -234,7 +234,7 @@ def _deepgemm_fp8_gemm_nt_warmup(
 
     device = w.device
     a1q = torch.empty((max_tokens, k), device=device, dtype=torch.float8_e4m3fn)
-    a1q_scales = torch.empty(
+    a1q_scales = torch.zeros(
         (max_tokens, k // block_m), device=device, dtype=torch.float32
     )
     out = torch.empty((max_tokens, n), device=device, dtype=torch.bfloat16)
@@ -336,7 +336,7 @@ def _deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
     def _warmup(w: torch.Tensor, w_scale: torch.Tensor):
         _, n, k = w.size()
         a1q = torch.empty((MAX_M, k), device=device, dtype=torch.float8_e4m3fn)
-        a1q_scales = torch.empty(
+        a1q_scales = torch.zeros(
             (MAX_M, k // block_m), device=device, dtype=torch.float32
         )
         out = torch.empty((MAX_M, n), device=device, dtype=torch.bfloat16)

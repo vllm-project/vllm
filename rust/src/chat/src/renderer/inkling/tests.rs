@@ -31,6 +31,10 @@ impl Tokenizer for FixtureTokenizer {
         Ok(text.bytes().map(u32::from).collect())
     }
 
+    fn encode_ordinary(&self, text: &str) -> vllm_tokenizer::Result<Vec<u32>> {
+        self.encode(text, false)
+    }
+
     fn decode(
         &self,
         token_ids: &[u32],
@@ -101,7 +105,7 @@ fn fixture_request(name: &str) -> ChatRequest {
 
 fn inkling_fixture_options() -> FixtureRequestOptions {
     FixtureRequestOptions {
-        enable_thinking: false,
+        enable_thinking: Some(false),
         no_generation_prompt_when_last_assistant: false,
     }
 }

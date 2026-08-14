@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -57,6 +58,7 @@ async fn main() -> Result<()> {
             local_input_address: None,
             local_output_address: None,
         },
+        data_parallel_size: args.engine_count,
         coordinator_mode: CoordinatorMode::MaybeInProc,
         model: args.model,
         served_model_name: vec![],
@@ -70,6 +72,7 @@ async fn main() -> Result<()> {
         language_model_only: false,
         chat_template: None,
         default_chat_template_kwargs: None,
+        limit_mm_per_prompt: HashMap::new(),
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
         max_logprobs: None,
         api_server_options: ApiServerOptions::default(),

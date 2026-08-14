@@ -37,6 +37,7 @@ class AttentionSelectorConfig(NamedTuple):
     use_batch_invariant: bool = False
     use_kv_connector: bool = False
     use_pcp: bool = False
+    use_adaptive_verification: bool = False
 
     def __repr__(self):
         return (
@@ -54,6 +55,7 @@ class AttentionSelectorConfig(NamedTuple):
             f"use_non_causal={self.use_non_causal}, "
             f"use_batch_invariant={self.use_batch_invariant}, "
             f"use_kv_connector={self.use_kv_connector}, "
+            f"use_adaptive_verification={self.use_adaptive_verification}, "
             f"use_pcp={self.use_pcp})"
         )
 
@@ -136,6 +138,18 @@ def get_attn_backend(
         kv_transfer_config is not None and kv_transfer_config.is_kv_transfer_instance
     )
 
+    speculative_config = vllm_config.speculative_config
+    use_adaptive_verification = (
+        speculative_config is not None
+        and speculative_config.enable_adaptive_verification
+    )
+    if use_adaptive_verification:
+        from vllm.compilation.backends import model_tag
+
+        # The drafter always runs full-length blocks; only the verifier sees
+        # the trimmed, device-decided query lengths.
+        use_adaptive_verification = model_tag != "dspark_head"
+
     attn_type = attn_type or AttentionType.DECODER
     attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,
@@ -153,6 +167,7 @@ def get_attn_backend(
         use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
         use_kv_connector=use_kv_connector,
         use_pcp=vllm_config.parallel_config.prefill_context_parallel_size > 1,
+        use_adaptive_verification=use_adaptive_verification,
     )
 
     # A per-KV-group override (keyed by KVCacheSpecKind) takes precedence over
@@ -199,7 +214,7 @@ def _cached_get_attn_backend(
         from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
         set_kv_cache_layout(required_layout)
-        logger.info(
+        logger.info_once(
             "Using %s KV cache layout for %s backend.",
             required_layout,
             backend.get_name(),

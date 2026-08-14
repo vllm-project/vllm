@@ -5,6 +5,10 @@ from dataclasses import replace
 
 import torch
 
+from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.canonical_mapping import (
+    derive_canonical_mappings,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
@@ -40,11 +44,17 @@ class OffloadingConnectorWorker:
     def __init__(
         self,
         spec: OffloadingSpec,
+        vllm_config: "VllmConfig",
         kv_cache_config: KVCacheConfig,
     ):
         self.spec = spec
+        self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         self.worker: OffloadingWorker | None = None
+        # Non-writers still ack: pending_count waits for world_size per job.
+        self._is_store_writer = (
+            not self.spec.replicated_layout or self.spec.config.parallel.rank == 0
+        )
 
         # job_id -> req_id for in-flight loads.
         self._load_jobs: dict[int, ReqId] = {}
@@ -59,6 +69,9 @@ class OffloadingConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         kv_cache_config = self.kv_cache_config
         num_blocks = kv_cache_config.num_blocks
+        mappings = derive_canonical_mappings(
+            self.vllm_config, kv_cache_config, kv_caches
+        )
 
         # Packed layouts (e.g. DSv4) set block_stride > 0; their tensors use
         # stride(0) as the manager-block stride (equals total_num_bytes_per_block).
@@ -197,10 +210,21 @@ class OffloadingConnectorWorker:
 
                 curr_tensor_idx = len(block_tensors) - 1
                 for layer_name in tensor_layer_names:
+                    mapping = (
+                        mappings.get(layer_name)
+                        if len(tensors_per_block[first_layer_name]) == 1
+                        else None
+                    )
+                    assert (
+                        mapping is None
+                        or mapping.local_page_size_bytes
+                        == unpadded_page_size_bytes[layer_name]
+                    )
                     block_data_refs[layer_name].append(
                         CanonicalKVCacheRef(
                             tensor_idx=curr_tensor_idx,
                             page_size_bytes=(unpadded_page_size_bytes[layer_name]),
+                            mapping=mapping,
                         )
                     )
 
@@ -274,6 +298,9 @@ class OffloadingConnectorWorker:
             for job_id in kv_connector_metadata.jobs_to_flush:
                 entry = kv_connector_metadata.store_jobs.pop(job_id, None)
                 if entry is not None:
+                    if not self._is_store_writer:
+                        self._connector_worker_meta.mark_completed(job_id)
+                        continue
                     assert isinstance(entry.src_spec, GPULoadStoreSpec)
                     self._unsubmitted_store_jobs.append(
                         (job_id, entry.src_spec, entry.dst_spec)
@@ -304,6 +331,10 @@ class OffloadingConnectorWorker:
 
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
         for job_id, entry in metadata.store_jobs.items():
+            if not self._is_store_writer:
+                # Gate before queueing: no _unsubmitted_store_jobs entry.
+                self._connector_worker_meta.mark_completed(job_id)
+                continue
             # NOTE(orozery): defer the store to the beginning of the next
             # engine step, so that offloading starts AFTER transfers related
             # to token sampling, thereby avoiding delays to token generation.

@@ -20,6 +20,7 @@ import pytest_asyncio
 
 from vllm import SamplingParams
 from vllm.engine.protocol import StreamingInput
+from vllm.exceptions import VLLMValidationError
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
@@ -571,13 +572,17 @@ async def test_streaming_input_validation_errors(engine: AsyncLLM):
         yield StreamingInput(prompt="test")
 
     # Test n > 1 is rejected
-    with pytest.raises(ValueError, match="Input streaming not currently supported"):
+    with pytest.raises(
+        VLLMValidationError, match="Input streaming not currently supported"
+    ):
         params_n2 = SamplingParams(max_tokens=10, n=2)
         async for _ in engine.generate(dummy_generator(), params_n2, "test_n2"):
             pass
 
     # Test FINAL_ONLY is rejected
-    with pytest.raises(ValueError, match="Input streaming not currently supported"):
+    with pytest.raises(
+        VLLMValidationError, match="Input streaming not currently supported"
+    ):
         params_final = SamplingParams(
             max_tokens=10, output_kind=RequestOutputKind.FINAL_ONLY
         )
@@ -585,7 +590,9 @@ async def test_streaming_input_validation_errors(engine: AsyncLLM):
             pass
 
     # Test stop strings are rejected
-    with pytest.raises(ValueError, match="Input streaming not currently supported"):
+    with pytest.raises(
+        VLLMValidationError, match="Input streaming not currently supported"
+    ):
         params_stop = SamplingParams(max_tokens=10, stop=["stop"])
         async for _ in engine.generate(dummy_generator(), params_stop, "test_stop"):
             pass

@@ -3,8 +3,9 @@
 
 import math
 from collections.abc import Mapping, Sequence
-from typing import cast
+from typing import Any, Literal, cast
 
+import numpy.typing as npt
 import torch
 from transformers import BatchFeature
 from transformers.video_utils import VideoMetadata
@@ -22,7 +23,6 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.parse import (
     ImageSize,
     MultiModalDataItems,
-    MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -306,14 +306,6 @@ class MiniMaxM3VLDummyInputsBuilder(BaseDummyInputsBuilder[MiniMaxM3VLProcessing
 class MiniMaxM3VLMultiModalProcessor(
     BaseMultiModalProcessor[MiniMaxM3VLProcessingInfo]
 ):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        # Request video metadata (fps + sampled frame indices) so the HF
-        # processor can emit per-frame ``]<]X.X seconds[>[`` timestamp markers,
-        # matching MiniMax's reference video token stream. ``_get_prompt_updates``
-        # reconstructs the same markers from the metadata to keep the prompt
-        # replacement aligned with the processor output.
-        return MultiModalDataParser(video_needs_metadata=True)
-
     def _call_hf_processor(
         self,
         prompt: str,
@@ -469,10 +461,39 @@ class MiniMaxM3VLMultiModalProcessor(
         ]
 
 
-# TODO(Isotr0py): Tie with MinimaxVideoProcessor
-# after https://github.com/vllm-project/vllm/pull/44126
-@VIDEO_LOADER_REGISTRY.register("minimax_m3_vl")
+@VIDEO_LOADER_REGISTRY.register(
+    name="minimax_m3_vl",
+    video_processor="MiniMaxM3VLVideoProcessor",
+)
 class MiniMaxM3VideoBackend(VideoBackend):
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = 1,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        *,
+        backend: Literal[
+            "opencv",
+            "pyav",
+            "torchcodec",
+            "pynvvideocodec",
+            "deepstream",
+        ] = "opencv",
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        return super().load_bytes(
+            data,
+            num_frames=num_frames,
+            fps=fps,
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            backend=backend,
+            **kwargs,
+        )
+
     @classmethod
     def compute_frames_index_to_sample(
         cls,
@@ -483,7 +504,6 @@ class MiniMaxM3VideoBackend(VideoBackend):
         total_frames = source.total_frames_num
         video_fps = source.original_fps
         fps = target.fps
-
         if total_frames <= 0 or video_fps <= 0 or fps <= 0:
             return [0] if total_frames > 0 else []
 
@@ -503,12 +523,6 @@ class MiniMaxM3VideoBackend(VideoBackend):
                 break
             indices.append(target_frame)
             prev_kept_ts = target_frame / video_fps
-
-        last_frame_idx = total_frames - 1
-        last_ts = last_frame_idx / video_fps
-        if indices and indices[-1] != last_frame_idx and last_ts - prev_kept_ts > eps:
-            indices.append(last_frame_idx)
-
         if not indices:
             indices = [0]
         return indices

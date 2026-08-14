@@ -32,6 +32,22 @@ MAX_LOGPROB_TOKEN_IDS = 128
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
 
+def _verify_num_sequences(value: int, parameter_name: str) -> None:
+    if not isinstance(value, int):
+        raise VLLMValidationError(
+            f"{parameter_name} must be an int, but is of type {type(value)}"
+        )
+    if value < 1:
+        raise VLLMValidationError(f"{parameter_name} must be at least 1, got {value}.")
+    max_n = envs.VLLM_MAX_N_SEQUENCES
+    if value > max_n:
+        raise VLLMValidationError(
+            f"{parameter_name} must be at most {max_n}, got {value}. "
+            "To increase this limit, set the VLLM_MAX_N_SEQUENCES "
+            "environment variable."
+        )
+
+
 def validate_thinking_token_budget(value: int | float | bool | None) -> int | None:
     """Validate ``thinking_token_budget``; return ``None`` if unset."""
     if value is None:
@@ -100,12 +116,12 @@ class StructuredOutputsParams:
             ]
         )
         if count > 1:
-            raise ValueError(
+            raise VLLMValidationError(
                 "You can only use one kind of structured outputs constraint "
                 f"but multiple are specified: {self.__dict__}"
             )
         if count < 1:
-            raise ValueError(
+            raise VLLMValidationError(
                 "You must use one kind of structured outputs constraint "
                 f"but none are specified: {self.__dict__}"
             )
@@ -166,13 +182,13 @@ class RepetitionDetectionParams:
             or self.min_pattern_size < 0
             or self.min_pattern_size > self.max_pattern_size
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 "max_pattern_size, min_pattern_size must be >=0, "
                 "with min_pattern_size <= max_pattern_size. "
                 "Set both to 0 to disable repetitive pattern detection."
             )
         if self.max_pattern_size > 0 and self.min_count < 2:
-            raise ValueError(
+            raise VLLMValidationError(
                 "min_count must be >= 2 to detect repetitive patterns "
                 "in engine output. If you do not wish to detect repetitive "
                 "patterns, set max_pattern_size to 0."
@@ -299,6 +315,11 @@ class SamplingParams(
     include_stop_str_in_output: bool = False
     """Whether to include the stop strings in output text."""
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
+    stream_interval: int | None = None
+    """Number of newly generated tokens to batch into each streamed
+    `RequestOutput`. Raises the interval above the engine-level
+    `--stream-interval`. Values below engine setting are clamped up to it.
+    The first and final outputs are always emitted immediately."""
     skip_clone: bool = False
     """Internal flag indicating that this SamplingParams instance is safe to
     reuse without cloning. When True, clone() will return self without
@@ -377,6 +398,7 @@ class SamplingParams(
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
+        stream_interval: int | None = None,
         structured_outputs: StructuredOutputsParams | None = None,
         logit_bias: dict[int, float] | dict[str, float] | None = None,
         allowed_token_ids: list[int] | None = None,
@@ -384,6 +406,7 @@ class SamplingParams(
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
         logprob_token_ids: list[int] | None = None,
+        routed_experts_prompt_start: int = 0,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -439,12 +462,14 @@ class SamplingParams(
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
             output_kind=output_kind,
+            stream_interval=stream_interval,
             structured_outputs=structured_outputs,
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
+            routed_experts_prompt_start=routed_experts_prompt_start,
         )
 
     def __post_init__(self) -> None:
@@ -472,9 +497,13 @@ class SamplingParams(
 
         if self.stop_token_ids is None:
             self.stop_token_ids = []
+        else:
+            self.stop_token_ids = list(dict.fromkeys(self.stop_token_ids))
 
         if self.bad_words is None:
             self.bad_words = []
+        else:
+            self.bad_words = list(dict.fromkeys(self.bad_words))
 
         if self.logprobs is True:
             self.logprobs = 1
@@ -506,32 +535,22 @@ class SamplingParams(
             self.skip_reading_prefix_cache = self.prompt_logprobs is not None
 
     def _verify_args(self) -> None:
-        if not isinstance(self.n, int):
-            raise ValueError(f"n must be an int, but is of type {type(self.n)}")
-        if self.n < 1:
-            raise ValueError(f"n must be at least 1, got {self.n}.")
-        max_n = envs.VLLM_MAX_N_SEQUENCES
-        if self.n > max_n:
-            raise ValueError(
-                f"n must be at most {max_n}, got {self.n}. "
-                "To increase this limit, set the VLLM_MAX_N_SEQUENCES "
-                "environment variable."
-            )
+        _verify_num_sequences(self.n, "n")
         if not -2.0 <= self.presence_penalty <= 2.0:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
             )
         if not -2.0 <= self.frequency_penalty <= 2.0:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"frequency_penalty must be in [-2, 2], got {self.frequency_penalty}."
             )
         if not math.isfinite(self.repetition_penalty):
-            raise ValueError(
+            raise VLLMValidationError(
                 "repetition_penalty must be a finite number, "
                 f"got {self.repetition_penalty}."
             )
         if self.repetition_penalty <= 0.0:
-            raise ValueError(
+            raise VLLMValidationError(
                 "repetition_penalty must be greater than zero, got "
                 f"{self.repetition_penalty}."
             )
@@ -561,15 +580,15 @@ class SamplingParams(
             )
         # quietly accept -1 as disabled, but prefer 0
         if self.top_k < -1:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"top_k must be 0 (disable), or at least 1, got {self.top_k}."
             )
         if not isinstance(self.top_k, int):
-            raise TypeError(
+            raise VLLMValidationError(
                 f"top_k must be an integer, got {type(self.top_k).__name__}"
             )
         if not 0.0 <= self.min_p <= 1.0:
-            raise ValueError(f"min_p must be in [0, 1], got {self.min_p}.")
+            raise VLLMValidationError(f"min_p must be in [0, 1], got {self.min_p}.")
         if self.max_tokens is not None and self.max_tokens < 1:
             raise VLLMValidationError(
                 f"max_tokens must be at least 1, got {self.max_tokens}.",
@@ -577,13 +596,19 @@ class SamplingParams(
                 value=self.max_tokens,
             )
         if self.min_tokens < 0:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"min_tokens must be greater than or equal to 0, got {self.min_tokens}."
             )
         if self.max_tokens is not None and self.min_tokens > self.max_tokens:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"min_tokens must be less than or equal to "
                 f"max_tokens={self.max_tokens}, got {self.min_tokens}."
+            )
+        if self.stream_interval is not None and self.stream_interval < 1:
+            raise VLLMValidationError(
+                f"stream_interval must be at least 1, got {self.stream_interval}.",
+                parameter="stream_interval",
+                value=self.stream_interval,
             )
         if self.logprobs is not None and self.logprobs != -1 and self.logprobs < 0:
             raise VLLMValidationError(
@@ -604,27 +629,29 @@ class SamplingParams(
             )
         assert isinstance(self.stop_token_ids, list)
         if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
-            raise ValueError(
+            raise VLLMValidationError(
                 f"stop_token_ids must contain only integers, got {self.stop_token_ids}."
             )
         assert isinstance(self.stop, list)
         if any(not stop_str for stop_str in self.stop):
-            raise ValueError("stop cannot contain an empty string.")
+            raise VLLMValidationError("stop cannot contain an empty string.")
         if self.stop and not self.detokenize:
-            raise ValueError(
+            raise VLLMValidationError(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop."
             )
         assert isinstance(self.bad_words, list)
         if any(not bad_word for bad_word in self.bad_words):
-            raise ValueError(
+            raise VLLMValidationError(
                 f"bad_words cannot contain an empty string. "
                 f"Got bad_words={self.bad_words}"
             )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
-            raise ValueError(f"n must be 1 when using greedy sampling, got {self.n}.")
+            raise VLLMValidationError(
+                f"n must be 1 when using greedy sampling, got {self.n}."
+            )
 
     def update_from_generation_config(
         self,
@@ -660,6 +687,7 @@ class SamplingParams(
         if not self.bad_words:
             return
         self._bad_words_token_ids = []
+        max_num_bad_words = envs.VLLM_MAX_NUM_BAD_WORDS
         for bad_word in self.bad_words:
             # To prohibit words both at the beginning
             # and in the middle of text
@@ -679,6 +707,14 @@ class SamplingParams(
                     and len(prompt_token_ids) == len(self._bad_words_token_ids[-1])
                 ):
                     self._bad_words_token_ids.append(prompt_token_ids)
+                    if len(self._bad_words_token_ids) > max_num_bad_words:
+                        raise VLLMValidationError(
+                            f"Too many bad words after tokenization: "
+                            f"{len(self._bad_words_token_ids)}. "
+                            f"The max number is {max_num_bad_words}.",
+                            parameter="bad_words",
+                            value=self.bad_words,
+                        )
 
         invalid_token_ids = [
             token_id
@@ -874,9 +910,23 @@ class SamplingParams(
         if speculative_config is None:
             return
 
+        # Adaptive verification compacts logits after the forward pass, while
+        # compute_topk_scores uses the scheduled layout in cu_num_logits_np.
+        # TODO(lucas): lift this restriction. The true boundaries exist on device as
+        # cu_num_logits; cu_num_generated_tokens is only read host-side after
+        # the logprobs D2H, so it could ride along on that copy.
+        if (
+            speculative_config.enable_adaptive_verification
+            and self.num_logprobs is not None
+        ):
+            raise ValueError(
+                "Output logprobs are not supported with DSpark confidence-based "
+                "verification."
+            )
+
         # Some sampling parameters are not yet compatible with spec decoding.
         if self.min_p > _SAMPLING_EPS or self.logit_bias:
-            raise ValueError(
+            raise VLLMValidationError(
                 "The min_p and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."
             )
@@ -897,7 +947,7 @@ class SamplingParams(
             or self.bad_words
             or self.allowed_token_ids
         ):
-            raise ValueError(
+            raise VLLMValidationError(
                 "The temperature, min_p, seed, min_tokens, logit_bias, "
                 "bad_words, and allowed_token_ids sampling parameters "
                 "are not yet supported with diffusion models."
@@ -917,7 +967,7 @@ class SamplingParams(
             # rather than sampling left-to-right, which the grammar FSM
             # requires. Without this check, requests fail mid-generation
             # with an FSM rejection (HTTP 500). See issue #45436.
-            raise ValueError(
+            raise VLLMValidationError(
                 "Structured outputs are not yet supported for diffusion "
                 "language models. Remove the structured output constraint "
                 "(e.g. `response_format`, `structured_outputs`) from the "
@@ -925,7 +975,7 @@ class SamplingParams(
             )
 
         if tokenizer is None:
-            raise ValueError(
+            raise VLLMValidationError(
                 "Structured outputs requires a tokenizer so it can't be used with 'skip_tokenizer_init'"  # noqa: E501
             )
 
@@ -939,7 +989,7 @@ class SamplingParams(
             if backend != _backend and not (
                 backend == "auto" and self.structured_outputs._backend_was_auto
             ):
-                raise ValueError(
+                raise VLLMValidationError(
                     "Request-level structured output backend selection is not "
                     f"supported. The request specified '{_backend}', but vLLM "
                     f"was initialised with '{backend}'. This error can be "
@@ -954,7 +1004,7 @@ class SamplingParams(
             and not self.structured_outputs.choice
         ):
             # It is invalid for choice to be an empty list
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Choice '{self.structured_outputs.choice}' cannot be an empty list"  # noqa: E501
             )
         # Reject empty string grammar early to avoid engine-side crashes
@@ -962,18 +1012,31 @@ class SamplingParams(
             isinstance(self.structured_outputs.grammar, str)
             and self.structured_outputs.grammar.strip() == ""
         ):
-            raise ValueError("structured_outputs.grammar cannot be an empty string")
+            raise VLLMValidationError(
+                "structured_outputs.grammar cannot be an empty string"
+            )
         # Reject empty string json schema early to avoid engine-side crashes
         if (
             isinstance(self.structured_outputs.json, str)
             and self.structured_outputs.json.strip() == ""
         ):
-            raise ValueError("structured_outputs.json cannot be an empty string")
+            raise VLLMValidationError(
+                "structured_outputs.json cannot be an empty string"
+            )
         # Reject json_object=False early to avoid engine-side crashes
         if self.structured_outputs.json_object is False:
-            raise ValueError(
+            raise VLLMValidationError(
                 "structured_outputs.json_object must be True if set; omit "
                 "structured_outputs to disable structured outputs"
+            )
+        # Reject a regex containing a NUL byte early, in every backend mode. A
+        # NUL is never meaningful in a regex pattern and is not handled by the
+        # regex-to-grammar conversion. Checked here, before backend selection,
+        # so it is a clean 400 rather than a silent fallback in the default
+        # "auto" mode.
+        if self.structured_outputs.regex and "\x00" in self.structured_outputs.regex:
+            raise VLLMValidationError(
+                "structured_outputs.regex must not contain a NUL character ('\\x00')"
             )
 
         from vllm.v1.structured_output.backend_guidance import (
@@ -993,7 +1056,7 @@ class SamplingParams(
             validate_xgrammar_grammar(self)
         elif backend.startswith("guidance"):
             if _is_non_tekken_mistral(tokenizer=tokenizer):
-                raise ValueError(
+                raise VLLMValidationError(
                     "Non-tekken Mistral tokenizers are not supported for the 'guidance'"
                     " structured output backend. Please either use a more recent "
                     "Mistral model, the ['xgrammar', 'outlines'] "
@@ -1013,7 +1076,7 @@ class SamplingParams(
         elif backend == "lm-format-enforcer":
             # lm format enforcer backend
             if is_mistral_tokenizer(tokenizer):
-                raise ValueError(
+                raise VLLMValidationError(
                     "Mistral tokenizer is not supported for the 'lm-format-enforcer' "
                     "structured output backend. Please use ['xgrammar', 'outlines'] "
                     "backends or tokenizer_mode='hf' instead."
@@ -1126,3 +1189,6 @@ class BeamSearchParams(
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
     structured_outputs: StructuredOutputsParams | None = None
+
+    def __post_init__(self) -> None:
+        _verify_num_sequences(self.beam_width, "beam_width")

@@ -7,12 +7,14 @@ Abstract interfaces and data types for the secondary tiering layer.
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 
 from vllm.v1.kv_offload.base import (
+    Locality,
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadingMetricMetadata,
     OffloadKey,
@@ -27,6 +29,7 @@ if TYPE_CHECKING:
     )
     from vllm.v1.kv_offload.base import OffloadingSpec
 
+
 # Type alias for job IDs used in async transfer tracking
 JobId = int
 
@@ -36,10 +39,25 @@ class TieringOffloadingMetrics:
 
     LOOKUP_SYNC_DELAY = "vllm:kv_offload_tiering_lookup_sync_delay_seconds"
     LOOKUP_ASYNC_DELAY = "vllm:kv_offload_tiering_lookup_async_delay_seconds"
+    READ_BYTES = "vllm:kv_offload_tiering_read_bytes"
+    READ_TIME = "vllm:kv_offload_tiering_read_time"
+    WRITE_BYTES = "vllm:kv_offload_tiering_write_bytes"
+    WRITE_TIME = "vllm:kv_offload_tiering_write_time"
+    PROMOTION_JOB_FAILURES = "vllm:kv_offload_tiering_promotion_job_failures"
+    CASCADE_JOB_FAILURES = "vllm:kv_offload_tiering_cascade_job_failures"
+    BLOCK_QUERIES = "vllm:kv_offload_tiering_block_queries"
+    BLOCK_HITS = "vllm:kv_offload_tiering_block_hits"
+    PRIMARY_WRITE_USAGE_PERC = "vllm:kv_offload_tiering_primary_write_usage_perc"
+    PRIMARY_READ_USAGE_PERC = "vllm:kv_offload_tiering_primary_read_usage_perc"
+    PROMOTION_ALLOCATION_FAILURES = (
+        "vllm:kv_offload_tiering_promotion_allocation_failures"
+    )
+    ACTIVE_PROMOTION_JOBS = "vllm:kv_offload_tiering_active_promotion_jobs"
+    ACTIVE_CASCADE_JOBS = "vllm:kv_offload_tiering_active_cascade_jobs"
 
 
 @dataclass
-class JobMetadata:
+class TransferJob:
     """Metadata for an in-flight async transfer job."""
 
     job_id: JobId
@@ -51,10 +69,16 @@ class JobMetadata:
 
 @dataclass
 class JobResult:
-    """Result of an async transfer job (successful or failed)."""
+    """Result of an async transfer job."""
 
     job_id: JobId
+    # True if all keys succeeded; False if all or some failed.
     success: bool
+    # Only applicable to promotion jobs. On partial failure, identifies the
+    # keys that were successfully loaded. None means all keys share the fate
+    # indicated by `success`. Must be a subset of the job's original keys.
+    successful_keys: Collection[OffloadKey] | None = None
+    transfer_time: float | None = None
 
 
 class ParentManager(ABC):
@@ -88,7 +112,7 @@ class ParentManager(ABC):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
-    ) -> JobMetadata: ...
+    ) -> TransferJob: ...
 
     @abstractmethod
     def on_request_finished(self, req_context: ReqContext) -> None: ...
@@ -108,6 +132,8 @@ class SecondaryTierManager(ABC):
     async jobs; get_finished_jobs() polls for completion.
     """
 
+    medium: ClassVar[Medium | None] = None
+
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
@@ -124,6 +150,7 @@ class SecondaryTierManager(ABC):
         self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
         self.tier_type = tier_type
+        self.locality: Locality | None = None
 
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
@@ -142,7 +169,7 @@ class SecondaryTierManager(ABC):
         pass
 
     @abstractmethod
-    def submit_store(self, job_metadata: JobMetadata) -> None:
+    def submit_store(self, job_metadata: TransferJob) -> None:
         """
         Submit an async job to store blocks from the primary tier to this
         secondary tier.
@@ -170,7 +197,7 @@ class SecondaryTierManager(ABC):
         pass
 
     @abstractmethod
-    def submit_load(self, job_metadata: JobMetadata) -> None:
+    def submit_load(self, job_metadata: TransferJob) -> None:
         """
         Submit an async job to load blocks from this secondary tier to the
         primary tier.

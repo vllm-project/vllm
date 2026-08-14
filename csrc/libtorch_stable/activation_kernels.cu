@@ -103,9 +103,10 @@ __global__ void act_and_mul_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., 2, d]
     const int d, const float limit, const float alpha, const float beta) {
-  const scalar_t* x_ptr = input + blockIdx.x * 2 * d;
+  const int64_t token_idx = blockIdx.x;
+  const scalar_t* x_ptr = input + token_idx * 2 * d;
   const scalar_t* y_ptr = x_ptr + d;
-  scalar_t* out_ptr = out + blockIdx.x * d;
+  scalar_t* out_ptr = out + token_idx * d;
 
   if constexpr (use_vec) {
     using cuda_t = typename CUDATypeConverter<scalar_t>::Type;
@@ -353,9 +354,10 @@ template <typename scalar_t, typename packed_t,
 __global__ void act_and_mul_kernel_with_param(
     scalar_t* __restrict__ out, const scalar_t* __restrict__ input, const int d,
     const float param) {
-  const scalar_t* x_ptr = input + blockIdx.x * 2 * d;
+  const int64_t token_idx = blockIdx.x;
+  const scalar_t* x_ptr = input + token_idx * 2 * d;
   const scalar_t* y_ptr = x_ptr + d;
-  scalar_t* out_ptr = out + blockIdx.x * d;
+  scalar_t* out_ptr = out + token_idx * d;
 
   if constexpr (use_vec) {
     using cuda_t = typename CUDATypeConverter<scalar_t>::Type;
@@ -464,6 +466,66 @@ __global__ void swigluoai_and_mul_kernel(
   }
 }
 
+// SITU (Kimi SituGLU) gated activation. Non-interleaved layout:
+// input = [gate(d), up(d)] per token.
+//   gate_out = beta * tanh(gate / beta) * sigmoid(gate)
+//   up_out   = (linear_beta > 0) ? linear_beta * tanh(up / linear_beta) : up
+//   out      = gate_out * up_out
+// Compute is done in fp32 and written straight to `out` -- no intermediate
+// tensors and no full-tensor fp32 upcast (the pure-torch forward_native
+// allocated ~8 fp32 temporaries per call, which blows up MoE profiling).
+template <typename scalar_t>
+__global__ void situ_and_mul_kernel(
+    scalar_t* __restrict__ out,          // [..., d]
+    const scalar_t* __restrict__ input,  // [..., 2, d]
+    const int d, const float beta, const float linear_beta) {
+  const int64_t row = blockIdx.x;
+  const scalar_t* gate_ptr = input + row * 2 * d;
+  const scalar_t* up_ptr = gate_ptr + d;
+  scalar_t* out_ptr = out + row * d;
+  const bool clamp_up = linear_beta > 0.0f;
+  const float inv_beta = 1.0f / beta;
+  const float inv_linear_beta = clamp_up ? 1.0f / linear_beta : 0.0f;
+  for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
+    const float g = (float)VLLM_LDG(&gate_ptr[idx]);
+    const float u = (float)VLLM_LDG(&up_ptr[idx]);
+    const float gate_out = beta * tanhf(g * inv_beta) / (1.0f + expf(-g));
+    const float up_out =
+        clamp_up ? linear_beta * tanhf(u * inv_linear_beta) : u;
+    out_ptr[idx] = (scalar_t)(gate_out * up_out);
+  }
+}
+
+template <typename scalar_t>
+__global__ void masked_situ_and_mul_kernel(
+    scalar_t* __restrict__ out, const scalar_t* __restrict__ input,
+    const int* __restrict__ expert_num_tokens, const int max_num_tokens,
+    const int d, const float beta, const float linear_beta) {
+  const int expert = blockIdx.y;
+  const int num_tokens = expert_num_tokens[expert];
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= d || num_tokens == 0) {
+    return;
+  }
+
+  const bool clamp_up = linear_beta > 0.0f;
+  const float inv_beta = 1.0f / beta;
+  const float inv_linear_beta = clamp_up ? 1.0f / linear_beta : 0.0f;
+  const int64_t expert_row = static_cast<int64_t>(expert) * max_num_tokens;
+  for (int token = 0; token < num_tokens; ++token) {
+    const int64_t row = expert_row + token;
+    const scalar_t* gate_ptr = input + row * 2 * d;
+    const scalar_t* up_ptr = gate_ptr + d;
+    scalar_t* out_ptr = out + row * d;
+    const float g = (float)VLLM_LDG(&gate_ptr[idx]);
+    const float u = (float)VLLM_LDG(&up_ptr[idx]);
+    const float gate_out = beta * tanhf(g * inv_beta) / (1.0f + expf(-g));
+    const float up_out =
+        clamp_up ? linear_beta * tanhf(u * inv_linear_beta) : u;
+    out_ptr[idx] = (scalar_t)(gate_out * up_out);
+  }
+}
+
 }  // namespace vllm
 
 #define LAUNCH_ACTIVATION_GATE_KERNEL_WITH_PARAM(KERNEL, PACKED_KERNEL, PARAM) \
@@ -553,6 +615,54 @@ void swigluoai_and_mul(torch::stable::Tensor& out,    // [..., d]
                        double alpha, double limit) {
   LAUNCH_SIGLUOAI_AND_MUL(vllm::swigluoai_and_mul, alpha, limit);
 }
+
+// Kimi SITU gated activation. `linear_beta <= 0` means "unset" (up passed
+// through), matching SituAndMul(linear_beta=None) on the Python side.
+void situ_and_mul(torch::stable::Tensor& out,    // [..., d]
+                  torch::stable::Tensor& input,  // [..., 2 * d]
+                  double beta, double linear_beta) {
+  int d = input.size(-1) / 2;
+  int64_t num_tokens = input.numel() / input.size(-1);
+  if (num_tokens == 0) {
+    return;
+  }
+  dim3 grid(num_tokens);
+  dim3 block(std::min(d, 1024));
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "situ_and_mul_kernel", [&] {
+        vllm::situ_and_mul_kernel<scalar_t><<<grid, block, 0, stream>>>(
+            out.mutable_data_ptr<scalar_t>(), input.const_data_ptr<scalar_t>(),
+            d, (float)beta, (float)linear_beta);
+      });
+}
+
+void masked_situ_and_mul(torch::stable::Tensor& out,    // [E, T, d]
+                         torch::stable::Tensor& input,  // [E, T, 2 * d]
+                         const torch::stable::Tensor& expert_num_tokens,
+                         double beta, double linear_beta) {
+  int num_experts = input.size(0);
+  int max_num_tokens = input.size(1);
+  int d = input.size(2) / 2;
+  if (num_experts == 0 || max_num_tokens == 0) {
+    return;
+  }
+  constexpr int block_size = 256;
+  dim3 grid((d + block_size - 1) / block_size, num_experts);
+  dim3 block(block_size);
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+      input.scalar_type(), "masked_situ_and_mul_kernel", [&] {
+        vllm::masked_situ_and_mul_kernel<scalar_t><<<grid, block, 0, stream>>>(
+            out.mutable_data_ptr<scalar_t>(), input.const_data_ptr<scalar_t>(),
+            expert_num_tokens.const_data_ptr<int>(), max_num_tokens, d,
+            (float)beta, (float)linear_beta);
+      });
+}
 namespace vllm {
 
 // Element-wise activation kernel template.
@@ -562,8 +672,9 @@ __global__ void activation_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., d]
     const int d) {
-  const scalar_t* in_ptr = input + blockIdx.x * d;
-  scalar_t* out_ptr = out + blockIdx.x * d;
+  const int64_t token_idx = blockIdx.x;
+  const scalar_t* in_ptr = input + token_idx * d;
+  scalar_t* out_ptr = out + token_idx * d;
 
   if constexpr (use_vec) {
     // Fast path: 128-bit/256-bit vectorized loop

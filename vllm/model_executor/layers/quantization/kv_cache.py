@@ -80,8 +80,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             return
 
         # Per-token-head quantized KV cache: scales are computed dynamically
-        # per (token, head) in the kernel at cache-write time.  Checkpoint
-        # scales are never used regardless of calculate_kv_scales.
+        # per (token, head) in the kernel at cache-write time.
         if kv_cache_uses_per_token_head_scales(layer.kv_cache_dtype):
             layer._k_scale.copy_(1.0)
             layer._v_scale.copy_(1.0)
@@ -97,10 +96,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         # regardless whether the kv-scale is available in the checkpoint.
         # No need to process kv scales after loading if we are going to
         # calculate them on the fly.
-        if (
-            is_quantized_kv_cache(layer.kv_cache_dtype)
-            and not layer.calculate_kv_scales
-        ):
+        if is_quantized_kv_cache(layer.kv_cache_dtype):
             if layer.k_scale > 0.0 and layer.v_scale > 0.0:
                 # We prefer to use separate k_scale and v_scale if present
                 k_scale = layer.k_scale.to("cpu").tolist()
@@ -158,7 +154,6 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             q_scale = layer.q_scale
             if current_platform.is_fp8_fnuz():
                 q_scale *= 2
-            layer.calculate_kv_scales = False
         else:
             q_scale = 1.0
         if layer.prob_scale > 0.0:

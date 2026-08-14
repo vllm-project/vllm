@@ -47,12 +47,6 @@ def _bracket_level_state(
     return level, in_string, escaped
 
 
-def _bracket_level(s: str, opening: str = "{", closing: str = "}") -> int:
-    """Calculate the current level of nested brackets in a string."""
-    level, _, _ = _bracket_level_state(s, opening, closing)
-    return level
-
-
 def filter_delta_text(
     delta_text: str,
     previous_text: str,
@@ -105,7 +99,7 @@ def extract_named_tool_call_streaming(
     else:
         if is_mistral_tokenizer(tokenizer):
             # Import mistral_common only if we need it.
-            from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
+            from vllm.parser.mistral import MistralToolCall
 
             tool_call_id = MistralToolCall.generate_random_id()
         else:

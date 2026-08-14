@@ -56,14 +56,19 @@ TOLERANCES = {
     torch.bfloat16: (3e-2, 2e-2),
 }
 
-pytestmark = pytest.mark.skipif(
-    not (
-        current_platform.is_cuda_alike()
-        or current_platform.is_cpu()
-        or current_platform.is_xpu()
+pytestmark = [
+    pytest.mark.skipif(
+        not (
+            current_platform.is_cuda_alike()
+            or current_platform.is_cpu()
+            or current_platform.is_xpu()
+        ),
+        reason="Backend not supported",
     ),
-    reason="Backend not supported",
-)
+    # Tests here either take dist_init, which tears the distributed environment
+    # down itself, or never build one, so the global cleanup only repeats it.
+    pytest.mark.skip_global_cleanup,
+]
 
 DEVICE_TYPE = current_platform.device_type
 DEVICES = (
@@ -81,6 +86,21 @@ STAGES = [True, False]
 NUM_RANDOM_SEEDS = 2
 
 VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 2
+
+
+def test_base_layer_with_lora_delegates_load_weights():
+    class BaseLayer(torch.nn.Module):
+        def load_weights(self, weights):
+            self.loaded_weights = list(weights)
+            return {"weight"}
+
+    base_layer = BaseLayer()
+    layer = BaseLayerWithLoRA()
+    layer.base_layer = base_layer
+    weights = [("weight", torch.ones(1))]
+
+    assert layer.load_weights(weights) == {"weight"}
+    assert base_layer.loaded_weights == weights
 
 
 @pytest.fixture(autouse=True)
@@ -507,6 +527,38 @@ def test_lm_head_logits_processor_invalid_vocab_size(
 
     with pytest.raises(ValueError, match="vocab size must be <= 258048"):
         lora_logits_processor.create_lora_weights(max_loras, lora_config)
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("device", DEVICES)
+def test_lm_head_reset_sharded_to_full_mapping(
+    default_vllm_config, dist_init, device
+) -> None:
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        torch.accelerator.set_device_index(device)
+
+    torch.set_default_device(device)
+    max_loras = 8
+    vocab_size = 1024
+    lora_config = LoRAConfig(
+        max_loras=max_loras, max_lora_rank=8, lora_dtype=torch.float16
+    )
+
+    logits_processor = LogitsProcessor(vocab_size)
+    sharded_to_full_mapping = list(reversed(range(vocab_size)))
+    lora_logits_processor = LogitsProcessorWithLoRA(
+        logits_processor, 1024, torch.float16, device, sharded_to_full_mapping
+    )
+    lora_logits_processor.create_lora_weights(max_loras, lora_config)
+
+    lora_logits_processor.sharded_to_full_mapping_gpu.fill_(-1)
+
+    lora_logits_processor.reset_sharded_to_full_mapping()
+
+    torch.testing.assert_close(
+        lora_logits_processor.sharded_to_full_mapping_gpu,
+        torch.tensor(sharded_to_full_mapping, dtype=torch.long),
+    )
 
 
 @torch.inference_mode()

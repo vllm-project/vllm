@@ -55,6 +55,7 @@ from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
+from ..renderers import ChatParams
 from .offline_utils import _O, _R, OfflineInferenceMixin
 
 if TYPE_CHECKING:
@@ -162,6 +163,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             dictionary or an AttentionConfig instance. If a dictionary, it will
             be converted to an AttentionConfig. Allows specifying the attention
             backend and other attention-related settings.
+        return_sampling_mask: Return each sampled token's post-processing
+            support set. Requires Model Runner V2 and processed log probabilities.
         spec_method: Top-level alias for `speculative_config["method"]`.
         spec_model: Top-level alias for `speculative_config["model"]`.
         spec_tokens: Top-level alias for
@@ -200,6 +203,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         offload_params: set[str] | None = None,
         enforce_eager: bool = False,
         enable_return_routed_experts: bool = False,
+        return_sampling_mask: bool = False,
         disable_custom_all_reduce: bool = False,
         hf_token: bool | str | None = None,
         hf_overrides: HfOverrides | None = None,
@@ -316,6 +320,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             offload_params=offload_params or set(),
             enforce_eager=enforce_eager,
             enable_return_routed_experts=enable_return_routed_experts,
+            return_sampling_mask=return_sampling_mask,
             disable_custom_all_reduce=disable_custom_all_reduce,
             hf_token=hf_token,
             hf_overrides=hf_overrides,
@@ -351,6 +356,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         self.renderer = self.llm_engine.renderer
         self.chat_template = load_chat_template(chat_template)
         self.input_processor = self.llm_engine.input_processor
+
+        self.renderer.warmup(ChatParams(chat_template=self.chat_template))
 
         # The renderer thread pool is only consumed by the async renderer
         # path; the synchronous `LLM` entrypoint runs multimodal
@@ -885,9 +892,19 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             "update_weights", kwargs={"update_info": update_info_dict}
         )
 
-    def finish_weight_update(self) -> None:
-        """Finish the current weight update."""
+    def finish_weight_update(self, weight_version: str | None = None) -> None:
+        """Finish the weight update and set its version if provided."""
         self.llm_engine.collective_rpc("finish_weight_update")
+        if weight_version is not None:
+            self.llm_engine.set_weight_version(weight_version)
+
+    def update_weight_version(self, new_version: str) -> None:
+        """Set the weight version without updating weights."""
+        self.llm_engine.set_weight_version(new_version)
+
+    def get_weight_version(self) -> str:
+        """Return the latest committed weight version."""
+        return self.llm_engine.get_weight_version()
 
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""

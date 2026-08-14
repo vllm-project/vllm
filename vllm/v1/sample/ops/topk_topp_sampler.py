@@ -18,6 +18,13 @@ if HAS_TRITON:
 logger = init_logger(__name__)
 
 
+def _skip_aiter_sampler_on_gfx1250() -> bool:
+    # Lazy ROCm-only import; keeps arch detection out of import time on CUDA/CPU.
+    from vllm.platforms.rocm import on_gfx1250
+
+    return on_gfx1250()
+
+
 def flashinfer_sampler_supported() -> bool:
     """Decide whether FlashInfer's top-p/top-k sampler can be used.
 
@@ -110,6 +117,7 @@ class TopKTopPSampler(nn.Module):
         elif (
             logprobs_mode not in PROCESSED_LOGPROBS_MODES
             and rocm_aiter_ops.is_enabled()
+            and not _skip_aiter_sampler_on_gfx1250()  # TODO (JPVILLAM): Enable
         ):
             self.aiter_ops = None
             self._aiter_ops_import_failed = False

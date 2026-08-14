@@ -29,7 +29,7 @@ class BgeM3SparseEmbeddingsProcessor(
         self.online_requests: dict[str, SparseEmbeddingCompletionRequestMixin] = {}
         self.renderer: BaseRenderer = renderer
         self.default_pooling_params = {}
-        pooler_config: PoolerConfig = vllm_config.model_config.pooler_config
+        pooler_config: PoolerConfig | None = vllm_config.model_config.pooler_config
         if pooler_config is not None:
             for param in ["use_activation", "dimensions"]:
                 if getattr(pooler_config, param, None) is None:
@@ -91,11 +91,11 @@ class BgeM3SparseEmbeddingsProcessor(
     ) -> list[SparseEmbeddingTokenWeight]:
         token_ids = sparse_embedding.keys()
         token_weights = sparse_embedding.values()
-        tokens = [None] * len(token_ids)
+        tokens: Sequence[str | None] = [None] * len(token_ids)
 
         if return_tokens and self.renderer is not None:
             tokens = convert_ids_list_to_tokens(
-                self.renderer.get_tokenizer(), token_ids
+                self.renderer.get_tokenizer(), list(token_ids)
             )
         sparse_embedding_output: list[SparseEmbeddingTokenWeight] = []
         for token_id, weight, token in zip(token_ids, token_weights, tokens):

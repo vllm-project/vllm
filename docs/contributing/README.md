@@ -301,8 +301,10 @@ review process:
   isn't clear or you disagree with a suggestion, feel free to ask for
   clarification or discuss the suggestion.
 - Note that not all CI checks will be executed due to limited computational
-  resources. The reviewer will add `ready` label to the PR when the PR is
-  ready to merge or a full CI run is needed.
+  resources. Reviewers with write access and configured trusted contributors
+  can comment `/ci run` when CI signals are needed before a PR is ready. After
+  the PR is approved or has the `ready` label, the PR author can use `/ci run`
+  or `/ci retry`. New commits do not start CI automatically.
 
 ### Pull Request Limits and Escalation
 

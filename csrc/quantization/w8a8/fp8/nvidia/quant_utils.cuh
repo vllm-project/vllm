@@ -13,10 +13,18 @@ namespace vllm {
 namespace fp8 {
   #ifdef ENABLE_FP8
 
+// Unspecialized conversions are a compile error: the old passthrough
+// (`return x;`) silently skipped fp8 encoding for any (Tout, Tin) pair
+// without a specialization below (e.g. the torch stable-ABI scalar types),
+// corrupting quantized data with no runtime signal.
+template <typename>
+inline constexpr bool _no_conversion_specialization = false;
+
 template <typename Tout, typename Tin>
 __inline__ __device__ Tout vec_conversion(
     const Tin& x, const __nv_fp8_interpretation_t fp8_type = __NV_E4M3) {
-  return x;
+  static_assert(_no_conversion_specialization<Tin>,
+                "no vec_conversion specialization for this (Tout, Tin) pair");
 }
 
 // float -> c10::Float8_e4m3fn
@@ -301,7 +309,9 @@ __inline__ __device__ bf16_8_t vec_conversion<bf16_8_t, Float8_>(
 template <typename Tout, typename Tin>
 __inline__ __device__ Tout scaled_vec_conversion(
     const Tin& x, const float scale, const __nv_fp8_interpretation_t fp8_type) {
-  return x;
+  static_assert(
+      _no_conversion_specialization<Tin>,
+      "no scaled_vec_conversion specialization for this (Tout, Tin) pair");
 }
 
 // fp8 -> half
@@ -490,6 +500,25 @@ __inline__ __device__ uint8_t scaled_vec_conversion<uint8_t, __nv_bfloat16>(
   return (uint8_t)res;
     #endif
   __builtin_unreachable();  // Suppress missing return statement warning
+}
+
+// torch stable-ABI (headeronly) scalar types delegate to the CUDA-native
+// conversions, so libtorch_stable kernels dispatched on c10::BFloat16 /
+// c10::Half quantize correctly without manual casts.
+template <>
+__inline__ __device__ uint8_t scaled_vec_conversion<uint8_t, c10::BFloat16>(
+    const c10::BFloat16& a, const float scale,
+    const __nv_fp8_interpretation_t fp8_type) {
+  return scaled_vec_conversion<uint8_t, __nv_bfloat16>(
+      reinterpret_cast<const __nv_bfloat16&>(a), scale, fp8_type);
+}
+
+template <>
+__inline__ __device__ uint8_t scaled_vec_conversion<uint8_t, c10::Half>(
+    const c10::Half& a, const float scale,
+    const __nv_fp8_interpretation_t fp8_type) {
+  return scaled_vec_conversion<uint8_t, uint16_t>(
+      reinterpret_cast<const uint16_t&>(a), scale, fp8_type);
 }
 
 // float -> fp8

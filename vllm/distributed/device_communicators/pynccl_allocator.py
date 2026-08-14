@@ -14,7 +14,7 @@ from vllm import envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.nccl import find_nccl_include_paths
+from vllm.utils.nccl import find_nccl_include_paths, find_nccl_library_paths
 
 logger = init_logger(__name__)
 
@@ -74,11 +74,15 @@ def compile_nccl_allocator():
         out_dir = tempfile.gettempdir()
         nccl_allocator_libname = "nccl_allocator"
         nccl_include_paths = find_nccl_include_paths()
+        ldflags = ["-l:libnccl.so.2"]
+        nccl_lib_paths = find_nccl_library_paths()
+        if nccl_lib_paths:
+            ldflags = [f"-L{p}" for p in nccl_lib_paths] + ldflags
         load_inline(
             name=nccl_allocator_libname,
             cpp_sources=nccl_allocator_source,
             with_cuda=True,
-            extra_ldflags=["-lnccl"],
+            extra_ldflags=ldflags,
             verbose=envs.VLLM_LOGGING_LEVEL == "DEBUG",
             is_python_module=False,
             build_directory=out_dir,

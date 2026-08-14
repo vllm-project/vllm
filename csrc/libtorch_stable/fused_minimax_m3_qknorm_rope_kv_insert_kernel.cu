@@ -269,6 +269,22 @@ __device__ __forceinline__ void storeElemsFp8(
 #endif
 }
 
+// Match scaled_fp8_quant(q_out): materialize q in scalar_t before applying the
+// inverse dequantization scale and converting it to E4M3.
+template <typename scalar_t>
+__device__ __forceinline__ void storeScaledQElemsFp8(
+    uint8_t* __restrict__ dst, float const (&elems)[kElemsPerLane],
+    float const inv_scale) {
+  using Converter = vllm::_typeConvert<scalar_t>;
+  float scaled[kElemsPerLane];
+#pragma unroll
+  for (int i = 0; i < kElemsPerLane; i++) {
+    auto const rounded = Converter::convert(elems[i]);
+    scaled[i] = static_cast<float>(rounded) * inv_scale;
+  }
+  storeElemsFp8(dst, scaled);
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Kernel
 // ────────────────────────────────────────────────────────────────────────────
@@ -297,6 +313,7 @@ template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
 __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
     scalar_t* __restrict__ qkv,  // [N, qkv_row] in/out (packs index if sparse)
     scalar_t* __restrict__ q_out,         // [N, nq*128] contiguous, or nullptr
+    uint8_t* __restrict__ q_fp8_out,      // [N, nq*128] E4M3, or nullptr
     out_idx_t* __restrict__ index_q_out,  // [N, niq*128]; scalar_t or e4m3 byte
     scalar_t const* __restrict__ q_norm_w,
     scalar_t const* __restrict__ k_norm_w,
@@ -308,8 +325,9 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
     int64_t const* __restrict__ index_slot_mapping,  // index K slots/nullptr
     cache_t* __restrict__ kv_cache,       // [nb,nkv,bs,2*128] or nullptr
     out_idx_t* __restrict__ index_cache,  // [nb*bs, 128]; scalar_t or e4m3 byte
-    float const eps, int const rotary_dim, int const num_tokens, int const nq,
-    int const nkv, int const niq, int const block_size,
+    float const eps, float const q_fp8_inv_scale, int const rotary_dim,
+    int const num_tokens, int const nq, int const nkv, int const niq,
+    int const block_size,
     // kv_cache strides (in elements) for logical shape [nb, nkv, bs, 2*128].
     // The content (last) dim is always innermost-contiguous (stride 1), so the
     // NHD/HND layout choice is captured by the head/token strides.
@@ -445,6 +463,12 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
       } else {
         storeElems<scalar_t>(store_ptr + dim_base, elems);
       }
+      if (isQ && q_fp8_out != nullptr) {
+        storeScaledQElemsFp8<scalar_t>(
+            q_fp8_out + static_cast<int64_t>(tokenIdx) * nq * kHeadDim +
+                slot * kHeadDim + dim_base,
+            elems, q_fp8_inv_scale);
+      }
     }
 
     // ── Cache inserts (sparse serving only). ───────────────────────────────
@@ -493,13 +517,14 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
 // ────────────────────────────────────────────────────────────────────────────
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 void launchFusedMiniMaxM3(
-    scalar_t* qkv, scalar_t* q_out, void* index_q_out, scalar_t const* q_norm_w,
-    scalar_t const* k_norm_w, scalar_t const* iq_norm_w,
-    scalar_t const* ik_norm_w, scalar_t const* cos_sin_cache,
-    int64_t const* positions, int64_t const* slot_mapping,
-    int64_t const* index_slot_mapping, cache_t* kv_cache, void* index_cache,
-    float const eps, int const rotary_dim, int const num_tokens, int const nq,
-    int const nkv, int const niq, int const block_size,
+    scalar_t* qkv, scalar_t* q_out, uint8_t* q_fp8_out, void* index_q_out,
+    scalar_t const* q_norm_w, scalar_t const* k_norm_w,
+    scalar_t const* iq_norm_w, scalar_t const* ik_norm_w,
+    scalar_t const* cos_sin_cache, int64_t const* positions,
+    int64_t const* slot_mapping, int64_t const* index_slot_mapping,
+    cache_t* kv_cache, void* index_cache, float const eps,
+    float const q_fp8_inv_scale, int const rotary_dim, int const num_tokens,
+    int const nq, int const nkv, int const niq, int const block_size,
     int64_t const kv_s_block, int64_t const kv_s_head, int64_t const kv_s_token,
     int64_t const kv_s_dim, bool const has_index, bool const insert_kv,
     bool const process_index, bool const fp8_idx, cudaStream_t stream) {
@@ -540,10 +565,11 @@ void launchFusedMiniMaxM3(
         fusedMiniMaxM3QNormRopeKVInsertKernel<scalar_t, cache_t, kv_dt, OUT_T, \
                                               HAS_INDEX, INSERT,               \
                                               PROCESS_INDEX, FP8>,             \
-        qkv, q_out, reinterpret_cast<OUT_T*>(index_q_out), q_norm_w, k_norm_w, \
-        iq_norm_w, ik_norm_w, cos_sin_cache, positions, slot_mapping,          \
-        index_slot_mapping, kv_cache, reinterpret_cast<OUT_T*>(index_cache),   \
-        eps, rotary_dim, num_tokens, nq, nkv, niq, block_size, kv_s_block,     \
+        qkv, q_out, q_fp8_out, reinterpret_cast<OUT_T*>(index_q_out),          \
+        q_norm_w, k_norm_w, iq_norm_w, ik_norm_w, cos_sin_cache, positions,    \
+        slot_mapping, index_slot_mapping, kv_cache,                            \
+        reinterpret_cast<OUT_T*>(index_cache), eps, q_fp8_inv_scale,           \
+        rotary_dim, num_tokens, nq, nkv, niq, block_size, kv_s_block,          \
         kv_s_head, kv_s_token, kv_s_dim)
 #else
   // ROCm: standard kernel launch syntax (no PDL/stream serialization).
@@ -552,12 +578,12 @@ void launchFusedMiniMaxM3(
     fusedMiniMaxM3QNormRopeKVInsertKernel<                                  \
         scalar_t, cache_t, kv_dt, OUT_T, HAS_INDEX, INSERT, PROCESS_INDEX,  \
         FP8><<<grid, kBlockSize, 0, stream>>>(                              \
-        qkv, q_out, reinterpret_cast<OUT_T*>(index_q_out), q_norm_w,        \
-        k_norm_w, iq_norm_w, ik_norm_w, cos_sin_cache, positions,           \
+        qkv, q_out, q_fp8_out, reinterpret_cast<OUT_T*>(index_q_out),       \
+        q_norm_w, k_norm_w, iq_norm_w, ik_norm_w, cos_sin_cache, positions, \
         slot_mapping, index_slot_mapping, kv_cache,                         \
-        reinterpret_cast<OUT_T*>(index_cache), eps, rotary_dim, num_tokens, \
-        nq, nkv, niq, block_size, kv_s_block, kv_s_head, kv_s_token,         \
-        kv_s_dim)
+        reinterpret_cast<OUT_T*>(index_cache), eps, q_fp8_inv_scale,        \
+        rotary_dim, num_tokens, nq, nkv, niq, block_size, kv_s_block,       \
+        kv_s_head, kv_s_token, kv_s_dim)
   // clang-format on
 #endif
 
@@ -599,6 +625,9 @@ void launchFusedMiniMaxM3(
   vllm::minimax_m3_fused_ops::launchFusedMiniMaxM3<st, CACHE_T, KV_DTYPE>(     \
       reinterpret_cast<st*>(qkv.data_ptr()),                                   \
       q_out.has_value() ? reinterpret_cast<st*>(q_out->data_ptr()) : nullptr,  \
+      q_fp8_out.has_value()                                                     \
+          ? reinterpret_cast<uint8_t*>(q_fp8_out->data_ptr())                  \
+          : nullptr,                                                           \
       index_q_out.has_value()                                                  \
           ? reinterpret_cast<void*>(index_q_out->data_ptr())                   \
           : nullptr,                                                           \
@@ -622,10 +651,10 @@ void launchFusedMiniMaxM3(
       (insert_kv && process_index)                                             \
           ? reinterpret_cast<void*>(index_cache->data_ptr())                   \
           : nullptr,                                                           \
-      static_cast<float>(eps), static_cast<int>(rotary_dim), num_tokens, nq,   \
-      nkv, niq, static_cast<int>(block_size), kv_s_block, kv_s_head,           \
-      kv_s_token, kv_s_dim, has_index, insert_kv, process_index, fp8_idx,       \
-      stream)
+      static_cast<float>(eps), 1.0f / static_cast<float>(q_fp8_scale),          \
+      static_cast<int>(rotary_dim), num_tokens, nq, nkv, niq,                  \
+      static_cast<int>(block_size), kv_s_block, kv_s_head, kv_s_token,         \
+      kv_s_dim, has_index, insert_kv, process_index, fp8_idx, stream)
 // clang-format on
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -649,7 +678,10 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     std::optional<torch::stable::Tensor> q_out,  // [N, nq*128] contiguous
     std::optional<torch::stable::Tensor>
         index_q_out,  // [N, niq*128] contiguous
-    const std::string& kv_cache_dtype, bool skip_index_branch) {
+    const std::string& kv_cache_dtype, bool skip_index_branch,
+    std::optional<torch::stable::Tensor>
+        q_fp8_out,  // [N, nq*128] contiguous E4M3
+    double q_fp8_scale) {
   STD_TORCH_CHECK(qkv.is_cuda() && qkv.is_contiguous(),
                   "qkv must be contiguous CUDA");
   STD_TORCH_CHECK(
@@ -779,6 +811,17 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     STD_TORCH_CHECK(
         q_out->numel() == static_cast<int64_t>(num_tokens) * nq * kHeadDim,
         "q_out must have num_tokens * num_heads * 128 elements");
+  }
+  if (q_fp8_out.has_value()) {
+    STD_TORCH_CHECK(q_fp8_out->is_cuda() && q_fp8_out->is_contiguous() &&
+                        q_fp8_out->scalar_type() ==
+                            torch::headeronly::ScalarType::Float8_e4m3fn,
+                    "q_fp8_out must be a contiguous CUDA fp8 e4m3 tensor");
+    STD_TORCH_CHECK(
+        q_fp8_out->numel() == static_cast<int64_t>(num_tokens) * nq * kHeadDim,
+        "q_fp8_out must have num_tokens * num_heads * 128 elements");
+    STD_TORCH_CHECK(std::isfinite(q_fp8_scale) && q_fp8_scale > 0.0,
+                    "q_fp8_scale must be finite and positive");
   }
   if (index_q_out.has_value()) {
     STD_TORCH_CHECK(process_index,
