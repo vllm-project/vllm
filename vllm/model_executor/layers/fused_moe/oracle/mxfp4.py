@@ -44,7 +44,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import all_close_1d
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_triton_kernels
+from vllm.utils.import_utils import has_humming, has_triton_kernels
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
@@ -329,7 +329,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
 def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     """
     Get available backends in priority order. SM100+ prefers DeepGEMM FP4 /
-    TRTLLM MXFP8; SM90 falls through to Triton_unfused or Marlin (the
+    TRTLLM MXFP8; SM90 falls through to Humming or Marlin (the
     backend-level ``is_supported_config`` check filters by device capability).
     """
     if current_platform.is_rocm():
@@ -345,9 +345,10 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
         # TRITON_UNFUSED has bug with MTP support
         # TODO re-enable after kernel is fixed
         # TRITON_UNFUSED
-        Mxfp4MoeBackend.MARLIN,
-        Mxfp4MoeBackend.BATCHED_MARLIN,
     ]
+    if has_humming():
+        _AVAILABLE_BACKENDS.append(Mxfp4MoeBackend.HUMMING)
+    _AVAILABLE_BACKENDS.extend([Mxfp4MoeBackend.MARLIN, Mxfp4MoeBackend.BATCHED_MARLIN])
     return _AVAILABLE_BACKENDS
 
 
