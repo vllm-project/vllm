@@ -14,7 +14,6 @@ from vllm.config import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
-from vllm.platforms.interface import DeviceCapability
 
 if current_platform.is_cuda():
     from vllm.platforms.cuda import CudaPlatform
