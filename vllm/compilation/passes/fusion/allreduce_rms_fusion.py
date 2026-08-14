@@ -262,7 +262,6 @@ if flashinfer_comm is not None:
         if workspace.backend in ("trtllm", "mnnvl"):
             layout_code = flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4
 
-
         flashinfer_comm.allreduce_fusion(
             input=allreduce_in,
             workspace=workspace,
