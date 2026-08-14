@@ -332,13 +332,18 @@ class Executor(ABC):
         if not self.is_sleeping:
             logger.warning("Executor is not sleeping.")
             return
-        if tags:
-            for tag in tags:
-                if tag not in self.sleeping_tags:
-                    logger.warning(
-                        "Tag %s is not in sleeping tags %s", tag, self.sleeping_tags
-                    )
-                    return
+        if tags is not None:
+            # Wake only the requested tags that are still asleep. A tag that is
+            # already awake is silently skipped instead of aborting the whole
+            # call: a mixed request such as ["weights", "kv_cache"] where one
+            # tag is already awake must still wake the remaining asleep tag(s).
+            # The previous early-return left those tags unmapped while the
+            # engine believed the wake-up succeeded, wedging it (e.g. KV
+            # unmapped with /health still reporting healthy).
+            tags = [tag for tag in tags if tag in self.sleeping_tags]
+            if not tags:
+                # Every requested tag is already awake -> clean no-op.
+                return
         time_before_wakeup = time.perf_counter()
         self.collective_rpc("wake_up", kwargs=dict(tags=tags))
         time_after_wakeup = time.perf_counter()
@@ -347,7 +352,7 @@ class Executor(ABC):
             time_after_wakeup - time_before_wakeup,
             tags if tags is not None else self.sleeping_tags,
         )
-        if tags:
+        if tags is not None:
             for tag in tags:
                 self.sleeping_tags.remove(tag)
         else:
