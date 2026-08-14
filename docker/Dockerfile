@@ -195,6 +195,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         && test -n "${CUDA_DRIVER_STUB}" \
         && mkdir -p "${CUDA_PYPI_ROOT}/lib/stubs" \
         && cp "${CUDA_DRIVER_STUB}" "${CUDA_PYPI_ROOT}/lib/stubs/libcuda.so" \
+        && NCCL_LIBRARY=$(find "$(dirname "${CUDA_PYPI_ROOT}")/nccl/lib" \
+            -name 'libnccl.so.2' -print -quit) \
+        && test -n "${NCCL_LIBRARY}" \
+        && ln -s "${NCCL_LIBRARY}" "${CUDA_PYPI_ROOT}/lib/libnccl.so.2" \
         && for library in "${CUDA_PYPI_ROOT}"/lib/*.so.*; do \
             linker_name="${library%%.so.*}.so"; \
             if [ ! -e "${linker_name}" ]; then \
