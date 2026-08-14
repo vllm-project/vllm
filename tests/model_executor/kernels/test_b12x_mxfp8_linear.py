@@ -778,6 +778,9 @@ def _mock_b12x_cuda_fp8_platform(monkeypatch: pytest.MonkeyPatch) -> None:
         types.SimpleNamespace(
             is_fp8_fnuz=lambda: False,
             is_rocm=lambda: False,
+            fp8_dtype=lambda: torch.float8_e4m3fn,
+            is_xpu=lambda: False,
+            is_cuda_alike=lambda: True,
         ),
     )
 
