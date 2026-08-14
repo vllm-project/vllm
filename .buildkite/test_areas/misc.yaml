@@ -430,6 +430,24 @@ steps:
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k TRITON_MLA
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle -k FLASH_ATTN
+  mirror:
+    amd:
+      device: mi250_1
+      working_dir: "/vllm-workspace/tests"
+      timeout_in_minutes: 30
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/attention
+      - vllm/model_executor/layers
+      - tests/v1/determinism/
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pip install pytest-timeout pytest-forked
+      - pytest -v -s v1/determinism/test_batch_invariance.py
+      - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
 
 - label: Batch Invariance (B200)
   key: batch-invariance-b200
