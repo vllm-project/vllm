@@ -73,8 +73,6 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
         generator = await handler.create_messages(request, raw_request)
     except Exception as e:
         logger.exception("Error in create_messages: %s", e)
-        # Let create_error_response map every exception type (client-caused
-        # errors like conversion ValidationError become 4xx).
         return translate_error_response(create_error_response(e))
 
     if isinstance(generator, ErrorResponse):
