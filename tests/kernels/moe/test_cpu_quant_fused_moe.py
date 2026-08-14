@@ -31,6 +31,21 @@ def _prepack_experts(w: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.convert_weight_packed(w)
 
 
+def _deterministic_expert_routes(
+    block_sizes: tuple[int, ...],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Create top-1 routes with exact per-expert block occupancies."""
+    topk_ids = torch.cat(
+        [
+            torch.full((size,), expert, dtype=torch.int32)
+            for expert, size in enumerate(block_sizes)
+        ]
+    )
+    topk_ids = topk_ids.view(-1, 1)
+    topk_weights = torch.ones(topk_ids.shape, dtype=torch.float32)
+    return topk_weights, topk_ids
+
+
 # ===========================================================================
 # FP8 W8A16 MoE
 # ===========================================================================
@@ -217,6 +232,40 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
         is_vnni=True,
     )
     torch.testing.assert_close(out_inplace, out, atol=0, rtol=0)
+
+
+def test_w8a16_block_fp8_cpu_fused_moe_small_expert_blocks():
+    """Test FP8 BRGEMM at exact and multi-block expert boundaries."""
+    set_random_seed(0)
+    block_sizes = (4, 5, 33)
+    N, K, E = 128, 128, len(block_sizes)
+    M = sum(block_sizes)
+
+    a = torch.randn(M, K, dtype=torch.bfloat16) / math.sqrt(K)
+    w1, w2, w1_s, w2_s = _make_fp8_moe_weights(E, N, K, BLOCK_SIZE)
+    topk_weight, topk_ids = _deterministic_expert_routes(block_sizes)
+
+    ref_out = ref_w8a16_block_fp8_moe(
+        a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, BLOCK_SIZE
+    )
+    pw1, pw2 = _prepack_experts(w1), _prepack_experts(w2)
+    out = ops.fused_experts_cpu(
+        a,
+        pw1,
+        pw2,
+        topk_weight,
+        topk_ids,
+        False,
+        ops.CPUQuantMethod.FP8_W8A16,
+        w1_s,
+        w2_s,
+        None,
+        None,
+        BLOCK_SIZE,
+        is_vnni=True,
+    )
+
+    torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
 
 
 # ===========================================================================
@@ -433,6 +482,167 @@ def test_mxfp4_cpu_fused_moe(M, N, K, E, topk, seed):
         None,  # w1_zero
         None,  # w2_zero
         None,  # block_size
+    )
+
+    torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
+
+
+def test_mxfp4_cpu_fused_moe_small_expert_blocks():
+    """Test MXFP4 BRGEMM at exact and multi-block expert boundaries."""
+    set_random_seed(0)
+    block_sizes = (4, 5, 33)
+    N, K, E = 128, 128, len(block_sizes)
+    M = sum(block_sizes)
+    dtype = torch.bfloat16
+
+    a = torch.randn(M, K, dtype=dtype) / 10
+    w1_bf16 = torch.randn(E, 2 * N, K, dtype=dtype) / 10
+    w1q, w1s = MXFP4QuantizeUtil.quantize(w1_bf16)
+    w1s = w1s.reshape(E, 2 * N, K // 32)
+    w1dq = MXFP4QuantizeUtil.dequantize(w1q, dtype, w1s)
+
+    w2_bf16 = torch.randn(E, K, N, dtype=dtype) / 10
+    w2q, w2s = MXFP4QuantizeUtil.quantize(w2_bf16)
+    w2s = w2s.reshape(E, K, N // 32)
+    w2dq = MXFP4QuantizeUtil.dequantize(w2q, dtype, w2s)
+
+    topk_weight, topk_ids = _deterministic_expert_routes(block_sizes)
+    ref_out = ref_mxfp4_fused_moe(a, w1dq, w2dq, topk_weight, topk_ids, 1)
+
+    pw1, pw1s = _prepack_mxfp4_experts(w1q, w1s)
+    pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
+    out = ops.fused_experts_cpu(
+        a,
+        pw1,
+        pw2,
+        topk_weight,
+        topk_ids,
+        False,
+        ops.CPUQuantMethod.MXFP4,
+        pw1s,
+        pw2s,
+        None,
+        None,
+        None,
+    )
+
+    torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
+
+
+# Both E2M1 zero codes: 0b0000 (+0.0) and 0b1000 (-0.0), in both nibbles.
+MXFP4_ZERO_BYTES = [0x00, 0x88, 0x08, 0x80]
+# 0 and 255 are the ends of the E8M0 range; 127 is the identity scale.
+MXFP4_E8M0_VALUES = [0, 1, 127, 200, 254, 255]
+
+
+@pytest.mark.parametrize("zero_byte", MXFP4_ZERO_BYTES)
+@pytest.mark.parametrize("e8m0", MXFP4_E8M0_VALUES)
+def test_mxfp4_cpu_zero_codes_stay_zero(zero_byte, e8m0):
+    """A zero E2M1 code stays zero for every E8M0 exponent.
+
+    The unpack applies the block scale as an integer add on the bf16 exponent
+    field, which is exact for every value in the E2M1 codebook except the two
+    zeros: 0x0000 and 0x8000 have no exponent to shift, so adding to them
+    produces a small finite number instead of zero. Both are special-cased, and
+    this is the invariant that special case exists for.
+
+    Worth pinning separately from ``test_mxfp4_cpu_fused_moe``: there the zero
+    codes are a small fraction of random weights and a broken special case
+    would stay inside the 1e-2 tolerance for the low exponents. Here every
+    weight is a zero, so the output is exactly zero or it is not.
+    """
+    N, K, E, M = 64, 64, 2, 4
+    dtype = torch.bfloat16
+    set_random_seed(0)
+
+    a = torch.randn(M, K, dtype=dtype)
+    w1q = torch.full((E, 2 * N, K // 2), zero_byte, dtype=torch.uint8)
+    w1s = torch.full((E, 2 * N, K // 32), e8m0, dtype=torch.uint8)
+    # w2 is ordinary: the zeros have to survive the first GEMM and the
+    # activation, and a nonzero w2 is what would expose it if they did not.
+    w2_bf16 = torch.randn(E, K, N, dtype=dtype) / 10
+    w2q, w2s = MXFP4QuantizeUtil.quantize(w2_bf16)
+    w2s = w2s.reshape(E, K, N // 32)
+
+    topk_weight = torch.ones((M, 1), dtype=torch.float32)
+    topk_ids = torch.zeros((M, 1), dtype=torch.int32)
+
+    pw1, pw1s = _prepack_mxfp4_experts(w1q, w1s)
+    pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
+    out = ops.fused_experts_cpu(
+        a,
+        pw1,
+        pw2,
+        topk_weight,
+        topk_ids,
+        False,
+        ops.CPUQuantMethod.MXFP4,
+        pw1s,
+        pw2s,
+        None,
+        None,
+        None,
+    )
+
+    # silu(0) * 0 = 0, so the whole layer collapses to exactly zero. Not
+    # assert_close: any nonzero output here is a wrong unpack, not rounding.
+    assert torch.equal(out, torch.zeros_like(out)), (
+        f"zero code 0x{zero_byte:02x} with e8m0={e8m0} produced "
+        f"max |out| = {out.abs().max().item()}"
+    )
+
+
+# Narrower than MXFP4_E8M0_VALUES on purpose: this test keeps nonzero weights,
+# and 6.0 * 2**(255-127) is not representable in bf16, so the ends of the E8M0
+# range would compare inf against inf and prove nothing. The all-zero test above
+# is the one that can reach them.
+MXFP4_E8M0_FINITE = [107, 127, 137]
+
+
+@pytest.mark.parametrize("e8m0", MXFP4_E8M0_FINITE)
+def test_mxfp4_cpu_zero_codes_mixed_with_nonzero(e8m0):
+    """Zeros and nonzeros in the same 32-element scale block.
+
+    The zero check is per lane, not per block: this fails if it is ever
+    rewritten as a whole-block branch. Uses a single shared exponent so the
+    reference is a plain power of two.
+    """
+    N, K, E, M = 64, 64, 2, 4
+    dtype = torch.bfloat16
+    set_random_seed(0)
+
+    a = torch.randn(M, K, dtype=dtype)
+    # Alternate a zero byte and a nonzero one along K, so every scale block
+    # holds both kinds.
+    pattern = torch.tensor([0x88, 0x21], dtype=torch.uint8).repeat(K // 4)
+    w1q = pattern.view(1, 1, -1).expand(E, 2 * N, K // 2).contiguous()
+    w1s = torch.full((E, 2 * N, K // 32), e8m0, dtype=torch.uint8)
+    w1dq = MXFP4QuantizeUtil.dequantize(w1q, dtype, w1s)
+
+    w2_bf16 = torch.randn(E, K, N, dtype=dtype) / 10
+    w2q, w2s = MXFP4QuantizeUtil.quantize(w2_bf16)
+    w2s = w2s.reshape(E, K, N // 32)
+    w2dq = MXFP4QuantizeUtil.dequantize(w2q, dtype, w2s)
+
+    topk_weight = torch.ones((M, 1), dtype=torch.float32)
+    topk_ids = torch.zeros((M, 1), dtype=torch.int32)
+    ref_out = ref_mxfp4_fused_moe(a, w1dq, w2dq, topk_weight, topk_ids, 1)
+
+    pw1, pw1s = _prepack_mxfp4_experts(w1q, w1s)
+    pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
+    out = ops.fused_experts_cpu(
+        a,
+        pw1,
+        pw2,
+        topk_weight,
+        topk_ids,
+        False,
+        ops.CPUQuantMethod.MXFP4,
+        pw1s,
+        pw2s,
+        None,
+        None,
+        None,
     )
 
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)

@@ -21,7 +21,7 @@ from vllm.v1.attention.backends.utils import (
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import MambaSpec
 
 M = TypeVar("M", bound="BaseMambaAttentionMetadata")
 
@@ -74,9 +74,16 @@ class BaseMambaAttentionMetadata:
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
+    # ReplaySSM standard decode: per-row ring cursor and flush flag, plus the
+    # per-step (decode_rows, ngroups, replayssm_buffer_len) fp32 scratch for the
+    # precomputed k^T q products. All None when use_replayssm is disabled.
+    write_pos_d: torch.Tensor | None = None
+    is_flush_d: torch.Tensor | None = None
+    bc_pre_scratch: torch.Tensor | None = None
 
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
+    kv_cache_spec: MambaSpec
     metadata_cls: type[M]
     reorder_batch_threshold: int = 1
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
@@ -86,7 +93,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
     def __init__(
         self,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: MambaSpec,
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
@@ -98,8 +105,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.compilation_config = vllm_config.compilation_config
         self.num_spec_tokens: int = vllm_config.num_speculative_tokens
         self.use_spec_decode = self.num_spec_tokens > 0
+        self.use_replayssm = vllm_config.cache_config.use_replayssm
+        self.replayssm_buffer_len = vllm_config.cache_config.replayssm_buffer_len
 
-        assert isinstance(kv_cache_spec, MambaSpec)
         scheduler_config = vllm_config.scheduler_config
         self.decode_cudagraph_max_bs: int = scheduler_config.max_num_seqs
         if self.compilation_config.max_cudagraph_capture_size is not None:
@@ -158,6 +166,36 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.int32,
                 device=device,
             )
+        # ReplaySSM standard-decode CUDA-graph buffers: per-row ring cursor,
+        # flush flag, and the k^T q precompute scratch.
+        if self.use_replayssm:
+            self.decode_write_pos_d: torch.Tensor = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.decode_is_flush_d: torch.Tensor = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int8,
+                device=device,
+            )
+            # B_cache shape = (ngroups, replayssm_buffer_len, dstate); the page
+            # layout is (conv_state, ssm_state, x_cache, dt_cache, B_cache).
+            bc_ngroups = kv_cache_spec.shapes[4][0]
+            bc_scratch_bs = max(
+                self.decode_cudagraph_max_bs, scheduler_config.max_num_seqs
+            )
+            self.decode_bc_pre_scratch: torch.Tensor = torch.empty(
+                (
+                    bc_scratch_bs,
+                    bc_ngroups,
+                    self.replayssm_buffer_len,
+                ),
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            self.decode_bc_pre_scratch = None
 
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
         if self.use_spec_decode:
@@ -286,6 +324,33 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         return cu_chunk_seqlen, seq_idx, last_chunk_indices
 
+    def _prefill_cpu_metadata(
+        self,
+        common: M,
+        common_attn_metadata: CommonAttentionMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Prefill context lengths and query offsets, from CPU data only.
+
+        `seq_lens_cpu_upper_bound` is precise for prefill rows in all modes
+        (including async spec decode), so this avoids the D2H sync that
+        `compute_num_computed_tokens().cpu()` would force.
+
+        Returns (num_computed_tokens_p_cpu, query_start_loc_p_cpu).
+        """
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+        assert seq_lens_cpu is not None
+        num_reqs = common.num_reqs
+        num_prefills = common.num_prefills
+        query_start_loc_p_cpu = (
+            common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
+            - common.num_decode_tokens
+        )
+        prefill_query_lens_cpu = query_start_loc_p_cpu[1:] - query_start_loc_p_cpu[:-1]
+        num_computed_tokens_p_cpu = (
+            seq_lens_cpu[num_reqs - num_prefills : num_reqs] - prefill_query_lens_cpu
+        )
+        return num_computed_tokens_p_cpu, query_start_loc_p_cpu
+
     def _build_chunk_metadata_tensors(
         self,
         chunk_size: int,
@@ -296,23 +361,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         Compute chunk metadata and return as device tensors.
         Returns (cu_chunk_seqlen_p, seq_idx_p, last_chunk_indices_p).
         """
-        num_reqs = common.num_reqs
         num_prefills = common.num_prefills
-        num_decode_tokens = common.num_decode_tokens
 
-        # Derive prefill context lengths from CPU data only.
-        # `seq_lens_cpu_upper_bound` is precise for prefill rows in all modes
-        # (including async spec decode), so this avoids the D2H sync that
-        # `compute_num_computed_tokens().cpu()` would force.
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
-        assert seq_lens_cpu is not None
-        query_start_loc_p_cpu = (
-            common_attn_metadata.query_start_loc_cpu[-num_prefills - 1 :]
-            - num_decode_tokens
-        )
-        prefill_query_lens_cpu = query_start_loc_p_cpu[1:] - query_start_loc_p_cpu[:-1]
-        num_computed_tokens_p_cpu = (
-            seq_lens_cpu[num_reqs - num_prefills : num_reqs] - prefill_query_lens_cpu
+        num_computed_tokens_p_cpu, query_start_loc_p_cpu = self._prefill_cpu_metadata(
+            common, common_attn_metadata
         )
 
         cu_chunk_seqlen, seq_idx, last_chunk_indices = self._compute_chunk_metadata(
@@ -414,6 +466,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         has_prior_state = seq_lens_cpu > 1
         prefill_to_decode = single_token_prefill_rows & has_prior_state
         if torch.any(prefill_to_decode).item():
+            # ReplaySSM handles these rows as single-token flushes (see the
+            # write-position derivation below), same as the baseline decode path.
             is_prefilling = is_prefilling.clone()
             is_prefilling[prefill_to_decode] = False
             common_attn_metadata = common_attn_metadata.replace(
@@ -444,6 +498,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
+        write_pos_d = None
+        is_flush_d = None
 
         if self.vllm_config.cache_config.mamba_cache_mode == "all":
             num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
@@ -530,6 +586,79 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     num_reqs - num_prefills : num_reqs
                 ]
 
+        if self.use_replayssm and num_decodes > 0:
+            decode_base_cpu = common_attn_metadata.replayssm_decode_base_cpu
+            num_computed_tokens_cpu = common_attn_metadata._num_computed_tokens_cpu
+            if decode_base_cpu is None or num_computed_tokens_cpu is None:
+                raise ValueError(
+                    "--use-replayssm requires CPU decode-base and "
+                    "computed-token counts to derive decode write positions"
+                )
+            num_computed_d = num_computed_tokens_cpu[:num_decodes]
+            decode_base_d = decode_base_cpu[:num_decodes]
+            align_mode = self.vllm_config.cache_config.mamba_cache_mode == "align"
+            block_size = self.kv_cache_spec.block_size
+            if align_mode:
+                # After a boundary the align copy leaves an exact checkpoint at
+                # the block start and the new block's ring restarts empty, so
+                # re-anchor there; max() keeps the prompt-end anchor for the
+                # first (partial) block.
+                effective_base = torch.maximum(
+                    decode_base_d, (num_computed_d // block_size) * block_size
+                )
+            else:
+                effective_base = decode_base_d
+            # write_pos counts decode steps since the ring's last full-state
+            # write (the anchor), so a resumed request re-anchors correctly.
+            decode_steps_cpu = num_computed_d - effective_base
+            query_lens_cpu = (
+                common_attn_metadata.query_start_loc_cpu[1 : num_decodes + 1]
+                - common_attn_metadata.query_start_loc_cpu[:num_decodes]
+            )
+            valid_decode_rows = query_lens_cpu > 0
+            # A single-token prefill row replayed as decode (query_len==1 with
+            # prior state) has decode_steps < 0; force it to a one-token flush
+            # (write_pos=0, is_flush=1). The flush branch reads an empty history
+            # window, so it applies exactly one recurrence step off the checkpoint
+            # -- identical to the baseline decode kernel for that row. The split
+            # (treat_short_extends_as_decodes=False) admits only such rows here.
+            leftover_prompt = valid_decode_rows & (decode_steps_cpu < 0)
+            decode_steps_cpu = torch.where(
+                valid_decode_rows & ~leftover_prompt,
+                decode_steps_cpu,
+                torch.zeros_like(decode_steps_cpu),
+            )
+            write_pos_cpu = torch.remainder(decode_steps_cpu, self.replayssm_buffer_len)
+            is_flush_cpu = (
+                write_pos_cpu == self.replayssm_buffer_len - 1
+            ) | leftover_prompt
+            if align_mode:
+                # Force a flush on the step completing a mamba block so the exact
+                # boundary state is materialized for prefix caching.
+                is_flush_cpu = is_flush_cpu | (
+                    valid_decode_rows
+                    & ((num_computed_d + query_lens_cpu) % block_size == 0)
+                )
+            is_flush_cpu = is_flush_cpu.to(torch.int8)
+            write_pos_d = async_tensor_h2d(
+                write_pos_cpu.to(torch.int32).tolist(),
+                dtype=torch.int32,
+                device=common_attn_metadata.query_start_loc.device,
+            )
+            is_flush_d = async_tensor_h2d(
+                is_flush_cpu.tolist(),
+                dtype=torch.int8,
+                device=common_attn_metadata.query_start_loc.device,
+            )
+
+        bc_pre_scratch = None
+        if (
+            self.use_replayssm
+            and self.decode_bc_pre_scratch is not None
+            and num_decodes > 0
+        ):
+            bc_pre_scratch = self.decode_bc_pre_scratch[:num_decodes]
+
         metadata = self.metadata_cls(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -539,6 +668,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             has_initial_states_p=has_initial_states_p,
             state_indices_tensor_p=state_indices_tensor_p,
             state_indices_tensor_d=state_indices_tensor_d,
+            write_pos_d=write_pos_d,
+            is_flush_d=is_flush_d,
+            bc_pre_scratch=bc_pre_scratch,
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc_d=query_start_loc_d,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
@@ -573,6 +705,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         block_idx_last_scheduled_token_prev_step = (
             metadata.block_idx_last_scheduled_token_prev_step
         )
+        write_pos_d = metadata.write_pos_d
+        is_flush_d = metadata.is_flush_d
+        bc_pre_scratch = metadata.bc_pre_scratch
         if (
             metadata.num_prefills == 0
             and metadata.num_decodes <= self.decode_cudagraph_max_bs
@@ -634,11 +769,34 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     )
                     block_idx_last_scheduled_token_prev_step[metadata.num_decodes :] = 0
 
+            if self.use_replayssm:
+                assert write_pos_d is not None
+                assert is_flush_d is not None
+                self.decode_write_pos_d[: metadata.num_decodes].copy_(
+                    write_pos_d[: metadata.num_decodes],
+                    non_blocking=True,
+                )
+                write_pos_d = self.decode_write_pos_d[:padded_bs]
+                write_pos_d[metadata.num_decodes :] = 0
+
+                self.decode_is_flush_d[: metadata.num_decodes].copy_(
+                    is_flush_d[: metadata.num_decodes],
+                    non_blocking=True,
+                )
+                is_flush_d = self.decode_is_flush_d[:padded_bs]
+                is_flush_d[metadata.num_decodes :] = 0
+
+                if self.decode_bc_pre_scratch is not None:
+                    bc_pre_scratch = self.decode_bc_pre_scratch[:padded_bs]
+
         return replace(
             metadata,
             state_indices_tensor_d=state_indices_tensor_d,
             query_start_loc_d=query_start_loc_d,
             num_accepted_tokens=num_accepted_tokens,
+            write_pos_d=write_pos_d,
+            is_flush_d=is_flush_d,
+            bc_pre_scratch=bc_pre_scratch,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
             block_idx_last_computed_token=block_idx_last_computed_token,
             block_idx_last_scheduled_token_prev_step=(

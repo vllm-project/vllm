@@ -22,6 +22,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/llm
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -30,19 +31,20 @@ steps:
   - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
   mirror:
     amd:
-      device: mi325_1
-      # TODO(akaratza): Test after Torch >= 2.12 bump
-      soft_fail: true
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 55
       depends_on:
       - image-build-amd
 
 - label: Entrypoints Integration (API Server)
   key: entrypoints-integration-api-server
   device: h200_35gb
-  timeout_in_minutes: 50
+  timeout_in_minutes: 75
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/serve
   - tests/entrypoints/scale_out
   commands:
@@ -52,17 +54,20 @@ steps:
   - pytest -v -s entrypoints/scale_out
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 65
       depends_on:
       - image-build-amd
 
 - label: Entrypoints Integration (API Server OpenAI - Part 1)
   device: h200_35gb
   key: entrypoints-integration-api-server-openai-part-1
-  timeout_in_minutes: 45
+  timeout_in_minutes: 68
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
   commands:
@@ -70,7 +75,8 @@ steps:
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi300_1
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -78,10 +84,11 @@ steps:
 - label: Entrypoints Integration (API Server OpenAI - Part 2)
   device: h200_35gb
   key: entrypoints-integration-api-server-openai-part-2
-  timeout_in_minutes: 55
+  timeout_in_minutes: 83
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
   commands:
@@ -90,8 +97,9 @@ steps:
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   mirror:
     amd:
-      device: mi325_1
-      timeout_in_minutes: 80
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 70
       depends_on:
       - image-build-amd
 
@@ -102,6 +110,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/tool_use
   - tests/entrypoints/tool_parsers
   - tests/entrypoints/anthropic
@@ -113,7 +122,8 @@ steps:
   - pytest -v -s entrypoints/anthropic
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi300_1
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -125,6 +135,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/openai/responses
   commands:
   - pytest -v -s entrypoints/openai/responses
@@ -136,6 +147,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/speech_to_text
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -148,6 +160,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/multimodal
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -156,10 +169,11 @@ steps:
 - label: Entrypoints Integration (Pooling)
   device: h200_35gb
   key: entrypoints-integration-pooling
-  timeout_in_minutes: 50
+  timeout_in_minutes: 75
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - "!vllm/distributed/kv_transfer/"
   - tests/entrypoints/pooling
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -176,7 +190,9 @@ steps:
   - pytest -s entrypoints/openai/correctness/
   mirror:
     amd:
-      device: mi325_1
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 30
       depends_on:
       - image-build-amd
       source_file_dependencies:
