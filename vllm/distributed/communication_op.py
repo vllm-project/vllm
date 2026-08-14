@@ -6,11 +6,60 @@ from typing import Any
 import torch
 import torch.distributed
 
+from vllm.utils.torch_utils import direct_register_custom_op
+
 from .parallel_state import get_tp_group
 
 
+def _all_reduce_with_dbo_yields(input_: torch.Tensor) -> torch.Tensor:
+    from vllm.v1.worker.ubatching import (
+        dbo_enabled,
+        dbo_yield_and_switch_from_comm_to_compute,
+        dbo_yield_and_switch_from_compute_to_comm,
+    )
+
+    if not dbo_enabled():
+        return get_tp_group().all_reduce(input_)
+    dbo_yield_and_switch_from_compute_to_comm()
+    out = get_tp_group().all_reduce(input_)
+    dbo_yield_and_switch_from_comm_to_compute()
+    return out
+
+
+# Opaque custom op so torch.compile can't fold the runtime dbo_enabled() check.
+def _ar_op_fake(input_: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(input_)
+
+
+direct_register_custom_op(
+    op_name="vllm_dbo_all_reduce",
+    op_func=_all_reduce_with_dbo_yields,
+    mutates_args=[],
+    fake_impl=_ar_op_fake,
+)
+_AR_OP = torch.ops.vllm.vllm_dbo_all_reduce.default
+
+
+# Route AR through the opaque op only when DBO is configured. Resolved once at
+# worker/model-runner init (while the engine config is in scope) and cached; it
+# must NOT be read from get_current_vllm_config_or_none() at forward/compile
+# time, where the config global is unset and would gate this to False.
+_USE_DBO_AR_OP: bool = False
+
+
+def configure_dbo_all_reduce(use_ubatching: bool) -> None:
+    """Set whether TP all-reduce routes through the opaque DBO op.
+
+    Call this during worker/model-runner initialization (config in scope),
+    before model compilation/warmup runs the first forward.
+    """
+    global _USE_DBO_AR_OP
+    _USE_DBO_AR_OP = bool(use_ubatching) and _AR_OP is not None
+
+
 def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
-    """All-reduce the input tensor across model parallel group."""
+    if _USE_DBO_AR_OP:
+        return _AR_OP(input_)
     return get_tp_group().all_reduce(input_)
 
 
