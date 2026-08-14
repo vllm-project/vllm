@@ -32,13 +32,13 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
-from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
-    selective_state_update_replayssm_output_only,
-)
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
-from vllm.model_executor.layers.mamba.ops.ssu_dispatch import selective_state_update
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+    selective_state_update,
+    selective_state_update_replayssm,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import (
     LoaderFunction,
@@ -1059,7 +1059,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
             if self.use_replayssm:
                 assert self.replayssm_buffer_len is not None
-                selective_state_update_replayssm_output_only(
+                selective_state_update_replayssm(
                     ssm_state,
                     hidden_states_d,
                     dt_d,
@@ -1078,15 +1078,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     max_cache_len=self.replayssm_buffer_len,
                     state_batch_indices=state_indices_tensor_d_input,
                     out=preallocated_ssm_out_d,
-                    # Stochastic Rounding for the vanilla decode path is read
-                    # from mamba_config inside ssu_dispatch; the replay kernel
-                    # isn't a dispatch backend, so pass it here.
-                    enable_stochastic_rounding=(
-                        self.mamba_config.enable_stochastic_rounding
-                    ),
-                    cache_philox_rounds=(
-                        self.mamba_config.stochastic_rounding_philox_rounds
-                    ),
                 )
             else:
                 selective_state_update(

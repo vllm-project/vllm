@@ -170,9 +170,9 @@ class CacheConfig:
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
     Requires mamba_cache_mode 'none' or 'align' (prefix caching) and the Triton
-    mamba backend; standard (non-speculative) decode only. In align mode flushes
-    are most efficient when mamba_block_size is a multiple of replayssm_buffer_len,
-    but this is not required."""
+    or FlashInfer mamba backend; standard (non-speculative) decode only. In align
+    mode flushes are most efficient when mamba_block_size is a multiple of
+    replayssm_buffer_len, but this is not required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 

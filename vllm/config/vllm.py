@@ -2581,8 +2581,16 @@ class VllmConfig:
                 "--use-replayssm supports prefix caching only in align mode; "
                 "pass --mamba-cache-mode align"
             )
-        if self.mamba_config.backend != MambaBackendEnum.TRITON:
-            raise ValueError("--use-replayssm requires --mamba-backend triton")
+        if self.num_speculative_tokens > 0:
+            raise ValueError("--use-replayssm does not support speculative decoding")
+        if self.mamba_config.backend not in (
+            MambaBackendEnum.TRITON,
+            MambaBackendEnum.FLASHINFER,
+        ):
+            raise ValueError(
+                "--use-replayssm requires --mamba-backend triton or flashinfer "
+                f"(got {self.mamba_config.backend.value!r})"
+            )
         if (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance

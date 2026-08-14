@@ -571,7 +571,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cls=self.pcp_manager_cls,
         )
         initialize_mamba_ssu_backend(
-            self.vllm_config.mamba_config, self.kv_cache_config
+            self.vllm_config.mamba_config,
+            self.kv_cache_config,
+            use_replayssm=self.vllm_config.cache_config.use_replayssm,
         )
         if self.adaptive_verification is not None:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
