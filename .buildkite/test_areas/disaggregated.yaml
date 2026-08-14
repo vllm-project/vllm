@@ -107,19 +107,27 @@ steps:
 
 - label: Hybrid SSM NixlConnector PD accuracy tests (4 GPUs)
   key: hybrid-ssm-nixlconnector-pd-accuracy-tests-4-gpus
-  timeout_in_minutes: 60
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
+  parallelism: 3
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - tests/v1/kv_connector/nixl_integration/
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-    - HYBRID_SSM=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    # Timing-balanced index buckets over the 7 hybrid_ssm_configs (measured on
+    # build 83851): shard 0 = configs 0,4 (~14.5m), shard 1 = configs 5,6
+    # (~13.2m), shard 2 = configs 1,2,3 (~16.3m). CONFIG_EXPECTED_COUNT makes
+    # the sweep fail loudly if the config array changes without rebalancing.
+    - test "$$BUILDKITE_PARALLEL_JOB" != "0" || HYBRID_SSM=1 CONFIG_EXPECTED_COUNT=7 CONFIG_INDICES=0,4 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - test "$$BUILDKITE_PARALLEL_JOB" != "1" || HYBRID_SSM=1 CONFIG_EXPECTED_COUNT=7 CONFIG_INDICES=5,6 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - test "$$BUILDKITE_PARALLEL_JOB" != "2" || HYBRID_SSM=1 CONFIG_EXPECTED_COUNT=7 CONFIG_INDICES=1,2,3 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
   mirror:
     amd:
       dind: false
       device: mi300_4
+      parallelism: 1
       timeout_in_minutes: 55
       depends_on:
         - image-build-amd
