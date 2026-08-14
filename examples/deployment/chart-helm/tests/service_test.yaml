@@ -1,0 +1,25 @@
+suite: test service
+templates:
+  - service.yaml
+release:
+  name: demo
+tests:
+  - it: should honor the configured service name
+    set:
+      serviceName: vllm-api
+    asserts:
+      - equal:
+          path: metadata.name
+          value: vllm-api
+
+  - it: should select pods using the configured labels
+    set:
+      labels:
+        environment: production
+        release: qwen-serving
+    asserts:
+      - equal:
+          path: spec.selector
+          value:
+            environment: production
+            release: qwen-serving
