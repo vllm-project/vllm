@@ -178,6 +178,8 @@ class Worker(WorkerBase):
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
+        # True while device-communicator memory is released (see sleep()).
+        self._comms_suspended = False
 
     def _get_sleep_mode_backend(self) -> "SleepModeBackend":
         if self._sleep_mode_backend is None:
@@ -206,7 +208,13 @@ class Worker(WorkerBase):
                     name: buffer.cpu().clone() for name, buffer in draft.named_buffers()
                 }
 
-        self._get_sleep_mode_backend().suspend(level)
+        backend = self._get_sleep_mode_backend()
+        backend.suspend(level)
+        if backend.releases_communicator_memory():
+            from vllm.distributed.parallel_state import suspend_device_comms
+
+            suspend_device_comms()
+            self._comms_suspended = True
 
         torch.accelerator.synchronize()
         deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)
@@ -227,6 +235,11 @@ class Worker(WorkerBase):
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         self._get_sleep_mode_backend().resume(tags)
+        if self._comms_suspended:
+            from vllm.distributed.parallel_state import resume_device_comms
+
+            resume_device_comms()
+            self._comms_suspended = False
 
         # Restore the buffers after level 2 sleep
         wake_weights = tags is None or "weights" in tags

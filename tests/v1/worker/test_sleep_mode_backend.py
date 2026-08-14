@@ -23,14 +23,18 @@ def test_cumem_is_the_default_registered_backend():
 
 
 def test_cumem_capability_flags():
-    # cumem preserves communicator identity but does not preserve compiled
-    # artifacts, graphs, or durable state. These flags are what the executor and
-    # /health introspect to decide reinit and persistence behavior.
+    # cumem leaves communicators untouched but does not preserve compiled
+    # artifacts, graphs, or durable state - these flags are what the executor and
+    # /health introspect to decide reinit / persistence behavior.
     assert CuMemBackend.is_supported() is True
     assert CuMemBackend.preserves_communicators() is True
+    assert CuMemBackend.releases_communicator_memory() is True
     assert CuMemBackend.preserves_compiled_artifacts() is False
     assert CuMemBackend.preserves_graphs_with_communicators() is False
     assert CuMemBackend.supports_durable_storage() is False
+    # ABC default: a backend must opt in to worker-driven communicator
+    # memory release (process-checkpoint mechanisms cover it themselves).
+    assert DummyBackend.releases_communicator_memory() is False
 
 
 def test_new_backend_starts_in_running_state():
@@ -38,17 +42,38 @@ def test_new_backend_starts_in_running_state():
     assert CuMemBackend().state() == "RUNNING"
 
 
-def test_cumem_wraps_allocator_with_communicator_memory_lifecycle(monkeypatch):
+def test_worker_wraps_backend_with_communicator_memory_lifecycle(monkeypatch):
+    """The worker, not the backend, drives communicator memory release: suspend
+    after backend.suspend, resume exactly once on the first wake even when the
+    wake is staged across tags (weights first, then kv_cache)."""
+    from vllm.v1.worker.gpu_worker import Worker
+
     calls = []
 
-    class Allocator:
-        def sleep(self, *, offload_tags):
-            calls.append(("allocator.sleep", offload_tags))
+    class Backend:
+        def suspend(self, level: int = 1) -> None:
+            calls.append(("backend.suspend", level))
 
-        def wake_up(self, tags):
-            calls.append(("allocator.wake_up", tags))
+        def resume(self, tags: list[str] | None = None) -> None:
+            calls.append(("backend.resume", tuple(tags) if tags else None))
 
-    monkeypatch.setattr("vllm.device_allocator.get_mem_allocator_instance", Allocator)
+        @classmethod
+        def releases_communicator_memory(cls) -> bool:
+            return True
+
+    class ModelRunner:
+        def post_kv_cache_wake_up(self) -> None:
+            calls.append(("model_runner.post_kv_cache_wake_up", None))
+
+    worker = object.__new__(Worker)
+    worker._sleep_mode_backend = Backend()
+    worker._comms_suspended = False
+    worker._sleep_saved_buffers = {}
+    worker._sleep_saved_draft_buffers = {}
+    worker.model_runner = ModelRunner()
+
+    monkeypatch.setattr("torch.accelerator.synchronize", lambda: None)
+    monkeypatch.setattr("torch.accelerator.get_memory_info", lambda: (0, 0))
     monkeypatch.setattr(
         "vllm.distributed.parallel_state.suspend_device_comms",
         lambda: calls.append(("comms.suspend", None)),
@@ -58,15 +83,17 @@ def test_cumem_wraps_allocator_with_communicator_memory_lifecycle(monkeypatch):
         lambda: calls.append(("comms.resume", None)),
     )
 
-    backend = CuMemBackend()
-    backend.suspend(level=1)
-    backend.resume(tags=["weights"])
+    worker.sleep(level=1)
+    worker.wake_up(tags=["weights"])
+    worker.wake_up(tags=["kv_cache"])
 
     assert calls == [
-        ("allocator.sleep", ("weights",)),
+        ("backend.suspend", 1),
         ("comms.suspend", None),
-        ("allocator.wake_up", ["weights"]),
+        ("backend.resume", ("weights",)),
         ("comms.resume", None),
+        ("backend.resume", ("kv_cache",)),
+        ("model_runner.post_kv_cache_wake_up", None),
     ]
 
 

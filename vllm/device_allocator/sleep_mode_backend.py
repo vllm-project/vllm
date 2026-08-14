@@ -87,6 +87,15 @@ class SleepModeBackend(ABC):
         return False
 
     @classmethod
+    def releases_communicator_memory(cls) -> bool:
+        """If True, the worker releases reclaimable device-communicator memory
+        (e.g. NCCL via ``ncclCommSuspend``) after ``suspend`` and restores it
+        after ``resume``. Only meaningful when ``preserves_communicators`` is
+        True: backends whose mechanism already covers communicator state (e.g.
+        process checkpoint) must return False to avoid double handling."""
+        return False
+
+    @classmethod
     def preserves_compiled_artifacts(cls) -> bool:
         """If True, torch.compile / JIT kernels survive suspend/resume and need
         not be recompiled on resume."""
@@ -119,27 +128,30 @@ class CuMemBackend(SleepModeBackend):
 
     def suspend(self, level: int = 1) -> None:
         from vllm.device_allocator import get_mem_allocator_instance
-        from vllm.distributed.parallel_state import suspend_device_comms
 
         self._state = "SUSPENDED"
         allocator = get_mem_allocator_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
-        suspend_device_comms()
 
     def resume(self, tags: list[str] | None = None) -> None:
         from vllm.device_allocator import get_mem_allocator_instance
-        from vllm.distributed.parallel_state import resume_device_comms
 
         self._state = "RESUMING"
         allocator = get_mem_allocator_instance()
         allocator.wake_up(tags)
-        resume_device_comms()
         self._state = "RUNNING"
 
     @classmethod
     def preserves_communicators(cls) -> bool:
         # Communicator identity and topology survive memory suspension, so no
         # reinitialization is needed on resume.
+        return True
+
+    @classmethod
+    def releases_communicator_memory(cls) -> bool:
+        # Allocator-level sleep leaves NCCL buffers untouched (they live
+        # outside the pool); the worker reclaims them via communicator
+        # suspend hooks.
         return True
 
 
