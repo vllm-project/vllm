@@ -17,6 +17,9 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm.config.mamba import MambaBackendEnum
+from vllm.v1.attention.backends.mamba_attn import (
+    _derive_flashinfer_replayssm_ring_state,
+)
 from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
@@ -187,16 +190,22 @@ REPLAYSSM_BUILD_CASES = {
 }
 
 
-def _make_mamba_spec(buffer_len: int) -> MambaSpec:
+def _make_mamba_spec(
+    buffer_len: int,
+    mamba_backend: MambaBackendEnum,
+) -> MambaSpec:
     # Five-tensor ReplaySSM page; the builder only reads shapes[4][0] (bc groups).
+    ring_buffer_len = buffer_len + (
+        1 if mamba_backend == MambaBackendEnum.FLASHINFER else 0
+    )
     return MambaSpec(
         block_size=BLOCK_SIZE,
         shapes=(
             (1, 1),
             (1, 1, 1),
-            (1, buffer_len, 1),
-            (1, buffer_len),
-            (1, buffer_len, 1),
+            (1, ring_buffer_len, 1),
+            (1, ring_buffer_len),
+            (1, ring_buffer_len, 1),
         ),
         dtypes=(torch.float32,),
     )
@@ -218,7 +227,10 @@ def _create_replayssm_builder(
     vllm_config.cache_config.mamba_cache_mode = mamba_cache_mode
     vllm_config.mamba_config.backend = mamba_backend
     return MockMambaBuilder(
-        _make_mamba_spec(buffer_len), ["layer0"], vllm_config, DEVICE
+        _make_mamba_spec(buffer_len, mamba_backend),
+        ["layer0"],
+        vllm_config,
+        DEVICE,
     )
 
 
@@ -282,3 +294,13 @@ def test_flashinfer_replayssm_ring_metadata_fresh_decode():
     assert meta.cumAdt_vec.shape == (1, 1, 16)
     assert meta.cb_old is not None
     assert meta.cb_old.shape == (1, 1, 32, 8)
+
+
+def test_flashinfer_replayssm_ring_lifecycle_across_flushes():
+    ring_start, prev_num_accepted = _derive_flashinfer_replayssm_ring_state(
+        torch.tensor([0, 5, 16, 17, 32, 33], dtype=torch.int32),
+        logical_window=16,
+    )
+
+    assert ring_start.tolist() == [0, 0, 0, 16, 16, 15]
+    assert prev_num_accepted.tolist() == [0, 5, 16, 1, 16, 1]
