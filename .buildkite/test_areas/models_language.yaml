@@ -141,11 +141,11 @@ steps:
       dind: false
       device: mi300_1
       timeout_in_minutes: 95
-      parallelism: 1
+      parallelism: 2
       depends_on:
       - image-build-amd
       commands:
-      - pytest -v -s models/language/pooling -m 'not core_model'
+      - pytest -v -s models/language/pooling -m 'not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: Language Models Test (MTEB)
   key: language-models-test-mteb
