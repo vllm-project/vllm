@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import numpy as np
+import pytest
 import torch
 
+from vllm.config import ParallelConfig
 from vllm.model_executor.layers.attention import pcp as attention_pcp
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu import pcp_manager as pcp_manager_module
@@ -35,6 +37,7 @@ def test_pcp_only_decode_requests_are_round_robin_balanced_each_step():
         pcp_world_size=4,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=True,
         dcp_world_size=1,
     )
     req_ids = [f"request-{idx}" for idx in range(18)]
@@ -72,6 +75,7 @@ def test_decode_requests_remain_replicated_when_dcp_is_enabled():
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=False,
         dcp_world_size=2,
     )
     req_ids = ["request-a", "request-b", "request-c"]
@@ -85,6 +89,7 @@ def test_prefill_partitioning_is_preserved_with_sharded_decode():
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=True,
         dcp_world_size=1,
     )
     segments_by_rank = [
@@ -123,6 +128,7 @@ def test_sharded_decode_layout_selects_owner_kv_for_replication(monkeypatch):
         pcp_world_size=2,
         pcp_rank=0,
         device=torch.device("cpu"),
+        shard_decode_requests=True,
         dcp_world_size=1,
     )
 
@@ -169,3 +175,18 @@ def test_sharded_decode_layout_selects_owner_kv_for_replication(monkeypatch):
 
     assert torch.equal(gathered_kv, torch.tensor([[11.0], [33.0], [22.0], [0.0]]))
     assert torch.equal(cache_slot_mapping, torch.tensor([123, 789, 456, PAD_SLOT_ID]))
+
+
+@pytest.mark.parametrize(
+    ("pcp_world_size", "dcp_world_size", "expected"),
+    [(1, 1, False), (2, 1, True), (2, 2, False)],
+)
+def test_parallel_config_manages_decode_sharding(
+    pcp_world_size: int, dcp_world_size: int, expected: bool
+):
+    parallel_config = ParallelConfig(
+        prefill_context_parallel_size=pcp_world_size,
+        decode_context_parallel_size=dcp_world_size,
+    )
+
+    assert parallel_config.pcp_shard_decode_requests is expected

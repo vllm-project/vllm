@@ -64,7 +64,7 @@ def maybe_gather_mla_latent_cache_inputs(
     slot_mapping: torch.Tensor | None,
     num_decode_tokens: int | None,
     use_pcp: bool,
-    shard_decode_requests: bool = False,
+    pcp_shard_decode_requests: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if not use_pcp or num_decode_tokens is None:
         return kv_c_normed, k_pe, slot_mapping
@@ -75,7 +75,7 @@ def maybe_gather_mla_latent_cache_inputs(
         (kv_c_normed, k_pe_flat),
         slot_mapping,
         num_decode_tokens,
-        shard_decode_requests,
+        pcp_shard_decode_requests,
     )
     cache_k_pe = cache_k_pe_flat.view(-1, *k_pe.shape[1:])
     return cache_kv_c, cache_k_pe, cache_slot_mapping
@@ -86,12 +86,12 @@ def maybe_gather_indexer_k(
     slot_mapping: torch.Tensor,
     num_decode_tokens: int,
     use_pcp: bool,
-    shard_decode_requests: bool = False,
+    pcp_shard_decode_requests: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if not use_pcp:
         return k, slot_mapping
     (cache_k,), cache_slot_mapping = _gather_prefill_cache_inputs(
-        (k,), slot_mapping, num_decode_tokens, shard_decode_requests
+        (k,), slot_mapping, num_decode_tokens, pcp_shard_decode_requests
     )
     return cache_k, cache_slot_mapping
 
