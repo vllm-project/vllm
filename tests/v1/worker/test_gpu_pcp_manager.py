@@ -84,6 +84,22 @@ def test_decode_requests_remain_replicated_when_dcp_is_enabled():
     assert _rank_request_ids(manager, 1, req_ids) == req_ids
 
 
+def test_decode_sharding_allows_ranks_with_no_owned_request():
+    manager = PCPManager(
+        pcp_world_size=4,
+        pcp_rank=0,
+        device=torch.device("cpu"),
+        shard_decode_requests=True,
+        dcp_world_size=1,
+    )
+    req_ids = ["request-a"]
+
+    assert _rank_request_ids(manager, 0, req_ids) == req_ids
+    assert _rank_request_ids(manager, 1, req_ids) == []
+    assert _rank_request_ids(manager, 2, req_ids) == []
+    assert _rank_request_ids(manager, 3, req_ids) == []
+
+
 def test_prefill_partitioning_is_preserved_with_sharded_decode():
     manager = PCPManager(
         pcp_world_size=2,
