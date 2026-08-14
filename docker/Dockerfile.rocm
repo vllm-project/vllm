@@ -479,30 +479,46 @@ RUN cd /opt/nixl && \
 FROM base AS build_lmcache
 ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
 ARG LMCACHE_REF="140819c9d57a975dbc5678a6459a218e544cb58b" # v0.5.3
-# Empty: inherit the image's PYTORCH_ROCM_ARCH so LMCache covers every arch
-# the release image targets.
+ARG LMCACHE_VERSION="0.5.3"
+# Archs covered by the published ROCm wheel (tag v${LMCACHE_VERSION}-rocm). When
+# the effective set is a subset, download it instead of compiling; anything wider
+# falls back to a source build so coverage is never silently narrowed.
+ARG LMCACHE_PREBUILT_ARCHS="gfx942 gfx950"
+# Empty: inherit the image's PYTORCH_ROCM_ARCH minus the consumer archs, matching
+# the set vLLM compiles its own kernels for (see Dockerfile.rocm_base).
 ARG LMCACHE_ROCM_ARCH=""
 ARG COMMON_WORKDIR
-# Full clone: setuptools_scm needs tag history reachable from LMCACHE_REF to
-# derive the version, so --depth/--filter would regress it to a fallback.
-RUN git clone ${LMCACHE_REPO} ${COMMON_WORKDIR}/lmcache \
-    && cd ${COMMON_WORKDIR}/lmcache \
-    && git checkout ${LMCACHE_REF}
 ARG USE_SCCACHE
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
-    cd ${COMMON_WORKDIR}/lmcache \
-    && uv pip install --system -r requirements/build.txt \
-    && if [ "$USE_SCCACHE" = "1" ]; then export HIP_CLANG_PATH=/opt/sccache-wrappers; fi \
-    && PYTORCH_ROCM_ARCH="${LMCACHE_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}" \
-       BUILD_WITH_HIP=1 \
-       CXX=hipcc \
-       TORCH_DONT_CHECK_COMPILER_ABI=1 \
-       python3 setup.py bdist_wheel --dist-dir=dist \
-    && mkdir -p /app/install \
-    && cp dist/*.whl /app/install \
-    && (cd /app/install && sha256sum *.whl > wheel.sha256) \
-    && python3 -c "import glob, zipfile, sys; \
+    set -eu; \
+    mkdir -p /app/install; \
+    ARCHS="${LMCACHE_ROCM_ARCH:-$(echo "${PYTORCH_ROCM_ARCH}" | sed -e 's/;gfx1[0-9]\{3\}//g')}"; \
+    echo "[LMCACHE] effective PYTORCH_ROCM_ARCH: ${ARCHS}"; \
+    PREBUILT=1; \
+    for a in $(echo "${ARCHS}" | tr ';,' '  '); do \
+        case " ${LMCACHE_PREBUILT_ARCHS} " in *" ${a} "*) ;; *) PREBUILT=0 ;; esac; \
+    done; \
+    if [ "${PREBUILT}" = "1" ] \
+       && pip download --no-deps --no-index --only-binary=:all: -d /app/install \
+            --find-links "https://github.com/LMCache/LMCache/releases/expanded_assets/v${LMCACHE_VERSION}-rocm" \
+            "lmcache==${LMCACHE_VERSION}"; then \
+        echo "[LMCACHE] using published ROCm wheel"; \
+    else \
+        echo "[LMCACHE] building from source for ${ARCHS}"; \
+        rm -f /app/install/*.whl; \
+        git clone "${LMCACHE_REPO}" "${COMMON_WORKDIR}/lmcache"; \
+        cd "${COMMON_WORKDIR}/lmcache"; \
+        git checkout "${LMCACHE_REF}"; \
+        uv pip install --system -r requirements/build.txt; \
+        if [ "${USE_SCCACHE:-0}" = "1" ]; then export HIP_CLANG_PATH=/opt/sccache-wrappers; fi; \
+        PYTORCH_ROCM_ARCH="${ARCHS}" BUILD_WITH_HIP=1 CXX=hipcc \
+            TORCH_DONT_CHECK_COMPILER_ABI=1 \
+            python3 setup.py bdist_wheel --dist-dir=dist; \
+        cp dist/*.whl /app/install; \
+    fi; \
+    (cd /app/install && sha256sum *.whl > wheel.sha256); \
+    python3 -c "import glob, zipfile, sys; \
 names = zipfile.ZipFile(glob.glob('/app/install/*.whl')[0]).namelist(); \
 so = [n for n in names if n.endswith('.so')]; \
 sys.exit('no compiled extension in wheel' if not so else 0)"
