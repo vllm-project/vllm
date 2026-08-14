@@ -12,6 +12,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.modular_kernel import W13Layout
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -240,6 +241,14 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
     def _supports_activation(activation: MoEActivation) -> bool:
         # Only SILU activation (swiglu) is supported
         return activation == MoEActivation.SWIGLUOAI
+
+    @staticmethod
+    def _expected_w13_layout(
+        activation: MoEActivation,
+        weight_key: "QuantKey | None" = None,
+        activation_key: "QuantKey | None" = None,
+    ) -> W13Layout:
+        return W13Layout.INTERLEAVED_W1W3
 
     @staticmethod
     def _supports_parallel_config(
