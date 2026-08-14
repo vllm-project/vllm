@@ -635,9 +635,7 @@ class Platform:
         # Backends may read the current config to decide a preference, so every
         # query runs inside the same context the single-backend path uses.
         with set_current_vllm_config(vllm_config):
-            preferred = backend_classes[0].get_preferred_block_size(
-                default_block_size
-            )
+            preferred = backend_classes[0].get_preferred_block_size(default_block_size)
             for backend_cls in backend_classes[1:]:
                 if not backend_cls.supports_block_size(preferred):
                     preferred = math.lcm(
@@ -747,6 +745,10 @@ class Platform:
         if not model_config:
             return
 
+        # Spec packing is the primary backend's concern; the full list
+        # is only consulted for kernel-block granularity below.
+        backend_cls = backend_classes[0]
+
         def per_token_page_bytes(dtype: "torch.dtype", cache_dtype: str) -> int:
             """Bytes one token occupies in one layer, for the given dtype."""
             spec = FullAttentionSpec(
@@ -846,6 +848,10 @@ class Platform:
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
+
+        # Spec packing is the primary backend's concern; the full list
+        # is only consulted for kernel-block granularity below.
+        backend_cls = backend_classes[0]
 
         if cache_config.cache_dtype == "auto":
             kv_cache_dtype = model_config.dtype
