@@ -305,6 +305,7 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
                     self.num_heads,
                 )
                 if use_static:
+                    assert static_descale is not None
                     self._fp8_static_layers_used.add(layer_name)
                     k_descale = static_descale[1:2]
                     k_fp8 = self._quantize_static(k, k_descale, fp8_dtype)

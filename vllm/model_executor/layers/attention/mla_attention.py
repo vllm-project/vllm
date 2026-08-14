@@ -548,10 +548,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             indexer=indexer,
             **extra_impl_args,
         )
-        self.impl.layer_name = prefix
-        self.impl._kimi_k3_fp8_calibration_amax = self._kimi_k3_fp8_calibration_amax
-        self.impl._kimi_k3_fp8_static_descale = self._kimi_k3_fp8_static_descale
-        self.impl._kimi_k3_fp8_calibration_state = self._kimi_k3_fp8_calibration_state
+        mla_impl = cast(MLACommonBaseImpl, self.impl)
+        mla_impl.layer_name = prefix
+        mla_impl._kimi_k3_fp8_calibration_amax = self._kimi_k3_fp8_calibration_amax
+        mla_impl._kimi_k3_fp8_static_descale = self._kimi_k3_fp8_static_descale
+        mla_impl._kimi_k3_fp8_calibration_state = self._kimi_k3_fp8_calibration_state
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self.use_direct_call = not current_platform.opaque_attention_op()
 
@@ -2542,6 +2543,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
     """
 
     _use_flashinfer_concat_mla_k: bool
+    _kimi_k3_fp8_calibration_amax: torch.Tensor
+    _kimi_k3_fp8_static_descale: torch.Tensor
+    _kimi_k3_fp8_calibration_state: dict[str, bool]
 
     def __init__(
         self,

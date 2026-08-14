@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, call, patch
 
 import torch
 
+from vllm.config.attention import AttentionConfig
 from vllm.v1.attention.backends.mla.prefill import aiter_flash_attn as mod
 
 
@@ -50,7 +51,10 @@ def _fake_aiter_modules() -> dict[str, ModuleType]:
 
 
 def _make_backend() -> mod.AiterFlashAttnPrefillBackend:
-    config = SimpleNamespace(model_config=SimpleNamespace(dtype=torch.bfloat16))
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(dtype=torch.bfloat16),
+        attention_config=AttentionConfig(),
+    )
     return mod.AiterFlashAttnPrefillBackend(
         num_heads=12,
         scale=1.0,
@@ -109,7 +113,7 @@ def test_fp8_prefill_always_quantizes_v():
     with patch.object(mod.current_platform, "fp8_dtype", return_value=fp8_dtype):
         assert backend.run_prefill_context_chunk(chunk, q, k, v) == (out, lse)
 
-    backend._quantize_q_once.assert_called_once_with(q)
+    backend._quantize_q_once.assert_called_once_with(q, "", None, None, False)
     assert backend._quantize_per_head.call_args_list == [
         call(k, fp8_dtype),
         call(v, fp8_dtype),
