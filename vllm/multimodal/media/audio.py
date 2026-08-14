@@ -379,37 +379,6 @@ _AUDIO_LOADERS: dict[str, Callable[..., tuple[npt.NDArray, float]]] = {
 }
 
 
-def _defer_torchcodec(exc: Exception) -> bool:
-    """Whether the ``"auto"`` chain should skip torchcodec and try soundfile.
-
-    Only a missing torchcodec/ffmpeg defers. Decode errors propagate —
-    torchcodec is FFmpeg-based, like PyAV, so retrying would just fail the
-    same way, and guard ``ValueError``s must surface unchanged.
-    """
-    if isinstance(exc, ImportError):
-        logger.warning(
-            "torchcodec unavailable (%r); falling back to soundfile/PyAV.", exc
-        )
-        return True
-    return False
-
-
-def _defer_soundfile(exc: Exception) -> bool:
-    """Whether the ``"auto"`` chain should skip soundfile and try PyAV.
-
-    Defers when soundfile is missing, or when libsndfile reports a format it
-    can't handle (it covers fewer containers than FFmpeg). A corrupt-but-
-    recognised file does NOT defer — PyAV would hit the same corruption.
-
-    ``ImportError`` is checked first: if soundfile is a PlaceholderModule,
-    evaluating ``soundfile.LibsndfileError`` below would itself raise.
-    """
-    if isinstance(exc, ImportError):
-        logger.error("Failed to load audio via soundfile: %r", exc)
-        return True
-    return isinstance(exc, soundfile.LibsndfileError) and exc.code in _BAD_SF_CODES
-
-
 def load_audio(
     path: BytesIO | Path | str,
     *,
@@ -443,9 +412,10 @@ def load_audio(
             max_decode_bytes=max_decode_bytes,
         )
 
-    # "auto": torchcodec → soundfile → PyAV. Each optional backend is tried
-    # by its bare name (so tests that monkeypatch it take effect) and defers
-    # to the next only when ``_defer_*`` says so; any other error propagates.
+    # "auto": torchcodec → soundfile → PyAV. Each backend is called by its
+    # bare name so tests that monkeypatch it take effect. Only an ImportError
+    # (backend missing) or, for soundfile, an unsupported-format error defers
+    # to the next; any other error (decode failure, guard ValueError) raises.
     if isinstance(path, BytesIO):
         path.seek(0)
     try:
@@ -456,9 +426,12 @@ def load_audio(
             max_duration_s=max_duration_s,
             max_decode_bytes=max_decode_bytes,
         )
-    except Exception as exc:
-        if not _defer_torchcodec(exc):
-            raise
+    except ImportError as exc:
+        # Decode errors don't defer: torchcodec is FFmpeg-based like PyAV, so
+        # retrying would just fail the same way.
+        logger.warning(
+            "torchcodec unavailable (%r); falling back to soundfile/PyAV.", exc
+        )
 
     if isinstance(path, BytesIO):
         path.seek(0)
@@ -470,8 +443,17 @@ def load_audio(
             max_duration_s=max_duration_s,
             max_decode_bytes=max_decode_bytes,
         )
-    except Exception as exc:
-        if not _defer_soundfile(exc):
+    except ImportError as exc:
+        # Reach the LibsndfileError clause below only if exc is not an
+        # ImportError — i.e. soundfile is a real module — so evaluating
+        # ``soundfile.LibsndfileError`` here is safe even when soundfile is a
+        # PlaceholderModule (which would make that attribute access raise).
+        logger.error("Failed to load audio via soundfile: %r", exc)
+    except soundfile.LibsndfileError as exc:
+        # libsndfile covers fewer containers than FFmpeg, so defer only on a
+        # format-detection failure; re-raise anything else (e.g. corrupt but
+        # recognised) since PyAV would hit the same corruption.
+        if exc.code not in _BAD_SF_CODES:
             raise
 
     # PyAV is terminal: nothing left to fall back to. Normalize an FFmpeg
