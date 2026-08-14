@@ -1,0 +1,84 @@
+env:
+  CUDA_ARCH_RUBIN: "10.7f"
+  CUDA134_STAGING_REPO: "public.ecr.aws/q9t5s3a7/vllm-release-repo"
+
+steps:
+  - block: "Build CUDA 13.4rc1 prerelease images"
+    key: unblock-cuda134-prerelease
+
+  - group: "Build CUDA 13.4rc1 prerelease images"
+    key: build-cuda134-prerelease-images
+    depends_on: unblock-cuda134-prerelease
+    steps:
+      - label: "Build CUDA 13.4rc1 prerelease - x86_64"
+        key: build-cuda134-prerelease-x86
+        timeout_in_minutes: 360
+        agents:
+          queue: cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh cu134-rc1) \
+              --build-arg max_jobs=64 \
+              --build-arg nvcc_threads=4 \
+              --build-arg USE_SCCACHE=1 \
+              --build-arg GIT_REPO_CHECK=1 \
+              --build-arg RUN_WHEEL_CHECK=false \
+              --build-arg CUDA_VERSION=13.4 \
+              --build-arg CUDA_TOOLKIT_PYPI_VERSION=13.4.0rc1 \
+              --build-arg PYTORCH_NIGHTLY=1 \
+              --build-arg PYTORCH_NIGHTLY_REQUIREMENTS=requirements/cuda134-nightly.txt \
+              --build-arg torch_cuda_arch_list="${CUDA_ARCH_RUBIN}" \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0 \
+              --build-arg FINAL_BASE_IMAGE=ubuntu:24.04 \
+              --build-arg INSTALL_FLASHINFER_JIT_CACHE=false \
+              --target vllm-openai \
+              --progress plain \
+              -f docker/Dockerfile .
+          - 'bash .buildkite/scripts/validate-cuda134-image.sh "${CUDA134_STAGING_REPO}:$BUILDKITE_COMMIT-$(uname -m)-cu134-rc1" x86_64'
+          - 'docker push "${CUDA134_STAGING_REPO}:$BUILDKITE_COMMIT-$(uname -m)-cu134-rc1"'
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "${CUDA134_STAGING_REPO}:$BUILDKITE_COMMIT-$(uname -m)-cu134-rc1" release-images'
+
+      - label: "Build CUDA 13.4rc1 prerelease - aarch64"
+        key: build-cuda134-prerelease-arm64
+        timeout_in_minutes: 360
+        agents:
+          queue: arm64_cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              $(bash .buildkite/scripts/docker-build-metadata-args.sh cu134-rc1) \
+              --build-arg max_jobs=64 \
+              --build-arg nvcc_threads=4 \
+              --build-arg USE_SCCACHE=1 \
+              --build-arg GIT_REPO_CHECK=1 \
+              --build-arg RUN_WHEEL_CHECK=false \
+              --build-arg CUDA_VERSION=13.4 \
+              --build-arg CUDA_TOOLKIT_PYPI_VERSION=13.4.0rc1 \
+              --build-arg PYTORCH_NIGHTLY=1 \
+              --build-arg PYTORCH_NIGHTLY_REQUIREMENTS=requirements/cuda134-nightly.txt \
+              --build-arg torch_cuda_arch_list="${CUDA_ARCH_RUBIN}" \
+              --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0 \
+              --build-arg FINAL_BASE_IMAGE=ubuntu:24.04 \
+              --build-arg INSTALL_FLASHINFER_JIT_CACHE=false \
+              --target vllm-openai \
+              --progress plain \
+              -f docker/Dockerfile .
+          - 'bash .buildkite/scripts/validate-cuda134-image.sh "${CUDA134_STAGING_REPO}:$BUILDKITE_COMMIT-$(uname -m)-cu134-rc1" aarch64'
+          - 'docker push "${CUDA134_STAGING_REPO}:$BUILDKITE_COMMIT-$(uname -m)-cu134-rc1"'
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "${CUDA134_STAGING_REPO}:$BUILDKITE_COMMIT-$(uname -m)-cu134-rc1" release-images'
+
+  - label: "Create CUDA 13.4rc1 multi-arch manifest"
+    key: create-cuda134-prerelease-manifest
+    depends_on:
+      - build-cuda134-prerelease-x86
+      - build-cuda134-prerelease-arm64
+    agents:
+      queue: small_cpu_queue_release
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - 'docker manifest create "${CUDA134_STAGING_REPO}:$BUILDKITE_COMMIT-cu134-rc1" "${CUDA134_STAGING_REPO}:$BUILDKITE_COMMIT-x86_64-cu134-rc1" "${CUDA134_STAGING_REPO}:$BUILDKITE_COMMIT-aarch64-cu134-rc1" --amend'
+      - 'docker manifest push "${CUDA134_STAGING_REPO}:$BUILDKITE_COMMIT-cu134-rc1"'
+      - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: CUDA 13.4rc1" "${CUDA134_STAGING_REPO}:$BUILDKITE_COMMIT-cu134-rc1" release-manifests'
