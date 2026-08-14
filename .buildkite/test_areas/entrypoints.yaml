@@ -166,10 +166,11 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/multimodal
 
-- label: Entrypoints Integration (Pooling)
+- label: Entrypoints Integration (Pooling) %N
   device: h200_35gb
   key: entrypoints-integration-pooling
   timeout_in_minutes: 75
+  parallelism: 5
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -177,7 +178,70 @@ steps:
   - tests/entrypoints/pooling
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/pooling
+  - |-
+    shard_0_files="
+      entrypoints/pooling/scoring/test_late_interaction_online_vision.py
+      entrypoints/pooling/embed/test_online.py
+      entrypoints/pooling/scoring/test_late_interaction_offline_vision.py
+      entrypoints/pooling/embed/test_online_dimensions.py
+      entrypoints/pooling/token_classify/test_offline.py
+      entrypoints/pooling/embed/test_io_processor.py
+    "
+    shard_1_files="
+      entrypoints/pooling/scoring/test_late_interaction_online.py
+      entrypoints/pooling/scoring/test_bi_encoder_online.py
+      entrypoints/pooling/scoring/test_cross_encoder_correctness_mteb.py
+      entrypoints/pooling/token_embed/test_online.py
+      entrypoints/pooling/embed/test_cohere_openai_parity.py
+      entrypoints/pooling/scoring/test_late_interaction_offline.py
+    "
+    shard_2_files="
+      entrypoints/pooling/scoring/test_cross_encoder_online_vision.py
+      entrypoints/pooling/reward/test_token_reward_online.py
+      entrypoints/pooling/classify/test_online.py
+      entrypoints/pooling/embed/test_cohere_online_vision.py
+      entrypoints/pooling/token_embed/test_offline.py
+      entrypoints/pooling/basic/test_encode.py
+      entrypoints/pooling/embed/test_protocol.py
+      entrypoints/pooling/test_io_processor.py
+      entrypoints/pooling/scoring/test_jina_ranking_io_processor_unit.py
+    "
+    shard_3_files="
+      entrypoints/pooling/scoring/test_cross_encoder_online.py
+      entrypoints/pooling/token_classify/test_online.py
+      entrypoints/pooling/classify/test_offline.py
+      entrypoints/pooling/basic/test_truncation.py
+      entrypoints/pooling/scoring/test_cross_encoder_offline.py
+      entrypoints/pooling/scoring/test_bi_encoder_offline.py
+      entrypoints/pooling/scoring/test_utils.py
+      entrypoints/pooling/test_utils.py
+    "
+    shard_4_files="
+      entrypoints/pooling/embed/test_online_vision.py
+      entrypoints/pooling/embed/test_cohere_online.py
+      entrypoints/pooling/classify/test_online_vision.py
+      entrypoints/pooling/embed/test_online_long_text.py
+      entrypoints/pooling/basic/test_tiling_engine.py
+      entrypoints/pooling/embed/test_offline.py
+      entrypoints/pooling/embed/test_correctness_mteb.py
+    "
+    known_files="$$shard_0_files $$shard_1_files $$shard_2_files $$shard_3_files $$shard_4_files"
+    case "$$BUILDKITE_PARALLEL_JOB" in
+      0) shard_files="$$shard_0_files" ;;
+      1) shard_files="$$shard_1_files" ;;
+      2) shard_files="$$shard_2_files" ;;
+      3) shard_files="$$shard_3_files" ;;
+      4) shard_files="$$shard_4_files" ;;
+      *) echo "Unexpected shard index: $$BUILDKITE_PARALLEL_JOB" >&2; exit 1 ;;
+    esac
+    if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then
+      for test_file in $$(find entrypoints/pooling -name 'test_*.py' -print | sort); do
+        if ! printf '%s\n' $$known_files | grep -Fqx "$$test_file"; then
+          shard_files="$$shard_files $$test_file"
+        fi
+      done
+    fi
+    pytest -v -s $$shard_files
 
 - label: OpenAI API Correctness
   key: openai-api-correctness
