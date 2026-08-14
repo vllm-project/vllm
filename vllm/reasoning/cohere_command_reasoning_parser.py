@@ -16,7 +16,7 @@ except ImportError as e:
     raise ImportError(
         "The Cohere reasoning parser requires the `cohere_melody` "
         "package, which is not installed. Install it with:\n"
-        "    pip install cohere_melody"
+        "    pip install 'cohere-melody>=0.11.1'"
     ) from e
 
 
@@ -132,7 +132,7 @@ def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
         tool_dictionary[tool_name] = f"{tool_name} ::= {tool_name}root\n{tool_grammar}"
     # Emitted grammar shape:
     #   root  ::= tools
-    #   tools ::= ws "[" ws tool ws ("," ws tool)* ws "]" ws
+    #   tools ::= ws "[" ws tool (ws "," ws tool)* ws "]" ws
     #   ws    ::= (" " | "\t" | "\n")*
     #   tool  ::= <tool_a> | <tool_b> | ...         (one alternative per input)
     #   <tool_x>     ::= <tool_x>root               (per-tool xgrammar rules)
@@ -140,7 +140,7 @@ def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
     tool_alternatives = "tool ::= " + " | ".join(tool_dictionary.keys())
     tool_rules = "\n    ".join(tool_dictionary.values())
     grammar = f"""root ::= tools
-    tools ::= ws "[" ws tool ws ("," ws tool)*  ws "]" ws
+    tools ::= ws "[" ws tool (ws "," ws tool)* ws "]" ws
     ws    ::= (" " | "\\t" | "\\n")*
     {tool_alternatives}
     {tool_rules}
@@ -699,7 +699,9 @@ class CohereCommand3ReasoningParser(BaseCohereCommandReasoningParser):
         super().__init__(
             tokenizer,
             *args,
-            streaming_opts=PyFilterOptions().cmd3().stream_non_grounded_answer(),
+            streaming_opts=(
+                PyFilterOptions().cmd3().no_tools().stream_non_grounded_answer()
+            ),
             unary_opts=PyFilterOptions().cmd3().no_tools(),
             **kwargs,
         )
@@ -710,7 +712,9 @@ class CohereCommand4ReasoningParser(BaseCohereCommandReasoningParser):
         super().__init__(
             tokenizer,
             *args,
-            streaming_opts=PyFilterOptions().cmd4().stream_non_grounded_answer(),
+            streaming_opts=(
+                PyFilterOptions().cmd4().no_tools().stream_non_grounded_answer()
+            ),
             unary_opts=PyFilterOptions().cmd4().no_tools(),
             **kwargs,
         )

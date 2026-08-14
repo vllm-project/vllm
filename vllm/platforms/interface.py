@@ -672,7 +672,6 @@ class Platform:
         For hybrid models, also aligns block_size with mamba page sizes.
         """
         from vllm.config.cache import CacheConfig
-        from vllm.config.vllm import set_current_vllm_config
 
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
@@ -690,10 +689,9 @@ class Platform:
         if backend_cls is not None:
             # Phase 1: Pick block size from backend (skip if user set --block-size)
             if not cache_config.user_specified_block_size:
-                with set_current_vllm_config(vllm_config):
-                    preferred = backend_cls.get_preferred_block_size(
-                        CacheConfig.DEFAULT_BLOCK_SIZE
-                    )
+                preferred = backend_cls.get_preferred_block_size_for_config(
+                    CacheConfig.DEFAULT_BLOCK_SIZE, vllm_config
+                )
                 if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
                     logger.info(
                         "Setting kv cache block size to %d for %s backend.",
@@ -1265,6 +1263,23 @@ class Platform:
         Returns if the graph mode is supported by the current platform.
         """
         return False
+
+    @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        """
+        Check whether the platform's ModelRunner can handle multiple attention
+        layers that share the same layer index (e.g. cross attention and self
+        attention in the same decoder block of an encoder-decoder model such as
+        BART).
+
+        Platforms that have verified that their ``runner_kv_caches`` is not
+        impacted by this case should override this to a no-op. Otherwise the
+        default implementation raises ``NotImplementedError``.
+        """
+        raise NotImplementedError(
+            "Multiple attention layers with the same layer index are not "
+            "supported on the current platform."
+        )
 
     @classmethod
     def support_deep_gemm(cls) -> bool:
