@@ -28,7 +28,7 @@ INPUT_IDS = [11, 12, 13]
 LOCAL_POS = [0, 1, 2]
 
 
-def _make_state(bad_words_token_ids: list[list[int]]) -> BadWordsState:
+def _make_state(bad_words_token_ids: list[list[int]]) -> tuple[BadWordsState, int]:
     req_states = RequestState(
         max_num_reqs=4,
         max_model_len=64,
@@ -46,19 +46,20 @@ def _make_state(bad_words_token_ids: list[list[int]]) -> BadWordsState:
     )
     req_states.apply_staged_writes()
 
+    req_idx = req_states.req_id_to_index["req"]
     state = BadWordsState(req_states)
-    state.add_request(3, SamplingParams(_bad_words_token_ids=bad_words_token_ids))
+    state.add_request(req_idx, SamplingParams(_bad_words_token_ids=bad_words_token_ids))
     state.apply_staged_writes()
-    return state
+    return state, req_idx
 
 
 def _apply(bad_words_token_ids: list[list[int]]) -> torch.Tensor:
-    state = _make_state(bad_words_token_ids)
+    state, req_idx = _make_state(bad_words_token_ids)
     num_logits = len(INPUT_IDS)
     logits = torch.zeros((num_logits, VOCAB_SIZE), device=DEVICE)
-    idx_mapping_np = np.array([3], dtype=np.intp)
+    idx_mapping_np = np.array([req_idx], dtype=np.intp)
     expanded_idx_mapping = torch.tensor(
-        [3] * num_logits, dtype=torch.int32, device=DEVICE
+        [req_idx] * num_logits, dtype=torch.int32, device=DEVICE
     )
     state.apply_bad_words(
         logits,
