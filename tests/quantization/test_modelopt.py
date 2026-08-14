@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
+    ModelOptNvFp4FusedMoE,
     ModelOptNvFp4LinearMethod,
     ModelOptNvFp4W4A16LinearMethod,
 )
@@ -33,6 +34,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.reload.meta import capture_layer_to_meta
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
 
@@ -98,6 +101,97 @@ def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionCon
             exclude_modules=[],
         ),
     )
+
+
+@pytest.fixture
+def single_rank_tp(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank", lambda: 0
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size", lambda: 1
+    )
+
+
+def _nvfp4_linear_for_reload(quant_method: str) -> torch.nn.Module:
+    config = ModelOptNvFp4Config(
+        quant_method=quant_method,
+        is_checkpoint_nvfp4_serialized=True,
+        group_size=16,
+    )
+    method = object.__new__(config.LinearMethodCls)
+    method.quant_config = config
+    method.kernel = MagicMock()
+    layer = torch.nn.Module()
+    method.create_weights(
+        layer,
+        input_size_per_partition=16,
+        output_partition_sizes=[8],
+        input_size=16,
+        output_size=8,
+        params_dtype=torch.bfloat16,
+        weight_loader=default_weight_loader,
+    )
+    return layer
+
+
+def _nvfp4_moe_for_reload(quant_method: str) -> torch.nn.Module:
+    config = ModelOptNvFp4Config(
+        quant_method=quant_method,
+        is_checkpoint_nvfp4_serialized=True,
+        group_size=16,
+    )
+    method = object.__new__(ModelOptNvFp4FusedMoE)
+    method.quant_config = config
+    method.moe = MagicMock(is_act_and_mul=False)
+    method.use_a16 = quant_method == "W4A16_NVFP4"
+    method.use_global_sf = False
+    layer = torch.nn.Module()
+    method.create_weights(
+        layer,
+        num_experts=2,
+        hidden_size=16,
+        intermediate_size_per_partition=16,
+        params_dtype=torch.bfloat16,
+        weight_loader=default_weight_loader,
+        global_num_experts=2,
+    )
+    return layer
+
+
+def test_modelopt_w4a16_reload_metadata_omits_only_unused_input_scales(
+    single_rank_tp,
+):
+    model = torch.nn.ModuleDict(
+        {
+            "w4a4_dense": _nvfp4_linear_for_reload("NVFP4"),
+            "w4a16_dense": _nvfp4_linear_for_reload("W4A16_NVFP4"),
+            "w4a4_moe": _nvfp4_moe_for_reload("NVFP4"),
+            "w4a16_moe": _nvfp4_moe_for_reload("W4A16_NVFP4"),
+        }
+    )
+
+    captured = {name: capture_layer_to_meta(layer)[0] for name, layer in model.items()}
+
+    assert "input_scale" in captured["w4a4_dense"]
+    assert "input_scale" not in captured["w4a16_dense"]
+    assert "w13_input_scale" in captured["w4a4_moe"]
+    assert "w2_input_scale" in captured["w4a4_moe"]
+    assert "w13_input_scale" not in captured["w4a16_moe"]
+    assert "w2_input_scale" not in captured["w4a16_moe"]
+
+
+def test_modelopt_w4a16_reload_metadata_preserves_loadable_placeholder(single_rank_tp):
+    layer = _nvfp4_linear_for_reload("W4A16_NVFP4")
+    placeholder = layer.input_scale
+
+    params, _ = capture_layer_to_meta(layer)
+
+    assert "input_scale" not in params
+    assert layer.input_scale is placeholder
+    loaded_scale = torch.full_like(placeholder, 3.0)
+    placeholder.weight_loader(placeholder, loaded_scale)
+    assert torch.equal(layer.input_scale, loaded_scale)
 
 
 def test_modelopt_nvfp4_quantizes_parallel_lm_head():

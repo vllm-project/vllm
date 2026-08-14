@@ -38,6 +38,12 @@ SKIP_LOAD_TENSORS: set[str] = {
 SKIP_TENSORS: set[str] = SKIP_LOAD_TENSORS | {"bias"}
 
 
+def _capture_for_layerwise_reload(name: str, tensor: torch.Tensor) -> bool:
+    return name not in SKIP_TENSORS and not getattr(
+        tensor, "skip_layerwise_reload", False
+    )
+
+
 def to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
     """Convert a tensor to a meta tensor while preserving class and attributes."""
     meta_tensor = tensor.data.to("meta")
@@ -105,12 +111,12 @@ def capture_layer_to_meta(layer: torch.nn.Module) -> LayerTensors:
         {
             name: sanitize_layer_refs(to_meta_tensor(param), layer)
             for name, param in params.items()
-            if name not in SKIP_TENSORS
+            if _capture_for_layerwise_reload(name, param)
         },
         {
             name: sanitize_layer_refs(to_meta_tensor(buffer), layer)
             for name, buffer in buffers.items()
-            if name not in SKIP_TENSORS
+            if _capture_for_layerwise_reload(name, buffer)
             and not _is_non_persistent_parameter_alias_buffer(
                 layer, name, buffer, parameter_storage_ptrs
             )

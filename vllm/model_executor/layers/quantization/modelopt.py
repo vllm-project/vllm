@@ -1329,6 +1329,7 @@ class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
             data=torch.empty(len(output_partition_sizes), dtype=torch.float32),
             weight_loader=weight_loader,
         )
+        set_weight_attrs(input_scale, {"skip_layerwise_reload": True})
         layer.register_parameter("input_scale", input_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -1514,12 +1515,16 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             ),
             weight_loader=weight_loader,
         )
+        if self.use_a16:
+            set_weight_attrs(w13_input_scale, {"skip_layerwise_reload": True})
         layer.register_parameter("w13_input_scale", w13_input_scale)
 
         w2_input_scale = PerTensorScaleParameter(
             data=torch.empty(global_sf_num_experts, dtype=torch.float32),
             weight_loader=weight_loader,
         )
+        if self.use_a16:
+            set_weight_attrs(w2_input_scale, {"skip_layerwise_reload": True})
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
