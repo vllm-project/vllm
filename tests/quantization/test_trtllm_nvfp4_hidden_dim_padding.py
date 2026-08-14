@@ -19,7 +19,12 @@ def test_shared_nvfp4_input_scales_have_writable_storage(monkeypatch):
     monkeypatch.setattr(flashinfer_fp4_moe, "swizzle_blockscale", lambda x: x)
 
     num_experts = 3
-    layer = SimpleNamespace(activation=SimpleNamespace(is_gated=False))
+    layer = SimpleNamespace(
+        activation=SimpleNamespace(is_gated=False),
+        moe_config=SimpleNamespace(
+            moe_parallel_config=SimpleNamespace(enable_eplb=False)
+        ),
+    )
     w13 = torch.zeros((num_experts, 2, 1), dtype=torch.uint8)
     w2 = torch.zeros((num_experts, 2, 1), dtype=torch.uint8)
     w13_scale = torch.zeros((num_experts, 2, 1), dtype=torch.float8_e4m3fn)

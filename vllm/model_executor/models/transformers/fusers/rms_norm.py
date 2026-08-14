@@ -15,7 +15,6 @@ from vllm.distributed import (
 )
 from vllm.distributed.parallel_state import model_parallel_is_initialized
 from vllm.distributed.utils import split_tensor_along_last_dim
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.models.transformers.fusers.base import BaseFuser
 from vllm.model_executor.models.transformers.fx_utils import (
     find_node,
@@ -24,6 +23,10 @@ from vllm.model_executor.models.transformers.fx_utils import (
     output_value,
     peel,
     trace,
+)
+from vllm.model_executor.models.transformers.layers import (
+    GemmaRMSNorm,
+    RMSNorm,
 )
 
 if TYPE_CHECKING:
@@ -190,20 +193,17 @@ class RMSNormFuser(BaseFuser):
         self, module: nn.Module, prefix: str, vllm_config: "VllmConfig"
     ) -> nn.Module:
         """Fuse the matched RMSNorm pattern into a vLLM fused RMSNorm CustomOp."""
-        model_config = vllm_config.model_config
         weight = getattr(module, "weight", None)
-        hidden_size = (
-            weight.size(0) if weight is not None else model_config.get_hidden_size()
-        )
+        has_weight = weight is not None
+        hidden_size = weight.size(0) if has_weight else 0
         graph = trace(module)
         eps = self._eps_from_graph(graph) if graph is not None else None
         if eps is None:
             # If eps not in graph, match torch behaviour.
-            dtype = weight.dtype if weight is not None else model_config.dtype
+            dtype = weight.dtype if has_weight else vllm_config.model_config.dtype
             eps = torch.finfo(dtype).eps
         if self.zero_centered:
             return TPAwareGemmaRMSNorm(hidden_size=hidden_size, eps=eps)
-        has_weight = weight is not None
         return TPAwareRMSNorm(
             hidden_size=hidden_size,
             eps=eps,

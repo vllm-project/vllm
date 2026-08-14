@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 import signal
 import socket
+from collections.abc import Generator
 from functools import partial
 from typing import Any
 
@@ -21,6 +23,18 @@ from vllm.logger import init_logger
 from vllm.utils.network_utils import find_process_using_port
 
 logger = init_logger(__name__)
+
+
+class NoSignalServer(uvicorn.Server):
+    """Uvicorn server that never installs its own SIGINT/SIGTERM handlers.
+
+    Callers register their own handlers on the event loop for graceful
+    shutdown; uvicorn's would race with and override them (see #49668).
+    """
+
+    @contextlib.contextmanager
+    def capture_signals(self) -> Generator[None, None, None]:
+        yield
 
 
 async def serve_http(
@@ -73,7 +87,7 @@ async def serve_http(
     config.h11_max_incomplete_event_size = h11_max_incomplete_event_size
     config.h11_max_header_count = h11_max_header_count
     config.load()
-    server = uvicorn.Server(config)
+    server = NoSignalServer(config)
     app.state.server = server
 
     loop = asyncio.get_running_loop()
@@ -91,18 +105,6 @@ async def serve_http(
             ca_path=config.ssl_ca_certs,
         )
     )
-
-    # make sure uvicorn server signal handler has been registered.
-    # Otherwise the app signal handler below will be overwritten in server.serve.
-    # server.started is set to True after server complete server.startup.
-    # We need to constraint the time sequence.
-    logger.info("API server: waiting for HTTP server to start")
-    while not server.started and not server_task.done():
-        await asyncio.sleep(0.1)
-    if server_task.done():
-        # Propagate startup failure (e.g. port bind error) instead of hanging.
-        await server_task
-    logger.info("API server: HTTP server started")
 
     shutdown_event = asyncio.Event()
 

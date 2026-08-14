@@ -103,41 +103,6 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
-    def _resize_output_size(
-        self,
-        *,
-        height: int,
-        width: int,
-        max_len: int | None = None,
-        min_len: int = 1,
-        max_size: int | None = None,
-    ) -> tuple[int, int]:
-        # Set default value for max_len if not provided
-        max_len = max(height, width) if max_len is None else max_len
-        aspect_ratio = width / height
-
-        # Handle the maximum size constraint
-        if max_size is not None:
-            max_len = min(max_len, max_size)
-
-        # Adjust dimensions according to the aspect ratio
-        if width >= height:
-            width = max_len
-            height = int(width / aspect_ratio)
-        else:
-            height = max_len
-            width = int(height * aspect_ratio)
-
-        # Ensure both width and height are even (if needed)
-        height += height % 2
-        width += width % 2
-
-        # Ensure dimensions are not smaller than the minimum length
-        height = max(height, min_len)
-        width = max(width, min_len)
-
-        return height, width
-
     def _get_image_feature_grid_size(
         self,
         *,
@@ -574,7 +539,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if self.config.text_config.tie_word_embeddings:
-            self.lm_head.weight = self.model.text_model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.text_model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.text_config.vocab_size)
 
     def _parse_and_validate_image_input(self, **kwargs: object) -> ImageInputs | None:

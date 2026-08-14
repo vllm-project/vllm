@@ -32,11 +32,9 @@ def _on_rocm_with_aiter() -> bool:
     return current_platform.is_rocm() and is_aiter_found()
 
 
-# Unlike the fp8 persistent-decode metadata this file's neighbour guards, the
-# verify flatten is not gfx950-only: it is selected by head count alone and is
-# reached on any ROCm AITER MLA deployment with fewer than 16 heads per rank.
-# The Gluon kernel is replaced by a spy here, so nothing below needs it to be
-# runnable either.
+# The production verify flatten is gfx950-only. This test replaces the Gluon
+# kernel with a spy and forces the architecture feature probe so the metadata
+# regression remains testable on every ROCm AITER CI runner.
 pytestmark = pytest.mark.skipif(
     not _on_rocm_with_aiter(),
     reason="ROCM_AITER_MLA verify flatten requires ROCm and AITER",
@@ -129,7 +127,14 @@ def _run_verify_block():
     # stub with the attribute is enough for metadata construction.
     layer_name = "placeholder"
     vllm_config.compilation_config.static_forward_context[layer_name] = (
-        types.SimpleNamespace(prefill_backend=torch.empty((1,)))
+        types.SimpleNamespace(
+            prefill_backend=torch.empty((1,)),
+            q_lora_rank=None,
+            kv_lora_rank=KV_LORA_RANK,
+            qk_nope_head_dim=QK_NOPE_HEAD_DIM,
+            qk_rope_head_dim=QK_ROPE_HEAD_DIM,
+            v_head_dim=V_HEAD_DIM,
+        )
     )
 
     init_workspace_manager(device)
@@ -186,9 +191,15 @@ def _run_verify_block():
 
     # The Gluon kernel only reads the metadata this test is about, so a spy in
     # its place keeps the assertions independent of the AITER build.
-    with patch(
-        "vllm.v1.attention.backends.mla.rocm_aiter_mla._get_mla_gluon",
-        lambda: spy,
+    with (
+        patch(
+            "vllm.v1.attention.backends.mla.rocm_aiter_mla._gluon_mla_decode_supported",
+            lambda: True,
+        ),
+        patch(
+            "vllm.v1.attention.backends.mla.rocm_aiter_mla._get_mla_gluon",
+            lambda: spy,
+        ),
     ):
         impl.forward_mqa((q_nope, q_pe), kv_cache, metadata, layer=None)
 

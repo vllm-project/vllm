@@ -29,6 +29,7 @@ from vllm.v1.kv_offload.base import (
     Medium,
     OffloadingCounterMetadata,
     OffloadingEvent,
+    OffloadingGaugeMetadata,
     OffloadKey,
     OffloadPolicy,
     ReqContext,
@@ -39,10 +40,10 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.tiering.base import (
-    JobMetadata,
     JobResult,
     SecondaryTierManager,
     TieringOffloadingMetrics,
+    TransferJob,
 )
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
@@ -85,6 +86,16 @@ def count_hits(manager, keys: list[OffloadKey]) -> int | None:
     return count
 
 
+def histogram_count_key(metric_name: str, labelvalues: tuple[str, ...]) -> str:
+    return f"{metric_name}:{labelvalues}_count"
+
+
+def has_histogram_count(reduced: dict[str, int | float], metric_name: str) -> bool:
+    return any(
+        key.startswith(f"{metric_name}:") and key.endswith("_count") for key in reduced
+    )
+
+
 class MetricsSecondaryTierManager(SecondaryTierManager):
     """Test-only secondary tier that declares and emits one labeled metric."""
 
@@ -102,18 +113,26 @@ class MetricsSecondaryTierManager(SecondaryTierManager):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.stats: OffloadingConnectorStats | None = None
+        self.lookup_result = LookupResult.MISS
+        self.finished_jobs: list[JobResult] = []
+        self.submitted_loads: list[TransferJob] = []
+        self.submitted_stores: list[TransferJob] = []
 
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
-        return False
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        return self.lookup_result
 
-    def submit_store(self, job_metadata: JobMetadata) -> None:
+    def submit_store(self, job_metadata: TransferJob) -> None:
+        self.submitted_stores.append(job_metadata)
         return
 
-    def submit_load(self, job_metadata: JobMetadata) -> None:
+    def submit_load(self, job_metadata: TransferJob) -> None:
+        self.submitted_loads.append(job_metadata)
         return
 
     def get_finished_jobs(self) -> Iterable[JobResult]:
-        return ()
+        results = self.finished_jobs
+        self.finished_jobs = []
+        return results
 
     def drain_jobs(self) -> None:
         return
@@ -141,6 +160,24 @@ def test_tiering_spec_collects_secondary_metric_definitions(monkeypatch):
     metadata = metrics[MetricsSecondaryTierManager.MY_TIER_METRIC]
     assert metadata.documentation == "Number of bytes served by the test tier."
     assert metadata.labelnames == ("tier",)
+    assert metrics[TieringOffloadingMetrics.BLOCK_QUERIES].labelnames == ("tier",)
+    assert metrics[TieringOffloadingMetrics.LOOKUP_SYNC_DELAY].labelnames == ("tier",)
+    assert metrics[TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY].labelnames == ("tier",)
+    assert metrics[TieringOffloadingMetrics.PROMOTION_JOB_FAILURES].labelnames == (
+        "tier",
+    )
+    assert isinstance(
+        metrics[TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES],
+        OffloadingCounterMetadata,
+    )
+    for metric_name in (
+        TieringOffloadingMetrics.PRIMARY_WRITE_USAGE_PERC,
+        TieringOffloadingMetrics.PRIMARY_READ_USAGE_PERC,
+        TieringOffloadingMetrics.ACTIVE_PROMOTION_JOBS,
+        TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS,
+    ):
+        assert isinstance(metrics[metric_name], OffloadingGaugeMetadata)
+        assert metrics[metric_name].labelnames == ("tier",)
 
 
 def test_tiering_manager_aggregates_secondary_stats():
@@ -250,6 +287,61 @@ class TestTieringOffloadingManager:
     def _start_request(self, req_context: ReqContext = _CTX):
         if req_context.req_id not in self.manager._req_state:
             self.manager.on_new_request(req_context)
+
+    def test_failed_promotion_finalizes_primary_with_failure(self, manager_setup):
+        """A failed promotion still finalizes the primary slots with
+        success=False; the tier corrects its own verdict."""
+        from unittest.mock import patch
+
+        from vllm.v1.kv_offload.tiering.base import JobResult
+
+        self._start_request()
+        # Register an in-flight promotion job for tier1 by hand.
+        job_id = self.manager._next_job_id()
+        self.manager._register_job(
+            TransferJob(
+                job_id=job_id,
+                keys=to_keys([1, 2]),
+                block_ids=[0, 1],
+                is_promotion=True,
+                req_context=_CTX,
+            ),
+            0,
+        )
+        failed = JobResult(job_id=job_id, success=False)
+        with (
+            patch.object(
+                self.secondary_tier1, "get_finished_jobs", return_value=[failed]
+            ),
+            patch.object(self.primary_tier, "complete_write") as completed,
+        ):
+            self.manager._process_finished_jobs()
+        completed.assert_called_once_with(to_keys([1, 2]), _CTX, False)
+
+    def test_successful_promotion_finalizes_primary_with_success(self, manager_setup):
+        from unittest.mock import patch
+
+        from vllm.v1.kv_offload.tiering.base import JobResult
+
+        self._start_request()
+        job_id = self.manager._next_job_id()
+        self.manager._register_job(
+            TransferJob(
+                job_id=job_id,
+                keys=to_keys([1]),
+                block_ids=[0],
+                is_promotion=True,
+                req_context=_CTX,
+            ),
+            0,
+        )
+        ok = JobResult(job_id=job_id, success=True)
+        with (
+            patch.object(self.secondary_tier1, "get_finished_jobs", return_value=[ok]),
+            patch.object(self.primary_tier, "complete_write") as completed,
+        ):
+            self.manager._process_finished_jobs()
+        completed.assert_called_once_with(to_keys([1]), _CTX, True)
 
     def test_take_events_aggregates_tier_owned_events(self, manager_setup):
         primary_event = OffloadingEvent(to_keys([1]), Medium.CPU, removed=False)
@@ -389,7 +481,7 @@ class TestTieringOffloadingManager:
         # Lookup each block to initiate promotion for all of them
         for block in blocks:
             result = self.manager.lookup(block, _CTX)
-            assert result is LookupResult.RETRY  # promotion initiated
+            assert result is LookupResult.HIT_PENDING  # promotion initiated
 
         # End of step 1: flushes deferred submit_load() calls
         self._simulate_on_schedule_end()
@@ -403,8 +495,55 @@ class TestTieringOffloadingManager:
         # Next lookup should succeed
         assert count_hits(self.manager, blocks) == 3
 
+    @pytest.mark.parametrize(
+        ("successful_indices", "expected_results"),
+        [
+            (
+                (0, 2),
+                [LookupResult.HIT, LookupResult.MISS, LookupResult.HIT],
+            ),
+            (
+                None,
+                [LookupResult.MISS, LookupResult.MISS, LookupResult.MISS],
+            ),
+        ],
+        ids=["partial", "legacy-full-failure"],
+    )
+    def test_failed_promotion_keeps_only_successful_blocks(
+        self, manager_setup, successful_indices, expected_results
+    ):
+        blocks = to_keys(range(3))
+        for block in blocks:
+            self.secondary_tier1.blocks[block] = True
+
+        def submit_partial(job_metadata: TransferJob) -> None:
+            successful_keys = (
+                None
+                if successful_indices is None
+                else tuple(blocks[i] for i in successful_indices)
+            )
+            self.secondary_tier1.completed_jobs.append(
+                JobResult(
+                    job_id=job_metadata.job_id,
+                    success=False,
+                    successful_keys=successful_keys,
+                )
+            )
+
+        self.secondary_tier1.submit_load = submit_partial
+
+        for block in blocks:
+            assert self.manager.lookup(block, _CTX) is LookupResult.HIT_PENDING
+
+        self._simulate_on_schedule_end()
+        self._simulate_on_schedule_end()
+
+        assert [
+            self.primary_tier.lookup(block, _CTX) for block in blocks
+        ] == expected_results
+
     def test_lookup_reports_sync_delay_for_resolved_lookups(self, manager_setup):
-        """Resolved lookups report one sync delay sample on allocation."""
+        """Resolved lookups report one sync delay sample per tier and block."""
         self._start_request()
         blocks = to_keys(range(2))
 
@@ -413,35 +552,69 @@ class TestTieringOffloadingManager:
             assert self.manager.lookup(block, _CTX) is LookupResult.MISS
 
         stats = self.manager.get_stats()
-        if stats is not None:
-            assert f"{TieringOffloadingMetrics.LOOKUP_SYNC_DELAY}_count" not in (
-                stats.reduce()
-            )
-
-        self._simulate_on_schedule_end(new_req_ids=[_CTX.req_id])
-
-        stats = self.manager.get_stats()
         assert stats is not None
         reduced = stats.reduce()
-        assert reduced[f"{TieringOffloadingMetrics.LOOKUP_SYNC_DELAY}_count"] == 1
-        assert f"{TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY}_count" not in reduced
+        assert (
+            reduced[
+                histogram_count_key(
+                    TieringOffloadingMetrics.LOOKUP_SYNC_DELAY, ("0:primary",)
+                )
+            ]
+            == 2
+        )
+        assert (
+            reduced[
+                histogram_count_key(
+                    TieringOffloadingMetrics.LOOKUP_SYNC_DELAY, ("1:example",)
+                )
+            ]
+            == 2
+        )
+        assert (
+            reduced[
+                histogram_count_key(
+                    TieringOffloadingMetrics.LOOKUP_SYNC_DELAY, ("2:example",)
+                )
+            ]
+            == 2
+        )
+        assert not has_histogram_count(
+            reduced, TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY
+        )
 
-    def test_lookup_reports_async_delay_across_promotion(self, manager_setup):
-        """A new request reports async delay at schedule end."""
+    def test_lookup_does_not_report_async_delay_for_promotion(self, manager_setup):
+        """Promotion time is not included in lookup async delay."""
         self._start_request()
         block = to_keys(range(1))[0]
         self.secondary_tier1.blocks[block] = True
 
         # First lookup finds the block in a secondary tier and defers.
-        assert self.manager.lookup(block, _CTX) is LookupResult.RETRY
+        assert self.manager.lookup(block, _CTX) is LookupResult.HIT_PENDING
 
-        # The first scheduler step reports async delay for the new request.
+        # Promotion is not treated as unresolved secondary lookup time.
         self._simulate_on_schedule_end(new_req_ids=[_CTX.req_id])
         stats = self.manager.get_stats()
         assert stats is not None
         reduced = stats.reduce()
-        assert reduced[f"{TieringOffloadingMetrics.LOOKUP_SYNC_DELAY}_count"] == 1
-        assert reduced[f"{TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY}_count"] == 1
+        assert (
+            reduced[
+                histogram_count_key(
+                    TieringOffloadingMetrics.LOOKUP_SYNC_DELAY, ("0:primary",)
+                )
+            ]
+            == 1
+        )
+        assert (
+            reduced[
+                histogram_count_key(
+                    TieringOffloadingMetrics.LOOKUP_SYNC_DELAY, ("1:example",)
+                )
+            ]
+            == 1
+        )
+        assert not has_histogram_count(
+            reduced, TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY
+        )
 
         # Promotion completes on the next scheduler step.
         self._simulate_on_schedule_end()
@@ -451,38 +624,51 @@ class TestTieringOffloadingManager:
 
         stats = self.manager.get_stats()
         if stats is not None:
-            assert f"{TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY}_count" not in (
-                stats.reduce()
+            assert not has_histogram_count(
+                stats.reduce(), TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY
             )
 
-    def test_lookup_reports_async_delay_on_request_finish(self, manager_setup):
-        """Never-allocated lookup delays flush at teardown."""
+    def test_lookup_reports_async_delay_when_deferred_lookup_resolves(
+        self, manager_setup
+    ):
+        """Async delay is observed when a RETRY lookup later resolves."""
         ctx = ReqContext(req_id="req_lookup_finish")
         self._start_request(ctx)
         block = to_keys(range(1))[0]
-        self.secondary_tier1.blocks[block] = True
+        self.secondary_tier1.lookup = MagicMock(
+            side_effect=[LookupResult.RETRY, LookupResult.HIT]
+        )
 
-        # Lookup finds the block in a secondary tier and defers.
+        # First lookup is deferred by the secondary tier.
         assert self.manager.lookup(block, ctx) is LookupResult.RETRY
 
-        self._simulate_on_schedule_end()
         stats = self.manager.get_stats()
         if stats is not None:
-            assert f"{TieringOffloadingMetrics.LOOKUP_SYNC_DELAY}_count" not in (
-                stats.reduce()
-            )
-            assert f"{TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY}_count" not in (
-                stats.reduce()
+            assert not has_histogram_count(
+                stats.reduce(), TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY
             )
 
-        # Request finishes before the deferred lookup is ever resolved.
-        self.manager.on_request_finished(ctx)
+        assert self.manager.lookup(block, ctx) is LookupResult.HIT_PENDING
 
         stats = self.manager.get_stats()
         assert stats is not None
         reduced = stats.reduce()
-        assert reduced[f"{TieringOffloadingMetrics.LOOKUP_SYNC_DELAY}_count"] == 1
-        assert reduced[f"{TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY}_count"] == 1
+        assert (
+            reduced[
+                histogram_count_key(
+                    TieringOffloadingMetrics.LOOKUP_SYNC_DELAY, ("1:example",)
+                )
+            ]
+            == 1
+        )
+        assert (
+            reduced[
+                histogram_count_key(
+                    TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY, ("1:example",)
+                )
+            ]
+            == 1
+        )
 
     def test_partial_lookup(self, manager_setup):
         """Test lookup with partial hits."""
@@ -585,11 +771,11 @@ class TestTieringOffloadingManager:
         ctx_a = ReqContext(req_id="req_a")
         ctx_b = ReqContext(req_id="req_b")
 
-        # All lookups return RETRY: secondary hit triggers promotion
-        assert self.manager.lookup(blocks[0], ctx_a) is LookupResult.RETRY
-        assert self.manager.lookup(blocks[1], ctx_a) is LookupResult.RETRY
-        assert self.manager.lookup(blocks[2], ctx_b) is LookupResult.RETRY
-        assert self.manager.lookup(blocks[3], ctx_b) is LookupResult.RETRY
+        # All lookups return HIT_PENDING: secondary hit triggers promotion
+        assert self.manager.lookup(blocks[0], ctx_a) is LookupResult.HIT_PENDING
+        assert self.manager.lookup(blocks[1], ctx_a) is LookupResult.HIT_PENDING
+        assert self.manager.lookup(blocks[2], ctx_b) is LookupResult.HIT_PENDING
+        assert self.manager.lookup(blocks[3], ctx_b) is LookupResult.HIT_PENDING
 
         # submit_load must not fire during lookup - only at end of step
         self.secondary_tier1.submit_load.assert_not_called()
@@ -626,9 +812,9 @@ class TestTieringOffloadingManager:
         result_a = self.manager.lookup(shared_block, ctx_a)
         result_b = self.manager.lookup(shared_block, ctx_b)
 
-        # First lookup triggers promotion (RETRY), second finds block
-        # already in primary with write in-flight (HIT_PENDING).
-        assert result_a is LookupResult.RETRY
+        # Both lookups find the shared_block and trigger promotion
+        # returning HIT_PENDING.
+        assert result_a is LookupResult.HIT_PENDING
         assert result_b is LookupResult.HIT_PENDING
 
         self._simulate_on_schedule_end()
@@ -842,9 +1028,7 @@ class TestTieringOffloadingManager:
         ctx = ReqContext(req_id="req_policy_lifecycle_2")
         result = self.manager.on_new_request(ctx)
         assert result.policy == OffloadPolicy.REQUEST_LEVEL
-        assert self.manager._req_state[ctx.req_id].request_level_tiers == {
-            self.secondary_tier1
-        }
+        assert self.manager._req_state[ctx.req_id].request_level_tiers == {0}
 
         # Cleanup
         self.manager.on_request_finished(ctx)
@@ -900,13 +1084,13 @@ class TestTieringOffloadingManager:
         primary tier; pending submissions are dropped without being sent
         to the secondary tier. Active request state is retained."""
         # Cascade — populates primary blocks and leaves cascade jobs
-        # in _transfer_jobs (the synchronous example tier has already
+        # in _jobs (the synchronous example tier has already
         # queued completions); reset_cache's drain loop will pick them up.
         blocks = to_keys(range(3))
         self._start_request()
         self.manager.prepare_store(blocks, _CTX)
         self.manager.complete_store(blocks, _CTX, success=True)
-        assert self.manager._transfer_jobs
+        assert self.manager._jobs
 
         # Pending promotion submission (deferred — no on_schedule_end after
         # the lookup that staged it).
@@ -914,7 +1098,7 @@ class TestTieringOffloadingManager:
         self.secondary_tier1.blocks[promo_block] = True
         assert (
             self.manager.lookup(promo_block, ReqContext(req_id="pending"))
-            is LookupResult.RETRY
+            is LookupResult.HIT_PENDING
         )
         assert self.manager._pending_load_submissions
 
@@ -924,9 +1108,7 @@ class TestTieringOffloadingManager:
         )
         rl_ctx = ReqContext(req_id="rl")
         self.manager.on_new_request(rl_ctx)
-        assert self.manager._req_state[rl_ctx.req_id].request_level_tiers == {
-            self.secondary_tier1
-        }
+        assert self.manager._req_state[rl_ctx.req_id].request_level_tiers == {0}
 
         # Mark this step as already polled (reset_cache must clear it).
         self.manager._processed_jobs_this_step = True
@@ -939,7 +1121,7 @@ class TestTieringOffloadingManager:
         self.manager.reset_cache()
 
         # Orchestrator state cleared.
-        assert self.manager._transfer_jobs == {}
+        assert self.manager._jobs == {}
         assert self.manager._pending_load_submissions == {}
         assert set(self.manager._req_state) == {_CTX.req_id, rl_ctx.req_id}
         assert self.manager._processed_jobs_this_step is False
@@ -967,18 +1149,18 @@ class TestTieringOffloadingManager:
             wraps=self.secondary_tier2.drain_jobs
         )
 
-        # Drive a cascade so a job lands in _transfer_jobs.
+        # Drive a cascade so a job lands in _jobs.
         blocks = to_keys(range(3))
         self._start_request()
         self.manager.prepare_store(blocks, _CTX)
         self.manager.complete_store(blocks, _CTX, success=True)
-        assert self.manager._transfer_jobs
+        assert self.manager._jobs
 
         self.manager.reset_cache()
 
         self.secondary_tier1.drain_jobs.assert_called_once()
         self.secondary_tier2.drain_jobs.assert_called_once()
-        assert self.manager._transfer_jobs == {}
+        assert self.manager._jobs == {}
 
     @pytest.mark.parametrize(
         "load_tier_filter",
@@ -1027,7 +1209,7 @@ class TestTieringOffloadingManager:
         self.secondary_tier1.lookup = MagicMock(wraps=self.secondary_tier1.lookup)
 
         ctx = ReqContext(req_id="r2", load_tier_filter=load_tier_filter)
-        assert self.manager.lookup(blocks[0], ctx) is LookupResult.RETRY
+        assert self.manager.lookup(blocks[0], ctx) is LookupResult.HIT_PENDING
         self.secondary_tier1.lookup.assert_called()
 
 

@@ -23,7 +23,6 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.parse import (
     ImageSize,
     MultiModalDataItems,
-    MultiModalDataParser,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -307,14 +306,6 @@ class MiniMaxM3VLDummyInputsBuilder(BaseDummyInputsBuilder[MiniMaxM3VLProcessing
 class MiniMaxM3VLMultiModalProcessor(
     BaseMultiModalProcessor[MiniMaxM3VLProcessingInfo]
 ):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        # Request video metadata (fps + sampled frame indices) so the HF
-        # processor can emit per-frame ``]<]X.X seconds[>[`` timestamp markers,
-        # matching MiniMax's reference video token stream. ``_get_prompt_updates``
-        # reconstructs the same markers from the metadata to keep the prompt
-        # replacement aligned with the processor output.
-        return MultiModalDataParser(video_needs_metadata=True)
-
     def _call_hf_processor(
         self,
         prompt: str,

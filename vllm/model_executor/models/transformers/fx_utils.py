@@ -416,6 +416,25 @@ def upstream_linear(node: object, module: nn.Module) -> fx.Node | None:
     return None
 
 
+def downstream_linear(node: fx.Node, module: nn.Module) -> fx.Node | None:
+    """Nearest linear consuming `node`'s output, walking through casts/scalings.
+
+    Never walks through a leaf call (e.g. an attention interface): what crosses
+    it is consumed by the attention computation, not projected."""
+    queue = list(node.users)
+    seen: set[fx.Node] = set()
+    while queue:
+        current = queue.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        if is_linear(current, module):
+            return current
+        if current.op in ("call_function", "call_method") and not is_leaf_call(current):
+            queue.extend(current.users)
+    return None
+
+
 def returned_linear(graph: fx.Graph, module: nn.Module) -> str | None:
     """Name of the Linear producing the graph's (first) output value."""
     value = output_value(graph)

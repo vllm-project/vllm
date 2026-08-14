@@ -225,3 +225,69 @@ def test_vocab_size_not_multiple_of_block(vocab_size: int):
     df = vocab_size - 1
     if df >= 1:
         assert chi2 < df + 10 * math.sqrt(2 * df), f"chi2={chi2:.1f}, df={df}"
+
+
+# ----------------------------- Logits cache --------------------------------
+
+
+def _float_bits(t: torch.Tensor) -> torch.Tensor:
+    """Reinterpret floats as same-width ints, so equality is truly bitwise."""
+    int_dtype = torch.int32 if t.dtype == torch.float32 else torch.int16
+    return t.view(int_dtype)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize("per_token_col", [False, True])
+def test_logits_cache_stores_input_logits_bitwise(
+    dtype: torch.dtype, per_token_col: bool
+):
+    """`logits_cache` must receive the input logits, pre-temperature and bit-exact.
+
+    The cache is kept in the head's dtype, which is only lossless because the
+    stored value is the input logit itself. Storing `logit / temp` instead would
+    generally not be representable there, and the rejection sampler -- which
+    divides by the same temperature on load -- would then verify against a `q`
+    the draft never sampled from. Temperatures 0.0 and 1.0 are included because
+    both make the divide a no-op and would mask such a bug.
+
+    Both column-addressing modes are covered: a 0-d column (one draft step per
+    call, as MTP/EAGLE do) and a [num_tokens] column (as DFlash does, sampling
+    every step in one call).
+    """
+    torch.manual_seed(0)
+    num_reqs, vocab_size, num_steps = 8, 4099, 3
+    logits = torch.randn(num_reqs, vocab_size, device=DEVICE, dtype=dtype)
+    idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+    temp = torch.tensor(
+        [0.0, 0.1, 0.5, 1.0, 1.5, 2.0, 0.7, 1.0], dtype=torch.float32, device=DEVICE
+    )
+    seed = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE)
+    pos = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE)
+
+    cache = torch.zeros(num_reqs, num_steps, vocab_size, device=DEVICE, dtype=dtype)
+    if per_token_col:
+        # Each token lands in its own column, cycling through the steps.
+        cols = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE) % num_steps
+    else:
+        cols = torch.tensor(1, dtype=torch.int32, device=DEVICE)
+
+    gumbel_sample(
+        logits,
+        idx_mapping,
+        temp,
+        seed,
+        pos,
+        apply_temperature=True,
+        logits_cache=cache,
+        logits_cache_col=cols,
+    )
+
+    if per_token_col:
+        stored = cache[torch.arange(num_reqs, device=DEVICE), cols.long()]
+    else:
+        stored = cache[:, 1]
+        # Untouched columns must stay untouched.
+        assert not cache[:, 0].any() and not cache[:, 2].any()
+    assert torch.equal(_float_bits(stored), _float_bits(logits)), (
+        "cached logits differ from the input logits"
+    )

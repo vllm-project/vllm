@@ -8,6 +8,7 @@ Validating the configuration and printing results for manual checking.
 Run `pytest tests/quantization/test_auto_round.py`.
 """
 
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -496,7 +497,7 @@ def test_qwen3_1p7b_mxfp4_autoround_uses_mxfp4_linear_scheme(
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes."
         "inc_mxfp4_linear.init_mxfp4_linear_kernel",
-        lambda: DummyKernel(),
+        lambda **kwargs: DummyKernel(),
     )
 
     from vllm.model_executor.layers.quantization.inc.schemes.inc_mxfp4_linear import (  # noqa: E501
@@ -614,7 +615,7 @@ def test_inc_mxfp4_linear_method_registers_and_processes_weights(
     monkeypatch.setattr(
         "vllm.model_executor.layers.quantization.inc.schemes."
         "inc_mxfp4_linear.init_mxfp4_linear_kernel",
-        lambda: DummyKernel(),
+        lambda **kwargs: DummyKernel(),
     )
     monkeypatch.setattr(
         "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
@@ -694,7 +695,8 @@ def test_inc_mxfp4_moe_method_registers_weights_and_builds_kernel(
         INCMxfp4MoEMethod,
     )
 
-    method = INCMxfp4MoEMethod(moe=cast(Any, "moe-config"))
+    expected_moe_config = SimpleNamespace(w13_num_shards=2)
+    method = INCMxfp4MoEMethod(moe=cast(Any, expected_moe_config))
     layer = torch.nn.Module()
     layer._expert_routing_tables = lambda: "routing-tables"
 
@@ -723,7 +725,7 @@ def test_inc_mxfp4_moe_method_registers_weights_and_builds_kernel(
     assert captured["quant_config_kwargs"]["w1_scale"] is layer.w13_weight_scale
     assert captured["quant_config_kwargs"]["w2_scale"] is layer.w2_weight_scale
     assert captured["kernel_kwargs"]["moe_quant_config"] is expected_quant_config
-    assert captured["kernel_kwargs"]["moe_config"] == "moe-config"
+    assert captured["kernel_kwargs"]["moe_config"] is expected_moe_config
     assert captured["kernel_kwargs"]["experts_cls"] is expected_experts_cls
     assert captured["kernel_kwargs"]["routing_tables"] == "routing-tables"
     assert method.moe_kernel is expected_kernel

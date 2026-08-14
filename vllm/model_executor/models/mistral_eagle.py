@@ -14,7 +14,10 @@ from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModalEmbeddings,
+)
 from vllm.model_executor.models.llama import LlamaConfig
 from vllm.model_executor.models.mistral import (
     MistralDecoderLayer,
@@ -109,7 +112,7 @@ class EagleMistralModel(MistralModel):
         return hidden_states, hidden_states
 
 
-class EagleMistralForCausalLM(MistralForCausalLM):
+class EagleMistralForCausalLM(MistralForCausalLM, SupportsMultiModalEmbeddings):
     mistral_mapping = MistralForCausalLM.mistral_mapping | {
         "eagle_linear": "model.fc",
     }

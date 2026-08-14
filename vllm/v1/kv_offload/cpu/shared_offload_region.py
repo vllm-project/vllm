@@ -1,15 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import errno
 import mmap
 import os
 import time
+from collections.abc import Callable
 
+import numpy as np
 import torch
 
+from vllm.distributed.device_communicators.shm_broadcast import (
+    check_shm_free_space,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+# MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
+_MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
 
 
 def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
@@ -23,6 +32,35 @@ def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> N
                 f"Timed out waiting for mmap file to reach {expected_size} bytes"
             )
         time.sleep(0.005)
+
+
+def _madvise_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
+    mmap_obj.madvise(_MADV_POPULATE_WRITE, offset, length)
+
+
+def _fallback_populate_write(mmap_obj: mmap.mmap, offset: int, length: int) -> None:
+    # Touch one byte per page via a read-modify-write so existing bytes are
+    # preserved — a peer worker may have already written KV data into this
+    # shared mmap by the time we run on a kernel without MADV_POPULATE_WRITE.
+    arr = np.frombuffer(mmap_obj, dtype=np.uint8)
+    arr[offset : offset + length : mmap.PAGESIZE] |= 0
+
+
+def _get_populate_write_fn(
+    mmap_obj: mmap.mmap,
+) -> Callable[[mmap.mmap, int, int], None]:
+    """Select the pre-faulting method once for this mmap."""
+    try:
+        _madvise_populate_write(mmap_obj, 0, mmap.PAGESIZE)
+    except OSError as e:
+        if e.errno != errno.EINVAL:
+            raise
+        logger.warning(
+            "MADV_POPULATE_WRITE is not supported; falling back to per-page "
+            "writes for mmap pre-population. Startup may be slower."
+        )
+        return _fallback_populate_write
+    return _madvise_populate_write
 
 
 class SharedOffloadRegion:
@@ -62,21 +100,37 @@ class SharedOffloadRegion:
             # exclusive upper bound for this worker's area within each row
             self._worker_area_end = (rank + 1) * cpu_page_size
         try:
-            # Exclusive create — only one worker succeeds
             self.fd: int | None = os.open(
                 self.mmap_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600
             )
-            os.ftruncate(self.fd, self.total_size_bytes)
+        except FileExistsError:
+            # Joiner path — another worker won O_EXCL. Reopen and wait
+            # for the file to reach expected size.
+            self.fd = os.open(self.mmap_path, os.O_RDWR)
+            try:
+                _wait_for_file_size(self.fd, self.total_size_bytes)
+            except (TimeoutError, OSError):
+                os.close(self.fd)
+                raise
+            logger.info("Opened existing mmap file %s", self.mmap_path)
+        else:
+            # Creator path. We won O_EXCL, so we own the file: any
+            # failure here must clean up so concurrent joiners don't
+            # land on a 0-byte stub and spin in _wait_for_file_size
+            # for the full 30 s timeout.
+            try:
+                check_shm_free_space(self.total_size_bytes)
+                os.ftruncate(self.fd, self.total_size_bytes)
+            except (RuntimeError, OSError):
+                os.unlink(self.mmap_path)
+                os.close(self.fd)
+                raise
             self._creator = True
             logger.info(
                 "Created mmap file %s (%.2f GB)",
                 self.mmap_path,
                 self.total_size_bytes / 1e9,
             )
-        except FileExistsError:
-            self.fd = os.open(self.mmap_path, os.O_RDWR)
-            _wait_for_file_size(self.fd, self.total_size_bytes)
-            logger.info("Opened existing mmap file %s", self.mmap_path)
 
         self.mmap_obj: mmap.mmap | None = mmap.mmap(
             self.fd,
@@ -85,8 +139,8 @@ class SharedOffloadRegion:
             prot=mmap.PROT_READ | mmap.PROT_WRITE,
         )
 
-        # MADV_POPULATE_WRITE was added in Linux 5.14 (value 23).
-        _MADV_POPULATE_WRITE = getattr(mmap, "MADV_POPULATE_WRITE", 23)
+        populate_write_fn = _get_populate_write_fn(self.mmap_obj)
+
         if rank is not None:
             # Populate only this worker's pages (one slot per block row).
             worker_offset = rank * cpu_page_size
@@ -97,9 +151,7 @@ class SharedOffloadRegion:
                 aligned_offset = (raw_offset // page_size) * page_size
                 end = raw_offset + cpu_page_size
                 aligned_length = end - aligned_offset
-                self.mmap_obj.madvise(
-                    _MADV_POPULATE_WRITE, aligned_offset, aligned_length
-                )
+                populate_write_fn(self.mmap_obj, aligned_offset, aligned_length)
             logger.debug(
                 "MADV_POPULATE_WRITE loop: %d blocks in %.3f s",
                 num_blocks,
@@ -108,16 +160,17 @@ class SharedOffloadRegion:
         else:
             # No rank — populate the entire shared region in one call.
             _t0 = time.perf_counter()
-            self.mmap_obj.madvise(_MADV_POPULATE_WRITE, 0, self.total_size_bytes)
+            populate_write_fn(self.mmap_obj, 0, self.total_size_bytes)
             logger.debug(
                 "MADV_POPULATE_WRITE entire region: %.3f s", time.perf_counter() - _t0
             )
 
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
         self._views: list[torch.Tensor] = []
+        self._canonical_offset = 0
         self.is_pinned: bool = False
 
-    def create_next_view(self, tensor_page_size: int) -> torch.Tensor:
+    def create_next_worker_view(self, tensor_page_size: int) -> torch.Tensor:
         """Allocate a strided int8 view for this worker, one canonical tensor.
 
         Must be called once per canonical tensor. The full mmap layout is:
@@ -155,6 +208,50 @@ class SharedOffloadRegion:
         self._worker_offset = new_offset
         self._views.append(worker_layer_view)
         return worker_layer_view
+
+    def create_next_canonical_view(self, tensor_page_size: int) -> torch.Tensor:
+        """Allocate a strided int8 view shared by all workers for one
+        canonical tensor (canonical layout).
+
+        Must be called once per canonical tensor, instead of
+        create_next_worker_view. The full mmap layout is:
+
+            |<-------- canonical area ------->|<-------- unused ------->|
+            |  all workers share this area    |                         |
+            |                                 |                         |
+            | [ canonical_t0 | canonical_t1 ] |                         |
+            | [ canonical_t0 | canonical_t1 ] |                         |
+            | [ canonical_t0 | canonical_t1 ] |                         |
+            ^                ^
+            _canonical_offset=0, then advances by each tensor's size
+
+        Each canonical_t{i} cell is that tensor's canonical page for the
+        block. Canonical areas are carved consecutively from the start of
+        each block row; consecutive rows are separated by row_stride. Every
+        worker gets the identical byte ranges and writes only its disjoint
+        bytes within them, as described by its canonical mappings — unlike
+        create_next_worker_view, which gives each worker a private
+        cpu_page_size slot per row.
+
+        The trailing unused bytes exist only when the canonical pages sum to
+        less than row_stride: page-alignment padding of the row, or
+        deduplication of KV replicated across workers (e.g. the MLA latent),
+        where one canonical copy replaces world_size worker copies.
+
+        Args:
+            tensor_page_size: Canonical bytes per block for this tensor.
+        """
+        new_offset = self._canonical_offset + tensor_page_size
+        assert new_offset <= self._row_stride
+        view = torch.as_strided(
+            self._base,
+            size=(self.num_blocks, tensor_page_size),
+            stride=(self._row_stride, 1),
+            storage_offset=self._canonical_offset,
+        )
+        self._canonical_offset = new_offset
+        self._views.append(view)
+        return view
 
     def create_kv_memoryview(self) -> memoryview:
         """Return a zero-copy memoryview over the entire KV buffer.

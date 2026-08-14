@@ -22,17 +22,18 @@ use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
 use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatEventStream, ChatEventStreamTrait,
-    CollectedAssistantMessage, FinishReason,
+    ChatRequest, CollectedAssistantMessage, FinishReason,
 };
 use vllm_engine_core_client::protocol::output::StopReason;
 
 use self::convert::{ResponseOptions, prepare_chat_request};
+pub(crate) use self::types::ChatCompletionRequest;
 use crate::config::ApiServerOptions;
 use crate::error::{ApiError, bail_server_error, chat_submit_error, server_error};
+use crate::lora::LoraModelResolution;
 use crate::routes::openai::chat_completions::types::{
-    AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionRequest,
-    ChatCompletionResponse, ChatCompletionStreamChoice, ChatCompletionStreamResponse,
-    ChatMessageDelta,
+    AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionResponse,
+    ChatCompletionStreamChoice, ChatCompletionStreamResponse, ChatMessageDelta,
 };
 use crate::routes::openai::utils::logprobs::{
     decoded_logprobs_to_openai_chat, prompt_logprobs_to_maps,
@@ -43,7 +44,15 @@ use crate::routes::openai::utils::types::{
 use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
-use crate::utils::{resolve_request_context, unix_timestamp};
+use crate::utils::{ResolvedRequestContext, resolve_request_context, unix_timestamp};
+
+pub(crate) fn lower_chat_request(
+    request: ChatCompletionRequest,
+    lora_resolution: &LoraModelResolution,
+    ctx: ResolvedRequestContext,
+) -> Result<ChatRequest, ApiError> {
+    prepare_chat_request(request, lora_resolution, ctx).map(|prepared| prepared.chat_request)
+}
 
 /// Validate one chat completion request and proxy it into the shared
 /// `vllm-chat` stack.

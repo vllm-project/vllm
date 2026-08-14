@@ -13,5 +13,6 @@ server_args: >-
   --enable-expert-parallel
   --kv-cache-dtype fp8
 env:
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
   VLLM_LOGGING_LEVEL: "DEBUG"
   VLLM_USE_V2_MODEL_RUNNER: "1"

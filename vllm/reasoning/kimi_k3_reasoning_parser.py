@@ -22,7 +22,7 @@ When thinking is disabled (``chat_template_kwargs={"thinking": False}`` or
 delta as normal content; there is simply no think channel to extract.
 """
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
 import regex as re
@@ -36,14 +36,44 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
+def _match_at(haystack: Sequence[int], i: int, needle: Sequence[int]) -> bool:
+    """Whether *needle* occurs in *haystack* starting at *i*.
+
+    Compares element by element rather than slicing: ``haystack`` is usually a
+    ``ConstantList``, whose slices cost a Python ``__getitem__`` plus a list
+    allocation on every probe.
+    """
+    return all(haystack[i + k] == needle[k] for k in range(len(needle)))
+
+
 def _subseq_index(haystack: Sequence[int], needle: Sequence[int]) -> int:
     """Return start index of the last occurrence of needle in haystack, or -1."""
     n = len(needle)
     if n == 0:
         return -1
+    first = needle[0]
     for i in range(len(haystack) - n, -1, -1):
-        if list(haystack[i : i + n]) == list(needle):
+        if haystack[i] == first and _match_at(haystack, i, needle):
             return i
+    return -1
+
+
+def _newest_marker(haystack: Sequence[int], a: Sequence[int], b: Sequence[int]) -> int:
+    """Report which of *a* / *b* occurs last in *haystack*.
+
+    Returns 0 if *a* is the newest marker, 1 if *b* is, -1 if neither occurs.
+    Equivalent to comparing two ``_subseq_index`` results, but a single backward
+    pass that stops at the first hit instead of walking to index 0 twice.
+    """
+    if not a or not b:
+        return -1
+    a0, b0 = a[0], b[0]
+    for i in range(len(haystack) - min(len(a), len(b)), -1, -1):
+        head = haystack[i]
+        if head == a0 and i + len(a) <= len(haystack) and _match_at(haystack, i, a):
+            return 0
+        if head == b0 and i + len(b) <= len(haystack) and _match_at(haystack, i, b):
+            return 1
     return -1
 
 
@@ -133,14 +163,36 @@ class KimiK3ReasoningParser(ReasoningParser):
         # agent continuations, where the chat template keeps a prior turn's
         # think channel (with its <|close|>think<|sep|>) in the prompt while the
         # current turn is still reasoning (its <|open|>think<|sep|> is the newest
-        # marker). See _subseq_index (returns the last occurrence).
-        last_close = _subseq_index(input_ids, self._think_close_ids)
-        last_open = _subseq_index(input_ids, self._think_open_ids)
-        if last_open == -1:
-            # No open marker in scope (e.g. the open was consumed as the
-            # generation prefix): a close marker means reasoning has ended.
-            return last_close != -1
-        return last_close > last_open
+        # marker). A missing open marker (e.g. it was consumed as the generation
+        # prefix) means a close marker alone ends reasoning, which is what
+        # "close is the newest marker" already encodes.
+        return (
+            _newest_marker(input_ids, self._think_close_ids, self._think_open_ids) == 0
+        )
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+    ) -> bool:
+        """Reasoning-end check for a single decode step.
+
+        The engine calls this once per structured-output request per decode step
+        while the request is still inside the think channel, so it only has to
+        look at the tokens generated this step, plus ``len(marker) - 1`` tokens
+        of context in case a marker straddles the step boundary.
+
+        The inherited default re-runs the full-sequence ``is_reasoning_end``,
+        which makes the scheduler O(context) per request per step and starves the
+        GPU on long agentic contexts.
+        """
+        if not self._thinking_enabled:
+            return True
+        delta = list(delta_ids)
+        if not delta:
+            return False
+        carry = max(len(self._think_close_ids), len(self._think_open_ids)) - 1
+        head = len(input_ids) - len(delta)
+        window = list(input_ids[max(0, head - carry) : head]) + delta
+        return _newest_marker(window, self._think_close_ids, self._think_open_ids) == 0
 
     def _extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if not self._thinking_enabled:

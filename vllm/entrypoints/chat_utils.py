@@ -2029,15 +2029,6 @@ async def parse_chat_messages_async(
     return conversation, mm_data, mm_uuids
 
 
-def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):
-    idx = 0
-    for msg in conversation:
-        if msg["role"] == "assistant":
-            tool_calls = msg.get("tool_calls")
-            idx += len(list(tool_calls)) if tool_calls is not None else 0  # noqa
-    return idx
-
-
 _KIMI_MODEL_TYPES = ("kimi_k2", "kimi_k25", "kimi_k3")
 
 

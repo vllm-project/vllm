@@ -34,7 +34,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
+from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
@@ -74,6 +74,8 @@ def _make_offloading_config(
             pcp_size=1,
             dcp_size=1,
             data_parallel_index=0,
+            data_parallel_size=1,
+            data_parallel_rank_local=None,
             is_parallelism_agnostic=is_parallelism_agnostic,
         ),
         replicated_layout=replicated_layout,
@@ -105,10 +107,10 @@ def make_job(
     job_id: int,
     keys: list[OffloadKey],
     block_ids: list[int] | None = None,
-) -> JobMetadata:
+) -> TransferJob:
     if block_ids is None:
         block_ids = list(range(len(keys)))
-    return JobMetadata(
+    return TransferJob(
         job_id=job_id,
         keys=keys,
         block_ids=np.array(block_ids, dtype=np.int64),
@@ -200,6 +202,9 @@ class MockNixlAgent:
 
     def release_dlist_handle(self, handle):
         pass
+
+    def get_xfer_telemetry(self, handle):
+        return SimpleNamespace(xferDuration=1000)
 
     def _query_memory(self, queries, mem_type, agent_name):
         return [object() if q[3] in self._stored_obj_keys else None for q in queries]
@@ -333,6 +338,32 @@ class TestMockObjTierBasic:
         results = drain(self.tier)
         assert len(results) == 1
         assert not results[0].success
+
+    def test_failed_load_marks_verdict_negative(self):
+        """Regression for the failed-load livelock on the obj tier: a
+        cached HIT must not survive a failed load of the same key. On the
+        failed promotion the tier marks the verdict False from
+        get_finished_jobs() (drained here) on the scheduler thread; otherwise
+        the scheduler would re-issue the same doomed promotion every step for
+        the life of the request. The mark is served from cache with no
+        re-probe, so even though the mock object is still 'present' the SAME
+        request now resolves to MISS."""
+        ctx = ReqContext(req_id="obj-livelock")
+        self.tier.submit_store(make_job(1, [key(1)], [0]))
+        assert all(r.success for r in drain(self.tier))
+        # Cache a positive verdict: the object is present, so lookup is a HIT.
+        assert lookup_and_wait(self.tier, [key(1)], ctx=ctx) == [LookupResult.HIT]
+
+        # The promotion the HIT triggered fails.
+        self.agent.check_xfer_state = lambda h: "ERR"
+        self.tier.submit_load(make_job(2, [key(1)], [0]))
+        results = drain(self.tier)
+        assert len(results) == 1 and not results[0].success
+
+        # After the failed promotion the SAME request's lookup must resolve to
+        # MISS (verdict marked False) instead of serving the stale HIT — even
+        # though the object itself is still present in the mock store.
+        assert lookup_and_wait(self.tier, [key(1)], ctx=ctx) == [LookupResult.MISS]
 
     def test_pending_transfer_not_returned_until_done(self):
         # First poll returns PROC; second poll returns DONE.

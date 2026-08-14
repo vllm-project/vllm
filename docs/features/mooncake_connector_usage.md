@@ -10,7 +10,9 @@ For more details about Mooncake, please refer to [Mooncake project](https://gith
 
 ### Installation
 
-Install mooncake through pip: `uv pip install mooncake-transfer-engine`.
+Install mooncake through pip: `uv pip install mooncake-transfer-engine-cuda13`.
+
+vLLM defaults to CUDA 13. On a CUDA 12 environment install `mooncake-transfer-engine` instead — the two are the same release built against different CUDA majors, and the wrong one fails to import with `libcudart.so.<major>: cannot open shared object file`.
 
 Refer to [Mooncake official repository](https://github.com/kvcache-ai/Mooncake) for more installation instructions
 
@@ -44,6 +46,12 @@ Now you can send requests to the proxy server through port 8000.
     - For headless instances, must be the same as the master instance
     - Each instance needs a unique port on its host; using the same port number across different hosts is fine
 
+- `WITH_NVIDIA_PEERMEM`: Selects how mooncake registers GPU memory for RDMA. Read by mooncake, not vLLM.
+    - Default: 1, which uses `ibv_reg_mr()` and requires the `nvidia-peermem` kernel module to be loaded
+    - Set to 0 to use the DMA-BUF path, which does not need that module. Required on hosts where `nvidia-peermem` is not loaded, such as GB200
+    - With the container image, pass it at run time: `docker run -e WITH_NVIDIA_PEERMEM=0 ...`
+    - Symptom when left unset on such a host: `Failed to register memory <addr>: Bad address [14]` from `rdma_context.cpp`, and KV transfers fail
+
 - `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`: Timeout (in seconds) for automatically releasing the prefiller’s KV cache for a particular request. (Optional)
     - Default: 480
     - If a request is aborted and the decoder has not yet notified the prefiller, the prefill instance will release its KV-cache blocks after this timeout to avoid holding them indefinitely.
@@ -60,6 +68,7 @@ Now you can send requests to the proxy server through port 8000.
 
 - **num_workers**: Size of thread pool for one prefiller worker to transfer KV caches by mooncake. (default 10)
 - **mooncake_protocol**: Mooncake connector protocol. (default "rdma")
+- **device_name**: Comma-separated whitelist of RDMA devices (e.g. `"mlx5_0,mlx5_1"`) to restrict topology discovery to. Empty discovers every device. Useful on hosts exposing a mix of InfiniBand and RoCE ports, where both peers must settle on the same link layer.
 
 ## Example Scripts/Code
 

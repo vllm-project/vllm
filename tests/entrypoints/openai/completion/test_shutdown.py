@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import httpx
 import openai
@@ -15,13 +16,11 @@ import psutil
 import pytest
 
 from tests.utils import RemoteOpenAIServer
-from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 # GPU initialization might take take longer
-_IS_ROCM = current_platform.is_rocm()
 _SERVER_STARTUP_TIMEOUT = 120
 _PROCESS_EXIT_TIMEOUT = 15
 _SHUTDOWN_DETECTION_TIMEOUT = 10
@@ -129,7 +128,7 @@ async def _concurrent_request_loop(
 
 
 @pytest.mark.asyncio
-async def test_shutdown_on_engine_failure():
+async def test_shutdown_on_engine_failure(tmp_path: Path):
     """Verify that API returns connection error when server process is killed.
 
     Starts a vLLM server, kills it to simulate a crash, then verifies that
@@ -138,33 +137,35 @@ async def test_shutdown_on_engine_failure():
 
     port = get_open_port()
 
-    proc = subprocess.Popen(
-        [
-            # dtype, max-len etc set so that this can run in CI
-            sys.executable,
-            "-m",
-            "vllm.entrypoints.openai.api_server",
-            "--model",
-            MODEL_NAME,
-            "--dtype",
-            "bfloat16",
-            "--max-model-len",
-            "128",
-            "--enforce-eager",
-            "--port",
-            str(port),
-            "--gpu-memory-utilization",
-            "0.05",
-            "--max-num-seqs",
-            "2",
-        ],
-        # ROCm: Disable stdout/stderr pipe capture. Subprocess hangs when
-        # stdout/stderr pipes are enabled during ROCm GPU initialization.
-        stdout=None if _IS_ROCM else subprocess.PIPE,
-        stderr=None if _IS_ROCM else subprocess.PIPE,
-        text=None if _IS_ROCM else True,
-        preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN),
-    )
+    # Redirect server output to a file rather than a pipe: nothing drains the
+    # pipes while we poll for startup, so a server that writes more than the
+    # pipe buffer holds would block on write and never become ready.
+    server_log = tmp_path / "server.log"
+    with server_log.open("wb") as log_file:
+        proc = subprocess.Popen(
+            [
+                # dtype, max-len etc set so that this can run in CI
+                sys.executable,
+                "-m",
+                "vllm.entrypoints.openai.api_server",
+                "--model",
+                MODEL_NAME,
+                "--dtype",
+                "bfloat16",
+                "--max-model-len",
+                "128",
+                "--enforce-eager",
+                "--port",
+                str(port),
+                "--gpu-memory-utilization",
+                "0.05",
+                "--max-num-seqs",
+                "2",
+            ],
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_IGN),
+        )
 
     # Wait for server startup
     start_time = time.time()
@@ -185,18 +186,17 @@ async def test_shutdown_on_engine_failure():
         except Exception:
             time.sleep(0.5)
             if proc.poll() is not None:
-                if _IS_ROCM:
-                    pytest.fail(f"Server died during startup: {proc.returncode}")
-                else:
-                    stdout, stderr = proc.communicate(timeout=1)
-                    pytest.fail(
-                        f"Server died during startup. "
-                        f"stdout: {stdout}, stderr: {stderr}"
-                    )
+                pytest.fail(
+                    f"Server died during startup: {proc.returncode}\n"
+                    f"{server_log.read_text(errors='replace')}"
+                )
     else:
         proc.terminate()
         proc.wait(timeout=_PROCESS_EXIT_TIMEOUT)
-        pytest.fail(f"Server failed to start in {_SERVER_STARTUP_TIMEOUT} seconds")
+        pytest.fail(
+            f"Server failed to start in {_SERVER_STARTUP_TIMEOUT} seconds\n"
+            f"{server_log.read_text(errors='replace')}"
+        )
 
     # Kill server to simulate crash
     proc.terminate()

@@ -113,9 +113,7 @@ def test_audio_multimodal_processor(model_id):
     )
 
 
-def test_audio_multiple_inputs():
-    """Multiple audios per prompt are each detected as a separate placeholder
-    and multi-modal item by the Transformers backend."""
+def _process_granite_speech(separator: str):
     model_id = "ibm-granite/granite-speech-3.3-2b"
     model_config = ModelConfig(model=model_id, model_impl="transformers")
     mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
@@ -124,15 +122,54 @@ def test_audio_multiple_inputs():
     # One token per audio; the processor expands each to its placeholder run.
     prompt = (
         "<|start_of_role|>user<|end_of_role|>"
-        f"{audio_token} and {audio_token} transcribe<|end_of_text|>\n"
+        f"{audio_token}{separator}{audio_token} transcribe<|end_of_text|>\n"
     )
     audios = [np.zeros(16000, dtype=np.float32), np.zeros(24000, dtype=np.float32)]
 
-    result = mm_processor(
+    return mm_processor(
         prompt=prompt,
         mm_items=mm_processor.info.parse_mm_data({"audio": audios}),
         hf_processor_mm_kwargs={},
     )
 
+
+def test_audio_multiple_inputs():
+    """Multiple audios per prompt are each detected as a separate placeholder
+    and multi-modal item by the Transformers modelling backend."""
+    result = _process_granite_speech(separator=" and ")
+
     assert len(result["mm_placeholders"]["audio"]) == 2
     assert len(result["mm_kwargs"]["audio"]) == 2
+
+
+def test_audio_fields_not_claimed_by_image():
+    """Audio fields survive when the image branch is also active."""
+    model_id = "ibm-granite/granite-speech-3.3-2b"
+    model_config = ModelConfig(model=model_id, model_impl="transformers")
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+
+    audio_keys = ["input_features", "input_features_mask"]
+    owned = mm_processor._partition_keys_by_modality(audio_keys, ["audio", "image"])
+
+    assert owned["audio"] == audio_keys
+    assert owned["image"] == []
+
+
+def test_unclaimed_fields_warn_rather_than_raise():
+    """Keys no sub-processor declares are dropped with a warning, not an error."""
+    model_id = "ibm-granite/granite-speech-3.3-2b"
+    model_config = ModelConfig(model=model_id, model_impl="transformers")
+    mm_processor = MULTIMODAL_REGISTRY.create_processor(model_config)
+
+    owned = mm_processor._partition_keys_by_modality(
+        ["input_features", "surprise_field"], ["audio", "image"]
+    )
+
+    assert owned["audio"] == ["input_features"]
+    assert owned["image"] == []
+
+
+def test_audio_adjacent_inputs():
+    """Adjacent audios are rejected rather than silently merged into one placeholder."""
+    with pytest.raises(ValueError, match="told apart"):
+        _process_granite_speech(separator="")
