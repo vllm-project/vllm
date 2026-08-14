@@ -60,7 +60,13 @@ def main() -> None:
     )
 
     outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
-    print(outputs)
+
+    for req in outputs:
+        print(f"Request {req.request_id}:")
+        for lp_dict in req.prompt_logprobs[1:]:
+            for token_id, logprob_obj in lp_dict.items():
+                print(f"  {token_id}:{logprob_obj.logprob:.4f}")
+        print()
 
 if __name__ == "__main__":
     main()
