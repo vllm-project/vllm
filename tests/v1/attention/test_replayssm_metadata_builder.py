@@ -22,11 +22,6 @@ from vllm.v1.kv_cache_interface import MambaSpec
 BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
 
-# Flip when FlashInfer ReplaySSM metadata (ring_start / prev_num_accepted) is
-# implemented in BaseMambaAttentionMetadataBuilder.
-FLASHINFER_REPLAYSSM_METADATA_READY = False
-
-
 @dataclass
 class ReplaySSMBuildCase:
     """A decode batch and its expected per-row write_pos / is_flush.
@@ -265,32 +260,25 @@ def test_resumed_request_differs_from_fresh():
     assert meta.is_flush_d.tolist()[:2] == [0, 0]
 
 
-def test_flashinfer_replayssm_metadata_pending():
-    """FlashInfer path must not silently reuse Triton write_pos metadata."""
+def test_flashinfer_replayssm_ring_metadata_fresh_decode():
+    """FlashInfer receives per-slot ring metadata and per-row scratch."""
     builder = _create_replayssm_builder(
         16, mamba_backend=MambaBackendEnum.FLASHINFER
     )
     case = REPLAYSSM_BUILD_CASES["fresh_decode"]
-    with pytest.raises(NotImplementedError, match="FlashInfer ReplaySSM metadata"):
-        _build(builder, case)
-
-
-@pytest.mark.skipif(
-    not FLASHINFER_REPLAYSSM_METADATA_READY,
-    reason="FlashInfer ReplaySSM metadata not implemented yet",
-)
-def test_flashinfer_replayssm_ring_metadata_fresh_decode():
-    """Fresh decode: ring_start / prev_num_accepted for checkpointing_ssu."""
-    builder = _create_replayssm_builder(
-        16, mamba_backend=MambaBackendEnum.FLASHINFER
-    )
-    meta = _build(builder, REPLAYSSM_BUILD_CASES["fresh_decode"])
+    meta = _build(builder, case)
 
     assert meta.ring_start_d is not None
     assert meta.prev_num_accepted_d is not None
     assert meta.write_pos_d is None
     assert meta.is_flush_d is None
     assert meta.bc_pre_scratch is None
-    # Fill in expected ring_start / prev_num_accepted once the FI schedule is
-    # defined; until then this test stays skipped via the flag above.
-    raise NotImplementedError("set expected ring_start / prev_num_accepted")
+    state_slot = int(meta.state_indices_tensor_d[0, 0])
+    assert torch.count_nonzero(meta.ring_start_d) == 0
+    assert int(meta.prev_num_accepted_d[state_slot]) == case.expected_write_pos[0]
+    assert meta.cb_scaled is not None
+    assert meta.cb_scaled.shape == (1, 1, 32, 8)
+    assert meta.cumAdt_vec is not None
+    assert meta.cumAdt_vec.shape == (1, 1, 16)
+    assert meta.cb_old is not None
+    assert meta.cb_old.shape == (1, 1, 32, 8)
