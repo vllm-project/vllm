@@ -65,6 +65,7 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -1364,19 +1365,54 @@ class MooncakeStoreWorker:
             )
             return
 
-        # Single-group + PCP/DCP > 1: scale the lone group's spec.block_size to
-        # self.block_size (= scheduler_block_size) so the coordinator's
-        # ``block_size % hash_block_size == 0`` invariant holds.
+        # Put every group's block size into the scheduler's coordinate space.
+        #
+        # This connector indexes ``block_ids`` with GLOBAL token positions --
+        # ``starts // block_size`` and ``(spans + block_size - 1) // block_size``
+        # in ChunkedTokenDatabase.prepare_values. Under DCP a rank holds a
+        # strided 1/dcp slice, so one physical block of an ATTENTION group spans
+        # ``block_size * dcp`` global tokens, while a Mamba group's state is
+        # replicated per rank and still spans ``block_size``. That is the rule
+        # ``resolve_kv_cache_block_sizes`` states and the scheduler follows, so
+        # mirroring it keeps this connector in the same coordinates as the
+        # ``block_ids`` it is handed. Applying it per group is what lifts the
+        # hybrid + DCP refusal in connector.py.
+        #
+        # The single-group path is left exactly as it was. It substitutes
+        # scheduler_block_size wholesale, which for one ATTENTION group equals
+        # ``block_size * dcp`` and so agrees with the rule anyway -- but for one
+        # MAMBA group it does not, and that substitution is deliberate: it keeps
+        # the coordinator's ``block_size % hash_block_size`` invariant holding.
+        # Generalising over it would have changed a working path to open an
+        # unrelated one.
         groups = list(kv_cache_config.kv_cache_groups)
-        if len(groups) == 1 and groups[0].kv_cache_spec.block_size != self.block_size:
-            g = groups[0]
+        if len(groups) == 1:
+            if groups[0].kv_cache_spec.block_size != self.block_size:
+                g = groups[0]
+                groups = [
+                    dataclasses.replace(
+                        g,
+                        kv_cache_spec=dataclasses.replace(
+                            g.kv_cache_spec, block_size=self.block_size
+                        ),
+                    )
+                ]
+        else:
+            # dcp only, exactly as resolve_kv_cache_block_sizes does. PCP is a
+            # different sharding, is still refused in connector.py, and folding
+            # it in here would be a scale nothing else agrees with.
+            dcp = vllm_config.parallel_config.decode_context_parallel_size
             groups = [
-                dataclasses.replace(
+                g
+                if not isinstance(g.kv_cache_spec, AttentionSpec) or dcp == 1
+                else dataclasses.replace(
                     g,
                     kv_cache_spec=dataclasses.replace(
-                        g.kv_cache_spec, block_size=self.block_size
+                        g.kv_cache_spec,
+                        block_size=g.kv_cache_spec.block_size * dcp,
                     ),
                 )
+                for g in groups
             ]
         self._kv_cache_groups: list[KVCacheGroupSpec] = groups
         spec_cfg = getattr(vllm_config, "speculative_config", None)
