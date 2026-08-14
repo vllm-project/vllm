@@ -247,6 +247,7 @@ def test_unaligned_resume_never_runs_past_its_block(
     for end in ends[:-1]:
         aligned = end % MAMBA_BLOCK_SIZE == 0
         assert aligned or (partial_hit and end in (tail_boundary, state_position)), (
-            f"intermediate chunk end {end} is neither block-aligned nor a "
-            f"partial-tail boundary"
+            f"intermediate chunk end {end} is neither block-aligned nor the "
+            f"partial-tail boundary {tail_boundary} nor the replay landing "
+            f"position {state_position}"
         )

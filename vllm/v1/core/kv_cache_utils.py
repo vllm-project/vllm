@@ -673,9 +673,10 @@ def mamba_state_cache_position(
 ) -> int:
     """Position at which a producer must snapshot Mamba state under spec decode.
 
-    A replay of this prefix caps its lookup at ``num_tokens - 1`` and then drops
-    one unit for EAGLE (see `FullAttentionManager.find_longest_cache_hit`), so it
-    lands one unit below the deepest boundary under that cap.
+    A replay of this prefix caps its lookup at ``num_tokens - 1`` (see
+    `KVCacheManager.get_computed_blocks`) and then drops one unit for EAGLE (see
+    `FullAttentionManager.find_longest_cache_hit`), so it lands one unit below
+    the deepest boundary under that cap. Clamped at 0 for short prefixes.
     """
     unit = min(hash_block_size, block_size)
     return max((num_tokens - 1 - unit) // unit * unit, 0)

@@ -817,8 +817,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             # A replay caps its lookup at ``prompt_tokens - 1``, so a prompt
             # ending on a boundary can only match one unit lower; the unshifted
             # tail still serves requests extending this prompt. Deepest first:
-            # a deeper entry evicts shallower hashes on the same block, not the
-            # other way round.
+            # a deeper entry overwrites shallower hashes on the same block, not
+            # the other way round.
             replay_tail = (prompt_tokens - 1) // hash_block_size * hash_block_size
             if replay_tail != boundaries[0]:
                 boundaries += (replay_tail,)
@@ -1737,8 +1737,11 @@ class MambaManager(SingleTypeKVCacheManager):
                 self.cached_blocks_this_step.add(block.block_hash)
 
     def _state_boundary(self, request: Request) -> int:
-        """Sub-block position whose state this prompt publishes, and where a
-        replay of it looks."""
+        """Sub-block position whose state this prompt publishes.
+
+        Under a drafter that is where a replay of the prompt lands; otherwise it
+        is the prompt's own hash boundary.
+        """
         hash_block_size = self.block_pool.hash_block_size
         if self.engine_uses_eagle:
             # A replay is rewound one hash unit, so the snapshot belongs there
@@ -1751,11 +1754,11 @@ class MambaManager(SingleTypeKVCacheManager):
     def _unreachable_boundaries(self, request: Request) -> Sequence[int]:
         """A block-aligned prompt end, once the state below it is published.
 
-        No lookup can land at or past this prompt's own end: its deepest key is
-        that end, and the drafter rewinds one hash unit off whatever the EAGLE
-        group matched. The state there is therefore dead, while the rewound one
-        below it is where consumers land. Guarded on the latter being cached so
-        a prompt is never left without a state.
+        No replay of this prompt can land at or past its own end: the deepest
+        key it offers is that end, and the drafter rewinds one hash unit off
+        whatever the EAGLE group matched. The state there is therefore dead for
+        replays, while the rewound one below it is where they land. Guarded on
+        the latter being cached so a prompt is never left without a state.
         """
         num_prompt_tokens = request.num_prompt_tokens
         if (
