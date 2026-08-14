@@ -169,16 +169,17 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: Multi-Modal Models (Extended Generation 2)
+- label: Multi-Modal Models (Extended Generation 2) %N
   device: h200_35gb
   key: multi-modal-models-extended-generation-2
+  parallelism: 4
   optional: true
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal/generation
   commands:
-    - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
+    - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: Multi-Modal Models (Extended Generation 3)
   device: h200_35gb
