@@ -11,7 +11,6 @@ overwrites the sampled token in place before logprobs are computed.
 from types import SimpleNamespace
 from typing import cast
 
-import numpy as np
 import pytest
 import torch
 
@@ -142,11 +141,10 @@ def test_state_end_to_end():
     state.apply_staged_writes()
 
     idx_mapping = _i32([0, 1])
-    idx_mapping_np = np.array([0, 1], dtype=np.int32)
     prompt_len = _i32([7, 7, 0, 0])
     sampled = _i64([-1, -1])
     total_len = _i32([7 + 1, 7, 0, 0])  # req 0 at step 1
-    state.apply_trace(sampled, idx_mapping, idx_mapping_np, total_len, prompt_len)
+    state.apply_trace(sampled, idx_mapping, total_len, prompt_len)
     assert sampled.tolist() == [22, -1]
 
 
@@ -159,11 +157,10 @@ def test_state_skips_when_no_trace_in_batch():
 
     # Only the non-trace request (state 1) is in this batch.
     idx_mapping = _i32([1])
-    idx_mapping_np = np.array([1], dtype=np.int32)
     prompt_len = _i32([7, 7, 0, 0])
     sampled = _i64([555])
     total_len = _i32([0, 7, 0, 0])
-    state.apply_trace(sampled, idx_mapping, idx_mapping_np, total_len, prompt_len)
+    state.apply_trace(sampled, idx_mapping, total_len, prompt_len)
     assert sampled.tolist() == [555]
 
 
@@ -177,9 +174,9 @@ def test_slot_reuse_clears_trace():
     state.apply_staged_writes()
 
     idx_mapping = _i32([0])
-    idx_mapping_np = np.array([0], dtype=np.int32)
     prompt_len = _i32([3, 0])
     sampled = _i64([888])
     total_len = _i32([3, 0])
-    state.apply_trace(sampled, idx_mapping, idx_mapping_np, total_len, prompt_len)
+    state.apply_trace(sampled, idx_mapping, total_len, prompt_len)
     assert sampled.tolist() == [888]
+    assert state.any_trace

@@ -121,7 +121,6 @@ class Sampler:
         self.trace_replay_state.apply_trace(
             sampled,
             idx_mapping,
-            idx_mapping_np,
             self.req_states.total_len.gpu,
             self.req_states.prompt_len.gpu,
         )

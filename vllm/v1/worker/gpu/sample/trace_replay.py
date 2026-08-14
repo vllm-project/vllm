@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import numpy as np
 import torch
 
 from vllm.sampling_params import SamplingParams
@@ -30,10 +29,8 @@ class TraceReplayState:
             uva_instead_of_gpu=True,
         )
         self.trace_len = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
-        # CPU mirror used to skip the kernel launch when no request replays.
-        self.use_trace = np.zeros(self.max_num_reqs, dtype=bool)
-        # Sticky: set once any request replays, so the per-step staged-write path
-        # is an O(1) check instead of an O(max_num_reqs) scan of use_trace.
+        # Sticky: set once any request replays, so the per-step paths can use an
+        # O(1) check. Per-request trace_len values protect non-replay requests.
         self.any_trace = False
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
@@ -41,11 +38,9 @@ class TraceReplayState:
         if trace is not None:
             self.trace_len.np[req_idx] = len(trace)
             self.trace_token_ids.stage_write(req_idx, 0, trace)
-            self.use_trace[req_idx] = True
             self.any_trace = True
         else:
             self.trace_len.np[req_idx] = 0
-            self.use_trace[req_idx] = False
 
     def apply_staged_writes(self) -> None:
         if self.any_trace:
@@ -56,11 +51,10 @@ class TraceReplayState:
         self,
         sampled: torch.Tensor,
         idx_mapping: torch.Tensor,
-        idx_mapping_np: np.ndarray,
         total_len: torch.Tensor,
         prompt_len: torch.Tensor,
     ) -> None:
-        if not np.any(self.use_trace[idx_mapping_np]):
+        if not self.any_trace:
             return
         apply_trace_tokens(
             sampled,
