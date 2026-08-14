@@ -36,8 +36,10 @@ from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+    get_replayssm_backend,
     selective_state_update,
-    selective_state_update_replayssm,
+    selective_state_update_replayssm_flashinfer,
+    selective_state_update_replayssm_triton,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import (
@@ -1059,26 +1061,52 @@ class MambaMixer2(MambaBase, PluggableLayer):
             )
             if self.use_replayssm:
                 assert self.replayssm_buffer_len is not None
-                selective_state_update_replayssm(
-                    ssm_state,
-                    hidden_states_d,
-                    dt_d,
-                    A_d,
-                    B_d,
-                    C_d,
-                    D_d,
-                    dt_bias,
-                    dt_softplus=True,
-                    x_cache=x_cache,
-                    dt_cache=dt_cache,
-                    B_cache=B_cache,
-                    bc_pre=attn_metadata.bc_pre_scratch,
-                    write_pos=attn_metadata.write_pos_d,
-                    is_flush=attn_metadata.is_flush_d,
-                    max_cache_len=self.replayssm_buffer_len,
-                    state_batch_indices=state_indices_tensor_d_input,
-                    out=preallocated_ssm_out_d,
-                )
+                replayssm_backend = get_replayssm_backend()
+                if replayssm_backend.name == "flashinfer":
+                    assert attn_metadata.ring_start_d is not None
+                    assert attn_metadata.prev_num_accepted_d is not None
+                    selective_state_update_replayssm_flashinfer(
+                        ssm_state,
+                        hidden_states_d,
+                        dt_d,
+                        A_d,
+                        B_d,
+                        C_d,
+                        preallocated_ssm_out_d,
+                        x_cache,
+                        B_cache,
+                        dt_cache,
+                        attn_metadata.ring_start_d,
+                        attn_metadata.prev_num_accepted_d,
+                        D=D_d,
+                        dt_bias=dt_bias,
+                        dt_softplus=True,
+                        state_batch_indices=state_indices_tensor_d_input,
+                        cb_scaled=attn_metadata.fi_cb_scaled_scratch,
+                        cumAdt_vec=attn_metadata.fi_cumAdt_vec_scratch,
+                        cb_old=attn_metadata.fi_cb_old_scratch,
+                    )
+                else:
+                    selective_state_update_replayssm_triton(
+                        ssm_state,
+                        hidden_states_d,
+                        dt_d,
+                        A_d,
+                        B_d,
+                        C_d,
+                        D_d,
+                        dt_bias,
+                        dt_softplus=True,
+                        x_cache=x_cache,
+                        dt_cache=dt_cache,
+                        B_cache=B_cache,
+                        bc_pre=attn_metadata.bc_pre_scratch,
+                        write_pos=attn_metadata.write_pos_d,
+                        is_flush=attn_metadata.is_flush_d,
+                        max_cache_len=self.replayssm_buffer_len,
+                        state_batch_indices=state_indices_tensor_d_input,
+                        out=preallocated_ssm_out_d,
+                    )
             else:
                 selective_state_update(
                     ssm_state,

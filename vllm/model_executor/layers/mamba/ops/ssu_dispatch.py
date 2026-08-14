@@ -3,17 +3,17 @@
 """
 Dispatch module for Mamba selective state update (SSU) backends.
 
-Provides unified ``selective_state_update`` (baseline decode) and
-``selective_state_update_replayssm`` (cached-input ReplaySSM decode) that
-dispatch to Triton / FlashInfer / CPU based on ``MambaBackendEnum``. On
-CPU-only platforms (PowerPC, x86 without CUDA) the baseline SSU backend
-defaults to ``cpu``.
+Provides unified ``selective_state_update`` (baseline decode) and ReplaySSM
+decode entry points that dispatch to Triton / FlashInfer / CPU based on
+``MambaBackendEnum``. On CPU-only platforms (PowerPC, x86 without CUDA) the
+baseline SSU backend defaults to ``cpu``.
 
-The FlashInfer ReplaySSM path imports ``flashinfer.mamba.checkpointing_ssu``
-and reshapes T=1 AR tensors, but the vLLM ``write_pos`` / ``is_flush`` /
-``bc_pre`` → FlashInfer ``ring_start`` / ``prev_num_accepted_tokens`` /
-scratch contract is intentionally unfinished (see
-``translate_vllm_replayssm_bookkeeping``).
+ReplaySSM backends:
+  - Triton: ``write_pos`` / ``is_flush`` / ``bc_pre``
+    (``selective_state_update_replayssm_triton``)
+  - FlashInfer: ``ring_start`` / ``prev_num_accepted_tokens`` (+ optional
+    two-kernel scratch), matching ``flashinfer.mamba.checkpointing_ssu``
+    (``selective_state_update_replayssm_flashinfer``)
 """
 
 from abc import ABC, abstractmethod
@@ -270,7 +270,7 @@ _mamba_ssu_backend: MambaSSUBackend | None = None
 
 
 class ReplaySSMBackend(ABC):
-    """Abstract base class for ReplaySSM decode backends."""
+    """Marker base for ReplaySSM decode backends."""
 
     def __init__(self, mamba_config: MambaConfig):
         self._mamba_config = mamba_config
@@ -279,34 +279,9 @@ class ReplaySSMBackend(ABC):
     @abstractmethod
     def name(self) -> str: ...
 
-    @abstractmethod
-    def __call__(
-        self,
-        state: torch.Tensor,
-        x: torch.Tensor,
-        dt: torch.Tensor,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        C: torch.Tensor,
-        D: torch.Tensor | None = None,
-        dt_bias: torch.Tensor | None = None,
-        z: torch.Tensor | None = None,
-        dt_softplus: bool = False,
-        x_cache: torch.Tensor | None = None,
-        dt_cache: torch.Tensor | None = None,
-        B_cache: torch.Tensor | None = None,
-        bc_pre: torch.Tensor | None = None,
-        write_pos: torch.Tensor | None = None,
-        is_flush: torch.Tensor | None = None,
-        max_cache_len: int = 16,
-        state_batch_indices: torch.Tensor | None = None,
-        null_block_id: int = NULL_BLOCK_ID,
-        out: torch.Tensor | None = None,
-    ) -> torch.Tensor: ...
-
 
 class TritonReplaySSMBackend(ReplaySSMBackend):
-    """vLLM's in-tree Triton ReplaySSM output_only kernel."""
+    """vLLM Triton ReplaySSM (``write_pos`` / ``is_flush`` / ``bc_pre``)."""
 
     def __init__(self, mamba_config: MambaConfig):
         super().__init__(mamba_config)
@@ -369,41 +344,8 @@ class TritonReplaySSMBackend(ReplaySSMBackend):
         )
 
 
-def translate_vllm_replayssm_bookkeeping(
-    *,
-    write_pos: torch.Tensor,
-    is_flush: torch.Tensor,
-    state_batch_indices: torch.Tensor | None,
-    max_cache_len: int,
-    batch: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Map vLLM ReplaySSM host metadata to FlashInfer checkpointing_ssu args.
-
-    vLLM (Triton ReplaySSM) provides per-decode-row:
-      - ``write_pos``: ring append cursor in ``[0, max_cache_len)``
-      - ``is_flush``: materialize full SSM state this step
-
-    FlashInfer ``checkpointing_ssu`` expects per-cache-slot:
-      - ``ring_start``: oldest live ring index
-      - ``prev_num_accepted_tokens``: live history length to replay
-
-    Returns:
-        ``(ring_start, prev_num_accepted_tokens)`` shaped for the FlashInfer
-        call (typically indexed by cache slot, not batch row).
-
-    Raises:
-        NotImplementedError: contract adapter not wired yet.
-    """
-    raise NotImplementedError(
-        "FlashInfer ReplaySSM bookkeeping adapter is not implemented yet. "
-        "Map vLLM write_pos/is_flush (and state_batch_indices) to FlashInfer "
-        "ring_start/prev_num_accepted_tokens for max_cache_len="
-        f"{max_cache_len}, batch={batch}."
-    )
-
-
 class FlashInferReplaySSMBackend(ReplaySSMBackend):
-    """FlashInfer ``checkpointing_ssu`` ReplaySSM backend (contract pending)."""
+    """FlashInfer ``checkpointing_ssu`` ReplaySSM backend."""
 
     def __init__(self, mamba_config: MambaConfig):
         super().__init__(mamba_config)
@@ -429,53 +371,32 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
         A: torch.Tensor,
         B: torch.Tensor,
         C: torch.Tensor,
+        out: torch.Tensor,
+        x_cache: torch.Tensor,
+        B_cache: torch.Tensor,
+        dt_cache: torch.Tensor,
+        ring_start: torch.Tensor,
+        prev_num_accepted_tokens: torch.Tensor,
         D: torch.Tensor | None = None,
         dt_bias: torch.Tensor | None = None,
         z: torch.Tensor | None = None,
         dt_softplus: bool = False,
-        x_cache: torch.Tensor | None = None,
-        dt_cache: torch.Tensor | None = None,
-        B_cache: torch.Tensor | None = None,
-        bc_pre: torch.Tensor | None = None,
-        write_pos: torch.Tensor | None = None,
-        is_flush: torch.Tensor | None = None,
-        max_cache_len: int = 16,
         state_batch_indices: torch.Tensor | None = None,
         null_block_id: int = NULL_BLOCK_ID,
-        out: torch.Tensor | None = None,
+        cb_scaled: torch.Tensor | None = None,
+        cumAdt_vec: torch.Tensor | None = None,
+        cb_old: torch.Tensor | None = None,
+        algorithm: str = "auto",
     ) -> torch.Tensor:
-        del bc_pre  # Triton-only scratch; FI uses its own precompute buffers.
-        if write_pos is None or is_flush is None:
-            raise ValueError(
-                "FlashInfer ReplaySSM requires write_pos and is_flush metadata"
-            )
-        if out is None:
-            raise ValueError("FlashInfer ReplaySSM requires a preallocated out tensor")
-        if x_cache is None or dt_cache is None or B_cache is None:
-            raise ValueError(
-                "FlashInfer ReplaySSM requires x_cache, dt_cache, and B_cache"
-            )
-
-        # Mechanical T=1 reshape for AR decode. MTP (T>1) is out of scope until
-        # ReplaySSM speculative decode is enabled.
+        # AR decode currently passes (batch, nheads, dim); checkpointing_ssu
+        # expects a predicted-token axis T. Unsqueeze T=1 here.
         if x.dim() == 3:
-            x_t = x.unsqueeze(1)
-            dt_t = dt.unsqueeze(1)
-            B_t = B.unsqueeze(1)
-            C_t = C.unsqueeze(1)
-            out_t = out.unsqueeze(1)
-            z_t = z.unsqueeze(1) if z is not None else None
-        else:
-            x_t, dt_t, B_t, C_t, out_t, z_t = x, dt, B, C, out, z
-
-        batch = x_t.shape[0]
-        ring_start, prev_num_accepted = translate_vllm_replayssm_bookkeeping(
-            write_pos=write_pos,
-            is_flush=is_flush,
-            state_batch_indices=state_batch_indices,
-            max_cache_len=max_cache_len,
-            batch=batch,
-        )
+            x = x.unsqueeze(1)
+            dt = dt.unsqueeze(1)
+            B = B.unsqueeze(1)
+            C = C.unsqueeze(1)
+            out = out.unsqueeze(1)
+            z = z.unsqueeze(1) if z is not None else None
 
         rand_seed = (
             torch.randint(0, 2**32, (1,), device=state.device, dtype=torch.int64)
@@ -492,21 +413,25 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
             B_cache,
             dt_cache,
             ring_start,
-            prev_num_accepted,
-            x_t,
-            dt_t,
+            prev_num_accepted_tokens,
+            x,
+            dt,
             A,
-            B_t,
-            C_t,
-            out_t,
+            B,
+            C,
+            out,
             D=D,
-            z=z_t,
+            z=z,
             dt_bias=dt_bias,
             dt_softplus=dt_softplus,
             state_batch_indices=indices,
             pad_slot_id=null_block_id,
             rand_seed=rand_seed,
             philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds or 10,
+            cb_scaled=cb_scaled,
+            cumAdt_vec=cumAdt_vec,
+            cb_old=cb_old,
+            algorithm=algorithm,
         )
 
 
@@ -554,7 +479,7 @@ def get_replayssm_backend() -> ReplaySSMBackend:
     return _replayssm_backend
 
 
-def selective_state_update_replayssm(
+def selective_state_update_replayssm_triton(
     state: torch.Tensor,
     x: torch.Tensor,
     dt: torch.Tensor,
@@ -576,8 +501,15 @@ def selective_state_update_replayssm(
     null_block_id: int = NULL_BLOCK_ID,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Unified dispatch for ReplaySSM selective state update."""
-    return get_replayssm_backend()(
+    """Triton ReplaySSM decode (``write_pos`` / ``is_flush`` / ``bc_pre``)."""
+    backend = get_replayssm_backend()
+    if not isinstance(backend, TritonReplaySSMBackend):
+        raise RuntimeError(
+            "selective_state_update_replayssm_triton is the Triton ReplaySSM "
+            f"entry point; current backend is {backend.name!r}. Use "
+            "selective_state_update_replayssm_flashinfer for FlashInfer."
+        )
+    return backend(
         state,
         x,
         dt,
@@ -598,6 +530,63 @@ def selective_state_update_replayssm(
         state_batch_indices=state_batch_indices,
         null_block_id=null_block_id,
         out=out,
+    )
+
+
+def selective_state_update_replayssm_flashinfer(
+    state: torch.Tensor,
+    x: torch.Tensor,
+    dt: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    out: torch.Tensor,
+    x_cache: torch.Tensor,
+    B_cache: torch.Tensor,
+    dt_cache: torch.Tensor,
+    ring_start: torch.Tensor,
+    prev_num_accepted_tokens: torch.Tensor,
+    D: torch.Tensor | None = None,
+    dt_bias: torch.Tensor | None = None,
+    z: torch.Tensor | None = None,
+    dt_softplus: bool = False,
+    state_batch_indices: torch.Tensor | None = None,
+    null_block_id: int = NULL_BLOCK_ID,
+    cb_scaled: torch.Tensor | None = None,
+    cumAdt_vec: torch.Tensor | None = None,
+    cb_old: torch.Tensor | None = None,
+    algorithm: str = "auto",
+) -> torch.Tensor:
+    """FlashInfer ReplaySSM decode (``checkpointing_ssu``)."""
+    backend = get_replayssm_backend()
+    if not isinstance(backend, FlashInferReplaySSMBackend):
+        raise RuntimeError(
+            "selective_state_update_replayssm_flashinfer requires the "
+            f"flashinfer ReplaySSM backend; current backend is {backend.name!r}."
+        )
+    return backend(
+        state,
+        x,
+        dt,
+        A,
+        B,
+        C,
+        out,
+        x_cache,
+        B_cache,
+        dt_cache,
+        ring_start,
+        prev_num_accepted_tokens,
+        D=D,
+        dt_bias=dt_bias,
+        z=z,
+        dt_softplus=dt_softplus,
+        state_batch_indices=state_batch_indices,
+        null_block_id=null_block_id,
+        cb_scaled=cb_scaled,
+        cumAdt_vec=cumAdt_vec,
+        cb_old=cb_old,
+        algorithm=algorithm,
     )
 
 

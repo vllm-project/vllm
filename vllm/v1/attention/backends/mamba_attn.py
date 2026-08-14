@@ -8,6 +8,7 @@ from typing import Any, ClassVar, TypeVar
 import torch
 
 from vllm.config import VllmConfig
+from vllm.config.mamba import MambaBackendEnum
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -74,12 +75,20 @@ class BaseMambaAttentionMetadata:
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
-    # ReplaySSM standard decode: per-row ring cursor and flush flag, plus the
-    # per-step (decode_rows, ngroups, replayssm_buffer_len) fp32 scratch for the
-    # precomputed k^T q products. All None when use_replayssm is disabled.
+    # ReplaySSM standard decode — Triton: per-row ring cursor and flush flag,
+    # plus (decode_rows, ngroups, replayssm_buffer_len) fp32 scratch for
+    # precomputed B·C products. All None when use_replayssm is disabled or
+    # the FlashInfer ReplaySSM backend is selected.
     write_pos_d: torch.Tensor | None = None
     is_flush_d: torch.Tensor | None = None
     bc_pre_scratch: torch.Tensor | None = None
+    # ReplaySSM — FlashInfer checkpointing_ssu bookkeeping / scratch.
+    # All None unless that backend is on.
+    ring_start_d: torch.Tensor | None = None
+    prev_num_accepted_d: torch.Tensor | None = None
+    fi_cb_scaled_scratch: torch.Tensor | None = None
+    fi_cumAdt_vec_scratch: torch.Tensor | None = None
+    fi_cb_old_scratch: torch.Tensor | None = None
 
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
@@ -107,6 +116,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.use_spec_decode = self.num_spec_tokens > 0
         self.use_replayssm = vllm_config.cache_config.use_replayssm
         self.replayssm_buffer_len = vllm_config.cache_config.replayssm_buffer_len
+        self.use_flashinfer_replayssm = (
+            self.use_replayssm
+            and vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+        )
 
         scheduler_config = vllm_config.scheduler_config
         self.decode_cudagraph_max_bs: int = scheduler_config.max_num_seqs
@@ -166,9 +179,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.int32,
                 device=device,
             )
-        # ReplaySSM standard-decode CUDA-graph buffers: per-row ring cursor,
-        # flush flag, and the k^T q precompute scratch.
-        if self.use_replayssm:
+        # ReplaySSM CUDA-graph buffers (Triton write_pos/is_flush/bc_pre).
+        # FlashInfer ring_start/pnat buffers are allocated when that path is
+        # wired.
+        if self.use_replayssm and not self.use_flashinfer_replayssm:
             self.decode_write_pos_d: torch.Tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,),
                 dtype=torch.int32,
@@ -587,6 +601,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 ]
 
         if self.use_replayssm and num_decodes > 0:
+            if self.use_flashinfer_replayssm:
+                raise NotImplementedError(
+                    "FlashInfer ReplaySSM metadata is not implemented yet. "
+                    "Build ring_start / prev_num_accepted_tokens (and optional "
+                    "checkpointing_ssu two-kernel scratch) for "
+                    "flashinfer.mamba.checkpointing_ssu."
+                )
             decode_base_cpu = common_attn_metadata.replayssm_decode_base_cpu
             num_computed_tokens_cpu = common_attn_metadata._num_computed_tokens_cpu
             if decode_base_cpu is None or num_computed_tokens_cpu is None:
@@ -769,7 +790,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     )
                     block_idx_last_scheduled_token_prev_step[metadata.num_decodes :] = 0
 
-            if self.use_replayssm:
+            if self.use_replayssm and not self.use_flashinfer_replayssm:
                 assert write_pos_d is not None
                 assert is_flush_d is not None
                 self.decode_write_pos_d[: metadata.num_decodes].copy_(
