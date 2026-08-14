@@ -17,6 +17,7 @@ from vllm.compilation.breakable_cudagraph import (
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.distributed.parallel_state import (
     get_pp_group,
     graph_capture,
@@ -53,6 +54,9 @@ class BatchExecutionDescriptor:
     num_tokens: int
     num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
     uniform_token_count: int | None = None
+    # Upper bound on per-request query length. Varlen decode graphs leave
+    # uniform_token_count unset, so this is what keeps a prefill batch out of one.
+    max_query_len: int | None = None
     num_active_loras: int = 0
 
 
@@ -74,34 +78,25 @@ def _is_compatible(
     num_tokens: int,
     uniform_token_count: int | None,
     num_active_loras: int,
+    max_query_len: int | None,
 ) -> bool:
     # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
     # desc.num_reqs=None means no request padding needed (PIECEWISE)
+    # desc.max_query_len=None means the graph does not constrain query length; a
+    # caller that does not track max_query_len must not match one that does
     return (
         (
             desc.uniform_token_count is None
             or desc.uniform_token_count == uniform_token_count
         )
+        and (
+            desc.max_query_len is None
+            or (max_query_len is not None and desc.max_query_len >= max_query_len)
+        )
         and (desc.num_reqs is None or desc.num_reqs >= num_reqs)
         and desc.num_tokens >= num_tokens
         and desc.num_active_loras == num_active_loras
     )
-
-
-def get_uniform_token_count(
-    num_reqs: int,
-    num_tokens: int,
-    max_query_len: int,
-) -> int | None:
-    """
-    Return the uniform token count if batch is uniform, else None.
-    A batch is uniform if all requests have the same number of tokens.
-    """
-    if (max_query_len == num_tokens // num_reqs) and (
-        num_tokens == max_query_len * num_reqs
-    ):
-        return max_query_len
-    return None
 
 
 class CudaGraphManager:
@@ -112,6 +107,7 @@ class CudaGraphManager:
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        varlen_decode: bool = False,
     ):
         self.vllm_config = vllm_config
         self.device = device
@@ -120,6 +116,7 @@ class CudaGraphManager:
         assert self.compilation_config is not None
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
+        self.varlen_decode = varlen_decode
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -219,12 +216,27 @@ class CudaGraphManager:
         else:
             decode_query_lens = [self.decode_query_len]
 
+        capture_varlen_decode = (
+            separate_decode_routine and bool(decode_mode) and self.varlen_decode
+        )
         for num_tokens, num_active_loras in product(
             capture_sizes, self.lora_capture_cases
         ):
+            # Varlen decode graphs take any mix of 1..decode_query_len tokens per
+            # request, worst case 1 token per request (or max_num_reqs)
+            if capture_varlen_decode and num_tokens <= max_decode_tokens:
+                desc = BatchExecutionDescriptor(
+                    cg_mode=decode_mode,
+                    num_tokens=num_tokens,
+                    num_reqs=min(num_tokens, self.max_num_reqs),
+                    max_query_len=self.decode_query_len,
+                    num_active_loras=num_active_loras,
+                )
+                descs_by_mode[decode_mode].append(desc)
+                descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
             # Capture uniform decode specfifc graphs if required
             #  (i.e. separate decode routine)
-            if separate_decode_routine and decode_mode:
+            elif separate_decode_routine and decode_mode and not self.varlen_decode:
                 for decode_query_len in decode_query_lens:
                     rounded_num_tokens = round_up(num_tokens, decode_query_len)
                     rounded_num_reqs = rounded_num_tokens // decode_query_len
@@ -253,12 +265,12 @@ class CudaGraphManager:
 
             if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
-                # i.e. no request padding is needed
-                # so we leave it as None
+                # i.e. no request padding is needed, so we leave it as None.
+                # For breakable PW graphs, break-point kernels read the real batch
+                # from the forward context; in-graph kernels handle the token padding
+                # themselves from the padded slot_mapping (rows with slot == -1).
                 num_reqs = None
-                if mixed_mode == CUDAGraphMode.FULL or (
-                    mixed_mode == CUDAGraphMode.PIECEWISE and self.use_breakable_cg
-                ):
+                if mixed_mode == CUDAGraphMode.FULL:
                     num_reqs = min(num_tokens, self.max_num_reqs)
                 desc = BatchExecutionDescriptor(
                     cg_mode=mixed_mode,
@@ -346,6 +358,10 @@ class CudaGraphManager:
                         # Sync offloader's copy stream before capture.
                         # Ensure any pre-capture prefetches from offloader are complete.
                         get_offloader().sync_prev_onload()
+                        if self.pool is not None:
+                            set_graph_pool_id(self.pool)
+                        else:
+                            set_graph_pool_id(current_platform.graph_pool_handle())
                         with torch.cuda.graph(graph, self.pool):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
@@ -357,12 +373,19 @@ class CudaGraphManager:
                         compilation_counter.num_cudagraph_captured += 1
         self._graphs_captured = True
 
+    def captured_token_counts(self) -> list[int]:
+        """Sorted token counts with a captured graph, ignoring LoRA variants."""
+        return sorted(
+            {desc.num_tokens for desc in self.graphs if desc.num_active_loras == 0}
+        )
+
     def dispatch(
         self,
         num_reqs: int,
         num_tokens: int,
         uniform_token_count: int | None,
         num_active_loras: int,
+        max_query_len: int | None = None,
     ) -> BatchExecutionDescriptor:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
 
@@ -376,6 +399,7 @@ class CudaGraphManager:
                     num_tokens,
                     uniform_token_count,
                     effective_loras,
+                    max_query_len,
                 ):
                     return desc
         return BatchExecutionDescriptor(
@@ -424,6 +448,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        varlen_decode: bool = False,
     ):
         super().__init__(
             vllm_config,
@@ -431,6 +456,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             cudagraph_mode,
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
+            varlen_decode=varlen_decode,
         )
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
@@ -493,10 +519,8 @@ class ModelCudaGraphManager(CudaGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
-                skip_attn=(
-                    desc.cg_mode == CUDAGraphMode.PIECEWISE
-                    and not self.use_breakable_cg
-                ),
+                full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
+                max_query_len=desc.max_query_len,
             )
 
             # Capture with dummy rows marked as padding.
@@ -505,7 +529,6 @@ class ModelCudaGraphManager(CudaGraphManager):
             def forward_fn(cg_mode: CUDAGraphMode) -> None:
                 batch_descriptor = None
                 if cg_mode == CUDAGraphMode.PIECEWISE:
-                    assert (attn_metadata is not None) == self.use_breakable_cg
                     batch_descriptor = BatchDescriptor(
                         num_tokens=num_tokens,
                         has_lora=has_lora,
@@ -588,9 +611,12 @@ def prepare_inputs_to_capture(
     block_tables: BlockTables,
     attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
-    skip_attn: bool = False,
+    full_cudagraph: bool,
+    max_query_len: int | None = None,
 ) -> AttentionState:
-    input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
+    input_batch = InputBatch.make_dummy(
+        num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
+    )
     input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
     slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = build_slot_mappings_by_layer(
@@ -609,15 +635,36 @@ def prepare_inputs_to_capture(
         )
         input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
 
-    attn_metadata = None
-    if not skip_attn:
-        attn_metadata = model_state.prepare_attn(
-            input_batch,
-            CUDAGraphMode.NONE,
-            input_block_tables,
-            slot_mappings,
-            attn_groups,
-            kv_cache_config,
-            for_capture=True,
-        )
+    # NOTE(woosuk): Attention metadata is required not just by standard attention
+    # kernels, but also by specialized attention-like operations (e.g., Inkling's sconv,
+    # DSV4 compressor), which maintain their own states and require special metadata
+    # such as block tables.
+    # During CUDA graph capture:
+    # - For FULL CUDA graphs: We set for_capture=True so that both attention and
+    #   attention-like ops produce capturable metadata compatible with CUDA graphs.
+    # - For PIECEWISE CUDA graphs: We still build attention metadata, but set
+    #   for_capture=False. This is because:
+    #     * Attention-like ops (such as sconv or DSV4 compressor) may not be used as
+    #       breakpoints in PIECEWISE CUDA graphs, so we must generate their attention
+    #       metadata so they can execute and be captured during graph capture.
+    #     * Standard attention ops that are treated as breakpoints will be executed
+    #       eagerly at capture time (not included in the graph itself), and for these,
+    #       setting for_capture=False is essential. Some attention backends
+    #       (like linear attention) cannot generate capturable metadata for prefill,
+    #       so for_capture=False ensures they execute without issue.
+    #     * We assume that attention-like operations intended for capture will still
+    #       produce capturable metadata, even when for_capture=False. While this
+    #       assumption is brittle, it currently works in practice.
+    # In summary: We always generate attention metadata for both FULL and PIECEWISE
+    # CUDA graphs, setting for_capture=True for FULL graphs, and for_capture=False
+    # for PIECEWISE graphs, to ensure correct execution and capture.
+    attn_metadata = model_state.prepare_attn(
+        input_batch,
+        CUDAGraphMode.NONE,
+        input_block_tables,
+        slot_mappings,
+        attn_groups,
+        kv_cache_config,
+        for_capture=full_cudagraph,
+    )
     return AttentionState(attn_metadata, slot_mappings_by_layer)

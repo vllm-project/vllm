@@ -12,8 +12,9 @@ import time
 from collections.abc import Sequence
 from typing import Annotated, Any, Literal, TypeAlias
 
+import numpy as np
 import pybase64 as base64
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 from vllm import PoolingParams
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
@@ -27,6 +28,7 @@ from ..base.protocol import (
     EmbeddingTokenizeParamsMixin,
     EmbedRequestMixin,
     PoolingBasicRequestMixin,
+    reject_removed_pooling_parameters,
 )
 
 
@@ -92,9 +94,9 @@ class EmbeddingBatchChatRequest(
     ``messages`` instead of introducing a separate batch-specific field.
     """
 
-    messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
-        Field(..., min_length=1)
-    )
+    messages: Sequence[
+        Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]
+    ] = Field(..., min_length=1)
 
     def to_pooling_params(self):
         return PoolingParams(
@@ -132,9 +134,9 @@ class EmbeddingChatInputRequest(
 class EmbeddingBatchChatInputRequest(EmbeddingBatchChatRequest):
     """OpenAI embeddings request with batched chat conversations in ``input``."""
 
-    input: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
-        Field(..., min_length=1)
-    )
+    input: Sequence[
+        Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]
+    ] = Field(..., min_length=1)
 
     @model_validator(mode="before")
     @classmethod
@@ -154,13 +156,14 @@ class EmbeddingBatchChatInputRequest(EmbeddingBatchChatRequest):
         return normalized
 
 
-EmbeddingRequest: TypeAlias = (
+EmbeddingRequest: TypeAlias = Annotated[
     EmbeddingCompletionRequest
     | EmbeddingChatRequest
     | EmbeddingBatchChatRequest
     | EmbeddingChatInputRequest
-    | EmbeddingBatchChatInputRequest
-)
+    | EmbeddingBatchChatInputRequest,
+    BeforeValidator(reject_removed_pooling_parameters),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -296,31 +299,28 @@ def _pack_binary_embeddings(
 ) -> list[list[int]]:
     """Bit-pack float embeddings: positive -> 1, negative -> 0.
 
-    Each bit is shifted left by ``7 - idx%8``, and every 8 bits are packed
-    into one byte.
+    Bits are packed MSB-first, eight per byte.
     """
-    result: list[list[int]] = []
-    for embedding in float_embeddings:
-        dim = len(embedding)
-        if dim % 8 != 0:
-            raise ValueError(
-                "Embedding dimension must be a multiple of 8 for binary "
-                f"embedding types, but got {dim}."
-            )
-        packed_len = dim // 8
-        packed: list[int] = []
-        byte_val = 0
-        for idx, value in enumerate(embedding):
-            bit = 1 if value >= 0 else 0
-            byte_val += bit << (7 - idx % 8)
-            if (idx + 1) % 8 == 0:
-                if signed:
-                    byte_val -= _UNSIGNED_TO_SIGNED_DIFF
-                packed.append(byte_val)
-                byte_val = 0
-        assert len(packed) == packed_len
-        result.append(packed)
-    return result
+    if not float_embeddings:
+        return []
+
+    array = np.asarray(float_embeddings, dtype=np.float64)
+    if array.ndim != 2:
+        raise ValueError(
+            f"Expected a 2D batch of embeddings, but got {array.ndim}D input."
+        )
+
+    dim = array.shape[1]
+    if dim % 8 != 0:
+        raise ValueError(
+            "Embedding dimension must be a multiple of 8 for binary "
+            f"embedding types, but got {dim}."
+        )
+
+    packed = np.packbits(array >= 0, axis=-1)
+    if signed:
+        packed = packed.astype(np.int16) - _UNSIGNED_TO_SIGNED_DIFF
+    return packed.tolist()
 
 
 def _encode_base64_embeddings(

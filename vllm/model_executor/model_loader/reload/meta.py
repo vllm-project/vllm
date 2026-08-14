@@ -20,9 +20,11 @@ __all__ = [
     "get_numel_loaded",
 ]
 
+# Modules whose tensors are never moved to, or materialized from, the meta device.
 SKIP_MODULES: set[str] = {"HadamardTransform"}
 
-SKIP_TENSORS: set[str] = {
+# Tensors never loaded by a weight loader, so the layerwise trigger ignores them.
+SKIP_LOAD_TENSORS: set[str] = {
     "_expert_map",
     "expert_mask",
     "expert_global_to_physical",
@@ -30,6 +32,10 @@ SKIP_TENSORS: set[str] = {
     "expert_local_to_global",
     "e_score_correction_bias",
 }
+
+# Tensors which are never moved to, or materialized from, the meta device.
+# `bias` is built after create_weights(), so it is never on meta to begin with.
+SKIP_TENSORS: set[str] = SKIP_LOAD_TENSORS | {"bias"}
 
 
 def to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
