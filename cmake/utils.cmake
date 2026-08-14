@@ -236,6 +236,25 @@ macro(clear_cuda_arches CUDA_ARCH_FLAGS)
 endmacro()
 
 #
+# Warn when a caller requested PTX code generation through global CUDA arch
+# flags. vLLM removes those flags and reapplies per-source gencode flags, so the
+# user's global PTX request will not be preserved.
+#
+function(warn_if_ptx_arch_requested CUDA_ARCH_FLAGS)
+  foreach(_ARCH_FLAG ${CUDA_ARCH_FLAGS})
+    if(_ARCH_FLAG MATCHES "code=.*compute_[0-9]+[af]?")
+      message(WARNING
+        "PTX code generation requested in CUDA architecture flags "
+        "(${_ARCH_FLAG}), but vLLM does not preserve global PTX requests "
+        "when normalizing per-source CUDA architectures. Remove '+PTX' from "
+        "TORCH_CUDA_ARCH_LIST or rely on vLLM's built-in per-kernel PTX "
+        "selection.")
+      return()
+    endif()
+  endforeach()
+endfunction()
+
+#
 # Extract unique CUDA architectures from a list of compute capabilities codes in 
 # the form `<major><minor>[<letter>]`, convert them to the form sort 
 # `<major>.<minor>`, dedupes them and then sorts them in ascending order and 
