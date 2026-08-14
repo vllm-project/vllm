@@ -18,7 +18,7 @@ steps:
     amd:
       dind: false
       device: mi355_1
-      timeout_in_minutes: 32
+      timeout_in_minutes: 35
       depends_on:
       - image-build-amd
 
@@ -150,7 +150,7 @@ steps:
     amd:
       dind: false
       device: mi355_1
-      timeout_in_minutes: 47
+      timeout_in_minutes: 50
       depends_on:
       - image-build-amd
 

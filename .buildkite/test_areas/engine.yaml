@@ -144,6 +144,6 @@ steps:
     amd:
       dind: false
       device: mi300_4
-      timeout_in_minutes: 32
+      timeout_in_minutes: 35
       depends_on:
       - image-build-amd
