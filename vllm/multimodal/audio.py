@@ -95,10 +95,14 @@ def reduce_channels_to_mono(
     """Combine the channels of channel-first audio into a 1-D waveform.
 
     Equivalent to the matching NumPy/torch reduction over the channel axis,
-    but computed by combining the channel slices. A reduction over a 2-element
-    axis spends most of its time in the generic reduction machinery rather
-    than on the arithmetic, so slicing is an order of magnitude faster for
-    identical results.
+    but computed by combining the channel slices. Decoders hand back
+    interleaved ``(time, channels)`` data, where a reduction over the
+    transposed channel axis runs one short inner loop per sample instead of
+    one vectorized pass -- an order of magnitude slower for identical results.
+    For contiguous channel-first input the gain is smaller: seeding the
+    accumulator with the first combination saves the pass a reduction must
+    spend materializing channel 0, and ``mean`` divides in place rather than
+    allocating a second array.
 
     Args:
         audio: Channel-first audio. Leading dimensions are flattened into the
