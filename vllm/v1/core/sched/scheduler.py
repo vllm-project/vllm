@@ -234,18 +234,26 @@ class Scheduler(SchedulerInterface):
         )
         encoder_cache_size = mm_budget.encoder_cache_size if mm_budget else 0
         manager_cls_obj = vllm_config.ec_manager_config.get_encoder_cache_manager_obj()
-        if manager_cls_obj is not None:
-            self.encoder_cache_manager = manager_cls_obj(cache_size=encoder_cache_size)
-        else:
-            self.encoder_cache_manager = (
-                EncoderDecoderCacheManager(cache_size=encoder_cache_size)
+        if manager_cls_obj is None:
+            manager_cls_obj = (
+                EncoderDecoderCacheManager
                 if self.is_encoder_decoder
-                else EncoderCacheManager(cache_size=encoder_cache_size)
+                else EncoderCacheManager
             )
+        self.encoder_cache_manager = manager_cls_obj.create_manager(
+            cache_size=encoder_cache_size, vllm_config=vllm_config
+        )
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = vllm_config.num_lookahead_tokens
+        # Positions past the computed tokens that the drafter reads mid-prefill.
+        # Eagle-family drafters read 1 ahead, but multi-module MTP reads
+        # num_spec_tokens ahead at chunked-prefill boundaries. Determines the
+        # encoder scheduling shift, the deferred encoder free, the KV cache
+        # manager's re-prefillable window (this minus 1), and how many tokens to
+        # reserve between a chunk boundary and the prefill end.
+        self.num_prefill_lookahead = 0
         self.dynamic_sd_lookup: list[int] | None = None
         if speculative_config is not None:
             if speculative_config.num_speculative_tokens_per_batch_size:
@@ -255,6 +263,12 @@ class Scheduler(SchedulerInterface):
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
             self.use_eagle = speculative_config.use_eagle()
+            if self.use_eagle:
+                self.num_prefill_lookahead = (
+                    self.num_spec_tokens
+                    if speculative_config.use_multi_module_mtp()
+                    else 1
+                )
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -266,6 +280,7 @@ class Scheduler(SchedulerInterface):
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle,
+            num_prefill_lookahead=self.num_prefill_lookahead,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
@@ -325,6 +340,7 @@ class Scheduler(SchedulerInterface):
         self.enable_return_routed_experts = (
             vllm_config.model_config.enable_return_routed_experts
         )
+        self.return_sampling_mask = vllm_config.model_config.return_sampling_mask
 
         if self.enable_return_routed_experts:
             assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
@@ -435,6 +451,27 @@ class Scheduler(SchedulerInterface):
             self.kv_cache_manager.get_computed_blocks(request)
         )
         return blocks, num_local, shared_prefix_boundary, False
+
+    def _reserve_prefill_lookahead(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        num_new_tokens: int,
+    ) -> int:
+        """Never end a prefill chunk within num_prefill_lookahead of the
+        prefill end.
+
+        At a chunked-prefill boundary, the multi-module MTP drafter consumes
+        the next num_prefill_lookahead known prefill tokens as draft inputs. A
+        boundary closer to the end than that would make it fall back to
+        sampled drafts, permanently polluting the trailing modules' KV caches.
+        Either finish the prefill or leave at least num_prefill_lookahead for
+        the next chunk. No-op for eagle-family drafters (lookahead 1).
+        """
+        remaining = request.num_tokens - num_computed_tokens - num_new_tokens
+        if 0 < remaining < self.num_prefill_lookahead:
+            num_new_tokens -= self.num_prefill_lookahead - remaining
+        return max(num_new_tokens, 0)
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
@@ -559,8 +596,14 @@ class Scheduler(SchedulerInterface):
                     request.num_computed_tokens,
                     num_new_tokens,
                     encoder_compute_budget,
-                    shift_computed_tokens=1 if self.use_eagle else 0,
+                    shift_computed_tokens=self.num_prefill_lookahead,
                 )
+
+            # Multi-module MTP: avoid ending a prefill chunk within
+            # num_prefill_lookahead of the prefill end.
+            num_new_tokens = self._reserve_prefill_lookahead(
+                request, request.num_computed_tokens, num_new_tokens
+            )
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
@@ -574,6 +617,8 @@ class Scheduler(SchedulerInterface):
                 # 3. The encoder cache is exhausted.
                 # 4. Insufficient budget for a block-aligned chunk in hybrid
                 #    models with mamba cache mode \"align\".
+                # 5. Insufficient budget to keep a multi-module MTP prefill
+                #    chunk out of the prefill-lookahead window.
                 # NOTE(woosuk): Here, by doing `continue` instead of `break`,
                 # we do not strictly follow the FCFS scheduling policy and
                 # allow the lower-priority requests to be scheduled.
@@ -944,11 +989,18 @@ class Scheduler(SchedulerInterface):
                             num_computed_tokens,
                             num_new_tokens,
                             encoder_compute_budget,
-                            shift_computed_tokens=1 if self.use_eagle else 0,
+                            shift_computed_tokens=self.num_prefill_lookahead,
                         )
-                        if num_new_tokens == 0:
-                            # The request cannot be scheduled.
-                            break
+
+                    # Multi-module MTP: avoid ending a prefill chunk within
+                    # num_prefill_lookahead of the prefill end.
+                    num_new_tokens = self._reserve_prefill_lookahead(
+                        request, num_computed_tokens, num_new_tokens
+                    )
+
+                    if num_new_tokens == 0:
+                        # The request cannot be scheduled.
+                        break
 
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
@@ -1808,6 +1860,7 @@ class Scheduler(SchedulerInterface):
 
             stopped = False
             new_logprobs = None
+            new_sampling_mask = None
             new_token_ids = generated_token_ids
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
@@ -1937,6 +1990,13 @@ class Scheduler(SchedulerInterface):
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
+            if self.return_sampling_mask:
+                sampling_masks = model_runner_output.sampling_masks
+                if new_token_ids and sampling_masks is not None:
+                    new_sampling_mask = sampling_masks.slice_request(
+                        req_index, len(new_token_ids)
+                    )
+
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
 
@@ -1950,6 +2010,7 @@ class Scheduler(SchedulerInterface):
                         new_token_ids=new_token_ids,
                         finish_reason=finish_reason,
                         new_logprobs=new_logprobs,
+                        new_sampling_mask=new_sampling_mask,
                         new_prompt_logprobs_tensors=prompt_logprobs_tensors,
                         pooling_output=pooler_output,
                         stop_reason=request.stop_reason,
@@ -2146,9 +2207,9 @@ class Scheduler(SchedulerInterface):
             return
 
         # Defer the free by the drafter's look-ahead so an entry stays
-        # referenced until the drafter's +1 read has also passed it, mirroring
-        # the shift the encoder scheduling path applies.
-        spec_lookahead = 1 if self.use_eagle else 0
+        # referenced until the drafter's read-ahead has also passed it,
+        # mirroring the shift the encoder scheduling path applies.
+        spec_lookahead = self.num_prefill_lookahead
 
         # Here, we use list(set) to avoid modifying the set while iterating
         # over it.

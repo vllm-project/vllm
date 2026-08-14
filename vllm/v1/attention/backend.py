@@ -16,7 +16,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
-from vllm.utils.torch_utils import np_to_pinned_tensor
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -69,6 +68,13 @@ class AttentionBackend(ABC):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(1)]
+
+    @classmethod
+    def get_supported_kernel_block_sizes_for_config(
+        cls, vllm_config: "VllmConfig"
+    ) -> list[int | MultipleOf]:
+        """Return kernel block sizes for a concrete engine configuration."""
+        return cls.get_supported_kernel_block_sizes()
 
     @staticmethod
     @abstractmethod
@@ -203,6 +209,13 @@ class AttentionBackend(ABC):
         return min(s.base if isinstance(s, MultipleOf) else s for s in supported_sizes)
 
     @classmethod
+    def get_preferred_block_size_for_config(
+        cls, default_block_size: int, vllm_config: "VllmConfig"
+    ) -> int:
+        """Return the preferred block size for a concrete engine config."""
+        return cls.get_preferred_block_size(default_block_size)
+
+    @classmethod
     def indexes_kv_by_block_stride(cls) -> bool:
         """Whether the backend reads KV pages by the runtime block stride.
 
@@ -282,6 +295,21 @@ class AttentionBackend(ABC):
         return True
 
     @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        """Whether this backend can run a batch whose device query_start_loc disagrees
+        with the CPU one; backends that plan off the CPU query lengths must opt out.
+
+        Currently only verification requests are affected: adaptive verification trims
+        their drafts on device. On the CPU the draft budget is evenly distributed across
+        requests, so the total draft budget, the decode/prefill split point and the CPU
+        prefill query lengths all stay correct.
+
+        SSM backends opt out: their recurrent-state planning is built from the CPU
+        per-request boundaries, which the trimmed batch no longer matches.
+        """
+        return not cls.is_ssm()
+
+    @classmethod
     def supports_pcp(cls) -> bool:
         try:
             return cls.get_impl_cls().supports_pcp
@@ -335,6 +363,7 @@ class AttentionBackend(ABC):
         use_batch_invariant: bool = False,
         use_kv_connector: bool = False,
         use_pcp: bool = False,
+        use_adaptive_verification: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -377,6 +406,14 @@ class AttentionBackend(ABC):
             invalid_reasons.append("KV connector not supported")
         if use_pcp and not cls.supports_pcp():
             invalid_reasons.append("PCP not supported")
+        if (
+            use_adaptive_verification
+            and not cls.supports_device_cpu_query_lens_mismatch()
+        ):
+            invalid_reasons.append(
+                "device-cpu query lens mismatch not supported, "
+                "this is needed for adaptive verification"
+            )
         combination_reason = cls.supports_combination(
             head_size,
             dtype,
@@ -549,17 +586,19 @@ class CommonAttentionMetadata:
             assert self._token_to_req_indices_cache.shape[0] >= num_tokens
             return self._token_to_req_indices_cache[:num_tokens]
 
-        starts = np.asarray(self.query_start_loc_cpu, dtype=np.int32)
-        query_lens = np.diff(starts)
-        token_to_req_indices = np.repeat(
-            np.arange(query_lens.shape[0], dtype=np.int32), query_lens
-        )
-        num_mapped_tokens = token_to_req_indices.shape[0]
+        # Built from the device query_start_loc: adaptive verification decides the
+        # per-request draft split on device, so the CPU copy carries the right total
+        # but not the right per-request boundaries. Padding requests have a query
+        # length of zero and drop out of the repeat.
+        num_mapped_tokens = int(self.query_start_loc_cpu[-1])
+        query_lens = self.query_start_loc[1:] - self.query_start_loc[:-1]
         assert buffer.shape[0] >= max(num_mapped_tokens, num_tokens)
-        # copy from CPU to GPU
-        buffer[:num_mapped_tokens].copy_(
-            np_to_pinned_tensor(token_to_req_indices), non_blocking=True
+        token_to_req_indices = torch.repeat_interleave(
+            torch.arange(query_lens.shape[0], dtype=torch.int32, device=buffer.device),
+            query_lens,
+            output_size=num_mapped_tokens,
         )
+        buffer[:num_mapped_tokens].copy_(token_to_req_indices)
         if num_mapped_tokens < num_tokens:
             buffer[num_mapped_tokens:num_tokens].zero_()
         self._token_to_req_indices_cache = buffer[: max(num_mapped_tokens, num_tokens)]
