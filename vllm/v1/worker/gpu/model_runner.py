@@ -35,7 +35,7 @@ from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
 )
-from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
@@ -75,6 +75,7 @@ from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import (
     AsyncOutput,
     AsyncPoolingOutput,
+    AsyncScoreOutput,
     StepTimingCollector,
 )
 from vllm.v1.worker.gpu.attn_utils import (
@@ -118,6 +119,7 @@ from vllm.v1.worker.gpu.lora_utils import (
     get_lora_capture_cases,
     get_num_active_loras_for_dispatch,
 )
+from vllm.v1.worker.gpu.gr_state import GRState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
@@ -185,6 +187,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.is_encoder_decoder = self.model_config.is_encoder_decoder
+
+        self.is_generative_recommend_model = bool(
+            getattr(self.model_config.hf_config,
+                "is_generative_recommend_model",
+                False))
+        self.gr_state = GRState()
 
         self.output_copy_stream = torch.cuda.Stream(self.device)
 
@@ -906,6 +914,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache.remove_request(req_id)
         if self.prompt_logprobs_worker is not None:
             self.prompt_logprobs_worker.remove_request(req_id)
+        self.gr_state.remove_request(req_id)
         self.lora_state.remove_request(req_id)
         return True
 
@@ -946,6 +955,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             prompt_len = len(new_req_data.prompt_token_ids)
             sampling_params = new_req_data.sampling_params
+            if self.is_generative_recommend_model:
+                self.gr_state.add_request(
+                    req_id,
+                    new_req_data.prompt_token_ids,
+                    sampling_params,
+                )
             self.req_states.add_request(
                 req_id=req_id,
                 prompt_len=prompt_len,
@@ -1440,6 +1455,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             empty_output = self.kv_connector.no_forward(scheduler_output)
             return empty_output
 
+        # A generative recommendation request is defined over at least one
+        # context/candidate pair, so a one-token batch cannot produce a score.
+        if batch_desc.num_tokens == 1 and self.is_generative_recommend_model:
+            empty_output = self.kv_connector.no_forward(scheduler_output)
+            return empty_output
+
         if not dummy_run:
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
@@ -1621,6 +1642,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
             ):
+                if self.is_generative_recommend_model:
+                    get_forward_context().additional_kwargs["gr_metadata"] = (
+                        self.gr_state.collect_metadata(input_batch.req_ids)
+                    )
                 self.kv_connector.pre_forward(scheduler_output)
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
                     # Run the PIECEWISE graph (compiled PW cudagraph or breakable
@@ -1710,6 +1735,35 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
             self.pcp_manager, hidden_states, input_batch
         )
+
+        if self.is_generative_recommend_model:
+            if self.pp_handler is not None:
+                raise NotImplementedError(
+                    "Generative recommendation does not support pipeline parallelism."
+                )
+
+            prompt_logprobs_dict = self.gr_state._get_candidate_scores_dict(
+                hidden_states,
+                input_batch,
+            )
+
+            # HSTU produces final candidate scores, not vocabulary logits. Do
+            # not route them through the token sampler or token-state updates.
+            model_runner_output = ModelRunnerOutput(
+                req_ids=input_batch.req_ids,
+                req_id_to_index={
+                    req_id: i for i, req_id in enumerate(input_batch.req_ids)
+                },
+                prompt_logprobs_dict=prompt_logprobs_dict,
+            )
+            model_runner_output.kv_connector_output = self.kv_connector.post_forward(
+                finished_req_ids
+            )
+            return AsyncScoreOutput(
+                model_runner_output=model_runner_output,
+                main_stream=self.main_stream,
+                copy_stream=self.output_copy_stream,
+            )
 
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output

@@ -1874,6 +1874,16 @@ class Scheduler(SchedulerInterface):
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids, is_stale=output_is_stale
                 )
+            elif (
+                request.sampling_params is not None
+                and request.sampling_params.extra_args is not None
+                and "gr_params" in request.sampling_params.extra_args
+                and req_id in prompt_logprobs_dict
+            ):
+                # A generative recommendation request returns final candidate
+                # scores as prompt logprobs instead of sampled token ids.
+                request.status = RequestStatus.FINISHED_STOPPED
+                stopped = True
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED

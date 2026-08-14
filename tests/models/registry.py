@@ -325,6 +325,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         min_transformers_version="5.9.0",
     ),
     "HunYuanDenseV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-7B-Instruct"),
+    "HSTUForCausalLM": _HfExamplesInfo(
+        "Lingqu-Rec/HSTU-0.2B", trust_remote_code=True
+    ),
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo(
         "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
     ),

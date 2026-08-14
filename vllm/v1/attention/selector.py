@@ -12,6 +12,7 @@ from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.backends.registry import (
+    AttentionBackendEnum,
     MambaAttentionBackendEnum,
 )
 
@@ -181,6 +182,34 @@ def get_attn_backend(
             attn_type=attn_type,
         )
         backend = attention_config.backend_per_kind.get(kind.value, backend)
+
+    # HSTU emits final candidate scores rather than vocabulary logits and
+    # therefore requires its dedicated attention implementation. Keep explicit
+    # backend settings authoritative so users can still override this choice.
+    hf_config = getattr(vllm_config.model_config, "hf_config", None)
+    is_hstu_model = bool(
+        getattr(hf_config, "is_generative_recommend_model", False)
+        or getattr(hf_config, "model_type", None) == "hstu"
+    )
+    if is_hstu_model and backend is None:
+        if use_mla or attn_type != AttentionType.DECODER or has_sliding_window:
+            raise ValueError(
+                "HSTU attention only supports decoder full attention."
+            )
+        if (
+            use_kv_connector
+            or attn_selector_config.use_pcp
+            or attn_selector_config.use_non_causal
+        ):
+            raise ValueError(
+                "HSTU attention does not support KV connectors, context "
+                "parallelism, or non-causal attention."
+            )
+        backend = AttentionBackendEnum.HSTU_ATTN
+        logger.info_once(
+            "Automatically selected HSTU_ATTN for generative "
+            "recommendation model."
+        )
 
     return _cached_get_attn_backend(
         backend=backend,

@@ -49,6 +49,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "HunYuanVLVisionConfig": "vllm.transformers_utils.configs.hunyuan_vl",
     "HCXVisionConfig": "vllm.transformers_utils.configs.hyperclovax",
     "HYV3Config": "vllm.transformers_utils.configs.hy_v3",
+    "HSTUConfig": "vllm.transformers_utils.configs.hstu",
     "HyperCLOVAXConfig": "vllm.transformers_utils.configs.hyperclovax",
     "IsaacConfig": "vllm.transformers_utils.configs.isaac",
     # RWConfig is for the original tiiuae/falcon-40b(-instruct) and

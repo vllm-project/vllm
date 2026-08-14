@@ -53,6 +53,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import (
     BatchDescriptor,
+    get_forward_context,
     set_forward_context,
 )
 from vllm.logger import init_logger
@@ -536,6 +537,10 @@ class GPUModelRunner(
         self.is_multimodal_raw_input_only_model = (
             model_config.is_multimodal_raw_input_only_model
         )
+        self.is_generative_recommend_model = \
+            self.model_config.hf_config.is_generative_recommend_model \
+            if hasattr(self.model_config.hf_config, "is_generative_recommend_model") else None
+
         # These will be overridden in load_model()
         self.is_multimodal_pruning_enabled = False
         self.requires_sequential_video_encoding = False
@@ -4274,6 +4279,105 @@ class GPUModelRunner(
         num_reqs = self.input_batch.num_reqs
         return bool(self.discard_request_mask.np[:num_reqs].all())
 
+    def _collect_gr_metadata(self, num_reqs: int) -> list[dict] | None:
+        """Collect per-request HSTU metadata from gr_params.
+
+        Iterates over the active requests in the input batch, extracts
+        ``gr_params`` from each request's ``sampling_params.extra_args``,
+        and returns them as a list ordered by request position in the batch.
+
+        Returns ``None`` if no request carries HSTU metadata, so that the
+        common (non-HSTU) path incurs zero overhead.
+        """
+        gr_metadata: list[dict] | None = None
+        for req_id in self.input_batch.req_ids[:num_reqs]:
+            req_state = self.requests.get(req_id)
+            if req_state is None or req_state.sampling_params is None:
+                if gr_metadata is not None:
+                    gr_metadata.append({})
+                continue
+            kv_params = (req_state.sampling_params.extra_args or {}).get("gr_params")
+            if kv_params is not None:
+                if gr_metadata is None:
+                    gr_metadata = []
+                gr_metadata.append(kv_params)
+            elif gr_metadata is not None:
+                # Already started collecting — keep list aligned with req order
+                gr_metadata.append({})
+        return gr_metadata
+
+    def _get_candidate_scores_dict(
+        self,
+        model_output: torch.Tensor,
+        num_scheduled_tokens: dict[str, int],
+    ) -> dict[str, LogprobsTensors | None]:
+        """Return GR candidate probabilities via the prompt-logprobs path."""
+        gr_scores_dict: dict[str, LogprobsTensors | None] = {}
+        completed_reqs = []
+
+        for i, req_id in enumerate(self.num_prompt_logprobs):
+            if req_id not in num_scheduled_tokens:
+                continue
+
+            request = self.requests[req_id]
+            sampling_params = request.sampling_params
+            gr_metadata = (sampling_params.extra_args or {}).get("gr_params", {})
+
+            request_stage = gr_metadata.get("request_stage")
+            if request_stage not in [0,1,2]:
+                raise ValueError(
+                    "Generative Recommend Model requests require request_stage in"
+                    "Sampling_params.extra_args['gr_params']"
+                )
+            if request_stage == 0:
+                completed_reqs.append(req_id)
+                continue
+
+            uids = gr_metadata.get("uid")
+            if not isinstance(uids, list):
+                raise ValueError("Generative Recommend Model's uids must be a list.")
+            candidate_num = gr_metadata.get("candidate_num")
+            if not (isinstance(candidate_num, list) and len(candidate_num) == 1):
+                raise ValueError("Generative Recommend Model's candidate_num must contain one value per request.")
+            candidate_nums = candidate_num * len(uids)
+            request_tokens = model_output.size()[0]
+            per_output_tokens = request_tokens // len(self.num_prompt_logprobs)
+            per_request_tokens =  num_scheduled_tokens[req_id] // len(uids)
+
+            candidate_token_ids = []
+            scores = []
+            offset_output = (i+ 1)* per_output_tokens
+            for idx, candidate_num in enumerate(candidate_nums):
+                offset_ids = (idx+ 1)* per_request_tokens
+                offset_output = offset_output if len(uids) == 1 else offset_ids
+                candidate_token_ids.append(
+                    torch.tensor(
+                        request.prompt_token_ids[offset_ids - candidate_num:offset_ids],
+                        dtype=torch.int32,
+                        device=model_output.device,
+                    )
+                )
+                scores.append(model_output[offset_output - candidate_num: offset_output])
+            gr_scores_dict[req_id] = LogprobsTensors(
+                logprob_token_ids=torch.cat(candidate_token_ids).unsqueeze(-1),
+                logprobs=torch.cat(scores),
+                selected_token_ranks=torch.zeros(
+                    sum(candidate_nums),
+                    dtype=torch.int32,
+                    device=model_output.device,
+                ),
+            ).to_cpu_nonblocking()
+            completed_reqs.append(req_id)
+
+        for req_id in completed_reqs:
+            del self.num_prompt_logprobs[req_id]
+            self.requests[req_id].in_progress_prompt_logprobs_cpu = None
+
+        if gr_scores_dict:
+            self._sync_device()
+
+        return gr_scores_dict
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -4551,6 +4655,11 @@ class GPUModelRunner(
                 defer_finalize=defer_kv_connector_finalize,
             ) as kv_connector_output,
         ):
+            if self.is_generative_recommend_model:
+                gr_meta = self._collect_gr_metadata(num_reqs)
+                get_forward_context().additional_kwargs["gr_metadata"] = gr_meta
+
+
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -5726,6 +5835,9 @@ class GPUModelRunner(
         if not num_prompt_logprobs_dict:
             return {}
 
+        if self.is_generative_recommend_model:
+            return self._get_candidate_scores_dict(hidden_states, num_scheduled_tokens)
+
         prompt_logprobs_dict: dict[str, LogprobsTensors | None] = {}
 
         # Since prompt logprobs are a rare feature, prioritize simple,
@@ -6247,6 +6359,10 @@ class GPUModelRunner(
                     slot_mapping=slot_mappings,
                 ),
             ):
+                if self.is_generative_recommend_model:
+                    gr_meta = self._collect_gr_metadata(num_reqs)
+                    get_forward_context().additional_kwargs["gr_metadata"] = gr_meta
+
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,
@@ -6340,6 +6456,8 @@ class GPUModelRunner(
         # The dummy hidden states may contain special values,
         # like `inf` or `nan`.
         # To avoid breaking the sampler, we use a random tensor here instead.
+        if self.is_generative_recommend_model:
+            return None
 
         mm_config = self.vllm_config.model_config.multimodal_config
         if mm_config and mm_config.mm_encoder_only:
