@@ -35,6 +35,7 @@ engine drives on your behalf:
 | [IPC](ipc.md) | CUDA IPC handles | Colocated training and inference on same GPU |
 | [sparse_nccl](nccl.md#sparse-nccl) | NCCL broadcast | Sparse flat-index weight patches (TP=1/PP=1) |
 | [sharded_rdt](sharded_rdt.md) | NIXL / Ray Direct Transport (pull-based) | Very large models where each worker needs only its own slice (MoE with expert parallelism) |
+| [nccl_m2n](m2n.md) | NCCL M2N reshard | Trainer and inference use different sharding layouts |
 
 ## Quickstart
 
@@ -49,7 +50,8 @@ from vllm.config import WeightTransferConfig
 
 llm = LLM(
     model="my-model",
-    weight_transfer_config=WeightTransferConfig(backend="nccl"),  # or "ipc", "sparse_nccl", "sharded_rdt"
+    # Other backends: "ipc", "sparse_nccl", "sharded_rdt", "nccl_m2n".
+    weight_transfer_config=WeightTransferConfig(backend="nccl"),
 )
 ```
 
