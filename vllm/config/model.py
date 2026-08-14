@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+import shutil
 import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
@@ -119,6 +121,9 @@ AttnTypeStr = Literal[
     "decoder", "encoder", "encoder_only", "encoder_decoder", "attention_free", "hybrid"
 ]
 
+# Weights are streamed straight from Object Storage, never mirrored to disk.
+_RUNAI_WEIGHT_PATTERNS = ["*.pt", "*.safetensors", "*.bin", "*.tensors", "*.pth"]
+
 
 @config(config=ConfigDict(arbitrary_types_allowed=True))
 class ModelConfig:
@@ -132,6 +137,10 @@ class ModelConfig:
     """Original model weights path. Used when the model is pulled from object
     storage (e.g., RunAI) to preserve the original URI while `model` points to
     the local directory."""
+    tokenizer_weights: str = ""
+    """Original tokenizer path. Used when a tokenizer separate from the model
+    is pulled from object storage (e.g., RunAI) to preserve the original URI
+    while `tokenizer` points to the local directory."""
     runner: RunnerOption = "auto"
     """The type of model runner to use. Each vLLM instance only supports one
     model runner, even if the same model can be used for multiple types."""
@@ -416,6 +425,7 @@ class ModelConfig:
         ignored_factors = {
             "convert",
             "tokenizer",
+            "tokenizer_weights",
             "tokenizer_mode",
             "seed",
             "hf_config_path",
@@ -1101,7 +1111,41 @@ class ModelConfig:
                 tokenizer,
                 ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors", "*.pth"],
             )
+            self.tokenizer_weights = tokenizer
             self.tokenizer = object_storage_tokenizer.dir
+
+    def maybe_pull_model_files_for_runai_worker(self) -> None:
+        """Pull non-tensor model and tokenizer files onto the local node.
+
+        Repairs every directory the driver pulled from Object Storage but
+        only materialized on its own node. Weights are streamed separately.
+        Safe to call on every rank.
+        """
+        # Only set once the driver has pulled that directory from Object
+        # Storage; the model and the tokenizer are recorded independently.
+        model_uri = self.model_weights
+        tokenizer_uri = self.tokenizer_weights
+        pull_model = bool(model_uri) and is_runai_obj_uri(model_uri)
+        pull_tokenizer = bool(tokenizer_uri) and is_runai_obj_uri(tokenizer_uri)
+        if not pull_model and not pull_tokenizer:
+            return
+
+        if pull_model:
+            pulls = [{"allow_pattern": ["*.model", "*.py", "*.json"]}]
+            # Shared tokenizer: the driver rewrote both `model` and
+            # `tokenizer` to this directory, so pull the rest of the
+            # non-weight files it will need. A separate tokenizer has its
+            # own directory, repaired from its own URI below.
+            if self.tokenizer == self.model:
+                pulls.append({"ignore_pattern": _RUNAI_WEIGHT_PATTERNS})
+            _pull_runai_dir_for_worker(model_uri, self.model, pulls)
+
+        if pull_tokenizer:
+            _pull_runai_dir_for_worker(
+                tokenizer_uri,
+                self.tokenizer,
+                [{"ignore_pattern": _RUNAI_WEIGHT_PATTERNS}],
+            )
 
     def _get_encoder_config(self) -> dict[str, Any] | None:
         return get_sentence_transformer_tokenizer_config(self.model, self.revision)
@@ -2116,6 +2160,58 @@ class ModelConfig:
             and quant_config is not None
             and "nvfp4" in quant_config.get("format", "").lower()
         )
+
+
+def _pull_runai_dir_for_worker(
+    uri: str, local_dir: str, pulls: list[dict[str, list[str]]]
+) -> None:
+    """Repair one node-local Object Storage directory on this node.
+
+    Args:
+        uri: Object Storage URI the driver pulled the directory from.
+        local_dir: Node-local path the driver rewrote the config to.
+        pulls: Keyword arguments of each `pull_files` call to replay.
+    """
+    # avoid circular import
+    from vllm.model_executor.model_loader.weight_utils import get_lock
+
+    # A general solution for concurrent Object Storage downloads is
+    # https://github.com/vllm-project/vllm/pull/36696.
+    # The canonical path, so two spellings of one directory share one lock.
+    with get_lock(os.path.realpath(local_dir)):
+        # Content, not existence: an empty pre-created directory is the
+        # broken state this repairs; a populated one means another rank
+        # already completed the pull. Unsafe to read outside the lock —
+        # a non-empty directory may be a pull still in progress.
+        if os.path.isdir(local_dir) and os.listdir(local_dir):
+            return
+
+        # Workers must not install process-global signal handlers.
+        object_storage_model = ObjectStorageModel(
+            url=uri, install_signal_handlers=False
+        )
+        if os.path.realpath(object_storage_model.dir) != os.path.realpath(local_dir):
+            raise RuntimeError(
+                "Run:ai model streamer cache directory mismatch on this node: "
+                f"the config resolved on the driver points at {local_dir!r}, "
+                f"but this node derives {object_storage_model.dir!r} from "
+                f"{uri!r}. This usually means VLLM_ASSETS_CACHE (or "
+                "XDG_CACHE_HOME / HOME) differs between the driver and this "
+                "node; make it consistent across all nodes."
+            )
+        logger.info(
+            "Pulling non-tensor files from %s to %s on this node.", uri, local_dir
+        )
+        pull_succeeded = False
+        try:
+            for pull_kwargs in pulls:
+                object_storage_model.pull_files(uri, **pull_kwargs)
+            pull_succeeded = True
+        finally:
+            if not pull_succeeded:
+                # A partial pull must not survive: the in-lock check would
+                # otherwise trust it on the next attempt.
+                shutil.rmtree(object_storage_model.dir, ignore_errors=True)
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):
