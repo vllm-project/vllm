@@ -273,6 +273,9 @@ class LongcatFlashNgramForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
 
 class LongcatNgramModelState(DefaultModelState):
+    # prepare_inputs builds its own inputs_embeds from n-gram token embeddings.
+    supports_prompt_embeds = False
+
     """Per-request n-gram token history for LongCat-Flash-Lite.
 
     Maintains a small CPU-side per-slot context (last ``n-1`` processed tokens)

@@ -24,6 +24,8 @@ from vllm.v1.worker.utils import AttentionGroup
 
 
 class DefaultModelState(ModelState):
+    supports_prompt_embeds = True
+
     def __init__(
         self,
         vllm_config: VllmConfig,

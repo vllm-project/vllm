@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import torch
 import torch.nn as nn
@@ -43,6 +43,9 @@ class ModelSpecificAttnMetadata:
 
 
 class ModelState(ABC):
+    supports_prompt_embeds: ClassVar[bool] = False
+    """Whether this state implements user-provided prompt embeddings."""
+
     def __init__(
         self,
         vllm_config: VllmConfig,
