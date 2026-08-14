@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import importlib
-import inspect
 import multiprocessing
 import multiprocessing.forkserver as forkserver
 import os
@@ -18,7 +16,6 @@ from typing import Any, cast
 import uvloop
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import State
 
 import vllm.envs as envs
@@ -30,7 +27,7 @@ from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
+from vllm.entrypoints.serve.middleware.register import init_entrypoints_middleware
 from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
@@ -45,7 +42,6 @@ from vllm.entrypoints.serve.utils.server_utils import (
     get_uvicorn_log_config,
     http_exception_handler,
     lifespan,
-    log_response,
     validation_exception_handler,
     vllm_error_handler,
 )
@@ -186,30 +182,11 @@ async def build_async_engine_client_from_engine_args(
             async_llm.shutdown(timeout=vllm_config.shutdown_timeout)
 
 
-def build_app(
-    args: Namespace,
+def register_api_routers(
+    app: FastAPI,
     supported_tasks: tuple["SupportedTask", ...] | None = None,
     model_config: ModelConfig | None = None,
-) -> FastAPI:
-    if supported_tasks is None:
-        warnings.warn(
-            "The 'supported_tasks' parameter was not provided to "
-            "build_app and will be required in a future version. "
-            "Defaulting to ('generate',).",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        supported_tasks = _FALLBACK_SUPPORTED_TASKS
-
-    if args.disable_fastapi_docs:
-        app = FastAPI(
-            openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
-        )
-    elif args.enable_offline_docs:
-        app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
-    else:
-        app = FastAPI(lifespan=lifespan)
-    app.state.args = args
+):
 
     from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
@@ -262,7 +239,7 @@ def build_app(
 
         register_pooling_api_routers(app, supported_tasks, model_config)
 
-    if args.enable_fault_tolerance:
+    if getattr(app.state.args, "enable_fault_tolerance", False):
         from vllm.entrypoints.serve.fault_tolerance.api_router import (
             register_fault_tolerance_api_router,
         )
@@ -275,14 +252,35 @@ def build_app(
     # `engine_client=None` at Phase B (see `_init_endpoint_plugins_state`).
     _attach_endpoint_plugins(app, supported_tasks)
 
+
+def build_app(
+    args: Namespace,
+    supported_tasks: tuple["SupportedTask", ...] | None = None,
+    model_config: ModelConfig | None = None,
+) -> FastAPI:
+    if supported_tasks is None:
+        warnings.warn(
+            "The 'supported_tasks' parameter was not provided to "
+            "build_app and will be required in a future version. "
+            "Defaulting to ('generate',).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        supported_tasks = _FALLBACK_SUPPORTED_TASKS
+
+    if args.disable_fastapi_docs:
+        app = FastAPI(
+            openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
+        )
+    elif args.enable_offline_docs:
+        app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
+    else:
+        app = FastAPI(lifespan=lifespan)
+    app.state.args = args
     app.root_path = args.root_path
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=args.allowed_origins,
-        allow_credentials=args.allow_credentials,
-        allow_methods=args.allowed_methods,
-        allow_headers=args.allowed_headers,
-    )
+
+    register_api_routers(args, app, supported_tasks)
+    init_entrypoints_middleware(args, app, supported_tasks)
 
     # Exception handlers are registered in four layers:
     #   1. framework errors raised by FastAPI/Starlette
@@ -305,48 +303,6 @@ def build_app(
     app.exception_handler(NotImplementedError)(exception_handler)
 
     app.exception_handler(Exception)(exception_handler)
-
-    # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
-    if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
-        from vllm.entrypoints.serve.utils.server_utils import AuthenticationMiddleware
-
-        app.add_middleware(AuthenticationMiddleware, tokens=tokens)
-
-    if args.enable_request_id_headers:
-        from vllm.entrypoints.serve.utils.server_utils import XRequestIdMiddleware
-
-        app.add_middleware(XRequestIdMiddleware)
-
-    # Add scaling middleware to check for scaling state
-    app.add_middleware(ScalingMiddleware)
-
-    if "realtime" in supported_tasks:
-        # Add WebSocket metrics middleware
-        from vllm.entrypoints.speech_to_text.factories import (
-            add_websocket_metrics_middleware,
-        )
-
-        add_websocket_metrics_middleware(app)
-
-    if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
-        logger.warning(
-            "CAUTION: Enabling log response in the API Server. "
-            "This can include sensitive information and should be "
-            "avoided in production."
-        )
-        app.middleware("http")(log_response)
-
-    for middleware in args.middleware:
-        module_path, object_name = middleware.rsplit(".", 1)
-        imported = getattr(importlib.import_module(module_path), object_name)
-        if inspect.isclass(imported):
-            app.add_middleware(imported)  # type: ignore[arg-type]
-        elif inspect.iscoroutinefunction(imported):
-            app.middleware("http")(imported)
-        else:
-            raise ValueError(
-                f"Invalid middleware {middleware}. Must be a function or a class."
-            )
 
     app = sagemaker_standards_bootstrap(app)
     return app
