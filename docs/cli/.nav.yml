@@ -1,10 +1,8 @@
 nav:
-  - README.md
-  - serve.md
-  - chat.md
-  - complete.md
-  - run-batch.md
-  - vllm bench:
-    - bench/**/*.md
-  - vllm launch:
-    - launch/**/*.md
+  - "*.md"
+  - bench:
+    - bench/*.md
+    - sweep:
+      - bench/sweep/*.md
+  - launch:
+    - launch/*.md

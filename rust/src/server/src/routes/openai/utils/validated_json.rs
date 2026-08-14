@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Validated JSON extractor for automatic request validation.
 //! Variation of https://github.com/lightseekorg/smg/blob/main/crates/protocols/src/validated.rs
 

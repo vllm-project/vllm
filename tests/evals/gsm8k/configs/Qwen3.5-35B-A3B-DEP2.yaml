@@ -7,4 +7,3 @@ server_args: >-
   --max-model-len 4096
   --data-parallel-size 2
   --enable-expert-parallel
-  --no-enable-flashinfer-autotune

@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 from transformers import BatchFeature, PretrainedConfig
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.inputs import MultiModalDataDict, MultiModalInput
@@ -42,10 +43,6 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.evs import (
-    compute_retained_tokens_count,
-    compute_retention_mask,
-)
 from vllm.multimodal.inputs import (
     AudioItem,
     BatchedTensorInputs,
@@ -73,6 +70,10 @@ from vllm.multimodal.processing.processor import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+)
+from vllm.multimodal.video_prune.evs import (
+    compute_retained_tokens_count,
+    compute_retention_mask,
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
@@ -627,7 +628,12 @@ class NanoNemotronVLMultiModalProcessor(
                     "the chat API with a model that sets use_audio_in_video)."
                 )
             try:
-                audio_items.append(load_audio_pyav(BytesIO(video_bytes)))
+                audio_items.append(
+                    load_audio_pyav(
+                        BytesIO(video_bytes),
+                        max_duration_s=envs.VLLM_MAX_AUDIO_DECODE_DURATION_S,
+                    )
+                )
                 has_audio.append(True)
             except Exception:
                 logger.debug(

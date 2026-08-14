@@ -20,7 +20,7 @@ The score models is designed to compute similarity scores between two input prom
     - `LLM.score`
 - Online APIs:
     - [Score API](scoring.md#score-api) (`/score`, `/v1/score`)
-    - [Cohere Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+    - [Cohere Rerank API](scoring.md#cohere-rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 
 !!! note
     Only when a classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.

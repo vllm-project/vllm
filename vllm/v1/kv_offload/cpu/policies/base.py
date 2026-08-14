@@ -41,8 +41,8 @@ class CachePolicy(ABC):
     and eviction, so they cannot be separated cleanly.
     """
 
-    @abstractmethod
-    def __init__(self, cache_capacity: int) -> None: ...
+    def __init__(self, cache_capacity: int) -> None:
+        self.cache_capacity = cache_capacity
 
     @abstractmethod
     def get(self, key: OffloadKey) -> BlockStatus | None:

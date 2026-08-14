@@ -6,16 +6,8 @@ import pytest
 from vllm.entrypoints.openai.engine.protocol import StreamOptions
 from vllm.entrypoints.serve.utils.api_utils import (
     get_max_tokens,
-    sanitize_message,
     should_include_usage,
 )
-
-
-def test_sanitize_message():
-    assert (
-        sanitize_message("<_io.BytesIO object at 0x7a95e299e750>")
-        == "<_io.BytesIO object>"
-    )
 
 
 @pytest.mark.parametrize(

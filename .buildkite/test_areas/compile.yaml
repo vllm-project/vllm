@@ -2,46 +2,20 @@ group: Compile
 depends_on: 
   - image-build
 steps:
-- label: Sequence Parallel Correctness Tests (2 GPUs)
-  key: sequence-parallel-correctness-tests-2-gpus
-  timeout_in_minutes: 50
+- label: Sequence Parallel Correctness Tests (2xB200)
+  key: sequence-parallel-correctness-tests-2xb200
+  timeout_in_minutes: 45
   working_dir: "/vllm-workspace/"
-  num_devices: 2
-  source_file_dependencies:
-  - vllm/model_executor/layers/
-  - vllm/compilation/
-  - vllm/v1/worker/
-  - vllm/v1/cudagraph_dispatcher.py
-  - tests/compile/correctness_e2e/test_sequence_parallel.py
-  commands:
-  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
-
-- label: Sequence Parallel Correctness Tests (2xH100)
-  key: sequence-parallel-correctness-tests-2xh100
-  timeout_in_minutes: 50
-  working_dir: "/vllm-workspace/"
-  device: h100
+  device: b200-k8s
   optional: true
   num_devices: 2
   commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
 
-- label: AsyncTP Correctness Tests (2xH100)
-  key: asynctp-correctness-tests-2xh100
-  timeout_in_minutes: 50
-  working_dir: "/vllm-workspace/"
-  device: h100
-  optional: true
-  num_devices: 2
-  commands:
-  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py
-
-- label: AsyncTP Correctness Tests (B200)
+- label: AsyncTP Correctness Tests (2xB200)
   key: asynctp-correctness-tests-b200
-  timeout_in_minutes: 50
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   device: b200-k8s
   optional: true
@@ -52,7 +26,7 @@ steps:
 
 - label: Distributed Compile Unit Tests (2xH100)
   key: distributed-compile-unit-tests-2xh100
-  timeout_in_minutes: 20
+  timeout_in_minutes: 45
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 2
@@ -66,7 +40,7 @@ steps:
 
 - label: Fusion and Compile Unit Tests (2xB200)
   key: fusion-and-compile-unit-tests-2xb200
-  timeout_in_minutes: 20
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   device: b200-k8s
   source_file_dependencies:
@@ -90,13 +64,10 @@ steps:
     - pytest -v -s tests/compile/passes/test_silu_mul_quant_fusion.py
     # this runner has 2 GPUs available even though num_devices=2 is not set
     - pytest -v -s tests/compile/passes/distributed/test_fusion_all_reduce.py
-    # test_fp8_kv_scale_compile requires FlashAttention (not supported on default L4/L40)
-    # TODO(luka) move to H100 once pass tests run on H100
-    - pytest -v -s tests/compile/fullgraph/test_full_graph.py::test_fp8_kv_scale_compile
 
 - label: Fusion E2E Quick (H100)
   key: fusion-e2e-quick-h100
-  timeout_in_minutes: 15
+  timeout_in_minutes: 25
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 1
@@ -115,7 +86,7 @@ steps:
 
 - label: Fusion E2E Config Sweep (H100)
   key: fusion-e2e-config-sweep-h100
-  timeout_in_minutes: 30
+  timeout_in_minutes: 25
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 1
@@ -149,7 +120,7 @@ steps:
 
 - label: Fusion E2E TP2 Quick (H100)
   key: fusion-e2e-tp2-quick-h100
-  timeout_in_minutes: 20
+  timeout_in_minutes: 35
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 2
@@ -167,7 +138,7 @@ steps:
 
 - label: Fusion E2E TP2 AR-RMS Config Sweep (H100)
   key: fusion-e2e-tp2-ar-rms-config-sweep-h100
-  timeout_in_minutes: 40
+  timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   device: h100
   num_devices: 2
@@ -207,7 +178,7 @@ steps:
 
 - label: Fusion E2E TP2 (B200)
   key: fusion-e2e-tp2-b200
-  timeout_in_minutes: 20
+  timeout_in_minutes: 45
   working_dir: "/vllm-workspace/"
   device: b200-k8s
   num_devices: 2

@@ -155,58 +155,6 @@ class Conv2dLayer(ConvLayerBase):
         return self._forward_conv(x)
 
 
-class CausalConv2dLayer(Conv2dLayer):
-    """
-    A causal version of nn.Conv2d where each location in the 2D matrix would
-    have no access to locations on its right or down
-    All arguments are the same as nn.Conv2d except padding which should be
-    set as None
-    """
-
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size: int,
-        stride: int,
-        padding: int = 0,
-        dilation: int = 1,
-        groups: int = 1,
-        bias: bool = True,
-        padding_mode: str = "zeros",
-        *,
-        params_dtype: torch.dtype | None = None,
-    ) -> None:
-        if padding is not None:
-            raise ValueError(
-                "Argument padding should be set to None for CausalConv2dLayer."
-            )
-        self._left_padding: int = kernel_size - 1
-        self._right_padding: int = stride - 1
-        padding = 0
-
-        super().__init__(
-            in_channels,
-            out_channels,
-            kernel_size,
-            stride,
-            padding,
-            dilation,
-            groups,
-            bias,
-            padding_mode,
-            params_dtype=params_dtype,
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-    ) -> torch.Tensor:
-        x = F.pad(x, pad=(self._left_padding, self._right_padding, 0, 0))
-        x = super().forward(x)
-        return x
-
-
 # --8<-- [start:conv3d]
 @CustomOp.register("conv3d")
 class Conv3dLayer(ConvLayerBase):

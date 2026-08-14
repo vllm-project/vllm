@@ -43,7 +43,7 @@ try:
         if flashinfer_comm is not None
         else None
     )
-except ImportError:
+except (ImportError, AttributeError):
     flashinfer_trtllm_fused_allreduce_norm = None  # type: ignore[assignment]
     get_fi_ar_workspace = None  # type: ignore[assignment]
     _AR_RESIDUAL_RMS_NORM = None
@@ -93,7 +93,7 @@ def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool
         max_token_num=max_token_num,
         hidden_dim=hidden_size,
         dtype=hidden_states.dtype,
-        group=get_tp_group().device_group,
+        group=get_tp_group().cpu_group,
     )
     if workspace is None:
         return False, 0

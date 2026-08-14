@@ -27,6 +27,7 @@ class SymmMemCommunicator:
         "9.0": [4, 6, 8],
         "10.0": [6, 8],
         "10.3": [6, 8],
+        "10.7": [6, 8],  # sm_107 (Rubin): reuse 10.3 thresholds
     }
 
     def __init__(

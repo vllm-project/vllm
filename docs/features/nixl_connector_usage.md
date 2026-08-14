@@ -13,11 +13,7 @@ Install the NIXL library: `uv pip install nixl`, as a quick start on Nvidia plat
 - Refer to [NIXL official repository](https://github.com/ai-dynamo/nixl) for more installation instructions
 - The specified required NIXL version can be found in [requirements/kv_connectors.txt](../../requirements/kv_connectors.txt) and other relevant config files
 
-For ROCm platform, the [ROCm docker file](../../docker/Dockerfile.rocm) includes RIXL and ucx already.
-
-- Refer to [RIXL official repository](https://github.com/rocm/rixl) for more information
-- The supportive libraries for RIXL can be found in [requirements/kv_connectors_rocm.txt](../../requirements/kv_connectors_rocm.txt)
-- In the future we may remove RIXL from docker image file and users will be able to install from pre-compiled binary packages
+For ROCm, the [ROCm Dockerfile](../../docker/Dockerfile.rocm) builds NIXL and UCX with ROCm support from source.
 
 For non-cuda platform, please install nixl with ucx build from source, instructed as below.
 

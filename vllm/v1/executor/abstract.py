@@ -116,11 +116,11 @@ class Executor(ABC):
         raise NotImplementedError
 
     def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
-        """
-        Initialize the KV caches and begin the model execution loop of the
-        underlying workers.
-        """
+        """Initialize the KV caches on the underlying workers."""
         self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
+
+    def compile_or_warm_up_model(self) -> None:
+        """Compile/warm up the model and capture cudagraphs on workers."""
         compilation_times: list[CompilationTimes] = self.collective_rpc(
             "compile_or_warm_up_model"
         )

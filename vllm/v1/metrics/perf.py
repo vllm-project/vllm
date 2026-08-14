@@ -46,7 +46,7 @@ class InvalidComponent(Exception):
 # FfnQuantizationConfigParser to determine the weight_byte_size for
 # flops/memory estimation.
 #
-# NOTE: Methods like GPTQ and BitsAndBytes support variable bit-widths
+# NOTE: Methods like GPTQ support variable bit-widths
 # (e.g., 4-bit and 8-bit). We default to 4-bit (0.5 bytes) since this
 # is by far the most common configuration.
 _QUANT_WEIGHT_BYTE_SIZE: dict[str, float] = {
@@ -63,7 +63,6 @@ _QUANT_WEIGHT_BYTE_SIZE: dict[str, float] = {
     "awq_marlin": 0.5,
     "gptq": 0.5,
     "gptq_marlin": 0.5,
-    "bitsandbytes": 0.5,
     "modelopt_fp4": 0.5,
     "petit_nvfp4": 0.5,
     "compressed-tensors": 0.5,
@@ -828,9 +827,7 @@ class BaseFfnConfigParser(Parser):
 
         # Try different naming conventions.
         args.num_experts = vllm_config.model_config.get_num_experts()
-        args.num_experts_per_tok = getattr_from_list(
-            cfg, ["num_experts_per_tok", "moe_topk"], 0
-        )
+        args.num_experts_per_tok = vllm_config.model_config.get_num_experts_per_tok()
         args.moe_intermediate_size = getattr_from_list(
             cfg, ["moe_intermediate_size", "intermediate_size"], 0
         )

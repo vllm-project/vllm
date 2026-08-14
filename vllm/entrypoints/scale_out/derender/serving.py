@@ -4,8 +4,14 @@ import time
 from typing import cast
 
 import vllm.envs as envs
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
-from vllm.entrypoints.openai.completion.protocol import CompletionResponse
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionResponse,
+    ChatCompletionStreamResponse,
+)
+from vllm.entrypoints.openai.completion.protocol import (
+    CompletionResponse,
+    CompletionStreamResponse,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     UsageInfo,
@@ -28,7 +34,10 @@ from vllm.renderers.online_derenderer import OnlineDerenderer
 from ..token_in_token_out.mm_serde import encode_mm_kwargs_item
 from ..token_in_token_out.protocol import (
     DerenderChatRequest,
+    DerenderChatStreamRequest,
     DerenderCompletionRequest,
+    DerenderCompletionStreamRequest,
+    DerenderStreamState,
     GenerateResponse,
     MultiModalFeatures,
     PlaceholderRangeInfo,
@@ -157,16 +166,17 @@ class ServingDerender(BaseServing):
             total_tokens=prompt_tokens + completion_tokens,
         )
 
+        model_name = request.model or self.models.model_name()
         logger.debug(
             "derender_chat request_id=%s model=%s choices=%d completion_tokens=%d",
             gen.request_id,
-            request.model,
+            model_name,
             len(choices),
             completion_tokens,
         )
         return ChatCompletionResponse(
             id=gen.request_id,
-            model=request.model,
+            model=model_name,
             created=int(time.time()),
             choices=choices,
             usage=usage,
@@ -200,7 +210,9 @@ class ServingDerender(BaseServing):
             total_prompt_tokens,
             total_completion_tokens,
         ) = await self.online_derenderer.derender_completion(
-            request.generate_responses, request.prompt_tokens
+            request.generate_responses,
+            request.prompt_tokens,
+            completion_request=request.completion_request,
         )
 
         first = request.generate_responses[0]
@@ -220,22 +232,109 @@ class ServingDerender(BaseServing):
             total_tokens=total_prompt_tokens + total_completion_tokens,
         )
 
+        model_name = request.model or self.models.model_name()
         logger.debug(
             "derender_completion request_id=%s model=%s choices=%d"
             " completion_tokens=%d",
             first.request_id,
-            request.model,
+            model_name,
             len(choices),
             total_completion_tokens,
         )
         return CompletionResponse(
             id=first.request_id,
-            model=request.model,
+            model=model_name,
             created=int(time.time()),
             choices=choices,
             usage=usage,
             kv_transfer_params=kv_params,
         )
+
+    async def derender_chat_stream_response(
+        self,
+        request: DerenderChatStreamRequest,
+    ) -> tuple[ChatCompletionStreamResponse, DerenderStreamState] | ErrorResponse:
+        """Streaming counterpart to ``derender_chat_response``.
+
+        Processes one ``GenerateStreamResponse`` chunk and returns the
+        derendered chunk together with the updated client carried state.
+
+        ``parser is None`` or no ``chat_request`` until reasoning/tool call
+        functionality added in future PR.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        model_name = request.model or self.models.model_name()
+        try:
+            chunk, updated_state = await self.online_derenderer.derender_chat_stream(
+                model=model_name,
+                generate_chunk=request.generate_chunk,
+                state=request.stream_state,
+                chat_request=request.chat_request,
+                prompt_tokens=request.prompt_tokens,
+            )
+        except NotImplementedError as exc:
+            return self.create_error_response(exc)
+        except ValueError as exc:
+            return self.create_error_response(str(exc))
+        except (KeyError, IndexError) as exc:
+            return self.create_error_response(
+                f"invalid stream_state: detokenization failed ({exc!r})"
+            )
+
+        logger.debug(
+            "derender_chat_stream request_id=%s model=%s delta_tokens=%d",
+            request.generate_chunk.request_id,
+            model_name,
+            sum(
+                len(c.token_ids) for c in request.generate_chunk.choices if c.token_ids
+            ),
+        )
+        return chunk, updated_state
+
+    async def derender_completion_stream_response(
+        self,
+        request: DerenderCompletionStreamRequest,
+    ) -> tuple[CompletionStreamResponse, DerenderStreamState] | ErrorResponse:
+        """Streaming counterpart to ``derender_completion_response``.
+
+        Processes one ``GenerateStreamResponse`` chunk (one output sequence's
+        delta) and returns the derendered chunk and updated state.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        model_name = request.model or self.models.model_name()
+        try:
+            (
+                chunk,
+                updated_state,
+            ) = await self.online_derenderer.derender_completion_stream(
+                model=model_name,
+                generate_chunk=request.generate_chunk,
+                state=request.stream_state,
+                prompt_tokens=request.prompt_tokens,
+                completion_request=request.completion_request,
+            )
+        except ValueError as exc:
+            return self.create_error_response(str(exc))
+        except (KeyError, IndexError) as exc:
+            return self.create_error_response(
+                f"invalid stream_state: detokenization failed ({exc!r})"
+            )
+
+        logger.debug(
+            "derender_completion_stream request_id=%s model=%s delta_tokens=%d",
+            request.generate_chunk.request_id,
+            model_name,
+            sum(
+                len(c.token_ids) for c in request.generate_chunk.choices if c.token_ids
+            ),
+        )
+        return chunk, updated_state
 
     @staticmethod
     def _extract_mm_features(

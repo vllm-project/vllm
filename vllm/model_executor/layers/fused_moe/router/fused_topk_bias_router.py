@@ -3,17 +3,28 @@
 import functools
 
 import torch
-import torch.nn.functional as F
 
 import vllm._custom_ops as ops
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
+    can_use_dsv4_topk,
+    dsv4_topk,
+)
+
+
+def _get_padding_mask(num_tokens: int) -> torch.Tensor | None:
+    if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+        is_padding = get_forward_context().is_padding
+        return is_padding[:num_tokens] if is_padding is not None else None
+    return None
 
 
 def vllm_topk_softmax(
@@ -31,6 +42,7 @@ def vllm_topk_softmax(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        is_padding=_get_padding_mask(topk_indices.shape[0]),
     )
 
     return topk_weights, topk_indices
@@ -53,54 +65,9 @@ def vllm_topk_sigmoid(
         renormalize,
         e_score_correction_bias,
         routed_scaling_factor,
+        is_padding=_get_padding_mask(topk_indices.shape[0]),
     )
 
-    return topk_weights, topk_indices
-
-
-def _topk_softplus_sqrt_torch(
-    topk_weights: torch.Tensor,
-    topk_indices: torch.Tensor,
-    token_expert_indices: torch.Tensor,
-    gating_output: torch.Tensor,
-    renormalize: bool = False,
-    e_score_correction_bias: torch.Tensor | None = None,
-    input_tokens: torch.Tensor | None = None,
-    hash_indices_table: torch.Tensor | None = None,
-    routed_scaling_factor: float = 1.0,
-) -> tuple[torch.Tensor, ...]:
-    """Pure PyTorch fallback for topk_softplus_sqrt (XPU/CPU)."""
-    # scores = sqrt(softplus(gating_output))
-    scores = torch.sqrt(F.softplus(gating_output.float()))
-
-    # Bias is used for expert SELECTION only, not for weight computation.
-    # Using biased scores as weights flattens the distribution when the bias
-    # is near-uniform (e.g., DSv4-Flash where all biases ≈ 8.08).
-    if e_score_correction_bias is not None:
-        scores_for_choice = scores + e_score_correction_bias.float()
-    else:
-        scores_for_choice = scores
-
-    topk = topk_weights.shape[-1]
-
-    if hash_indices_table is not None and input_tokens is not None:
-        # Hash MoE: expert indices predetermined by lookup table
-        # hash_indices_table: [vocab_size, topk] mapping token_id -> expert_ids
-        expert_ids = hash_indices_table[input_tokens.long()]  # [M, topk]
-        topk_indices.copy_(expert_ids)
-        # Gather weights from unbiased scores
-        weights = scores.gather(1, expert_ids.long())
-    else:
-        # Standard topk selection using biased scores
-        _, indices = torch.topk(scores_for_choice, k=topk, dim=-1)
-        topk_indices.copy_(indices)
-        # Gather weights from unbiased scores
-        weights = scores.gather(1, indices)
-
-    if renormalize:
-        weights = weights / (weights.sum(dim=-1, keepdim=True).clamp(min=1e-20))
-
-    topk_weights.copy_(weights * routed_scaling_factor)
     return topk_weights, topk_indices
 
 
@@ -115,21 +82,6 @@ def vllm_topk_softplus_sqrt(
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, ...]:
-    from vllm.platforms import current_platform
-
-    if current_platform.is_xpu():
-        return _topk_softplus_sqrt_torch(
-            topk_weights,
-            topk_indices,
-            token_expert_indices,
-            gating_output,
-            renormalize,
-            e_score_correction_bias,
-            input_tokens,
-            hash_indices_table,
-            routed_scaling_factor,
-        )
-
     ops.topk_hash_softplus_sqrt(
         topk_weights,
         topk_indices,
@@ -140,6 +92,7 @@ def vllm_topk_softplus_sqrt(
         e_score_correction_bias,
         input_tokens,
         hash_indices_table,
+        is_padding=_get_padding_mask(topk_indices.shape[0]),
     )
 
     return topk_weights, topk_indices
@@ -170,18 +123,33 @@ def fused_topk_bias(
     hash_indices_table: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ):
-    # The topk kernel dispatches dtype based on topk_ids (set by
-    # indices_type) and assumes input_tokens/hash_indices_table match.
-    if indices_type is not None:
-        if input_tokens is not None and input_tokens.dtype != indices_type:
-            input_tokens = input_tokens.to(dtype=indices_type)
-        if hash_indices_table is not None and hash_indices_table.dtype != indices_type:
-            hash_indices_table = hash_indices_table.to(dtype=indices_type)
+    if (
+        input_tokens is not None
+        and hash_indices_table is not None
+        and input_tokens.dtype != hash_indices_table.dtype
+    ):
+        input_tokens = input_tokens.to(dtype=hash_indices_table.dtype)
 
     if not rocm_aiter_ops.is_fused_moe_enabled():
         assert hidden_states.size(0) == gating_output.size(0), (
             "Number of tokens mismatch"
         )
+
+        output_indices_dtype = torch.int32 if indices_type is None else indices_type
+        if scoring_func == "sqrtsoftplus" and can_use_dsv4_topk(
+            gating_output,
+            e_score_correction_bias,
+            topk,
+            renormalize,
+            output_indices_dtype,
+        ):
+            assert e_score_correction_bias is not None
+            return dsv4_topk(
+                gating_output,
+                e_score_correction_bias,
+                output_indices_dtype,
+                routed_scaling_factor,
+            )
 
         M, _ = hidden_states.size()
 
@@ -304,6 +272,7 @@ def fused_topk_bias(
         scores_for_choice = scores.view(-1, n_routed_experts)
     # For batch invariance, use sorted=True to ensure deterministic expert selection
     if hash_indices_table is not None:
+        assert input_tokens is not None
         topk_indices = hash_indices_table[input_tokens]
     else:
         use_sorted = envs.VLLM_BATCH_INVARIANT

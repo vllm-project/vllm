@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Streaming reasoning parsers for chat completions.
 //!
 //! The key design choice here is that parser initialization prefers the

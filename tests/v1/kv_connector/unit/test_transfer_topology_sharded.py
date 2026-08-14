@@ -18,8 +18,8 @@ class _FakeAttentionBackend:
         block_size: int,
         num_kv_heads: int,
         head_size: int,
-    ) -> tuple[int, int, int, int, int]:
-        return (2, num_blocks, num_kv_heads, block_size, head_size)
+    ) -> tuple[int, int, int, int]:
+        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
 
 def _make_topology(

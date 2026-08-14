@@ -12,3 +12,5 @@ Our renderer API is designed to disaggregate the render phase(preprocessing) and
     - Render completion requests
 - [Chat Completions Render API](renderer.md) (`/v1/chat/completions/render`)
     - Render chat completions
+
+For the post processing counterpart that turns generated token IDs back into OpenAI compatible responses, see the [Derenderer APIs](derenderer.md).

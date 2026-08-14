@@ -2,14 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import io
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from typing import cast
 
-import numpy as np
-import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -48,6 +45,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
+from vllm.utils.serial_utils import numpy2base64
 
 logger = init_logger(__name__)
 
@@ -194,6 +192,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            session_id = self._get_session_id(request, raw_request)
 
             if isinstance(sampling_params, BeamSearchParams):
                 generator = self.beam_search(
@@ -202,6 +201,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     params=sampling_params,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
+                    session_id=session_id,
                 )
             else:
                 generator = self.engine_client.generate(
@@ -210,8 +210,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     request_id_item,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    priority=request.priority,
+                    priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
+                    session_id=session_id,
                 )
 
             generators.append(generator)
@@ -386,6 +387,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             top_logprobs=out_logprobs,
                             num_output_top_logprobs=request.logprobs,
                             tokenizer=tokenizer,
+                            logprob_token_ids=request.logprob_token_ids,
                             initial_text_offset=previous_text_lens[i],
                             return_as_token_id=request.return_tokens_as_token_ids,
                         )
@@ -510,6 +512,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         num_prompt_tokens = 0
         num_generated_tokens = 0
         kv_transfer_params = None
+        ec_transfer_params = None
         last_final_res = None
         for final_res in final_res_batch:
             last_final_res = final_res
@@ -559,22 +562,17 @@ class OpenAIServingCompletion(GenerateBaseServing):
                         top_logprobs=out_logprobs,
                         tokenizer=tokenizer,
                         num_output_top_logprobs=request.logprobs,
+                        logprob_token_ids=request.logprob_token_ids,
                         return_as_token_id=request.return_tokens_as_token_ids,
                     )
                 else:
                     logprobs = None
 
-                # Encode routed_experts for transport. JSON can't carry raw
-                # bytes, so we write the ndarray as a ``.npy`` byte stream
-                # and base64-encode it. ``pybase64`` is ~3x faster than the
-                # stdlib ``base64`` on large payloads thanks to SIMD.
-                routed_experts_b64 = None
-                if output.routed_experts is not None:
-                    buf = io.BytesIO()
-                    np.save(buf, output.routed_experts)
-                    routed_experts_b64 = base64.b64encode(buf.getvalue()).decode(
-                        "ascii"
-                    )
+                routed_experts_b64 = (
+                    numpy2base64(output.routed_experts)
+                    if output.routed_experts is not None
+                    else None
+                )
 
                 choice_data = CompletionResponseChoice(
                     index=len(choices),
@@ -632,6 +630,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
         if final_res_batch:
             kv_transfer_params = final_res_batch[0].kv_transfer_params
+            ec_transfer_params = final_res_batch[0].ec_transfer_params
+
         return CompletionResponse(
             id=request_id,
             created=created_time,
@@ -640,6 +640,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
             usage=usage,
             system_fingerprint=self.system_fingerprint,
             kv_transfer_params=kv_transfer_params,
+            ec_transfer_params=ec_transfer_params,
             metrics=per_request_metrics,
         )
 
@@ -649,6 +650,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         top_logprobs: GenericSequence[dict[int, Logprob] | None],
         num_output_top_logprobs: int,
         tokenizer: TokenizerLike | None,
+        logprob_token_ids: list[int] | None = None,
         initial_text_offset: int = 0,
         return_as_token_id: bool | None = None,
     ) -> CompletionLogProbs:
@@ -713,7 +715,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                             return_as_token_id=should_return_as_token_id,
                         ): max(top_lp[1].logprob, -9999.0)
                         for i, top_lp in enumerate(step_top_logprobs.items())
-                        if num_output_top_logprobs >= i
+                        if logprob_token_ids or num_output_top_logprobs >= i
                     }
                 )
 

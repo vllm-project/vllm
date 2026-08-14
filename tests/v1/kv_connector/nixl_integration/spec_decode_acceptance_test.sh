@@ -20,7 +20,8 @@
 #   SD_MODEL            - drafter model path
 #   MODEL_NAME          - target model (default: meta-llama/Llama-3.1-8B-Instruct)
 #   NUM_SPEC_TOKENS     - number of speculative tokens (default: 3)
-#   GPU_MEMORY_UTILIZATION - (default: 0.7)
+#   GPU_MEMORY_UTILIZATION - used when KV_CACHE_MEMORY_BYTES is unset (default: 0.7)
+#   KV_CACHE_MEMORY_BYTES - optional KV cache size per server
 #   ATTENTION_BACKEND   - attention backend to use
 #                         Default: TRITON_ATTN on ROCm, FLASH_ATTN on NVIDIA
 #                         ROCm options: TRITON_ATTN, ROCM_ATTN, ROCM_AITER_FA,
@@ -52,9 +53,16 @@ NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
 DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.7}
+KV_CACHE_MEMORY_BYTES=${KV_CACHE_MEMORY_BYTES:-}
 BLOCK_SIZE=${BLOCK_SIZE:-16}
 SERVER_HOST="${SERVER_HOST:-127.0.0.1}"
 NIXL_SIDE_CHANNEL_HOST="${NIXL_SIDE_CHANNEL_HOST:-$SERVER_HOST}"
+
+if [[ -n "$KV_CACHE_MEMORY_BYTES" ]]; then
+  KV_CACHE_ARGS=(--kv-cache-memory-bytes "$KV_CACHE_MEMORY_BYTES")
+else
+  KV_CACHE_ARGS=(--gpu-memory-utilization "$GPU_MEMORY_UTILIZATION")
+fi
 
 # Resolve the repository root from the script location instead of `.git`.
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -209,6 +217,7 @@ run_test_for_device() {
   echo "SD model:           ${SD_MODEL}"
   echo "Spec tokens:        ${NUM_SPEC_TOKENS}"
   echo "KV buffer device:   ${kv_device}"
+  echo "KV cache memory:    ${KV_CACHE_MEMORY_BYTES:-auto-sized}"
   echo "Attention backend:  ${ATTENTION_BACKEND}"
   echo "GPU platform:       ${GPU_PLATFORM}"
   echo "Server host:        ${SERVER_HOST}"
@@ -248,7 +257,7 @@ run_test_for_device() {
       --enforce-eager \
       --max-model-len $MAX_MODEL_LEN \
       --block-size ${BLOCK_SIZE} \
-      --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+      "${KV_CACHE_ARGS[@]}" \
       --tensor-parallel-size $PREFILLER_TP_SIZE \
       --kv-transfer-config "$kv_config_p" \
       --speculative-config "$PREFILL_SPEC_CONFIG" \
@@ -287,7 +296,7 @@ run_test_for_device() {
       --enforce-eager \
       --max-model-len $MAX_MODEL_LEN \
       --block-size ${BLOCK_SIZE} \
-      --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
+      "${KV_CACHE_ARGS[@]}" \
       --tensor-parallel-size $DECODER_TP_SIZE \
       --kv-transfer-config "$kv_config_d" \
       --speculative-config "$DECODE_SPEC_CONFIG" \

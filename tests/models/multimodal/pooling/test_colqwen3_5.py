@@ -7,6 +7,8 @@ ColBERT-style late interaction scoring (MaxSim). It produces per-token
 embeddings for both text and image inputs.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -154,12 +156,14 @@ def test_colqwen3_5_relevance_ordering(
     _run_relevance_test(vllm_runner, model, dtype=dtype)
 
 
-def test_colqwen3_5_config_enables_bidirectional_attention() -> None:
-    """ColQwen3.5 retrieval must be served BIDIRECTIONAL (is_causal=False) so the
-    full_attention layers build with AttentionType.ENCODER_ONLY. This guards the
-    silent-causal regression (no GPU / model load needed)."""
-    from types import SimpleNamespace
-
+@pytest.mark.parametrize(
+    ("contract", "expected_is_causal"),
+    [("causal", True), ("bidirectional", False)],
+)
+def test_colqwen3_5_config_applies_declared_attention_contract(
+    contract: str,
+    expected_is_causal: bool,
+) -> None:
     from vllm.model_executor.models.config import (
         MODELS_CONFIG_MAP,
         ColQwen3_5Config,
@@ -167,6 +171,97 @@ def test_colqwen3_5_config_enables_bidirectional_attention() -> None:
 
     assert MODELS_CONFIG_MAP["ColQwen3_5"] is ColQwen3_5Config
 
-    model_config = SimpleNamespace(hf_config=SimpleNamespace())
+    hf_config = SimpleNamespace(retrieval_attention_contract=contract)
+    text_config = SimpleNamespace()
+    model_config = SimpleNamespace(
+        hf_config=hf_config,
+        hf_text_config=text_config,
+    )
     ColQwen3_5Config.verify_and_update_model_config(model_config)
-    assert model_config.hf_config.is_causal is False
+    assert hf_config.is_causal is expected_is_causal
+    assert text_config.is_causal is expected_is_causal
+
+
+@pytest.mark.parametrize(
+    "hf_config",
+    [
+        SimpleNamespace(),
+        SimpleNamespace(retrieval_attention_contract="unsupported"),
+        SimpleNamespace(
+            retrieval_attention_contract="causal",
+            text_config=SimpleNamespace(retrieval_attention_contract="bidirectional"),
+        ),
+    ],
+)
+def test_colqwen3_5_config_rejects_invalid_attention_contract(hf_config) -> None:
+    from vllm.model_executor.models.config import ColQwen3_5Config
+
+    text_config = getattr(hf_config, "text_config", SimpleNamespace())
+    model_config = SimpleNamespace(
+        hf_config=hf_config,
+        hf_text_config=text_config,
+    )
+    with pytest.raises(ValueError, match="retrieval_attention_contract"):
+        ColQwen3_5Config.verify_and_update_model_config(model_config)
+
+
+def test_colqwen3_5_bidirectional_contract_builds_encoder_only_attention(
+    monkeypatch,
+) -> None:
+    from vllm.model_executor.models import qwen3_next
+    from vllm.model_executor.models.config import ColQwen3_5Config
+    from vllm.v1.attention.backend import AttentionType
+
+    hf_config = SimpleNamespace(retrieval_attention_contract="bidirectional")
+    text_config = SimpleNamespace(
+        hidden_size=256,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=128,
+        max_position_embeddings=4096,
+        rope_parameters={},
+        rms_norm_eps=1e-6,
+    )
+    model_config = SimpleNamespace(
+        hf_config=hf_config,
+        hf_text_config=text_config,
+    )
+    ColQwen3_5Config.verify_and_update_model_config(model_config)
+
+    captured = {}
+
+    class FakeAttention(torch.nn.Module):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__()
+            captured["attn_type"] = kwargs["attn_type"]
+
+    monkeypatch.setattr(qwen3_next, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(
+        qwen3_next, "QKVParallelLinear", lambda *args, **kwargs: torch.nn.Identity()
+    )
+    monkeypatch.setattr(
+        qwen3_next, "RowParallelLinear", lambda *args, **kwargs: torch.nn.Identity()
+    )
+    monkeypatch.setattr(
+        qwen3_next,
+        "get_rope",
+        lambda *args, **kwargs: SimpleNamespace(is_neox_style=False),
+    )
+    monkeypatch.setattr(
+        qwen3_next, "Qwen3NextRMSNorm", lambda *args, **kwargs: torch.nn.Identity()
+    )
+    monkeypatch.setattr(qwen3_next, "Attention", FakeAttention)
+
+    qwen3_next.Qwen3NextAttention(text_config)
+
+    assert captured["attn_type"] is AttentionType.ENCODER_ONLY
+
+
+def test_colqwen3_5_encoder_only_attention_has_no_kv_cache_spec() -> None:
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backend import AttentionType
+
+    attention = SimpleNamespace(attn_type=AttentionType.ENCODER_ONLY)
+    vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=16))
+
+    assert Attention.get_kv_cache_spec(attention, vllm_config) is None

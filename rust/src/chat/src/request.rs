@@ -1,4 +1,7 @@
-use std::collections::HashMap;
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use std::collections::{HashMap, HashSet};
 
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Serialize};
@@ -36,7 +39,24 @@ pub enum ChatContentPart {
         detail: Option<ImageDetail>,
         uuid: Option<String>,
     },
+    /// One video URL/data URL content block.
+    VideoUrl {
+        video_url: String,
+        uuid: Option<String>,
+    },
+    /// One `input_audio` content block carrying base64-encoded audio bytes.
+    InputAudio {
+        data: String,
+        format: Option<String>,
+        uuid: Option<String>,
+    },
+    /// One audio URL/data URL content block.
+    AudioUrl {
+        audio_url: String,
+        uuid: Option<String>,
+    },
     // ImageData...
+    // VideoData...
     // ImageEmbeds...
 }
 
@@ -55,12 +75,40 @@ impl ChatContentPart {
         }
     }
 
+    /// Construct one video URL content part with the given URL string.
+    pub fn video_url(video_url: impl Into<String>) -> Self {
+        Self::VideoUrl {
+            video_url: video_url.into(),
+            uuid: None,
+        }
+    }
+
+    /// Construct one base64-encoded input-audio content part.
+    pub fn input_audio(data: impl Into<String>, format: Option<String>) -> Self {
+        Self::InputAudio {
+            data: data.into(),
+            format,
+            uuid: None,
+        }
+    }
+
+    /// Construct one audio URL content part with the given URL string.
+    pub fn audio_url(audio_url: impl Into<String>) -> Self {
+        Self::AudioUrl {
+            audio_url: audio_url.into(),
+            uuid: None,
+        }
+    }
+
     /// Return the text content of this part when it's a text block, or an
     /// "unsupported multimodal content" error otherwise.
     pub(crate) fn as_text(&self) -> Result<&str> {
         match self {
             Self::Text { text } => Ok(text),
             Self::ImageUrl { .. } => Err(Error::UnsupportedMultimodalContent("image_url")),
+            Self::VideoUrl { .. } => Err(Error::UnsupportedMultimodalContent("video_url")),
+            Self::InputAudio { .. } => Err(Error::UnsupportedMultimodalContent("input_audio")),
+            Self::AudioUrl { .. } => Err(Error::UnsupportedMultimodalContent("audio_url")),
         }
     }
 
@@ -73,7 +121,10 @@ impl ChatContentPart {
     pub(crate) fn is_multimodal(&self) -> bool {
         match self {
             Self::Text { .. } => false,
-            Self::ImageUrl { .. } => true,
+            Self::ImageUrl { .. }
+            | Self::VideoUrl { .. }
+            | Self::InputAudio { .. }
+            | Self::AudioUrl { .. } => true,
         }
     }
 }
@@ -194,6 +245,16 @@ impl ChatMessage {
         Self::Developer {
             content: content.into(),
             tools,
+        }
+    }
+
+    /// Return message-scoped tool declarations carried by this message.
+    pub fn declared_tools(&self) -> Option<&[ChatTool]> {
+        match self {
+            Self::Developer {
+                tools: Some(tools), ..
+            } if !tools.is_empty() => Some(tools),
+            _ => None,
         }
     }
 
@@ -346,6 +407,10 @@ pub struct ChatOptions {
     /// Effort level exposed to chat templates for reasoning models.
     pub reasoning_effort: Option<ReasoningEffort>,
 
+    /// Standard response format available to model-specific renderers.
+    #[serde(default)]
+    pub response_format: Option<Value>,
+
     /// Additional keyword arguments exposed to the chat template.
     pub template_kwargs: HashMap<String, Value>,
 }
@@ -356,6 +421,7 @@ impl Default for ChatOptions {
             generation_prompt_mode: GenerationPromptMode::StartNewAssistant,
             chat_template: None,
             reasoning_effort: None,
+            response_format: None,
             template_kwargs: HashMap::new(),
         }
     }
@@ -394,6 +460,93 @@ pub enum ChatToolChoice {
     },
 }
 
+/// Resolved tool state shared by rendering, output parsing, and constraints.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedToolContext {
+    /// Request-level tools rendered before the ordered chat history.
+    pub initial_tools: Vec<ChatTool>,
+    /// Request-level and message-scoped tools available for this generation.
+    pub effective_tools: Vec<ChatTool>,
+    /// Resolved tool-choice behavior for this request.
+    pub tool_choice: ChatToolChoice,
+    /// Whether more than one parsed tool call may be surfaced northbound.
+    pub parallel_tool_calls: bool,
+}
+
+impl ResolvedToolContext {
+    /// Resolve one complete tool context from request and message declarations.
+    pub fn new(
+        messages: &[ChatMessage],
+        initial_tools: Vec<ChatTool>,
+        requested_tool_choice: Option<ChatToolChoice>,
+        parallel_tool_calls: bool,
+    ) -> Result<Self> {
+        let dynamic_tool_count = messages
+            .iter()
+            .filter_map(ChatMessage::declared_tools)
+            .map(<[ChatTool]>::len)
+            .sum::<usize>();
+        let mut effective_tools = Vec::with_capacity(initial_tools.len() + dynamic_tool_count);
+        let mut names = HashSet::with_capacity(effective_tools.capacity());
+
+        for tool in initial_tools
+            .iter()
+            .chain(messages.iter().filter_map(ChatMessage::declared_tools).flatten())
+        {
+            if !names.insert(tool.name.clone()) {
+                return Err(Error::DuplicateToolName {
+                    name: tool.name.clone(),
+                });
+            }
+            effective_tools.push(tool.clone());
+        }
+
+        let tool_choice = requested_tool_choice.unwrap_or({
+            if effective_tools.is_empty() {
+                ChatToolChoice::None
+            } else {
+                ChatToolChoice::Auto
+            }
+        });
+
+        match &tool_choice {
+            ChatToolChoice::Auto | ChatToolChoice::Required if effective_tools.is_empty() => {
+                return Err(Error::ToolChoiceRequiresTools);
+            }
+            ChatToolChoice::Function { name } if !names.contains(name) => {
+                return Err(Error::ToolChoiceFunctionNotFound { name: name.clone() });
+            }
+            ChatToolChoice::None
+            | ChatToolChoice::Auto
+            | ChatToolChoice::Required
+            | ChatToolChoice::Function { .. } => {}
+        }
+
+        Ok(Self {
+            initial_tools,
+            effective_tools,
+            tool_choice,
+            parallel_tool_calls,
+        })
+    }
+
+    /// Return whether tool output parsing is active for this request.
+    pub fn parsing_enabled(&self) -> bool {
+        !matches!(self.tool_choice, ChatToolChoice::None) && !self.effective_tools.is_empty()
+    }
+}
+
+impl Default for ResolvedToolContext {
+    fn default() -> Self {
+        Self {
+            initial_tools: Vec::new(),
+            effective_tools: Vec::new(),
+            tool_choice: ChatToolChoice::None,
+            parallel_tool_calls: true,
+        }
+    }
+}
+
 /// One chat request ready to be rendered into a prompt and lowered into a
 /// generate request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -406,14 +559,8 @@ pub struct ChatRequest {
     pub sampling_params: SamplingParams,
     /// Chat-specific rendering options.
     pub chat_options: ChatOptions,
-    /// Function tools made available to the model for this request.
-    pub tools: Vec<ChatTool>,
-    /// Tool-choice behavior for this request.
-    pub tool_choice: ChatToolChoice,
-    /// Whether the model may return more than one tool call per response.
-    ///
-    /// When `false`, only the first parsed tool call is surfaced northbound.
-    pub parallel_tool_calls: bool,
+    /// Resolved request-level and message-scoped tool behavior.
+    pub tool_context: ResolvedToolContext,
     /// Text decode options for incremental detokenization.
     pub decode_options: TextDecodeOptions,
     /// Whether to emit intermediate northbound content deltas before the
@@ -435,6 +582,9 @@ pub struct ChatRequest {
     /// Override data parallel rank.
     #[serde(default)]
     pub data_parallel_rank: Option<u32>,
+    /// Stable session identity shared by related requests.
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
@@ -448,9 +598,7 @@ impl ChatRequest {
             messages: vec![ChatMessage::text(ChatRole::User, "test")],
             sampling_params: SamplingParams::default(),
             chat_options: ChatOptions::default(),
-            tools: Vec::new(),
-            tool_choice: ChatToolChoice::None,
-            parallel_tool_calls: true,
+            tool_context: ResolvedToolContext::default(),
             decode_options: TextDecodeOptions::default(),
             intermediate: true,
             priority: 0,
@@ -458,6 +606,7 @@ impl ChatRequest {
             cache_salt: None,
             add_special_tokens: false,
             data_parallel_rank: None,
+            session_id: None,
             lora_request: None,
         }
     }
@@ -487,10 +636,33 @@ impl ChatRequest {
         self.messages.iter().any(ChatMessage::has_multimodal)
     }
 
+    /// Return every tool available for this generation.
+    pub fn tools(&self) -> &[ChatTool] {
+        &self.tool_context.effective_tools
+    }
+
+    /// Return request-level tools before message-scoped declarations.
+    ///
+    /// Renderers should use [`Self::tools`] unless their prompt format places
+    /// initial and message-scoped declarations differently.
+    pub fn initial_tools(&self) -> &[ChatTool] {
+        &self.tool_context.initial_tools
+    }
+
+    /// Return the resolved tool-choice behavior.
+    pub fn tool_choice(&self) -> &ChatToolChoice {
+        &self.tool_context.tool_choice
+    }
+
+    /// Return whether more than one parsed tool call may be surfaced.
+    pub fn parallel_tool_calls(&self) -> bool {
+        self.tool_context.parallel_tool_calls
+    }
+
     /// Return true if this request should enable tool parsing based on the tool
     /// choice and tool list.
     pub(crate) fn tool_parsing_enabled(&self) -> bool {
-        !matches!(self.tool_choice, ChatToolChoice::None) && !self.tools.is_empty()
+        self.tool_context.parsing_enabled()
     }
 
     /// Return the request-level thinking toggle when explicitly requested.
@@ -545,7 +717,10 @@ impl ChatRole {
 mod tests {
     use serde_json::{json, to_value};
 
-    use super::{ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool};
+    use super::{
+        ChatContent, ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
+        ResolvedToolContext,
+    };
     use crate::Error;
     use crate::event::AssistantContentBlock;
 
@@ -553,6 +728,26 @@ mod tests {
     fn chat_content_deserializes_from_raw_string() {
         let content: ChatContent = serde_json::from_value(json!("hello")).unwrap();
         assert_eq!(content, ChatContent::Text("hello".to_string()));
+    }
+
+    #[test]
+    fn chat_content_video_url_part_round_trips_through_serde() {
+        let content = ChatContent::Parts(vec![ChatContentPart::VideoUrl {
+            video_url: "https://example.com/demo.mp4".to_string(),
+            uuid: Some("video-1".to_string()),
+        }]);
+
+        let value = to_value(&content).unwrap();
+        assert_eq!(
+            value,
+            json!([{
+                "type": "video_url",
+                "video_url": "https://example.com/demo.mp4",
+                "uuid": "video-1",
+            }])
+        );
+        let decoded: ChatContent = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, content);
     }
 
     #[test]
@@ -620,6 +815,101 @@ mod tests {
         let value = to_value(&message).unwrap();
         let decoded: ChatMessage = serde_json::from_value(value).unwrap();
         assert_eq!(decoded, message);
+    }
+
+    fn chat_tool(name: &str) -> ChatTool {
+        ChatTool {
+            name: name.to_string(),
+            description: None,
+            parameters: json!({"type": "object"}),
+            strict: None,
+        }
+    }
+
+    #[test]
+    fn resolved_tool_context_defaults_dynamic_only_tools_to_auto() {
+        let messages = vec![
+            ChatMessage::user("hello"),
+            ChatMessage::developer("", Some(vec![chat_tool("lookup")])),
+        ];
+
+        let context = ResolvedToolContext::new(&messages, Vec::new(), None, false).unwrap();
+
+        assert!(context.initial_tools.is_empty());
+        assert_eq!(context.effective_tools, vec![chat_tool("lookup")]);
+        assert_eq!(context.tool_choice, ChatToolChoice::Auto);
+        assert!(!context.parallel_tool_calls);
+        assert!(context.parsing_enabled());
+    }
+
+    #[test]
+    fn resolved_tool_context_preserves_initial_then_message_order() {
+        let messages = vec![
+            ChatMessage::developer("", Some(vec![chat_tool("middle")])),
+            ChatMessage::developer("policy", Some(vec![chat_tool("last")])),
+        ];
+
+        let context = ResolvedToolContext::new(
+            &messages,
+            vec![chat_tool("first")],
+            Some(ChatToolChoice::Required),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            context
+                .effective_tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "middle", "last"]
+        );
+        assert_eq!(context.tool_choice, ChatToolChoice::Required);
+    }
+
+    #[test]
+    fn resolved_tool_context_rejects_duplicate_names() {
+        let messages = vec![ChatMessage::developer("", Some(vec![chat_tool("lookup")]))];
+
+        let error =
+            ResolvedToolContext::new(&messages, vec![chat_tool("lookup")], None, true).unwrap_err();
+
+        assert!(matches!(error, Error::DuplicateToolName { name } if name == "lookup"));
+    }
+
+    #[test]
+    fn resolved_tool_context_validates_named_choice_against_effective_tools() {
+        let messages = vec![ChatMessage::developer("", Some(vec![chat_tool("lookup")]))];
+        let context = ResolvedToolContext::new(
+            &messages,
+            Vec::new(),
+            Some(ChatToolChoice::Function {
+                name: "lookup".to_string(),
+            }),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            context.tool_choice,
+            ChatToolChoice::Function {
+                name: "lookup".to_string()
+            }
+        );
+
+        let error = ResolvedToolContext::new(
+            &messages,
+            Vec::new(),
+            Some(ChatToolChoice::Function {
+                name: "missing".to_string(),
+            }),
+            true,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::ToolChoiceFunctionNotFound { name } if name == "missing"
+        ));
     }
 
     #[test]

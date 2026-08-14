@@ -25,7 +25,6 @@ QuantizationMethods = Literal[
     "awq_marlin",
     "humming",
     "compressed-tensors",
-    "bitsandbytes",
     "experts_int8",
     "quark",
     "moe_wna16",
@@ -42,6 +41,7 @@ QuantizationMethods = Literal[
     "fp8_per_block",
     "fp8_per_channel",
     "int8_per_channel_weight_only",
+    "nvfp4_per_token",
     "mxfp8",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
@@ -116,7 +116,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
 
     from .auto_awq import AutoAWQConfig
     from .auto_gptq import AutoGPTQConfig
-    from .bitsandbytes import BitsAndBytesConfig
     from .compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
     )
@@ -152,7 +151,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "gptq": AutoGPTQConfig,
         "gptq_marlin": AutoGPTQConfig,
         "compressed-tensors": CompressedTensorsConfig,
-        "bitsandbytes": BitsAndBytesConfig,
         "experts_int8": ExpertsInt8Config,
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,

@@ -316,8 +316,12 @@ class GraniteMoeHybridAttention(nn.Module):
 
 
 ALL_DECODER_LAYER_TYPES = {
+    # Transformers < 5.13.0
     "attention": GraniteMoeHybridAttentionDecoderLayer,
     "mamba": GraniteMoeHybridMambaDecoderLayer,
+    # Transformers >= 5.13.0
+    "full_attention": GraniteMoeHybridAttentionDecoderLayer,
+    "linear_attention": GraniteMoeHybridMambaDecoderLayer,
 }
 
 
@@ -659,7 +663,7 @@ class GraniteMoeHybridForCausalLM(
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(
             config.vocab_size,
             config.vocab_size,

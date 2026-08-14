@@ -24,8 +24,11 @@ class CpuCommunicator(DeviceCommunicatorBase):
         device: torch.device | None = None,
         device_group: ProcessGroup | None = None,
         unique_name: str = "",
+        use_all2all: bool = False,
     ):
-        super().__init__(cpu_group, device, device_group, unique_name)
+        super().__init__(
+            cpu_group, device, device_group, unique_name, use_all2all=use_all2all
+        )
         self.dist_module = torch.distributed
 
         if (
@@ -33,6 +36,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
                 current_platform.get_cpu_architecture() == CpuArchEnum.X86
                 or current_platform.get_cpu_architecture() == CpuArchEnum.ARM
                 or current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
+                or current_platform.get_cpu_architecture() == CpuArchEnum.S390X
             )
             and hasattr(torch.ops._C, "init_shm_manager")
             and (unique_name.startswith("tp") or unique_name.startswith("pp"))

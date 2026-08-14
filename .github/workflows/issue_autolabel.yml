@@ -130,6 +130,66 @@ jobs:
                   },
                 ],
               },
+              kimi: {
+                keywords: [
+                  { term: "Kimi",     searchIn: "both" },
+                  { term: "Moonshot", searchIn: "both" },
+                ],
+                substrings: [
+                  { term: "moonshotai/", searchIn: "both" },
+                  { term: "kimi",        searchIn: "title" },
+                ],
+              },
+              k3: {
+                keywords: [
+                  { term: "Kimi K3", searchIn: "both" },
+                  { term: "K3",      searchIn: "title" },
+                ],
+                substrings: [
+                  { term: "moonshotai/kimi-k3", searchIn: "both" },
+                ],
+              },
+              quantization: {
+                keywords: [
+                  {
+                    term: "quantization",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "quantized",
+                    searchIn: "both"
+                  },
+                ],
+              },
+              "intel-gpu": {
+                // Keyword search - matches whole words only (with word boundaries)
+                keywords: [
+                  {
+                    term: "B50",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "B60",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "B70",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "intel gpu",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "Arc GPU",
+                    searchIn: "both"
+                  },
+                  {
+                    term: "BMG",
+                    searchIn: "both"
+                  },
+                ],
+              },
               // Add more label configurations here as needed
               // example: {
               //   keywords: [...],
@@ -323,8 +383,12 @@ jobs:
             // {users} will be replaced with @mentions
             const ccConfig = {
               rocm: {
-                users: ['hongxiayang', 'tjtanaa', 'vllmellm'],
+                users: ['hongxiayang', 'tjtanaa', 'vllmellm', 'giuseppegrossi'],
                 message: 'CC {users} for ROCm-related issue',
+              },
+              cohere: {
+                users: ['walterbm', 'ekagra-ranjan', 'andrewbcohere', 'jasonozuzu-cohere'],
+                message: 'CC {users} for Cohere-related issue',
               },
               mistral: {
                 users: ['patrickvonplaten', 'juliendenize', 'andylolu2', 'NickLucche'],

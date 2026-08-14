@@ -53,6 +53,13 @@ def get_eagle3_aux_layers_from_config(
         target_layer_ids = getattr(hf_config, "target_layer_ids", None)
         if target_layer_ids:
             layer_ids = [i + 1 for i in target_layer_ids]
+    if not layer_ids:
+        for config_name in ("dflash_config", "eagle_config"):
+            drafter_config = getattr(hf_config, config_name, None)
+            if drafter_config and isinstance(drafter_config, dict):
+                layer_ids = drafter_config.get("layer_ids")
+                if layer_ids:
+                    break
     if layer_ids and isinstance(layer_ids, (list, tuple)):
         return tuple(layer_ids)
     return None

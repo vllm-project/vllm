@@ -34,6 +34,7 @@ from tests.parser.engine.trace_builder import _BUILDERS, build_samples
 from vllm.parser.engine import registered_adapters as _adapters_mod
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import ParserState
+from vllm.parser.mistral import MistralParser
 
 # ── Parser discovery ─────────────────────────────────────────────────
 
@@ -64,9 +65,18 @@ def _discover_parsers() -> list[_ParserInfo]:
             and obj is not ParserEngine
         ):
             continue
+        if obj is MistralParser:
+            # Mistral uses brace-balanced JSON tool args with no TOOL_END
+            # token, so it does not fit this TOOL_END-based replay harness.
+            # It is covered by tests/parser/mistral/ instead.
+            continue
         cfg = obj(bare_tok, None).parser_engine_config
         if cfg.name not in _BUILDERS:
             missing_builders.append(f"{obj.__name__} (config.name={cfg.name!r})")
+            continue
+        if cfg.name == "inkling":
+            # Inkling opts out of token-id terminal matching and has typed
+            # structural blocks; its replay coverage lives in test_inkling.py.
             continue
         tool_end = cfg.token_id_terminals.get("TOOL_END")
         if not tool_end:
@@ -299,7 +309,12 @@ _TOOL_CALL_SAMPLES = [
     (p.parser_cls, s, p.think_end, p.tool_start)
     for p in _PARSERS
     for s in p.samples
-    if s.expected_tool_calls and s.expected_reasoning
+    if s.expected_tool_calls
+    and s.expected_reasoning
+    # Inkling's typed-block format (structural role/kind tokens, shared
+    # block-end token) doesn't fit the generic reasoning/tool split
+    # below; its filtering modes are covered in test_inkling.py instead.
+    and p.name != "inkling"
 ]
 
 

@@ -11,8 +11,13 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm import envs
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config,
+    get_layers_from_vllm_config,
+)
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
@@ -65,6 +70,10 @@ class CPUAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_non_causal(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_sliding_window(cls) -> bool:
         return True
 
     @classmethod
@@ -147,21 +156,41 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         )
         self.head_dim = kv_cache_spec.head_size
         self.dtype = vllm_config.model_config.dtype
-        self.window_size = getattr(kv_cache_spec, "sliding_window", -1)
-        if self.window_size is None:
-            self.window_size = -1
+        # Resolved from the layers on the first build(), once they exist.
+        self.window_size: int | None = None
         self.block_size = vllm_config.cache_config.block_size
-        kv_cache_dtype_str = vllm_config.cache_config.cache_dtype
+        self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self.isa = _get_attn_isa(
             self.dtype,
             self.block_size,
             self.head_dim,
-            kv_cache_dtype_str,
+            self.kv_cache_dtype,
         )
         self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
         self.is_encoder_only_attention = isinstance(
             kv_cache_spec, EncoderOnlyAttentionSpec
         )
+
+    def _group_sliding_window(self) -> int:
+        """The window shared by every layer in this group, else -1 (no window).
+
+        Taken from the layers rather than the group spec: one KV cache group can
+        hold both windowed and global layers (e.g. Gemma-3 with the hybrid KV
+        cache manager disabled), and the scheduler metadata built here is shared
+        by the whole group, so it may only assume a window all of them agree on.
+        """
+        layers = get_layers_from_vllm_config(
+            self.vllm_config, Attention, self.layer_names
+        )
+        windows = {
+            layer.impl.sliding_window
+            for layer in layers.values()
+            if isinstance(layer.impl, CPUAttentionBackendImpl)
+        }
+        if len(windows) != 1:
+            return -1
+        window = windows.pop()
+        return -1 if window is None else window
 
     def build(
         self,
@@ -169,6 +198,9 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> CPUAttentionMetadata:
+        if self.window_size is None:
+            self.window_size = self._group_sliding_window()
+
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
@@ -230,6 +262,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             isa=self.isa,
             enable_kv_split=envs.VLLM_CPU_ATTN_SPLIT_KV,
             dynamic_causal=dynamic_casual,
+            kv_cache_dtype=self.kv_cache_dtype,
         )
 
         attn_metadata = CPUAttentionMetadata(
@@ -345,8 +378,11 @@ class CPUAttentionBackendImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        # For encoder attention
-        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+        is_encoder_attention = self.attn_type in (
+            AttentionType.ENCODER_ONLY,
+            AttentionType.ENCODER,
+        )
+        if is_encoder_attention:
             # For encoder attention,
             kv_cache = attn_metadata.encoder_cache
 
@@ -357,14 +393,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
         kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
         key_cache, value_cache = kv_cache.chunk(2, dim=2)
 
-        # key and value may be None in the case of cross attention. They are
-        # calculated once based on the output from the encoder and then cached
-        # in KV cache.
-        if (
-            self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-        ):
+        if is_encoder_attention:
             ops.cpu_attn_reshape_and_cache(
                 key,
                 value,

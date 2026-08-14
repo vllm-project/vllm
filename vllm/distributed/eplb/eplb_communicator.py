@@ -38,7 +38,7 @@ logger = init_logger(__name__)
 
 
 def has_nixl() -> bool:
-    """Whether the optional NIXL / RIXL package is available."""
+    """Whether the optional NIXL package is available."""
     return nixl_utils.NixlWrapper is not None
 
 
@@ -266,7 +266,7 @@ class NixlEplbCommunicator(EplbCommunicator):
         assert expert_buffer, "NixlEplbCommunicator requires non-empty expert_buffer."
         nixl_wrapper_cls = nixl_utils.NixlWrapper
         if nixl_wrapper_cls is None:
-            raise RuntimeError("NIXL/ RIXL is unavailable.")
+            raise RuntimeError("NIXL is unavailable.")
 
         self._cpu_group = cpu_group
         self._world_size = cpu_group.size()

@@ -2,17 +2,37 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import os
 import sys
 import typing
 
+from vllm import envs
 from vllm.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.logger import init_logger
 
 if typing.TYPE_CHECKING:
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 else:
     FlexibleArgumentParser = argparse.ArgumentParser
+
+logger = init_logger(__name__)
+
+
+def maybe_exec_rust_bench() -> None:
+    if sys.argv[1:3] != ["bench", "serve"] or not envs.VLLM_USE_RUST_BENCH:
+        return
+
+    rust_cli = envs.VLLM_RUST_FRONTEND_PATH
+    if rust_cli is None:
+        raise RuntimeError(
+            "VLLM_USE_RUST_BENCH=1 requires VLLM_RUST_FRONTEND_PATH "
+            "to resolve to the vllm-rs binary."
+        )
+
+    logger.info("Delegating `vllm bench serve` to Rust binary at %s.", rust_cli)
+    os.execv(rust_cli, [rust_cli, "bench", "serve", *sys.argv[3:]])
 
 
 def _import_bench_subcommand_modules() -> None:

@@ -565,6 +565,40 @@ def test_human_readable_model_len():
             parser.parse_args(["--max-model-len", invalid])
 
 
+def test_human_readable_other_args():
+    # Test human-readable parsing for other integer args
+    # that were added to use human_readable_int parser
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser(exit_on_error=False))
+
+    # Test max_num_scheduled_tokens
+    args = parser.parse_args(["--max-num-scheduled-tokens", "1024"])
+    assert args.max_num_scheduled_tokens == 1024
+    args = parser.parse_args(["--max-num-scheduled-tokens", "2k"])
+    assert args.max_num_scheduled_tokens == 2_000
+    args = parser.parse_args(["--max-num-scheduled-tokens", "4K"])
+    assert args.max_num_scheduled_tokens == 2**10 * 4
+    args = parser.parse_args(["--max-num-scheduled-tokens", "10.5k"])
+    assert args.max_num_scheduled_tokens == 10500
+
+    # Test kv_cache_memory_bytes (existing human-readable arg)
+    args = parser.parse_args(["--kv-cache-memory-bytes", "100000"])
+    assert args.kv_cache_memory_bytes == 100000
+    args = parser.parse_args(["--kv-cache-memory-bytes", "100k"])
+    assert args.kv_cache_memory_bytes == 100_000
+    args = parser.parse_args(["--kv-cache-memory-bytes", "1M"])
+    assert args.kv_cache_memory_bytes == 2**20
+    args = parser.parse_args(["--kv-cache-memory-bytes", "1m"])
+    assert args.kv_cache_memory_bytes == 1_000_000
+
+    # Test max_num_batched_tokens (existing human-readable arg)
+    args = parser.parse_args(["--max-num-batched-tokens", "1024"])
+    assert args.max_num_batched_tokens == 1024
+    args = parser.parse_args(["--max-num-batched-tokens", "2k"])
+    assert args.max_num_batched_tokens == 2_000
+    args = parser.parse_args(["--max-num-batched-tokens", "4K"])
+    assert args.max_num_batched_tokens == 2**10 * 4
+
+
 def test_numa_bind_args():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args(

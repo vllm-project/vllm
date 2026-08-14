@@ -10,7 +10,6 @@ from logging import Logger
 from string import Template
 from typing import Any
 
-import regex as re
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -309,11 +308,6 @@ def process_lora_modules(
     return lora_modules
 
 
-def sanitize_message(message: str) -> str:
-    # Avoid leaking memory address from object reprs
-    return re.sub(r" at 0x[0-9a-f]+>", ">", message)
-
-
 def log_version_and_model(lgr: Logger, version: str, model_name: str) -> None:
     if envs.VLLM_DISABLE_LOG_LOGO or (formatter := current_formatter_type(lgr)) is None:
         message = "vLLM server version %s, serving model %s"
@@ -325,7 +319,7 @@ def log_version_and_model(lgr: Logger, version: str, model_name: str) -> None:
             "   ${b}▀▀${r}  ${w}▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀${r}\n"
         )
         colors = {
-            "w": "\033[97;1m",  # white
+            "w": "\033[1m",  # bold, default foreground
             "o": "\033[93m",  # orange
             "b": "\033[94m",  # blue
             "r": "\033[0m",  # reset

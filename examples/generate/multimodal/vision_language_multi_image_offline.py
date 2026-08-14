@@ -17,6 +17,7 @@ from transformers import AutoProcessor, AutoTokenizer
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.utils import fetch_image
+from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 QUESTION = "What is the content of each image?"
@@ -1443,6 +1444,8 @@ def run_generate(
     engine_args.seed = seed
     if tensor_parallel_size is not None:
         engine_args.tensor_parallel_size = tensor_parallel_size
+    if current_platform.is_rocm():
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     llm = LLM.from_engine_args(engine_args)
 
     sampling_params = SamplingParams(
@@ -1484,6 +1487,8 @@ def run_chat(
     engine_args.seed = seed
     if tensor_parallel_size is not None:
         engine_args.tensor_parallel_size = tensor_parallel_size
+    if current_platform.is_rocm():
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     llm = LLM.from_engine_args(engine_args)
 
     sampling_params = (

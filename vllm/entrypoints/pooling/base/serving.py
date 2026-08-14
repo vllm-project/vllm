@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Mapping
 from concurrent.futures import Executor
@@ -63,9 +63,6 @@ class PoolingBaseServing(ABC, BaseServing):
 
         # Shared thread pool executor for preprocessing and postprocessing.
         self._executor: Executor = self.renderer._executor
-        self._preprocessing_async = make_async(
-            self._preprocessing, executor=self._executor
-        )
         self._postprocessing_async = make_async(
             self._postprocessing, executor=self._executor
         )
@@ -77,7 +74,7 @@ class PoolingBaseServing(ABC, BaseServing):
     ) -> Response:
         io_processor = self.get_io_processor(request)
         ctx = await self._init_ctx(io_processor, request, raw_request)
-        await self._preprocessing_async(io_processor, ctx)
+        await self._preprocessing(io_processor, ctx)
         await self._prepare_generators(ctx)
         await self._collect_batch(ctx)
         return await self._postprocessing_async(io_processor, ctx)
@@ -86,11 +83,17 @@ class PoolingBaseServing(ABC, BaseServing):
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
         raise NotImplementedError
 
-    @torch.inference_mode()
-    def _preprocessing(
+    async def _preprocessing(
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
-        return io_processor.pre_process_online(ctx)
+        requests = io_processor.get_request_factory_online(ctx)
+
+        if len(requests) == 0:
+            raise ValueError("You must pass at least one prompt")
+
+        ctx.engine_inputs = await asyncio.gather(
+            *[io_processor.render_async(request) for request in requests]
+        )
 
     @torch.inference_mode()
     def _postprocessing(
@@ -110,16 +113,26 @@ class PoolingBaseServing(ABC, BaseServing):
         await self._check_model(request)
 
         pooling_params = io_processor.create_pooling_params(request)
+        lora_request = self._maybe_get_adapters(request)
+        priorities = getattr(request, "priority", 0)
+        prompt_extras = {
+            k: v
+            for k in ("mm_processor_kwargs", "cache_salt", "chat_template_kwargs")
+            if (v := getattr(request, k, None)) is not None
+        }
+
         ctx = PoolingServeContext(
             request=request,
             raw_request=raw_request,
             model_name=model_name,
             pooling_params=pooling_params,
             request_id=request_id,
+            lora_request=lora_request,
+            priorities=priorities,
+            prompt_extras=prompt_extras,
         )
 
         self._validate_request(ctx)
-        ctx.lora_request = self._maybe_get_adapters(ctx.request)
         return ctx
 
     async def _prepare_generators(
@@ -127,7 +140,7 @@ class PoolingBaseServing(ABC, BaseServing):
         ctx: PoolingServeContext,
     ):
         if ctx.engine_inputs is None:
-            raise ValueError("Engine prompts not available")
+            raise ValueError("Engine inputs not available")
 
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
@@ -139,12 +152,7 @@ class PoolingBaseServing(ABC, BaseServing):
 
         assert ctx.pooling_params is not None
         pooling_params = ctx.pooling_params
-
-        if isinstance(pooling_params, list):
-            for params in pooling_params:
-                params.verify(self.model_config)
-        else:
-            pooling_params.verify(self.model_config)
+        pooling_params.verify(self.model_config)
 
         for i, engine_input in enumerate(ctx.engine_inputs):
             prompt_request_id = (
@@ -153,26 +161,20 @@ class PoolingBaseServing(ABC, BaseServing):
                 else ctx.prompt_request_ids[i]
             )
 
-            params = (
-                pooling_params[i]
-                if isinstance(pooling_params, list)
-                else pooling_params
-            )
-
             self._log_inputs(
                 prompt_request_id,
-                engine_input,
-                params=params,
+                engine_input["prompts"],
+                params=engine_input["params"],
                 lora_request=ctx.lora_request,
             )
 
             generator = self.engine_client.encode(
-                engine_input,
-                params,
-                prompt_request_id,
-                lora_request=ctx.lora_request,
+                request_id=prompt_request_id,
+                prompt=engine_input["prompts"],
+                pooling_params=engine_input["params"],
+                lora_request=engine_input["lora_requests"],
+                priority=engine_input["priorities"],
                 trace_headers=trace_headers,
-                priority=getattr(ctx.request, "priority", 0),
             )
 
             generators.append(generator)

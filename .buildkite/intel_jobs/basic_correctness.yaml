@@ -3,7 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: XPU Sleep Mode
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:
     label: production

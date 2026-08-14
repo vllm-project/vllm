@@ -56,13 +56,22 @@ _PARAM_RE = re.compile(
 _PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>(.*)$", re.DOTALL)
 
 
+def _trim_wrapping_newlines(value: str) -> str:
+    """Strip one leading and one trailing newline (the Qwen3 template markup)."""
+    if value.startswith("\n"):
+        value = value[1:]
+    if value.endswith("\n"):
+        value = value[:-1]
+    return value
+
+
 def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
     params: dict[str, object] = {}
 
     for match in _PARAM_RE.finditer(raw_args):
         name = match.group(1)
         value = match.group(2)
-        params[name] = value.strip()
+        params[name] = _trim_wrapping_newlines(value)
 
     if partial:
         remaining = _PARAM_RE.sub("", raw_args)
@@ -71,7 +80,7 @@ def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
             name = m.group(1)
             value = m.group(2)
             if name:
-                params[name] = value.strip()
+                params[name] = _trim_wrapping_newlines(value)
 
     return json.dumps(params, ensure_ascii=False)
 

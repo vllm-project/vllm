@@ -5,6 +5,8 @@ from collections import OrderedDict
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
+from vllm.config import VllmConfig
+from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.logger import init_logger
 from vllm.v1.request import Request
 
@@ -63,6 +65,12 @@ class EncoderCacheManager:
         freed: List of mm_hash strings that were actually evicted since the
             last call to get_freed_mm_hashes(). This list is cleared on return.
     """
+
+    @classmethod
+    def create_manager(
+        cls, *, cache_size: int, vllm_config: "VllmConfig"
+    ) -> "EncoderCacheManager":
+        return cls(cache_size=cache_size)
 
     def __init__(self, cache_size: int):
         self.cache_size = cache_size
@@ -264,6 +272,9 @@ class EncoderCacheManager:
         freed = self.freed
         self.freed = []
         return freed
+
+    def get_manager_metadata(self) -> EncoderCacheManagerMetadata | None:
+        return None
 
 
 def compute_mm_encoder_budget(

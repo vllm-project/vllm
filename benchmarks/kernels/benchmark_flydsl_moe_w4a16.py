@@ -17,7 +17,7 @@ from vllm.model_executor.layers.fused_moe.fused_flydsl_moe import fused_flydsl_m
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
     compressed_tensors_moe_w4a16_flydsl,
 )
-from vllm.platforms import current_platform
+from vllm.utils.platform_utils import get_device_name_as_file_name
 
 RoutingBuffers = tuple[
     torch.Tensor,  # sorted_token_ids
@@ -259,7 +259,7 @@ def tune_flydsl_moe_w4a16(
                             )
                             us_best = us
                             tuned_config[str(num_tokens)] = tile_config
-            device_name = current_platform.get_device_name().replace(" ", "_")
+            device_name = get_device_name_as_file_name()
             tuned_config_file_name = (
                 f"E={num_experts},N={inter_dim},device_name={device_name},"
                 f"dtype=int4_w4a16,backend=flydsl.json"

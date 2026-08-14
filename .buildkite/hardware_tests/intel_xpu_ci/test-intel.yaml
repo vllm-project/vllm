@@ -18,7 +18,7 @@ steps:
   - label: "XPU example Test"
     depends_on:
       - image-build-xpu
-    timeout_in_minutes: 30
+    timeout_in_minutes: 50
     optional: true
     device: intel_gpu
     agent_tags:
@@ -39,7 +39,7 @@ steps:
   - label: "XPU V1 test"
     depends_on:
       - image-build-xpu
-    timeout_in_minutes: 30
+    timeout_in_minutes: 70
     optional: true
     device: intel_gpu
     agent_tags:
@@ -60,7 +60,7 @@ steps:
   - label: "XPU server test"
     depends_on:
       - image-build-xpu
-    timeout_in_minutes: 30
+    timeout_in_minutes: 45
     optional: true
     device: intel_gpu
     agent_tags:

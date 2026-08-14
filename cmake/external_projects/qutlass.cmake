@@ -22,7 +22,7 @@ if(QUTLASS_SRC_DIR)
   set(qutlass_BINARY_DIR "${CMAKE_BINARY_DIR}/qutlass-binary-dir-unused")
 else()
   set(_QUTLASS_UPSTREAM_REPO "https://github.com/IST-DASLab/qutlass.git")
-  set(_QUTLASS_UPSTREAM_TAG "830d2c4537c7396e14a02a46fbddd18b5d107c65")
+  set(_QUTLASS_UPSTREAM_TAG "e74319e3405ce6d71965732880f5dc1f52371f64")
 
   set(_qutlass_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _qutlass_fc_root)
@@ -55,7 +55,11 @@ message(STATUS "[QUTLASS] QuTLASS is available at ${qutlass_SOURCE_DIR}")
 
 if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
   cuda_archs_loose_intersection(QUTLASS_SM120_ARCHS "12.0f" "${CUDA_ARCHS}")
-  cuda_archs_loose_intersection(QUTLASS_SM100_ARCHS "10.0f" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.4)
+    cuda_archs_loose_intersection(QUTLASS_SM100_ARCHS "10.0f;10.7f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(QUTLASS_SM100_ARCHS "10.0f" "${CUDA_ARCHS}")
+  endif()
 else()
   cuda_archs_loose_intersection(QUTLASS_SM120_ARCHS "12.0a;12.1a" "${CUDA_ARCHS}")
   cuda_archs_loose_intersection(QUTLASS_SM100_ARCHS "10.0a;10.3a" "${CUDA_ARCHS}")
@@ -125,8 +129,6 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND QUTLASS_ARCHS)
     CUDA_ARCHS "${QUTLASS_ARCHS}"
   )
 
-  # QuTLASS uses legacy ATen headers and cannot be built with TORCH_TARGET_VERSION.
-  # Keep it as its own extension (registers torch.ops._qutlass_C).
   define_extension_target(
     _qutlass_C
     DESTINATION vllm
@@ -139,9 +141,11 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND QUTLASS_ARCHS)
     WITH_SOABI)
 
   target_compile_definitions(_qutlass_C PRIVATE
-    QUTLASS_DISABLE_PYBIND=1
+    QUTLASS_MINIMAL_BUILD=1
     TARGET_CUDA_ARCH=${QUTLASS_TARGET_CC}
-    CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
+    CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1
+    TORCH_TARGET_VERSION=0x020B000000000000ULL
+    USE_CUDA)
 
   set_property(SOURCE ${QUTLASS_SOURCES} APPEND PROPERTY COMPILE_OPTIONS
     $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr --use_fast_math -O3>

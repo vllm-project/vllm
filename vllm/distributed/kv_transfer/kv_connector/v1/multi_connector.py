@@ -204,10 +204,20 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self._extra_async_saves: dict[str, int] = {}
 
     @property
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        return bool(self._connectors) and all(
+            c.supports_divergent_local_hybrid_hits for c in self._connectors
+        )
+
+    @property
     def prefer_cross_layer_blocks(self) -> bool:
         if not self._connectors:
             return False
         return all(c.prefer_cross_layer_blocks for c in self._connectors)
+
+    @property
+    def requires_kv_delivery(self) -> bool:
+        return any(c.requires_kv_delivery for c in self._connectors)
 
     @classmethod
     def _get_connector_classes_and_configs(
@@ -403,14 +413,13 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
-        empty_blocks = blocks.new_empty()
         for i, c in enumerate(self._connectors):
             if i == chosen_connector:
                 # Forward call to the chosen connector (if any).
                 c.update_state_after_alloc(request, blocks, num_external_tokens)
             else:
-                # Call with empty blocks for other connectors.
-                c.update_state_after_alloc(request, empty_blocks, 0)
+                # Other connectors still receive the request's real blocks
+                c.update_state_after_alloc(request, blocks, 0)
 
     def on_new_request(self, request: "Request") -> None:
         for c in self._connectors:

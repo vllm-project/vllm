@@ -26,19 +26,23 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaForCausalLM, LlamaModel
 
 from .llama import LlamaDecoderLayer
-from .utils import (
-    AutoWeightsLoader,
-    PPMissingLayer,
-    WeightsMapper,
-    is_pp_missing_parameter,
-)
+from .utils import AutoWeightsLoader, PPMissingLayer, WeightsMapper
 
 
 class TeleChat2Model(LlamaModel):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".query": (".qkv_proj", "q"),
+            ".key": (".qkv_proj", "k"),
+            ".value": (".qkv_proj", "v"),
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        }
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         hf_config = vllm_config.model_config.hf_config
 
@@ -65,62 +69,34 @@ class TeleChat2Model(LlamaModel):
                 layer.mlp.gate_up_proj.bias = None
                 layer.mlp.gate_up_proj.skip_bias_add = True
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
+    def _split_key_value(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        # TeleChat2 stores k/v as a single per-head-interleaved `key_value`
+        # tensor. De-interleave it into separate k/v so the qkv_proj mapper
+        # can stack them.
         total_num_heads = self.config.n_head
         head_dim = self.config.hidden_size // total_num_heads
         for name, loaded_weight in weights:
             if "self_attn.key_value" in name:
-                k_weight = []
-                v_weight = []
-                for i in range(total_num_heads):
-                    start = i * head_dim * 2
-                    k_weight.append(loaded_weight[start : start + head_dim, :])
-                    v_weight.append(
-                        loaded_weight[start + head_dim : start + 2 * head_dim :]
-                    )
-                k_weight = torch.cat(k_weight, dim=0)
-                v_weight = torch.cat(v_weight, dim=0)
-                name = name.replace("key_value", "qkv_proj")
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, k_weight, "k")
-                weight_loader(param, v_weight, "v")
-            elif "query" in name:
-                name = name.replace("query", "qkv_proj")
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, "q")
+                starts = [i * head_dim * 2 for i in range(total_num_heads)]
+                k_weight = torch.cat(
+                    [loaded_weight[s : s + head_dim, :] for s in starts], dim=0
+                )
+                v_weight = torch.cat(
+                    [loaded_weight[s + head_dim : s + 2 * head_dim, :] for s in starts],
+                    dim=0,
+                )
+                yield name.replace("key_value", "key"), k_weight
+                yield name.replace("key_value", "value"), v_weight
             else:
-                for param_name, weight_name, shard_id in stacked_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(param, loaded_weight, shard_id)
-                    break
-                else:
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+                yield name, loaded_weight
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(
+            self._split_key_value(weights), mapper=self.hf_to_vllm_mapper
+        )
 
 
 class TeleChat2ForCausalLM(LlamaForCausalLM):

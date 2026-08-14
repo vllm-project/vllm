@@ -24,7 +24,7 @@ from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
-from vllm.tool_parsers.utils import extract_intermediate_diff
+from vllm.tool_parsers.utils import extract_intermediate_diff, is_complete_json
 from vllm.utils.mistral import is_mistral_tokenizer
 
 logger = init_logger(__name__)
@@ -266,9 +266,18 @@ class JambaToolParser(ToolParser):
                     cur_arguments_json = json.dumps(cur_arguments, ensure_ascii=False)
                     logger.debug("finding %s in %s", new_text, cur_arguments_json)
 
-                    arguments_delta = cur_arguments_json[
-                        : cur_arguments_json.index(new_text) + len(new_text)
-                    ]
+                    # `new_text` may not appear verbatim in the re-serialized JSON.
+                    match_start = cur_arguments_json.find(new_text)
+                    if match_start != -1:
+                        arguments_delta = cur_arguments_json[
+                            : match_start + len(new_text)
+                        ]
+                    elif is_complete_json(parsable_arr):
+                        # Complete in this delta: send whole, don't drop.
+                        arguments_delta = cur_arguments_json
+                    else:
+                        # Still partial: wait for more text.
+                        return None
                     logger.debug(
                         "First tokens in arguments received: %s", arguments_delta
                     )

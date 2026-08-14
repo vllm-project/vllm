@@ -701,3 +701,67 @@ def test_decompose_size_with_getitem_user():
                 f"getitem node '{node.name}' has {len(node.args)} args "
                 f"(expected 2): {node.args}"
             )
+
+
+def test_decompose_size_leaves_scalar_size_with_dim():
+    """
+    Regression test: _decompose_size_nodes must leave x.size(dim) alone.
+
+    x.size() returns a torch.Size tuple that can't cross split boundaries and
+    must be decomposed. x.size(dim), however, already returns a scalar
+    SymInt/int that crosses fine, so the pass must not touch it.
+
+    The punica LoRA path traces token_lora_mapping[:x.size(0)] under a dynamic
+    batch dim, so the size(0) node ends up nested inside a slice object:
+
+        %size  = call_method[target="size"](args = (%x, 0))
+        %slice = call_function[target=getitem](
+                     args = (%mapping, slice(None, %size, None)))
+
+    The old pass tried to decompose this scalar node too and then erase it, but
+    the slice still referenced it, raising "Tried to erase Node size but it
+    still had N users". The fix skips size calls that carry a dim argument.
+    """
+    from torch._dynamo.source import LocalSource
+    from torch._subclasses.fake_tensor import FakeTensorMode
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+    # Build graph:
+    #   %x       = placeholder
+    #   %mapping = placeholder
+    #   %size    = x.size(0)                          # scalar, with a dim arg
+    #   %sliced  = mapping[slice(None, %size, None)]  # size node inside a slice
+    graph = fx.Graph()
+    x = graph.placeholder("x")
+    mapping = graph.placeholder("token_lora_mapping")
+    size_node = graph.call_method("size", args=(x, 0))
+    sliced_node = graph.call_function(
+        operator.getitem,
+        args=(mapping, slice(None, size_node, None)),
+    )
+    graph.output((sliced_node,))
+
+    # dim 0 dynamic (SymInt) — the realistic Unsloth + LoRA case. Without the
+    # skip, the pass would build per-dim replacements and then crash trying to
+    # erase the still-referenced size node.
+    shape_env = ShapeEnv()
+    src = LocalSource("tokens")
+    sym_tokens = shape_env.create_symintnode(shape_env.create_symbol(4, src), hint=4)
+    fake_mode = FakeTensorMode(shape_env=shape_env)
+    with fake_mode:
+        fake_x = torch.empty_strided((sym_tokens, 8), (8, 1))
+    x.meta["example_value"] = fake_x
+
+    gm = fx.GraphModule(torch.nn.Module(), graph)
+
+    # Must not raise "Tried to erase Node ... still had N users".
+    _decompose_size_nodes(gm)
+
+    # The scalar x.size(0) node is left in place, untouched.
+    remaining = list(gm.graph.find_nodes(op="call_method", target="size"))
+    assert len(remaining) == 1, (
+        f"x.size(0) should be left untouched, found {len(remaining)} size nodes"
+    )
+    assert remaining[0].args == (x, 0), (
+        f"size node args changed: {remaining[0].args} (expected (x, 0))"
+    )

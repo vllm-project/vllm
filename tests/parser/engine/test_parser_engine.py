@@ -896,6 +896,7 @@ def _make_delegating_request():
     req = MagicMock(spec=ChatCompletionRequest)
     req.tools = []
     req.tool_choice = "auto"
+    req.include_reasoning = True
     return req
 
 
@@ -1072,6 +1073,91 @@ class TestReasoningOnlyEndTokenLeak:
         )
         assert "</think>" not in d2.content
         assert "Hi!" in d2.content
+
+
+class TestSkipToolSpanForwarding:
+    """Reasoning (skip_tool_parsing) pass: tool syntax is forwarded verbatim
+    for the tool pass, and the lexical passthrough flag never goes stale.
+
+    ``_combined_config`` defines ``</tool_call>`` only from ``TOOL_ARGS``; the
+    skip pass stays in ``CONTENT``, so the closer arrives with no current-state
+    transition. It must still be forwarded and must clear the span — otherwise
+    ``_in_skipped_tool_span`` stays True for the rest of the request. This is the
+    shape of every current engine grammar whose wrapper closer has no CONTENT
+    transition (qwen3, deepseek, glm47_moe, nemotron_v3).
+    """
+
+    _TOOL_VOCAB = {**_VOCAB, '{"a":1}': 300}
+    _TOOL_CALL = '<tool_call>{"a":1}</tool_call>'
+    _TOOL_IDS = [202, 300, 203]
+
+    def _skip_engine(self):
+        engine = _make_engine(
+            vocab=self._TOOL_VOCAB,
+            special_tokens=list(_VOCAB.keys()),
+        )
+        engine._engine.skip_tool_parsing = True
+        engine._engine.reset(initial_state=ParserState.CONTENT)
+        return engine
+
+    def test_tool_syntax_forwarded_and_span_cleared(self):
+        engine = self._skip_engine()
+        events = engine._engine.feed(self._TOOL_CALL, self._TOOL_IDS)
+        forwarded = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+        assert forwarded == self._TOOL_CALL
+        assert engine._engine._in_skipped_tool_span is False
+
+    def test_span_not_stale_across_two_tool_calls(self):
+        engine = self._skip_engine()
+        engine._engine.feed(self._TOOL_CALL, self._TOOL_IDS)
+        assert engine._engine._in_skipped_tool_span is False
+        events = engine._engine.feed(self._TOOL_CALL, self._TOOL_IDS)
+        forwarded = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+        assert forwarded == self._TOOL_CALL
+        assert engine._engine._in_skipped_tool_span is False
+
+    def test_content_after_transitionless_closer_observable(self):
+        """Observable lifecycle contract (not just the private flag): after a
+        tool closer with no CONTENT transition, a later *shared* block-ender
+        that also closes text blocks must be consumed, not leaked as content.
+
+        The config combines the two real patterns — a qwen3-style tool-only
+        closer with no CONTENT transition (``</a>``) and an inkling-style token
+        that closes both tool and text blocks (``</b>``). A stale span would
+        route the trailing ``</b>`` down the forward path and leak it.
+        """
+        ts, close_a, close_b = "<tc>", "</a>", "</b>"
+        cfg = ParserEngineConfig(
+            name="shared_closer_test",
+            terminals={"TOOL_START": ts, "CLOSE_A": close_a, "CLOSE_B": close_b},
+            transitions={
+                (ParserState.CONTENT, "TOOL_START"): Transition(
+                    ParserState.TOOL_ARGS, (EventType.TOOL_CALL_START,)
+                ),
+                (ParserState.TOOL_ARGS, "CLOSE_A"): Transition(
+                    ParserState.CONTENT, (EventType.TOOL_CALL_END,)
+                ),
+                (ParserState.TOOL_ARGS, "CLOSE_B"): Transition(
+                    ParserState.CONTENT, (EventType.TOOL_CALL_END,)
+                ),
+                (ParserState.CONTENT, "CLOSE_B"): Transition(ParserState.CONTENT, ()),
+            },
+            initial_state=ParserState.CONTENT,
+            content_events={
+                ParserState.CONTENT: EventType.TEXT_CHUNK,
+                ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
+            },
+        )
+        engine = _make_engine(config=cfg, vocab={ts: 210, close_a: 211, close_b: 212})
+        engine._engine.skip_tool_parsing = True
+        engine._engine.reset(initial_state=ParserState.CONTENT)
+
+        events = engine._engine.feed(f"{ts}args{close_a}text{close_b}", [])
+        content = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+
+        assert content == f"{ts}args{close_a}text"
+        assert close_b not in content
+        assert engine._engine._in_skipped_tool_span is False
 
 
 # ── TestToolAdapterForwardsKwargs ──────────────────────────────────
@@ -1623,19 +1709,41 @@ class TestDropSpecialTokens:
         assert delta is not None
         assert "<bos>" in delta.reasoning
 
-    def test_drops_suppressed_with_skip_tool_parsing(self):
-        """When skip_tool_parsing is active, drop tokens are preserved
-        as content so a later tool-call pass can see them."""
+    def test_drops_applied_with_skip_tool_parsing(self):
+        """Drop tokens are always dropped, even with skip_tool_parsing.
+        DROP_TERMINALs have no transitions by construction, so no parser
+        pass can use them."""
+        for initial_state in (ParserState.REASONING, ParserState.CONTENT):
+            engine = _make_engine(
+                vocab=_DROP_VOCAB,
+                special_tokens=list(_DROP_VOCAB.keys()),
+            )
+            engine._engine.skip_tool_parsing = True
+            engine._engine.reset(initial_state=initial_state)
+            events = engine._engine.feed("hello<bos>world", [72, 204, 73])
+            delta = engine._events_to_delta(events)
+            assert delta is not None
+            output = (delta.reasoning or "") + (delta.content or "")
+            assert "<bos>" not in output, f"<bos> leaked in state {initial_state}"
+
+    def test_transitions_unaffected_by_drop_in_reasoning_with_skip_tool_parsing(self):
+        """With skip_tool_parsing in REASONING state, drop tokens are
+        removed but configured terminals still fire their transitions."""
         engine = _make_engine(
             vocab=_DROP_VOCAB,
             special_tokens=list(_DROP_VOCAB.keys()),
         )
         engine._engine.skip_tool_parsing = True
         engine._engine.reset()
-        events = engine._engine.feed("hello<bos>world", [72, 204, 73])
-        delta = engine._events_to_delta(events)
-        assert delta is not None
-        assert "<bos>" in delta.reasoning
+        events = engine._engine.feed("thought<bos></think>answer", [72, 204, 201, 73])
+        types = [e.type for e in events]
+        assert EventType.REASONING_CHUNK in types
+        assert EventType.REASONING_END in types
+        assert EventType.TEXT_CHUNK in types
+        reasoning_text = "".join(
+            e.value for e in events if e.type == EventType.REASONING_CHUNK
+        )
+        assert "<bos>" not in reasoning_text
 
     def test_drops_in_tool_args_state(self):
         """Drop tokens in TOOL_ARGS state are silently discarded."""

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::net::TcpListener;
 use std::time::Duration;
 
@@ -87,8 +90,8 @@ async fn shutdown_mock(
     shutdown: CancellationToken,
     task: tokio::task::JoinHandle<Result<()>>,
 ) {
-    client.shutdown().await.expect("client shutdown");
     shutdown.cancel();
+    client.shutdown().await.expect("client shutdown");
     task.await.expect("mock join").expect("mock run");
 }
 

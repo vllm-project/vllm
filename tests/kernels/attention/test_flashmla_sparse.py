@@ -4,6 +4,43 @@ import pytest
 import torch
 
 
+def test_deepseek_v4_c128a_dynamic_topk_packed_buffers():
+    from vllm.models.deepseek_v4.sparse_mla import build_c128a_topk_metadata
+
+    device = torch.device("cuda")
+    capacity_width = 256
+    active_width = 128
+    global_decode_buffer = torch.empty(
+        (2, capacity_width), dtype=torch.int32, device=device
+    )
+    decode_lens_buffer = torch.empty(2, dtype=torch.int32, device=device)
+    prefill_buffer = torch.empty((2, capacity_width), dtype=torch.int32, device=device)
+
+    global_decode, decode_lens, prefill_local = build_c128a_topk_metadata(
+        positions=torch.tensor([255, 511], dtype=torch.int64, device=device),
+        compress_ratio=128,
+        num_decode_tokens=1,
+        token_to_req_indices=torch.tensor([0, 0], dtype=torch.int32, device=device),
+        block_table=torch.tensor([[3]], dtype=torch.int32, device=device),
+        block_size=capacity_width,
+        slot_mapping=torch.tensor([0, 1], dtype=torch.int64, device=device),
+        global_decode_buffer=global_decode_buffer,
+        decode_lens_buffer=decode_lens_buffer,
+        prefill_buffer=prefill_buffer,
+        max_compressed_tokens=active_width,
+    )
+
+    assert global_decode.shape == (1, active_width)
+    assert prefill_local.shape == (1, active_width)
+    assert global_decode.stride() == (active_width, 1)
+    assert prefill_local.stride() == (active_width, 1)
+    assert global_decode[0, :2].cpu().tolist() == [768, 769]
+    assert decode_lens.cpu().tolist() == [2]
+    assert prefill_local[0, :4].cpu().tolist() == list(range(4))
+    assert torch.all(global_decode[0, 2:] == -1)
+    assert torch.all(prefill_local[0, 4:] == -1)
+
+
 def test_sparse_flashmla_metadata_smoke():
     import vllm.v1.attention.ops.flashmla as fm
 
@@ -98,7 +135,8 @@ def test_sparse_flashmla_decode_smoke():
     assert lse.shape[0] == batch_size
 
 
-def test_sparse_flashmla_prefill_smoke():
+@pytest.mark.parametrize("h_q", [64, 128])
+def test_sparse_flashmla_prefill_smoke(h_q: int):
     import vllm.v1.attention.ops.flashmla as fm
 
     ok, reason = fm.is_flashmla_sparse_supported()
@@ -106,22 +144,25 @@ def test_sparse_flashmla_prefill_smoke():
         pytest.skip(reason)
 
     device = torch.device("cuda")
+    torch.manual_seed(0)
     s_q = 1
-    s_kv = 1
-    h_q = 64  # kernel expects multiple of 64
+    s_kv = 8
     h_kv = 1
     d_qk = 576
     d_v = 512
     topk = 128
+    q = torch.randn((s_q, h_q, d_qk), dtype=torch.bfloat16, device=device)
+    kv = torch.randn((s_kv, h_kv, d_qk), dtype=torch.bfloat16, device=device)
+    indices = torch.randint(s_kv, (s_q, h_kv, topk), dtype=torch.int32, device=device)
+    reference_indices = indices.clone()
+    reference_indices[..., 1:] = -1
+    kwargs = {"topk_length": torch.ones(1, dtype=torch.int32, device=device)}
+    reference = fm.flash_mla_sparse_fwd(q, kv, reference_indices, 1.0, d_v, **kwargs)
+    actual = fm.flash_mla_sparse_fwd(q, kv, indices, 1.0, d_v, **kwargs)
 
-    q = torch.zeros((s_q, h_q, d_qk), dtype=torch.bfloat16, device=device)
-    kv = torch.zeros((s_kv, h_kv, d_qk), dtype=torch.bfloat16, device=device)
-    indices = torch.zeros((s_q, h_kv, topk), dtype=torch.int32, device=device)
-
-    out, max_logits, lse = fm.flash_mla_sparse_fwd(q, kv, indices, 1.0, d_v)
-    assert out.shape == (s_q, h_q, d_v)
-    assert max_logits.shape == (s_q, h_q)
-    assert lse.shape == (s_q, h_q)
+    for actual_tensor, reference_tensor in zip(actual, reference):
+        torch.testing.assert_close(actual_tensor, reference_tensor, rtol=0, atol=0)
+    assert actual[0].shape == (s_q, h_q, d_v)
 
 
 def test_deepseek_v4_prefill_chunk_planning_expands_for_short_sequences():

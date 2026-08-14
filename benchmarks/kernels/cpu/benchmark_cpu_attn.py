@@ -154,7 +154,7 @@ def main(
                 scale=scale,
                 causal=True,
                 alibi_slopes=None,
-                sliding_window=window_size,
+                sliding_window=window_size if sliding_window is not None else -1,
                 block_table=block_tables,
                 softcap=0,
                 scheduler_metadata=metadata,

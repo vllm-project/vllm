@@ -15,7 +15,6 @@ feeds decoded frames to the processor.
 
 import math
 
-import regex as re
 import torch
 from torchvision.transforms import InterpolationMode
 from transformers import AutoTokenizer, BatchFeature
@@ -553,85 +552,6 @@ class MiniMaxVLProcessor(ProcessorMixin):
         self.vision_end_token_id = tokenizer.convert_tokens_to_ids(
             self.VISION_END_TOKEN
         )
-
-    def _prune_video_tokens(
-        self,
-        input_text: str,
-        video_segments: list[int],
-        video_token: str,
-    ) -> str:
-        """Prune video tokens by temporal_patch_size (e.g., 2:1).
-
-        Expects the prompt to carry exactly sum(video_segments) video tokens
-        — i.e. one token per *sampled* frame — then drops tokens.
-        """
-        # If no videos or temporal_patch_size <= 1, no pruning needed
-        if not video_segments or self.video_processor.temporal_patch_size <= 1:
-            return input_text
-
-        # Split while keeping delimiters
-        special_tokens = [video_token]
-        pattern = "|".join(map(re.escape, special_tokens))
-        parts = re.split(f"({pattern})", input_text)
-
-        def is_timestamp(text: str) -> bool:
-            """Check if text ends with timestamp format like ']<]0.0 seconds[>['"""
-            return (
-                text.endswith("seconds[>[")
-                or text.endswith("seconds[>[ ")
-                or text.endswith("seconds [>[")
-                or text.endswith("seconds [>[ ")
-            )
-
-        def extract_timestamp(text: str) -> str:
-            """Extract timestamp text from the end, starting from ']<]'"""
-            start_index = text.rfind("]<]")
-            if start_index == -1:
-                raise ValueError(f"Failed to extract timestamp: {text}")
-            return text[start_index:]
-
-        # Build new text with pruned video tokens
-        final_parts = []
-        current_seg_idx = 0  # Which video segment we're in
-        frame_in_seg = 0  # Frame index within current segment
-        last_timestamp_len = 0  # Length of timestamp to potentially remove
-
-        for part in parts:
-            if part == video_token:
-                if current_seg_idx < len(video_segments):
-                    if frame_in_seg % self.video_processor.temporal_patch_size == 0:
-                        # Keep this video token
-                        final_parts.append(part)
-                        frame_in_seg += 1
-                        if frame_in_seg >= video_segments[current_seg_idx]:
-                            current_seg_idx += 1
-                            frame_in_seg = 0
-                        last_timestamp_len = 0
-                    else:
-                        # Skip this video token
-                        frame_in_seg += 1
-                        if frame_in_seg >= video_segments[current_seg_idx]:
-                            current_seg_idx += 1
-                            frame_in_seg = 0
-                        # Remove the timestamp that was already appended
-                        if last_timestamp_len > 0:
-                            assert len(final_parts) > 0
-                            final_parts[-1] = final_parts[-1][:-last_timestamp_len]
-                            last_timestamp_len = 0
-                else:
-                    # No more video segments, keep as is
-                    final_parts.append(part)
-                    last_timestamp_len = 0
-            else:
-                # Text part
-                final_parts.append(part)
-                # Check if this text ends with a timestamp
-                if is_timestamp(part):
-                    last_timestamp_len = len(extract_timestamp(part))
-                else:
-                    last_timestamp_len = 0
-
-        return "".join(final_parts)
 
     def __call__(
         self,

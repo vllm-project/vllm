@@ -67,16 +67,6 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
-    max_num_partial_prefills: int = Field(default=1, ge=1)
-    """For chunked prefill, the maximum number of sequences that can be
-    partially prefilled concurrently."""
-
-    max_long_partial_prefills: int = Field(default=1, ge=1)
-    """For chunked prefill, the maximum number of prompts longer than
-    long_prefill_token_threshold that will be prefilled concurrently. Setting
-    this less than max_num_partial_prefills will allow shorter prompts to jump
-    the queue in front of longer prompts in some cases, improving latency."""
-
     long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens. 0 disables the cap (default)."""
@@ -254,19 +244,6 @@ class SchedulerConfig:
                 self.max_num_batched_tokens,
             )
 
-        if self.max_num_partial_prefills > 1:
-            if self.long_prefill_token_threshold == 0:
-                self.long_prefill_token_threshold = int(max_model_len * 0.04)
-
-            logger.info(
-                "Concurrent partial prefills enabled with "
-                "max_num_partial_prefills=%d, max_long_partial_prefills=%d, "
-                "long_prefill_token_threshold=%d",
-                self.max_num_partial_prefills,
-                self.max_long_partial_prefills,
-                self.long_prefill_token_threshold,
-            )
-
         self.verify_max_model_len(max_model_len)
 
     def verify_max_model_len(self, max_model_len: int) -> Self:
@@ -298,24 +275,11 @@ class SchedulerConfig:
                 self.max_num_seqs * max_model_len,
             )
 
-        if self.max_num_partial_prefills > 1:
-            if not self.enable_chunked_prefill:
-                raise ValueError(
-                    "Chunked prefill must be enabled to set "
-                    "max_num_partial_prefills > 1."
-                )
-
-            if self.long_prefill_token_threshold > max_model_len:
-                raise ValueError(
-                    "long_prefill_token_threshold "
-                    f"({self.long_prefill_token_threshold}) cannot be greater "
-                    f"than the max_model_len ({max_model_len})."
-                )
-
-        if self.max_long_partial_prefills > self.max_num_partial_prefills:
+        if self.long_prefill_token_threshold > max_model_len:
             raise ValueError(
-                f"{self.max_long_partial_prefills=} must be less than or equal to "
-                f"{self.max_num_partial_prefills=}."
+                "long_prefill_token_threshold "
+                f"({self.long_prefill_token_threshold}) cannot be greater "
+                f"than the max_model_len ({max_model_len})."
             )
 
         return self

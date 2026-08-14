@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use tracing::Span;
 use vllm_engine_core_client::EngineCoreClient;
 
@@ -122,7 +125,12 @@ impl Llm {
     /// tracking entries themselves are removed when the corresponding output
     /// streams are dropped, not here.
     pub async fn abort(&self, external_ids: &[String]) -> Result<()> {
-        let internal_ids = self.inflight.resolve(external_ids);
+        // Empty `external_ids` means abort every in-flight request.
+        let internal_ids = if external_ids.is_empty() {
+            self.inflight.all_internal_ids()
+        } else {
+            self.inflight.resolve(external_ids)
+        };
         if internal_ids.is_empty() {
             return Ok(());
         }

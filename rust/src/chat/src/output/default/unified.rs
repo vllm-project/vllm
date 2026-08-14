@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 //! Adapts decoded text updates into parsed assistant deltas.
 //!
 //! This stage sits between low-level token decoding and final block assembly.
@@ -257,6 +260,7 @@ pub(crate) async fn unified_event_stream(
                         usage: finished.usage,
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
+                        ec_transfer_params: finished.ec_transfer_params,
                     })
                     .await;
                 }
@@ -387,6 +391,7 @@ mod tests {
                 usage: vllm_llm::TokenUsage::default(),
                 finish_reason: crate::FinishReason::Stop(None),
                 kv_transfer_params: None,
+                ec_transfer_params: None,
             }),
         }
     }
@@ -444,6 +449,57 @@ mod tests {
         let mut output = first;
         output.append(second);
         output
+    }
+
+    #[tokio::test]
+    async fn unified_stream_parses_formatted_tool_call_without_latch() {
+        use vllm_parser::tool::{HermesToolParser, ToolParser as _};
+
+        let hermes = HermesToolParser::create(&[]).unwrap();
+        let parser = vllm_parser::unified::CombinedParser::new(None, Some(hermes));
+
+        // Regression guard: a formatted call (space before the outer `}`) must not
+        // trip the parse-error latch that turns it and every later call into text.
+        let d1 = decoded_delta(
+            r#"<tool_call>{"name":"get_weather","arguments":{"location":"Paris"} }</tool_call>"#,
+        );
+        let d2 = finished_delta(
+            r#"<tool_call>{"name":"get_time","arguments":{"tz":"UTC"}}</tool_call>"#,
+        );
+
+        let stream = stream::iter(vec![d1, d2].into_iter().map(Ok));
+        let events = unified_event_stream(stream, Box::new(parser))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        let names: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                AssistantEvent::ToolCallStart { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(names, ["get_weather", "get_time"]);
+
+        let text_leaks = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    AssistantEvent::TextDelta {
+                        kind: AssistantBlockKind::Text,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            text_leaks, 0,
+            "formatted tool call leaked into text: {events:#?}"
+        );
     }
 
     #[tokio::test]
@@ -628,6 +684,7 @@ mod tests {
                     usage: vllm_llm::TokenUsage::default(),
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 },
             ]
         );
@@ -671,6 +728,7 @@ mod tests {
                     usage: vllm_llm::TokenUsage::default(),
                     finish_reason: crate::FinishReason::Stop(None),
                     kv_transfer_params: None,
+                    ec_transfer_params: None,
                 },
             ]
         );

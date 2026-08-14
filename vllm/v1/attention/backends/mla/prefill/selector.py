@@ -47,11 +47,13 @@ class MLAPrefillSelectorConfig(NamedTuple):
 
 def _get_mla_prefill_backend_priorities(
     device_capability: DeviceCapability,
+    mla_dimensions: MLADimensions,
 ) -> list[MLAPrefillBackendEnum]:
     """Get MLA prefill backend priorities based on device capability.
 
     Args:
         device_capability: The device's compute capability.
+        mla_dimensions: The model's MLA head dimensions.
 
     Returns:
         List of backends in priority order (highest priority first).
@@ -65,6 +67,17 @@ def _get_mla_prefill_backend_priorities(
         ]
 
     if device_capability.major == 10:  # Blackwell
+        if mla_dimensions == MLADimensions(
+            qk_nope_head_dim=192,
+            qk_rope_head_dim=64,
+            v_head_dim=256,
+        ):
+            return [
+                MLAPrefillBackendEnum.TRTLLM_RAGGED,
+                MLAPrefillBackendEnum.FLASH_ATTN,
+                MLAPrefillBackendEnum.FLASHINFER,
+                MLAPrefillBackendEnum.TOKENSPEED_MLA,
+            ]
         return [
             MLAPrefillBackendEnum.FLASH_ATTN,
             MLAPrefillBackendEnum.TRTLLM_RAGGED,
@@ -157,7 +170,10 @@ def _auto_select_mla_prefill_backend(
     Returns:
         The selected prefill backend class.
     """
-    priorities = _get_mla_prefill_backend_priorities(device_capability)
+    priorities = _get_mla_prefill_backend_priorities(
+        device_capability,
+        selector_config.mla_dimensions,
+    )
     all_invalid_reasons: dict[str, list[str]] = {}
 
     for backend_enum in priorities:

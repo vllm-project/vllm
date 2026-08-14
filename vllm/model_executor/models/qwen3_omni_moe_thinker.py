@@ -102,6 +102,7 @@ from .qwen2_5_vl import (
 from .qwen3_moe import Qwen3MoeForCausalLM, Qwen3MoeModel
 from .utils import (
     AutoWeightsLoader,
+    StageMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
     maybe_prefix,
@@ -436,7 +437,7 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         # Compute chunk information
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
 
-        chunk_lengths = torch.tensor(
+        chunk_lengths = async_tensor_h2d(
             [self.n_window * 2] * chunk_num.sum(),
             dtype=torch.long,
             device=feature_lens.device,
@@ -1110,7 +1111,7 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
             config.vocab_size, config.hidden_size, quant_config=quant_config
         )
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -1224,6 +1225,13 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             tok_kwargs = dict(tok_kwargs)
             mm_kwargs["audio_kwargs"] = dict(mm_kwargs.get("audio_kwargs") or {})
             mm_kwargs["text_kwargs"] = dict(mm_kwargs.get("text_kwargs") or {})
+        elif mm_kwargs.get("use_audio_in_video") and mm_data.get("videos"):
+            # mm_data can be empty on a multimodal-processor-cache hit, where
+            # there's nothing to (re-)process this call and the real result
+            # comes from the cache — not a genuine "no audio" case.
+            raise ValueError(
+                "Video doesn't have audio track with `audio_in_video=True`"
+            )
 
         hf_inputs = super()._call_hf_processor(
             prompt=prompt,
@@ -1530,52 +1538,6 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         result_placeholders["audio"] = audio_placeholders
         return result_placeholders
 
-    def _get_raw_input_ids(
-        self,
-        token_ids: list[int],
-        use_audio_in_video: bool = False,
-    ) -> list[int]:
-        tokenizer = self.info.get_tokenizer()
-        vision_bos_token = tokenizer.encode(tokenizer.vision_bos_token)[0]
-        vision_eos_token = tokenizer.encode(tokenizer.vision_eos_token)[0]
-        audio_bos_token = tokenizer.encode(tokenizer.audio_bos_token)[0]
-        audio_eos_token = tokenizer.encode(tokenizer.audio_eos_token)[0]
-        audio_token = tokenizer.encode("<|audio_pad|>")[0]
-        image_token = tokenizer.encode("<|image_pad|>")[0]
-        video_token = tokenizer.encode("<|video_pad|>")[0]
-
-        result = token_ids[:]
-        if use_audio_in_video:
-            while True:
-                start = None
-                for i in range(len(result) - 1):
-                    if result[i : i + 2] == [vision_bos_token, audio_bos_token]:
-                        start = i
-                        break
-                if start is not None:
-                    end = None
-                    for i in range(start + 2, len(result) - 1):
-                        if result[i : i + 2] == [audio_eos_token, vision_eos_token]:
-                            end = i
-                            break
-                    if end is not None:
-                        result = (
-                            result[:start]
-                            + [vision_bos_token, video_token, vision_eos_token]
-                            + result[end + 2 :]
-                        )
-                else:
-                    break
-
-        for mm_token in [audio_token, image_token, video_token]:
-            compressed = []
-            for x in result:
-                if x != mm_token or (not compressed or compressed[-1] != mm_token):
-                    compressed.append(x)
-            result = compressed
-
-        return result
-
 
 class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMixin):
     def _process_audio_input(
@@ -1659,17 +1621,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "audio_tower"),
             )
 
-        self.use_deepstack = hasattr(
-            thinker_config.vision_config, "deepstack_visual_indexes"
-        )
-        self.deepstack_num_level = (
-            len(thinker_config.vision_config.deepstack_visual_indexes)
-            if self.use_deepstack
-            else 0
-        )
-        self.visual_dim = thinker_config.vision_config.out_hidden_size
-        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
-
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3Omni_VisionTransformer(
                 vision_config=thinker_config.vision_config,
@@ -1678,18 +1629,28 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
-            # register buffer for deepstack
-            if self.use_deepstack:
-                self.deepstack_input_embeds = [
-                    torch.zeros(
-                        vllm_config.scheduler_config.max_num_batched_tokens,
-                        thinker_config.text_config.hidden_size,
-                    )
-                    for _ in range(self.deepstack_num_level)
-                ]
-                # Tracks the valid token span currently stored in the buffer.
-                # Zero means there is no active deepstack payload to consume.
-                self.deepstack_input_embeds_num_tokens = 0
+        self.use_deepstack = hasattr(
+            thinker_config.vision_config, "deepstack_visual_indexes"
+        ) and not isinstance(self.visual, StageMissingLayer)
+        self.deepstack_num_level = (
+            len(thinker_config.vision_config.deepstack_visual_indexes)
+            if self.use_deepstack
+            else 0
+        )
+        self.visual_dim = thinker_config.vision_config.out_hidden_size
+        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
+
+        if self.use_deepstack:
+            self.deepstack_input_embeds = [
+                torch.zeros(
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    thinker_config.text_config.hidden_size,
+                )
+                for _ in range(self.deepstack_num_level)
+            ]
+            # Tracks the valid token span currently stored in the buffer.
+            # Zero means there is no active deepstack payload to consume.
+            self.deepstack_input_embeds_num_tokens = 0
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3MoeLLMForCausalLM(
@@ -1833,9 +1794,11 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         # both the deepstack path and the final embedding merge.
         video_token_id = self.config.video_token_id
         audio_token_id = self.config.audio_token_id
+        image_token_id = self.config.image_token_id
         input_ids_cpu = input_ids.cpu()
         is_video = is_multimodal & (input_ids_cpu == video_token_id)
         is_audio = is_multimodal & (input_ids_cpu == audio_token_id)
+        is_image = is_multimodal & (input_ids_cpu == image_token_id)
         num_video = is_video.sum().item()
         num_audio = is_audio.sum().item()
 
@@ -1856,9 +1819,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             multimodal_embeddings_multiscale = []
 
             if is_interleaved:
-                # Use input_ids-based mask for correct vision positions
-                # when audio and video tokens are interleaved.
-                is_vision = is_video.clone()
+                # Use input_ids-based mask for all vision positions when
+                # audio and video tokens are interleaved.
+                is_vision = is_video | is_image
             else:
                 is_vision = torch.zeros_like(is_multimodal)
                 mm_positions = torch.nonzero(is_multimodal, as_tuple=True)[0]
@@ -1917,8 +1880,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 is_video,
                 is_audio,
                 is_multimodal,
-                num_video,
-                num_audio,
             )
 
         # Default: standard merge (no interleaving), same as parent class.
