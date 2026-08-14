@@ -409,6 +409,23 @@ def test_replace_plain_embedding(vpe):
     assert type(replace(nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE))) is vpe
 
 
+def test_replace_plain_embedding_hw_agnostic(monkeypatch, tp_init):
+    """With `VLLM_USE_HW_AGNOSTIC=1` the plain path builds the hw-agnostic class,
+    the same one `CausalMixin` resolves for its tie-weights check.
+
+    The MRO-rebasing path stays on vLLM's class (covered by the inherited/nested
+    tests above), so only the plain path is asserted here.
+    """
+    monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
+    from vllm.model_executor.models.transformers.layers import (
+        get_vocab_parallel_embedding_cls,
+    )
+
+    hw_vpe = get_vocab_parallel_embedding_cls()
+    assert "hw_agnostic.layers" in hw_vpe.__module__
+    assert type(replace(nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE))) is hw_vpe
+
+
 def test_replace_infers_shape_and_dtype(tp_init):
     """Shape and dtype come from the replaced module, not from the config."""
     embedding = nn.Embedding(VOCAB_SIZE * 2, HIDDEN_SIZE + 1, dtype=torch.float16)

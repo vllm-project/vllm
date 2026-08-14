@@ -270,7 +270,11 @@ def replace_embedding_class(
     )
     # If `embedding` is a bare `nn.Embedding`, simple replace
     if type(embedding) is nn.Embedding:
-        return VocabParallelEmbedding(**kwargs)
+        from vllm.model_executor.models.transformers.layers import (
+            get_vocab_parallel_embedding_cls,
+        )
+
+        return get_vocab_parallel_embedding_cls()(**kwargs)
 
     # Otherwise `embedding` inherits `nn.Embedding`, rebase it in place
     embedding.__class__ = _rebase_on_vocab_parallel(type(embedding))
