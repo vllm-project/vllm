@@ -206,7 +206,7 @@ def save_kimi_k3_fp8_calibration(vllm_config: VllmConfig) -> None:
     layers = _kimi_layers(vllm_config)
 
     if layers:
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
     tp_rank = get_tp_group().rank_in_group
     pp_rank = get_pp_group().rank_in_group
     payload: dict[str, Any] = {
