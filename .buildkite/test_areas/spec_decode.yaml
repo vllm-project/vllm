@@ -330,13 +330,19 @@ steps:
 
 - label: Spec Decode AL MTP + Other Acceptance Nightly
   key: spec-decode-mtp-other-acceptance-nightly
-  timeout_in_minutes: 60
+  timeout_in_minutes: 35
   device: h200_35gb
   optional: true
+  parallelism: 2
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
     - tests/v1/e2e/spec_decode/conftest.py
     - tests/v1/e2e/spec_decode/
   commands:
-    - pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/
+    # The two parametrizations of test_gemma4_mtp_acceptance_lengths run ~24m
+    # each (build 83851), so <20m shards are impossible without splitting the
+    # test itself. Shard 0 runs the whole directory minus the [False] case
+    # (new tests land there by default); shard 1 runs only the [False] case.
+    - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s v1/e2e/spec_decode/acceptance_rates/mtp_other/ --deselect "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"
+    - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s "v1/e2e/spec_decode/acceptance_rates/mtp_other/test_mtp.py::test_gemma4_mtp_acceptance_lengths[False]"
