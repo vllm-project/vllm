@@ -16,6 +16,7 @@ from vllm.entrypoints.openai.run_batch import (
     batch_output_writer,
     dispatch_batch,
     download_bytes_from_url,
+    is_same_local_file,
     validate_batch,
 )
 
@@ -958,3 +959,46 @@ async def test_batch_output_writer_persists_before_completion(tmp_path):
         print("second", file=output_file)
 
     assert output_path.read_text() == "first\nsecond\n"
+
+
+def test_is_same_local_file_detects_aliases(tmp_path):
+    """Aliases of one file must be recognised.
+
+    Responses are written while the batch runs, so an output path that aliases
+    the input would truncate it before it has been read.
+    """
+    target = tmp_path / "batch.jsonl"
+    target.write_text("{}\n")
+    link = tmp_path / "link.jsonl"
+    link.symlink_to(target)
+    other = tmp_path / "other.jsonl"
+    other.write_text("{}\n")
+
+    assert is_same_local_file(str(target), str(target))
+    assert is_same_local_file(str(target), str(link))
+    assert is_same_local_file(str(target), f"{tmp_path}/./batch.jsonl")
+
+    assert not is_same_local_file(str(target), str(other))
+    assert not is_same_local_file(str(target), "https://example.com/output.jsonl")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_batch_counts_error_responses_as_completed(tmp_path):
+    """Synthesized error responses advance progress like any other response.
+
+    They never reach run_request, so counting only dispatched requests leaves
+    the bar short of the batch size for inputs containing an unsupported URL.
+    """
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text(INPUT_BATCH + "\n")
+    output_path = tmp_path / "output.jsonl"
+    num_requests = len(INPUT_BATCH.strip().split("\n"))
+
+    tracker = BatchProgressTracker()
+    with open(output_path, "w", encoding="utf-8") as output_file:
+        with tracker.pbar(total=num_requests) as pbar:
+            # An empty registry makes every response a synthesized error.
+            await dispatch_batch(
+                str(input_path), output_file, {}, tracker, max_inflight=2
+            )
+        assert pbar.n == num_requests

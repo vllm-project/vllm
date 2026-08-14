@@ -4,6 +4,7 @@
 import asyncio
 import contextlib
 import json
+import os
 import sys
 import tempfile
 from argparse import Namespace
@@ -542,7 +543,6 @@ async def make_async_error_request_output(
 async def run_request(
     serving_engine_func: Callable,
     request: BatchRequestInput,
-    tracker: BatchProgressTracker,
 ) -> BatchRequestOutput:
     try:
         response = await serving_engine_func(request.body)
@@ -579,7 +579,6 @@ async def run_request(
             request, error_msg="Request must not be sent in stream mode"
         )
 
-    tracker.completed()
     return batch_output
 
 
@@ -620,7 +619,7 @@ def handle_endpoint_request(
         handler_fn = wrapper_fn(handler_fn)
 
     tracker.submitted()
-    return run_request(handler_fn, request, tracker)
+    return run_request(handler_fn, request)
 
 
 def make_transcription_wrapper(
@@ -792,7 +791,25 @@ async def build_endpoint_registry(
     return endpoint_registry
 
 
+def is_same_local_file(input_file: str, output_file: str) -> bool:
+    """Whether both paths name the same file, through symlinks or aliases."""
+    if input_file.startswith(("http://", "https://")) or output_file.startswith(
+        ("http://", "https://")
+    ):
+        return False
+    if not (os.path.exists(input_file) and os.path.exists(output_file)):
+        return False
+    return os.path.samefile(input_file, output_file)
+
+
 def validate_run_batch_args(args):
+    if is_same_local_file(args.input_file, args.output_file):
+        raise ValueError(
+            f"--input-file and --output-file are the same file ({args.output_file}). "
+            "Responses are written while the batch runs, so the input would be "
+            "truncated before it has been read."
+        )
+
     valid_reasoning_parsers = ReasoningParserManager.list_registered()
     if (
         reasoning_parser := args.structured_outputs_config.reasoning_parser
@@ -857,6 +874,7 @@ async def dispatch_batch(
     def write_completed(finished: set[asyncio.Task[BatchRequestOutput]]) -> None:
         for task in finished:
             print(task.result().model_dump_json(), file=output_file)
+            tracker.completed()
         output_file.flush()
 
     with open(input_path, encoding="utf-8") as f:
