@@ -17,7 +17,7 @@ import vllm.envs as envs
 @pytest.fixture
 def rendered():
     """Run the generator and return the produced markdown string."""
-    from docs.mkdocs.plugins.gen_env_vars import render_env_vars_page
+    from docs.mkdocs.gen_files.generate_env_vars import render_env_vars_page
 
     return render_env_vars_page()
 

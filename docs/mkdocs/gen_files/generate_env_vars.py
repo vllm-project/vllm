@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""mkdocs-gen-files plugin: generates docs/configuration/env_vars.md.
+"""mkdocs-gen-files script: generates docs/configuration/env_vars.md.
 
 Walks ``vllm.envs.Settings`` sub-models and emits a Markdown reference
 with each environment variable as an H3 heading. Run automatically by

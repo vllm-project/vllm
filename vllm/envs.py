@@ -2670,7 +2670,7 @@ def resolve_env_name(info: FieldInfo, field_name: str, prefix: str) -> str:
     """Resolve the canonical environment variable name for a pydantic field.
 
     Used by the registry builder and the docs generator
-    (docs/mkdocs/plugins/gen_env_vars.py).
+    (docs/mkdocs/gen_files/generate_env_vars.py).
 
     - explicit ``alias=`` wins (used for non-VLLM_ env vars)
     - ``AliasChoices`` -> first choice (e.g., DO_NOT_TRACK fallback)
