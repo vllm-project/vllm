@@ -36,6 +36,7 @@ logger = init_logger(__name__)
 
 MTPModelTypes = Literal[
     "deepseek_mtp",
+    "dots3_note_mtp",
     "mimo_mtp",
     "mimo_v2_mtp",
     "glm4_moe_mtp",
@@ -121,7 +122,7 @@ class SpeculativeConfig:
     attention_backend: AttentionBackendEnum | None = None
     """Attention backend to use for the draft model. When `None`, the backend is
     automatically selected. Useful when the drafter requires a different attention
-    backend (e.g. DFlash needs a non-causal-capable backend like FLASH_ATTN)."""
+    backend (e.g. DFlash needs a backend that supports non-causal attention)."""
     kv_cache_dtype: CacheDType | None = None
     """KV cache dtype for the draft model. When `None`, the draft inherits the
     target model's `--kv-cache-dtype`."""
@@ -237,6 +238,10 @@ class SpeculativeConfig:
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
 
+    enable_adaptive_verification: bool = False
+    """Whether to adaptively size the draft-verification budget from per-request
+    confidence. Currently only supported for method="dspark"."""
+
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
         """Mean acceptance length to unconditional per-position rates, using
@@ -336,6 +341,21 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
+        if hf_config.model_type == "dots3_note":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            mtp_layer_types = getattr(hf_config, "mtp_layer_types", None)
+            if mtp_layer_types is None:
+                mtp_layer_types = ["sliding_attention"] * n_predict
+            if len(mtp_layer_types) != n_predict:
+                raise ValueError(
+                    "mtp_layer_types must have one entry per MTP layer: "
+                    f"got {len(mtp_layer_types)} for {n_predict} layers"
+                )
+            hf_config.layer_types = [*hf_config.layer_types, *mtp_layer_types]
+            hf_config.model_type = "dots3_note_mtp"
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["Dots3NoteMTPModel"]}
+            )
         if hf_config.model_type in (
             "deepseek_v3",
             "deepseek_v32",
@@ -528,8 +548,16 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Exaone4_5_MTP"]}
             )
-        if hf_config.model_type in ("qwen3_5", "qwen3_5_moe"):
-            is_moe = hf_config.model_type == "qwen3_5_moe"
+        if hf_config.model_type in (
+            "qwen3_5",
+            "qwen3_5_moe",
+            "qwen3_5_text",
+            "qwen3_5_moe_text",
+        ):
+            # Checkpoints that ship only the text config resolve to the
+            # `qwen3_5_text` / `qwen3_5_moe_text` model types and carry the
+            # same `mtp_num_hidden_layers` field as the multimodal ones.
+            is_moe = hf_config.model_type in ("qwen3_5_moe", "qwen3_5_moe_text")
             hf_config.model_type = "qwen3_5_mtp"
             n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
             hf_config.update(
@@ -538,15 +566,28 @@ class SpeculativeConfig:
                     "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
                 }
             )
-        if hf_config.model_type == "intern_s2_preview":
+        if hf_config.model_type in ("intern_s2_preview", "interns2_mobius"):
+            is_mobius = hf_config.model_type == "interns2_mobius"
             text_config = getattr(hf_config, "text_config", None)
-            is_moe = getattr(text_config, "model_type", None) == "qwen3_5_moe_text"
+            is_moe = is_mobius or (
+                getattr(text_config, "model_type", None) == "qwen3_5_moe_text"
+            )
+            if is_mobius:
+                assert text_config is not None
+                text_config.model_type = "qwen3_5_moe_text"
+                text_config.num_experts = text_config.mtp_num_experts
+                text_config.num_experts_per_tok = text_config.mtp_num_experts_per_tok
             hf_config.model_type = "qwen3_5_mtp"
             n_predict = getattr(text_config, "mtp_num_hidden_layers", None)
+            architecture = (
+                "InternS2MobiusMTP"
+                if is_mobius
+                else ("Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP")
+            )
             hf_config.update(
                 {
                     "n_predict": n_predict,
-                    "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
+                    "architectures": [architecture],
                 }
             )
         if hf_config.model_type in ("longcat_flash", "longcat_flash_ngram"):
@@ -589,8 +630,7 @@ class SpeculativeConfig:
             hf_config.model_type = "inkling_mtp"
             hf_config.update(
                 {
-                    # Inkling currently exposes only the first checkpoint depth.
-                    "n_predict": 1,
+                    "n_predict": checkpoint_depths,
                     "num_nextn_predict_layers": checkpoint_depths,
                     "chain_hidden_post_norm": mtp_config.get(
                         "chain_hidden_post_norm", False
@@ -977,6 +1017,9 @@ class SpeculativeConfig:
                     self.draft_model_config.hf_config.architectures = [
                         "DSparkDraftModel"
                     ]
+                    self.draft_model_config.quantization = (
+                        self.target_model_config.quantization
+                    )
                     self.update_arch_()
                 elif (
                     self.method == "dspark"
@@ -1039,43 +1082,11 @@ class SpeculativeConfig:
                         "`num_speculative_tokens` was not provided"
                     )
 
-                if (
-                    self.draft_model_config.hf_config.model_type == "inkling_mtp"
-                    and self.num_speculative_tokens != 1
-                ):
-                    raise ValueError(
-                        "Inkling MTP currently supports exactly one speculative token"
-                    )
-
                 if self.dspark_draft_topk is not None and self.method != "dspark":
                     raise ValueError("dspark_draft_topk is only supported by DSpark")
 
                 dspark_draft_topk = None
                 if self.method == "dspark":
-                    # DSpark is a semi-autoregressive *block* drafter. A
-                    # speculative length smaller than the checkpoint's block
-                    # feeds the block / Markov-head machinery an unsupported
-                    # layout and yields incorrect (garbled) output rather than
-                    # merely lower acceptance. Require num_speculative_tokens to
-                    # be at least the block size (e.g. 5 or 7 for DeepSeek-V4).
-                    dspark_block_size = getattr(
-                        self.draft_model_config.hf_config,
-                        "dspark_block_size",
-                        None,
-                    )
-                    if (
-                        dspark_block_size is not None
-                        and self.num_speculative_tokens < dspark_block_size
-                    ):
-                        raise ValueError(
-                            "DSpark requires num_speculative_tokens >= "
-                            f"dspark_block_size ({dspark_block_size}); got "
-                            f"{self.num_speculative_tokens}. Smaller values "
-                            "produce incorrect output. Use "
-                            f"num_speculative_tokens={dspark_block_size} or "
-                            "larger (e.g. 7)."
-                        )
-
                     hf_config = self.draft_model_config.hf_config
                     dspark_draft_topk = self.dspark_draft_topk
                     if dspark_draft_topk is None:
@@ -1122,6 +1133,10 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
+
+        if self.method != "dspark" and self.enable_adaptive_verification:
+            raise ValueError("Adaptive verification only supported with DSpark")
+
         return self
 
     def _validate_suffix_decoding(self):
@@ -1400,19 +1415,44 @@ class SpeculativeConfig:
 
     @property
     def max_num_new_slots_for_drafting(self) -> int:
+        """Return the maximum additional drafting slots per request.
+
+        The scheduler budget already includes one query slot per decoding request.
+        Let K be ``num_speculative_tokens``. Standard configurations require:
+
+        ==================== ============= ======== ================
+        Algorithm            Method        Parallel Additional slots
+        ==================== ============= ======== ================
+        EAGLE3               eagle3        No       0
+        P-EAGLE              eagle3        Yes      K - 1
+        DFlash               dflash        Yes      K
+        DSpark               dspark        Yes      K - 1
+        MTP                  mtp           No       0
+        N-gram               ngram         No       0
+        Draft model          draft_model   No       1
+        PARD                 draft_model   Yes      K
+        ==================== ============= ======== ================
         """
-        Calculate the maximum number of new slots that might be added to the batch
-        when drafting.
-        """
-        slots_per_req = 0  # for serial non-draft-model methods, no change needed
+        num_draft_tokens = self.num_speculative_tokens
+
+        if self.use_dflash():
+            # DFlash uses one bonus query followed by K mask queries.
+            return num_draft_tokens
+
         if self.parallel_drafting:
-            # For parallel drafting, we need one new slot per 'masked' token
-            slots_per_req = self.num_speculative_tokens - 1
+            if self.uses_draft_model():
+                # PARD does not shift the existing input, so all K query
+                # positions require additional slots.
+                return num_draft_tokens
+
+            # The existing query is reused; only masked queries need new slots.
+            return num_draft_tokens - 1
+
         if self.uses_draft_model():
-            # For draft model-based speculation, we need one new slot per request
-            # Since we do not slice the draft tokens
-            slots_per_req += 1
-        return slots_per_req
+            # The autoregressive draft-model input retains one unsliced token.
+            return 1
+
+        return 0
 
     def use_gemma4_mtp(self) -> bool:
         return (
