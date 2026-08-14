@@ -16,7 +16,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec
-from vllm.utils.torch_utils import get_dtype_size
+from vllm.utils.torch_utils import async_tensor_h2d, get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
@@ -703,3 +703,125 @@ def compute_mm_prefix_ranges(
                 image_doc_ranges.append(r)
         req_doc_ranges[req_idx] = image_doc_ranges
     return req_doc_ranges
+
+
+def compute_spec_metadata(
+    num_decode_draft_tokens_cpu: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    query_start_loc_gpu: torch.Tensor,
+    query_start_loc_cpu: torch.Tensor,
+    num_spec: int,
+) -> tuple[Any, ...]:
+    """Compute the batch-level spec-decode metadata once per step.
+
+    This metadata (masks, decode/prefill/spec split, token indices,
+    query_start_loc cumsums, spec-row-gathered num_accepted_tokens) is identical
+    for every GDN kv-cache group in a step, so it is computed once here and
+    shared. Only the block_table-dependent state-index gathers stay per-group in
+    GDN build().
+    """
+    if num_decode_draft_tokens_cpu is None:
+        return (None, None, 0, 0, 0, 0, 0, 0, None, None, None, None, None, None)
+
+    spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
+    if num_decode_draft_tokens_cpu[spec_sequence_masks_cpu].sum().item() == 0:
+        return (None, None, 0, 0, 0, 0, 0, 0, None, None, None, None, None, None)
+
+    device = query_start_loc_gpu.device
+    num_spec_decodes = int(spec_sequence_masks_cpu.sum().item())
+    spec_sequence_masks = async_tensor_h2d(spec_sequence_masks_cpu, device=device)
+
+    query_lens = query_start_loc_gpu[1:] - query_start_loc_gpu[:-1]
+    query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+
+    # Use CPU tensors to avoid CPU-GPU sync
+    non_spec_query_lens_cpu = query_lens_cpu[~spec_sequence_masks_cpu]
+    num_decodes = int((non_spec_query_lens_cpu == 1).sum().item())
+    # Exclude zero-length padded sequences from prefill count.
+    num_zero_len = int((non_spec_query_lens_cpu == 0).sum().item())
+    num_prefills = non_spec_query_lens_cpu.size(0) - num_decodes - num_zero_len
+    num_decode_tokens = num_decodes
+    num_prefill_tokens = int(non_spec_query_lens_cpu.sum().item()) - num_decode_tokens
+    num_spec_decode_tokens = (
+        int(query_lens_cpu.sum().item()) - num_prefill_tokens - num_decode_tokens
+    )
+
+    if num_decodes > 0 and num_spec_decodes > 0:
+        num_prefills += num_decodes
+        num_prefill_tokens += num_decode_tokens
+        num_decodes = 0
+        num_decode_tokens = 0
+
+    if num_prefills == 0 and num_decodes == 0:
+        spec_token_size = min(
+            num_spec_decodes * (num_spec + 1),
+            int(query_start_loc_cpu[-1].item()),
+        )
+        spec_token_indx = torch.arange(
+            spec_token_size, dtype=torch.int32, device=device
+        )
+        non_spec_token_indx = torch.empty(0, dtype=torch.int32, device=device)
+        # Padded sequences are always at the back, so the first
+        # num_spec_decodes + 1 entries of query_start_loc already
+        # contain the correct cumulative token counts.
+        spec_query_start_loc = query_start_loc_gpu[: num_spec_decodes + 1]
+        non_spec_query_start_loc = None
+        non_spec_query_start_loc_cpu = None
+    else:
+        spec_token_masks = torch.repeat_interleave(
+            spec_sequence_masks,
+            query_lens,
+            output_size=int(query_start_loc_cpu[-1].item()),
+        )
+        index = torch.argsort(spec_token_masks, stable=True)
+        num_non_spec_tokens = num_prefill_tokens + num_decode_tokens
+        non_spec_token_indx = index[:num_non_spec_tokens]
+        spec_token_indx = index[num_non_spec_tokens:]
+
+        spec_query_start_loc = torch.zeros(
+            num_spec_decodes + 1, dtype=torch.int32, device=device
+        )
+        torch.cumsum(
+            query_lens[spec_sequence_masks_cpu],
+            dim=0,
+            out=spec_query_start_loc[1:],
+        )
+        non_spec_query_start_loc = torch.zeros(
+            query_lens.size(0) - num_spec_decodes + 1,
+            dtype=torch.int32,
+            device=device,
+        )
+        torch.cumsum(
+            query_lens[~spec_sequence_masks_cpu],
+            dim=0,
+            out=non_spec_query_start_loc[1:],
+        )
+        non_spec_query_start_loc_cpu = torch.zeros(
+            query_lens_cpu.size(0) - num_spec_decodes + 1,
+            dtype=torch.int32,
+        )
+        torch.cumsum(
+            query_lens_cpu[~spec_sequence_masks_cpu],
+            dim=0,
+            out=non_spec_query_start_loc_cpu[1:],
+        )
+
+    assert num_accepted_tokens is not None
+    num_accepted_tokens = num_accepted_tokens[spec_sequence_masks_cpu]
+
+    return (
+        spec_sequence_masks_cpu,
+        spec_sequence_masks,
+        num_spec_decodes,
+        num_decodes,
+        num_prefills,
+        num_decode_tokens,
+        num_prefill_tokens,
+        num_spec_decode_tokens,
+        spec_token_indx,
+        non_spec_token_indx,
+        spec_query_start_loc,
+        non_spec_query_start_loc,
+        non_spec_query_start_loc_cpu,
+        num_accepted_tokens,
+    )
