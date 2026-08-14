@@ -307,7 +307,9 @@ def get_compilation_config(config: VitCudagraphTestConfig):
 
 
 @pytest.mark.parametrize("model_id", params_with_marks(MODEL_CONFIGS))
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
 def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
     config = MODEL_CONFIGS[model_id]
 
@@ -351,7 +353,9 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
 
 
 @pytest.mark.parametrize("model_id", params_with_marks(MODEL_CONFIGS))
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Skip if not cuda or rocm"
+)
 def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
     config = MODEL_CONFIGS[model_id]
 
