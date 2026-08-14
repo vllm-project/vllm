@@ -19,14 +19,25 @@ from vllm.v1.attention.backends.mla.indexer import (
 
 
 def test_deepseek_v4_rocm_adaptive_builders_support_varlen_full_graphs():
-    assert (
-        DeepseekV4ROCMAiterMLASparseMetadataBuilder._cudagraph_support
-        == AttentionCGSupport.ALWAYS
+    adaptive_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(enable_adaptive_verification=True)
     )
-    assert (
-        DeepseekV4ROCMAiterSparseSWAMetadataBuilder._cudagraph_support
-        == AttentionCGSupport.ALWAYS
+    fixed_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(enable_adaptive_verification=False)
     )
+
+    for builder_cls in (
+        DeepseekV4ROCMAiterMLASparseMetadataBuilder,
+        DeepseekV4ROCMAiterSparseSWAMetadataBuilder,
+    ):
+        assert (
+            builder_cls.get_cudagraph_support(adaptive_config, SimpleNamespace())
+            == AttentionCGSupport.ALWAYS
+        )
+        assert (
+            builder_cls.get_cudagraph_support(fixed_config, SimpleNamespace())
+            == AttentionCGSupport.UNIFORM_BATCH
+        )
 
 
 def test_deepseek_v4_rocm_adaptive_indexer_support(monkeypatch: pytest.MonkeyPatch):
