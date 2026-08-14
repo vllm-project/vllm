@@ -110,6 +110,7 @@ class PyNcclCommunicator:
 
         self.available = True
         self.disabled = False
+        self._suspended = False
 
         self.nccl_version = self.nccl.ncclGetRawVersion()
         if self.rank == 0:
@@ -428,17 +429,29 @@ class PyNcclCommunicator:
         """Release dynamic GPU memory, keeping topology/connection state.
 
         Collective across the group's ranks (ncclCommSuspend has an internal
-        cross-rank barrier). No-op on NCCL < 2.29.7.
+        cross-rank barrier). Idempotent: a second suspend is a no-op, as NCCL
+        rejects suspending a suspended comm. No-op on NCCL < 2.29.7.
         """
         if self.disabled or self.nccl_version < _NCCL_SUSPEND_MIN_VERSION:
             return
+        if self._suspended:
+            return
         self.nccl.ncclCommSuspend(self.comm, _NCCL_SUSPEND_MEM)
+        self._suspended = True
 
     def resume(self):
-        """Restore a suspended communicator (collective). No-op on NCCL < 2.29.7."""
+        """Restore a suspended communicator (collective).
+
+        Idempotent: resuming a non-suspended comm is a no-op — NCCL raises
+        "invalid usage" otherwise, which staged wake-ups (weights first, then
+        kv_cache) would trigger. No-op on NCCL < 2.29.7.
+        """
         if self.disabled or self.nccl_version < _NCCL_SUSPEND_MIN_VERSION:
             return
+        if not self._suspended:
+            return
         self.nccl.ncclCommResume(self.comm)
+        self._suspended = False
 
     def batch_isend_irecv(self, p2p_ops: list, stream=None):
         if self.disabled:
