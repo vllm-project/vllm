@@ -97,35 +97,22 @@ def _fixup_moe_tuning_config(tuning_config: list, max_k_block: int = 128) -> Non
 
     - block_shape[2] (K-block) > ``max_k_block``: the driver rejects the TMA
       descriptor at launch (CUDA_ERROR_MISALIGNED_ADDRESS). Cap at 128, which
-      Humming already uses for larger M. Gated by
-      VLLM_HUMMING_CAP_MOE_TUNING_K_BLOCK (default on).
+      Humming already uses for larger M.
     - warp_shape[1] (warp-N) < 32: block-FP8 (group-128) activations route the
       w13 (gate/up) GEMM to a tuning table that pins warp-N to 16, under-filling
       the Hopper WGMMA N dimension. Widen to 32 when block_n % 32 == 0. w2
-      (down) already uses warp_n=32 and is untouched. Gated by
-      VLLM_HUMMING_WIDEN_MOE_WARP_N (default on).
+      (down) already uses warp_n=32 and is untouched.
     """
-    cap = envs.VLLM_HUMMING_CAP_MOE_TUNING_K_BLOCK
-    widen = envs.VLLM_HUMMING_WIDEN_MOE_WARP_N
-    if not (cap or widen):
-        return
     for entry in tuning_config:
         config = entry[2]
         block_shape = config.get("block_shape")
         if not (block_shape and len(block_shape) == 3):
             continue
         block_m, block_n, block_k = block_shape
-        if cap and block_k > max_k_block:
+        if block_k > max_k_block:
             config["block_shape"] = [block_m, block_n, max_k_block]
         warp_shape = config.get("warp_shape")
-        if (
-            widen
-            and warp_shape
-            and len(warp_shape) == 3
-            and block_n % 32 == 0
-            and warp_shape[1] < 32
-        ):
-            config["warp_shape"] = [warp_shape[0], 32, warp_shape[2]]
+        config["warp_shape"] = [warp_shape[0], 32, warp_shape[2]]
 
 
 class HummingExpertsBase(mk.FusedMoEExpertsModular):
