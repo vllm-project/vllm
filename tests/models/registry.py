@@ -847,8 +847,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "deepseek-ai/DeepSeek-OCR-2",
     ),
     "Dots3NoteForCausalLM": _HfExamplesInfo(
-        "rednote-hilab/dots3.note",
-        trust_remote_code=True,
+        "dots-studio/dots3-note-prev",
         is_available_online=False,
     ),
     "UnlimitedOCRForCausalLM": _HfExamplesInfo(
@@ -1681,9 +1680,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     "Dots3NoteMTPModel": _HfExamplesInfo(
-        "rednote-hilab/dots3.note",
-        speculative_model="rednote-hilab/dots3.note",
-        trust_remote_code=True,
+        "dots-studio/dots3-note-prev",
+        speculative_model="dots-studio/dots3-note-prev",
         is_available_online=False,
     ),
     "Gemma4MTPModel": _HfExamplesInfo(
