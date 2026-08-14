@@ -245,7 +245,9 @@ def _completion_response(serving, request, request_output):
 def test_completion_spec_decode_metrics_present_for_single_sequence():
     # Timing off, but the sequence carries acceptance metrics -> the metrics
     # object is created just to hold metrics.speculative_decoding.
-    serving = _build_minimal_metrics_serving_completion(enable_per_request_metrics=False)
+    serving = _build_minimal_metrics_serving_completion(
+        enable_per_request_metrics=False
+    )
     response = _completion_response(
         serving,
         CompletionRequest(model=MODEL_NAME, prompt="Test prompt", max_tokens=10),
@@ -263,7 +265,9 @@ def test_completion_spec_decode_metrics_present_for_single_sequence():
 
 def test_completion_spec_decode_metrics_suppressed_for_n_gt_1():
     # Per-request metrics can't be attributed to one of the n sequences.
-    serving = _build_minimal_metrics_serving_completion(enable_per_request_metrics=False)
+    serving = _build_minimal_metrics_serving_completion(
+        enable_per_request_metrics=False
+    )
     response = _completion_response(
         serving,
         CompletionRequest(model=MODEL_NAME, prompt="Test prompt", n=2, max_tokens=10),
@@ -274,7 +278,9 @@ def test_completion_spec_decode_metrics_suppressed_for_n_gt_1():
 
 def test_completion_spec_decode_metrics_absent_when_not_collected():
     # Flag off -> the sequence carries no acceptance metrics -> no metrics object.
-    serving = _build_minimal_metrics_serving_completion(enable_per_request_metrics=False)
+    serving = _build_minimal_metrics_serving_completion(
+        enable_per_request_metrics=False
+    )
     response = _completion_response(
         serving,
         CompletionRequest(model=MODEL_NAME, prompt="Test prompt", max_tokens=10),
