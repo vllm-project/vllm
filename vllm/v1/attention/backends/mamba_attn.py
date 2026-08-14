@@ -82,13 +82,15 @@ class BaseMambaAttentionMetadata:
     write_pos_d: torch.Tensor | None = None
     is_flush_d: torch.Tensor | None = None
     bc_pre_scratch: torch.Tensor | None = None
-    # ReplaySSM — FlashInfer checkpointing_ssu bookkeeping / scratch.
-    # All None unless that backend is on.
+    # ReplaySSM — FlashInfer checkpointing_ssu:
+    # ring_start / prev_num_accepted (always), plus two-kernel scratch
+    # (cb_scaled / cumAdt_vec / cb_old) so monolith and two-kernel are both
+    # available via algorithm="auto". All None unless that backend is on.
     ring_start_d: torch.Tensor | None = None
     prev_num_accepted_d: torch.Tensor | None = None
-    fi_cb_scaled_scratch: torch.Tensor | None = None
-    fi_cumAdt_vec_scratch: torch.Tensor | None = None
-    fi_cb_old_scratch: torch.Tensor | None = None
+    cb_scaled: torch.Tensor | None = None
+    cumAdt_vec: torch.Tensor | None = None
+    cb_old: torch.Tensor | None = None
 
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
@@ -179,9 +181,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.int32,
                 device=device,
             )
-        # ReplaySSM CUDA-graph buffers (Triton write_pos/is_flush/bc_pre).
-        # FlashInfer ring_start/pnat buffers are allocated when that path is
-        # wired.
+        # ReplaySSM CUDA-graph buffers.
+        # Triton: write_pos / is_flush / bc_pre.
+        # FlashInfer: ring_start / prev_num_accepted + two-kernel scratch
+        # (cb_scaled / cumAdt_vec / cb_old) so algorithm="auto" can pick
+        # monolith or two-kernel.
         if self.use_replayssm and not self.use_flashinfer_replayssm:
             self.decode_write_pos_d: torch.Tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,),
@@ -208,8 +212,64 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.float32,
                 device=device,
             )
+            self.decode_ring_start_d = None
+            self.decode_prev_num_accepted_d = None
+            self.decode_cb_scaled = None
+            self.decode_cumAdt_vec = None
+            self.decode_cb_old = None
+        elif self.use_flashinfer_replayssm:
+            self.decode_bc_pre_scratch = None
+            scratch_bs = max(
+                self.decode_cudagraph_max_bs, scheduler_config.max_num_seqs
+            )
+            # checkpointing_ssu ring_start / prev_num_accepted are per cache
+            # slot; for decode metadata we keep per-row views sized to the
+            # CG batch (indexed via state_batch_indices inside the kernel).
+            self.decode_ring_start_d = torch.empty(
+                (scratch_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.decode_prev_num_accepted_d = torch.empty(
+                (scratch_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+            # x_cache page: (nheads, L, head_dim); AR decode uses T=1.
+            # Scratch shapes follow flashinfer's bench_checkpointing_ssu.py
+            # (WARP_SIZE / MMA_FRAG_SIZE are not exported from Python).
+            nheads = kv_cache_spec.shapes[2][0]
+            npredicted = 1  # AR decode
+            max_window = self.replayssm_buffer_len - 1
+            k_old = (max_window + 7) // 8 * 8
+            # cumAdt_vec: next_multiple_of_16(T)
+            t_pad = ((npredicted + 15) // 16) * 16
+            warp_size = 32
+            # cb_scaled: (..., 32, 8) = fragA for m16n8k16
+            mma_frag_size = t_pad // 2
+            act_dtype = vllm_config.model_config.dtype
+            self.decode_cb_scaled = torch.empty(
+                (scratch_bs, nheads, warp_size, mma_frag_size),
+                dtype=act_dtype,
+                device=device,
+            )
+            self.decode_cumAdt_vec = torch.empty(
+                (scratch_bs, nheads, t_pad),
+                dtype=torch.float32,
+                device=device,
+            )
+            self.decode_cb_old = torch.empty(
+                (scratch_bs, nheads, warp_size, k_old // 2),
+                dtype=act_dtype,
+                device=device,
+            )
         else:
             self.decode_bc_pre_scratch = None
+            self.decode_ring_start_d = None
+            self.decode_prev_num_accepted_d = None
+            self.decode_cb_scaled = None
+            self.decode_cumAdt_vec = None
+            self.decode_cb_old = None
 
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
         if self.use_spec_decode:
@@ -604,9 +664,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             if self.use_flashinfer_replayssm:
                 raise NotImplementedError(
                     "FlashInfer ReplaySSM metadata is not implemented yet. "
-                    "Build ring_start / prev_num_accepted_tokens (and optional "
-                    "checkpointing_ssu two-kernel scratch) for "
-                    "flashinfer.mamba.checkpointing_ssu."
+                    "Fill ring_start_d / prev_num_accepted_d (CG buffers and "
+                    "two-kernel scratch are already allocated)."
                 )
             decode_base_cpu = common_attn_metadata.replayssm_decode_base_cpu
             num_computed_tokens_cpu = common_attn_metadata._num_computed_tokens_cpu
