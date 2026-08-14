@@ -133,8 +133,8 @@ def test_xpu_kda_adapter_dispatches_native_op(monkeypatch) -> None:
     assert isinstance(q_proj, torch.Tensor)
     assert isinstance(k_proj, torch.Tensor)
     assert isinstance(v_proj, torch.Tensor)
-    assert q_proj.shape == k_proj.shape == v_proj.shape == (1, 2, 2, 2)
-    assert q_proj.stride() == k_proj.stride() == v_proj.stride()
+    assert q_proj.shape == k_proj.shape == v_proj.shape == (2, 4)
+    assert q_proj.stride() == k_proj.stride() == v_proj.stride() == (12, 1)
     assert args[5].dtype == torch.float32
     assert args[5].is_contiguous()
     assert args[6] is conv_state

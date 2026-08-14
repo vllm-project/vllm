@@ -62,9 +62,9 @@ class KimiK3DeltaAttention(KimiGatedDeltaNetAttention):
             self.head_dim,
         )
         q_proj, k_proj, v_proj = mixed_qkv.unbind(dim=1)
-        q_proj = q_proj.unsqueeze(0)
-        k_proj = k_proj.unsqueeze(0)
-        v_proj = v_proj.unsqueeze(0)
+        q_proj = q_proj.flatten(1)
+        k_proj = k_proj.flatten(1)
+        v_proj = v_proj.flatten(1)
 
         conv_state, recurrent_state = self.kv_cache
         conv_weights = self.conv1d.weight.view(
