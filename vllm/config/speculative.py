@@ -1043,16 +1043,6 @@ class SpeculativeConfig:
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
 
-                if (
-                    self.method == "dspark"
-                    and "K3DSparkModel" in self.draft_model_config.architectures
-                    and self.target_parallel_config.decode_context_parallel_size > 1
-                ):
-                    raise ValueError(
-                        "MLA DSpark does not currently support decode context "
-                        "parallelism; set decode_context_parallel_size=1."
-                    )
-
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
                 ):

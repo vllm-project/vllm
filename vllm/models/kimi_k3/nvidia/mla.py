@@ -320,11 +320,6 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             "parallelism."
         )
         self.dcp_world_size = parallel_config.decode_context_parallel_size
-        assert self.dcp_world_size <= 1 or self.rotary_emb is None, (
-            "Kimi-K3 MultiHeadLatentAttention does not support RoPE with decode "
-            "context parallelism because gathered queries require gathered "
-            "positions."
-        )
         self.dcp_manager: MLADCPManager | None = None
         if self.dcp_world_size > 1:
             query_dtype = (

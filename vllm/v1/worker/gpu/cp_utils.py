@@ -59,3 +59,32 @@ def _dcp_local_seq_lens_kernel(
     # For [num_reqs, max_num_reqs), pad with 0
     local_seq_lens = tl.where(block < num_reqs, local_seq_lens, 0)
     tl.store(out_ptr + block, local_seq_lens, mask=block < max_num_reqs)
+
+
+@triton.jit
+def cp_local_slot(
+    positions,
+    block_numbers,
+    block_size,
+    cp_rank,
+    CP_SIZE: tl.constexpr,
+    CP_INTERLEAVE: tl.constexpr,
+    PAD_ID: tl.constexpr,
+):
+    """KV slot for `positions` on this CP rank, or PAD_ID if not owned here.
+
+    DCP distributes a sequence round-robin over the CP ranks in chunks of
+    CP_INTERLEAVE, so a token's rank-local offset is not its global offset.
+    At CP_SIZE == 1 this reduces to the non-CP expression exactly.
+
+    `block_numbers` must have been loaded with the matching block index,
+    `positions // (block_size * CP_SIZE)`.
+    """
+    block_offsets = positions % (block_size * CP_SIZE)
+    if CP_SIZE == 1:
+        return block_numbers * block_size + block_offsets
+    is_local = block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
+    rounds = block_offsets // (CP_INTERLEAVE * CP_SIZE)
+    remainder = block_offsets % CP_INTERLEAVE
+    local_offsets = rounds * CP_INTERLEAVE + remainder
+    return tl.where(is_local, block_numbers * block_size + local_offsets, PAD_ID)
