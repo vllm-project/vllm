@@ -5,9 +5,12 @@ from unittest import TestCase
 import numpy as np
 import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
+
+DEVICE_TYPE = current_platform.device_type
 
 
 def test_logprobs_tensors_cat():
@@ -71,9 +74,9 @@ def test_sampling_mask_tensors_from_logits():
                 [3.0, 4.0, float("-inf")],
                 [float("-inf"), 5.0, 6.0],
             ],
-            device="cuda",
+            device=DEVICE_TYPE,
         ),
-        num_sampled_tokens=torch.tensor([1, 0, 1], device="cuda"),
+        num_sampled_tokens=torch.tensor([1, 0, 1], device=DEVICE_TYPE),
     )
 
     result = tensors.tolists(np.array([1, 0, 1]))
@@ -85,9 +88,11 @@ def test_sampling_mask_tensors_from_logits():
 
 def test_sampling_mask_matches_processed_top_k_top_p_support():
     processed_logits = apply_top_k_top_p(
-        logits=torch.tensor([[6.0, 5.0, 4.0, 4.0, 4.0, 2.0, 1.0, 0.0]], device="cuda"),
-        k=torch.tensor([3], device="cuda"),
-        p=torch.tensor([0.9], device="cuda"),
+        logits=torch.tensor(
+            [[6.0, 5.0, 4.0, 4.0, 4.0, 2.0, 1.0, 0.0]], device=DEVICE_TYPE
+        ),
+        k=torch.tensor([3], device=DEVICE_TYPE),
+        p=torch.tensor([0.9], device=DEVICE_TYPE),
     )
     expected_token_ids = (
         torch.isfinite(processed_logits[0]).nonzero().flatten().tolist()
@@ -96,7 +101,7 @@ def test_sampling_mask_matches_processed_top_k_top_p_support():
 
     tensors = SamplingMaskTensors.from_logits(
         processed_logits,
-        num_sampled_tokens=torch.tensor([1], device="cuda"),
+        num_sampled_tokens=torch.tensor([1], device=DEVICE_TYPE),
     )
     result = tensors.tolists(np.array([1]))
 
