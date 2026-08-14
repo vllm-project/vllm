@@ -585,6 +585,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.all2all_manager.destroy()
             self.all2all_manager = None  # type: ignore[assignment]
 
+    def suspend(self) -> None:
+        if self.pynccl_comm is not None:
+            self.pynccl_comm.suspend()
+
+    def resume(self) -> None:
+        if self.pynccl_comm is not None:
+            self.pynccl_comm.resume()
+
     def checkpoint_prepare(self) -> None:
         # Only FlashInfer all-reduce and FlashInfer all2all are supported for now.
         from .flashinfer_all_reduce import checkpoint_prepare_fi_ar_workspaces
