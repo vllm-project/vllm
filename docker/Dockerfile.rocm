@@ -480,10 +480,16 @@ FROM base AS build_lmcache
 ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
 ARG LMCACHE_REF="140819c9d57a975dbc5678a6459a218e544cb58b" # v0.5.3
 ARG LMCACHE_VERSION="0.5.3"
-# Archs covered by the published ROCm wheel (tag v${LMCACHE_VERSION}-rocm). When
+# Arch lists use PYTORCH_ROCM_ARCH-style ';' (space and ',' also accepted).
+# Archs covered by the published ROCm wheel. When
 # the effective set is a subset, download it instead of compiling; anything wider
 # falls back to a source build so coverage is never silently narrowed.
-ARG LMCACHE_PREBUILT_ARCHS="gfx942 gfx950"
+ARG LMCACHE_PREBUILT_ARCHS="gfx942;gfx950"
+# Archs LMCache upstream supports on ROCm. The inherited set is intersected with
+# this and anything dropped is logged, so unsupported GPUs are skipped loudly
+# rather than shipping non-runnable device code. Set LMCACHE_ROCM_ARCH to
+# override (e.g. gfx90a, which builds from source but has no published wheel).
+ARG LMCACHE_SUPPORTED_ARCHS="gfx942;gfx950"
 # Empty: inherit the image's PYTORCH_ROCM_ARCH minus the consumer archs, matching
 # the set vLLM compiles its own kernels for (see Dockerfile.rocm_base).
 ARG LMCACHE_ROCM_ARCH=""
@@ -493,11 +499,25 @@ RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
     set -eu; \
     mkdir -p /app/install; \
+    SUPPORTED=" $(echo "${LMCACHE_SUPPORTED_ARCHS}" | tr ';,' '  ') "; \
+    PREBUILT_SET=" $(echo "${LMCACHE_PREBUILT_ARCHS}" | tr ';,' '  ') "; \
     ARCHS="${LMCACHE_ROCM_ARCH:-$(echo "${PYTORCH_ROCM_ARCH}" | sed -e 's/;gfx1[0-9]\{3\}//g')}"; \
+    if [ -z "${LMCACHE_ROCM_ARCH}" ]; then \
+        KEPT=""; SKIPPED=""; \
+        for a in $(echo "${ARCHS}" | tr ';,' '  '); do \
+            case "${SUPPORTED}" in \
+                *" ${a} "*) KEPT="${KEPT}${KEPT:+;}${a}" ;; \
+                *) SKIPPED="${SKIPPED} ${a}" ;; \
+            esac; \
+        done; \
+        [ -n "${SKIPPED}" ] && echo "[LMCACHE] not supported upstream, skipping:${SKIPPED}"; \
+        [ -z "${KEPT}" ] && echo "[LMCACHE] no supported arch in '${ARCHS}'" && exit 1; \
+        ARCHS="${KEPT}"; \
+    fi; \
     echo "[LMCACHE] effective PYTORCH_ROCM_ARCH: ${ARCHS}"; \
     PREBUILT=1; \
     for a in $(echo "${ARCHS}" | tr ';,' '  '); do \
-        case " ${LMCACHE_PREBUILT_ARCHS} " in *" ${a} "*) ;; *) PREBUILT=0 ;; esac; \
+        case "${PREBUILT_SET}" in *" ${a} "*) ;; *) PREBUILT=0 ;; esac; \
     done; \
     if [ "${PREBUILT}" = "1" ] \
        && pip download --no-deps --no-index --only-binary=:all: -d /app/install \
