@@ -91,6 +91,17 @@ def hf_model(hf_runner):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_negative_token_ids(client: openai.AsyncOpenAI, model_name: str):
+    # A negative token id is out of vocabulary just like an over-large one, but
+    # is not caught by the upper-bound check. Unlike the OpenAI completion
+    # schema, the pooling schema does not constrain token ids to be
+    # non-negative, so the request reaches the shared engine-level validation.
+    with pytest.raises(openai.BadRequestError, match=".*out of vocabulary.*"):
+        await client.embeddings.create(model=model_name, input=[-1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_basic(
     server: RemoteOpenAIServer, client: openai.AsyncOpenAI, model_name: str
 ):
