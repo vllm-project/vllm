@@ -76,11 +76,7 @@ class MambaBase(AttentionLayerBase):
             num_speculative_blocks=(
                 0
                 if vllm_config.cache_config.use_kda_recoverssm
-                else (
-                    vllm_config.speculative_config.num_speculative_tokens
-                    if vllm_config.speculative_config
-                    else 0
-                )
+                else vllm_config.num_speculative_tokens
             ),
         )
 
