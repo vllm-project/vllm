@@ -168,6 +168,8 @@ def get_flash_attn_version(
             )
             fa_version = 2
 
+        # TODO: Restore the `requires_local_attention` restriction when FA4
+        # head-dim 256 is re-enabled.
         if fa_version == 4 and device_capability.major >= 10 and head_size == 256:
             logger.warning_once(
                 "FA4 on Blackwell is temporarily disabled for head_size=256, "
