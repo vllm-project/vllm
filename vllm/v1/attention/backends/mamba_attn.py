@@ -27,6 +27,29 @@ from vllm.v1.kv_cache_interface import MambaSpec
 M = TypeVar("M", bound="BaseMambaAttentionMetadata")
 
 
+def _derive_flashinfer_replayssm_ring_state(
+    decode_steps: torch.Tensor,
+    logical_window: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the ring cursor and live-token count before each T=1 call."""
+    positive_steps = torch.clamp(decode_steps - 1, min=0)
+    flushes_before = torch.div(
+        positive_steps,
+        logical_window,
+        rounding_mode="floor",
+    )
+    prev_num_accepted = torch.where(
+        decode_steps == 0,
+        torch.zeros_like(decode_steps),
+        torch.remainder(positive_steps, logical_window) + 1,
+    )
+    ring_start = torch.remainder(
+        flushes_before * logical_window,
+        logical_window + 1,
+    )
+    return ring_start, prev_num_accepted
+
+
 @dataclass
 class BaseMambaAttentionMetadata:
     num_prefills: int
@@ -243,7 +266,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             # (WARP_SIZE / MMA_FRAG_SIZE are not exported from Python).
             nheads = kv_cache_spec.shapes[2][0]
             npredicted = 1  # AR decode
-            max_window = self.replayssm_buffer_len - 1
+            max_window = self.replayssm_buffer_len
             k_old = (max_window + 7) // 8 * 8
             # cumAdt_vec: next_multiple_of_16(T)
             t_pad = ((npredicted + 15) // 16) * 16
@@ -731,11 +754,27 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 ring_start_d = self.decode_ring_start_d
                 prev_num_accepted_d = self.decode_prev_num_accepted_d
                 state_slots = state_indices_tensor_d[:num_decodes, 0].long()
-                prev_num_accepted = async_tensor_h2d(
-                    write_pos_cpu.to(torch.int32).tolist(),
+                # For T=1, a checkpoint replays B old tokens and leaves the
+                # fresh token live. Derive the host-owned ring state before
+                # this call from the number of completed decode steps.
+                logical_window = self.replayssm_buffer_len
+                ring_start_cpu, prev_num_accepted_cpu = (
+                    _derive_flashinfer_replayssm_ring_state(
+                        decode_steps_cpu,
+                        logical_window,
+                    )
+                )
+                ring_start = async_tensor_h2d(
+                    ring_start_cpu.to(torch.int32).tolist(),
                     dtype=torch.int32,
                     device=common_attn_metadata.query_start_loc.device,
                 )
+                prev_num_accepted = async_tensor_h2d(
+                    prev_num_accepted_cpu.to(torch.int32).tolist(),
+                    dtype=torch.int32,
+                    device=common_attn_metadata.query_start_loc.device,
+                )
+                ring_start_d.index_copy_(0, state_slots, ring_start)
                 prev_num_accepted_d.index_copy_(0, state_slots, prev_num_accepted)
                 cb_scaled = self.decode_cb_scaled[:num_decodes]
                 cumAdt_vec = self.decode_cumAdt_vec[:num_decodes]
