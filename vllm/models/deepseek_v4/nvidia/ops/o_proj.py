@@ -6,6 +6,10 @@ import torch.nn as nn
 from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
     fused_inv_rope_fp8_quant,
 )
+from vllm.models.deepseek_v4.nvidia.ops.fp8_einsum import (
+    _use_deepseek_v4_sm12x_triton_fp8_einsum,
+    deepseek_v4_fp8_einsum,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import fp8_einsum
 
@@ -15,14 +19,19 @@ def compute_fp8_einsum_recipe() -> tuple[tuple[int, int, int], bool]:
 
     SM90: FP32 block scales stay [g, r/128, d/128] → sfb_gran_mn=128.
     SM100: INT32 packed scales become [g, r, ...] → sfb_gran_mn=1.
+    SM12x (GB10 / RTX 50): DeepGEMM's SM100 recipe asserts in layout.hpp
+    (``sf.size(-2) == ceil_div(mn, gran_mn)``). Use the SM90-shaped
+    FP32 recipe and the Triton SM12x fallback (see #43743), not family-120
+    as a blunt DeepGEMM enable.
 
     Returns ``(einsum_recipe, tma_aligned_scales)`` for ``deep_gemm_fp8_o_proj``.
     """
     cap = current_platform.get_device_capability()
     assert cap is not None, "DeepseekV4 attention requires a CUDA device"
-    einsum_recipe = (1, 128, 128) if cap.major <= 9 else (1, 1, 128)
-    tma_aligned_scales = cap.major >= 10
-    return einsum_recipe, tma_aligned_scales
+    if cap.major == 10:
+        return (1, 1, 128), True
+    # SM90 and SM12x share the FP32 (1, 128, 128) layout.
+    return (1, 128, 128), False
 
 
 def deep_gemm_fp8_o_proj(
@@ -63,11 +72,24 @@ def deep_gemm_fp8_o_proj(
     weight_scale = (
         wo_a.weight_scale if hasattr(wo_a, "weight_scale") else wo_a.weight_scale_inv
     )
-    fp8_einsum(
-        "bhr,hdr->bhd",
-        (o_fp8, o_scale),
-        (wo_a.weight, weight_scale),
-        z,
-        recipe=einsum_recipe,
-    )
+    if _use_deepseek_v4_sm12x_triton_fp8_einsum(
+        "bhr,hdr->bhd", list(einsum_recipe), weight_scale
+    ):
+        deepseek_v4_fp8_einsum(
+            o_fp8,
+            o_scale,
+            wo_a.weight,
+            weight_scale,
+            z,
+            equation="bhr,hdr->bhd",
+            recipe=list(einsum_recipe),
+        )
+    else:
+        fp8_einsum(
+            "bhr,hdr->bhd",
+            (o_fp8, o_scale),
+            (wo_a.weight, weight_scale),
+            z,
+            recipe=einsum_recipe,
+        )
     return wo_b(z.flatten(1))
