@@ -9,6 +9,10 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    index_quantized_activation,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
@@ -365,7 +369,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor]:
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
         with set_forward_context(
             attn_metadata,
@@ -438,7 +442,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             mm_inputs=mm_inputs,
         )
-        sample_hidden_states = last_hidden_states[last_token_indices]
+        sample_hidden_states = index_quantized_activation(
+            last_hidden_states, last_token_indices
+        )
 
         self.draft_tokens[:num_reqs, 0] = self.sample_draft(
             sample_hidden_states,
@@ -615,7 +621,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             num_tokens_across_dp,
             cudagraph_runtime_mode,
         )
-        last_hidden_states = last_hidden_states[:num_reqs]
+        last_hidden_states = index_quantized_activation(
+            last_hidden_states, slice(None, num_reqs)
+        )
 
         sample_positions = positions
         if not self.advance_draft_positions:

@@ -34,8 +34,11 @@ from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
     expose_input_quant_key,
+    index_quantized_activation,
 )
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -129,3 +132,50 @@ def test_as_quantized_activation_validates_key():
         as_quantized_activation(qa, None)
     assert as_quantized_activation(torch.zeros(2, 4), kFp8StaticTensorSym) is None
     assert as_quantized_activation(qa, kFp8StaticTensorSym) is qa
+
+
+def test_index_fp8_block_activation_repacks_scale_layout():
+    data = torch.arange(30).view(5, 6)
+    scale = torch.empty_strided((5, 2), (1, 8), dtype=torch.int32)
+    scale.copy_(torch.arange(10).view(5, 2))
+    activation = QuantizedActivation(
+        data=data,
+        scale=scale,
+        orig_dtype=torch.bfloat16,
+        orig_shape=data.shape,
+        quant_key=kFp8Dynamic128Sym,
+    )
+
+    indexed = index_quantized_activation(activation, torch.tensor([4, 1, 3]))
+
+    assert isinstance(indexed, QuantizedActivation)
+    torch.testing.assert_close(indexed.data, data[[4, 1, 3]])
+    torch.testing.assert_close(indexed.scale, scale[[4, 1, 3]])
+    assert indexed.scale.stride() == (1, 4)
+    assert indexed.orig_shape == (3, 6)
+
+
+def test_logits_processor_forwards_quantized_activation(default_vllm_config):
+    activation = QuantizedActivation(
+        data=torch.empty(2, 4),
+        scale=torch.empty(2, 1),
+        orig_dtype=torch.bfloat16,
+        orig_shape=torch.Size([2, 4]),
+        quant_key=kFp8Dynamic128Sym,
+    )
+
+    class RecordingQuantMethod:
+        received = None
+
+        def apply(self, layer, hidden_states, bias=None):
+            self.received = hidden_states
+            return torch.ones(2, 3)
+
+    head = torch.nn.Module()
+    head.quant_method = RecordingQuantMethod()
+    head.tp_size = 1
+
+    logits = LogitsProcessor(3)(head, activation)
+
+    assert head.quant_method.received is activation
+    torch.testing.assert_close(logits, torch.ones(2, 3))

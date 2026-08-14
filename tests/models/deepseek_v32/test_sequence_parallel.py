@@ -7,6 +7,10 @@ from unittest.mock import Mock
 import torch
 from torch import nn
 
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+)
 from vllm.models.deepseek_v32.nvidia import model as deepseek_v32_model
 from vllm.models.deepseek_v32.nvidia import mtp as deepseek_v32_mtp
 
@@ -146,3 +150,59 @@ def test_mtp_projects_sequence_shard_and_restores_full_output(monkeypatch):
     torch.testing.assert_close(hidden_states, expected)
     torch.testing.assert_close(recycled_hidden_states, expected)
     norm.assert_called_once()
+
+
+def test_mtp_fuses_final_reduce_norm_quant_for_logits(monkeypatch):
+    layer = object.__new__(deepseek_v32_mtp.DeepseekV32MultiTokenPredictorLayer)
+    nn.Module.__init__(layer)
+    layer.enorm = _IdentityNorm()
+    layer.hnorm = _IdentityNorm()
+    layer.eh_proj = _RecordingProjection()
+    layer._eh_plan = None
+    mtp_block = _SequenceParallelMTPBlock()
+    mtp_block.use_sequence_parallel = False
+    object.__setattr__(layer, "mtp_block", mtp_block)
+    norm = _IdentityNorm()
+    head = nn.Module()
+    object.__setattr__(layer, "shared_head", SimpleNamespace(norm=norm, head=head))
+
+    monkeypatch.setattr(
+        deepseek_v32_mtp,
+        "fused_eh_norm",
+        lambda positions, inputs_embeds, previous_hidden_states, *args: torch.cat(
+            [inputs_embeds, previous_hidden_states], dim=-1
+        ),
+    )
+    monkeypatch.setattr(deepseek_v32_mtp, "run_glm52_plan", lambda *args: None)
+
+    quantized = QuantizedActivation(
+        data=torch.empty(3, 2),
+        scale=torch.empty_strided((3, 1), (1, 4), dtype=torch.int32),
+        orig_dtype=torch.float32,
+        orig_shape=torch.Size([3, 2]),
+        quant_key=kFp8Dynamic128Sym,
+    )
+    fused = Mock(return_value=(torch.full((3, 2), 7.0), torch.empty(3, 2), quantized))
+    monkeypatch.setattr(deepseek_v32_mtp, "fused_allreduce_rms_norm_fp8_quant", fused)
+
+    inputs_embeds = torch.arange(6, dtype=torch.float32).view(3, 2)
+    logits_input, recycled_hidden_states = layer(
+        input_ids=torch.zeros(3, dtype=torch.long),
+        positions=torch.arange(3),
+        previous_hidden_states=torch.zeros_like(inputs_embeds),
+        inputs_embeds=inputs_embeds,
+    )
+
+    assert logits_input is quantized
+    torch.testing.assert_close(recycled_hidden_states, torch.full((3, 2), 7.0))
+    assert fused.call_args.args[2:] == (norm, head)
+
+    fused.return_value = (torch.full((3, 2), 9.0), torch.empty(3, 2), None)
+    logits_input, recycled_hidden_states = layer(
+        input_ids=torch.zeros(3, dtype=torch.long),
+        positions=torch.arange(3),
+        previous_hidden_states=torch.zeros_like(inputs_embeds),
+        inputs_embeds=inputs_embeds,
+    )
+    torch.testing.assert_close(logits_input, torch.full((3, 2), 9.0))
+    assert logits_input is recycled_hidden_states
