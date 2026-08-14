@@ -56,6 +56,10 @@ def get_b12x_fused_moe() -> ModuleType | None:
     return _get_submodule("b12x.moe.fused_moe")
 
 
+def get_b12x_paged_attention() -> ModuleType | None:
+    return _get_submodule("b12x.attention.paged")
+
+
 def b12x_warmup_token_counts(
     *,
     max_tokens: int,
