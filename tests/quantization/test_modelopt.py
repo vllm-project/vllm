@@ -523,22 +523,15 @@ def test_modelopt_fp8_pb_wo_checkpoint_setup(default_vllm_config, vllm_runner):
             assert gate_up_proj.weight.dtype == torch.float8_e4m3fn
             assert down_proj.weight.dtype == torch.float8_e4m3fn
 
-            # Block scales; should be materialized as a 2D [out_blk, in_blk] tensor.
-            assert hasattr(qkv_proj, "weight_scale")
-            assert qkv_proj.weight_scale.dtype == torch.float32
-            assert qkv_proj.weight_scale.dim() == 2
-
-            assert hasattr(o_proj, "weight_scale")
-            assert o_proj.weight_scale.dtype == torch.float32
-            assert o_proj.weight_scale.dim() == 2
-
-            assert hasattr(gate_up_proj, "weight_scale")
-            assert gate_up_proj.weight_scale.dtype == torch.float32
-            assert gate_up_proj.weight_scale.dim() == 2
-
-            assert hasattr(down_proj, "weight_scale")
-            assert down_proj.weight_scale.dtype == torch.float32
-            assert down_proj.weight_scale.dim() == 2
+            # Block scales; materialized as a 2D [out_blk, in_blk] tensor.
+            # On a DeepGEMM-backed kernel the warmup pre-packs them from fp32
+            # into UE8M0 int32 (4 exponents per word), which is what the
+            # Blackwell GEMM consumes, so accept either representation. The
+            # DeepSeek block-FP8 path via Fp8LinearMethod has always done this.
+            for mod in (qkv_proj, o_proj, gate_up_proj, down_proj):
+                assert hasattr(mod, "weight_scale")
+                assert mod.weight_scale.dim() == 2
+                assert mod.weight_scale.dtype in (torch.float32, torch.int32)
 
         llm.apply_model(check_model)
 
