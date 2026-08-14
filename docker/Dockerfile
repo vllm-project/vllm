@@ -195,6 +195,12 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         && test -n "${CUDA_DRIVER_STUB}" \
         && mkdir -p "${CUDA_PYPI_ROOT}/lib/stubs" \
         && cp "${CUDA_DRIVER_STUB}" "${CUDA_PYPI_ROOT}/lib/stubs/libcuda.so" \
+        && for library in "${CUDA_PYPI_ROOT}"/lib/*.so.*; do \
+            linker_name="${library%%.so.*}.so"; \
+            if [ ! -e "${linker_name}" ]; then \
+                ln -s "$(basename "${library}")" "${linker_name}"; \
+            fi; \
+        done \
         && if [ ! -e "${CUDA_PYPI_ROOT}/lib64" ]; then \
             ln -s lib "${CUDA_PYPI_ROOT}/lib64"; \
         fi \
@@ -711,6 +717,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
             'import nvidia; from pathlib import Path; print(Path(next(iter(nvidia.__path__))) / "cu13")') \
         && test -x "${CUDA_PYPI_ROOT}/bin/nvcc" \
         && test -x "${CUDA_PYPI_ROOT}/bin/ptxas" \
+        && for library in "${CUDA_PYPI_ROOT}"/lib/*.so.*; do \
+            linker_name="${library%%.so.*}.so"; \
+            if [ ! -e "${linker_name}" ]; then \
+                ln -s "$(basename "${library}")" "${linker_name}"; \
+            fi; \
+        done \
         && if [ ! -e "${CUDA_PYPI_ROOT}/lib64" ]; then \
             ln -s lib "${CUDA_PYPI_ROOT}/lib64"; \
         fi \
