@@ -468,6 +468,27 @@ class ServerSettings(BaseSettings):
             "fan-out of engine requests from a single API call. Default: 1024."
         ),
     )
+    max_stop_strings: int = Field(
+        default=4,
+        description=(
+            "Maximum number of stop strings allowed in a single request. Default: 4."
+        ),
+    )
+    max_num_bad_words: int = Field(
+        default=128,
+        description=(
+            "Maximum number of bad-word token sequences generated per "
+            "request. Default: 128."
+        ),
+    )
+    max_bad_words_total_tokens: int = Field(
+        default=1024,
+        description=(
+            "Maximum total number of bad-word tokens (summed across all bad "
+            "words) allowed per request. Bounds the per-request GPU buffer "
+            "width. Default: 1024."
+        ),
+    )
     engine_iteration_timeout_s: int = Field(
         default=60,
         json_schema_extra={"compile_factor": False},
@@ -1323,6 +1344,17 @@ class MediaSettings(BaseSettings):
             "memory is never allocated. Default is 600s (10 minutes)."
         ),
     )
+    max_audio_decode_bytes: int = Field(
+        default=268_435_456,
+        json_schema_extra={"compile_factor": False},
+        description=(
+            "Maximum float32 PCM bytes that audio decoding may allocate. "
+            "Guards against sample-rate forgery where an attacker inflates "
+            "the header sample rate to bypass the duration guard while the "
+            "actual frame count still causes a multi-GiB allocation. "
+            "Default is 256 MiB (sufficient for 600s mono 48 kHz float32)."
+        ),
+    )
     max_audio_preprocess_workers: int = Field(
         default_factory=lambda: max(1, min(os.cpu_count() or 1, 2)),
         json_schema_extra={"compile_factor": False},
@@ -1857,6 +1889,27 @@ class QuantSettings(BaseSettings):
             "Opt-in MLA DCP query replication: skip the decode query all-gather."
         ),
     )
+    use_direct_dcp_a2a: bool | None = Field(
+        default=None,
+        description=(
+            "Direct DCP all-to-all. Tri-state: ``1`` enforces it, ``0`` "
+            "disables it, and unset (default) enables it when applicable."
+        ),
+    )
+    use_direct_dcp_q_gather: bool | None = Field(
+        default=None,
+        description=(
+            "Direct DCP query gather. Tri-state: ``1`` enforces it, ``0`` "
+            "disables it, and unset (default) enables it when applicable."
+        ),
+    )
+    use_direct_dcp_kv_gather: bool | None = Field(
+        default=None,
+        description=(
+            "Direct DCP KV gather. Tri-state: ``1`` enforces it, ``0`` "
+            "disables it, and unset (default) enables it when applicable."
+        ),
+    )
     deep_gemm_warmup: Literal["skip", "full", "relax"] = Field(
         default="relax",
         description=(
@@ -1898,6 +1951,14 @@ class QuantSettings(BaseSettings):
             "layer, so it only wins at low token counts: intended for decode "
             "instances in a P/D disaggregated deployment, not for prefill or "
             "unified serving."
+        ),
+    )
+    kimi_k3_gemm_rs: bool = Field(
+        default=False,
+        description=(
+            "Use the SM100 BF16 GEMM-RS kernel for eligible Kimi-K3 "
+            "sequence-parallel row-parallel projections. All TP ranks must "
+            "belong to one NVLink domain."
         ),
     )
     deepep_buffer_size_mb: int = Field(
@@ -2042,6 +2103,17 @@ class QuantSettings(BaseSettings):
             "this also enables the NaN computation required to detect them."
         ),
     )
+    adaptive_verification_profile_context_len: int = Field(
+        default=8192,
+        description=(
+            "KV context length each adaptive-verification profiling request "
+            "pretends to carry, so the profiled step reads a realistic amount "
+            "of cache. Raise it for long-context deployments, where step cost "
+            "is dominated by attention over a much larger KV cache than the "
+            "default assumes. Clamped to max_model_len - query_len. "
+            "Default: 8192 tokens."
+        ),
+    )
     use_oink_ops: bool = Field(
         default=False,
         description=(
@@ -2142,6 +2214,20 @@ class QuantSettings(BaseSettings):
             return v
         if isinstance(v, str):
             return {"1": True, "0": False}.get(v.strip())
+        return v
+
+    @field_validator(
+        "use_direct_dcp_a2a",
+        "use_direct_dcp_q_gather",
+        "use_direct_dcp_kv_gather",
+        mode="before",
+    )
+    @classmethod
+    def _parse_direct_dcp(cls, v: Any) -> Any:
+        if v is None or isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            return bool(int(v))
         return v
 
 
@@ -2435,6 +2521,10 @@ class UsageSettings(BaseSettings):
             "affects MPLinearKernel selection (kernels: MacheteLinearKernel, "
             "MarlinLinearKernel, ExllamaLinearKernel)."
         ),
+    )
+    use_hw_agnostic: bool = Field(
+        default=False,
+        description="Selects hw-agnostic layers for the HF transformer backend.",
     )
     allow_runtime_lora_updating: bool = Field(
         default=False,
