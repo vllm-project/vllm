@@ -213,20 +213,20 @@ class MambaStateShapeCalculator:
         base_shapes: tuple[tuple[int, ...], ...],
         n_groups: int,
         tp_world_size: int,
-        replayssm_buffer_len: int,
+        ring_buffer_len: int,
     ) -> tuple[tuple[int, ...], ...]:
-        """Append the ReplaySSM ring shapes (x_cache, dt_cache, B_cache) to a
-        base ``(conv, ssm)`` tuple. ``base_shapes[1]`` is the ssm shape
-        ``(nheads // tp, head_dim, state_size)``; B_cache uses the un-extended
-        ``n_groups``.
+        """Append the physical ReplaySSM ring shapes to ``(conv, ssm)``.
+
+        ``base_shapes[1]`` is ``(nheads // tp, head_dim, state_size)``;
+        B_cache uses the un-extended ``n_groups``.
         """
         local_nheads, head_dim, state_size = base_shapes[1]
         local_ngroups = divide(n_groups, tp_world_size)
         return (
             *base_shapes,
-            (local_nheads, replayssm_buffer_len, head_dim),
-            (local_nheads, replayssm_buffer_len),
-            (local_ngroups, replayssm_buffer_len, state_size),
+            (local_nheads, ring_buffer_len, head_dim),
+            (local_nheads, ring_buffer_len),
+            (local_ngroups, ring_buffer_len, state_size),
         )
 
     @classmethod
