@@ -42,7 +42,40 @@ llm = LLM(
 vllm serve my-model --weight-transfer-config '{"backend": "nccl_m2n"}'
 ```
 
-The trainer drives the four-phase protocol (`init_weight_transfer_engine`, `start_weight_update`, `update_weights`, `finish_weight_update`) over the existing HTTP or Ray control plane. The init call carries the transfer plan described above; each `update_weights` call carries only the ordered parameter names for that round. Because every rank in the communicator has to be inside the same reshard, `update_weights` must be in flight while the trainer sends — the trainer-side engine that manages this ships separately.
+## Trainer Side
+
+The trainer uses the stateful trainer engine. m2n needs each parameter's source layout, which the base `WeightSource` does not carry, so it takes an `M2NWeightSource`. `DTensorModuleSource` covers the common case: it reads each parameter's device mesh and placements and yields **local shards** — it never calls `full_tensor()`.
+
+```python
+from vllm.distributed.weight_transfer import (
+    RayVLLMWeightSyncClient,
+    WeightTransferTrainerFactory,
+)
+from vllm.distributed.weight_transfer.m2n_source import DTensorModuleSource
+from vllm.distributed.weight_transfer.m2n_trainer import M2NTrainerInitInfo
+
+# Called on every trainer rank; rank 0 is the sender.
+engine = WeightTransferTrainerFactory.trainer_init(
+    init_info=M2NTrainerInitInfo(
+        master_address=master_address,
+        master_port=master_port,
+        world_size=num_trainer_ranks + num_inference_workers,
+        num_trainer_ranks=num_trainer_ranks,
+        rank=my_rank,
+    ),
+    client=RayVLLMWeightSyncClient(llm_handle),
+    source=DTensorModuleSource(model, num_trainer_ranks),
+)
+
+# Each round, on every trainer rank:
+engine.send_weights()
+```
+
+`send_weights()` drives the whole round — `start_weight_update`, `update_weights`, `finish_weight_update`. Every rank in the communicator must be inside the same reshard, so `update_weights` has to be in flight while the trainer sends; the engine runs it on a helper thread so the trainer loop does not have to open-code that.
+
+Trainers with a custom producer (a Megatron export, MoE re-fusing) subclass `M2NWeightSource` and supply layouts explicitly.
+
+See [`examples/rl/rlhf_m2n.py`](../../../examples/rl/rlhf_m2n.py) for a runnable FSDP → TP example.
 
 ## Limitations
 
