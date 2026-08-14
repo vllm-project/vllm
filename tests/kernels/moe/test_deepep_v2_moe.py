@@ -235,6 +235,10 @@ def _deep_ep_v2_moe(
         w2_scale = w2_scale.to(device=device_idx)
 
     pg = torch.distributed.new_group(list(range(pgi.world_size)))
+    # The caller's set_random_seed() only seeds the parent; spawn() gives each
+    # worker a fresh unseeded RNG, so seed here too or the inputs below differ
+    # every run. Offset by rank to keep the ranks' data distinct.
+    set_random_seed(7 + pgi.rank)
     test_tensors = TestTensors.make(config)
 
     with set_current_vllm_config(VllmConfig()):
@@ -373,6 +377,7 @@ def _deep_ep_v2_moe_cudagraph(
     init_workspace_manager(device)
 
     pg = torch.distributed.new_group(list(range(pgi.world_size)))
+    set_random_seed(7 + pgi.rank)
     test_tensors = TestTensors.make(config)
     num_local_experts = config.num_experts // pgi.world_size
     hidden_size = config.k
