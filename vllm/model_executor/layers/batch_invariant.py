@@ -815,8 +815,34 @@ def bmm_batch_invariant(a, b, *, out=None):
     return c
 
 
-def addmm_batch_invariant(bias, a, b):
-    return matmul_persistent(a, b, bias=bias)
+def _addmm_fused_bias(bias, beta, alpha, n):
+    # The kernel adds bias into its fp32 accumulator indexed by output column,
+    # so it can only absorb a row vector of width n, unscaled by alpha.
+    if beta == 0 or alpha != 1:
+        return None
+    if bias.dim() == 2 and bias.shape[0] == 1:
+        bias = bias.squeeze(0)
+    if bias.dim() != 1 or bias.shape[0] != n:
+        return None
+    # fp32 keeps the scaling exact; the kernel casts the bias to fp32 anyway.
+    return bias if beta == 1 else bias.float() * beta
+
+
+def _addmm_impl(bias, a, b, beta, alpha, out):
+    fused_bias = _addmm_fused_bias(bias, beta, alpha, b.shape[1])
+    result = matmul_persistent(a, b, bias=fused_bias)
+    if fused_bias is None:
+        if alpha != 1:
+            result = result * alpha
+        if beta != 0:
+            result = result + (bias if beta == 1 else beta * bias)
+    if out is None:
+        return result
+    return out.copy_(result)
+
+
+def addmm_batch_invariant(bias, a, b, *, beta=1, alpha=1):
+    return _addmm_impl(bias, a, b, beta, alpha, None)
 
 
 # Inductor lowers mm/addmm/bmm to ``extern_kernels.<op>(..., out=buf)``, which
@@ -826,23 +852,15 @@ def addmm_batch_invariant(bias, a, b):
 
 
 def mm_out_batch_invariant(a, b, *, out):
-    out.copy_(matmul_persistent(a, b))
-    return out
+    return matmul_batch_invariant(a, b, out=out)
 
 
 def addmm_out_batch_invariant(bias, a, b, *, beta=1, alpha=1, out):
-    result = matmul_persistent(a, b)
-    if alpha != 1:
-        result = result * alpha
-    if beta != 0:
-        result = result + (bias if beta == 1 else beta * bias)
-    out.copy_(result)
-    return out
+    return _addmm_impl(bias, a, b, beta, alpha, out)
 
 
 def bmm_out_batch_invariant(a, b, *, out):
-    out.copy_(bmm_batch_invariant(a, b))
-    return out
+    return bmm_batch_invariant(a, b, out=out)
 
 
 def _log_softmax_batch_invariant(input, dim, _half_to_float):
@@ -1005,11 +1023,12 @@ def rms_norm_batch_invariant(
 
 
 def linear_batch_invariant(input, weight, bias=None):
-    output = matmul_batch_invariant(input, weight.t())
-
-    if bias is not None:
-        output = output + bias
-    return output
+    # Fold bias into the matmul's fp32 accumulator instead of adding it to the
+    # rounded product. matmul_persistent is 2D-only, so flatten the batch dims.
+    output = matmul_persistent(
+        input.reshape(-1, input.shape[-1]), weight.t(), bias=bias
+    )
+    return output.view(*input.shape[:-1], output.shape[-1])
 
 
 @triton.jit(launch_metadata=_matmul_launch_metadata)
