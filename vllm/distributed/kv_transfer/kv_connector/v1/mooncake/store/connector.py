@@ -116,10 +116,18 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 )
         pcp = vllm_config.parallel_config.prefill_context_parallel_size
         dcp = vllm_config.parallel_config.decode_context_parallel_size
-        if len(kv_cache_config.kv_cache_groups) > 1 and pcp * dcp > 1:
-            unsupported.append(
-                f"PCP/DCP > 1 (pcp={pcp}, dcp={dcp}) with hybrid attention"
-            )
+        # DCP with hybrid attention is supported: the worker now puts every
+        # group's block size into the scheduler's coordinate space -- attention
+        # groups scaled by dcp, Mamba groups not, the rule
+        # resolve_kv_cache_block_sizes states -- so ``starts // block_size`` in
+        # ChunkedTokenDatabase indexes the block_ids it is handed. The store key
+        # has always carried @dcp{rank}, so each rank's strided slice keys
+        # separately.
+        #
+        # PCP is a different sharding, is not mirrored by that scaling, and has
+        # not been measured, so it stays refused.
+        if len(kv_cache_config.kv_cache_groups) > 1 and pcp > 1:
+            unsupported.append(f"PCP > 1 (pcp={pcp}) with hybrid attention")
         if unsupported:
             raise ValueError(
                 "MooncakeStoreConnector does not support: " + "; ".join(unsupported)
