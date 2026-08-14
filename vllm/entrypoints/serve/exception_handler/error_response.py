@@ -7,8 +7,9 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     GenerationError,
 )
-from .utils import sanitize_message
 from vllm.logger import init_logger
+
+from .utils import sanitize_message
 
 logger = init_logger(__name__)
 

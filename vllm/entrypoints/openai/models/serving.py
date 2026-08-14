@@ -14,9 +14,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ModelPermission,
 )
 from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
-from vllm.entrypoints.serve.exception_handler.error_response import (
-    create_error_response,
-)
+from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,

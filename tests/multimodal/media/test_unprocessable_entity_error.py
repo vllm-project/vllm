@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
-from vllm.entrypoints.serve.exception_handler.error_response import create_error_response
+from vllm.entrypoints.serve import create_error_response
 from vllm.exceptions import VLLMClientError, VLLMUnprocessableEntityError
 from vllm.multimodal.media import MediaConnector
 

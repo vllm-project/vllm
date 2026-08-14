@@ -6,11 +6,11 @@ from starlette.responses import JSONResponse
 
 from vllm.entrypoints.launcher import terminate_if_errored
 from vllm.entrypoints.openai.engine.protocol import GenerationError
-from ..error_response import create_error_response
 from vllm.exceptions import VLLMError
 from vllm.logger import init_logger
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
+from ..error_response import create_error_response
 from .exception import exception_handler
 
 logger = init_logger(__name__)
