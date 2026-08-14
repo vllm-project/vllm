@@ -1596,3 +1596,39 @@ The implementation, tests, benchmark utilities, documentation, and compact
 GSM8K result artifacts were committed to the non-main branch
 `backup/gvr-fixed-fp32-20260814`. The source snapshot is commit `1daf3b4c2e`.
 The 7.3 GB generated Nsight `prof/` directory was intentionally excluded.
+
+### Speculative-decoding assessment
+
+GVR is currently disabled fail-closed when `speculative_config` is present;
+the real-model numbers above are all non-speculative. This is not just an
+unmeasured dispatch combination. With `S` speculative tokens, the indexer
+produces `S + 1` rows per request, while the GVR state has only one top-k row
+per stable request ID. The current call would slice a request-ID buffer of
+length `B` as if it had `B * (S + 1)` entries, and expanding each ID naively
+would make multiple GVR rows race while writing the same persistent state.
+
+The selector itself remains exact with a stale or unrelated valid hint because
+its fallback and final selection are exact. A correct first implementation can
+therefore expand request IDs across speculative positions, use the last
+accepted-step state as the common hint for all verification rows, disable the
+per-row fused state write, and deterministically commit one output row per
+request afterward. Committing the row corresponding to the accepted prefix
+would preserve the best temporal locality, but requires connecting the state
+update to speculative acceptance; committing the last real verification row
+is still exact but may give a worse hint after rejection.
+
+Speculation may move the kernel crossover to a smaller request batch because
+selector occupancy follows effective rows, approximately `B * (S + 1)`. For
+example, five target positions turn B8 into 40 selector rows. The existing
+real-capture matrix suggests a directional crossover near 64 effective rows
+at 50K/100K and near 32 at 200K, while GVR still loses at 10K even at B1024.
+These are not spec-decode measurements: verification rows share a request and
+hint, so their admission distribution can differ from repeated independent
+decode rows.
+
+An end-to-end speculative gain will also be diluted by draft generation,
+acceptance, and sampling work outside the target-model forward. Validation
+must compare the same proposer and acceptance trace, report both target-forward
+latency and accepted output tokens/s, and check exact top-k under variable
+decode lengths and CUDA-graph padding. Until that support and benchmark exist,
+no speculative GVR speedup should be claimed.
