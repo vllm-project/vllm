@@ -204,7 +204,7 @@ import itertools
 import math
 from abc import abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from math import lcm
 from typing import ClassVar, Generic, TypeVar, cast
@@ -270,6 +270,7 @@ from vllm.utils.torch_utils import (
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
+    get_dtype_size,
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
     np_to_pinned_tensor,
@@ -298,6 +299,7 @@ from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
+    KVQuantMode,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     get_kv_quant_mode,
@@ -1152,6 +1154,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+            # fp8_ds_mla: 656-byte custom layout (kv_lora_rank=512 +
+            # qk_rope_head_dim=64, head_size=576). See flashmla_sparse.py.
+            state_content_bytes=656 if self.kv_cache_dtype == "fp8_ds_mla" else None,
         )
         if self.sliding_window is not None:
             return SlidingWindowMLASpec(
@@ -1370,6 +1375,20 @@ class _DecodeConcatQuantFP8(QuantFP8):
 
 
 class MLACommonBackend(AttentionBackend):
+    @classmethod
+    def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
+        """Per-token-head modes pack an inline fp32 scale pair after the
+        latent data (single-sided: ``head_size_v == 0`` for MLA)."""
+        mode = spec.kv_quant_mode
+        if spec.state_content_bytes is not None or not mode.is_per_token_head:
+            return spec
+        head_size = spec.head_size
+        if mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            head_size //= 2
+        scale_bytes = get_dtype_size(torch.float32)
+        content = head_size * get_dtype_size(spec.dtype) + 2 * scale_bytes
+        return replace(spec, state_content_bytes=content)
+
     @staticmethod
     def get_name() -> str:
         return "TRITON_MLA"
