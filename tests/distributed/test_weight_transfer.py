@@ -1415,53 +1415,55 @@ class TestModuleSource:
 
 
 class TestWeightSourceGroupContract:
-    """`groups()` / `iter_groups()` on the WeightSource ABC. Group indices are
-    what `owned_groups()` names and what backends gather and free by, so the
-    default must agree with `layerwise_groups` over `metadata()`."""
+    """`groups()` / `iter_groups()` on the WeightSource ABC. Groups are what
+    backends gather and free by, so the default must agree with
+    `layerwise_groups` over `metadata()`, restricted to what this rank holds."""
 
     class _Source(WeightSource):
-        """Minimal source over an ordered (name, tensor) list, optionally owning
-        only some groups (in which case it iterates only those, per contract)."""
+        """Minimal source over an ordered (name, tensor) list, optionally holding
+        only some names (in which case it iterates only their groups)."""
 
-        def __init__(self, names, owned=None, reverse=False):
+        def __init__(self, names, held=None, reverse=False):
             self._pairs = [(n, torch.full((2,), float(i))) for i, n in enumerate(names)]
-            self._owned = owned
+            self._held = held
             self._reverse = reverse
 
         def metadata(self):
             return [ParamMeta(n, t.dtype, tuple(t.shape)) for n, t in self._pairs]
 
-        def owned_groups(self):
-            return self._owned
+        def held_names(self):
+            return self._held
 
         def __iter__(self):
             pairs = self._pairs
-            if self._owned is not None:
-                all_groups = layerwise_groups([n for n, _ in pairs])
-                keep = {n for i in self._owned for n in all_groups[i]}
+            if self._held is not None:
+                keep = set(self._held)
                 pairs = [(n, t) for n, t in pairs if n in keep]
             return iter(list(reversed(pairs)) if self._reverse else pairs)
 
-    def _source(self, names, owned=None, reverse=False):
-        return self._Source(names, owned, reverse)
+    def _source(self, names, held=None, reverse=False):
+        return self._Source(names, held, reverse)
 
     def test_groups_defaults_to_the_layerwise_partition(self):
         names = ["embed.w", "model.layers.0.a", "model.layers.1.a", "norm.w"]
         assert self._source(names).groups() == layerwise_groups(names)
 
-    def test_groups_is_restricted_to_owned_groups(self):
+    def test_groups_keeps_only_groups_holding_a_held_name(self):
         names = ["embed.w", "model.layers.0.a", "model.layers.1.a", "norm.w"]
-        assert self._source(names, owned=[1, 2]).groups() == [
+        held = ["model.layers.0.a", "model.layers.1.a"]
+        assert self._source(names, held=held).groups() == [
             ["model.layers.0.a"],
             ["model.layers.1.a"],
         ]
 
-    def test_groups_normalizes_owned_indices(self):
-        """A trainer engine normalizes ``owned_groups()`` to sorted-unique before
-        walking it, so this must too -- otherwise a source that reports its groups
-        out of order pairs each group with the wrong batch of ``iter_groups()``."""
+    def test_groups_order_follows_metadata_not_the_declaration(self):
+        """The declaration is a SET of names; the groups it selects still come
+        out in metadata order, so each pairs with the right ``iter_groups()``
+        batch however the source listed them."""
         names = ["embed.w", "model.layers.0.a", "model.layers.1.a", "norm.w"]
-        source = self._source(names, owned=[2, 1, 2])
+        source = self._source(
+            names, held=["model.layers.1.a", "model.layers.0.a", "model.layers.1.a"]
+        )
         assert source.groups() == [["model.layers.0.a"], ["model.layers.1.a"]]
         assert [ns for ns, _ in source.iter_groups()] == [
             ["model.layers.0.a"],
@@ -1484,9 +1486,9 @@ class TestWeightSourceGroupContract:
         _names, tensors = batch
         assert [float(t[0]) for t in tensors] == [0.0, 1.0]
 
-    def test_iter_groups_yields_only_owned_groups(self):
+    def test_iter_groups_yields_only_held_groups(self):
         names = ["embed.w", "model.layers.0.a", "model.layers.1.a"]
-        batches = list(self._source(names, owned=[2]).iter_groups())
+        batches = list(self._source(names, held=["model.layers.1.a"]).iter_groups())
         assert [ns for ns, _ in batches] == [["model.layers.1.a"]]
 
     def test_out_of_order_iteration_raises(self):

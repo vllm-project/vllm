@@ -31,7 +31,7 @@ everything else is bookkeeping around it.
     PLAN      once, cached, _build_call_plan
       _Chunk    one packed pull: its scatters, deduped keys, the byte-exact
                 pack_layout, which producer serves it, and what to run after
-                (materialize / quant / free).  One per (gather group, ep_rank).
+                (materialize / quant / free).  One per (group, owner class).
       _CallPlan all chunks + pre_free.
 
     RUN       per chunk, per sync, _run_chunk_pipeline
@@ -96,8 +96,8 @@ class _Chunk:
     materialize: "list[Any]"
     quant: "list[Any]"
     free: "list[int]"
-    # Index into ``_produce_methods`` of the producer serving this chunk's
-    # (group, ep_rank) unit. One per chunk: its owner holds every slice.
+    # Trainer rank serving this chunk, resolved at plan time. One per chunk:
+    # every name in it shares an owner class, so one producer holds them all.
     owner: int
 
 
@@ -183,29 +183,21 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     static chunk/signal plan from it at init, and fires ``free_group`` at every
     owner as each group's last chunk completes."""
 
-    group_owners: list[list[int]] = field(default_factory=list)
-    """Optional per-group ownership: ``group_owners[g]`` lists the trainer ranks
-    (indices into ``trainer_actor_names``) that gather and publish group ``g``.
-    Set when producers hold disjoint parts of the model — pipeline-parallel
-    producers that gather within a stage instead of to all ranks — so each pull
-    must go to an owner of that group. Empty means every producer owns every
-    group (gather-to-all). Aligned with ``group_lens``."""
+    owner_sets: list[list[int]] = field(default_factory=list)
+    """The distinct producer sets that occur, each a sorted list of trainer ranks
+    (indices into ``trainer_actor_names``). Indexed by ``name_owner_class``.
+    Empty means every producer holds every name."""
 
-    name_ep_rank: list[int] = field(default_factory=list)
-    """Optional per-name expert ownership stamp, parallel to ``names``: the
-    producer EP coordinate holding each name, ``-1`` for names replicated across
-    EP (attention, norms, router/gate, embeddings, dense layers). Empty means
-    every stamp is ``-1`` (no expert sharding — the historical layout). With
-    stamps, the engine cuts each group's baked copies into one chunk per
-    distinct stamp and routes each chunk to a group owner whose
-    ``producer_ep_ranks`` entry matches. From
-    ``WeightSource.expert_ownership()``, digest-checked across trainer ranks."""
+    name_owner_class: list[int] = field(default_factory=list)
+    """Per-name index into ``owner_sets``, parallel to ``names``: which producers
+    hold each name. Empty means every producer holds every name.
 
-    producer_ep_ranks: list[int] = field(default_factory=list)
-    """Optional per-producer expert coordinate, aligned with
-    ``trainer_actor_names`` — the second of the two stamp lists (see
-    ``name_ep_rank``). Empty means no expert sharding. Required (and shipped
-    together with ``name_ep_rank``) whenever any name stamp is >= 0."""
+    This one table expresses every layout the trainer can have — pipeline stages
+    (the names of these groups have this owner set), expert parallelism (this
+    expert name has this one-rank owner set), and combinations of the two — so
+    the engine cuts each group's baked copies into one chunk per distinct class
+    present and routes each chunk to that class's owner. Derived by the trainer
+    from ``WeightSource.held_names()``."""
 
     num_consumers: int = 0
     """Total consumer count across the fleet, for M:N routing. Authoritative when
@@ -299,19 +291,10 @@ class ShardedRDTWeightTransferEngine(
         model: torch.nn.Module,
     ) -> None:
         super().__init__(config, vllm_config, device, model)
-        # Binds EVERY producer actor: pulls route to one owner per (group,
-        # ep_rank) unit, but free_group fans out to every owner of the group,
-        # including producers this worker never pulls from. Indexed by trainer
-        # rank. ``_consumer_id`` is this worker's stable global index, sent on
-        # every produce call so a producer serving several consumers keeps a
-        # per-consumer serve ring (the C>P fan-in regime).
-        self._producer_actors: list[Any] = []
-        self._produce_methods: list[Any] = []
+        # Ownership table, routing rules, and (once bound) every producer's
+        # handle — pulls go to one owner per chunk, but free_group fans out to
+        # every owner of the group, so all handles are bound.
         self._router: RdtRouter | None = None
-        self._consumer_id: int = 0
-        # name -> producer EP coordinate holding it (absent = -1, replicated).
-        # From init_info.name_ep_rank; drives the per-(group, ep_rank) chunk cut.
-        self._name_ep_rank: dict[str, int] = {}
         # Driver-supplied total consumer count (init_info.num_consumers); 0 => infer
         # from parallel_config. See _num_consumers.
         self._num_consumers_override: int = 0
@@ -431,9 +414,8 @@ class ShardedRDTWeightTransferEngine(
         """Work out this worker's consumer identity, build the router, and bind
         EVERY producer actor.
 
-        Pull routing is M:N: each worker pulls every (gather group, ep_rank)
-        unit from ONE producer that owns it (see ``RdtRouter``) — a unit's owner
-        holds every slice of it, so one producer serves a whole pull. All
+        Pull routing is M:N: each chunk goes to ONE producer holding every name
+        in it (see ``RdtRouter``), so one producer serves a whole pull. All
         producers are bound regardless, because the per-group ``free_group``
         signal fans out to every owner of a group, including producers this
         worker never pulls from.
@@ -454,43 +436,28 @@ class ShardedRDTWeightTransferEngine(
                 "init_info.trainer_actor_names."
             )
 
-        self._consumer_id = self._resolve_consumer_id(init_info)
-        group_owners = list(init_info.group_owners) or None
-        if group_owners is not None and len(group_owners) != len(init_info.group_lens):
+        consumer_id = self._resolve_consumer_id(init_info)
+        name_owner_class = list(init_info.name_owner_class or [])
+        if name_owner_class and len(name_owner_class) != len(init_info.names):
             raise RuntimeError(
-                f"Sharded RDT engine: {len(group_owners)} ownership rows for "
-                f"{len(init_info.group_lens)} gather groups."
+                f"Sharded RDT engine: {len(name_owner_class)} owner-class entries "
+                f"for {len(init_info.names)} names."
             )
-        # The two expert stamp lists ship together (see the init-info fields).
-        name_ep_rank = list(init_info.name_ep_rank or [])
-        producer_ep_ranks = list(init_info.producer_ep_ranks or [])
-        if name_ep_rank and len(name_ep_rank) != len(init_info.names):
-            raise RuntimeError(
-                f"Sharded RDT engine: {len(name_ep_rank)} name_ep_rank stamps for "
-                f"{len(init_info.names)} names."
-            )
-        if any(er >= 0 for er in name_ep_rank) and not producer_ep_ranks:
-            raise RuntimeError(
-                "Sharded RDT engine: name_ep_rank carries expert stamps but "
-                "producer_ep_ranks is empty; the two stamp lists must ship together."
-            )
-        self._name_ep_rank = {
-            n: er for n, er in zip(init_info.names, name_ep_rank) if er >= 0
-        }
-        self._router = RdtRouter(
+        router = RdtRouter(
             len(producer_names),
             self._num_consumers(),
-            group_owners,
-            len(init_info.group_lens),
-            producer_ep_ranks=producer_ep_ranks or None,
+            list(init_info.owner_sets) or None,
+            name_owner_class or None,
+            list(init_info.names),
+            list(init_info.group_lens),
         )
-        self._router.validate()
+        router.validate()
 
-        # Idempotency: these lists are append-only and every downstream index is a
-        # position in them, so a second init_transfer_engine — exactly what a
-        # rejoining engine does — would silently shift every owner index.
-        self._producer_actors = []
-        self._produce_methods = []
+        # A fresh router per init, never appended to: every owner index is a
+        # position in these lists, so a rejoining engine's second
+        # init_transfer_engine must not shift them.
+        actors: list[Any] = []
+        methods: list[Any] = []
 
         for chosen_name in producer_names:
             try:
@@ -508,15 +475,17 @@ class ShardedRDTWeightTransferEngine(
             # _ray_enable_tensor_transport, so the NIXL dispatch guard rejects the
             # call even when the trainer enabled it. Force it back on.
             actor._ray_enable_tensor_transport = True
-            self._producer_actors.append(actor)
-            self._produce_methods.append(getattr(actor, init_info.produce_method_name))
+            actors.append(actor)
+            methods.append(getattr(actor, init_info.produce_method_name))
+        router.bind(actors, methods, consumer_id)
+        self._router = router
         logger.info(
             "Sharded RDT engine (consumer %d) bound to all %d producers "
-            "(batched method %r, %d expert-stamped names)",
-            self._consumer_id,
+            "(batched method %r, %d owner class(es))",
+            consumer_id,
             len(producer_names),
             init_info.produce_method_name,
-            len(self._name_ep_rank),
+            len(init_info.owner_sets) or 1,
         )
 
     def _resolve_consumer_id(self, init_info: ShardedRDTWeightTransferInitInfo) -> int:
@@ -577,17 +546,14 @@ class ShardedRDTWeightTransferEngine(
                 self._dest_arenas[slot][torch.uint8] = arena
 
         # (b) producer serve rings — max bytes this consumer pulls from each
-        # bound producer (index into self._produce_methods == producer_local).
-        serve_bytes = [0] * len(self._produce_methods)
+        # bound producer.
+        assert self._router is not None
+        serve_bytes = [0] * self._router.num_producers
         for c in plan.chunks:
             serve_bytes[c.owner] = max(serve_bytes[c.owner], c.pack_bytes)
         import ray
 
-        refs = [
-            self._producer_actors[p].reserve_serve_arena.remote(self._consumer_id, nb)
-            for p, nb in enumerate(serve_bytes)
-            if nb > 0
-        ]
+        refs = self._router.reserve_serve_arenas(serve_bytes)
         if refs:
             ray.get(refs)  # block until every serve ring is registered
         logger.info(
@@ -666,7 +632,7 @@ class ShardedRDTWeightTransferEngine(
         fails loudly on the missing slice rather than loading wrong data.
         """
         del update_info  # the plan is static; nothing arrives per sync
-        if not self._produce_methods:
+        if self._router is None:
             raise RuntimeError(
                 "Sharded RDT engine not initialized. Call init_transfer_engine() first."
             )
@@ -745,9 +711,8 @@ class ShardedRDTWeightTransferEngine(
         # the get: set_target_for_ref stores WEAKREFS, and a dropped target
         # reroutes the transfer into a fallback buffer.
         blob = arena[:cur]
-        ref = self._produce_methods[chunk.owner].remote(
-            keys, consumer_id=self._consumer_id
-        )
+        assert self._router is not None
+        ref = self._router.pull(chunk.owner, keys)
         set_target_for_ref(ref, [blob])
         return _PendingPull(
             ref=ref,
@@ -1077,27 +1042,27 @@ class ShardedRDTWeightTransferEngine(
     def _chunk_module_scatters(
         self, modules: "list[list[_Scatter]]"
     ) -> "list[tuple[int, list[_Scatter]]]":
-        """Cut the modules' copies into one chunk per distinct producer
-        ``ep_rank`` present — ``-1`` (replicated) first, then ascending — as
-        ``(ep_rank, scatters)`` pairs. The stamp of a copy is
-        ``name_ep_rank[copy.src_name]``, so the cut is a pure function of the
-        bake: vLLM's expert placement (``linear``, ``round_robin``) only changes
-        which stamps a worker's copies carry. Copy order within a chunk is
-        bake order, and a module's copies may span chunks (materialize/quant
-        fire on its first/last chunk; see ``_build_call_plan``)."""
-        by_rank: dict[int, list[_Scatter]] = {}
+        """Cut the modules' copies into one chunk per distinct owner class
+        present, ascending by class index, as ``(class_idx, scatters)`` pairs.
+
+        A chunk is one packed pull, so every name in it must share a producer —
+        which is exactly what an owner class is. The cut is a pure function of
+        the bake and the ownership table. Copy order within a chunk is bake
+        order, and a module's copies may span chunks (materialize/quant fire on
+        its first/last chunk; see ``_build_call_plan``)."""
+        assert self._router is not None
+        by_class: dict[int, list[_Scatter]] = {}
         for copies in modules:
             for c in copies:
-                er = self._name_ep_rank.get(c.src[0], -1)
-                by_rank.setdefault(er, []).append(c)
-        return [(er, by_rank[er]) for er in sorted(by_rank, key=lambda k: (k >= 0, k))]
+                by_class.setdefault(self._router.class_of(c.src[0]), []).append(c)
+        return [(ci, by_class[ci]) for ci in sorted(by_class)]
 
     def _build_call_plan(self, names: list[str], group_lens: list[int]) -> "_CallPlan":
         """[RDT-SINGLE-CALL] Build the STATIC plan for one whole-sync call.
 
         Pure — no pulls, no engine state touched — so the result is cached and
         reused every sync. Three passes:
-          1. Split ``names`` into gather groups, one chunk per producer ep_rank
+          1. Split ``names`` into gather groups, one chunk per owner class
              present in this worker's baked copies, recording each group's last
              chunk for its ``free_group`` signal (or ``pre_free`` when this worker
              pulls nothing from it). Every group is signaled exactly once by
@@ -1108,9 +1073,8 @@ class ShardedRDTWeightTransferEngine(
              instead of by runtime counters.
           3. Assemble ``_Chunk``s: dedup keys and precompute the packed layout.
         """
-        # --- pass 1: gather groups -> per-(group, ep_rank) scatter chunks ------
+        # --- pass 1: gather groups -> per-owner-class scatter chunks -----------
         raw_chunks: list[list[_Scatter]] = []
-        chunk_route: list[tuple[int, int]] = []  # chunk idx -> (group idx, ep_rank)
         free_at: dict[int, list[int]] = {}  # chunk idx -> groups to signal after it
         pre_free: list[int] = []  # groups with no chunk here (signal at start)
         unbaked: list[str] = []
@@ -1134,9 +1098,8 @@ class ShardedRDTWeightTransferEngine(
                 # tolerate a signal that arrives before the publish).
                 pre_free.append(gi)
                 continue
-            for er, scatters in self._chunk_module_scatters(modules):
+            for _ci, scatters in self._chunk_module_scatters(modules):
                 raw_chunks.append(scatters)
-                chunk_route.append((gi, er))
             free_at.setdefault(len(raw_chunks) - 1, []).append(gi)
         if unbaked:
             # A live name with no baked plan cannot be loaded: there is no
@@ -1192,17 +1155,14 @@ class ShardedRDTWeightTransferEngine(
                     materialize=materialize_at.get(ci, []),
                     quant=quant_at.get(ci, []),
                     free=free_at.get(ci, []),
-                    owner=self._owner_of(*chunk_route[ci]),
+                    # Every name of a chunk shares an owner class and a group,
+                    # so any of them resolves the same producer.
+                    owner=self._router.producer_for(
+                        self._router.consumer_id, scatters[0].src[0]
+                    ),
                 )
             )
         return _CallPlan(chunks=chunks, pre_free=pre_free)
-
-    def _owner_of(self, group_idx: int, ep_rank: int = -1) -> int:
-        """The trainer rank this worker pulls (``group_idx``, ``ep_rank``) from —
-        also its index into ``_produce_methods``/``_producer_actors``, since
-        every producer is bound in rank order."""
-        assert self._router is not None
-        return self._router.producer_for(self._consumer_id, group_idx, ep_rank)
 
     def _signal_group_done(self, group_idx: int) -> None:
         """Fire-and-forget ``free_group`` signal at EVERY owner of the group.
@@ -1215,10 +1175,7 @@ class ShardedRDTWeightTransferEngine(
         the counters, and a straggler landing in the next sync would credit a
         group it does not belong to."""
         assert self._router is not None
-        for p in self._router.owners(group_idx):
-            self._pending_frees.append(
-                self._producer_actors[p].free_group.remote(group_idx)
-            )
+        self._pending_frees.extend(self._router.free_group(group_idx))
 
     def _run_chunk_pipeline(self, plan: "_CallPlan") -> None:
         """[RDT-RING] Pipelined chunk pulls over the ring of receive slots.
@@ -1316,7 +1273,11 @@ class ShardedRDTWeightTransferEngine(
                     materialize_layer(layer, info)
                 for sc in chunk.scatters:
                     param = getattr(sc.layer, sc.param_name)
-                    dst = param.as_strided(sc.shape, sc.stride, sc.offset)
+                    # Through .data, exactly like default_weight_loader: params
+                    # that keep requires_grad=True (plain nn.Parameters like
+                    # GLM's router bias) reject an in-place copy through an
+                    # autograd view of the leaf.
+                    dst = param.data.as_strided(sc.shape, sc.stride, sc.offset)
                     with torch._C.DisableTorchFunctionSubclass():
                         dst.copy_(results[sc.src])
                 # All reads of this slot's arena are now enqueued on the process
@@ -1419,8 +1380,7 @@ class ShardedRDTWeightTransferEngine(
             self._quant_queue = None
             self._quant_stream = None
         self._slot_read_done = []
-        self._producer_actors = []
-        self._produce_methods = []
+        self._router = None
         # Drop strong references to baked modules so the model can be freed.
         self._name_to_plan.clear()
         self._name_meta.clear()

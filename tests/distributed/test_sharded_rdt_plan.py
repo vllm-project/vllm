@@ -22,6 +22,7 @@ from vllm.distributed.weight_transfer.sharded_rdt_common import (
     SUPPORTED_OPS,
     RdtRouter,
     arena_alloc_bytes,
+    assign_producer_indices,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_engine import (
     ShardedRDTWeightTransferEngine,
@@ -86,31 +87,41 @@ def _copy(name, layer_param="weight", *, offset=0, shape=(4,), ops=(), layer=Non
     )
 
 
-def _planner(baked, *, name_meta, live=None, name_ep_rank=None):
+def _planner(baked, *, name_meta, live=None, held_by=None, group_lens=None):
     """A planning-only engine.
 
     `__init__` needs a config/model/device the planner never reads, so build the
     instance without it and set exactly the state `_build_call_plan` consumes:
-    the baked plan, the name metadata, the live-name set and the expert stamps
-    (``name_ep_rank``: name -> producer EP coordinate; unstamped = -1).
+    the baked plan, the name metadata, the live-name set, and a bound router.
 
-    Unstamped: one producer that owns everything (the degenerate router).
-    Stamped: routing needs a rank per coordinate, so a four-producer router
-    with coordinates 0-3 stands in — plan-level tests assert chunk structure,
-    not owner values.
+    ``held_by``: name -> the ranks holding it. Names left out are held by every
+    producer (the replicated class 0). Default: one producer holding everything,
+    the degenerate router. Stand-in ranks 0-3 let plan tests assert chunk
+    structure; owner VALUES are pinned by TestCallPlanRouting.
     """
+    names = list(name_meta)
+    if held_by:
+        n_prod = max(r for owners in held_by.values() for r in owners) + 1
+        owner_sets = [list(range(n_prod))]
+        seen = {tuple(range(n_prod)): 0}
+        classes = []
+        for n in names:
+            key = tuple(sorted(held_by.get(n, range(n_prod))))
+            if key not in seen:
+                seen[key] = len(owner_sets)
+                owner_sets.append(list(key))
+            classes.append(seen[key])
+    else:
+        n_prod, owner_sets, classes = 1, [[0]], [0] * len(names)
     eng = object.__new__(ShardedRDTWeightTransferEngine)
     eng._name_to_plan = dict(baked)
     eng._name_meta = dict(name_meta)
     eng._live_names = set(live or name_meta)
-    eng._name_ep_rank = {n: er for n, er in (name_ep_rank or {}).items() if er >= 0}
-    if eng._name_ep_rank:
-        eng._produce_methods = [object()] * 4
-        eng._router = RdtRouter(4, 1, None, 0, producer_ep_ranks=[0, 1, 2, 3])
-    else:
-        eng._produce_methods = [object()]
-        eng._router = RdtRouter(1, 1, None, 0)
-    eng._consumer_id = 0
+    router = RdtRouter(
+        n_prod, 1, owner_sets, classes, names, group_lens or [1] * len(names)
+    )
+    router.bind([object()] * n_prod, [object()] * n_prod, 0)
+    eng._router = router
     return eng
 
 
@@ -346,6 +357,134 @@ class TestBakeRecording:
         assert 2 * torch.bfloat16.itemsize == 4
 
 
+
+# ---------------------------------------------------------------------------
+# RdtRouter: per-name ownership -> one producer per pull
+# ---------------------------------------------------------------------------
+
+
+def _router(num_producers, num_consumers, owner_sets=None, name_owner_class=None,
+            names=None, group_lens=None):
+    """A router over ``n`` single-name groups unless told otherwise, so a test
+    can talk in group indices the way the old coordinate router did."""
+    if names is None:
+        n = len(name_owner_class or []) or (len(group_lens or []) or 1)
+        names = [f"g{i}" for i in range(n)]
+    if group_lens is None:
+        group_lens = [1] * len(names)
+    return RdtRouter(
+        num_producers, num_consumers, owner_sets, name_owner_class, names, group_lens
+    )
+
+
+class TestRdtRouter:
+    """Who serves each name.
+
+    A wrong answer is not a wrong number but a hang or a loud misroute: a
+    consumer pulling from a producer that never gathered the name trips its
+    served-names guard. Freeing does NOT route this way — every consumer signals
+    every owner of a group and the producers count to the live total — so these
+    pin PULL routing, plus ``group_owners`` for the free fan-out.
+    """
+
+    def test_identity_when_fleets_match(self):
+        r = _router(8, 8, group_lens=[1] * 6)
+        assert all(r.producer_for(3, f"g{g}") == 3 for g in range(6))
+        assert all(r.producer_for(c, "g0") == c for c in range(8))
+
+    def test_gather_to_all_keeps_the_historical_binding(self):
+        """16 producers / 8 consumers: the block rule spreads each consumer's
+        pulls over its block, alternating by group, and every producer NIC still
+        carries traffic. Plain `consumer_id % len(owners)` would idle half."""
+        r = _router(16, 8, group_lens=[1] * 95)
+        names = [f"g{i}" for i in range(95)]
+        for c in range(8):
+            block = assign_producer_indices(16, 8, c)
+            assert {r.producer_for(c, n) for n in names} == set(block)
+        assert [r.producer_for(0, f"g{g}") for g in range(4)] == [0, 1, 0, 1]
+        assert {r.producer_for(c, n) for c in range(8) for n in names} == set(range(16))
+
+    def test_fan_in_shares_one_producer(self):
+        r = _router(2, 8, group_lens=[1] * 5)
+        names = [f"g{i}" for i in range(5)]
+        assert [{r.producer_for(c, n) for n in names} for c in range(8)] == [
+            {c // 4} for c in range(8)
+        ]
+
+    def test_pipeline_stages_route_to_the_owning_stage(self):
+        """2 stages x 8 ranks: groups 0-2 on stage 0, 3-5 on stage 1. Two owner
+        sets, one per stage; each consumer reaches both."""
+        r = _router(
+            16,
+            8,
+            owner_sets=[list(range(8)), list(range(8, 16))],
+            name_owner_class=[0, 0, 0, 1, 1, 1],
+        )
+        for c in range(8):
+            picks = [r.producer_for(c, f"g{g}") for g in range(6)]
+            assert picks == [c] * 3 + [c + 8] * 3
+        assert r.group_owners(0) == list(range(8))
+        assert r.group_owners(3) == list(range(8, 16))
+        r.validate()
+
+    def test_expert_names_route_to_the_holding_ranks(self):
+        """A name held by only some ranks routes to those; a replicated name
+        keeps the full set. Under the old scheme this took two stamp lists."""
+        r = RdtRouter(
+            8,
+            4,
+            [[0, 1, 2, 3], [2, 3], [4, 5, 6, 7], [6, 7]],
+            [0, 1, 2, 3],
+            ["repl0", "expert0", "repl1", "expert1"],
+            [2, 2],
+        )
+        r.validate()
+        assert r.owners("expert0") == [2, 3]
+        assert r.owners("expert1") == [6, 7]
+        assert r.owners("repl1") == [4, 5, 6, 7]
+        for c in range(4):
+            assert r.producer_for(c, "expert0") in (2, 3)
+            assert r.producer_for(c, "repl1") in (4, 5, 6, 7)
+
+    def test_consumers_spread_over_an_owner_set(self):
+        """Several ranks hold a name (its TP peers); the block rule must spread
+        consumers across them, not funnel through one."""
+        r = _router(
+            4, 4, owner_sets=[[0, 1]], name_owner_class=[0] * 6, group_lens=[1] * 6
+        )
+        served = {r.producer_for(c, f"g{g}") for c in range(4) for g in range(6)}
+        assert served == {0, 1}
+
+    def test_a_group_frees_at_every_owner_of_any_of_its_names(self):
+        """The free barrier is per group, so its fan-out is the UNION over the
+        group's names — narrower than the old per-group owner list only when a
+        rank holds none of the group's names."""
+        r = RdtRouter(
+            4, 2, [[0, 1], [2, 3]], [0, 1, 0], ["a", "b", "c"], [2, 1]
+        )
+        assert r.group_owners(0) == [0, 1, 2, 3]
+        assert r.group_owners(1) == [0, 1]
+
+    def test_an_unowned_name_raises(self):
+        r = RdtRouter(2, 2, [[]], [0], ["w"], [1])
+        with pytest.raises(ValueError, match="has no owner"):
+            r.producer_for(0, "w")
+
+    def test_validate_rejects_an_empty_owner_set(self):
+        with pytest.raises(ValueError, match="empty"):
+            RdtRouter(
+                4, 2, [[0, 1], [], [2, 3]], [0, 1, 2], ["a", "b", "c"], [3]
+            ).validate()
+
+    def test_validate_rejects_an_out_of_range_owner(self):
+        with pytest.raises(ValueError, match="out of range"):
+            RdtRouter(2, 2, [[0, 5]], [0], ["a"], [1]).validate()
+
+    def test_validate_rejects_an_unresolvable_class(self):
+        with pytest.raises(ValueError, match="owner class"):
+            RdtRouter(4, 2, [[0, 1]], [0, 7], ["a", "b"], [2]).validate()
+
+
 # ---------------------------------------------------------------------------
 # Packed layout: the cross-process invariant
 # ---------------------------------------------------------------------------
@@ -454,25 +593,29 @@ class TestChunkModuleScatters:
         copies = [_copy(f"w{i}", shape=(4,)) for i in range(5)]
         eng = _planner({}, name_meta={f"w{i}": ("bfloat16", [4]) for i in range(5)})
         chunks = eng._chunk_module_scatters([_module(layer, copies)])
-        assert [er for er, _s in chunks] == [-1]
+        assert [ci for ci, _s in chunks] == [0]
         assert len(chunks[0][1]) == 5
 
-    def test_one_chunk_per_ep_rank_minus_one_first_then_ascending(self):
+    def test_one_chunk_per_owner_class_ascending(self):
+        """Classes are numbered by first appearance in metadata order, so the
+        replicated class (0) leads and the rest follow — the ordering the old
+        "-1 first, then ascending stamp" rule produced, now falling out of the
+        table instead of a special case."""
         layer = _FakeLayer("moe")
         names = ["norm", "e5", "e0", "e2"]
         copies = [_copy(n, shape=(4,)) for n in names]
         eng = _planner(
             {},
             name_meta={n: ("bfloat16", [4]) for n in names},
-            name_ep_rank={"e0": 0, "e2": 1, "e5": 2},
+            held_by={"e0": [0], "e2": [1], "e5": [2]},
         )
         chunks = eng._chunk_module_scatters([_module(layer, copies)])
-        assert [er for er, _s in chunks] == [-1, 0, 1, 2]
-        assert [[s.src[0] for s in sc] for _er, sc in chunks] == [
+        assert [ci for ci, _s in chunks] == [0, 1, 2, 3]
+        assert [[s.src[0] for s in sc] for _ci, sc in chunks] == [
             ["norm"],
+            ["e5"],
             ["e0"],
             ["e2"],
-            ["e5"],
         ]
 
     def test_copy_order_within_a_chunk_is_bake_order(self):
@@ -484,12 +627,9 @@ class TestChunkModuleScatters:
         eng = _planner(
             {},
             name_meta={n: ("bfloat16", [4]) for n in names},
-            name_ep_rank={n: 0 for n in names},
+            held_by={n: [0] for n in names},
         )
-        ((er, scatters),) = eng._chunk_module_scatters(
-            [_module(layer, copies)]
-        )
-        assert er == 0
+        ((_ci, scatters),) = eng._chunk_module_scatters([_module(layer, copies)])
         assert [s.src[0] for s in scatters] == names
 
     def test_stamps_interleave_across_modules_without_reordering_within(self):
@@ -505,12 +645,12 @@ class TestChunkModuleScatters:
         eng = _planner(
             {},
             name_meta={n: ("bfloat16", [4]) for n in ("a0", "a1", "b0", "b1")},
-            name_ep_rank={"a0": 0, "a1": 1, "b0": 0, "b1": 1},
+            held_by={"a0": [0], "a1": [1], "b0": [0], "b1": [1]},
         )
         chunks = eng._chunk_module_scatters(mods)
-        assert [(er, [s.src[0] for s in sc]) for er, sc in chunks] == [
-            (0, ["a0", "b0"]),
-            (1, ["a1", "b1"]),
+        assert [(ci, [s.src[0] for s in sc]) for ci, sc in chunks] == [
+            (1, ["a0", "b0"]),
+            (2, ["a1", "b1"]),
         ]
 
     def test_scatters_carry_their_own_dtype_and_nbytes(self):
@@ -549,10 +689,10 @@ class TestBuildCallPlan:
         eng = _planner(
             {n: mod_plan for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
-            name_ep_rank={"w2": 0, "w3": 1},
+            held_by={"w2": [0], "w3": [1]},
         )
         plan = eng._build_call_plan(names, [4])
-        assert len(plan.chunks) == 3  # -1, 0, 1
+        assert len(plan.chunks) == 3  # replicated, w2's class, w3's class
 
     def test_materialize_fires_on_a_modules_first_chunk_only(self):
         """Empty HF params are allocated once per module, by construction —
@@ -564,7 +704,7 @@ class TestBuildCallPlan:
         eng = _planner(
             {n: mod_plan for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
-            name_ep_rank={"w0": 0, "w1": 0, "w2": 1, "w3": 1},
+            held_by={"w0": [0], "w1": [0], "w2": [1], "w3": [1]},
         )
         plan = eng._build_call_plan(names, [4])
         assert [c.materialize for c in plan.chunks] == [[layer], []]
@@ -577,7 +717,7 @@ class TestBuildCallPlan:
         eng = _planner(
             {n: mod_plan for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
-            name_ep_rank={"w0": 0, "w1": 0, "w2": 1, "w3": 1},
+            held_by={"w0": [0], "w1": [0], "w2": [1], "w3": [1]},
         )
         plan = eng._build_call_plan(names, [4])
         assert [c.quant for c in plan.chunks] == [[], [layer]]
@@ -599,7 +739,7 @@ class TestBuildCallPlan:
         eng = _planner(
             {n: mod_plan for n in names},
             name_meta={n: ("bfloat16", [4]) for n in names},
-            name_ep_rank={"w2": 0, "w3": 1},
+            held_by={"w2": [0], "w3": [1]},
         )
         plan = eng._build_call_plan(names, [4])
         assert len(plan.chunks) == 3
@@ -618,8 +758,8 @@ class TestBuildCallPlan:
             for i, n in enumerate(names):
                 baked[n] = mod_plan
                 name_meta[n] = ("bfloat16", [4])
-                stamps[n] = i // 2  # two stamps per group
-        eng = _planner(baked, name_meta=name_meta, name_ep_rank=stamps)
+                stamps[n] = [i // 2]  # two owner classes per group
+        eng = _planner(baked, name_meta=name_meta, held_by=stamps)
         plan = eng._build_call_plan(names_a + names_b, [4, 4])
         assert [c.free for c in plan.chunks] == [[], [0], [], [1]]
 
@@ -705,88 +845,74 @@ class TestUnbakedNamesGuard:
 
 class TestCallPlanRouting:
     """Under partial ownership each chunk must be pulled from a producer that
-    actually holds its (group, ep_rank) unit. Consumers bind EVERY producer
-    (signals fan out to all owners), so local index == trainer rank."""
+    actually holds every name in it. Consumers bind EVERY producer (signals fan
+    out to all owners), so local index == trainer rank."""
 
     def _routed_planner(
-        self,
-        group_owners,
-        num_consumers,
-        consumer_id,
-        *,
-        producer_ep_ranks=None,
-        **planner_kw,
+        self, held_by_group, num_consumers, consumer_id, *, held_by=None
     ):
-        from vllm.distributed.weight_transfer.sharded_rdt_common import RdtRouter
-
+        """``held_by_group[g]`` = the ranks holding group g's names, so a test
+        can still speak in groups; ``held_by`` overrides individual names."""
         baked, name_meta, names, group_lens = _one_module_per_layer(
-            len(group_owners) - 2
+            len(held_by_group) - 2
         )
-        eng = _planner(baked, name_meta=name_meta, **planner_kw)
-        n_prod = max(max(o) for o in group_owners) + 1
+        per_name = {n: list(held_by_group[gi]) for gi, n in enumerate(names)}
+        per_name.update(held_by or {})
+        n_prod = max(max(o) for o in per_name.values()) + 1
+        owner_sets: list[list[int]] = []
+        seen: dict[tuple, int] = {}
+        classes = []
+        for n in names:
+            key = tuple(sorted(per_name[n]))
+            if key not in seen:
+                seen[key] = len(owner_sets)
+                owner_sets.append(list(key))
+            classes.append(seen[key])
+        eng = _planner(baked, name_meta=name_meta)
         router = RdtRouter(
-            num_producers=n_prod,
-            num_consumers=num_consumers,
-            group_owners=group_owners,
-            num_groups=len(group_owners),
-            producer_ep_ranks=producer_ep_ranks,
+            n_prod, num_consumers, owner_sets, classes, names, group_lens
         )
         router.validate()
+        router.bind([object()] * n_prod, [object()] * n_prod, consumer_id)
         eng._router = router
-        eng._consumer_id = consumer_id
-        eng._produce_methods = [object()] * n_prod
         return eng, names, group_lens
 
     def test_two_stage_ownership_splits_chunks_between_owners(self):
-        """Two PP stages, 4 groups: stage 0 owns the first half, stage 1 the
-        second. Every chunk goes to an owner of its group."""
-        owners = [[0], [0], [1], [1]]
-        eng, names, group_lens = self._routed_planner(owners, 1, 0)
+        """Two PP stages, 4 groups: stage 0 holds the first half, stage 1 the
+        second. Every chunk goes to a holder of its names."""
+        eng, names, group_lens = self._routed_planner([[0], [0], [1], [1]], 1, 0)
         plan = eng._build_call_plan(names, group_lens)
         assert [c.owner for c in plan.chunks] == [0, 0, 1, 1]
 
     def test_a_multi_owner_group_still_resolves_to_one_producer(self):
-        """Every pull unit is served by exactly ONE producer per consumer:
-        splitting a pull only multiplies produce calls, since the consumer's NIC
-        bounds it."""
-        owners = [[0, 1], [0, 1], [0, 1], [0, 1]]
-        eng, names, group_lens = self._routed_planner(owners, 1, 0)
+        """Every chunk is served by exactly ONE producer: splitting a pull only
+        multiplies produce calls, since the consumer's NIC bounds it."""
+        eng, names, group_lens = self._routed_planner([[0, 1]] * 4, 1, 0)
         plan = eng._build_call_plan(names, group_lens)
-        assert all(isinstance(c.owner, int) for c in plan.chunks)
         assert all(0 <= c.owner < 2 for c in plan.chunks)
 
-    def test_an_expert_chunk_routes_to_the_matching_coordinate_owner(self):
-        """PP ∩ EP: 2 stages x ep2, coords [0, 1, 0, 1]. A chunk stamped 1 in a
-        stage-1 group must land on the ONE rank in stage 1 with coordinate 1."""
-        owners = [[0, 1], [0, 1], [2, 3], [2, 3]]
-        # _one_module_per_layer(2): groups = embed, layers.0, layers.1, norm.
-        # Stamp group 2's single name with coordinate 1.
+    def test_an_expert_name_routes_to_the_rank_holding_it(self):
+        """PP ∩ EP: stage 0 = ranks 0-1, stage 1 = ranks 2-3, and one expert
+        name inside a stage-1 group is held by rank 3 alone. Under the old
+        scheme this needed a coordinate list on both sides; now the name's own
+        owner set says it."""
         eng, names, group_lens = self._routed_planner(
-            owners,
+            [[0, 1], [0, 1], [2, 3], [2, 3]],
             1,
             0,
-            producer_ep_ranks=[0, 1, 0, 1],
-            name_ep_rank={"model.layers.1.w": 1},
+            held_by={"model.layers.1.w": [3]},
         )
         plan = eng._build_call_plan(names, group_lens)
         assert plan.chunks[2].owner == 3
-        # Unstamped chunks stay within their group's owner set.
         assert plan.chunks[0].owner in (0, 1)
         assert plan.chunks[3].owner in (2, 3)
 
-    def test_an_unowned_pull_unit_fails_at_plan_build(self):
-        """A stamped name whose coordinate has no rank inside the group's owner
-        set must raise at init (plan build), not hang at first pull."""
-        owners = [[0, 1], [0, 1], [0, 1], [0, 1]]
-        eng, names, group_lens = self._routed_planner(
-            owners,
-            1,
-            0,
-            producer_ep_ranks=[0, 0],
-            name_ep_rank={"model.layers.1.w": 1},
-        )
-        with pytest.raises(ValueError, match="has no owner"):
-            eng._build_call_plan(names, group_lens)
+    def test_an_unheld_name_is_rejected_at_init(self):
+        """A name no rank holds can never be served. The trainer raises when it
+        transposes the holdings; the router's validate() is the consumer-side
+        backstop, and either way it fails at init rather than at first pull."""
+        with pytest.raises(ValueError, match="empty"):
+            RdtRouter(2, 1, [[]], [0], ["w"], [1]).validate()
 
 
 class TestSignalCompleteness:
@@ -829,7 +955,7 @@ class TestSignalCompleteness:
             for e in range(n_experts):
                 n = f"model.layers.{li}.experts.{e}.w"
                 name_meta[n] = ("bfloat16", [4])
-                stamps[n] = e // n_local
+                stamps[n] = [e // n_local]  # held by that EP rank alone
                 if e in worker_experts:
                     baked[n] = fused
                     live.add(n)
@@ -840,7 +966,7 @@ class TestSignalCompleteness:
         )
         name_meta["lm_head.weight"] = ("bfloat16", [4])
         live.add("lm_head.weight")
-        eng = _planner(baked, name_meta=name_meta, live=live, name_ep_rank=stamps)
+        eng = _planner(baked, name_meta=name_meta, live=live, held_by=stamps)
         return eng, names, group_lens
 
     @staticmethod

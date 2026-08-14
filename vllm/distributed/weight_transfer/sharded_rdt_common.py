@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Helpers shared by the sharded-RDT consumer (worker) and producer (trainer)
-engines: M:N routing, arena sizing, and the op-chain allowlist. Both sides derive
-them from here so the two cannot drift.
+"""Shared pieces of the sharded-RDT backend: the op-chain allowlist and arena
+sizing, which both sides derive from here so the two cannot drift, plus
+``RdtRouter`` — consumer-only, since routing is a consumer decision.
 
 The gather-group partition itself is ``base.layerwise_groups``: it defines what a
 group index means for any ``WeightSource``, not just this transport.
 """
 
 from collections.abc import Callable
+from typing import Any
 
 import torch
 
@@ -55,106 +56,166 @@ def assign_producer_indices(
 
 
 class RdtRouter:
-    """Decides which producer serves each (gather group, ep_rank) pull unit.
+    """Decides which producer serves each weight name, and — once bound — sends.
 
-    Both engines build this from the same wire-carried data, so they always agree
-    on who serves what. Disagreement is not a wrong answer but a hang or a loud
+    Ownership is per NAME. ``owner_sets`` holds the few distinct producer sets
+    that occur, and ``name_owner_class[i]`` indexes it for ``names[i]``; a name
+    determines both its owner set and its gather group, so neither appears in the
+    routing API. Empty tables mean every producer holds everything.
+
+    That subsumes the coordinate schemes it replaced: pipeline-stage ownership is
+    "the names of these groups have this owner set", expert parallelism is "these
+    expert names have this one-rank owner set", and layouts that fit neither
+    (a group produced by two stages) are expressible for free.
+
+    Both engines derive the same tables from the same wire data, so they agree on
+    who serves what. Disagreement is not a wrong answer but a hang or a loud
     misroute: a pull sent to a producer that never gathered the name trips its
     served-names guard.
 
-    ``group_owners[g]`` lists the producer ranks that publish group ``g``;
-    ``None`` means every producer owns every group (gather-to-all).
-
-    ``producer_ep_ranks[r]`` is trainer rank r's expert-parallel coordinate. A
-    pull for a name stamped ``k >= 0`` must go to a group owner whose coordinate
-    is ``k``; ``-1`` matches every owner, and ``None`` means no expert sharding.
-    The matching name stamps ride the worker init info, not this router.
-
-    Exactly one producer serves each unit: splitting a pull only multiplies
-    produce calls, since the consumer's own NIC bounds it either way.
-
-    Freeing does not route through here. Each consumer signals ``free_group(g)``
-    to every owner, counted against the live total handed to ``begin_sync``.
+    Routing is consumer-only. The trainer publishes what it holds and answers
+    whatever arrives; it never asks who serves what.
     """
 
     def __init__(
         self,
         num_producers: int,
         num_consumers: int,
-        group_owners: list[list[int]] | None = None,
-        num_groups: int = 0,
-        producer_ep_ranks: list[int] | None = None,
+        owner_sets: list[list[int]] | None = None,
+        name_owner_class: list[int] | None = None,
+        names: list[str] | None = None,
+        group_lens: list[int] | None = None,
     ) -> None:
         self.num_producers = max(1, num_producers)
         self.num_consumers = max(1, num_consumers)
-        self._owners = (
-            [sorted(set(owners)) for owners in group_owners] if group_owners else None
+        self._owner_sets = (
+            [sorted(set(row)) for row in owner_sets]
+            if owner_sets
+            else [list(range(self.num_producers))]
         )
-        self.num_groups = len(self._owners) if self._owners else max(0, num_groups)
-        self._ep_ranks = list(producer_ep_ranks) if producer_ep_ranks else None
+        names = list(names or [])
+        self.num_groups = len(group_lens) if group_lens else 0
+        classes = list(name_owner_class or [])
+        self._class_of = {n: (classes[i] if i < len(classes) else 0)
+                          for i, n in enumerate(names)}
+        # name -> gather group, and the per-group owner union the free barrier
+        # fans out to. Both are pure functions of the tables, so precompute once.
+        self._group_of: dict[str, int] = {}
+        self._group_owners: list[list[int]] = []
+        pos = 0
+        for gi, glen in enumerate(group_lens or []):
+            union: set[int] = set()
+            for n in names[pos : pos + glen]:
+                self._group_of[n] = gi
+                c = self._class_of.get(n, 0)
+                # Bounds-checked: a bad class must surface from validate() as a
+                # named ValueError, not as an IndexError from this precompute.
+                if 0 <= c < len(self._owner_sets):
+                    union.update(self._owner_sets[c])
+            pos += glen
+            self._group_owners.append(sorted(union))
+        # Bound at init on the consumer; the rule methods never touch these.
+        self._actors: list[Any] = []
+        self._produce_methods: list[Any] = []
+        self.consumer_id = 0
 
-    def owners(self, group_idx: int, ep_rank: int = -1) -> list[int]:
-        """Producer ranks publishing ``group_idx`` and, for ``ep_rank >= 0``,
-        holding that coordinate. The intersection is valid because Megatron
-        expert-parallel groups never span pipeline stages, so a group's owner set
-        always contains every coordinate."""
-        base = (
-            list(range(self.num_producers))
-            if self._owners is None
-            else list(self._owners[group_idx])
-        )
-        if ep_rank < 0:
-            return base
-        if self._ep_ranks is None:
-            raise ValueError(
-                f"pull unit (group {group_idx}, ep_rank {ep_rank}) requested but no "
-                "producer_ep_ranks were declared; the name stamps and the producer "
-                "stamps must ship together"
-            )
-        return [r for r in base if self._ep_ranks[r] == ep_rank]
+    # ---------------- rules (pure; safe to use unbound) ----------------
 
-    def producer_for(self, consumer_id: int, group_idx: int, ep_rank: int = -1) -> int:
-        """The single producer ``consumer_id`` pulls (``group_idx``, ``ep_rank``)
-        from. Blocks consumers across the unit's owner set with the same rule that
-        binds producers globally, then rotates by group index, so every producer
-        NIC carries traffic."""
-        own = self.owners(group_idx, ep_rank)
+    def class_of(self, name: str) -> int:
+        """The name's owner class — the planner's bucketing key, since all names
+        of a chunk must share one producer."""
+        return self._class_of.get(name, 0)
+
+    def owners(self, name: str) -> list[int]:
+        """Every producer holding ``name``."""
+        return list(self._owner_sets[self.class_of(name)])
+
+    def group_owners(self, group_idx: int) -> list[int]:
+        """Every producer holding any name of ``group_idx``.
+
+        The one group-keyed rule, because the free barrier is per group: a
+        consumer signals ``free_group(gi)`` at each of these and the producer
+        counts signals against its live-consumer total. Names route; groups free.
+        """
+        if not self._group_owners:
+            return list(range(self.num_producers))
+        return list(self._group_owners[group_idx])
+
+    def producer_for(self, consumer_id: int, name: str) -> int:
+        """The single producer ``consumer_id`` pulls ``name`` from.
+
+        Blocks consumers across the name's owner set with the same rule that
+        binds producers globally, then rotates by the name's GROUP index so a
+        consumer spreads its groups over its block instead of hammering one NIC.
+        Rotating per group (not per name) keeps every name of a chunk on one
+        producer, which is what lets a chunk be a single pull.
+        """
+        own = self.owners(name)
         if not own:
-            raise ValueError(
-                f"pull unit (group {group_idx}, ep_rank {ep_rank}) has no owner"
-            )
+            raise ValueError(f"{name!r} has no owner")
         block = assign_producer_indices(len(own), self.num_consumers, consumer_id)
-        return own[block[group_idx % len(block)]]
-
-    def owned_groups(self, producer_rank: int) -> list[int]:
-        """Groups ``producer_rank`` gathers and publishes."""
-        return [g for g in range(self.num_groups) if producer_rank in self.owners(g)]
+        return own[block[self._group_of.get(name, 0) % len(block)]]
 
     def validate(self) -> None:
         """Check the ownership tables can be served.
 
         Raises:
-            ValueError: a group has no owner, an owner is out of range, or the
-                coordinate list does not cover every producer. Empty
-                (group, ep_rank) pull units are caught at plan build instead,
-                since only the consumer's baked copies know which units exist.
+            ValueError: an owner set is empty or out of range, or a class index
+                does not resolve.
         """
-        if self._owners is not None and self.num_groups != len(self._owners):
-            raise ValueError(
-                f"group count {self.num_groups} != ownership rows {len(self._owners)}"
-            )
-        if self._ep_ranks is not None and len(self._ep_ranks) != self.num_producers:
-            raise ValueError(
-                f"producer_ep_ranks has {len(self._ep_ranks)} entries for "
-                f"{self.num_producers} producers"
-            )
-        for g in range(self.num_groups):
-            own = self.owners(g)
-            if not own:
-                raise ValueError(f"group {g} has no owner")
-            bad = [p for p in own if not 0 <= p < self.num_producers]
+        for c, row in enumerate(self._owner_sets):
+            if not row:
+                raise ValueError(f"owner set {c} is empty: no producer holds it")
+            bad = [p for p in row if not 0 <= p < self.num_producers]
             if bad:
-                raise ValueError(f"group {g} owners out of range: {bad}")
+                raise ValueError(f"owner set {c} out of range: {bad}")
+        for name, c in self._class_of.items():
+            if not 0 <= c < len(self._owner_sets):
+                raise ValueError(
+                    f"{name!r} has owner class {c}, but only "
+                    f"{len(self._owner_sets)} owner set(s) were shipped"
+                )
+
+    # ---------------- send surface (needs the binding) ----------------
+
+    def bind(self, actors: list, produce_methods: list, consumer_id: int) -> None:
+        """Attach this consumer's producer handles. Rebuilt wholesale per init,
+        never appended to: every owner index is a position in these lists, so a
+        rejoining engine that re-inits must not shift them."""
+        if len(actors) != len(produce_methods):
+            raise ValueError("actors and produce_methods must be parallel")
+        self._actors = list(actors)
+        self._produce_methods = list(produce_methods)
+        self.consumer_id = consumer_id
+
+    def _bound(self) -> None:
+        if not self._produce_methods:
+            raise RuntimeError("RdtRouter has no producers bound; call bind() first.")
+
+    def pull(self, owner: int, keys: list) -> Any:
+        """Issue one packed pull to ``owner``. The consumer id keys the producer's
+        per-consumer serve ring; without it every worker is served out of ring 0
+        and concurrent pulls overwrite each other's blob."""
+        self._bound()
+        return self._produce_methods[owner].remote(keys, consumer_id=self.consumer_id)
+
+    def free_group(self, group_idx: int) -> list:
+        """Signal the group done at every producer holding any of its names."""
+        self._bound()
+        return [
+            self._actors[p].free_group.remote(group_idx)
+            for p in self.group_owners(group_idx)
+        ]
+
+    def reserve_serve_arenas(self, bytes_by_producer: list[int]) -> list:
+        """Ask each producer to pre-register a serve ring sized to the most this
+        consumer will pull from it."""
+        self._bound()
+        return [
+            self._actors[p].reserve_serve_arena.remote(self.consumer_id, nb)
+            for p, nb in enumerate(bytes_by_producer)
+            if nb > 0
+        ]
 
 
 def arena_alloc_bytes(nbytes: int, presize: int = 0) -> int:

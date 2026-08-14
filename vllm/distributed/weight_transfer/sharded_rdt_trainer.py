@@ -41,7 +41,6 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     ALLOWED_OPS,
-    RdtRouter,
     arena_alloc_bytes,
 )
 from vllm.logger import init_logger
@@ -531,16 +530,14 @@ class ShardedRDTTrainerWeightTransferEngine(
         # Group-major metadata / partition, computed at trainer_init.
         self._meta: list[ParamMeta] = []
         self._groups: list[list[str]] = []
-        # Per-group routing, resolved at trainer_init from the source's ownership.
-        self._router: RdtRouter | None = None
-        self._group_owners: list[list[int]] = []
+        # Ownership resolved at trainer_init from the fleet's held names: the
+        # distinct owner sets, the per-name index into them, this rank's groups
+        # and its held set. Routing itself is consumer-side; the trainer only
+        # ships the table.
+        self._owner_sets: list[list[int]] = []
+        self._name_owner_class: list[int] = []
         self._owned_idx: list[int] = []
-        # Expert stamps resolved at trainer_init: name_ep_rank per metadata name,
-        # my_ep_rank this rank's coordinate, producer_ep_ranks the all-gathered
-        # set. None/-1 = no expert sharding declared.
-        self._name_ep_rank: list[int] | None = None
-        self._producer_ep_ranks: list[int] | None = None
-        self._my_ep_rank: int = -1
+        self._held_names: set[str] | None = None
         # Strong refs to gathered tensors we've shared into the server, keyed by
         # group index. CUDA-IPC exports must outlive the importer, so we hold
         # them until the server reports the group freed. See send_weights.
@@ -622,8 +619,8 @@ class ShardedRDTTrainerWeightTransferEngine(
             )
 
         world, rank = engine._world_and_rank()
-        engine._build_router(world, rank)
-        engine._spawn_server(engine._served_names())
+        engine._resolve_ownership(world, rank)
+        engine._spawn_server(sorted(engine._held_names or []))
 
         # Every rank's server must exist before the sender's init RPC (the worker
         # init calls reserve_serve_arena back on ALL producer servers). The
@@ -662,104 +659,94 @@ class ShardedRDTTrainerWeightTransferEngine(
             return torch.distributed.get_world_size(), torch.distributed.get_rank()
         return 1, self._init_info.rank
 
-    def _build_router(self, world: int, rank: int) -> None:
-        """Resolve per-group ownership, expert stamps and this rank's publish plan.
+    def _resolve_ownership(self, world: int, rank: int) -> None:
+        """Resolve which rank holds which name, and this rank's publish plan.
 
-        A source may gather only part of the model (PP producers gather within a
-        stage, EP ranks hold one coordinate's experts), so both ownership
-        declarations are all-gathered here and shipped to the consumers. Every
-        rank must agree on who serves what, or a pull trips the served-names
-        guard. Sources declaring neither own everything (gather-to-all).
+        A source may hold only part of the model — pipeline stages, expert
+        parallelism, or any mix — so each rank declares its held names and the
+        fleet all-gathers them. The consumers route per name, so the wire carries
+        the transposed result: the distinct owner sets, and a per-name index into
+        them.
+
+        The masks are positional over metadata order, which is why the metadata
+        digest is checked first: a rank whose names disagree would transpose into
+        the wrong owners entirely.
         """
         assert self.source is not None  # guaranteed by trainer_init
         num_groups = len(self._groups)
-        owned: list[int] | None = None
-        declared = self.source.owned_groups()
-        if declared is not None:
-            owned = sorted({int(g) for g in declared})
-            bad = [g for g in owned if not 0 <= g < num_groups]
-            if bad:
+        names = [m.name for m in self._meta]
+        held = self.source.held_names()
+        if held is None:
+            held_set = set(names)
+        else:
+            held_set = {str(n) for n in held}
+            unknown = sorted(held_set - set(names))
+            if unknown:
                 raise ValueError(
-                    f"WeightSource.owned_groups() out of range for "
-                    f"{num_groups} groups: {bad}"
+                    f"WeightSource.held_names() lists {len(unknown)} name(s) not "
+                    f"in metadata(), e.g. {unknown[:3]}."
                 )
-            if not owned:
+            if not held_set:
                 raise ValueError(
-                    "WeightSource.owned_groups() is empty; a rank with nothing "
-                    "to serve cannot take part in the gather"
-                )
-        # Resolved AFTER owned_groups: its shared-group discovery can demote a
-        # shard-aware source to the naive path, and the two declarations flip
-        # together.
-        ownership = self.source.expert_ownership()
-        name_ep_rank: list[int] | None = None
-        my_ep_rank = -1
-        if ownership is not None:
-            name_ep_rank, my_ep_rank = list(ownership[0]), int(ownership[1])
-            if len(name_ep_rank) != len(self._meta):
-                raise ValueError(
-                    f"WeightSource.expert_ownership() stamped "
-                    f"{len(name_ep_rank)} names for {len(self._meta)} metadata "
-                    "entries."
+                    "WeightSource.held_names() is empty; a rank with nothing to "
+                    "serve cannot take part in the gather"
                 )
 
-        # One collective carries the ownership lists plus digests of the metadata
-        # and stamps they index into. The digests are what make partial ownership
-        # safe: only the sender's metadata reaches the consumers, so a rank
-        # describing just its own share would silently mis-serve the model.
+        # One collective carries this rank's holdings as a bitmask over metadata
+        # order, plus the digest of the metadata it indexes into. The digest is
+        # what makes partial ownership safe: only the sender's metadata reaches
+        # the consumers, so a rank describing just its own share would silently
+        # mis-serve the model.
         digest = self._meta_digest()
-        ep_digest = self._stamps_digest(name_ep_rank)
-        per_rank = self._all_gather_owned(world, (digest, owned, my_ep_rank, ep_digest))
+        mask = bytearray((len(names) + 7) // 8)
+        for i, n in enumerate(names):
+            if n in held_set:
+                mask[i >> 3] |= 1 << (i & 7)
+        per_rank = self._all_gather_owned(world, (digest, bytes(mask)))
         mismatched = [r for r, (d, *_rest) in enumerate(per_rank) if d != digest]
         if mismatched:
             raise ValueError(
                 f"WeightSource.metadata() disagrees across trainer ranks "
                 f"(rank {rank} digest {digest}, differing ranks {mismatched[:4]}). "
-                "Every rank must describe the WHOLE model, even when it owns "
-                "only some groups."
+                "Every rank must describe the WHOLE model, even when it holds "
+                "only some of it."
             )
-        ep_mismatched = [
-            r for r, (_d, _o, _ep, epd) in enumerate(per_rank) if epd != ep_digest
+        masks = [m for _d, m in per_rank]
+
+        # Transpose to per-name owners, then dedup into classes. Numbering by
+        # FIRST APPEARANCE in metadata order keeps it a pure function of
+        # rank-identical inputs, which is what lets a rejoining consumer rebuild
+        # the identical table from get_worker_init_payload.
+        owner_sets: list[list[int]] = []
+        class_of_owners: dict[tuple[int, ...], int] = {}
+        name_owner_class: list[int] = []
+        for i, n in enumerate(names):
+            owners = tuple(
+                r for r, m in enumerate(masks) if m[i >> 3] & (1 << (i & 7))
+            )
+            if not owners:
+                raise ValueError(
+                    f"no trainer rank holds {n!r}; every name in metadata() must "
+                    "be held by at least one rank or it can never be served."
+                )
+            ci = class_of_owners.get(owners)
+            if ci is None:
+                ci = len(owner_sets)
+                class_of_owners[owners] = ci
+                owner_sets.append(list(owners))
+            name_owner_class.append(ci)
+
+        self._owner_sets = owner_sets
+        self._name_owner_class = name_owner_class
+        # Groups holding anything here: exactly what iteration must cover.
+        self._owned_idx = [
+            gi
+            for gi in range(num_groups)
+            if any(n in held_set for n in self._groups[gi])
         ]
-        if ep_mismatched:
-            raise ValueError(
-                "WeightSource.expert_ownership() name stamps disagree across "
-                f"trainer ranks (differing ranks {ep_mismatched[:4]}). Every rank "
-                "must derive the identical name_ep_rank list (it is a pure "
-                "function of the metadata names)."
-            )
-        owned_per_rank = [o for _d, o, _ep, _epd in per_rank]
-        ep_coords = [int(ep) for _d, _o, ep, _epd in per_rank]
+        self._held_names = held_set
 
-        group_owners: list[list[int]] | None = None
-        if any(o is not None for o in owned_per_rank):
-            group_owners = [[] for _ in range(num_groups)]
-            for r, rank_owned in enumerate(owned_per_rank):
-                for gi in range(num_groups) if rank_owned is None else rank_owned:
-                    group_owners[gi].append(r)
-
-        producer_ep_ranks = ep_coords if name_ep_rank is not None else None
-        router = RdtRouter(
-            world,
-            self._init_info.num_consumers,
-            group_owners,
-            num_groups,
-            producer_ep_ranks=producer_ep_ranks,
-        )
-        router.validate()
-        self._router = router
-        self._group_owners = group_owners or []
-        self._owned_idx = owned if owned is not None else list(range(num_groups))
-        self._name_ep_rank = name_ep_rank
-        self._producer_ep_ranks = producer_ep_ranks
-        self._my_ep_rank = my_ep_rank
-        # The names this rank is REQUIRED to yield real tensors for (and the
-        # only ones it may), per the stamps. None = unstamped source, no check.
-        self._held_names = (
-            set(self._served_names()) if name_ep_rank is not None else None
-        )
-
-    def _validate_stamped_yields(self, gi: int, names, tensors) -> None:
+    def _validate_held_yields(self, gi: int, names, tensors) -> None:
         """Stamps must be truthful against yields (the ABC contract's first
         invariant), and this is the one place both sit side by side. Without
         this check, a source that stamps a name as held but yields ``None`` for
@@ -776,27 +763,11 @@ class ShardedRDTTrainerWeightTransferEngine(
                 claim = "does not hold" if tensor is not None else "holds"
                 have = "a real tensor" if tensor is not None else "None"
                 raise RuntimeError(
-                    f"expert_ownership stamps disagree with the yielded tensors: "
-                    f"group {gi} name {name!r} yielded {have} but the stamps say "
-                    f"this rank {claim} it. The WeightSource's stamps must be "
-                    "truthful against its iteration (see "
-                    "WeightSource.expert_ownership)."
+                    f"held_names() disagrees with the yielded tensors: group {gi} "
+                    f"name {name!r} yielded {have} but this rank {claim} it. A "
+                    "WeightSource must yield a real tensor for every held name "
+                    "and None for the rest (see WeightSource.held_names)."
                 )
-
-    def _served_names(self) -> list[str]:
-        """The names this rank actually publishes: for every owned group, its
-        replicated (``-1``) names plus its own EP coordinate's expert names.
-        This is the sidecar's misroute guard — a pull for any other name fails
-        loudly instead of blocking forever in the cache wait."""
-        if self._name_ep_rank is None:
-            return [n for gi in self._owned_idx for n in self._groups[gi]]
-        stamp_of = {m.name: er for m, er in zip(self._meta, self._name_ep_rank)}
-        return [
-            n
-            for gi in self._owned_idx
-            for n in self._groups[gi]
-            if stamp_of[n] < 0 or stamp_of[n] == self._my_ep_rank
-        ]
 
     def _meta_digest(self) -> str:
         """Stable digest of this rank's metadata (name order + count)."""
@@ -809,21 +780,8 @@ class ShardedRDTTrainerWeightTransferEngine(
             h.update(b"\n")
         return h.hexdigest()[:16]
 
-    @staticmethod
-    def _stamps_digest(name_ep_rank: "list[int] | None") -> str:
-        """Stable digest of the expert stamp list (``"none"`` when undeclared —
-        a rank WITH stamps then mismatches a rank without, which is the point:
-        mixed declarations are as wrong as differing ones)."""
-        if name_ep_rank is None:
-            return "none"
-        import hashlib
-
-        h = hashlib.sha256()
-        h.update(",".join(map(str, name_ep_rank)).encode())
-        return h.hexdigest()[:16]
-
     def _all_gather_owned(self, world: int, mine: tuple) -> list[tuple]:
-        """All-gather each rank's (metadata digest, owned groups)."""
+        """All-gather each rank's (metadata digest, held-name bitmask)."""
         if world <= 1 or not (
             torch.distributed.is_available() and torch.distributed.is_initialized()
         ):
@@ -925,9 +883,8 @@ class ShardedRDTTrainerWeightTransferEngine(
             dtype_names=dtype_names,
             shapes=shapes,
             group_lens=group_lens,
-            group_owners=self._group_owners,
-            name_ep_rank=self._name_ep_rank or [],
-            producer_ep_ranks=self._producer_ep_ranks or [],
+            owner_sets=self._owner_sets,
+            name_owner_class=self._name_owner_class,
             num_consumers=self._init_info.num_consumers,
             num_rdt_buffers=self._init_info.num_rdt_buffers,
             arena_presize_gb=self._init_info.arena_presize_gb,
@@ -1021,7 +978,7 @@ class ShardedRDTTrainerWeightTransferEngine(
                         f"{names[:2]!r} but expected {len(group)} starting "
                         f"{group[:2]!r}; iteration order must match metadata."
                     )
-                self._validate_stamped_yields(gi, names, tensors)
+                self._validate_held_yields(gi, names, tensors)
                 # Share each unique STORAGE once and describe every name as an
                 # as_strided view onto it. ``None`` means a name this rank does not
                 # hold (a foreign expert); the source keeps it in the list so the

@@ -3,7 +3,7 @@
 """Base class for weight transfer engines."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass, field
 from typing import (
     TYPE_CHECKING,
@@ -37,7 +37,7 @@ def layerwise_groups(names: list[str]) -> list[list[str]]:
     """Partition flat parameter names into the pre block, one group per decoder
     layer, then the post block (keys on ``model.layers.<N>.``).
 
-    This defines what a *group index* means for `WeightSource.owned_groups` and
+    This defines what a *group index* means for `WeightSource.groups` and
     `WeightSource.iter_groups`: index *g* names the same group on every trainer
     rank and every consumer, because it is derived from one rank's `metadata()`
     order. The split is by POSITION relative to the first layer name, not by name
@@ -105,8 +105,8 @@ class WeightSource(ABC):
       time. Materializing is typically a collective (FSDP `full_tensor()`, a
       Megatron export), so the ranks that share a parameter must iterate it in
       the same order in lockstep, or they deadlock.
-    * `owned_groups()` — which gather groups this rank holds, for producers that
-      are split so each rank holds only part of the model. Defaults to all.
+    * `held_names()` — which parameters this rank holds, for producers that are
+      split so each rank holds only part of the model. Defaults to all.
     * `iter_groups()` — the same stream batched per gather group (see
       `layerwise_groups`). Defaults to batching `__iter__`; override to
       materialize a whole group in one step.
@@ -132,86 +132,49 @@ class WeightSource(ABC):
     def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
         raise NotImplementedError
 
-    def owned_groups(self) -> list[int] | None:
-        """Indices of the gather groups this rank holds, or None for all of them.
+    def held_names(self) -> "Collection[str] | None":
+        """The parameters this rank holds, or None for all of them.
 
-        Groups partition `metadata()`'s name order into the pre block, one group
-        per decoder layer, then the post block (`layerwise_groups`), so index *g*
-        means the same group on every rank and on every consumer. Override when
-        producers are split so each holds only part of the model — pipeline
-        parallelism, where a layer's gather spans only the ranks that hold it.
-        The default owns everything, which is the gather-to-all layout.
+        This is the whole ownership contract. Override it when producers are
+        split so each holds only part of the model — pipeline parallelism (a rank
+        holds some layers), expert parallelism (a rank holds some experts), or
+        any combination, including layouts that fit neither. A consumer routes
+        each name to a rank that holds it, so per-name is the granularity that
+        matters; the engine derives everything else from this.
 
-        Two requirements come with overriding it:
+        Three requirements come with overriding it:
 
         * `metadata()` must still describe the WHOLE model on every rank. The
           group partition, the iteration checks and the consumers' pull plans are
           all built from one rank's metadata, so a rank that reported only its own
           share would leave the rest of the model silently un-transferred. The
           sharded-RDT engine cross-checks this across ranks at init.
-        * iteration must yield ONLY the owned groups, in metadata order. A rank
-          that does not hold a group must not iterate it: the group's gather is a
-          collective among its owners alone, so a non-owner joining in has
-          nothing to contribute and nothing to receive.
+        * Every name must be held by at least one rank, or it can never be
+          served. The engine raises at init naming the first orphan.
+        * Iteration must cover exactly `groups()` in metadata order, yielding a
+          real tensor for each held name and `None` for the rest. A group's
+          gather is a collective among the ranks that hold part of it, so the
+          name must still appear (to keep the order check aligned) while the
+          data is absent.
 
         Returns:
-            Sorted group indices, or None to own every group.
-        """
-        return None
-
-    def expert_ownership(self) -> "tuple[list[int], int] | None":
-        """Name-level ownership WITHIN owned groups, or None for none.
-
-        Sibling of `owned_groups`, one grain finer: `owned_groups` says which
-        gather groups this rank takes part in at all; this says which NAMES
-        inside those groups it actually holds. The only realistic name-level
-        sharding is expert parallelism — a rank holds whole experts, its EP
-        peers hold the others — hence the concrete name.
-
-        Returns ``(name_ep_rank, my_ep_rank)``:
-
-        * ``name_ep_rank[i]`` stamps ``metadata()[i]``: the producer EP rank
-          holding that name, or ``-1`` for names replicated across EP
-          (attention, norms, router/gate, embeddings, dense layers). Like
-          ``metadata()``, it must describe the WHOLE model identically on
-          every rank — the consumers' pull routing is built from the sender's
-          copy alone, and the engine digest-checks it across ranks.
-        * ``my_ep_rank`` is THIS rank's own EP coordinate. The engine
-          all-gathers the coordinates (the mirror of the ``owned_groups`` ->
-          ``group_owners`` split), so the source never sees the fleet.
-
-        Three invariants come with declaring it (sources enforce their own
-        preconditions):
-
-        * Stamps must be truthful against iteration: within an owned group, a
-          name stamped ``-1`` or ``my_ep_rank`` yields a real tensor; any other
-          stamp yields ``None`` (the name still appears, in metadata order, so
-          the group-order check holds — only the data is absent).
-        * All ranks must derive the identical ``name_ep_rank`` list.
-        * Ranks declaring the same coordinate must hold identical name sets for
-          every group they co-own — routing spreads consumers across a
-          coordinate's owner set, so its members must be interchangeable.
-
-        The default (None) means every name is held by every owner of its
-        group — equivalent to all ``-1`` — and is correct for any source whose
-        iteration yields real tensors for everything it owns.
+            The held parameter names, or None to hold every one.
         """
         return None
 
     def groups(self) -> list[list[str]]:
         """This rank's gather groups, in metadata order: `layerwise_groups` over
-        `metadata()`, restricted to `owned_groups()` when that is overridden.
+        `metadata()`, restricted to the groups holding at least one held name.
 
-        The indices are normalized (sorted, de-duplicated) exactly as a trainer
-        engine normalizes them, so the two agree by construction: a source whose
-        `owned_groups()` came back unsorted would otherwise pair each group with
-        the wrong batch from this stream.
+        A group with nothing held here is not iterated at all — its gather is a
+        collective among the ranks that do hold part of it.
         """
         groups = layerwise_groups([m.name for m in self.metadata()])
-        owned = self.owned_groups()
-        if owned is None:
+        held = self.held_names()
+        if held is None:
             return groups
-        return [groups[g] for g in sorted({int(g) for g in owned})]
+        held = set(held)
+        return [g for g in groups if any(n in held for n in g)]
 
     def iter_groups(self) -> Iterator[tuple[list[str], list[torch.Tensor]]]:
         """Yield one `(names, tensors)` batch per group from `groups()`.

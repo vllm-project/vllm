@@ -24,10 +24,6 @@ from vllm.distributed.weight_transfer import (
     WeightTransferTrainerFactory,
 )
 from vllm.distributed.weight_transfer.base import layerwise_groups
-from vllm.distributed.weight_transfer.sharded_rdt_common import (
-    RdtRouter,
-    assign_producer_indices,
-)
 from vllm.distributed.weight_transfer.sharded_rdt_trainer import (
     ShardedRDTTrainerInitInfo,
     ShardedRDTTrainerWeightTransferEngine,
@@ -137,22 +133,31 @@ def _rdt_engine_with_fake_server(
     engine._groups = layerwise_groups(names)
     engine._server = server
     engine._rpc = lambda method, *args: getattr(server, method)(*args)
-    # What trainer_init resolves from the source's ownership + the fleet's
+    # What trainer_init resolves from the source's held names + the fleet's
     # all-gather. ``fleet_owned`` stands in for that all-gather so a partial-
     # ownership rank can be tested without a real process group; the fleet must
-    # cover every group or the router rejects it (nothing would serve the rest).
+    # cover every name or the transpose rejects it (nothing would serve the rest).
     if fleet_owned is None:
-        engine._build_router(1, 0)
+        engine._resolve_ownership(1, 0)
     else:
-        # Stands in for the (metadata digest, owned groups, ep coord, stamp
-        # digest) all-gather; every rank reports THIS rank's digests, i.e.
-        # agreeing metadata and stamps.
-        monkeypatch.setattr(
-            engine,
-            "_all_gather_owned",
-            lambda w, mine: [(mine[0], o, mine[2], mine[3]) for o in fleet_owned],
-        )
-        engine._build_router(len(fleet_owned), 0)
+        # Stands in for the (metadata digest, held-name bitmask) all-gather:
+        # each rank's group list becomes the mask its held names would set.
+        names = [m.name for m in engine._meta]
+        groups = engine._groups
+
+        def _fake_gather(_world, mine):
+            out = []
+            for owned in fleet_owned:
+                held = {n for gi in owned for n in groups[gi]}
+                mask = bytearray((len(names) + 7) // 8)
+                for i, n in enumerate(names):
+                    if n in held:
+                        mask[i >> 3] |= 1 << (i & 7)
+                out.append((mine[0], bytes(mask)))
+            return out
+
+        monkeypatch.setattr(engine, "_all_gather_owned", _fake_gather)
+        engine._resolve_ownership(len(fleet_owned), 0)
     return engine
 
 
@@ -311,102 +316,9 @@ def test_sharded_rdt_send_weights_surfaces_update_error(monkeypatch):
         engine.send_weights()
 
 
-class TestRdtRouter:
-    """Who serves each (gather group, ep_rank) pull unit.
-
-    A wrong answer here is not a wrong number but a hang or a loud misroute: a
-    consumer pulling from a producer that never gathered the name trips its
-    served-names guard. Freeing does NOT route through the router — every
-    consumer signals every owner of a group, and the producers count to the
-    live total — so these tests pin PULL routing only."""
-
-    def test_identity_when_fleets_match(self):
-        r = RdtRouter(8, 8, None, num_groups=6)
-        assert all(r.producer_for(3, g) == 3 for g in range(6))
-        assert all(r.producer_for(c, 0) == c for c in range(8))
-
-    def test_gather_to_all_keeps_the_historical_binding(self):
-        """16 producers / 8 consumers: the block rule spreads each consumer's
-        pulls over its block, alternating by group, and every producer NIC
-        still carries traffic."""
-        r = RdtRouter(16, 8, None, num_groups=95)
-        for c in range(8):
-            block = assign_producer_indices(16, 8, c)
-            assert {r.producer_for(c, g) for g in range(95)} == set(block)
-        assert [r.producer_for(0, g) for g in range(4)] == [0, 1, 0, 1]
-        # No producer is left out of the pull traffic entirely.
-        assert {r.producer_for(c, g) for c in range(8) for g in range(95)} == set(
-            range(16)
-        )
-
-    def test_fan_in_shares_one_producer(self):
-        r = RdtRouter(2, 8, None, num_groups=5)
-        assert [{r.producer_for(c, g) for g in range(5)} for c in range(8)] == [
-            {c // 4} for c in range(8)
-        ]
-
-    def test_pipeline_stages_route_to_the_owning_stage(self):
-        """2 stages x 8 ranks: groups 0-2 on stage 0, 3-5 on stage 1. Each
-        consumer must reach both stages, pulling each group from an owner."""
-        owners = [list(range(8))] * 3 + [list(range(8, 16))] * 3
-        r = RdtRouter(16, 8, owners)
-        for c in range(8):
-            assert [r.producer_for(c, g) for g in range(6)] == [c] * 3 + [c + 8] * 3
-        assert r.owned_groups(0) == [0, 1, 2]
-        assert r.owned_groups(8) == [3, 4, 5]
-        r.validate()
-
-    def test_expert_units_route_to_the_matching_coordinate(self):
-        """The two stamp lists must match: a pull for a name stamped k goes to a
-        group owner whose producer_ep_ranks entry is k; -1 keeps the full owner
-        set (the historical routing)."""
-        # 2 stages x (tp2 x ep2): coords repeat per stage.
-        owners = [[0, 1, 2, 3]] * 2 + [[4, 5, 6, 7]] * 2
-        coords = [0, 0, 1, 1, 0, 0, 1, 1]
-        r = RdtRouter(8, 4, owners, producer_ep_ranks=coords)
-        r.validate()
-        assert r.owners(0, 1) == [2, 3]
-        assert r.owners(2, 1) == [6, 7]
-        assert r.owners(2) == [4, 5, 6, 7]  # -1: unchanged
-        for c in range(4):
-            assert r.producer_for(c, 0, 1) in (2, 3)
-            assert r.producer_for(c, 2, 0) in (4, 5)
-
-    def test_consumers_spread_over_a_coordinates_owner_set(self):
-        """Several ranks share a coordinate (its TP peers); the block rule must
-        spread consumers across them, not funnel through one."""
-        r = RdtRouter(4, 4, None, num_groups=6, producer_ep_ranks=[0, 0, 1, 1])
-        served = {r.producer_for(c, g, 0) for c in range(4) for g in range(6)}
-        assert served == {0, 1}
-
-    def test_an_empty_pull_unit_raises(self):
-        """A stamped name whose coordinate has no rank in the group's owner set
-        is a routing impossibility and must raise, not hang."""
-        r = RdtRouter(2, 2, None, num_groups=2, producer_ep_ranks=[0, 0])
-        with pytest.raises(ValueError, match="has no owner"):
-            r.producer_for(0, 0, 1)
-
-    def test_stamped_routing_without_coords_raises(self):
-        """name stamps and producer stamps must ship together."""
-        r = RdtRouter(2, 2, None, num_groups=2)
-        with pytest.raises(ValueError, match="producer_ep_ranks"):
-            r.owners(0, 1)
-
-    def test_validate_rejects_an_unowned_group(self):
-        with pytest.raises(ValueError, match="no owner"):
-            RdtRouter(4, 2, [[0, 1], [], [2, 3]]).validate()
-
-    def test_validate_rejects_an_out_of_range_owner(self):
-        with pytest.raises(ValueError, match="out of range"):
-            RdtRouter(2, 2, [[0, 5]]).validate()
-
-    def test_validate_rejects_a_short_coordinate_list(self):
-        with pytest.raises(ValueError, match="producer_ep_ranks"):
-            RdtRouter(4, 2, None, num_groups=2, producer_ep_ranks=[0, 1]).validate()
-
-
 class _OwnedSource(_ListSource):
-    """A source that gathers only some groups, like a pipeline-parallel rank."""
+    """A source holding only some groups' names, like a pipeline-parallel rank.
+    Takes group indices for convenience and declares the names inside them."""
 
     def __init__(self, pairs, owned_group_idx):
         super().__init__(pairs)
@@ -414,8 +326,8 @@ class _OwnedSource(_ListSource):
         groups = layerwise_groups([n for n, _ in pairs])
         self._owned_names = [n for gi in self._owned for n in groups[gi]]
 
-    def owned_groups(self):
-        return list(self._owned)
+    def held_names(self):
+        return list(self._owned_names)
 
     def __iter__(self):
         by_name = dict(self._pairs)
@@ -426,7 +338,7 @@ class _OwnedSource(_ListSource):
     not torch.cuda.is_available(),
     reason="the gather loop's CUDA-IPC export needs a device",
 )
-def test_sharded_rdt_publishes_only_owned_groups(monkeypatch):
+def test_sharded_rdt_publishes_only_the_groups_it_holds(monkeypatch):
     server = _FakeProducerServer(auto_free=True)
     engine = _rdt_engine_with_fake_server(
         _OwnedSource(_rdt_source_two_layers()._pairs, [1, 2]),
@@ -441,7 +353,10 @@ def test_sharded_rdt_publishes_only_owned_groups(monkeypatch):
     assert server.published == [1, 2]
     assert server.order == ["begin", "publish", "publish", "end"]
     assert engine._inflight == {}
-    assert engine._group_owners == [[1], [0], [0], [1]]
+    # embed + norm on rank 1, the two layers here: two distinct owner sets,
+    # numbered by first appearance in metadata order.
+    assert engine._owner_sets == [[1], [0]]
+    assert engine._name_owner_class == [0, 1, 1, 0]
 
 
 def test_sharded_rdt_owned_group_order_mismatch_raises(monkeypatch):
@@ -497,7 +412,6 @@ class TestLiveCountPlumbing:
         engine._init_info = ShardedRDTTrainerInitInfo(
             rank=rank, num_consumers=num_consumers
         )
-        engine._router = RdtRouter(world, num_consumers, None, num_groups=4)
         engine.source = object()  # send_weights asserts a source is present
         received: list = []
         engine._send_weights_inner = received.append
@@ -530,7 +444,7 @@ class TestLiveCountPlumbing:
         assert counts == [4, 4, 4]
 
 
-def test_sharded_rdt_worker_init_info_carries_group_owners(monkeypatch):
+def test_sharded_rdt_worker_init_info_carries_the_ownership_table(monkeypatch):
     import json
 
     server = _FakeProducerServer(auto_free=True)
@@ -543,32 +457,30 @@ def test_sharded_rdt_worker_init_info_carries_group_owners(monkeypatch):
         fleet_owned=[[0, 1], [2, 3]],
     )
     worker_init = engine._build_worker_init_info(["srv_rk0", "srv_rk1"])
-    assert worker_init.group_owners == [[0], [0], [1], [1]]
-    assert len(worker_init.group_owners) == len(worker_init.group_lens)
-    # The payload crosses the control plane as JSON.
-    assert json.loads(json.dumps(asdict(worker_init)))["group_owners"] == [
-        [0],
-        [0],
-        [1],
-        [1],
-    ]
+    assert worker_init.owner_sets == [[0], [1]]
+    assert worker_init.name_owner_class == [0, 0, 1, 1]
+    assert len(worker_init.name_owner_class) == len(worker_init.names)
+    # The payload crosses the control plane as JSON: nested lists must survive.
+    round_tripped = json.loads(json.dumps(asdict(worker_init)))
+    assert round_tripped["owner_sets"] == [[0], [1]]
+    assert round_tripped["name_owner_class"] == [0, 0, 1, 1]
 
 
-def test_weight_source_owns_every_group_by_default():
-    """The contract's default: a source that says nothing owns the whole model."""
+def test_weight_source_holds_everything_by_default():
+    """The contract's default: a source that says nothing holds the whole model."""
     src = _rdt_source_two_layers()
-    assert src.owned_groups() is None
-    assert ModuleSource(torch.nn.Linear(2, 2)).owned_groups() is None
+    assert src.held_names() is None
+    assert ModuleSource(torch.nn.Linear(2, 2)).held_names() is None
 
 
-def test_sharded_rdt_rejects_out_of_range_owned_group(monkeypatch):
-    class _BadOwned(_OwnedSource):
-        def owned_groups(self):
-            return [0, 99]
+def test_sharded_rdt_rejects_a_held_name_outside_metadata(monkeypatch):
+    class _BadHeld(_OwnedSource):
+        def held_names(self):
+            return ["embed.weight", "not.a.real.name"]
 
-    with pytest.raises(ValueError, match="out of range"):
+    with pytest.raises(ValueError, match="not"):
         _rdt_engine_with_fake_server(
-            _BadOwned(_rdt_source_two_layers()._pairs, [0]),
+            _BadHeld(_rdt_source_two_layers()._pairs, [0]),
             is_sender=False,
             client=RecordingClient(),
             server=_FakeProducerServer(),
@@ -576,18 +488,32 @@ def test_sharded_rdt_rejects_out_of_range_owned_group(monkeypatch):
         )
 
 
-def test_sharded_rdt_rejects_empty_owned_groups(monkeypatch):
-    class _OwnsNothing(_ListSource):
-        def owned_groups(self):
+def test_sharded_rdt_rejects_a_rank_holding_nothing(monkeypatch):
+    class _HoldsNothing(_ListSource):
+        def held_names(self):
             return []
 
     with pytest.raises(ValueError, match="empty"):
         _rdt_engine_with_fake_server(
-            _OwnsNothing(_rdt_source_two_layers()._pairs),
+            _HoldsNothing(_rdt_source_two_layers()._pairs),
             is_sender=False,
             client=RecordingClient(),
             server=_FakeProducerServer(),
             monkeypatch=monkeypatch,
+        )
+
+
+def test_sharded_rdt_rejects_a_name_no_rank_holds(monkeypatch):
+    """Every name must be held somewhere or it can never be served — caught
+    when the holdings are transposed, naming the orphan."""
+    with pytest.raises(ValueError, match="no trainer rank holds"):
+        _rdt_engine_with_fake_server(
+            _OwnedSource(_rdt_source_two_layers()._pairs, [0, 1]),
+            is_sender=False,
+            client=RecordingClient(),
+            server=_FakeProducerServer(),
+            monkeypatch=monkeypatch,
+            fleet_owned=[[0, 1], [2]],  # nobody holds group 3
         )
 
 
@@ -606,10 +532,10 @@ def test_sharded_rdt_rejects_metadata_disagreement_across_ranks(monkeypatch):
     monkeypatch.setattr(
         engine,
         "_all_gather_owned",
-        lambda w, mine: [mine, ("deadbeefdeadbeef", [0, 3])],
+        lambda w, mine: [mine, ("deadbeefdeadbeef", mine[1])],
     )
     with pytest.raises(ValueError, match="disagrees across trainer ranks"):
-        engine._build_router(2, 0)
+        engine._resolve_ownership(2, 0)
 
 
 def _serve_ring_server(src_name, src):

@@ -51,7 +51,7 @@ Weights are transferred in **gather groups**: `layerwise_groups` (in `base.py`, 
 
 The group is the unit of three things at once: the trainer's gather, the consumer's free barrier, and the arena budget. Without it a whole model becomes one chunk and the receive and serve arenas balloon to the full per-worker share.
 
-Each group's copies are then cut into one **chunk** per producer expert coordinate present — the `ep_rank` stamp of a copy is `name_ep_rank[copy.src_name]`, `-1` (replicated) first, then ascending — so a worker pulls each expert from a rank that actually holds it, under any static vLLM expert placement (`linear`, `round_robin`). Dense models carry only `-1` stamps and keep one chunk per group. Copies are atomic, so a single huge one (an untied `lm_head`) simply makes its chunk oversized — that is what `arena_presize_gb` exists to cover. A module's copies may span chunks (a FusedMoE's experts land on several producer coordinates); `materialize` fires on its first chunk and quant/kernel-copy/`reset` on its last, which makes materialize-once correct by construction rather than by a runtime counter.
+Each group's copies are then cut into one **chunk** per distinct *owner class* present (see below), ascending by class index — so a worker pulls each name from a rank that actually holds it, under any static vLLM expert placement (`linear`, `round_robin`). A chunk is one packed pull, so every name in it must share a producer, which is exactly what an owner class is. Dense models have one class and keep one chunk per group. Copies are atomic, so a single huge one (an untied `lm_head`) simply makes its chunk oversized — that is what `arena_presize_gb` exists to cover. A module's copies may span chunks (a FusedMoE's experts land on several owner classes); `materialize` fires on its first chunk and quant/kernel-copy/`reset` on its last, which makes materialize-once correct by construction rather than by a runtime counter.
 
 Chunks stream over a ring of receive slots (`num_rdt_buffers` deep). While chunk *i*'s RDMA lands inside its `ray.get`, the producer serves chunk *i+1* into its own ring slot and a background thread scatters chunk *i-1* out of another receive slot. The reads themselves stay serialized — they share the flow's NIC, which is the bandwidth floor, not a loss.
 
@@ -63,16 +63,25 @@ A divergence cannot be caught on the wire: the bytes arrive exactly as sent eith
 
 ## Ownership and M:N routing
 
-Producers and consumers need not be the same size, and a producer need not hold the whole model. `RdtRouter`, built identically on both sides from wire-carried data (`num_producers`, `num_consumers`, `group_owners`, `producer_ep_ranks`), answers one question: which producer serves each (gather group, `ep_rank`) pull unit for a given consumer.
+Producers and consumers need not be the same size, and a producer need not hold the whole model. Ownership is declared **per name** — a trainer rank lists what it holds via `WeightSource.held_names()`, and that one declaration expresses every layout: pipeline stages (a rank holds some layers' names), expert parallelism (a rank holds some experts' names), both at once, or a shape that fits neither, such as one gather group produced by two stages.
 
-- `group_owners[g]` lists the producer ranks that gather and publish group *g*. `None` means every producer owns every group — the gather-to-all layout.
-- Expert ownership is two parallel stamp lists that must match: `name_ep_rank` stamps each weight name with the expert-parallel coordinate holding it (`-1` = replicated), `producer_ep_ranks` stamps each producer rank with its own coordinate. A pull for a name stamped `k >= 0` goes to a group owner whose coordinate is `k`; `-1` names match every group owner.
-- Each pull unit is served by exactly **one** producer per consumer. Splitting one pull across producers only multiplies produce calls, since the consumer's own NIC bounds the pull either way.
+The trainer fleet all-gathers those declarations at `trainer_init` and transposes them into the table the consumers route from:
+
+- `owner_sets` — the few *distinct* producer sets that occur, each a sorted list of trainer ranks.
+- `name_owner_class[i]` — which of those sets holds `names[i]`.
+
+That is the same wire cost as one stamp per name, however many ranks there are. Empty tables mean every producer holds everything (gather-to-all).
+
+`RdtRouter` — consumer-side only, since routing is a consumer decision — answers one question from that table: which producer does *this* consumer pull a given name from.
+
+- Names route; groups free. A pull resolves through the name's owner set; the free barrier is per group, so its fan-out is `group_owners(g)`, the union over the group's names.
+- Each name is served by exactly **one** producer per consumer. Splitting one pull across producers only multiplies produce calls, since the consumer's own NIC bounds the pull either way.
+- Consumers are blocked across the name's owner set with the same rule that binds producers globally, then rotated by the name's *group* index — rotating per group, not per name, is what keeps every name of a chunk on one producer.
 - Freeing does NOT route: every consumer signals `free_group(g)` at every owner of *g*, exactly once per sync, and each owner counts signals against the live consumer total handed to `begin_sync` — a per-group barrier, one uniform integer, no routed targets.
 
-Disagreement between the two sides is not a wrong number but a **hang** or a loud misroute. Three things guard it: `RdtRouter.validate()` (every group owned, coordinates cover every producer), SHA-256 digests of the metadata name sequence AND the stamp list cross-checked across trainer ranks, and the producer's `served_names` allowlist (its owned groups' replicated names plus its own coordinate's experts), which turns a misroute into a loud error instead of an unbounded wait.
+Disagreement between the two sides is not a wrong number but a **hang** or a loud misroute. Three things guard it: every name must be held by at least one rank (the transpose raises at init naming the first orphan), a SHA-256 digest of the metadata name sequence cross-checked across trainer ranks — load-bearing because the gathered masks are *positional* over that order — and the producer's `served_names` allowlist, which turns a misroute into a loud error instead of an unbounded wait.
 
-A pipeline-parallel trainer declares partial ownership through `WeightSource.owned_groups()`; an expert-parallel trainer declares name-level ownership through `WeightSource.expert_ownership()`. The same requirements come with both: `metadata()` must still describe the **whole** model on every rank (only the sender's metadata reaches the consumers, so a rank describing just its own share would leave the rest silently un-transferred), iteration must yield **only** the owned groups, in metadata order, and within them a name stamped with a foreign coordinate yields `None` (the name stays in the list; only the data is absent).
+Declaring `held_names()` comes with three requirements. `metadata()` must still describe the **whole** model on every rank (only the sender's metadata reaches the consumers, so a rank describing just its own share would leave the rest silently un-transferred). Iteration must cover exactly the groups holding at least one held name, in metadata order. And within those groups an unheld name yields `None` — the name stays in the list so the order check stays aligned; only the data is absent.
 
 ## Producer lifecycle
 
