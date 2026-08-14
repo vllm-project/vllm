@@ -63,6 +63,7 @@ from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import (
     set_random_seed,  # noqa: F401 - re-exported for use in test files
 )
+from vllm.v1.engine.utils import get_engine_process_shutdown_timeout
 
 logger = init_logger(__name__)
 
@@ -214,6 +215,9 @@ class RemoteVLLMServer:
     _cleanup_hooks_registered = False
     _signal_hooks_registered = False
     _previous_signal_handlers: dict[int, Any] = {}
+    _failed_gpu_cleanup: dict[
+        tuple[str, tuple[str, ...]], tuple[float, float, float | None]
+    ] = {}
     proc: subprocess.Popen
 
     def _create_cli_subcommand(self):
@@ -236,6 +240,137 @@ class RemoteVLLMServer:
 
             model_loader = get_model_loader(load_config)
             model_loader.download_model(model_config)
+
+    def _requires_clean_gpu_memory(self) -> bool:
+        """Whether this server needs GPU cleanup from its predecessor."""
+        return True
+
+    def _get_gpu_device_ids(
+        self, env_dict: dict[str, str] | None
+    ) -> tuple[str, ...] | None:
+        """Return canonical device IDs that this process can measure."""
+        if not (
+            current_platform.is_rocm()
+            or current_platform.is_cuda()
+            or current_platform.is_xpu()
+        ):
+            return None
+
+        if current_platform.is_xpu():
+            # torch.xpu.mem_get_info takes parent-local logical ordinals, not
+            # ZE_AFFINITY_MASK physical/tile IDs. Preserve the existing
+            # parent-visible aggregate measurement until a physical-device
+            # management API is available here.
+            device_ids = tuple(str(i) for i in range(current_platform.device_count()))
+            return device_ids or None
+
+        child_env = os.environ.copy()
+        if env_dict is not None:
+            child_env.update(env_dict)
+        visibility = child_env.get(current_platform.device_control_env_var)
+        if visibility is None:
+            device_ids = tuple(str(i) for i in range(current_platform.device_count()))
+            return device_ids or None
+        device_ids = tuple(
+            sorted({device.strip() for device in visibility.split(",") if device})
+        )
+        return device_ids or None
+
+    def _ensure_failed_gpu_cleanup_recovered(self) -> None:
+        """Refuse to turn a known GPU leak into a new server baseline."""
+        scope = self._gpu_device_scope
+        if scope is None:
+            return
+
+        root_cls = RemoteVLLMServer
+        with root_cls._active_servers_lock:
+            platform, device_ids = scope
+            overlapping_failures = [
+                (failed_scope, failed_cleanup)
+                for failed_scope, failed_cleanup in root_cls._failed_gpu_cleanup.items()
+                if failed_scope[0] == platform
+                and not set(failed_scope[1]).isdisjoint(device_ids)
+            ]
+            if not overlapping_failures:
+                return
+
+            for failed_scope, failed_cleanup in overlapping_failures:
+                failed_device_ids = failed_scope[1]
+
+                # Parallel/distributed fixtures intentionally overlap server
+                # lifetimes. Their aggregate memory cannot prove whether an
+                # older cleanup failure has recovered, so retain the poison
+                # until no server using any affected device is active.
+                active_device_ids: set[str] = set()
+                for server in root_cls._active_servers:
+                    active_scope = getattr(server, "_gpu_device_scope", None)
+                    if active_scope is not None and active_scope[0] == platform:
+                        active_device_ids.update(active_scope[1])
+                affected_device_ids = set(device_ids).intersection(failed_device_ids)
+                active_device_ids.intersection_update(failed_device_ids)
+                if active_device_ids:
+                    if affected_device_ids.issubset(active_device_ids):
+                        continue
+                    raise RuntimeError(
+                        f"[{type(self).__name__}] Refusing to start because GPU "
+                        "cleanup recovery cannot be verified while active servers "
+                        "cover only part of the affected device scope."
+                    )
+
+                baseline, target, previous_used = failed_cleanup
+                current_used = self._get_gpu_memory_used(failed_device_ids)
+                if current_used is not None and current_used <= target:
+                    del root_cls._failed_gpu_cleanup[failed_scope]
+                    print(
+                        f"[{type(self).__name__}] GPU memory recovered after a "
+                        f"previous cleanup failure: {current_used / 1e9:.2f} GB "
+                        f"(target: {target / 1e9:.2f} GB)"
+                    )
+                    continue
+
+                current_text = (
+                    "unavailable"
+                    if current_used is None
+                    else f"{current_used / 1e9:.2f} GB"
+                )
+                previous_text = (
+                    "unavailable"
+                    if previous_used is None
+                    else f"{previous_used / 1e9:.2f} GB"
+                )
+                raise RuntimeError(
+                    f"[{type(self).__name__}] Refusing to start because GPU memory "
+                    f"has not recovered from a previous server cleanup failure. "
+                    f"Current: {current_text}, previous: {previous_text}, "
+                    f"target: {target / 1e9:.2f} GB, "
+                    f"baseline: {baseline / 1e9:.2f} GB."
+                )
+
+    def _record_failed_gpu_cleanup(
+        self,
+        baseline: float,
+        target: float,
+        observed: float | None,
+        scope: tuple[str, tuple[str, ...]] | None = None,
+    ) -> None:
+        if scope is None:
+            scope = self._gpu_device_scope
+        if scope is None:
+            return
+
+        root_cls = RemoteVLLMServer
+        with root_cls._active_servers_lock:
+            previous = root_cls._failed_gpu_cleanup.get(scope)
+            if previous is None or target < previous[1]:
+                root_cls._failed_gpu_cleanup[scope] = (
+                    baseline,
+                    target,
+                    observed,
+                )
+
+    def _get_process_termination_timeout(self) -> float:
+        """Maximum time to wait for the root server after SIGTERM."""
+        return 15.0
 
     def __init__(
         self,
@@ -288,13 +423,32 @@ class RemoteVLLMServer:
             getattr(args, "show_hidden_metrics_for_version", None) is not None
         )
 
+        self._request_shutdown_timeout = float(args.shutdown_timeout)
+        self._gpu_device_ids = self._get_gpu_device_ids(env_dict)
+        self._gpu_device_scope = (
+            None
+            if self._gpu_device_ids is None
+            else (current_platform.device_type, self._gpu_device_ids)
+        )
+
         with _temporarily_sanitized_pythonpath_env():
             self._pre_download_model(model, args)
         self._shutdown_complete = False
 
         # Record GPU memory before server start so we know what
-        # "released" looks like.
-        self._pre_server_gpu_memory = self._get_gpu_memory_used()
+        # "released" looks like. Keep the poison check and baseline capture
+        # atomic with respect to teardown failures recorded by other servers.
+        with RemoteVLLMServer._active_servers_lock:
+            if self._requires_clean_gpu_memory():
+                self._ensure_failed_gpu_cleanup_recovered()
+            self._pre_server_gpu_memory_by_device = (
+                self._get_gpu_memory_used_by_device()
+            )
+            self._pre_server_gpu_memory = (
+                None
+                if self._pre_server_gpu_memory_by_device is None
+                else sum(self._pre_server_gpu_memory_by_device.values())
+            )
         if self._pre_server_gpu_memory is not None:
             pre_gb = self._pre_server_gpu_memory / 1e9
             print(
@@ -415,8 +569,9 @@ class RemoteVLLMServer:
             self.proc.terminate()
             print(f"[RemoteOpenAIServer] Sent SIGTERM to process {pid}")
 
+        process_timeout = self._get_process_termination_timeout()
         try:
-            self.proc.wait(timeout=15)
+            self.proc.wait(timeout=process_timeout)
             print(f"[RemoteOpenAIServer] Server {pid} terminated gracefully")
         except subprocess.TimeoutExpired:
             # Phase 2: SIGKILL the entire process group
@@ -454,8 +609,8 @@ class RemoteVLLMServer:
         servers are still holding GPU memory.
 
         Instead, this method terminates every server's process tree in
-        parallel, then runs the GPU-memory-release wait once against the
-        earliest recorded baseline (memory before any server started).
+        parallel, merges overlapping device scopes, and runs one release wait
+        per connected scope using each device's earliest recorded baseline.
         """
         if not servers:
             return
@@ -476,22 +631,126 @@ class RemoteVLLMServer:
         for t in threads:
             t.join()
 
-        # Use the smallest pre-server baseline so the wait targets memory
-        # usage before *any* of these sibling servers started, not after
-        # earlier siblings had already allocated.
-        earliest = min(
-            servers,
-            key=lambda s: (
-                float("inf")
-                if s._pre_server_gpu_memory is None
-                else s._pre_server_gpu_memory
-            ),
-        )
+        # Merge overlapping device scopes into connected components. Within
+        # each component, use the smallest baseline observed for each physical
+        # device. This prevents a later multi-GPU server from incorporating an
+        # earlier sibling's allocation into its aggregate baseline and hiding a
+        # leak on another device.
+        cleanup_servers = [
+            server
+            for server in servers
+            if server._requires_clean_gpu_memory()
+            and server._gpu_device_scope is not None
+        ]
+        components_by_platform: dict[str, list[set[str]]] = {}
+        for server in cleanup_servers:
+            assert server._gpu_device_scope is not None
+            platform, device_ids = server._gpu_device_scope
+            components = components_by_platform.setdefault(platform, [])
+            merged = set(device_ids)
+            disjoint_components = []
+            for component in components:
+                if component.isdisjoint(merged):
+                    disjoint_components.append(component)
+                else:
+                    merged.update(component)
+            components[:] = [*disjoint_components, merged]
+
+        wait_specs: list[
+            tuple[
+                RemoteVLLMServer,
+                tuple[str, ...],
+                float,
+                tuple[str, tuple[str, ...]],
+            ]
+        ] = []
+        for platform, components in components_by_platform.items():
+            for component in components:
+                component_servers = [
+                    server
+                    for server in cleanup_servers
+                    if server._gpu_device_scope is not None
+                    and server._gpu_device_scope[0] == platform
+                    and not set(server._gpu_device_scope[1]).isdisjoint(component)
+                ]
+                earliest_by_device: dict[str, float] = {}
+                for server in component_servers:
+                    baselines = getattr(
+                        server, "_pre_server_gpu_memory_by_device", None
+                    )
+                    if baselines is None:
+                        continue
+                    for device_id, baseline in baselines.items():
+                        if device_id in component:
+                            earliest_by_device[device_id] = min(
+                                baseline,
+                                earliest_by_device.get(device_id, float("inf")),
+                            )
+
+                # Match the pre-existing behavior if baseline telemetry was
+                # unavailable: cleanup still runs, but there is no reliable
+                # memory value against which to wait.
+                if earliest_by_device.keys() != component:
+                    continue
+
+                device_ids = tuple(sorted(component))
+                representative = min(
+                    component_servers,
+                    key=lambda server: (
+                        float("inf")
+                        if server._pre_server_gpu_memory is None
+                        else server._pre_server_gpu_memory
+                    ),
+                )
+                wait_specs.append(
+                    (
+                        representative,
+                        device_ids,
+                        sum(earliest_by_device.values()),
+                        (platform, device_ids),
+                    )
+                )
+
+        errors: list[BaseException] = []
+        errors_lock = threading.Lock()
+
+        def wait_for_release(
+            server: RemoteVLLMServer,
+            device_ids: tuple[str, ...],
+            baseline: float,
+            scope: tuple[str, tuple[str, ...]],
+        ) -> None:
+            try:
+                server._wait_for_gpu_memory_release(
+                    device_ids=device_ids,
+                    baseline=baseline,
+                    cleanup_scope=scope,
+                )
+            except BaseException as e:
+                with errors_lock:
+                    errors.append(e)
+
+        wait_threads = [
+            threading.Thread(
+                target=wait_for_release,
+                args=spec,
+                name=f"gpu-release-{scope}",
+                daemon=True,
+            )
+            for spec in wait_specs
+            for scope in (spec[3],)
+        ]
         try:
-            earliest._wait_for_gpu_memory_release()
+            for thread in wait_threads:
+                thread.start()
+            for thread in wait_threads:
+                thread.join()
         finally:
             for server in servers:
                 server._unregister_active_server()
+
+        if errors:
+            raise errors[0]
 
     def _kill_process_group_survivors(
         self, pgid: int | None, timeout: float = 15.0
@@ -568,20 +827,26 @@ class RemoteVLLMServer:
                 continue
         return members
 
-    def _get_gpu_memory_used(self) -> float | None:
-        """Get total GPU memory used across all visible devices in bytes."""
+    def _get_gpu_memory_used_by_device(
+        self, device_ids: tuple[str, ...] | None = None
+    ) -> dict[str, float] | None:
+        """Get GPU memory used per selected device in bytes."""
         try:
+            if device_ids is None:
+                device_ids = getattr(self, "_gpu_device_ids", None)
+                if device_ids is None:
+                    device_ids = self._get_gpu_device_ids(None)
+            if device_ids is None:
+                return None
+
             if current_platform.is_rocm():
                 with _nvml():
                     handles = amdsmi_get_processor_handles()
-                    devices = get_physical_device_indices(
-                        list(range(current_platform.device_count()))
-                    )
-                    total_used_mib = 0
-                    for device in devices:
-                        handle = handles[device]
+                    used_by_device = {}
+                    for device_id in device_ids:
+                        handle = handles[int(device_id)]
                         vram_info = amdsmi_get_gpu_vram_usage(handle)
-                        total_used_mib += vram_info["vram_used"]
+                        used_by_device[device_id] = vram_info["vram_used"] * 1024 * 1024
                     # amdsmi reports VRAM in MiB; convert to bytes so this
                     # matches the CUDA/nvml branch (already bytes) and the
                     # byte-based target in _wait_for_gpu_memory_release. Without
@@ -589,30 +854,45 @@ class RemoteVLLMServer:
                     # is always satisfied instantly, and returns "released to
                     # 0.00 GB" while the previous server's VRAM is still
                     # resident -- OOMing the next server's startup on ROCm.
-                    return total_used_mib * 1024 * 1024
+                    return used_by_device
             elif current_platform.is_cuda():
                 with _nvml():
-                    total_used = 0
-                    device_count = current_platform.device_count()
-                    for i in range(device_count):
-                        handle = nvmlDeviceGetHandleByIndex(i)
+                    used_by_device = {}
+                    for device_id in device_ids:
+                        handle = (
+                            nvmlDeviceGetHandleByUUID(device_id)
+                            if device_id.startswith(("GPU-", "MIG-"))
+                            else nvmlDeviceGetHandleByIndex(int(device_id))
+                        )
                         mem_info = nvmlDeviceGetMemoryInfo(handle)
-                        total_used += mem_info.used
-                    return total_used
+                        used_by_device[device_id] = mem_info.used
+                    return used_by_device
             elif current_platform.is_xpu():
-                total_used = 0
-                device_count = current_platform.device_count()
-                for i in range(device_count):
-                    free, total = torch.xpu.mem_get_info(i)
-                    total_used += total - free
-                return total_used
+                used_by_device = {}
+                for device_id in device_ids:
+                    free, total = torch.xpu.mem_get_info(int(device_id))
+                    used_by_device[device_id] = total - free
+                return used_by_device
         except Exception as e:
             print(f"[RemoteOpenAIServer] Could not query GPU memory: {e}")
             return None
         return None
 
+    def _get_gpu_memory_used(
+        self, device_ids: tuple[str, ...] | None = None
+    ) -> float | None:
+        """Get total GPU memory used across selected devices in bytes."""
+        used_by_device = self._get_gpu_memory_used_by_device(device_ids)
+        return None if used_by_device is None else sum(used_by_device.values())
+
     def _wait_for_gpu_memory_release(
-        self, timeout: float = 120.0, log_interval: float = 10.0
+        self,
+        timeout: float = 120.0,
+        log_interval: float = 10.0,
+        *,
+        device_ids: tuple[str, ...] | None = None,
+        baseline: float | None = None,
+        cleanup_scope: tuple[str, tuple[str, ...]] | None = None,
     ):
         """Wait for GPU memory to drop back toward pre-server levels.
 
@@ -622,7 +902,8 @@ class RemoteVLLMServer:
         the test fails so the problem is surfaced immediately rather
         than causing cascading OOM failures in every subsequent test.
         """
-        baseline = self._pre_server_gpu_memory
+        if baseline is None:
+            baseline = self._pre_server_gpu_memory
         if baseline is None:
             # Can't query GPU memory - nothing to do
             return
@@ -636,10 +917,14 @@ class RemoteVLLMServer:
         next_log_time = start + log_interval
 
         while time.time() - start < timeout:
-            used = self._get_gpu_memory_used()
+            used = self._get_gpu_memory_used(device_ids)
 
             if used is None:
-                return  # Can't query, assume ok
+                # A transient telemetry failure is not proof that cleanup
+                # succeeded. Keep waiting so an unverified release cannot
+                # become the next server's baseline.
+                time.sleep(1.0)
+                continue
 
             used_gb = used / 1e9
             target_gb = target / 1e9
@@ -666,14 +951,19 @@ class RemoteVLLMServer:
 
         # Timeout -- raise so the current test fails with a clear
         # message instead of silently poisoning subsequent tests.
-        final_used = self._get_gpu_memory_used()
-        final_gb = final_used / 1e9 if final_used else 0.0
+        final_used = self._get_gpu_memory_used(device_ids)
+        self._record_failed_gpu_cleanup(
+            baseline, target, final_used, scope=cleanup_scope
+        )
+        final_text = (
+            "unavailable" if final_used is None else f"{final_used / 1e9:.2f} GB"
+        )
         raise RuntimeError(
             f"[RemoteOpenAIServer] GPU memory did not release within "
-            f"{timeout}s. Current: {final_gb:.2f} GB, "
+            f"{timeout}s. Current: {final_text}, "
             f"target: {target / 1e9:.2f} GB, "
             f"baseline: {baseline / 1e9:.2f} GB. "
-            f"Child processes may still be holding GPU memory."
+            f"A child process or another workload may be holding GPU memory."
         )
 
     def _poll(self) -> int | None:
@@ -758,6 +1048,15 @@ class RemoteVLLMServer:
 class RemoteOpenAIServer(RemoteVLLMServer):
     """Launches ``vllm serve`` for testing OpenAI-compatible endpoints."""
 
+    def _get_process_termination_timeout(self) -> float:
+        process_timeout = get_engine_process_shutdown_timeout(
+            self._request_shutdown_timeout, self._request_shutdown_timeout
+        )
+        assert process_timeout is not None
+        # Leave time for the API process to finish its own cleanup after its
+        # EngineCore manager has completed.
+        return max(super()._get_process_termination_timeout(), process_timeout + 15.0)
+
     def _create_cli_subcommand(self):
         return ServeSubcommand()
 
@@ -787,6 +1086,14 @@ class RemoteOpenAIServer(RemoteVLLMServer):
 
 class RemoteLaunchRenderServer(RemoteVLLMServer):
     """Launches ``vllm launch render`` for GPU-less serving tests."""
+
+    def _requires_clean_gpu_memory(self) -> bool:
+        return False
+
+    def _get_gpu_device_ids(
+        self, env_dict: dict[str, str] | None
+    ) -> tuple[str, ...] | None:
+        return None
 
     def _create_cli_subcommand(self):
         return ServeSubcommand()
@@ -889,7 +1196,7 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
             self.proc.terminate()
             print(f"[RemoteOpenAIServerCustom] Sent SIGTERM to process {pid}")
 
-        self.proc.join(15)
+        self.proc.join(self._get_process_termination_timeout())
         if self.proc.is_alive():
             print(
                 f"[RemoteOpenAIServerCustom] Server {pid} did not respond "
