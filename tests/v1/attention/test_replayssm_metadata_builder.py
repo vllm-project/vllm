@@ -17,9 +17,6 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm.config.mamba import MambaBackendEnum
-from vllm.v1.attention.backends.mamba_attn import (
-    _derive_flashinfer_replayssm_ring_state,
-)
 from vllm.v1.kv_cache_interface import MambaSpec
 
 BLOCK_SIZE = 16
@@ -194,19 +191,23 @@ def _make_mamba_spec(
     buffer_len: int,
     mamba_backend: MambaBackendEnum,
 ) -> MambaSpec:
-    # Five-tensor ReplaySSM page; the builder only reads shapes[4][0] (bc groups).
+    # The builder only reads the x/B ring shapes; include FlashInfer's trackers
+    # so the mock page matches the production cache layout.
     ring_buffer_len = buffer_len + (
         1 if mamba_backend == MambaBackendEnum.FLASHINFER else 0
     )
+    shapes = (
+        (1, 1),
+        (1, 1, 1),
+        (1, ring_buffer_len, 1),
+        (1, ring_buffer_len),
+        (1, ring_buffer_len, 1),
+    )
+    if mamba_backend == MambaBackendEnum.FLASHINFER:
+        shapes = (*shapes, (), ())
     return MambaSpec(
         block_size=BLOCK_SIZE,
-        shapes=(
-            (1, 1),
-            (1, 1, 1),
-            (1, ring_buffer_len, 1),
-            (1, ring_buffer_len),
-            (1, ring_buffer_len, 1),
-        ),
+        shapes=shapes,
         dtypes=(torch.float32,),
     )
 
@@ -272,35 +273,20 @@ def test_resumed_request_differs_from_fresh():
     assert meta.is_flush_d.tolist()[:2] == [0, 0]
 
 
-def test_flashinfer_replayssm_ring_metadata_fresh_decode():
-    """FlashInfer receives per-slot ring metadata and per-row scratch."""
+def test_flashinfer_replayssm_scratch_metadata_fresh_decode():
+    """FlashInfer receives per-row scratch; ring state is layer-local."""
     builder = _create_replayssm_builder(
         16, mamba_backend=MambaBackendEnum.FLASHINFER
     )
     case = REPLAYSSM_BUILD_CASES["fresh_decode"]
     meta = _build(builder, case)
 
-    assert meta.ring_start_d is not None
-    assert meta.prev_num_accepted_d is not None
     assert meta.write_pos_d is None
     assert meta.is_flush_d is None
     assert meta.bc_pre_scratch is None
-    state_slot = int(meta.state_indices_tensor_d[0, 0])
-    assert torch.count_nonzero(meta.ring_start_d) == 0
-    assert int(meta.prev_num_accepted_d[state_slot]) == case.expected_write_pos[0]
     assert meta.cb_scaled is not None
     assert meta.cb_scaled.shape == (1, 1, 32, 8)
     assert meta.cumAdt_vec is not None
     assert meta.cumAdt_vec.shape == (1, 1, 16)
     assert meta.cb_old is not None
     assert meta.cb_old.shape == (1, 1, 32, 8)
-
-
-def test_flashinfer_replayssm_ring_lifecycle_across_flushes():
-    ring_start, prev_num_accepted = _derive_flashinfer_replayssm_ring_state(
-        torch.tensor([0, 5, 16, 17, 32, 33], dtype=torch.int32),
-        logical_window=16,
-    )
-
-    assert ring_start.tolist() == [0, 0, 0, 16, 16, 15]
-    assert prev_num_accepted.tolist() == [0, 5, 16, 1, 16, 1]
