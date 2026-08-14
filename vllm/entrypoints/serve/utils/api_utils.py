@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 import dataclasses
 import functools
 import os
@@ -35,17 +36,14 @@ VLLM_SUBCMD_PARSER_EPILOG = (
 
 
 async def listen_for_disconnect(request: Request) -> None:
-    """Returns if a disconnect message is received"""
+    """Returns if a disconnect message is received.
+
+    Load metrics are owned by ``load_aware_call`` so disconnect and response
+    completion cannot double-decrement ``server_load_metrics``.
+    """
     while True:
         message = await request.receive()
         if message["type"] == "http.disconnect":
-            # If load tracking is enabled *and* the counter exists, decrement
-            # it. Combines the previous nested checks into a single condition
-            # to satisfy the linter rule.
-            if getattr(
-                request.app.state, "enable_server_load_tracking", False
-            ) and hasattr(request.app.state, "server_load_metrics"):
-                request.app.state.server_load_metrics -= 1
             break
 
 
@@ -89,6 +87,9 @@ def with_cancellation(handler_func):
 
         if handler_task in done:
             return handler_task.result()
+        # Let load_aware_call run CancelledError cleanup before returning.
+        with contextlib.suppress(asyncio.CancelledError):
+            await handler_task
         return None
 
     return wrapper
@@ -118,7 +119,8 @@ def load_aware_call(func):
         raw_request.app.state.server_load_metrics += 1
         try:
             response = await func(*args, **kwargs)
-        except Exception:
+        except (Exception, asyncio.CancelledError):
+            # CancelledError is BaseException on Py3.9+ (disconnect path).
             raw_request.app.state.server_load_metrics -= 1
             raise
 
