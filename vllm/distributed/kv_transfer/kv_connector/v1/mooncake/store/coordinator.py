@@ -37,6 +37,13 @@ class ExternalCachedBlockPool:
         # determined and we just want each spec's manager to apply its own mask.
         self._exists = exists
         self.hash_block_size = hash_block_size
+        # False on the recv side, where the pool answers "present" to anything.
+        # The exact-boundary retry must not run against such a pool: it would
+        # shorten a hit that the lookup already validated, and load_mask's caller
+        # keeps using the original token_len, so process_tokens' trailing chunks
+        # would fall off the end of the mask and leave those blocks
+        # uninitialized -- silent corruption where -704 was at least loud.
+        self.tracks_existence = exists is not None
         self.null_block = KVCacheBlock(block_id=0)
         # Dummy ID 1 for present block for duck-typing.
         self._present_block = KVCacheBlock(block_id=1)
@@ -89,6 +96,14 @@ class MooncakeStoreCoordinator:
         # Mirror vLLM core's KVCacheCoordinator.retention_interval.
         self.retention_interval = retention_interval
         self._verify_and_split_kv_cache_groups()
+
+    @property
+    def cache_hit_alignment_tokens(self) -> int:
+        return (
+            self.hash_block_size
+            if self.enable_partial_hash_hits
+            else self.lcm_block_size
+        )
 
     def align_lookup_length(self, length: int) -> int:
         alignment = (
@@ -152,14 +167,56 @@ class MooncakeStoreCoordinator:
         already reflects the eagle-pruned hit length and a second pop would
         leave the trailing block unloaded.
         """
-        blocks_per_group, hit_length = self._find_hit_blocks(
-            block_hashes, max_length, cached_block_pool, apply_eagle=apply_eagle
+        candidate_length = max_length
+        while True:
+            blocks_per_group, hit_length = self._find_hit_blocks(
+                block_hashes,
+                candidate_length,
+                cached_block_pool,
+                apply_eagle=apply_eagle,
+            )
+            masks = tuple(
+                [blk is not cached_block_pool.null_block for blk in blocks]
+                for blocks in blocks_per_group
+            )
+            if hit_length == 0 or self._exact_partial_hit_key_exists(
+                block_hashes, hit_length, cached_block_pool
+            ):
+                return masks, hit_length
+
+            candidate_length = max(0, hit_length - self.cache_hit_alignment_tokens)
+
+    def _exact_partial_hit_key_exists(
+        self,
+        block_hashes: Sequence[BlockHash],
+        hit_length: int,
+        cached_block_pool: ExternalCachedBlockPool,
+    ) -> bool:
+        """Whether the reconciled partial FullAttention tail can be loaded."""
+        if not self.enable_partial_hash_hits:
+            return True
+        if not cached_block_pool.tracks_existence:
+            # Recv-side pool: it has no truth to check, and shortening the hit
+            # here would desynchronise the mask from its caller's token_len.
+            return True
+
+        # Attribute access, not tuple unpacking: SpecGroup carries manager_cls
+        # and use_eagle here, so the upstream 3-tuple unpack raises ValueError
+        # on the first lookup. git apply cannot see that -- it is a runtime
+        # arity mismatch, not a textual conflict.
+        group = self.attention_groups[0]
+        if not isinstance(group.spec, FullAttentionSpec):
+            # Nothing to revalidate: the defect needs an attention group coarser
+            # than hash granularity, and a recurrent group is tail-only. Upstream
+            # asserts FullAttentionSpec here, which crashes at the first lookup on
+            # a Mamba-only layout -- reachable, since partial hits are enabled by
+            # a Mamba group alone.
+            return True
+        hash_idx = hit_length // self.hash_block_size - 1
+        return (
+            cached_block_pool.get_cached_block(block_hashes[hash_idx], group.group_ids)
+            is not None
         )
-        masks = tuple(
-            [blk is not cached_block_pool.null_block for blk in blocks]
-            for blocks in blocks_per_group
-        )
-        return masks, hit_length
 
     def load_mask(
         self,
