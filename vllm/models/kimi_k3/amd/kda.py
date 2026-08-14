@@ -43,6 +43,7 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
 )
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
 from vllm.models.kimi_k3.amd.ops.kda_decode import (
     is_fused_kda_decode_supported,
     make_decode_conv1d_weight_loader,
@@ -55,12 +56,16 @@ from vllm.models.kimi_k3.amd.ops.third_party.kda import (
 )
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 logger = init_logger(__name__)
 
 
 class KimiK3DeltaAttention(GatedDeltaNetAttention):
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return KimiK3ROCmKDABackend
+
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
@@ -551,6 +556,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     output_final_state=True,
                     use_qk_l2norm_in_kernel=True,
                     cu_seqlens=prefill_query_start_loc,
+                    chunk_indices=m.chunk_indices,
+                    chunk_offsets=m.chunk_offsets,
                 )
                 # Init cache
                 recurrent_state[prefill_state_indices] = last_recurrent_state

@@ -104,10 +104,6 @@ class Mxfp4Config(QuantizationConfig):
             )
         return None
 
-    def is_mxfp4_quant(self, prefix: str, layer: torch.nn.Module) -> bool:
-        """MXFP4 config always uses MXFP4 quantization."""
-        return True
-
 
 class GptOssMxfp4Config(Mxfp4Config):
     """MXFP4 config for GPT-OSS checkpoints.
