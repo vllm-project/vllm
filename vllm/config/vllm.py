@@ -1987,16 +1987,36 @@ class VllmConfig:
                         speculative_config is not None
                         and speculative_config.uses_dynamic_speculative_decoding()
                     ):
+                        from vllm.v1.spec_decode.dynamic.utils import (
+                            build_dynamic_sd_schedule_lookup,
+                        )
+
                         schedule = (
                             speculative_config.num_speculative_tokens_per_batch_size
                         )
                         assert schedule is not None
-                        # (range_start, range_end, num_speculative_tokens), and
-                        # a tier only ever runs up to the end of its range.
-                        decode_tiers = [
-                            (num_spec + 1, min(range_end, max_num_seqs))
-                            for _, range_end, num_spec in schedule
-                        ]
+                        # Read the tiers off the dense lookup the scheduler
+                        # runs on, so the clamp against num_speculative_tokens
+                        # and the carry-forward through gaps and the tail
+                        # cannot drift from it. Validation lives elsewhere; an
+                        # invalid schedule keeps the single-tier default.
+                        try:
+                            dense_schedule = build_dynamic_sd_schedule_lookup(
+                                schedule,
+                                vllm_max_batch_size=max_num_seqs,
+                                vllm_num_speculative_tokens=self.num_speculative_tokens,
+                            )
+                        except ValueError:
+                            pass
+                        else:
+                            # Ascending batch size, so the last write per
+                            # query length is the widest batch running at it.
+                            widest_batch: dict[int, int] = {}
+                            for batch_size, num_spec in enumerate(
+                                dense_schedule[1:], start=1
+                            ):
+                                widest_batch[num_spec + 1] = batch_size
+                            decode_tiers = list(widest_batch.items())
 
                     uniform_decode_sizes = sorted(
                         {

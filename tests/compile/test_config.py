@@ -722,6 +722,44 @@ def test_default_cudagraph_capture_sizes_cover_every_dynamic_decode_width():
     assert _widest_covered_request_count(sizes, 3, 256) == 256
 
 
+def test_dynamic_decode_capture_clamps_configured_width():
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=16,
+        num_speculative_tokens=3,
+        max_num_batched_tokens=32768,
+        compilation_config=compilation_config,
+        num_speculative_tokens_per_batch_size=[(1, 16, 5)],
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    sizes = compilation_config.cudagraph_capture_sizes
+    assert _widest_covered_request_count(sizes, 4, 16) == 16
+    assert 6 not in sizes
+
+
+def test_dynamic_decode_capture_covers_schedule_gap_and_tail():
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=17,
+        num_speculative_tokens=4,
+        max_num_batched_tokens=32768,
+        compilation_config=compilation_config,
+        num_speculative_tokens_per_batch_size=[(1, 2, 4), (5, 5, 1)],
+    )
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    sizes = compilation_config.cudagraph_capture_sizes
+    assert 20 in sizes
+    assert 34 in sizes
+
+
 def test_default_cudagraph_capture_size_still_clamped_by_token_budget():
     """Decode coverage does not override the `max_num_batched_tokens` clamp.
 
