@@ -13,6 +13,7 @@ from collections.abc import Callable, Iterable
 from math import lcm
 from typing import TypeGuard
 
+import regex as re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -214,9 +215,49 @@ def _is_block_fp8_config(
 
 def _configure_ling_fp8_quant_config(
     quant_config: QuantizationConfig | None,
+    config: PretrainedConfig,
 ) -> None:
-    if _is_block_fp8_config(quant_config):
-        quant_config.ignored_layers_match_mode = "suffix"
+    if not _is_block_fp8_config(quant_config):
+        return
+
+    quant_config.ignored_layers_match_mode = "suffix"
+    hf_quant_config = getattr(config, "quantization_config", None)
+    if not isinstance(hf_quant_config, dict):
+        return
+
+    quant_config.is_scale_e8m0 = (  # type: ignore[attr-defined]
+        hf_quant_config.get("scale_fmt") == "ue8m0"
+    )
+
+    routed_quant_method = hf_quant_config.get("routed_experts_quant_method")
+    if routed_quant_method is None:
+        return
+    if routed_quant_method != "mxfp4":
+        raise ValueError(
+            f"Unsupported routed experts quantization: {routed_quant_method!r}"
+        )
+
+    quant_config.store_dtype = "mxfp4"
+
+
+_LING_MXFP4_WEIGHTS_MAPPER = WeightsMapper(
+    orig_to_new_regex={
+        re.compile(
+            r"(\.mlp\.experts\.\d+\."
+            r"(?:gate_proj|up_proj|down_proj)\.weight_scale)_inv$"
+        ): r"\1"
+    }
+)
+
+
+def _maybe_remap_ling_mxfp4_weight_names(
+    weights: Iterable[tuple[str, torch.Tensor]],
+    quant_config: QuantizationConfig | None,
+) -> Iterable[tuple[str, torch.Tensor]]:
+    """Map Ling's MXFP4 expert scales to Mxfp4MoEMethod parameters."""
+    if isinstance(quant_config, Fp8Config) and quant_config.store_dtype == "mxfp4":
+        return _LING_MXFP4_WEIGHTS_MAPPER.apply(weights)
+    return weights
 
 
 def _is_fp8_module_excluded(
@@ -1351,7 +1392,7 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        _configure_ling_fp8_quant_config(quant_config)
+        _configure_ling_fp8_quant_config(quant_config, config)
         self.config = config
         self.quant_config = quant_config
         self.model = BailingMoeV3Model(
@@ -1421,6 +1462,7 @@ class BailingMoeV3ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = self.hf_to_vllm_mapper.apply(weights)
+        weights = _maybe_remap_ling_mxfp4_weight_names(weights, self.quant_config)
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
         stacked_mappings = [

@@ -54,6 +54,11 @@ def test_registry_imports(model_arch):
     ):
         pytest.skip("DSparkDraftModel is only supported on CUDA and ROCm")
 
+    if model_arch in ("Dots3NoteForCausalLM", "Dots3NoteMTPModel") and not (
+        current_platform.is_cuda()
+    ):
+        pytest.skip("Dots3 NOTE is only supported on CUDA")
+
     # Ensure all model classes can be imported successfully
     model_cls = ModelRegistry._try_load_model_cls(model_arch)
     assert model_cls is not None

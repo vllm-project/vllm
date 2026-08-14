@@ -124,10 +124,11 @@ def test_dynamic_sd_full_cudagraph_covers_all_uniform_decode_shapes(monkeypatch)
             # Uniform decode means every request contributes the same number of
             # tokens, so the total token count is exactly num_reqs * query_len.
             num_tokens = num_reqs * max_query_len
-            uniform_tok_count = gpu_cudagraph_utils.get_uniform_token_count(
+            uniform_tok_count = get_uniform_decode_token_count(
                 num_reqs,
                 num_tokens,
                 max_query_len,
+                has_prefill=False,
             )
 
             # The scheduler should mark every one of these shapes as a uniform
@@ -233,8 +234,8 @@ def test_prompt_chunks_shaped_like_spec_decode_miss_the_full_graph(monkeypatch):
 
     # The batch shape is indistinguishable from a full batch of spec decodes.
     assert (
-        gpu_cudagraph_utils.get_uniform_token_count(
-            num_reqs, num_tokens, decode_query_len
+        get_uniform_decode_token_count(
+            num_reqs, num_tokens, decode_query_len, has_prefill=False
         )
         == decode_query_len
     )
@@ -305,10 +306,11 @@ def test_basic_sd_does_not_capture_shorter_full_decode_shapes(monkeypatch):
             # These are still uniform decode batches, but basic SD should only
             # have FULL graphs for query_len == max_decode_query_len.
             num_tokens = num_reqs * max_query_len
-            uniform_tok_count = gpu_cudagraph_utils.get_uniform_token_count(
+            uniform_tok_count = get_uniform_decode_token_count(
                 num_reqs,
                 num_tokens,
                 max_query_len,
+                has_prefill=False,
             )
             assert uniform_tok_count == max_query_len
 
@@ -370,10 +372,11 @@ def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
     for num_reqs in range(1, max_num_seqs + 1):
         for max_query_len in range(1, max_decode_query_len + 1):
             num_tokens = num_reqs * max_query_len
-            uniform_tok_count = gpu_cudagraph_utils.get_uniform_token_count(
+            uniform_tok_count = get_uniform_decode_token_count(
                 num_reqs,
                 num_tokens,
                 max_query_len,
+                has_prefill=False,
             )
             assert uniform_tok_count == max_query_len
 

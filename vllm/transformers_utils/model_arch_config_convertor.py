@@ -317,6 +317,7 @@ class ModelArchConfigConvertorBase:
             "deepseek_v3",
             "deepseek_v32",
             "deepseek_v4",
+            "dots3_note",
             "deepseek_mtp",
             "k3_dspark",
             "glm_moe_dsa",

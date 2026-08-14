@@ -477,6 +477,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self._flash_attn_varlen_diff_headdims(
             q=q,
@@ -489,6 +490,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             softmax_scale=self.scale,
             causal=False,  # Context is unmasked
             return_softmax_lse=True,
+            out=out,
         )
 
 

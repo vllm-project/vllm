@@ -8,7 +8,10 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, get_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    get_current_vllm_config,
+)
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -94,6 +97,7 @@ def should_load_quant_weights(quant_method: QuantizeMethodBase | None) -> bool:
 
 def _largest_kernel_block_within(
     attn_backend: "type[AttentionBackend]",
+    vllm_config: VllmConfig,
     per_token_bytes: int,
     page_budget: int | None,
     fallback: int,
@@ -108,7 +112,7 @@ def _largest_kernel_block_within(
     """
     from vllm.v1.attention.backend import MultipleOf
 
-    sizes = attn_backend.get_supported_kernel_block_sizes()
+    sizes = attn_backend.get_supported_kernel_block_sizes_for_config(vllm_config)
     candidates = [s for s in sizes if isinstance(s, int)]
     if not candidates:
         candidates = [s.base for s in sizes if isinstance(s, MultipleOf)]
@@ -619,17 +623,24 @@ class Attention(nn.Module, AttentionLayerBase):
             # bytes per block. Otherwise (page_size_padded is None) the smallest
             # block is fine — ``unify`` scales it up by an integer ratio.
             shared_page = vllm_config.cache_config.skip_page_size_padded
-            sw_per_token = SlidingWindowSpec(
-                block_size=1,
-                num_kv_heads=self.num_kv_heads,
-                head_size=self.head_size,
-                head_size_v=self.head_size_v,
-                dtype=self.kv_cache_torch_dtype,
-                kv_quant_mode=quant_mode,
-                sliding_window=self.sliding_window,
+            # The backend owns its packing
+            sw_per_token = self.attn_backend.customize_spec(
+                SlidingWindowSpec(
+                    block_size=1,
+                    num_kv_heads=self.num_kv_heads,
+                    head_size=self.head_size,
+                    head_size_v=self.head_size_v,
+                    dtype=self.kv_cache_torch_dtype,
+                    kv_quant_mode=quant_mode,
+                    sliding_window=self.sliding_window,
+                )
             ).real_page_size_bytes
             sw_block_size = _largest_kernel_block_within(
-                self.attn_backend, sw_per_token, shared_page, block_size
+                self.attn_backend,
+                vllm_config,
+                sw_per_token,
+                shared_page,
+                block_size,
             )
             return SlidingWindowSpec(
                 block_size=sw_block_size,
@@ -640,24 +651,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
                 page_size_padded=shared_page,
-            )
-        elif self.kv_cache_dtype.startswith("turboquant_"):
-            from vllm.model_executor.layers.quantization.turboquant.config import (
-                TurboQuantConfig,
-            )
-            from vllm.v1.kv_cache_interface import TQFullAttentionSpec
-
-            tq_config = TurboQuantConfig.from_cache_dtype(
-                self.kv_cache_dtype, self.head_size
-            )
-            return TQFullAttentionSpec(
-                block_size=block_size,
-                num_kv_heads=self.num_kv_heads,
-                head_size=self.head_size,
-                head_size_v=self.head_size,
-                dtype=self.kv_cache_torch_dtype,
-                kv_quant_mode=quant_mode,
-                tq_slot_size=tq_config.slot_size_aligned,
             )
         else:
             return FullAttentionSpec(
