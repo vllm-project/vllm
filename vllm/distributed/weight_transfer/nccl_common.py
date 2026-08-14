@@ -104,12 +104,12 @@ def worker_init_process_group(
 
 def trainer_init(
     init_info: NCCLRendezvous | dict,
+    rank: int = 0,
 ) -> "PyNcclCommunicator":
     """
     Initialize NCCL process group for trainer-side weight transfer.
 
-    The trainer is always rank 0 in the process group. Uses the current
-    CUDA device (torch.accelerator.current_device_index()).
+    Uses the current CUDA device (torch.accelerator.current_device_index()).
 
     Args:
         init_info: Any object carrying the `NCCLRendezvous` fields (a trainer or
@@ -117,6 +117,9 @@ def trainer_init(
             - master_address: str
             - master_port: int
             - world_size: int
+        rank: This trainer process's rank in the group. The broadcast backends
+            have a single trainer at rank 0; multi-rank trainers (m2n) occupy
+            ranks `[0, num_trainer_ranks)` and the workers start after them.
 
     Returns:
         PyNcclCommunicator for weight transfer.
@@ -130,12 +133,11 @@ def trainer_init(
         master_port = init_info.master_port
         world_size = init_info.world_size
 
-    # Trainer is always rank 0
     device = torch.accelerator.current_device_index()
     return stateless_init_process_group(
         master_address,
         master_port,
-        0,
+        rank,
         world_size,
         device,
     )

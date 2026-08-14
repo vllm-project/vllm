@@ -271,3 +271,9 @@ WeightTransferTrainerFactory.register_engine(
     "vllm.distributed.weight_transfer.sharded_rdt_trainer",
     "ShardedRDTTrainerWeightTransferEngine",
 )
+
+WeightTransferTrainerFactory.register_engine(
+    "nccl_m2n",
+    "vllm.distributed.weight_transfer.m2n_trainer",
+    "M2NTrainerWeightTransferEngine",
+)
