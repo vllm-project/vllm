@@ -259,11 +259,7 @@ def test_rocm_aiter_rmsnorm_with_add_vs_torch():
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
-    reason=(
-        "AITER Triton RoPE precision gap: max element error ~0.03125 (2^-5 BF16 ULP) "
-        "requires atol~=2e-2; NVIDIA CUDA RoPE achieves atol=1e-3 for bf16 "
-        "(allclose_default.py). Fix in upstream aiter rope kernel."
-    ),
+    reason="AITER Triton RoPE precision issue: https://github.com/ROCm/aiter/issues/4765",
 )
 def test_rocm_aiter_triton_rotary_embedding_vs_torch():
     """rocm_aiter_triton_rotary_embedding matches manual NeoX-style RoPE reference.
