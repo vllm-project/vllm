@@ -340,6 +340,19 @@ class CudaCommunicator(DeviceCommunicatorBase):
             torch.distributed.all_reduce(out, group=self.device_group)
         return out
 
+    def all_reduce_out(self, input_: torch.Tensor, out: torch.Tensor) -> None:
+        aiter_ar_comm = self.aiter_ar_comm
+        if (
+            aiter_ar_comm is not None
+            and not aiter_ar_comm.disabled
+            and aiter_ar_comm.should_custom_ar(input_)
+        ):
+            result = aiter_ar_comm.custom_all_reduce_out(input_, out)
+            assert result is not None
+            return
+
+        out.copy_(self.all_reduce(input_))
+
     def custom_all_gather(self, input_: torch.Tensor) -> torch.Tensor | None:
         ca_comm = self.ca_comm
         if ca_comm is None:

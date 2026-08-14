@@ -8,7 +8,10 @@ from torch import nn
 from vllm import _custom_ops as ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig
-from vllm.distributed import divide
+from vllm.distributed import (
+    divide,
+    tensor_model_parallel_all_reduce_out,
+)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
@@ -233,6 +236,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.hidden_size,
             bias=False,
             quant_config=self.quant_config,
+            reduce_results=False,
             prefix=f"{prefix}.o_proj",
         )
 
@@ -290,7 +294,8 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
-        output[:] = self.o_proj(core_attn_out)[0]
+        output_parallel = self.o_proj(core_attn_out)[0]
+        tensor_model_parallel_all_reduce_out(output_parallel, output)
 
     @eager_break_during_capture
     def _forward(
