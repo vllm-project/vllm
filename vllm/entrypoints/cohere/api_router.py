@@ -33,9 +33,9 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 import vllm.envs as envs
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.serve.exception_handler.utils import sanitize_message
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
-    sanitize_message,
     validate_json_request,
     with_cancellation,
 )

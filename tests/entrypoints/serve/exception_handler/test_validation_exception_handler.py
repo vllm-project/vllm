@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.exceptions import RequestValidationError
 
-from vllm.entrypoints.serve.utils.server_utils import (
+from vllm.entrypoints.serve.exception_handler.handler.validation import (
     clean_loc_for_param,
     validation_exception_handler,
 )

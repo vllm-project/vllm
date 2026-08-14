@@ -86,7 +86,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     StreamOptions,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.utils.api_utils import sanitize_message
+from vllm.entrypoints.serve.exception_handler.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.parser.abstract_parser import Parser
 from vllm.renderers.cohere import MESSAGES_CITATIONS_KEY, POSITION_TO_SOURCE_KEY

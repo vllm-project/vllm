@@ -52,7 +52,9 @@ from vllm.entrypoints.pooling.scoring.protocol import (
     ScoreRequest,
     ScoreResponse,
 )
-from vllm.entrypoints.serve.utils.error_response import create_error_response
+from vllm.entrypoints.serve.exception_handler.error_response import (
+    create_error_response,
+)
 from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
