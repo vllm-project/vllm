@@ -69,25 +69,18 @@ fi
 export BUILDKIT_PROGRESS TERM FORCE_COLOR CLICOLOR_FORCE PY_COLORS PYTEST_ADDOPTS PYTEST_TIMEOUT ROCM_DOCKER_TTY
 export PYTHONFAULTHANDLER
 
-# The pipeline generator enables this only for eligible AMD jobs. Non-main,
-# non-scheduled first attempts start cache-only; all other jobs run online.
-amd_runner_script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck source=amd-hf-client-mode.sh
-source "${amd_runner_script_dir}/amd-hf-client-mode.sh" || exit 1
-hf_offline_retry_enabled="${VLLM_CI_HF_OFFLINE_RETRY-0}"
-hf_retry_count="${BUILDKITE_RETRY_COUNT-0}"
-hf_offline_retry_disabled="${VLLM_CI_DISABLE_HF_OFFLINE_RETRY-0}"
-hf_initial_online=$(
-  vllm_amd_hf_resolve_initial_online \
-    "${BUILDKITE_BRANCH-}" "${NIGHTLY-0}" "${TORCH_NIGHTLY-0}"
-) || exit $?
-hf_client_mode=$(
-  vllm_amd_hf_resolve_mode \
-    "${hf_offline_retry_enabled}" \
-    "${hf_retry_count}" \
-    "${hf_offline_retry_disabled}" \
-    "${hf_initial_online}"
-) || exit $?
+# Opted-in presubmit jobs start from the cache. Retries and scheduled jobs run
+# online so a fresh job can refresh it.
+hf_client_offline=
+if [[ "${VLLM_CI_HF_OFFLINE_RETRY:-0}" == "1" ]]; then
+  hf_client_offline=0
+  if [[ "${BUILDKITE_RETRY_COUNT:-0}" == "0" \
+    && "${BUILDKITE_BRANCH:-}" != "main" \
+    && "${NIGHTLY:-0}" != "1" \
+    && "${TORCH_NIGHTLY:-0}" != "1" ]]; then
+    hf_client_offline=1
+  fi
+fi
 
 # Export Python path for commands that run directly on the host. Containerized
 # tests set this to /vllm-workspace below so spawned Python processes do not
@@ -104,26 +97,28 @@ report_docker_usage() {
 }
 
 log_hf_client_mode() {
-  case "${hf_client_mode}" in
-    cache-only)
+  case "${hf_client_offline}" in
+    1)
       echo "--- :package: Hugging Face clients: cache-only first Buildkite attempt"
-      echo "HF client offline flags are enabled; network access is not isolated."
       ;;
-    online)
-      if [[ "${hf_retry_count}" == "0" ]]; then
-        echo "--- :globe_with_meridians: Hugging Face clients: online first Buildkite attempt"
-      else
-        echo "--- :globe_with_meridians: Hugging Face clients: online Buildkite retry ${hf_retry_count}"
-      fi
+    0)
+      echo "--- :globe_with_meridians: Hugging Face clients: online"
       ;;
   esac
+}
+
+apply_hf_client_mode() {
+  if [[ "${hf_client_offline}" == "1" ]]; then
+    export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
+  elif [[ "${hf_client_offline}" == "0" ]]; then
+    unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE HF_DATASETS_OFFLINE
+  fi
 }
 
 clear_ci_orchestration_env() {
   unset -v \
     VLLM_TEST_GROUP_NAME \
     VLLM_CI_HF_OFFLINE_RETRY \
-    VLLM_CI_DISABLE_HF_OFFLINE_RETRY \
     VLLM_CI_REQUIRE_PERSISTENT_HF_CACHE \
     VLLM_CI_ARTIFACT_STEP \
     VLLM_TEST_CACHE \
@@ -725,11 +720,13 @@ collect_rocm_failure_diagnostics() {
   echo "Unauthenticated outer-runner network reachability diagnostics" \
     | tee -a "${diagnostics_path}"
   if command -v curl >/dev/null 2>&1; then
-    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" curl -q \
-      --silent --location --proto '=https' --proto-redir '=https' \
-      --max-redirs 3 --output /dev/null --connect-timeout 2 --max-time 4 \
-      --write-out 'target=huggingface http_code=%{http_code} dns_done_s=%{time_namelookup} connect_done_s=%{time_connect} tls_done_s=%{time_appconnect} first_byte_s=%{time_starttransfer} total_s=%{time_total}\n' \
-      https://huggingface.co/api/models/gpt2
+    if [[ "${hf_client_offline}" != "1" ]]; then
+      run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" curl -q \
+        --silent --location --proto '=https' --proto-redir '=https' \
+        --max-redirs 3 --output /dev/null --connect-timeout 2 --max-time 4 \
+        --write-out 'target=huggingface http_code=%{http_code} dns_done_s=%{time_namelookup} connect_done_s=%{time_connect} tls_done_s=%{time_appconnect} first_byte_s=%{time_starttransfer} total_s=%{time_total}\n' \
+        https://huggingface.co/api/models/gpt2
+    fi
     run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" curl -q \
       --silent --location --proto '=https' --proto-redir '=https' \
       --max-redirs 3 --output /dev/null --connect-timeout 2 --max-time 4 \
@@ -978,10 +975,6 @@ if is_native_runtime; then
   fi
 
   if is_multi_node "$commands"; then
-    if [[ "${hf_offline_retry_enabled}" == "1" ]]; then
-      echo "Hugging Face client cache-only mode is not eligible for AMD multi-node jobs" >&2
-      exit 2
-    fi
     echo "Native CI does not support multi-node jobs yet."
     exit 1
   fi
@@ -1001,7 +994,7 @@ if is_native_runtime; then
   run_native_preflight || exit 1
   # Keep AMD CI orchestration variables out of vLLM's runtime environment.
   clear_ci_orchestration_env
-  vllm_amd_hf_apply_mode "${hf_client_mode}" || exit $?
+  apply_hf_client_mode
   log_hf_client_mode
   /bin/bash -o pipefail -c "${commands}"
   handle_pytest_exit "$?"
@@ -1165,10 +1158,6 @@ fi
 # --- Route: multi-node vs single-node ---
 clear_ci_orchestration_env
 if is_multi_node "$commands"; then
-  if [[ "${hf_offline_retry_enabled}" == "1" ]]; then
-    echo "Hugging Face client cache-only mode is not eligible for AMD multi-node jobs" >&2
-    exit 2
-  fi
   echo "--- Multi-node job detected"
   export DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
 
@@ -1214,13 +1203,11 @@ if is_multi_node "$commands"; then
 else
   echo "--- Single-node job"
   hf_client_container_args=()
-  hf_client_container_value=$(
-    vllm_amd_hf_container_offline_value "${hf_client_mode}"
-  ) || exit $?
-  if [[ "${hf_client_container_value}" != "inherit" ]]; then
+  if [[ -n "${hf_client_offline}" ]]; then
     hf_client_container_args=(
-      -e "HF_HUB_OFFLINE=${hf_client_container_value}"
-      -e "TRANSFORMERS_OFFLINE=${hf_client_container_value}"
+      -e "HF_HUB_OFFLINE=${hf_client_offline}"
+      -e "TRANSFORMERS_OFFLINE=${hf_client_offline}"
+      -e "HF_DATASETS_OFFLINE=${hf_client_offline}"
     )
   fi
   log_hf_client_mode
