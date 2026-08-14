@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 import torch
 from torch import nn
 
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -35,11 +35,27 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
 )
 
+if TYPE_CHECKING:
+    from vllm.models.deepseek_v4.eager_scratch import DeepseekV4EagerScratchPool
+
 
 def _prefer_two_stage_compressor() -> bool:
     # Platforms that favor the triton variant of two-stage compressor split.
     # Currently only tested on ROCm
     return current_platform.is_rocm()
+
+
+def _get_c128_boundary(metadata: CommonAttentionMetadata) -> bool | None:
+    starts = metadata._num_computed_tokens_cpu
+    if starts is None:
+        return None
+
+    starts_list = starts.tolist()
+    query_start_loc = metadata.query_start_loc_cpu.tolist()
+    return any(
+        start % 128 + query_start_loc[i + 1] - query_start_loc[i] >= 128
+        for i, start in enumerate(starts_list)
+    )
 
 
 class CompressorBackend(AttentionBackend):
@@ -90,6 +106,7 @@ class CompressorMetadata:
 
     token_to_req_indices: torch.Tensor | None = None  # [num_tokens]
     num_decode_tokens: int | None = None
+    c128_boundary: bool | None = None
 
 
 class CompressorMetadataBuilder(AttentionMetadataBuilder):
@@ -127,6 +144,11 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             block_size=self.block_size,
             token_to_req_indices=token_to_req_indices,
             num_decode_tokens=num_decode_tokens,
+            c128_boundary=(
+                _get_c128_boundary(common_attn_metadata)
+                if self.block_size == 8
+                else None
+            ),
         )
 
 
@@ -207,6 +229,7 @@ class DeepseekCompressor(nn.Module):
         prefix: str = "",
         k_cache_prefix="",
         use_fp4_cache: bool = False,
+        eager_scratch_pool: "DeepseekV4EagerScratchPool | None" = None,
     ):
         super().__init__()
         self.compress_ratio = compress_ratio
@@ -216,6 +239,7 @@ class DeepseekCompressor(nn.Module):
         self.prefix = prefix
         self.k_cache_prefix = k_cache_prefix
         self.use_fp4_cache = use_fp4_cache
+        self.eager_scratch_pool = eager_scratch_pool
 
         config = vllm_config.model_config.hf_config
         self.rope_head_dim = config.qk_rope_head_dim
@@ -317,7 +341,8 @@ class DeepseekCompressor(nn.Module):
         )
 
         # Get the metadata and handle dummy profiling run.
-        attn_metadata = get_forward_context().attn_metadata
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
         if not isinstance(attn_metadata, dict):
             return
 
@@ -359,6 +384,16 @@ class DeepseekCompressor(nn.Module):
             pdl_kwargs=pdl_kwargs,
         )
 
+        # full graph cannot branch on per-step CPU metadata after capture
+        if (
+            current_platform.is_cuda()
+            and self.head_dim == 512
+            and self.compress_ratio == 128
+            and forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL
+            and state_metadata.c128_boundary is False
+        ):
+            return
+
         # Fused: compress → RMSNorm → RoPE → FP8 quant → KV cache write.
         # RoPE requirements (kernel applies forward GPT-J style rotation):
         # - is_neox_style=False (interleaved pairs, NOT split-half)
@@ -398,6 +433,10 @@ class DeepseekCompressor(nn.Module):
                 store_full_fp8=store_full_fp8,
                 fp8_scale=fp8_scale,
             )
+            if not self.overlap and self.eager_scratch_pool is not None:
+                extra_kwargs["compress_scratch"] = (
+                    self.eager_scratch_pool.compressor_scratch(num_actual)
+                )
         elif self._use_two_stage_fused_compressor:
             # head=512 cr>=128 (no overlap): two-pass split compressor on the
             # prefill suffix, single-pass on the decode prefix.

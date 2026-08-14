@@ -34,7 +34,7 @@ lookup() is a pure OrderedDict operation.
 import queue
 import threading
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 
 from vllm.logger import init_logger
@@ -170,7 +170,25 @@ class AsyncLookupManager(ABC):
             for key, result in batch:
                 state = self._lookup_state.get(key)
                 if state is not None:
+                    # A key is enqueued for probing exactly once, so a decided
+                    # verdict must never receive a second result. Enforcing it
+                    # keeps a late/duplicate result from resurrecting a stale
+                    # True and reopening the failed-load livelock.
+                    assert state.result is None, (
+                        "cached key received a second lookup result; the "
+                        "enqueue-once invariant is broken and could reopen the "
+                        "failed-load livelock"
+                    )
                     state.result = result
+
+    def mark_miss(self, keys: Collection[OffloadKey]) -> None:
+        """Force the cached verdict for ``keys`` to False after a failed load, so
+        the scheduler stops re-issuing the doomed promotion (livelock, #49176).
+        Keys with no cached entry are skipped."""
+        for key in keys:
+            state = self._lookup_state.get(key)
+            if state is not None:
+                state.result = False
 
     def cleanup(self, req_id: str) -> None:
         """Remove entries no longer needed by any active request.

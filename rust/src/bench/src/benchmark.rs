@@ -365,7 +365,8 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         let tid = config.tokenizer_id.as_deref().unwrap_or(&model_id);
         tracing::info!(tokenizer = tid, "loading tokenizer");
         let server_info = Some((config.base_url.as_str(), model_id.as_str()));
-        let t = crate::tokenizer::load_tokenizer(tid, config.trust_remote_code, server_info)?;
+        let t =
+            crate::tokenizer::load_tokenizer(tid, config.trust_remote_code, server_info).await?;
         Some(t)
     };
     let has_tokenizer = tokenizer.is_some();
@@ -481,7 +482,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
             let path = match config.dataset_path.as_deref() {
                 Some(p) => p,
                 None => {
-                    downloaded = crate::datasets::sharegpt::download_sharegpt_dataset()?;
+                    downloaded = crate::datasets::sharegpt::download_sharegpt_dataset().await?;
                     downloaded.as_str()
                 }
             };
@@ -521,7 +522,8 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                 None => {
                     downloaded = crate::datasets::speed_bench::download_speed_bench(
                         config.speed_bench_config,
-                    )?;
+                    )
+                    .await?;
                     downloaded.as_str()
                 }
             };
@@ -552,7 +554,8 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
                     config.hf_subset.as_deref(),
                     config.hf_split.as_deref(),
                     config.num_prompts,
-                )?;
+                )
+                .await?;
             crate::datasets::hf_dataset::load_hf_dataset(
                 tok,
                 &downloaded_path,

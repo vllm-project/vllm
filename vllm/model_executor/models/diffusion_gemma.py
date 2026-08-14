@@ -32,6 +32,7 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
@@ -48,7 +49,9 @@ from vllm.model_executor.models.transformers.utils import recursive_replace_line
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor, async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -60,7 +63,6 @@ from vllm.v1.worker.gpu.states import RequestState
 
 from .interfaces import (
     SupportsMultiModal,
-    SupportsPP,
     SupportsQuant,
 )
 
@@ -142,7 +144,6 @@ class DiffusionGemmaForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
     SupportsQuant,
-    SupportsPP,
 ):
     """DiffusionGemma for vLLM.
 
@@ -195,8 +196,10 @@ class DiffusionGemmaForConditionalGeneration(
 
         # ---- Vision tower ----
         vision_config = getattr(config, "vision_config", None)
+        self.embed_vision: Gemma4MultimodalEmbedder | None
         if vision_config is not None:
             quant_config = vllm_config.quant_config
+            tower_quant: QuantizationConfig | None
             if quant_config and quant_config.get_name() in [
                 "bitsandbytes",
                 "torchao",
@@ -263,10 +266,6 @@ class DiffusionGemmaForConditionalGeneration(
             hidden_size=text_config.hidden_size,
             self_conditioning_size=sc_size,
             eps=getattr(text_config, "rms_norm_eps", 1e-6),
-        )
-
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
         )
 
     def compute_self_conditioning(
@@ -733,10 +732,13 @@ class DiffusionGemmaRequestStates:
             max_num_reqs, canvas_length, hidden_size, dtype=torch.float32, device=device
         )
 
-    def init_canvas(self, slot_indices_np: np.ndarray) -> None:
-        """Initialize canvas with random tokens for the given slots."""
-        n = slot_indices_np.shape[0]
-        self.canvas[slot_indices_np] = torch.randint(
+    def init_canvas(self, slot_indices: torch.Tensor) -> None:
+        """Initialize canvas with random tokens for the given slots.
+
+        `slot_indices` must already be on device to avoid a cpu->gpu sync.
+        """
+        n = slot_indices.shape[0]
+        self.canvas[slot_indices] = torch.randint(
             0,
             self.vocab_size,
             (n, self.canvas_length),
@@ -745,15 +747,15 @@ class DiffusionGemmaRequestStates:
         )
 
     def add_request(self, slot_idx: int) -> None:
-        self.is_encoder_phase[slot_idx] = True
-        self.init_canvas(torch.tensor([slot_idx], device=self.device))
-        self.step[slot_idx] = 0
-        self.accepted_canvas_history_len[slot_idx] = 0
+        self.is_encoder_phase[slot_idx].fill_(True)
+        self.init_canvas(async_tensor_h2d([slot_idx], device=self.device))
+        self.step[slot_idx].fill_(0)
+        self.accepted_canvas_history_len[slot_idx].fill_(0)
         self.self_conditioning_embeds[slot_idx] = 0
 
     def remove_request(self, slot_idx: int) -> None:
-        self.is_encoder_phase[slot_idx] = False
-        self.accepted_canvas_history_len[slot_idx] = 0
+        self.is_encoder_phase[slot_idx].fill_(False)
+        self.accepted_canvas_history_len[slot_idx].fill_(0)
         self.self_conditioning_embeds[slot_idx] = 0
 
 
@@ -1049,7 +1051,7 @@ class DiffusionSampler:
         sampler: Any,
         diffusion_config: Any,
         vocab_size: int,
-        diffusion_states: DiffusionGemmaRequestStates | None = None,
+        diffusion_states: DiffusionGemmaRequestStates,
         *,
         confidence_threshold: float,
         t_min: float,
@@ -1153,11 +1155,15 @@ class DiffusionSampler:
         ps = input_batch.idx_mapping_np[prefill_indices_np[done_prefill_np]]
         if len(ps) == 0:
             return
-        states.init_canvas(ps)
-        self.req_states.draft_tokens[ps, : self.canvas_length] = states.canvas[ps]
+        # Move the slot indices across once, up front: indexing a device
+        # tensor with a numpy array copies them over synchronously each time.
         ps_gpu = async_copy_to_gpu(
             ps.astype(np.int64), device=states.is_encoder_phase.device
         )
+        states.init_canvas(ps_gpu)
+        self.req_states.draft_tokens[ps_gpu, : self.canvas_length] = states.canvas[
+            ps_gpu
+        ]
         states.is_encoder_phase.index_fill_(0, ps_gpu, False)
 
     def _handle_prefill(
@@ -1262,16 +1268,31 @@ class DiffusionSampler:
             valid_canvas_len_np.astype(np.int64), device=device
         )
 
+        # Per-request top_k/top_p, mirroring the AR sampler. Masked tokens
+        # become -inf and survive the temperature scaling in the compiled
+        # step, so Gumbel sampling, probs, and entropy all see the filtered
+        # distribution. The committed argmax (always the top-1 token) is
+        # unaffected; only the canvas exploration is constrained. Applied
+        # before canvas padding so phantom positions stay uniform.
+        if num_decode > 0:
+            top_k, top_p = self.sampling_states.get_top_k_top_p(
+                decode_slots.repeat_interleave(valid_canvas_len), decode_slots_np
+            )
+            if top_k is not None or top_p is not None:
+                logits = apply_top_k_top_p(logits.float(), top_k, top_p)
+
         # Pad any truncated canvas back to CL so the uniform-CL sampler math
         # holds. Phantom (padded) positions are zeroed → uniform logits → high
         # entropy (no premature convergence) and argmax 0 (stable); they are
-        # never committed (num_sampled == real length).
+        # never committed (num_sampled == real length). masked_fill (not
+        # multiply) so -inf entries from top_k/top_p filtering above don't
+        # turn phantom rows into NaN.
         if num_decode > 0 and valid_canvas_len_np.min() < CL:
             ar = torch.arange(CL, device=device)
             starts = valid_canvas_len.cumsum(0) - valid_canvas_len  # row offset per req
             valid = ar.unsqueeze(0) < valid_canvas_len.unsqueeze(1)  # [num_decode, CL]
             src = (starts.unsqueeze(1) + ar.unsqueeze(0)).clamp_max(logits.shape[0] - 1)
-            logits = logits[src.reshape(-1)] * valid.reshape(-1, 1).to(logits.dtype)
+            logits = logits[src.reshape(-1)].masked_fill_(~valid.reshape(-1, 1), 0)
 
         # Clear once: the tiled loop below only scatters its own decode slots,
         # so it must not re-clear earlier tiles' writes.

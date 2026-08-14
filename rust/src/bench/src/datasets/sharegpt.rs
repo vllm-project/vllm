@@ -22,14 +22,15 @@ const DEFAULT_SHAREGPT_FILE: &str = "ShareGPT_V3_unfiltered_cleaned_split.json";
 
 /// Download the default ShareGPT dataset from HuggingFace Hub.
 /// Uses hf-hub's built-in cache — subsequent calls return the cached path instantly.
-pub fn download_sharegpt_dataset() -> Result<String> {
+pub async fn download_sharegpt_dataset() -> Result<String> {
     tracing::info!(
         repository = DEFAULT_SHAREGPT_REPO,
         file = DEFAULT_SHAREGPT_FILE,
         "downloading ShareGPT dataset"
     );
-    let repo = crate::hub::HubRepo::dataset(DEFAULT_SHAREGPT_REPO.to_string());
-    let path = repo.get(DEFAULT_SHAREGPT_FILE).map_err(|e| {
+    let repo = crate::hub::HubRepo::dataset(DEFAULT_SHAREGPT_REPO.to_string())
+        .map_err(BenchError::Config)?;
+    let path = repo.get(DEFAULT_SHAREGPT_FILE).await.map_err(|e| {
         BenchError::Config(format!(
             "Failed to download ShareGPT dataset from '{DEFAULT_SHAREGPT_REPO}': {e}"
         ))

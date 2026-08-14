@@ -46,9 +46,12 @@ BACKENDS_TO_TEST = [
 
 DEVICE_TYPE = current_platform.device_type
 
+# Use the platform's preferred FP8 type so the stored cache matches what the
+# backends reinterpret at runtime. On ROCm gfx94x this is e4m3fnuz, not e4m3fn;
+# storing e4m3fn bytes there would be re-read as fnuz and produce NaNs.
 FP8_KV_CACHE_DTYPES = {
-    "fp8": torch.float8_e4m3fn,
-    "fp8_e4m3": torch.float8_e4m3fn,
+    "fp8": current_platform.fp8_dtype(),
+    "fp8_e4m3": current_platform.fp8_dtype(),
 }
 
 # Remove flashinfer from the list if it's not available
@@ -247,6 +250,7 @@ def run_attention_backend(
     attn_type: AttentionType = AttentionType.DECODER,
     sliding_window: int | None = None,
     kv_cache_dtype: str = "auto",
+    sinks: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
@@ -274,6 +278,7 @@ def run_attention_backend(
                     window_left=-1,  # No sliding window
                     logits_soft_cap=0.0,  # No soft cap
                     sm_scale=1.0 / (head_size**0.5),  # Standard scale
+                    has_sinks=sinks is not None,
                 )
                 for layer_name in layer_names
             }
@@ -315,6 +320,7 @@ def run_attention_backend(
         sliding_window=sliding_window,
         attn_type=attn_type,
         kv_cache_dtype=kv_cache_dtype,
+        **({"sinks": sinks} if sinks is not None else {}),
     )
 
     # Create mock layer and output buffer
@@ -351,10 +357,11 @@ def _test_backend_correctness(
     rtol: float = 1e-2,
     tensor_parallel_size: int = 1,
     kv_cache_dtype: str = "auto",
+    use_sinks: bool = False,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
-    using torch.nn.functional.scaled_dot_product_attention.
+    using FlexAttention or an explicit attention-sink reference.
 
     This test works by:
     1. Generating a batch of sequences with specified context and query lengths.
@@ -414,6 +421,11 @@ def _test_backend_correctness(
     num_kv_heads = vllm_config.model_config.get_num_kv_heads(
         vllm_config.parallel_config
     )
+    sinks = (
+        torch.linspace(-1.0, 1.0, num_q_heads, dtype=torch.float32, device=device)
+        if use_sinks
+        else None
+    )
     head_size = vllm_config.model_config.get_head_size()
     sliding_window = vllm_config.model_config.get_sliding_window()
     dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
@@ -468,17 +480,38 @@ def _test_backend_correctness(
         kv_len = s_len
 
         final_mask_mod = partial(mask_mod, context_len=context_len)
-        block_mask = create_block_mask(
-            final_mask_mod, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len, device=device
-        )
-        sdpa_out_i = flex_attention(
-            q_sdpa_in,
-            k_sdpa_in,
-            v_sdpa_in,
-            block_mask=block_mask,
-            scale=scale,
-            enable_gqa=True,
-        )
+        if sinks is None:
+            block_mask = create_block_mask(
+                final_mask_mod,
+                B=None,
+                H=None,
+                Q_LEN=q_len,
+                KV_LEN=kv_len,
+                device=device,
+            )
+            sdpa_out_i = flex_attention(
+                q_sdpa_in,
+                k_sdpa_in,
+                v_sdpa_in,
+                block_mask=block_mask,
+                scale=scale,
+                enable_gqa=True,
+            )
+        else:
+            scores = (
+                torch.matmul(q_sdpa_in.float(), k_sdpa_in.float().transpose(-2, -1))
+                * scale
+            )
+            q_idx = torch.arange(q_len, device=device).unsqueeze(1)
+            kv_idx = torch.arange(kv_len, device=device).unsqueeze(0)
+            zero = torch.zeros((), dtype=torch.int32, device=device)
+            valid = final_mask_mod(zero, zero, q_idx, kv_idx)
+            scores.masked_fill_(~valid.unsqueeze(0).unsqueeze(0), -torch.inf)
+            sink_logits = sinks.view(1, num_q_heads, 1, 1).expand(1, -1, q_len, -1)
+            weights = torch.softmax(torch.cat((scores, sink_logits), dim=-1), dim=-1)[
+                ..., :kv_len
+            ]
+            sdpa_out_i = torch.matmul(weights, v_sdpa_in.float()).to(dtype)
 
         all_sdpa_outputs.append(sdpa_out_i.transpose(1, 2).squeeze(0))
 
@@ -571,6 +604,7 @@ def _test_backend_correctness(
                 sliding_window=sliding_window,
                 attn_type=attn_type,
                 kv_cache_dtype=kv_cache_dtype,
+                sinks=sinks,
             )
         finally:
             if reset_kv_cache_layout:
@@ -707,6 +741,86 @@ def test_flashinfer_xqa_bmm1_scale_matches_decode_q_dtype():
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
+def test_flashinfer_xqa_draft_masks():
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    device = torch.device("cpu")
+    causal = flashinfer_backend._make_xqa_draft_block_mask(3, True, device)
+    full = flashinfer_backend._make_xqa_draft_block_mask(3, False, device)
+    ragged = flashinfer_backend._make_xqa_ragged_draft_block_mask(
+        [2, 3], 3, True, device
+    )
+
+    assert torch.equal(
+        causal.view(torch.int16),
+        torch.tensor([[1, 0], [3, 0], [7, 0]], dtype=torch.int16),
+    )
+    assert torch.equal(
+        full.view(torch.int16), torch.tensor([[7, 0]] * 3, dtype=torch.int16)
+    )
+    assert torch.equal(
+        ragged.view(torch.int16),
+        torch.tensor(
+            [[1, 0], [3, 0], [1, 0], [3, 0], [7, 0]],
+            dtype=torch.int16,
+        ),
+    )
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_xqa_query_lens_preserve_cudagraph_padding():
+    """CUDA-graph padding stays as zero-length requests in ragged offsets."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    device = torch.device("cpu")
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    builder.use_dedicated_xqa = True
+    qo_indptr = torch.tensor([0, 3, 9, 15, 15], dtype=torch.int32, device=device)
+
+    q_len, q_cu_seq_lens, q_lens = builder._compute_decode_query_lens(
+        qo_indptr,
+        qo_indptr,
+        num_decodes=4,
+        num_decode_tokens=21,
+    )
+
+    assert q_len == 6
+    assert q_lens == [3, 6, 6, 0]
+    assert q_cu_seq_lens is not None
+    assert q_cu_seq_lens.tolist() == [0, 3, 9, 15, 15]
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_xqa_query_lens_require_exact_uniform_product():
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    builder.use_dedicated_xqa = True
+    qo_indptr = torch.tensor([0, 3, 3, 3], dtype=torch.int32)
+
+    q_len, q_cu_seq_lens, q_lens = builder._compute_decode_query_lens(
+        qo_indptr,
+        qo_indptr,
+        num_decodes=3,
+        num_decode_tokens=6,
+    )
+
+    assert q_len == 3
+    assert q_lens == [3, 0, 0]
+    assert q_cu_seq_lens is not None
+    assert q_cu_seq_lens.tolist() == [0, 3, 3, 3]
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
@@ -734,10 +848,48 @@ def test_flashinfer_attention_sinks_refreshed_after_reload(dtype):
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
-def test_flashinfer_sm90_xqa_decode_correctness(default_vllm_config):
-    """FlashInfer should route Hopper decode through XQA and match SDPA."""
-    if not current_platform.is_cuda() or not current_platform.is_device_capability(90):
-        pytest.skip("FlashInfer XQA decode requires SM90.")
+def test_flashinfer_native_prefill_with_sinks(default_vllm_config):
+    if not (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(120)
+    ):
+        pytest.skip("Native FlashInfer prefill with sinks requires SM12x.")
+
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    if not FlashInferBackend.supports_sink():
+        pytest.skip("FlashInfer attention sinks are not available in this setup.")
+
+    def causal_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return (q_idx + context_len) >= kv_idx
+
+    _test_backend_correctness(
+        BATCH_SPECS["small_prefill"],
+        "meta-llama/Meta-Llama-3-8B",
+        [AttentionBackendEnum.FLASHINFER],
+        causal_mask_mod,
+        use_sinks=True,
+    )
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_xqa_decode_correctness(default_vllm_config):
+    """FlashInfer should route supported decode through XQA and match SDPA."""
+    supported = current_platform.is_cuda() and (
+        current_platform.is_device_capability(90)
+        or current_platform.is_device_capability_family(120)
+    )
+    if not supported:
+        pytest.skip("FlashInfer XQA decode requires SM90 or SM12x.")
 
     import unittest.mock
 
@@ -802,11 +954,16 @@ def test_flashinfer_sm90_xqa_decode_correctness(default_vllm_config):
             )
             attn_metadata = builder.build(0, common_attn_metadata)
 
+    expected_cg_support = (
+        AttentionCGSupport.UNIFORM_BATCH
+        if current_platform.is_device_capability_family(120)
+        else AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
     assert (
         flashinfer_backend.FlashInferMetadataBuilder.get_cudagraph_support(
             vllm_config, kv_cache_spec
         )
-        == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+        == expected_cg_support
     )
     assert isinstance(
         attn_metadata.decode,
