@@ -170,6 +170,18 @@ class TestEnvWithChoices:
         env_func = env_with_choices("NONEXISTENT_ENV", None, ["option1", "option2"])
         assert env_func() is None
 
+    def test_empty_value_treated_as_unset(self):
+        """Test that `export VAR=` disables the option instead of failing."""
+        with patch.dict(os.environ, {"TEST_ENV": ""}):
+            env_func = env_with_choices("TEST_ENV", None, ["option1", "option2"])
+            assert env_func() is None
+
+    def test_empty_value_honoured_when_an_allowed_choice(self):
+        """Test that an explicitly allowed empty choice still validates."""
+        with patch.dict(os.environ, {"TEST_ENV": ""}):
+            env_func = env_with_choices("TEST_ENV", "default", ["", "option1"])
+            assert env_func() == ""
+
     def test_valid_value_returned_case_sensitive(self):
         """Test that valid value is returned in case sensitive mode."""
         with patch.dict(os.environ, {"TEST_ENV": "option1"}):

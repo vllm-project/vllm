@@ -401,6 +401,13 @@ def env_with_choices(
         # Resolve choices if it's a callable (for lazy loading)
         actual_choices = choices() if callable(choices) else choices
 
+        # An empty value means unset, so `export VAR=` turns the option off
+        # rather than failing validation. This matches
+        # `env_list_with_choices`, which already falls back to the default
+        # when nothing is left after splitting.
+        if not value and "" not in actual_choices:
+            return default
+
         if not case_sensitive:
             check_value = value.lower()
             check_choices = [choice.lower() for choice in actual_choices]
