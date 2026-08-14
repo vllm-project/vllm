@@ -357,30 +357,56 @@ class NixlBaseConnectorScheduler:
         with zmq_ctx(zmq.ROUTER, path) as sock:
             sock.setsockopt(zmq.RCVTIMEO, 1000)
             ready_event.set()
-            while True:
+            # Decode (GET_META_MSG, pp_rank, tp_rank).
+            decoder = msgspec.msgpack.Decoder(tuple[bytes, int, int])
+            while not stop_event.is_set():
                 try:
-                    identity, _, msg = sock.recv_multipart()
+                    frames = sock.recv_multipart()
                 except zmq.Again:
-                    if stop_event.is_set():
-                        break
                     continue
-                # Decode (GET_META_MSG, pp_rank, tp_rank).
-                msg, target_pp_rank, target_tp_rank = msgspec.msgpack.decode(msg)
+                if len(frames) != 3:
+                    logger.warning(
+                        "Ignoring NIXL handshake request with %d frames, expected 3",
+                        len(frames),
+                    )
+                    continue
+                identity, _, msg = frames
+                try:
+                    decoded_msg, target_pp_rank, target_tp_rank = decoder.decode(msg)
+                except msgspec.DecodeError as e:
+                    logger.warning(
+                        "Ignoring malformed NIXL handshake request (raw=%.200r): %s",
+                        msg,
+                        e,
+                    )
+                    continue
                 logger.debug(
                     "Received message for pp rank %s, tp rank %s",
                     target_pp_rank,
                     target_tp_rank,
                 )
-                if msg != GET_META_MSG:
-                    logger.warning("Connection listener got unexpected message %s", msg)
+                if decoded_msg != GET_META_MSG:
+                    logger.warning(
+                        "Ignoring NIXL handshake request with unexpected "
+                        "message %.200r",
+                        decoded_msg,
+                    )
+                    continue
+                metadata = encoded_data.get((target_pp_rank, target_tp_rank))
+                if metadata is None:
+                    logger.warning(
+                        "Ignoring NIXL handshake request for unknown "
+                        "pp rank %s, tp rank %s",
+                        target_pp_rank,
+                        target_tp_rank,
+                    )
+                    continue
                 # Echo our perf_counter so P can estimate the clock offset.
                 # perf_counter is only comparable within a process, so this
                 # listener must run in the same process that stamps the block
                 # expiry deadline (`_reqs_need_send`).
                 ts = msgspec.msgpack.encode(time.perf_counter())
-                sock.send_multipart(
-                    (identity, b"", encoded_data[(target_pp_rank, target_tp_rank)], ts)
-                )
+                sock.send_multipart((identity, b"", metadata, ts))
 
     def _prefill_backoff(self) -> int:
         """Trailing prompt tokens the prefiller must not compute; the decoder
