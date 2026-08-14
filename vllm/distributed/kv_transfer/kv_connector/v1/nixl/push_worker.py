@@ -77,6 +77,9 @@ _PUSH_WRITER_POLL_INTERVAL_MS = 1.0
 class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     """Push-specific (WRITE) worker logic. See module docstring."""
 
+    # Distinguishes push from pull in the NIXL compatibility hash.
+    _TRANSFER_MODE: str = "push"
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
