@@ -771,6 +771,98 @@ def test_flashinfer_xqa_draft_masks():
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
+@pytest.mark.parametrize(
+    ("supports_multi_token", "use_non_causal", "expected"),
+    [
+        (True, False, AttentionCGSupport.UNIFORM_BATCH),
+        (False, False, AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE),
+        (True, True, AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE),
+    ],
+)
+def test_flashinfer_native_multi_token_cudagraph_support(
+    monkeypatch,
+    supports_multi_token: bool,
+    use_non_causal: bool,
+    expected: AttentionCGSupport,
+):
+    from unittest.mock import MagicMock
+
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    vllm_config = MagicMock()
+    vllm_config.attention_config.use_non_causal = use_non_causal
+    vllm_config.parallel_config.decode_context_parallel_size = 1
+    vllm_config.model_config.get_num_attention_heads.return_value = 32
+    kv_cache_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.float16,
+    )
+
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "is_device_capability",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "is_device_capability_family",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend, "can_use_trtllm_attention", lambda *args, **kwargs: False
+    )
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "flashinfer_supports_uniform_multi_token_decode",
+        lambda: supports_multi_token,
+    )
+
+    support = flashinfer_backend.FlashInferMetadataBuilder.get_cudagraph_support(
+        vllm_config, kv_cache_spec
+    )
+    assert support == expected
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_cudagraph_decode_wrappers_include_query_length(monkeypatch):
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    class Buffer:
+        gpu = torch.zeros(32, dtype=torch.int32)
+
+    builder = object.__new__(flashinfer_backend.FlashInferMetadataBuilder)
+    builder.paged_kv_indptr = Buffer()
+    builder.paged_kv_indices = Buffer()
+    builder.paged_kv_last_page_len = Buffer()
+    builder._workspace_buffer = torch.zeros(1024, dtype=torch.uint8)
+    builder.is_kvcache_nvfp4 = False
+    builder._decode_wrappers_cudagraph = {}
+    builder._decode_wrapper = None
+
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "BatchDecodeWithPagedKVCacheWrapper",
+        lambda *args, **kwargs: object(),
+    )
+    monkeypatch.setattr(flashinfer_backend, "get_kv_cache_layout", lambda: "NHD")
+
+    single_token = builder._get_decode_wrapper(4, True, q_len_per_req=1)
+    multi_token = builder._get_decode_wrapper(4, True, q_len_per_req=3)
+
+    assert builder._get_decode_wrapper(4, True, q_len_per_req=1) is single_token
+    assert multi_token is not single_token
+    assert set(builder._decode_wrappers_cudagraph) == {(4, 1), (4, 3)}
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
 def test_flashinfer_xqa_query_lens_preserve_cudagraph_padding():
     """CUDA-graph padding stays as zero-length requests in ragged offsets."""
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend

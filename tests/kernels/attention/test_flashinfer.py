@@ -249,11 +249,11 @@ def test_fast_plan_decode_matches_full_plan(
         kv_indptr,
         kv_indices,
         kv_last_page_lens,
-        num_query_heads,
-        num_kv_heads,
-        head_size,
-        block_size,
-        "NONE",
+        num_qo_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_size,
+        page_size=block_size,
+        pos_encoding_mode="NONE",
         q_data_type=dtype,
         kv_data_type=dtype,
     )
@@ -285,6 +285,77 @@ def test_fast_plan_decode_matches_full_plan(
     fast_plan_decode(cg_wrapper, **plan_kwargs)
     fast_output = cg_wrapper.run(query, key_value_cache)
     torch.testing.assert_close(fast_output, ref_output, atol=1e-2, rtol=1e-2)
+
+
+@torch.inference_mode()
+def test_fast_plan_decode_multi_token_cuda_graph() -> None:
+    """Uniform multi-token plans must capture and match the reference path."""
+    from vllm.v1.attention.backends.flashinfer import fast_plan_decode
+
+    torch.set_default_device("cuda")
+    set_random_seed(0)
+
+    kv_lens = [128, 64]
+    block_size = 16
+    num_seqs = len(kv_lens)
+    q_len_per_req = 3
+    num_query_heads, num_kv_heads = 8, 2
+    head_size = 128
+    dtype = torch.bfloat16
+
+    query = torch.randn(
+        num_seqs * q_len_per_req, num_query_heads, head_size, dtype=dtype
+    )
+    key_value_cache = torch.randn(
+        NUM_BLOCKS, 2, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    kv_indptr, kv_indices, kv_last_page_lens, _ = _make_paged_kv_metadata(
+        kv_lens, block_size, NUM_BLOCKS
+    )
+
+    workspace_ref = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
+    ref_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
+        workspace_ref, "NHD", use_tensor_cores=True
+    )
+    ref_wrapper.plan(
+        kv_indptr,
+        kv_indices,
+        kv_last_page_lens,
+        num_qo_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_size,
+        page_size=block_size,
+        pos_encoding_mode="NONE",
+        q_data_type=dtype,
+        kv_data_type=dtype,
+        q_len_per_req=q_len_per_req,
+    )
+    ref_output = ref_wrapper.run(query, key_value_cache)
+
+    workspace_cg = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
+    cg_wrapper = _make_cg_decode_wrapper(num_seqs, kv_indices.clone(), workspace_cg)
+    fast_plan_decode(
+        cg_wrapper,
+        indptr_cpu=kv_indptr,
+        indices=kv_indices,
+        last_page_len_cpu=kv_last_page_lens,
+        num_qo_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_size,
+        page_size=block_size,
+        q_data_type=dtype,
+        kv_data_type=dtype,
+        q_len_per_req=q_len_per_req,
+    )
+
+    captured_output = torch.empty_like(ref_output)
+    cg_wrapper.run(query, key_value_cache, out=captured_output)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        cg_wrapper.run(query, key_value_cache, out=captured_output)
+    graph.replay()
+
+    torch.testing.assert_close(captured_output, ref_output, atol=1e-2, rtol=1e-2)
 
 
 @pytest.mark.parametrize("kv_lens", [[1328, 18, 463], [1, 54, 293, 70]])
