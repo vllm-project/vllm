@@ -94,10 +94,7 @@ if find_spec("flashinfer"):
         ):
             flashinfer_comm = _flashinfer_comm
     except Exception:
-        logger.warning(
-            "Failed to import flashinfer.comm; disabling allreduce fusion.",
-            exc_info=True,
-        )
+        pass
 
 if hasattr(torch.ops._C, "scaled_fp4_quant"):
     STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.out
