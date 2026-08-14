@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
+from vllm.config.mamba import MambaBackendEnum
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -1158,11 +1159,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         if self.use_replayssm:
             assert self.replayssm_buffer_len is not None
+            ring_buffer_len = self.replayssm_buffer_len
+            if self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
+                ring_buffer_len += 1
             return MambaStateShapeCalculator.append_replayssm_ring(
                 base_shape,
                 self.n_groups,
                 tp_world_size,
-                self.replayssm_buffer_len,
+                ring_buffer_len,
             )
         return base_shape
 
