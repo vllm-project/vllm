@@ -102,6 +102,26 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-pcp.txt
 
+- label: LM Eval Spec Decode (4xB200)
+  key: lm-eval-spec-decode-4xb200
+  timeout_in_minutes: 120
+  device: b200-k8s
+  num_devices: 4
+  optional: true
+  source_file_dependencies:
+  - tests/evals/gsm8k/configs/DeepSeek-V4-Flash-DSpark-confidence-TP4.yaml
+  - tests/evals/gsm8k/configs/models-spec-decode.txt
+  - vllm/models/deepseek_v4/
+  - vllm/model_executor/models/qwen3_dspark.py
+  - vllm/v1/spec_decode/metrics.py
+  - vllm/v1/worker/gpu/spec_decode/adaptive_verification.py
+  - vllm/v1/worker/gpu/spec_decode/dflash/
+  - vllm/v1/worker/gpu/spec_decode/dspark/
+  - vllm/v1/worker/gpu/spec_decode/rejection_sampler.py
+  - vllm/v1/worker/gpu/spec_decode/speculator.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-spec-decode.txt
+
 - label: LM Eval Large Models EP (2xB200)
   key: lm-eval-large-models-ep-2xb200
   timeout_in_minutes: 60
