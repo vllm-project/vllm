@@ -184,7 +184,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && uv pip install -r requirements/cpu.txt \
             --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
     else \
-        uv pip install -r requirements/cpu.txt --torch-backend cpu; \
+        uv pip install -r requirements/cpu.txt \
+            --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/test/cpu; \
     fi
 
 ######################### x86_64 BASE IMAGE #########################
@@ -315,7 +316,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && uv pip install -r requirements/build/cpu.txt \
             --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
     else \
-        uv pip install -r requirements/build/cpu.txt --torch-backend cpu; \
+        uv pip install -r requirements/build/cpu.txt \
+            --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/test/cpu; \
     fi
 
 COPY . .
@@ -375,7 +377,7 @@ WORKDIR /vllm-workspace
 
 # Test requirements are compiled from requirements/test/cuda.in into
 # requirements/test/cpu.txt by the pip-compile-cpu pre-commit hook, which
-# resolves CPU wheels via uv's --torch-backend cpu.
+# resolves CPU wheels from the torch test index.
 COPY requirements/test/cpu.txt requirements/test/cpu.txt
 
 # cpu.txt is compiled for x86_64, so platform markers are resolved away. Drop
@@ -393,7 +395,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && uv pip install -r requirements/test/cpu.txt \
             --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
     else \
-        uv pip install -r requirements/test/cpu.txt --torch-backend cpu; \
+        uv pip install -r requirements/test/cpu.txt \
+            --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/test/cpu; \
     fi
 
 ######################### DEV IMAGE #########################
@@ -430,7 +433,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uv pip install -r requirements/test/cpu.txt \
             --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/nightly/cpu; \
     else \
-        uv pip install -r requirements/test/cpu.txt --torch-backend cpu; \
+        uv pip install -r requirements/test/cpu.txt \
+            --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/test/cpu; \
     fi && \
     pre-commit install --hook-type pre-commit --hook-type commit-msg
 
