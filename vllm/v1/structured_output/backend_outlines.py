@@ -26,6 +26,7 @@ from vllm.v1.structured_output.utils import (
     compile_regex_with_timeout,
     get_outlines_cache,
     get_outlines_vocabulary,
+    compile_schema_with_timeout,
 )
 
 if TYPE_CHECKING:
@@ -77,7 +78,9 @@ class OutlinesBackend(StructuredOutputBackend):
         stop_token_ids: set[int] | None = None,
     ) -> StructuredOutputGrammar:
         if request_type == StructuredOutputOptions.JSON:
-            regex = json_schema.build_regex_from_schema(grammar_spec)
+            regex = compile_schema_with_timeout(
+                json_schema.build_regex_from_schema, grammar_spec
+            )
         elif request_type == StructuredOutputOptions.REGEX:
             regex = grammar_spec
         elif request_type == StructuredOutputOptions.CHOICE:
@@ -194,7 +197,7 @@ def validate_structured_output_request_outlines(params: SamplingParams):
                 raise ValueError(
                     f"Error serializing structured outputs jsonschema: {e}"
                 ) from e
-        pattern = json_schema.build_regex_from_schema(schema)
+        pattern = compile_schema_with_timeout(json_schema.build_regex_from_schema, schema)
         validate_regex_is_buildable(pattern)
     elif so_params.choice:
         choices = [regex_escape(str(choice)) for choice in so_params.choice]
