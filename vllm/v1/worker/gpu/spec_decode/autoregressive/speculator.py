@@ -224,7 +224,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> torch.Tensor:
         num_tokens = input_batch.num_tokens
         num_tokens_padded = input_batch.num_tokens_after_padding
         num_reqs = input_batch.num_reqs
@@ -313,7 +313,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         if self.num_speculative_steps == 1:
             # Early exit.
-            return self.draft_tokens[:num_reqs, :1], None
+            return self.draft_tokens[:num_reqs, :1]
 
         # Prepare the inputs for the decode steps.
         prepare_decode_inputs(
@@ -354,7 +354,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
         self.on_multi_step_decode_end(num_reqs)
 
-        return self.draft_tokens[:num_reqs], None
+        return self.draft_tokens[:num_reqs]
 
     @torch.inference_mode()
     def _run_model(

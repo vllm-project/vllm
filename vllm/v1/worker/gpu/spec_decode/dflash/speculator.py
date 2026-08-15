@@ -365,7 +365,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
             )
-            return self.draft_tokens[:num_reqs], None
+            return self.draft_tokens[:num_reqs]
 
         # The query slot mapping is written into the shared BlockTables slot_mappings.
         # That buffer's address is what the captured CUDA graph reads from at replay.
@@ -465,7 +465,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 cudagraph_runtime_mode=batch_desc.cg_mode,
             )
 
-        return self.draft_tokens[:num_reqs], None
+        return self.draft_tokens[:num_reqs]
 
 
 @triton.jit
