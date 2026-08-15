@@ -1833,35 +1833,47 @@ sparse attention is 0.194 ms faster.
 
 ### Why the standalone B1024 selector reports only 1.722x
 
-The standalone B1024 row is not an independent sample of the selector work in
-the corrected model trace. Its baseline/GVR times are 487.619/283.104 us, but
-the real trace averages 12.661712/21 = 602.939 us and 2.785424/21 = 132.639 us
-per selector call. Thus the 1.722x versus 4.546x difference exists at the
-single-call level; multiplying either measurement by 21 is not the cause.
+The standalone row is a valid timing of its constructed input, but calling it a
+representative B1024 model result is wrong. The offline dataset retained only
+the first sparse-indexer layer at two consecutive native-B32 decode steps
+(`call0` and `call21`). Later layer captures were invalid. Its nominal B1024
+input repeats those 32 rows 32 times; it does not sample the other 20 selector
+layers.
 
-The offline dataset retained only the first sparse-indexer layer at two
-consecutive native-B32 decode steps (`call0` and `call21`). Later layers from
-that eager debug capture were invalid. The nominal B1024 input repeats each of
-those 32 rows 32 times, and every timed graph replay reuses the same logits and
-prepared hints. By contrast, the corrected model trace covers 21 distinct
-layers, 1,024 independently evolving child sequences, many decode steps, and
-the production fused hint/state path.
+Per-call attribution of the independent BEAM trace isolates the gap. These are
+medians for each call ordinal over all exact-B1024 graph replays and TP ranks:
 
-This mismatch matters more for GVR than for the baseline. GVR's rung admission,
-fallback search, and candidate-processing cost depends on each layer's score
-distribution and temporal-hint quality. The baseline mostly scans and selects
-the fixed-width row regardless of those values. Repeated B32 rows are therefore
-useful for occupancy and crossover experiments, but they cannot predict the
-aggregate real-model ratio. Full-graph cache and resource context can also
-change absolute kernel duration: here the embedded baseline is 24% slower than
-standalone, while embedded GVR has 53% lower latency.
+| Selector ordinal | Baseline | GVR | Baseline / GVR |
+| --- | ---: | ---: | ---: |
+| 1, the layer represented by the standalone capture | 511.568 us | 293.696 us | 1.742x |
+| 2 | 542.720 us | 485.040 us | 1.119x |
+| 3 | 613.888 us | 1,213.680 us | 0.506x |
+| 4--21, mean of the 18 ordinal medians | 612.347 us | 44.452 us | 13.775x |
+| Sum of all 21 ordinal medians | 12.690 ms | 2.793 ms | 4.544x |
+
+The standalone 487.619/283.104-us result is therefore within 5% of the real
+model's first call and gives nearly the same 1.72--1.74x ratio. It never
+measured an average layer. The 4.55x ratio is the sum over a very heterogeneous
+21-call model forward, dominated by calls 4--21. The original document-prompt
+trace reproduces the same ordinal pattern: 284 us, 485 us, and 1,214 us for the
+first three GVR calls, followed by about 45 us for each remaining call.
+
+All 21 exact-B1024 GVR calls use the same compiled launch configuration: grid
+1024, block size 512, 64 registers per thread, and 60,140 bytes of dynamic
+shared memory. The model also owns separate GVR state buffers for every hidden
+layer. The large per-layer variation is therefore an algorithm/data-path
+effect, not different CTA tuning or accidentally shared layer state. GVR's
+rung admission, fallback, and candidate-processing work depends on each
+layer's score distribution and temporal hints; the current trace does not
+include counters that identify which of those mechanisms makes calls 4--21 so
+cheap.
 
 The existing trace proves the aggregate 4.55x selector ratio and its causal
 connection to the 1.1110x forward result through Amdahl's Law. It does not
 record rung choice or candidate count, so attributing the remaining difference
-among hint quality, fallback frequency, candidate count, and cache state would
-require capturing the exact B1024 tensors from all 21 layers or adding
-event-free device-side diagnostic counters.
+among hint quality, fallback frequency, and candidate count would require
+capturing exact B1024 tensors from all 21 layers or adding event-free
+device-side diagnostic counters.
 
 The B1 whole-forward ratio must not be attributed to GVR. Its selector is
 about 19 us slower than the cooperative baseline, while unrelated kernels vary
@@ -1927,13 +1939,15 @@ exactly 21 fused GVR launches and no filtered selector.
 | --- | ---: | ---: | ---: |
 | One TP-rank forward | 99.757 ms | 89.639 ms | 1.1129x |
 | 21 selectors in one TP-rank forward | 12.709 ms | 2.796 ms | 4.5456x |
-| One selector call | 605.204 us | 133.141 us | 4.5456x |
+| 21-call selector total divided by 21 | 605.204 us | 133.141 us | 4.5456x |
 | TP critical-path forward | 99.814 ms | 89.682 ms | 1.1130x |
 
-The original repository-document trace reported 602.939 us versus 132.639 us,
-or 4.546x. The independent BEAM data changes the absolute times by less than
-0.4% and reproduces the ratio to three decimal places. The individual-rank
-forward distribution is also narrow: the baseline/GVR 5th-to-95th percentile
+The original repository-document trace reported aggregate/21 values of
+602.939 us versus 132.639 us, or 4.546x. These are arithmetic normalizations,
+not representative single calls. The independent BEAM data changes the
+aggregate/21 values by less than 0.4% and reproduces the ratio to three decimal
+places. The individual-rank forward distribution is also narrow: the
+baseline/GVR 5th-to-95th percentile
 ranges are 99.381--100.185 ms and 89.387--90.006 ms.
 
 Using the median per-step TP-rank mean, baseline selector share is 12.74% and

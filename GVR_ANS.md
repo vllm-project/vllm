@@ -97,6 +97,13 @@ Every GVR row matched the exact FP32 selected-value set from `torch.topk`.
 | 200K | 128 | 66.379 us | 33.310 us | 1.993x |
 | 200K | 1024 | 487.619 us | 283.104 us | 1.722x |
 
+The B1024 label above is only a constructed row count: the benchmark repeats
+the first sparse layer's native B32 capture 32 times. It is not a real B1024
+sample and not an average over the model's 21 selector layers. A later
+per-call BEAM trace measures the corresponding first production call at
+511.568/293.696 us (1.742x), confirming this microbenchmark, while the highly
+heterogeneous sum over all 21 calls is 4.55x.
+
 These numbers are internally plausible: fixed launch and synchronization work
 dominates short/small rows, while the amount of baseline score traffic grows
 with both dimensions. GVR therefore loses through B32 except at 200K, crosses

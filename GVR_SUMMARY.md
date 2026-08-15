@@ -37,7 +37,7 @@ exact-B1024 decode steps on each of four TP ranks.
 
 | Median graph metric | Baseline | GVR | Speedup |
 | --- | ---: | ---: | ---: |
-| Per selector call | 605.204 us | 133.141 us | 4.5456x |
+| 21-call selector total divided by 21 | 605.204 us | 133.141 us | 4.5456x |
 | TP critical-path forward | 99.814 ms | 89.682 ms | 1.1130x |
 
 Every retained replay contains 21 expected selector kernels and zero kernels
@@ -122,14 +122,14 @@ plateaus contain 130 baseline and 146 GVR analyzed replays per rank.
 The standalone CUDA-graph benchmark remains useful for kernel crossover
 analysis. At 200K context on real captured tensors:
 
-| Batch | Baseline | GVR | Kernel speedup |
+| Constructed rows | Baseline | GVR | Kernel speedup |
 | ---: | ---: | ---: | ---: |
 | 1 | 12.641 us | 18.305 us | 0.691x |
 | 8 | 15.133 us | 19.812 us | 0.764x |
 | 32 | 24.337 us | 20.455 us | 1.190x |
 | 64 | 55.402 us | 26.105 us | 2.122x |
 | 128 | 66.379 us | 33.310 us | 1.993x |
-| 1024 | 487.619 us | 283.104 us | 1.722x |
+| 1024 (32 native rows repeated 32 times) | 487.619 us | 283.104 us | 1.722x |
 
 B1/B8/B32 are native captures. B64/B128/B1024 repeat native B32 rows, so their
 hint distribution is not a substitute for a real B1024 model run. The
@@ -139,28 +139,28 @@ The 1.722x standalone result and the 4.55x embedded result are not measurements
 of the same selector workload. The standalone dataset retained only the first
 sparse-indexer layer at two consecutive B32 decode steps (`call0` and
 `call21`); an eager debug-capture limitation made the other layer tensors
-invalid. Its B1024 row repeats those 32 rows 32 times and replays fixed logits
-and prepared hints. The model trace instead sums 21 distinct selector layers
-on 1,024 independently evolving sequences, using the production fused
-hint/state path.
+invalid. Its B1024 row repeats those 32 rows 32 times.
 
 The difference is visible before taking either ratio:
 
-| Per selector call at 200K/B1024 | Baseline | GVR | Speedup |
+| Selector measurement at 200K/B1024 | Baseline | GVR | Speedup |
 | --- | ---: | ---: | ---: |
 | Repeated-B32 standalone | 487.619 us | 283.104 us | 1.722x |
-| Real model, 21-call average | 602.939 us | 132.639 us | 4.546x |
-| Real BEAM prompt, independent rerun | 605.204 us | 133.141 us | 4.546x |
+| Real model selector total divided by 21 | 602.939 us | 132.639 us | 4.546x |
+| Real BEAM selector total divided by 21 | 605.204 us | 133.141 us | 4.546x |
 
-GVR's admission, fallback, and candidate work depends strongly on the score
-and temporal-hint distribution, whereas the baseline is much less
-data-dependent. Repeating one layer therefore preserves grid occupancy but
-does not reproduce the work taken by the other 20 layers or by a real B1024
-decode trajectory. Full-graph cache/resource context can also shift absolute
-kernel time. The current traces do not instrument candidate counts, so they do
-not separate those effects further; the 4.55x aggregate is nevertheless
-directly measured and is independently validated by the end-to-end Amdahl
-result.
+The independent BEAM trace explains the difference directly. The real first
+call is 511.568/293.696 us, or 1.742x, which matches the standalone ratio.
+Call 2 is 1.119x, call 3 is a 0.506x regression, and calls 4--21 average
+612.347/44.452 us, or 13.775x. Summing the 21 per-call medians gives
+12.690/2.793 ms, or 4.544x.
+
+Thus the standalone number is numerically valid for a repeated first-layer
+input, but it was misleadingly labeled as if it predicted a real B1024
+21-layer average. All 21 production calls use the same launch configuration
+and separate per-layer state. Their large variation comes from GVR's
+data-dependent admission/fallback path; identifying the precise rung and
+candidate counts requires additional device-side counters.
 
 ## FP16 baseline experiment
 
