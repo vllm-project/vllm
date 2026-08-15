@@ -1966,3 +1966,29 @@ exact-B1024 decode steps per rank test the performance claim rather than model
 accuracy.
 
 [beam]: https://github.com/MoonshotAI/Kimi-Vendor-Verifier/tree/main/beam
+
+## Native 21st-selector microbenchmark
+
+The requested kernel time does not require adding events or capture nodes to
+the CUDA graph. The normal BEAM model traces above are event-free Nsight
+CUDA/NVTX captures. Sorting the 21 selector kernels on their shared stream 19
+within each exact-B1024 graph replay gives the following 21st-call result over
+384 samples (96 decode steps on each of four TP ranks):
+
+| 21st selector kernel | Median | Mean | P05--P95 |
+| --- | ---: | ---: | ---: |
+| Baseline | 612.256 us | 611.991 us | 608.256--614.496 us |
+| GVR | 44.480 us | 44.544 us | 43.904--45.408 us |
+
+The directly observed individual-kernel speedup is therefore 13.765x. Nsight
+reports one stable configuration for every retained 21st call: baseline uses
+grid/block 1024/1024 with 60 registers and 131,072 bytes dynamic shared memory;
+GVR uses grid/block 1024/512 with 64 registers and 60,140 bytes dynamic shared
+memory.
+
+A temporary tensor-copy experiment was also attempted to feed the existing
+standalone replay. Copying a full `(1024, 200000)` layer-74 tensor out of the
+worker required eager execution, so it changed the execution mode being
+investigated. Its timings are not used to reinterpret the normal CUDA-graph
+trace, and the temporary source hook was removed. No CUDA event or tensor-copy
+node was added to the production graph.
