@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -243,7 +244,8 @@ class ExampleConnector(KVConnectorBase_V1):
                     layer_name, request.token_ids, request.mm_hashes
                 )
                 kv_cache = extract_kv_from_layer(kv_layer, request.slot_mapping)
-                tensors = {"kv_cache": kv_cache.detach().cpu()}
+                with gpu_sync_allowed():
+                    tensors = {"kv_cache": kv_cache.detach().cpu()}
                 safetensors.torch.save_file(tensors, filename)
 
     def wait_for_save(self):

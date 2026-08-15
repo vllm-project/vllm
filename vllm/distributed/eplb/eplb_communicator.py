@@ -33,6 +33,7 @@ from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)
 
@@ -222,10 +223,11 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
 
         # Wait for all D2H copies to finish
         # before issuing gloo batch_isend_irecv operations.
-        if self._cuda_stream is not None:
-            self._cuda_stream.synchronize()
-        else:
-            torch.cuda.current_stream().synchronize()
+        with gpu_sync_allowed():
+            if self._cuda_stream is not None:
+                self._cuda_stream.synchronize()
+            else:
+                torch.cuda.current_stream().synchronize()
 
         reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:
