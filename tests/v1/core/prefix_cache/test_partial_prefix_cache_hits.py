@@ -1356,6 +1356,173 @@ def test_hybrid_partial_hit_with_eagle_stays_within_group_blocks():
     assert manager.allocate_slots(req1, 4, num_computed, computed_blocks) is not None
 
 
+def test_mamba_align_split_stops_below_eagle_proof_boundary():
+    """The chunk that registers the partial tail must end one hash unit below
+    the prompt's last hash boundary under Eagle, which drops one unit past the
+    candidate.
+    """
+    block_size = 1536
+    hash_block_size = 128
+    mock = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
+        max_num_scheduled_tokens=8192,
+        scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
+        use_eagle=True,
+        hash_block_size=hash_block_size,
+        mamba_partial_cache_hit=True,
+    )
+    split = Scheduler._mamba_block_aligned_split
+
+    for prompt_len in (24576, 24577):
+        req = make_request("0", [0] * prompt_len, hash_block_size, sha256)
+        req.num_computed_tokens = 23040
+        assert (
+            split(self=mock, request=req, num_new_tokens=prompt_len - 23040)
+            == 24448 - 23040
+        )
+
+    # Without eagle the tail stays at the prompt's own last hash boundary.
+    mock.use_eagle = False
+    req = make_request("1", [0] * 24577, hash_block_size, sha256)
+    req.num_computed_tokens = 23040
+    assert split(self=mock, request=req, num_new_tokens=1537) == 24576 - 23040
+
+
+def test_mamba_partial_tail_hits_below_eagle_proof_boundary():
+    """Regression: a prompt whose last hash boundary coincides with its last
+    mamba block boundary registered its only fine-grained checkpoint at a
+    position Eagle can never resume from, collapsing the next turn to the
+    coarse block boundary (or, under sparse retention, to a full miss).
+    """
+    hash_block_size = 2
+    mamba_block_size = 2 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=mamba_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        use_eagle=True,
+    )
+
+    # 9 tokens: the last hash boundary (8) is also a mamba block boundary, so
+    # the prompt's two checkpoints collapse. The reachable tail is 6.
+    req0 = make_request("0", [7] * 9, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert num_computed == 0
+    assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+    req0.num_computed_tokens = 6
+    manager.new_step_starts()
+    assert manager.allocate_slots(req0, 3) is not None
+    req0.num_computed_tokens = 9
+    manager.new_step_starts()
+
+    partial_hash = req0.block_hashes[6 // hash_block_size - 1]
+    partial_block = manager.block_pool.get_cached_block(
+        partial_hash, kv_cache_group_ids=[1]
+    )
+    assert partial_block is not None
+    assert partial_block[0].block_hash_num_tokens == 6
+
+    # Full attention matches to 8 and drops one hash unit to 6, where the
+    # mamba tail now exists -- instead of falling back to the block boundary 4.
+    req1 = make_request("1", [7] * 9 + [9] * 4, hash_block_size, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == 6
+
+
+def test_mamba_coarse_checkpoint_retained_below_eagle_proof_boundary(monkeypatch):
+    """Without a prefix-match unit there is no partial tail, so the only
+    checkpoint comes from the retention mask. A prompt ending just past its
+    last block boundary pinned that checkpoint where eagle can never resume,
+    so under ``retention_interval=0`` the reachable block was masked out and
+    the next turn missed entirely.
+    """
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
+    block_size = 4
+    kv_cache_config = KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+
+    # 9 tokens: the last aligned boundary is 8, which eagle cannot resume
+    # from, so block 0 (ending at 4) must stay retained. Prefill in
+    # scheduler-split style -- Mamba keeps one rolling state, so a boundary is
+    # only materialized by a chunk that ends exactly on it.
+    req0 = make_request("0", [7] * 9, block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert num_computed == 0
+    assert manager.allocate_slots(req0, 4, num_computed, computed_blocks) is not None
+    req0.num_computed_tokens = 4
+    manager.new_step_starts()
+    assert manager.allocate_slots(req0, 5) is not None
+    req0.num_computed_tokens = 9
+    manager.free(req0)
+    manager.new_step_starts()
+
+    # The reachable state (4) is retained; the unreachable one (8) is not.
+    assert (
+        manager.block_pool.get_cached_block(
+            req0.block_hashes[0], kv_cache_group_ids=[1]
+        )
+        is not None
+    )
+
+    req1 = make_request("1", [7] * 9 + [9] * 4, block_size, sha256)
+    _, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == 4
+
+
 def test_hybrid_sliding_window_group_disables_partial_hash_hits():
     hash_block_size = 2
     sliding_window_block_size = 2 * hash_block_size

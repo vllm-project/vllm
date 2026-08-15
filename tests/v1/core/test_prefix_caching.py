@@ -3431,9 +3431,10 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary(monkeypatch):
         use_eagle=True,
     )
 
-    # 127 tokens: latest replay boundary is floor((127 - 1) / 32) * 32 = 96.
-    # The EAGLE/MTP SWA lookup group must cache the local tail ending at
-    # 104 tokens, and that tail is two 8-token blocks wide: hashes 11 and 12.
+    # 127 tokens: eagle proves a boundary only if an aligned unit exists past
+    # it, so the replay boundary rewinds one unit to
+    # floor(127 / 32) * 32 - 32 = 64. The SWA tail plus its proof block then
+    # ends at 72, two 8-token blocks wide: hashes 7 and 8.
     token_ids = [i for i in range(15) for _ in range(block_size)] + [15] * 7
     req0 = make_request("0", token_ids, block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
@@ -3447,7 +3448,7 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary(monkeypatch):
     assert blocks is not None
 
     pool = manager.block_pool
-    expected_swa_cached = {11, 12}
+    expected_swa_cached = {7, 8}
     for i in range(15):
         cached = pool.get_cached_block(req0.block_hashes[i], kv_cache_group_ids=[1])
         if i in expected_swa_cached:
@@ -3459,8 +3460,8 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary(monkeypatch):
 
     req1 = make_request("1", token_ids, block_size, sha256)
     computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
-    assert num_computed_tokens == 12 * block_size
-    assert [len(blocks) for blocks in computed_blocks.blocks] == [3, 12]
+    assert num_computed_tokens == 8 * block_size
+    assert [len(blocks) for blocks in computed_blocks.blocks] == [2, 8]
 
 
 def test_block_lookup_cache_single_block_per_key():
