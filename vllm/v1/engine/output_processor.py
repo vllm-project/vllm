@@ -29,7 +29,7 @@ from vllm.tracing import (
 )
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
-from vllm.v1.engine.detokenizer import IncrementalDetokenizer
+from vllm.v1.engine.detokenizer import DetokenizerFinish, IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
@@ -666,12 +666,15 @@ class OutputProcessor:
                         engine_core_output.new_sampling_mask
                     )
                 # 2) Detokenize the token ids into text and perform stop checks.
-                stop_string = req_state.detokenizer.update(
+                detokenizer_finish = req_state.detokenizer.update(
                     new_token_ids, finish_reason == FinishReason.STOP
                 )
-                if stop_string:
+                if isinstance(detokenizer_finish, DetokenizerFinish):
+                    finish_reason = detokenizer_finish.finish_reason
+                    stop_reason = detokenizer_finish.stop_reason
+                elif detokenizer_finish:
                     finish_reason = FinishReason.STOP
-                    stop_reason = stop_string
+                    stop_reason = detokenizer_finish
 
                 # 3) Compute sample and prompt logprobs for request,
                 # if required.

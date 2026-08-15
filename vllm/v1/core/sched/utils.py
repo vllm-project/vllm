@@ -40,6 +40,10 @@ def check_sequence_repetition(
     min_pattern_size = params.min_pattern_size
     min_count = params.min_count
 
+    # Decoded-word repetition is detected by the frontend detokenizer.
+    if params.mode == "word_anywhere":
+        return False
+
     if min_pattern_size <= 0:
         min_pattern_size = 1
 

@@ -8,7 +8,7 @@ import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 import msgspec
 from pydantic import BeforeValidator
@@ -175,6 +175,13 @@ class RepetitionDetectionParams:
     """Minimum number of times an N-gram pattern must repeat to trigger
     detection. Must be >= 2. Example: 3 for detecting a phrase repeated
     3 times. Must be used together with max_pattern_size."""
+
+    mode: Literal["consecutive", "word_anywhere"] = "consecutive"
+    """How matching occurrences are located. ``consecutive`` preserves the
+    original behavior and detects adjacent token N-grams at the end of the
+    output. ``word_anywhere`` detects repeated normalized word N-grams in
+    decoded output; pattern sizes are interpreted as word counts in that
+    mode."""
 
     def __post_init__(self):
         if (

@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import sys
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
+import regex as re
 import tokenizers
 import tokenizers.decoders
 from packaging import version
@@ -10,15 +12,79 @@ from tokenizers import Tokenizer
 from transformers import TokenizersBackend
 
 from vllm.logger import init_logger
+from vllm.sampling_params import RepetitionDetectionParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import (
     convert_prompt_ids_to_tokens,
     detokenize_incrementally,
 )
 from vllm.utils import length_from_prompt_token_ids_or_embeds
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest, FinishReason
 
 logger = init_logger(__name__)
+
+_NON_WORD = re.compile(r"[^\w]+", flags=re.UNICODE)
+REPETITION_DETECTED_STOP_REASON = "repetition_detected"
+
+
+@dataclass(frozen=True)
+class DetokenizerFinish:
+    """A typed frontend finish signal emitted during detokenization."""
+
+    finish_reason: FinishReason
+    stop_reason: str
+
+
+class _WordRepetitionDetector:
+    """Incrementally count normalized word N-grams in decoded text."""
+
+    def __init__(self, params: RepetitionDetectionParams):
+        self._min_pattern_size = params.min_pattern_size or 1
+        self._max_pattern_size = params.max_pattern_size
+        self._min_count = params.min_count
+        self._words: list[str] = []
+        self._counts: dict[tuple[str, ...], int] = {}
+        self._word_start: int | None = None
+        self._text_offset = 0
+
+    def update(self, output_text: str) -> int | None:
+        """Return the end offset of the first newly completed repetition."""
+        for offset in range(self._text_offset, len(output_text)):
+            char = output_text[offset]
+            if not char.isspace():
+                if self._word_start is None:
+                    self._word_start = offset
+                continue
+
+            if self._word_start is None:
+                continue
+            word = _NON_WORD.sub(
+                "",
+                output_text[self._word_start : offset].casefold(),
+            )
+            self._word_start = None
+            if self._add_word(word):
+                self._text_offset = offset + 1
+                return self._text_offset
+
+        self._text_offset = len(output_text)
+        return None
+
+    def _add_word(self, word: str) -> bool:
+        self._words.append(word)
+        for pattern_size in range(
+            self._min_pattern_size,
+            min(self._max_pattern_size, len(self._words)) + 1,
+        ):
+            pattern = tuple(self._words[-pattern_size:])
+            if not all(pattern):
+                continue
+            count = self._counts.get(pattern, 0) + 1
+            if count >= self._min_count:
+                return True
+            self._counts[pattern] = count
+        return False
+
 
 # Only tokenizers >= 0.22.0 supports DecodeStream with native prefill
 # (ids parameter) used for FastIncrementalDetokenizer.
@@ -39,7 +105,11 @@ class IncrementalDetokenizer:
     def num_output_tokens(self) -> int:
         return len(self.token_ids)
 
-    def update(self, new_token_ids: list[int], stop_terminated: bool) -> str | None:
+    def update(
+        self,
+        new_token_ids: list[int],
+        stop_terminated: bool,
+    ) -> str | DetokenizerFinish | None:
         self.token_ids.extend(new_token_ids)
         return None
 
@@ -82,6 +152,15 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         self.min_tokens = params.min_tokens
         self.include_stop_str_in_output = params.include_stop_str_in_output
 
+        repetition_params = params.repetition_detection
+        self.word_repetition_detector = (
+            _WordRepetitionDetector(repetition_params)
+            if repetition_params is not None
+            and repetition_params.mode == "word_anywhere"
+            and repetition_params.max_pattern_size > 0
+            else None
+        )
+
         # Number of chars to hold back when stop strings are to be excluded
         # from streamed output.
         if self.stop and not self.include_stop_str_in_output:
@@ -93,13 +172,17 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # Generation data
         self.output_text = ""
 
-    def update(self, new_token_ids: list[int], stop_terminated: bool) -> str | None:
+    def update(
+        self,
+        new_token_ids: list[int],
+        stop_terminated: bool,
+    ) -> str | DetokenizerFinish | None:
         """
         Update RequestState for the request_id by:
             1) Detokenize the new token ids incrementally.
-            2) Evaluate stop criteria.
+            2) Evaluate stop and repetition criteria.
 
-        Return matched stop string or None.
+        Return a matched stop string, typed finish signal, or None.
         """
         if not new_token_ids:
             # Skip detokenization if no new token ids.
@@ -140,7 +223,25 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
                 if truncate_to != -1:
                     self.output_text = self.output_text[:truncate_to]
 
-        return stop_string
+        if stop_string is not None:
+            return stop_string
+
+        repetition_end = None
+        if (
+            self.word_repetition_detector is not None
+            and not stop_terminated
+            and self.num_output_tokens() > self.min_tokens
+        ):
+            repetition_end = self.word_repetition_detector.update(self.output_text)
+
+        if repetition_end is not None:
+            self.output_text = self.output_text[:repetition_end]
+            return DetokenizerFinish(
+                FinishReason.REPETITION,
+                REPETITION_DETECTED_STOP_REASON,
+            )
+
+        return None
 
     @abstractmethod
     def decode_next(self, next_token_id: int) -> str:

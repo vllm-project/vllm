@@ -107,6 +107,38 @@ class TestCheckSequenceRepetition:
         )
         assert check_sequence_repetition(token_ids, params)
 
+    def test_default_mode_does_not_match_gap_separated_occurrence(self):
+        """Test that the default preserves consecutive-only semantics."""
+        token_ids = [1, 2, 3, 90, 91, 1, 2, 3]
+        params = RepetitionDetectionParams(
+            max_pattern_size=3,
+            min_pattern_size=3,
+            min_count=2,
+        )
+        assert params.mode == "consecutive"
+        assert not check_sequence_repetition(token_ids, params)
+
+    def test_word_anywhere_mode_is_deferred_to_detokenizer(self):
+        """Test that decoded-word mode does not stop in the token scheduler."""
+        token_ids = [1, 2, 3, 1, 2, 3]
+        params = RepetitionDetectionParams(
+            max_pattern_size=3,
+            min_pattern_size=3,
+            min_count=2,
+            mode="word_anywhere",
+        )
+        assert not check_sequence_repetition(token_ids, params)
+
+    def test_invalid_repetition_mode_is_rejected(self):
+        """Test that unsupported matching modes cannot enter the scheduler."""
+        with pytest.raises(ValueError, match="consecutive.*word_anywhere"):
+            RepetitionDetectionParams(
+                max_pattern_size=3,
+                min_pattern_size=3,
+                min_count=2,
+                mode="invalid",  # type: ignore[arg-type]
+            )
+
 
 # ============================================================================
 # INTEGRATION TESTS - check_stop with repetition detection
