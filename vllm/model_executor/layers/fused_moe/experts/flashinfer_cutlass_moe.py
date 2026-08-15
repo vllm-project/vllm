@@ -111,21 +111,15 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         self.gemm1_alpha = _per_expert(quant_config.gemm1_alpha)
         self.gemm1_beta = _per_expert(quant_config.gemm1_beta)
 
-        if quant_config.weight_quant_dtype == "mxfp4":
-            # This value is used specifically for gpt-oss,
-            # Need to revisit this for other models
-            if self.gemm1_alpha is None:
-                self.gemm1_alpha = _per_expert(1.702)
-            if self.gemm1_beta is None:
-                self.gemm1_beta = _per_expert(1.0)
-            if self.gemm1_clamp_limit is None:
-                self.gemm1_clamp_limit = _per_expert(7.0)
-            if quant_config.quant_dtype == "mxfp8":
-                self.fake_input_scale = torch.ones(
-                    self.num_experts,
-                    device=self.device,
-                    dtype=torch.float32,
-                )
+        if (
+            quant_config.weight_quant_dtype == "mxfp4"
+            and quant_config.quant_dtype == "mxfp8"
+        ):
+            self.fake_input_scale = torch.ones(
+                self.num_experts,
+                device=self.device,
+                dtype=torch.float32,
+            )
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -324,9 +318,6 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
         elif self.weight_quant_dtype == "mxfp4":
             assert self.w1_scale is not None and self.w2_scale is not None
             assert w1.is_contiguous() and w2.is_contiguous()
-            assert self.gemm1_alpha is not None
-            assert self.gemm1_beta is not None
-            assert self.gemm1_clamp_limit is not None
             assert topk_ids.is_contiguous()
 
             fc1_expert_biases = self.w1_bias
