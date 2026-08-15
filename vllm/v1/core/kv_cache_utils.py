@@ -979,15 +979,34 @@ def get_max_concurrency_for_kv_cache_config(
     a group carries an aggregated UniformTypeKVCacheSpecs (worker config) or
     a representative per-layer spec (scheduler config), so both capacity
     call sites agree.
+
+    Only the steady part of each group's per-request footprint scales with
+    concurrency. The in-flight allowance (chunked-prefill tokens not yet
+    settled, see `KVCacheSpec.transient_memory_usage_bytes`) is bounded
+    system-wide by `max_in_flight_tokens` across *all* requests, so it is
+    reserved once per pool rather than multiplied by concurrency. Without
+    this, hybrid SWA models charge every request each SWA group's peak
+    window+in-flight blocks and under-report capacity by a large factor
+    (#51041).
     """
-    num_blocks_per_request = sum(
+    steady_blocks_per_request = sum(
         cdiv(
-            group.kv_cache_spec.max_memory_usage_bytes(vllm_config),
+            group.kv_cache_spec.steady_memory_usage_bytes(vllm_config),
             group.kv_cache_spec.page_size_bytes,
         )
         for group in kv_cache_config.kv_cache_groups
     )
-    max_concurrency = kv_cache_config.num_blocks / num_blocks_per_request
+    transient_blocks_per_pool = sum(
+        cdiv(
+            group.kv_cache_spec.transient_memory_usage_bytes(vllm_config),
+            group.kv_cache_spec.page_size_bytes,
+        )
+        for group in kv_cache_config.kv_cache_groups
+    )
+    max_concurrency = (
+        max(kv_cache_config.num_blocks - transient_blocks_per_pool, 0)
+        / steady_blocks_per_request
+    )
     return max_concurrency
 
 
@@ -1898,6 +1917,13 @@ def _max_memory_usage_bytes_from_groups(
 
     Each group independently claims blocks from the shared pool, so a request consumes
     the sum of the per-group block counts, i.e. ``bytes_per_block * total_blocks``.
+
+    Only the steady part of the per-request footprint gates startup: the
+    in-flight allowance (chunked-prefill tokens not yet settled) is bounded
+    system-wide by `max_in_flight_tokens` and enforced per request by the
+    runtime admission gate, so charging it here would inflate the
+    `max_model_len` fit-check by the (pool-stride-sized) transient pages of
+    every SWA-class group (#51041).
     """
     if not kv_cache_groups:
         return 0
@@ -1907,10 +1933,10 @@ def _max_memory_usage_bytes_from_groups(
     for group in kv_cache_groups:
         spec = group.kv_cache_spec
         if isinstance(spec, UniformTypeKVCacheSpecs):
-            total_blocks += spec.max_memory_usage_pages(vllm_config)
+            total_blocks += spec.steady_memory_usage_pages(vllm_config)
         else:
             total_blocks += cdiv(
-                spec.max_memory_usage_bytes(vllm_config),
+                spec.steady_memory_usage_bytes(vllm_config),
                 spec.page_size_bytes,
             )
 
