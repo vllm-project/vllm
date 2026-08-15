@@ -966,8 +966,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         # Prefer TRTLLM/XQA for decoding whenever supported. The decode kernel
         # must be selected statically for FULL cudagraph capture.
-        can_use_xqa_or_trtllm_gen_decode = can_use_trtllm_attention(
-            self.num_qo_heads, self.num_kv_heads, is_prefill=False
+        # NVFP4 KV on consumer Blackwell is served by the FA2 paged reader;
+        # XQA/trtllm-gen decode cannot read NVFP4 cache.
+        can_use_xqa_or_trtllm_gen_decode = (
+            not self.use_fa2_nvfp4_kv
+            and can_use_trtllm_attention(
+                self.num_qo_heads, self.num_kv_heads, is_prefill=False
+            )
         )
         # Page sizes >= 128 require the trtllm-gen GQA/MQA path (guaranteed by
         # get_supported_kernel_block_sizes).
