@@ -154,6 +154,28 @@ async def test_generate_sampling_mask(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("n", [2, 4])
+async def test_generate_returns_all_choices(client, n):
+    """Regression: ``n > 1`` must not silently return fewer than ``n`` choices.
+
+    Non-streaming requests used to keep ``RequestOutputKind.CUMULATIVE``, so
+    the full generator only saw the sequences updated in the final step and
+    sequences that finished earlier never reached ``choices``.
+    """
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [1, 2, 3],
+        "sampling_params": {"max_tokens": 5, "temperature": 1.0, "n": n},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    choices = resp.json()["choices"]
+    assert len(choices) == n
+    assert sorted(choice["index"] for choice in choices) == list(range(n))
+
+
+@pytest.mark.asyncio
 async def test_generate_defaults_max_tokens_when_omitted(client):
     """Regression: omitting ``max_tokens`` must not silently cap at 16.
 
