@@ -337,24 +337,14 @@ async def test_shutdown_if_supervisor_server_error_on_startup(
 @pytest.mark.asyncio
 async def test_start_server_applies_access_log_filter(monkeypatch):
     """get_uvicorn_log_config result is forwarded to uvicorn.Config."""
-    captured: dict = {}
     sentinel_config = {"version": 1, "loggers": {}}
+    captured_config: list[uvicorn.Config] = []
 
-    def fake_get_uvicorn_log_config(_args):
-        return sentinel_config
-
-    monkeypatch.setattr(dp_sup, "get_uvicorn_log_config", fake_get_uvicorn_log_config)
-
-    original_config_init = uvicorn.Config.__init__
-
-    def spy_config_init(self, *args, **kwargs):
-        captured.update(kwargs)
-        original_config_init(self, *args, **kwargs)
-
-    monkeypatch.setattr(uvicorn.Config, "__init__", spy_config_init)
+    monkeypatch.setattr(dp_sup, "get_uvicorn_log_config", lambda _args: sentinel_config)
 
     class FakeServer:
-        def __init__(self, _config):
+        def __init__(self, config):
+            captured_config.append(config)
             self.started = True
             self.should_exit = False
 
@@ -370,27 +360,22 @@ async def test_start_server_applies_access_log_filter(monkeypatch):
     supervisor = DPSupervisor(args)
     await supervisor._start_server()
 
-    assert captured.get("log_config") is sentinel_config
-    assert captured.get("access_log") is True
+    assert len(captured_config) == 1
+    config = captured_config[0]
+    assert config.log_config is sentinel_config
+    assert config.access_log is True
 
 
 @pytest.mark.asyncio
 async def test_start_server_disables_access_log(monkeypatch):
     """disable_uvicorn_access_log=True sets access_log=False."""
-    captured: dict = {}
+    captured_config: list[uvicorn.Config] = []
 
     monkeypatch.setattr(dp_sup, "get_uvicorn_log_config", lambda _args: None)
 
-    original_config_init = uvicorn.Config.__init__
-
-    def spy_config_init(self, *args, **kwargs):
-        captured.update(kwargs)
-        original_config_init(self, *args, **kwargs)
-
-    monkeypatch.setattr(uvicorn.Config, "__init__", spy_config_init)
-
     class FakeServer:
-        def __init__(self, _config):
+        def __init__(self, config):
+            captured_config.append(config)
             self.started = True
             self.should_exit = False
 
@@ -406,27 +391,20 @@ async def test_start_server_disables_access_log(monkeypatch):
     supervisor = DPSupervisor(args)
     await supervisor._start_server()
 
-    assert captured.get("access_log") is False
-    assert "log_config" not in captured
+    assert len(captured_config) == 1
+    assert captured_config[0].access_log is False
 
 
 @pytest.mark.asyncio
 async def test_start_server_no_log_config_when_no_filter(monkeypatch):
-    """Without filtering options, no log_config is passed to uvicorn."""
-    captured: dict = {}
+    """Without filtering options, default uvicorn log_config is used."""
+    captured_config: list[uvicorn.Config] = []
 
     monkeypatch.setattr(dp_sup, "get_uvicorn_log_config", lambda _args: None)
 
-    original_config_init = uvicorn.Config.__init__
-
-    def spy_config_init(self, *args, **kwargs):
-        captured.update(kwargs)
-        original_config_init(self, *args, **kwargs)
-
-    monkeypatch.setattr(uvicorn.Config, "__init__", spy_config_init)
-
     class FakeServer:
-        def __init__(self, _config):
+        def __init__(self, config):
+            captured_config.append(config)
             self.started = True
             self.should_exit = False
 
@@ -439,8 +417,10 @@ async def test_start_server_no_log_config_when_no_filter(monkeypatch):
     supervisor = DPSupervisor(args)
     await supervisor._start_server()
 
-    assert "log_config" not in captured
-    assert captured.get("access_log") is True
+    assert len(captured_config) == 1
+    config = captured_config[0]
+    assert config.log_config == uvicorn.Config(app=None).log_config
+    assert config.access_log is True
 
 
 # ---------------------------------------------------------------------------
