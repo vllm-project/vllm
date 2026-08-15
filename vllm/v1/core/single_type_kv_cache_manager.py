@@ -16,6 +16,7 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_block_hashes,
 )
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     ChunkedLocalAttentionSpec,
     CrossAttentionSpec,
     FullAttentionSpec,
@@ -83,11 +84,8 @@ class SingleTypeKVCacheManager(ABC):
         self._max_admission_blocks_per_request = max_admission_blocks_per_request
         # Record newly allocated block ids only when worker-side zeroing will
         # consume them and this manager holds a spec type that gets zeroed.
-        self._record_new_block_ids = needs_kv_cache_zeroing and type(kv_cache_spec) in (
-            FullAttentionSpec,
-            TQFullAttentionSpec,
-            MLAAttentionSpec,
-            HiddenStateCacheSpec,
+        self._record_new_block_ids = needs_kv_cache_zeroing and isinstance(
+            kv_cache_spec, AttentionSpec
         )
         self.new_block_ids: list[int] = []
 
@@ -563,6 +561,11 @@ class SingleTypeKVCacheManager(ABC):
         return an empty list.
         If eagle is enabled, drop the last matched block to force recompute the
         last block to get the required hidden states for eagle drafting head.
+        For multi-module MTP, this recompute also rewrites the dropped block's
+        draft-layer KVs, which depend on up to num_speculative_tokens - 1
+        tokens past the matched prefix (i.e. on the cache writer's
+        continuation, which the block hash does not cover); the coordinator
+        asserts the block size covers that window.
         Need to be customized for each attention type.
 
         Args:
@@ -879,6 +882,10 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
     def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
+        # Extra trailing tokens to retain below the window (never attended) so a
+        # multi-module MTP store-side lag can still reconstruct the window from
+        # cached blocks.
+        self.extra_retained_tokens = kv_cache_spec.extra_retained_tokens
 
     @classmethod
     def _contiguous_blocks_for_hit(
@@ -1074,13 +1081,22 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         attention computation since they are outside the sliding window.
         Thus, get_num_skipped_tokens(7) == 4.
 
+        The trailing edge of the window is extended by ``extra_retained_tokens``
+        so that those extra trailing tokens' blocks are retained (but not
+        attended). This is needed for multi-module spec decoding which can
+        re-prefill the last num_spec_prefill_tokens - 1 tokens from the end
+        of the sequence, and thus needs to delay freeing/caching of blocks.
+
         Args:
             num_computed_tokens: The number of tokens that have been computed.
 
         Returns:
             The number of tokens that will be skipped for attention computation.
         """
-        return max(0, num_computed_tokens - self.sliding_window + 1)
+        return max(
+            0,
+            num_computed_tokens - self.sliding_window + 1 - self.extra_retained_tokens,
+        )
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
@@ -1559,6 +1575,7 @@ class MambaManager(SingleTypeKVCacheManager):
             # `num_required_blocks` might be less than `len(req_blocks)` if blocks are
             # over-allocated at last round.
             if num_required_blocks <= len(req_blocks) and not has_partial_hit:
+                self._allocated_block_reqs.add(request_id)
                 return []
             else:
                 prev_block_len = len(req_blocks)

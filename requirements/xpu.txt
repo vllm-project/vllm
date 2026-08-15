@@ -1,5 +1,7 @@
 # Common dependencies
 -r common.txt
+--extra-index-url=https://wheels.vllm.ai/xpu/
+triton==3.7.2+xpu
 
 ray>=2.9
 cmake>=3.26.1
