@@ -3,6 +3,7 @@
 
 import argparse
 import glob
+import re
 import sys
 
 # Only strip targeted libraries when checking prefix
@@ -15,6 +16,16 @@ TORCH_LIB_PREFIXES = (
     '"torch =',
     '"torchvision =',
     '"torchaudio =',
+)
+
+# Matches a line that is exactly one of torch/torchvision/torchaudio,
+# optionally followed by a version specifier (e.g. "torch==2.5.1") or a
+# pyproject.toml-style quoted entry (e.g. '"torch>=2.5.1"'). Deliberately
+# narrower than a plain substring check so packages like terratorch,
+# open_clip_torch, or vector-quantize-pytorch, and comment lines like
+# "# via torch", are left untouched.
+TORCH_LIB_LINE_RE = re.compile(
+    r'^\s*"?(torch|torchvision|torchaudio)"?\s*([=<>!~].*)?$', re.IGNORECASE
 )
 
 
@@ -43,7 +54,7 @@ def main(argv):
                         args.prefix
                         and not line.lower().strip().startswith(TORCH_LIB_PREFIXES)
                         or not args.prefix
-                        and "torch" not in line.lower()
+                        and not TORCH_LIB_LINE_RE.match(line.strip())
                     ):
                         f.write(line)
                     else:
