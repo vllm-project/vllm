@@ -531,8 +531,8 @@ class TestExtractAllowedToolsFromMcpRequests:
         }
 
 
-class TestHarmonyPreambleStreaming:
-    """Tests for preamble (commentary with no recipient) streaming events."""
+class TestHarmonyStreamingEvents:
+    """Tests for Harmony streaming event routing."""
 
     @staticmethod
     def _make_segment(*, channel, recipient, delta="hello"):
@@ -599,6 +599,44 @@ class TestHarmonyPreambleStreaming:
 
         type_names = [e.type for e in events]
         assert "response.output_text.delta" not in type_names
+
+    def test_browser_stream_emits_only_web_search_events(self) -> None:
+        """A browser stream must not emit an MCP lifecycle as well."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_content_delta_events,
+            emit_previous_item_done_events,
+            emit_tool_action_events,
+        )
+
+        previous = self._make_previous_item(
+            channel="commentary",
+            recipient="browser.search",
+            text='{"query": "weather"}',
+        )
+        previous.author.role = "assistant"
+        state = StreamingState()
+
+        events = emit_content_delta_events(
+            self._make_segment(
+                channel="commentary",
+                recipient="browser.search",
+                delta='{"query": "weather"}',
+            ),
+            state,
+        )
+        events.extend(emit_previous_item_done_events(previous, state))
+
+        tool_server = MagicMock()
+        tool_server.has_tool.return_value = True
+        events.extend(emit_tool_action_events(previous, state, tool_server))
+
+        assert [event.type for event in events] == [
+            "response.output_item.added",
+            "response.web_search_call.in_progress",
+            "response.web_search_call.searching",
+            "response.web_search_call.completed",
+            "response.output_item.done",
+        ]
 
     def test_preamble_done_emits_text_done_events(self) -> None:
         """Completed preamble should emit text done + content_part done +

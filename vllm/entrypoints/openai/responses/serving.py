@@ -1446,7 +1446,6 @@ class OpenAIServingResponses(GenerateBaseServing):
                         yield _increment_sequence_number_and_return(event)
 
                 elif completed_message := segment.completed_message:
-                    # TODO: Fix browser emitted as MCP calls
                     for event in emit_previous_item_done_events(
                         completed_message, state, ctx.function_tool_names
                     ):
