@@ -149,15 +149,38 @@ The difference is visible before taking either ratio:
 | Real model selector total divided by 21 | 602.939 us | 132.639 us | 4.546x |
 | Real BEAM selector total divided by 21 | 605.204 us | 133.141 us | 4.546x |
 
-The independent BEAM trace explains the difference directly. The real first
-call is 511.568/293.696 us, or 1.742x, which matches the standalone ratio.
-Call 2 is 1.119x, call 3 is a 0.506x regression, and calls 4--21 average
-612.347/44.452 us, or 13.775x. Summing the 21 per-call medians gives
-12.690/2.793 ms, or 4.544x.
+The independent BEAM trace explains the difference directly. Each row below
+is the median of 384 exact-B1024 measurements from normal model execution:
 
-Calls 4--21 were each measured separately over 384 exact-B1024 replays; this
-is not an extrapolation from call 4. Their individual median speedups occupy
-the narrow 13.739x--13.827x range.
+| Selector | Model layer | Baseline | GVR | Speedup |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0 | 511.568 us | 293.696 us | 1.742x |
+| 2 | 1 | 542.720 us | 485.040 us | 1.119x |
+| 3 | 2 | 613.888 us | 1,213.680 us | 0.506x |
+| 4 | 6 | 614.080 us | 44.576 us | 13.776x |
+| 5 | 10 | 613.216 us | 44.416 us | 13.806x |
+| 6 | 14 | 612.224 us | 44.432 us | 13.779x |
+| 7 | 18 | 611.904 us | 44.384 us | 13.787x |
+| 8 | 22 | 611.936 us | 44.256 us | 13.827x |
+| 9 | 26 | 612.288 us | 44.544 us | 13.746x |
+| 10 | 30 | 612.432 us | 44.576 us | 13.739x |
+| 11 | 34 | 612.256 us | 44.416 us | 13.785x |
+| 12 | 38 | 612.000 us | 44.384 us | 13.789x |
+| 13 | 42 | 612.416 us | 44.544 us | 13.749x |
+| 14 | 46 | 612.224 us | 44.544 us | 13.744x |
+| 15 | 50 | 612.160 us | 44.384 us | 13.792x |
+| 16 | 54 | 612.256 us | 44.384 us | 13.795x |
+| 17 | 58 | 612.160 us | 44.480 us | 13.763x |
+| 18 | 62 | 612.240 us | 44.448 us | 13.774x |
+| 19 | 66 | 612.016 us | 44.544 us | 13.740x |
+| 20 | 70 | 612.176 us | 44.352 us | 13.803x |
+| 21 | 74 | 612.256 us | 44.480 us | 13.765x |
+| **Sum of medians** | -- | **12.690 ms** | **2.793 ms** | **4.544x** |
+
+The real first call's 1.742x matches the standalone ratio. Selector 3 regresses
+to 0.506x, while selectors 4--21 individually occupy the narrow
+13.739x--13.827x range. That range is measured, not extrapolated from selector
+4.
 
 Thus the standalone number is numerically valid for a repeated first-layer
 input, but it was misleadingly labeled as if it predicted a real B1024
