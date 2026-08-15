@@ -1538,7 +1538,7 @@ class TestClientErrorResponses:
             response = client.post("/v1/messages", json=self._request_body())
 
         assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
-        assert response.json()["error"]["type"] == "internal_error"
+        assert response.json()["error"]["type"] == "InternalServerError"
 
     def test_count_tokens_validation_error_returns_bad_request(self):
         """The count_tokens route maps conversion errors to 400 as well."""
