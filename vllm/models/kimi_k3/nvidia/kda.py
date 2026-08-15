@@ -42,6 +42,10 @@ from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
 )
+from vllm.models.kimi_k3.nvidia.quantization import (
+    pad_merged_output_sizes,
+    uses_modelopt_fp8_pb_wo,
+)
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
@@ -322,19 +326,25 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             "KimiK3DeltaAttention requires a full-rank gate"
         )
 
-        # Keep f_a before the narrow beta shard, then pad each TP-local row
-        # to select the aligned BF16 GEMM path.
+        # Keep f_a before the narrow beta shard, then pad each TP-local row.
+        # ModelOpt FP8_PB_WO requires a complete 128-row output block; other
+        # formats retain the 16-row alignment used by the BF16 GEMM path.
         qkvg_output_sizes = [self.projection_size] * 4
         in_proj_output_sizes = qkvg_output_sizes + [
             self.head_dim,
             self.num_heads,
         ]
-        local_output_size = (
-            4 * self.local_projection_size + self.head_dim + self.local_num_heads
+        in_proj_prefix = f"{prefix}.in_proj_qkvgfab"
+        alignment = (
+            128 if uses_modelopt_fp8_pb_wo(self.quant_config, in_proj_prefix) else 16
         )
-        self.in_proj_padding = -local_output_size % 16
-        if self.in_proj_padding:
-            in_proj_output_sizes.append(self.in_proj_padding * self.tp_size)
+        in_proj_output_sizes, self.in_proj_padding = pad_merged_output_sizes(
+            in_proj_output_sizes,
+            self.tp_size,
+            disable_tp=False,
+            alignment=alignment,
+            replicated_shard_ids=(4,),
+        )
         self.in_proj_qkvgfab = _KimiGDNMergedColumnParallelLinear(
             self.hidden_size,
             in_proj_output_sizes,
@@ -342,7 +352,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             tp_size=self.tp_size,
             bias=False,
             quant_config=self.quant_config,
-            prefix=f"{prefix}.in_proj_qkvgfab",
+            prefix=in_proj_prefix,
         )
         if self.in_proj_padding:
             self.in_proj_qkvgfab.weight.data[-self.in_proj_padding :].zero_()

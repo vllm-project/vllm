@@ -23,11 +23,15 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptFp8LinearMethod,
+    ModelOptFp8PbWoLinearMethod,
     ModelOptMixedPrecisionConfig,
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
     ModelOptNvFp4LinearMethod,
     ModelOptNvFp4W4A16LinearMethod,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_and_maybe_dequant_weights,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -135,6 +139,18 @@ def test_modelopt_fp8_updates_weight_dims_after_transpose():
     assert layer.weight.input_dim == 0
     assert layer.weight.output_dim == 1
     method.fp8_linear.process_weights_after_loading.assert_called_once_with(layer)
+
+
+def test_modelopt_fp8_pb_wo_dequantizes_standard_block_scales():
+    layer = torch.nn.Module()
+    layer.quant_method = object.__new__(ModelOptFp8PbWoLinearMethod)
+    layer.weight = torch.ones((128, 128), dtype=torch.float8_e4m3fn)
+    layer.weight_scale = torch.full((1, 1), 0.25, dtype=torch.float32)
+    layer.weight_block_size = [128, 128]
+
+    weight = get_and_maybe_dequant_weights(layer)
+
+    torch.testing.assert_close(weight, torch.full((128, 128), 0.25))
 
 
 def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
