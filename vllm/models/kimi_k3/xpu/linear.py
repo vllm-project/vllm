@@ -26,24 +26,40 @@ from vllm.model_executor.layers.linear import (
 	ReplicatedLinear,
 	RowParallelLinear,
 )
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mamba.mamba_utils import (
+	MambaStateCopyFunc,
+	MambaStateCopyFuncCalculator,
+	MambaStateDtypeCalculator,
+	MambaStateShapeCalculator,
+)
 from vllm.model_executor.layers.mla import (
 	MLAModules,
 	MultiHeadLatentAttentionWrapper,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
+	ParallelLMHead,
 	VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import (
 	default_weight_loader,
 	maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.interfaces import EagleModelMixin
+from vllm.model_executor.models.interfaces import (
+	EagleModelMixin,
+	HasInnerState,
+	IsHybrid,
+	MixtureOfExperts,
+	SupportsPP,
+)
 from vllm.model_executor.models.utils import (
+	AutoWeightsLoader,
 	PPMissingLayer,
 	get_spec_layer_idx_from_weight_name,
 	is_pp_missing_parameter,
 	make_layers,
+	maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
@@ -987,16 +1003,35 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 		return loaded_params
 
 
-class KimiLinearForCausalLM(nn.Module):
-	"""Placeholder for the native Intel XPU Kimi-K3 text model."""
+class KimiLinearForCausalLM(
+	nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
+):
 
 	def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
 		super().__init__()
-		del vllm_config, prefix
-		raise NotImplementedError("Native XPU Kimi-K3 text model is not implemented.")
+		self.model_config = vllm_config.model_config
+		self.vllm_config = vllm_config
+		self.config = self.model_config.hf_config
+		self.quant_config = vllm_config.quant_config
+		self.model = KimiLinearModel(
+			vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+		)
+		if get_pp_group().is_last_rank:
+			self.lm_head = ParallelLMHead(
+				self.config.vocab_size,
+				self.config.hidden_size,
+				quant_config=self.quant_config,
+				prefix=maybe_prefix(prefix, "lm_head"),
+			)
+		else:
+			self.lm_head = PPMissingLayer()
+		logit_scale = getattr(self.config, "logit_scale", 1.0)
+		self.logits_processor = LogitsProcessor(
+			self.config.vocab_size, scale=logit_scale
+		)
 
 	def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-		raise NotImplementedError
+		return self.model.embed_input_ids(input_ids)
 
 	def make_empty_intermediate_tensors(
 		self,
@@ -1004,7 +1039,7 @@ class KimiLinearForCausalLM(nn.Module):
 		dtype: torch.dtype,
 		device: torch.device,
 	) -> IntermediateTensors:
-		raise NotImplementedError
+		return self.model.make_empty_intermediate_tensors(batch_size, dtype, device)
 
 	def forward(
 		self,
@@ -1013,14 +1048,61 @@ class KimiLinearForCausalLM(nn.Module):
 		intermediate_tensors: IntermediateTensors | None = None,
 		inputs_embeds: torch.Tensor | None = None,
 		**kwargs: object,
-	) -> torch.Tensor | IntermediateTensors:
-		raise NotImplementedError
+	) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+		return self.model(
+			input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+		)
+
+	@classmethod
+	def get_mamba_state_dtype_from_config(
+		cls,
+		vllm_config: VllmConfig,
+	) -> tuple[torch.dtype, torch.dtype]:
+		return MambaStateDtypeCalculator.kda_state_dtype(
+			vllm_config.model_config.dtype,
+			vllm_config.cache_config.mamba_cache_dtype,
+		)
+
+	@classmethod
+	def get_mamba_state_shape_from_config(
+		cls,
+		vllm_config: VllmConfig,
+	) -> tuple[tuple[int, int], tuple[int, int, int]]:
+		parallel_config = vllm_config.parallel_config
+		hf_config = vllm_config.model_config.hf_config
+		num_spec = (
+			vllm_config.speculative_config.num_speculative_tokens
+			if vllm_config.speculative_config
+			else 0
+		)
+		return MambaStateShapeCalculator.kda_state_shape(
+			parallel_config.tensor_parallel_size,
+			hf_config.linear_attn_config["num_heads"],
+			hf_config.linear_attn_config["head_dim"],
+			conv_kernel_size=hf_config.linear_attn_config[
+				"short_conv_kernel_size"
+			],
+			num_spec=num_spec,
+		)
+
+	@classmethod
+	def get_mamba_state_copy_func(
+		cls,
+	) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+		return MambaStateCopyFuncCalculator.kda_state_copy_func()
 
 	def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
-		raise NotImplementedError
+		hidden_states = self.model.norm(hidden_states, None)
+		return self.logits_processor(self.lm_head, hidden_states)
 
 	def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-		raise NotImplementedError
+		loader = AutoWeightsLoader(
+			self,
+			skip_prefixes=(
+				["lm_head."] if self.config.tie_word_embeddings else None
+			),
+		)
+		return loader.load_weights(weights)
 
 __all__ = [
 	"KimiDecoderLayer",

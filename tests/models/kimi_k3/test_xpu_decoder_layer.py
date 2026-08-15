@@ -13,6 +13,7 @@ from vllm.models.kimi_k3.xpu import kda as kimi_xpu_kda
 from vllm.models.kimi_k3.xpu import linear as kimi_xpu
 from vllm.models.kimi_k3.xpu.ops.attn_res import attn_res
 from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
@@ -134,6 +135,62 @@ class _WeightLoaderLayer(nn.Module):
         super().__init__()
         self.mlp = nn.Module()
         self.mlp.gate_up_proj = _FusedWeightModule(calls)
+
+
+class _WrapperModel(nn.Module):
+    def __init__(self, *, vllm_config: object, prefix: str) -> None:
+        super().__init__()
+        self.vllm_config = vllm_config
+        self.prefix = prefix
+        self.norm = _ResidualNorm()
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return input_ids + 1
+
+    def make_empty_intermediate_tensors(
+        self,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> IntermediateTensors:
+        return IntermediateTensors(
+            {"hidden_states": torch.zeros(batch_size, 2, dtype=dtype, device=device)}
+        )
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        del positions, intermediate_tensors, kwargs
+        assert inputs_embeds is not None or input_ids is not None
+        return inputs_embeds if inputs_embeds is not None else input_ids
+
+
+class _WrapperLMHead(nn.Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        hidden_size: int,
+        quant_config: object,
+        prefix: str,
+    ) -> None:
+        super().__init__()
+        self.args = (vocab_size, hidden_size, quant_config, prefix)
+
+
+class _WrapperLogitsProcessor:
+    def __init__(self, vocab_size: int, scale: float) -> None:
+        self.args = (vocab_size, scale)
+
+    def __call__(
+        self, lm_head: nn.Module, hidden_states: torch.Tensor
+    ) -> torch.Tensor:
+        del lm_head
+        return hidden_states * self.args[1]
 
 
 @pytest.mark.parametrize(
@@ -474,6 +531,121 @@ def test_xpu_kimi_linear_model_loads_fused_mlp_shards() -> None:
     assert len(calls) == 2
     assert calls[0][0] is gate_weight and calls[0][1] == 0
     assert calls[1][0] is up_weight and calls[1][1] == 1
+
+
+def test_xpu_kimi_linear_for_causal_lm_wraps_model(monkeypatch) -> None:
+    monkeypatch.setattr(kimi_xpu, "get_pp_group", lambda: _SingleRankPPGroup())
+    monkeypatch.setattr(kimi_xpu, "KimiLinearModel", _WrapperModel)
+    monkeypatch.setattr(kimi_xpu, "ParallelLMHead", _WrapperLMHead)
+    monkeypatch.setattr(kimi_xpu, "LogitsProcessor", _WrapperLogitsProcessor)
+    config = SimpleNamespace(
+        vocab_size=8,
+        hidden_size=2,
+        logit_scale=0.5,
+        tie_word_embeddings=False,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=config),
+        quant_config="quant",
+    )
+
+    model = kimi_xpu.KimiLinearForCausalLM(
+        vllm_config=vllm_config,  # type: ignore[arg-type]
+        prefix="language_model",
+    )
+
+    assert model.model.prefix == "language_model.model"
+    assert model.lm_head.args == (8, 2, "quant", "language_model.lm_head")
+    torch.testing.assert_close(
+        model.embed_input_ids(torch.tensor([[1.0, 2.0]])),
+        torch.tensor([[2.0, 3.0]]),
+    )
+    inputs_embeds = torch.tensor([[3.0, 5.0]])
+    assert model(None, torch.tensor([0]), inputs_embeds=inputs_embeds) is inputs_embeds
+    logits = model.compute_logits(torch.tensor([[1.0, 3.0]]))
+    torch.testing.assert_close(logits, torch.tensor([[1.0, 2.0]]))
+    intermediates = model.make_empty_intermediate_tensors(
+        3, torch.bfloat16, torch.device("cpu")
+    )
+    assert intermediates["hidden_states"].shape == (3, 2)
+
+
+def test_xpu_kimi_linear_for_causal_lm_kda_state_contract(monkeypatch) -> None:
+    dtype_args: list[object] = []
+    shape_args: list[object] = []
+    copy_funcs = (lambda: None, lambda: None)
+    monkeypatch.setattr(
+        kimi_xpu.MambaStateDtypeCalculator,
+        "kda_state_dtype",
+        lambda dtype, cache_dtype: dtype_args.append((dtype, cache_dtype))
+        or (torch.float32, torch.bfloat16),
+    )
+    monkeypatch.setattr(
+        kimi_xpu.MambaStateShapeCalculator,
+        "kda_state_shape",
+        lambda *args, **kwargs: shape_args.append((args, kwargs))
+        or ((12, 4), (3, 4, 4)),
+    )
+    monkeypatch.setattr(
+        kimi_xpu.MambaStateCopyFuncCalculator,
+        "kda_state_copy_func",
+        lambda: copy_funcs,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_config=SimpleNamespace(
+                linear_attn_config={
+                    "num_heads": 8,
+                    "head_dim": 64,
+                    "short_conv_kernel_size": 4,
+                }
+            ),
+        ),
+        cache_config=SimpleNamespace(mamba_cache_dtype="auto"),
+        parallel_config=SimpleNamespace(tensor_parallel_size=2),
+        speculative_config=SimpleNamespace(num_speculative_tokens=3),
+    )
+
+    assert kimi_xpu.KimiLinearForCausalLM.get_mamba_state_dtype_from_config(
+        vllm_config  # type: ignore[arg-type]
+    ) == (torch.float32, torch.bfloat16)
+    assert kimi_xpu.KimiLinearForCausalLM.get_mamba_state_shape_from_config(
+        vllm_config  # type: ignore[arg-type]
+    ) == ((12, 4), (3, 4, 4))
+    assert kimi_xpu.KimiLinearForCausalLM.get_mamba_state_copy_func() is copy_funcs
+    assert dtype_args == [(torch.bfloat16, "auto")]
+    assert shape_args == [
+        ((2, 8, 64), {"conv_kernel_size": 4, "num_spec": 3})
+    ]
+
+
+def test_xpu_kimi_linear_for_causal_lm_loads_weights(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Loader:
+        def __init__(self, model: nn.Module, skip_prefixes: list[str]) -> None:
+            captured["model"] = model
+            captured["skip_prefixes"] = skip_prefixes
+
+        def load_weights(
+            self, weights: list[tuple[str, torch.Tensor]]
+        ) -> set[str]:
+            captured["weights"] = weights
+            return {"model.weight"}
+
+    monkeypatch.setattr(kimi_xpu, "AutoWeightsLoader", _Loader)
+    model = object.__new__(kimi_xpu.KimiLinearForCausalLM)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(tie_word_embeddings=True)
+    weights = [("model.weight", torch.ones(1))]
+
+    assert model.load_weights(weights) == {"model.weight"}
+    assert captured == {
+        "model": model,
+        "skip_prefixes": ["lm_head."],
+        "weights": weights,
+    }
 
 
 def test_xpu_decoder_layer_uses_three_attn_res_states(monkeypatch) -> None:
