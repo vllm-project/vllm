@@ -330,6 +330,30 @@ def convert_to_unquantized_kernel_format(
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    # Kernel-format conversion can be called again after a runtime weight
+    # update. Never let a layout bit from an earlier conversion leak into a
+    # later, ineligible one.
+    moe_config.w13_swiglu_interleaved = False
+    if (
+        unquantized_backend == UnquantizedMoeBackend.TRITON
+        and current_platform.is_cuda()
+        and moe_config.in_dtype == torch.bfloat16
+        and moe_config.activation == MoEActivation.SILU
+        and moe_config.is_act_and_mul
+        and not moe_config.has_bias
+        and not moe_config.is_lora_enabled
+        and not moe_config.moe_parallel_config.enable_eplb
+        and moe_config.swiglu_limit is None
+        and moe_config.swiglu_alpha in (None, 1.0)
+        and moe_config.swiglu_beta in (None, 0.0)
+    ):
+        gate, up = w13_weight.chunk(2, dim=1)
+        w13_weight = torch.stack((gate, up), dim=2).flatten(1, 2)
+        moe_config.w13_swiglu_interleaved = True
+        logger.info_once(
+            "Using fused Triton W13 SwiGLU epilogue with interleaved weights."
+        )
+
     if unquantized_backend == UnquantizedMoeBackend.AITER:
         w13_weight, w2_weight = rocm_aiter_ops.shuffle_weights(w13_weight, w2_weight)
         w13_weight.is_shuffled = True
