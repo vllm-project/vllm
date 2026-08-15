@@ -275,9 +275,7 @@ class BatchSharder:
         )
         local_grammar_output = None
         if grammar_output is not None:
-            local_grammar_output = _shard_grammar_output(
-                grammar_output, input_batch, local_req_ids
-            )
+            local_grammar_output = _shard_grammar_output(grammar_output, local_req_ids)
         metadata = BatchShardMetadata(
             tp_size=tp_size,
             num_logits_per_rank=num_logits_per_rank_np.tolist(),
@@ -314,23 +312,21 @@ def all_to_all_logits(
 
 def _shard_grammar_output(
     grammar_output: GrammarOutput,
-    input_batch: InputBatch,
     local_req_ids: list[str],
 ) -> GrammarOutput | None:
     owned = set(local_req_ids)
-    req_id_to_idx = {req_id: i for i, req_id in enumerate(input_batch.req_ids)}
-    cu_num_logits_np = input_batch.cu_num_logits_np
+    mask_stride = grammar_output.grammar_bitmask.shape[0] // len(
+        grammar_output.structured_output_request_ids
+    )
 
     local_ids: list[str] = []
     keep_indices: list[int] = []
     cursor = 0
     for req_id in grammar_output.structured_output_request_ids:
-        req_idx = req_id_to_idx[req_id]
-        num_req_logits = int(cu_num_logits_np[req_idx + 1] - cu_num_logits_np[req_idx])
         if req_id in owned:
             local_ids.append(req_id)
-            keep_indices.extend(range(cursor, cursor + num_req_logits))
-        cursor += num_req_logits
+            keep_indices.extend(range(cursor, cursor + mask_stride))
+        cursor += mask_stride
     if not local_ids:
         return None
     # num_acceptable_drafts is ordered with structured_output_request_ids.
