@@ -2,15 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import io
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
 from typing import Any, Final, cast
 
-import numpy as np
-import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -64,6 +61,7 @@ from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
+from vllm.utils.serial_utils import numpy2base64
 
 logger = init_logger(__name__)
 
@@ -318,6 +316,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            session_id = self._get_session_id(request, raw_request)
 
             if isinstance(sampling_params, BeamSearchParams):
                 generator = self.beam_search(
@@ -326,6 +325,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     params=sampling_params,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
+                    session_id=session_id,
                 )
             else:
                 if not request.include_reasoning:
@@ -346,8 +346,9 @@ class OpenAIServingChat(GenerateBaseServing):
                     sub_request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    priority=request.priority,
+                    priority=self._get_priority(request, raw_request),
                     data_parallel_rank=data_parallel_rank,
+                    session_id=session_id,
                     reasoning_ended=reasoning_ended,
                     reasoning_parser_kwargs={
                         "chat_template_kwargs": chat_template_kwargs,
@@ -1004,15 +1005,11 @@ class OpenAIServingChat(GenerateBaseServing):
                 and output.finish_reason == "stop"
             )
 
-            # Encode routed_experts for transport. JSON can't carry raw
-            # bytes, so we write the ndarray as a ``.npy`` byte stream
-            # and base64-encode it. ``pybase64`` is ~3x faster than the
-            # stdlib ``base64`` on large payloads thanks to SIMD.
-            routed_experts_b64 = None
-            if output.routed_experts is not None:
-                buf = io.BytesIO()
-                np.save(buf, output.routed_experts)
-                routed_experts_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            routed_experts_b64 = (
+                numpy2base64(output.routed_experts)
+                if output.routed_experts is not None
+                else None
+            )
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
