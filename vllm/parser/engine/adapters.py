@@ -132,6 +132,12 @@ class ParserEngineToolAdapter(ToolParser):
     state so it can parse reasoning-stripped content (i.e. the output of
     :meth:`ReasoningParser.extract_reasoning`).
 
+    When no reasoning parser is configured at the serving layer, the
+    owning :class:`~vllm.parser.abstract_parser.Parser` sets
+    :attr:`skip_reasoning_parsing` so reasoning markup — plain content
+    in that configuration — passes through verbatim instead of being
+    consumed or reclassified by the engine.
+
     Subclasses set :attr:`_parser_engine_cls` to the concrete
     :class:`ParserEngine` class.
     """
@@ -147,6 +153,14 @@ class ParserEngineToolAdapter(ToolParser):
     ) -> None:
         super().__init__(tokenizer, tools)
         self._parser_engine = self._parser_engine_cls(tokenizer, tools, **kwargs)  # type: ignore[call-arg]
+
+    @property
+    def skip_reasoning_parsing(self) -> bool:
+        return self._parser_engine.skip_reasoning_parsing
+
+    @skip_reasoning_parsing.setter
+    def skip_reasoning_parsing(self, value: bool) -> None:
+        self._parser_engine.skip_reasoning_parsing = value
 
     def adjust_request(
         self,
