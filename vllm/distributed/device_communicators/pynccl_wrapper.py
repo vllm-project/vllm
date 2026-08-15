@@ -389,14 +389,7 @@ class NCCLLibrary:
                     _funcs[func.name] = f
                 except AttributeError:
                     if func.name in ("ncclCommSuspend", "ncclCommResume"):
-                        # Only present in NCCL >= 2.29.7. Skip on older NCCL;
-                        # sleep-mode NCCL memory release degrades to a no-op.
-                        logger.warning_once(
-                            "NCCL communicator suspend/resume not found in %s "
-                            "(needs NCCL >= 2.29.7); sleep-mode NCCL memory "
-                            "release is disabled.",
-                            so_file,
-                        )
+                        # Only present in NCCL >= 2.29.7; suspension no-ops.
                         continue
                     if func.name in [
                         "ncclCommWindowRegister",
@@ -599,6 +592,9 @@ class NCCLLibrary:
 
     def ncclCommAbort(self, comm: ncclComm_t) -> None:
         self.NCCL_CHECK(self._funcs["ncclCommAbort"](comm))
+
+    def supports_comm_suspension(self) -> bool:
+        return "ncclCommSuspend" in self._funcs and "ncclCommResume" in self._funcs
 
     def ncclCommSuspend(self, comm: ncclComm_t, flags: int) -> None:
         self.NCCL_CHECK(self._funcs["ncclCommSuspend"](comm, flags))

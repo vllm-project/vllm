@@ -472,3 +472,29 @@ def test_ncclGetUniqueId():
     # 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     # as long as the function doesn't raise an exception, we're good
     assert unique_id is not None
+
+
+def test_pynccl_suspend_resume_idempotent():
+    """Repeated suspend/resume calls (e.g. staged wake-ups) must each reach
+    NCCL exactly once; resuming a non-suspended comm is an NCCL error."""
+    from unittest.mock import Mock
+
+    comm = object.__new__(PyNcclCommunicator)
+    comm.disabled = False
+    comm._suspended = False
+    comm.nccl_version = 23007
+    comm.comm = object()
+    comm.nccl = Mock()
+    comm.nccl.supports_comm_suspension.return_value = True
+
+    comm.suspend()
+    comm.suspend()
+    comm.resume()
+    comm.resume()
+
+    assert comm.nccl.ncclCommSuspend.call_count == 1
+    assert comm.nccl.ncclCommResume.call_count == 1
+
+    comm.nccl.supports_comm_suspension.return_value = False
+    comm.suspend()
+    assert comm.nccl.ncclCommSuspend.call_count == 1

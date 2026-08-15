@@ -210,11 +210,13 @@ class Worker(WorkerBase):
 
         backend = self._get_sleep_mode_backend()
         backend.suspend(level)
-        if backend.releases_communicator_memory():
+        if backend.requires_communicator_suspend() and not self._comms_suspended:
             from vllm.distributed.parallel_state import suspend_device_comms
 
-            suspend_device_comms()
+            # Set first: if the walker partially fails, wake_up() must still
+            # attempt to resume every communicator.
             self._comms_suspended = True
+            suspend_device_comms()
 
         torch.accelerator.synchronize()
         deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)
@@ -239,6 +241,8 @@ class Worker(WorkerBase):
             from vllm.distributed.parallel_state import resume_device_comms
 
             resume_device_comms()
+            # Cleared only after the full walk succeeds, so a failed resume
+            # stays retryable.
             self._comms_suspended = False
 
         # Restore the buffers after level 2 sleep

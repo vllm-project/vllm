@@ -129,7 +129,7 @@ def _register_group(group: "GroupCoordinator") -> None:
 
 def _apply_to_device_comms(
     action: Callable[[DeviceCommunicatorBase], None],
-) -> int:
+) -> None:
     """Apply ``action`` to every group's device communicator.
 
     Walks the registered parallel groups and skips those without a device
@@ -148,41 +148,18 @@ def _apply_to_device_comms(
     for dc in comms:
         action(dc)
 
-    return len(comms)
-
-
-def _apply_device_comm_memory_action(
-    label: str,
-    action: Callable[[DeviceCommunicatorBase], None],
-) -> None:
-    free_before = torch.accelerator.get_memory_info()[0]
-    comm_count = _apply_to_device_comms(action)
-    if comm_count == 0:
-        return
-
-    delta = torch.accelerator.get_memory_info()[0] - free_before
-    direction = "freed" if delta > 0 else "allocated"
-    logger.info(
-        "device-comm %s: %d comms, %.1f MiB %s",
-        label,
-        comm_count,
-        abs(delta) / 1024**2,
-        direction,
-    )
-
 
 def suspend_device_comms() -> None:
-    """Release idle device communicator memory on every group (collective).
+    """Release reclaimable device communicator memory (collective).
 
-    Must run on every rank with communicators idle. Communicator suspend hooks
-    are no-ops where unsupported.
+    Must run on every rank while communicators are idle.
     """
-    _apply_device_comm_memory_action("suspend", lambda comm: comm.suspend())
+    _apply_to_device_comms(lambda comm: comm.suspend())
 
 
 def resume_device_comms() -> None:
     """Restore all suspended device communicators before reuse (collective)."""
-    _apply_device_comm_memory_action("resume", lambda comm: comm.resume())
+    _apply_to_device_comms(lambda comm: comm.resume())
 
 
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:

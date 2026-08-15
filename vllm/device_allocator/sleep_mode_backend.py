@@ -87,12 +87,11 @@ class SleepModeBackend(ABC):
         return False
 
     @classmethod
-    def releases_communicator_memory(cls) -> bool:
-        """If True, the worker releases reclaimable device-communicator memory
-        (e.g. NCCL via ``ncclCommSuspend``) after ``suspend`` and restores it
-        after ``resume``. Only meaningful when ``preserves_communicators`` is
-        True: backends whose mechanism already covers communicator state (e.g.
-        process checkpoint) must return False to avoid double handling."""
+    def requires_communicator_suspend(cls) -> bool:
+        """If True, the worker suspends device communicators (e.g. NCCL via
+        ``ncclCommSuspend``) after ``suspend`` and resumes them after
+        ``resume``. Backends whose mechanism already covers communicator state
+        (e.g. process checkpoint) must return False."""
         return False
 
     @classmethod
@@ -148,10 +147,9 @@ class CuMemBackend(SleepModeBackend):
         return True
 
     @classmethod
-    def releases_communicator_memory(cls) -> bool:
-        # Allocator-level sleep leaves NCCL buffers untouched (they live
-        # outside the pool); the worker reclaims them via communicator
-        # suspend hooks.
+    def requires_communicator_suspend(cls) -> bool:
+        # NCCL buffers live outside the allocator pool; the worker reclaims
+        # them via communicator suspend hooks.
         return True
 
 
