@@ -99,6 +99,7 @@ def _rotate_qpe_for_kpe_4bit(
     q_pe_rot = q[..., L : L + R] @ pi
     return torch.cat([q[..., :L], q_pe_rot], dim=-1)
 
+
 # P1: Triton autotune for the fused stage1 decode kernel.
 # Original PR hardcoded BLOCK_N=32, BLOCK_H=16, num_warps=4, num_stages=2 (mirrored
 # from upstream `_fwd_grouped_kernel_stage1` defaults). For the TurboQuant 4bit /
@@ -119,7 +120,9 @@ _TQ_MLA_DECODE_AUTOTUNE_CONFIGS = (
     [
         # PR default; identical to pre-P1 behaviour.
         triton.Config(
-            {"BLOCK_N": 32, "BLOCK_H": 16}, num_warps=4, num_stages=2,
+            {"BLOCK_N": 32, "BLOCK_H": 16},
+            num_warps=4,
+            num_stages=2,
         ),
     ]
     if _TQ_MLA_DECODE_DISABLE_AUTOTUNE
@@ -332,15 +335,9 @@ def _load_kpe_4bit_1d_bulk(
     idx = (row >> shift) & 0xF
     idx = tl.where(r_mask, idx, 0)
 
-    y_hat = _tq_mla_gather_centroids_1d(
-        Kpe_centroids_ptr, idx, r_mask, BLOCK_R, 4
-    )
-    n_lo = tl.load(
-        Cache_ptr + slot_base + KV_C_BYTES + KPE_MSE_BYTES
-    ).to(tl.uint16)
-    n_hi = tl.load(
-        Cache_ptr + slot_base + KV_C_BYTES + KPE_MSE_BYTES + 1
-    ).to(tl.uint16)
+    y_hat = _tq_mla_gather_centroids_1d(Kpe_centroids_ptr, idx, r_mask, BLOCK_R, 4)
+    n_lo = tl.load(Cache_ptr + slot_base + KV_C_BYTES + KPE_MSE_BYTES).to(tl.uint16)
+    n_hi = tl.load(Cache_ptr + slot_base + KV_C_BYTES + KPE_MSE_BYTES + 1).to(tl.uint16)
     kpe_scale = (n_lo | (n_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
     return (y_hat * kpe_scale).to(tl.bfloat16)
 
@@ -369,15 +366,9 @@ def _load_kpe_4bit_1d(
     ).to(tl.int32)
     raw16 = raw0 | (raw1 << 8)
     idx = (raw16 >> bit_shift) & umask
-    y_hat = _tq_mla_gather_centroids_1d(
-        Kpe_centroids_ptr, idx, r_mask, BLOCK_R, 4
-    )
-    n_lo = tl.load(
-        Cache_ptr + slot_base + KV_C_BYTES + KPE_MSE_BYTES
-    ).to(tl.uint16)
-    n_hi = tl.load(
-        Cache_ptr + slot_base + KV_C_BYTES + KPE_MSE_BYTES + 1
-    ).to(tl.uint16)
+    y_hat = _tq_mla_gather_centroids_1d(Kpe_centroids_ptr, idx, r_mask, BLOCK_R, 4)
+    n_lo = tl.load(Cache_ptr + slot_base + KV_C_BYTES + KPE_MSE_BYTES).to(tl.uint16)
+    n_hi = tl.load(Cache_ptr + slot_base + KV_C_BYTES + KPE_MSE_BYTES + 1).to(tl.uint16)
     kpe_scale = (n_lo | (n_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
     return (y_hat * kpe_scale).to(tl.bfloat16)
 
@@ -437,9 +428,7 @@ def _tq_mla_dequant_mse(
     raw16 = raw0 | (raw1 << 8)
     idx = (raw16 >> bit_shift) & umask
 
-    y_hat = _tq_mla_gather_centroids_1d(
-        Centroids_ptr, idx, d_mask, BLOCK_D, MSE_BITS
-    )
+    y_hat = _tq_mla_gather_centroids_1d(Centroids_ptr, idx, d_mask, BLOCK_D, MSE_BITS)
 
     # ----- Per-token scale (fp16 @ MSE_BYTES) -----
     # NORM_CORRECTION=1: store wrote eff_scale = vec_norm / ||y_hat_raw||.
@@ -554,18 +543,16 @@ def _tq_mla_sparse_topk_gather_dequant_mse(
     bit_shift = bit_off % 8
     umask = (1 << MSE_BITS) - 1
 
-    raw0 = tl.load(
-        Paged_cache_ptr + slot_base + byte_idx, mask=d_mask, other=0
-    ).to(tl.int32)
-    raw1 = tl.load(
-        Paged_cache_ptr + slot_base + byte_idx + 1, mask=d_mask, other=0
-    ).to(tl.int32)
+    raw0 = tl.load(Paged_cache_ptr + slot_base + byte_idx, mask=d_mask, other=0).to(
+        tl.int32
+    )
+    raw1 = tl.load(Paged_cache_ptr + slot_base + byte_idx + 1, mask=d_mask, other=0).to(
+        tl.int32
+    )
     raw16 = raw0 | (raw1 << 8)
     idx = (raw16 >> bit_shift) & umask
 
-    y_hat = _tq_mla_gather_centroids_1d(
-        Centroids_ptr, idx, d_mask, BLOCK_D, MSE_BITS
-    )
+    y_hat = _tq_mla_gather_centroids_1d(Centroids_ptr, idx, d_mask, BLOCK_D, MSE_BITS)
 
     n_lo = tl.load(Paged_cache_ptr + slot_base + MSE_BYTES).to(tl.uint16)
     n_hi = tl.load(Paged_cache_ptr + slot_base + MSE_BYTES + 1).to(tl.uint16)
@@ -601,9 +588,7 @@ def _tq_mla_sparse_topk_gather_dequant_mse(
         kpe_fp8 = fp8_byte.to(tl.float8e4nv, bitcast=True)
         kpe_f32 = kpe_fp8.to(tl.float32)
         s_lo = tl.load(Paged_cache_ptr + slot_base + KV_C_BYTES + R).to(tl.uint16)
-        s_hi = tl.load(Paged_cache_ptr + slot_base + KV_C_BYTES + R + 1).to(
-            tl.uint16
-        )
+        s_hi = tl.load(Paged_cache_ptr + slot_base + KV_C_BYTES + R + 1).to(tl.uint16)
         scale_u16 = s_lo | (s_hi << 8)
         scale_f32 = scale_u16.to(tl.float16, bitcast=True).to(tl.float32)
         kpe_bf = (kpe_f32 * scale_f32).to(tl.bfloat16)
@@ -654,9 +639,7 @@ def fused_mla_sparse_topk_gather_dequant_mse(
         return
 
     kpe_cents = (
-        kpe_centroids_bf16
-        if kpe_centroids_bf16 is not None
-        else centroids_bf16[:1]
+        kpe_centroids_bf16 if kpe_centroids_bf16 is not None else centroids_bf16[:1]
     )
     kpe_mse_bytes = math.ceil(R * 4 / 8) if kpe_4bit else 0
     BLOCK_D = triton.next_power_of_2(L)
@@ -726,9 +709,7 @@ def fused_mla_dequant_mse(
         return
 
     kpe_cents = (
-        kpe_centroids_bf16
-        if kpe_centroids_bf16 is not None
-        else centroids_bf16[:1]
+        kpe_centroids_bf16 if kpe_centroids_bf16 is not None else centroids_bf16[:1]
     )
     kpe_mse_bytes = math.ceil(R * 4 / 8) if kpe_4bit else 0
 
@@ -873,9 +854,7 @@ def _fwd_grouped_kernel_stage1_tq(
         cache_modifier=".ca",
     )
     if KPE_4BIT and QPE_FWHT_IN_KERNEL:
-        qpe = _fwht_qpe_tile(
-            qpe, mask_h, BLOCK_H, BLOCK_DPE, R, LOG2N_R, INV_SQRT_R
-        )
+        qpe = _fwht_qpe_tile(qpe, mask_h, BLOCK_H, BLOCK_DPE, R, LOG2N_R, INV_SQRT_R)
 
     kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
     split_kv_start = kv_len_per_split * split_kv_id
@@ -1119,9 +1098,7 @@ def fused_mla_tq_decode_stage1(
     BLOCK_DPE = triton.next_power_of_2(R)
     BLOCK_DV = BLOCK_DMODEL
     kpe_cents = (
-        kpe_centroids_bf16
-        if kpe_centroids_bf16 is not None
-        else centroids_bf16[:1]
+        kpe_centroids_bf16 if kpe_centroids_bf16 is not None else centroids_bf16[:1]
     )
     kpe_mse_bytes = math.ceil(R * 4 / 8) if kpe_4bit else 0
 
@@ -1192,7 +1169,16 @@ def fused_mla_tq_decode_stage1(
 
 @triton.autotune(
     configs=_TQ_MLA_SPARSE_DECODE_AUTOTUNE_CONFIGS,
-    key=["L", "R", "MSE_BITS", "KEY_FP8", "KPE_FP8", "q_head_num", "TOPK", "NUM_KV_SPLITS"],
+    key=[
+        "L",
+        "R",
+        "MSE_BITS",
+        "KEY_FP8",
+        "KPE_FP8",
+        "q_head_num",
+        "TOPK",
+        "NUM_KV_SPLITS",
+    ],
 )
 @triton.jit
 def _fwd_grouped_kernel_stage1_tq_sparse(
@@ -1265,9 +1251,7 @@ def _fwd_grouped_kernel_stage1_tq_sparse(
         cache_modifier=".ca",
     )
     if KPE_4BIT and QPE_FWHT_IN_KERNEL:
-        qpe = _fwht_qpe_tile(
-            qpe, mask_h, BLOCK_H, BLOCK_DPE, R, LOG2N_R, INV_SQRT_R
-        )
+        qpe = _fwht_qpe_tile(qpe, mask_h, BLOCK_H, BLOCK_DPE, R, LOG2N_R, INV_SQRT_R)
 
     kv_len_per_split = tl.cdiv(cur_batch_seq_len, NUM_KV_SPLITS)
     split_kv_start = kv_len_per_split * split_kv_id
@@ -1501,9 +1485,7 @@ def fused_mla_tq_sparse_decode_stage1(
     BLOCK_DPE = triton.next_power_of_2(R)
     BLOCK_DV = BLOCK_DMODEL
     kpe_cents = (
-        kpe_centroids_bf16
-        if kpe_centroids_bf16 is not None
-        else centroids_bf16[:1]
+        kpe_centroids_bf16 if kpe_centroids_bf16 is not None else centroids_bf16[:1]
     )
     kpe_mse_bytes = math.ceil(R * 4 / 8) if kpe_4bit else 0
 
@@ -1601,6 +1583,4 @@ def sparse_decode_softmax_reducev_fwd(
         _decode_softmax_reducev_fwd,
     )
 
-    _decode_softmax_reducev_fwd(
-        logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits
-    )
+    _decode_softmax_reducev_fwd(logits, q, o, lse, v_buffer, b_seq_len, num_kv_splits)

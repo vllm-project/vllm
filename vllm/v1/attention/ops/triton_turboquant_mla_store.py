@@ -183,9 +183,7 @@ def _tq_mla_store_mse_1d(
     N_CENTROIDS: tl.constexpr,
     NORM_CORRECTION: tl.constexpr,
 ):
-    idx = _tq_mla_bucketize_1d(
-        y, Midpoints_ptr, d_mask, BLOCK_D, MSE_BITS, N_CENTROIDS
-    )
+    idx = _tq_mla_bucketize_1d(y, Midpoints_ptr, d_mask, BLOCK_D, MSE_BITS, N_CENTROIDS)
 
     if NORM_CORRECTION:
         y_hat = _tq_mla_gather_centroids_1d(
@@ -327,9 +325,7 @@ def _tq_mla_fused_store_kernel(
         max_safe = tl.maximum(max_abs, 1e-8)
         kpe_scale = max_safe / 448.0
         inv_scale = tl.where(kpe_scale > 0.0, 1.0 / kpe_scale, 1.0)
-        kpe_scaled = tl.minimum(
-            tl.maximum(kpe_vec * inv_scale, -448.0), 448.0
-        )
+        kpe_scaled = tl.minimum(tl.maximum(kpe_vec * inv_scale, -448.0), 448.0)
         kpe_fp8 = kpe_scaled.to(tl.float8e4nv)
         kpe_u8 = kpe_fp8.to(tl.uint8, bitcast=True)
         kpe_scale_u16 = kpe_scale.to(tl.float16).to(tl.uint16, bitcast=True)
@@ -408,14 +404,11 @@ def _tq_mla_fused_store_kernel_bf16_direct(
 
     d_offs = tl.arange(0, BLOCK_D)
     d_mask = d_offs < D
-    kv_c_f = (
-        tl.load(
-            KV_C_ptr + tid * stride_kvc + d_offs,
-            mask=d_mask,
-            other=0.0,
-        )
-        .to(tl.float32)
-    )
+    kv_c_f = tl.load(
+        KV_C_ptr + tid * stride_kvc + d_offs,
+        mask=d_mask,
+        other=0.0,
+    ).to(tl.float32)
     norm_sq = tl.sum(tl.where(d_mask, kv_c_f * kv_c_f, 0.0), axis=0)
     norm = tl.sqrt(tl.maximum(norm_sq, 1e-8))
     x_hat = tl.where(d_mask, kv_c_f / norm, 0.0)
@@ -439,14 +432,11 @@ def _tq_mla_fused_store_kernel_bf16_direct(
 
     r_offs = tl.arange(0, BLOCK_R)
     r_mask = r_offs < R
-    kpe_vec = (
-        tl.load(
-            KPE_ptr + tid * stride_kpe + r_offs,
-            mask=r_mask,
-            other=0.0,
-        )
-        .to(tl.float32)
-    )
+    kpe_vec = tl.load(
+        KPE_ptr + tid * stride_kpe + r_offs,
+        mask=r_mask,
+        other=0.0,
+    ).to(tl.float32)
 
     if KPE_MODE == 2:
         kpe_norm_sq = tl.sum(tl.where(r_mask, kpe_vec * kpe_vec, 0.0), axis=0)
@@ -473,9 +463,7 @@ def _tq_mla_fused_store_kernel_bf16_direct(
         max_safe = tl.maximum(max_abs, 1e-8)
         kpe_scale = max_safe / 448.0
         inv_scale = tl.where(kpe_scale > 0.0, 1.0 / kpe_scale, 1.0)
-        kpe_scaled = tl.minimum(
-            tl.maximum(kpe_vec * inv_scale, -448.0), 448.0
-        )
+        kpe_scaled = tl.minimum(tl.maximum(kpe_vec * inv_scale, -448.0), 448.0)
         kpe_fp8 = kpe_scaled.to(tl.float8e4nv)
         kpe_u8 = kpe_fp8.to(tl.uint8, bitcast=True)
         kpe_scale_u16 = kpe_scale.to(tl.float16).to(tl.uint16, bitcast=True)

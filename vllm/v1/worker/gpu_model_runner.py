@@ -10,7 +10,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import reduce
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
@@ -666,21 +666,20 @@ class GPUModelRunner(
         # layers in the draft model.
         # PP+MTP port: the entire draft model lives only on the last PP rank.
         # On every other rank set drafter=None so the guards below skip it.
-        if self.speculative_config and not get_pp_group().is_last_rank:
-            self.drafter = None
+        self.drafter: (
+            NgramProposer  # noqa: F823
+            | NgramProposerGPU
+            | SuffixDecodingProposer
+            | EagleProposer
+            | DFlashProposer
+            | DraftModelProposer
+            | MedusaProposer
+            | ExtractHiddenStatesProposer
+            | Gemma4Proposer
+            | Step3p5MTPProposer
+            | None
+        ) = None
         if self.speculative_config and get_pp_group().is_last_rank:
-            self.drafter: (
-                NgramProposer  # noqa: F823
-                | NgramProposerGPU
-                | SuffixDecodingProposer
-                | EagleProposer
-                | DFlashProposer
-                | DraftModelProposer
-                | MedusaProposer
-                | ExtractHiddenStatesProposer
-                | Gemma4Proposer
-                | Step3p5MTPProposer
-            )
             if self.speculative_config.method == "custom_class":
                 self.drafter = create_custom_proposer(  # type: ignore[assignment]
                     self.vllm_config
@@ -1064,7 +1063,7 @@ class GPUModelRunner(
         handoff ring overlaps across PP stages. Must match the scheduler-side
         Scheduler._pp_decode_cadence gate. Only meaningful for V1 PP + MTP + async;
         the worker handoff ring deepens to pp_size when on (INV-RING)."""
-        return (
+        return bool(
             envs.VLLM_V1_PP_DECODE_CADENCE
             and self._is_pp_spec_decode
             and self.use_async_scheduling
@@ -5195,8 +5194,10 @@ class GPUModelRunner(
             stid = sampled_token_ids[:num_reqs].to(torch.int32)
         else:
             stid = torch.full(
-                (num_reqs, 1 + num_spec), -1,
-                dtype=torch.int32, device=self.device,
+                (num_reqs, 1 + num_spec),
+                -1,
+                dtype=torch.int32,
+                device=self.device,
             )
             stid[:, 0] = sampled_token_ids[:num_reqs, 0]
 
@@ -5206,12 +5207,15 @@ class GPUModelRunner(
             did = self._draft_token_ids[:num_reqs].to(torch.int32)
         else:
             did = torch.zeros(
-                (num_reqs, num_spec), dtype=torch.int32, device=self.device,
+                (num_reqs, num_spec),
+                dtype=torch.int32,
+                device=self.device,
             )
 
         nts = torch.tensor(
             self.input_batch.num_tokens_no_spec[:num_reqs],
-            dtype=torch.int32, device=self.device,
+            dtype=torch.int32,
+            device=self.device,
         ).unsqueeze(1)
 
         handoff = torch.cat([stid, did, nts], dim=1)
@@ -5241,7 +5245,11 @@ class GPUModelRunner(
             # False; only the send collective is deferred. Store send_work (consume
             # waits it) and raw_handoff (keeps the send buffer alive until then).
             self._stash_mtp_handoff_slot(
-                num_reqs, prev_sampled, valid_counts.to(torch.int32), did, nts_np,
+                num_reqs,
+                prev_sampled,
+                valid_counts.to(torch.int32),
+                did,
+                nts_np,
                 bcast_work=send_work,
                 raw_handoff=handoff if self._pp_async_bcast else None,
             )
@@ -5295,29 +5303,38 @@ class GPUModelRunner(
         num_spec = self.num_spec_tokens
 
         handoff = torch.empty(
-            (num_reqs, 2 + 2 * num_spec), dtype=torch.int32, device=self.device,
+            (num_reqs, 2 + 2 * num_spec),
+            dtype=torch.int32,
+            device=self.device,
         )
-        torch.distributed.broadcast(
-            handoff, src=pp.last_rank, group=pp.device_group
-        )
+        torch.distributed.broadcast(handoff, src=pp.last_rank, group=pp.device_group)
         prev_sampled, valid_counts, draft, nts = self._derive_mtp_handoff(handoff)
         return num_reqs, prev_sampled, valid_counts, draft, nts
 
     def _pp_apply_mtp_handoff_inline(self):
         """Original inline path: receive + apply immediately (fallback)."""
-        num_reqs, prev_sampled, valid_counts, draft, nts = (
-            self._pp_recv_mtp_handoff()
-        )
+        num_reqs, prev_sampled, valid_counts, draft, nts = self._pp_recv_mtp_handoff()
         self._apply_mtp_handoff_fields(
-            num_reqs, prev_sampled, valid_counts, draft, nts,
+            num_reqs,
+            prev_sampled,
+            valid_counts,
+            draft,
+            nts,
             list(self.input_batch.req_ids),
             self.input_batch.num_prompt_tokens[:num_reqs],
             self.discard_request_mask.np[:num_reqs],
         )
 
     def _stash_mtp_handoff_slot(
-        self, num_reqs, prev_sampled, valid_counts, draft, nts,
-        bcast_work=None, raw_handoff=None, derive_pending=False,
+        self,
+        num_reqs,
+        prev_sampled,
+        valid_counts,
+        draft,
+        nts,
+        bcast_work=None,
+        raw_handoff=None,
+        derive_pending=False,
     ):
         """Build an MTPHandoffSlot from handoff fields and append it to the ring
         (deferred apply). Shared by the non-last-rank receive and (under cadence)
@@ -5335,9 +5352,7 @@ class GPUModelRunner(
             num_prompt_tokens=np.asarray(
                 self.input_batch.num_prompt_tokens[:num_reqs]
             ).copy(),
-            discard_mask=np.asarray(
-                self.discard_request_mask.np[:num_reqs]
-            ).copy(),
+            discard_mask=np.asarray(self.discard_request_mask.np[:num_reqs]).copy(),
             bcast_work=bcast_work,
             raw_handoff=raw_handoff,
             derive_pending=derive_pending,
@@ -5365,20 +5380,26 @@ class GPUModelRunner(
             num_reqs = self.input_batch.num_reqs
             num_spec = self.num_spec_tokens
             handoff = torch.empty(
-                (num_reqs, 2 + 2 * num_spec), dtype=torch.int32, device=self.device,
+                (num_reqs, 2 + 2 * num_spec),
+                dtype=torch.int32,
+                device=self.device,
             )
             work = torch.distributed.broadcast(
                 handoff, src=pp.last_rank, group=pp.device_group, async_op=True
             )
             # Stash raw buffer + work; derived fields filled at consume post-wait.
             self._stash_mtp_handoff_slot(
-                num_reqs, None, None, None, None,
-                bcast_work=work, raw_handoff=handoff, derive_pending=True,
+                num_reqs,
+                None,
+                None,
+                None,
+                None,
+                bcast_work=work,
+                raw_handoff=handoff,
+                derive_pending=True,
             )
             return
-        num_reqs, prev_sampled, valid_counts, draft, nts = (
-            self._pp_recv_mtp_handoff()
-        )
+        num_reqs, prev_sampled, valid_counts, draft, nts = self._pp_recv_mtp_handoff()
         self._stash_mtp_handoff_slot(num_reqs, prev_sampled, valid_counts, draft, nts)
 
     def _apply_pending_mtp_handoff(self):
@@ -5395,9 +5416,12 @@ class GPUModelRunner(
             logger.info(
                 "[PPMTP-DIAG] rank=%d last=%s cadence=%s async_bcast=%s "
                 "ring_depth=%d (VLLM_PPMTP_ASYNC_BCAST=%s)",
-                get_pp_group().rank_in_group, get_pp_group().is_last_rank,
-                self._pp_decode_cadence, self._pp_async_bcast,
-                self._mtp_handoff_ring_depth, envs.VLLM_PPMTP_ASYNC_BCAST,
+                get_pp_group().rank_in_group,
+                get_pp_group().is_last_rank,
+                self._pp_decode_cadence,
+                self._pp_async_bcast,
+                self._mtp_handoff_ring_depth,
+                envs.VLLM_PPMTP_ASYNC_BCAST,
             )
         # continue31: reset per-step cadence state; a cadence landing repopulates
         # it. Stale values would misroute the next step's draft scatter / frontier.
@@ -5474,6 +5498,8 @@ class GPUModelRunner(
         num_reqs = slot.num_reqs
         req_ids = slot.req_ids
         nts = slot.nts
+        assert slot.valid_sampled_token_count_gpu is not None
+        assert nts is not None
         valid_counts = slot.valid_sampled_token_count_gpu[:num_reqs].cpu().numpy()
         discard_set = set(np.nonzero(slot.discard_mask)[0])
         pending_nts: dict[str, int] = {}
@@ -5504,8 +5530,15 @@ class GPUModelRunner(
         self.valid_sampled_token_count_gpu = slot.valid_sampled_token_count_gpu
 
     def _apply_mtp_handoff_fields(
-        self, num_reqs, prev_sampled, valid_counts, draft, nts,
-        req_ids, num_prompt_tokens, discard_mask,
+        self,
+        num_reqs,
+        prev_sampled,
+        valid_counts,
+        draft,
+        nts,
+        req_ids,
+        num_prompt_tokens,
+        discard_mask,
     ):
         """Shared apply body for inline + ring paths (mutates input_batch).
 
@@ -6830,10 +6863,14 @@ class GPUModelRunner(
             else:
                 hidden_states = outputs
 
-            if self.speculative_config and self.drafter is not None and (
-                self.speculative_config.use_eagle()
-                or self.speculative_config.uses_draft_model()
-                or self.speculative_config.uses_extract_hidden_states()
+            if (
+                self.speculative_config
+                and self.drafter is not None
+                and (
+                    self.speculative_config.use_eagle()
+                    or self.speculative_config.uses_draft_model()
+                    or self.speculative_config.uses_extract_hidden_states()
+                )
             ):
                 assert isinstance(
                     self.drafter,
@@ -7837,9 +7874,13 @@ class GPUModelRunner(
         self.calculate_reorder_batch_threshold()
 
         # Initialize drafter attention backend
-        if self.speculative_config and self.drafter is not None and (
-            self.speculative_config.use_eagle()
-            or self.speculative_config.uses_draft_model()
+        if (
+            self.speculative_config
+            and self.drafter is not None
+            and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_draft_model()
+            )
         ):
             assert isinstance(
                 self.drafter,
@@ -7891,10 +7932,14 @@ class GPUModelRunner(
         )
 
         # Initialize drafter's cudagraph dispatcher if using spec decode.
-        if self.speculative_config and self.drafter is not None and (
-            self.speculative_config.use_eagle()
-            or self.speculative_config.uses_draft_model()
-            or self.speculative_config.uses_extract_hidden_states()
+        if (
+            self.speculative_config
+            and self.drafter is not None
+            and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_draft_model()
+                or self.speculative_config.uses_extract_hidden_states()
+            )
         ):
             assert isinstance(
                 self.drafter,

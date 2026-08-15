@@ -621,9 +621,7 @@ def _fwd_kernel_stage2(
             # (old_scale==1 only when e_max==-inf, where acc/e_sum are still 0).
             active = tlogic > -float("inf")
             n_e_max = tl.maximum(tlogic, e_max)
-            old_scale = tl.where(
-                e_max > -float("inf"), tl.exp(e_max - n_e_max), 1.0
-            )
+            old_scale = tl.where(e_max > -float("inf"), tl.exp(e_max - n_e_max), 1.0)
             acc *= old_scale
             exp_logic = tl.where(active, tl.exp(tlogic - n_e_max), 0.0)
             acc += exp_logic * tv

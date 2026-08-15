@@ -92,8 +92,11 @@ class AsyncScheduler(Scheduler):
                         logger.info(
                             "[PPB-BAL] step=%d req=%s r=%d offset=%d next=%d "
                             "residue=%d admit=%d",
-                            self.current_step, str(request.request_id)[-6:], r,
-                            offset, request.next_decode_eligible_step,
+                            self.current_step,
+                            str(request.request_id)[-6:],
+                            r,
+                            offset,
+                            request.next_decode_eligible_step,
                             request.next_decode_eligible_step % self.pp_size,
                             self._admit_counter,
                         )

@@ -48,13 +48,13 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.config.vllm import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadata,
-    MLACommonMetadataBuilder,
 )
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
@@ -65,8 +65,8 @@ from vllm.model_executor.layers.quantization.turboquant.centroids import (
 from vllm.model_executor.layers.quantization.turboquant.config import (
     TurboQuantConfig,
 )
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.triton_utils import triton
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -77,15 +77,18 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.attention.ops.flashmla import flash_mla_sparse_fwd
-from vllm.platforms import current_platform
-from vllm import _custom_ops as ops
 from vllm.v1.attention.backends.mla.triton_mla import (
     TritonMLABackend,
     TritonMLAImpl,
+    TritonMLAMetadataBuilder,
 )
 from vllm.v1.attention.backends.turboquant_attn import _build_hadamard
+from vllm.v1.attention.ops.flashmla import flash_mla_sparse_fwd
+from vllm.v1.attention.ops.tq_mla_defaults import (
+    default_kpe_4bit,
+    default_kpe_fp8,
+    default_store_fwht,
+)
 from vllm.v1.attention.ops.triton_decode_attention import (
     _decode_softmax_reducev_fwd,
 )
@@ -98,17 +101,13 @@ from vllm.v1.attention.ops.triton_turboquant_mla_decode import (
     tq_mla_sparse_adaptive_enabled,
     tq_mla_sparse_split_count,
 )
-from vllm.v1.attention.ops.tq_mla_defaults import (
-    default_kpe_4bit,
-    default_kpe_fp8,
-    default_store_fwht,
-)
 from vllm.v1.attention.ops.triton_turboquant_mla_store import (
     kpe_mse_index_bytes,
     kpe_packed_bytes,
     tq_mla_fused_kv_cache_store,
     tq_mla_fused_store_enabled,
 )
+from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
@@ -132,10 +131,7 @@ _DEDUP_BUCKET_IDMAP_WS: dict[str, torch.Tensor] = {}
 
 
 def _in_cuda_graph_capture() -> bool:
-    return (
-        torch.cuda.is_available()
-        and torch.cuda.is_current_stream_capturing()
-    )
+    return torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()
 
 
 def _sparse_topk_dedup_enabled() -> bool:
@@ -144,9 +140,7 @@ def _sparse_topk_dedup_enabled() -> bool:
         return False
     # torch.unique / Tensor.any() sync during CUDAGraph capture →
     # cudaErrorStreamCaptureUnsupported (breaks engine startup).
-    if _in_cuda_graph_capture():
-        return False
-    return True
+    return not _in_cuda_graph_capture()
 
 
 def _dedup_bucket_enabled() -> bool:
@@ -216,7 +210,9 @@ def _dedup_global_topk(
         present.fill_(False)
         present[safe_long] = True
         present[n_slots] = False  # drop invalid sentinel
-        unique_slots = present[:-1].nonzero(as_tuple=True)[0].to(torch.int32)  # ascending
+        unique_slots = (
+            present[:-1].nonzero(as_tuple=True)[0].to(torch.int32)
+        )  # ascending
         num_unique = int(unique_slots.numel())
         id_map.fill_(-1)
         id_map[unique_slots.to(torch.long)] = torch.arange(
@@ -228,14 +224,10 @@ def _dedup_global_topk(
 
     if not bool(valid.any()):
         empty = torch.empty(0, dtype=torch.int32, device=device)
-        remapped = torch.full(
-            (num_tokens, topk), -1, dtype=torch.int32, device=device
-        )
+        remapped = torch.full((num_tokens, topk), -1, dtype=torch.int32, device=device)
         return empty, remapped, 0
 
-    unique_slots, inverse = torch.unique(
-        flat[valid], sorted=True, return_inverse=True
-    )
+    unique_slots, inverse = torch.unique(flat[valid], sorted=True, return_inverse=True)
     remapped_flat = torch.full((flat.numel(),), -1, dtype=torch.int32, device=device)
     remapped_flat[valid] = inverse.to(torch.int32)
     remapped = remapped_flat.view(num_tokens, topk)
@@ -378,7 +370,7 @@ def _unpack_bits_rows(packed: torch.Tensor, bits: int, D: int) -> torch.Tensor:
     return out.to(torch.int64)
 
 
-class TritonMLATurboQuantMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+class TritonMLATurboQuantMetadataBuilder(TritonMLAMetadataBuilder):
     """MLA metadata builder that advertises CUDA-graph support.
 
     Parent MLACommonMetadataBuilder defaults to AttentionCGSupport.NEVER.
@@ -452,7 +444,7 @@ class TritonMLATurboQuantBackend(TritonMLABackend):
         return TritonMLATurboQuantImpl
 
     @staticmethod
-    def get_builder_cls() -> type[TritonMLATurboQuantMetadataBuilder]:
+    def get_builder_cls() -> type[TritonMLAMetadataBuilder]:
         return TritonMLATurboQuantMetadataBuilder
 
 
@@ -491,7 +483,8 @@ class TritonMLATurboQuantImpl(TritonMLAImpl):
         # P3-2 / P6-4: k_pe FP8 (e4m3) compression (default on).
         # bf16 layout: 2*R bytes when VLLM_TQ_KPE_FP8=0.
         # fp8 layout:  R bytes fp8 + 2 bytes per-token fp16 scale.
-        # 4bit layout: ceil(R*4/8) index bytes + 2 bytes fp16 scale (VLLM_TQ_KPE_4BIT=1).
+        # 4bit: ceil(R*4/8) index bytes + 2-byte fp16 scale
+        # (VLLM_TQ_KPE_4BIT=1).
         # R=64 → 128B → 66B (~48% smaller k_pe, ~16% smaller 4bit_nc slot).
         # k_pe layout follows --kv-cache-dtype (NC presets → 4bit + FWHT store).
         self._kpe_4bit = default_kpe_4bit(self.kv_cache_dtype, self.tq_config)
@@ -607,8 +600,8 @@ class TritonMLATurboQuantImpl(TritonMLAImpl):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         shapes_and_dtypes = (
             ((B, H_q, num_kv_splits, L + 1), torch.float32),  # attn_logits
-            ((B, H_q, L), out_dtype),                          # o_unrot
-            ((B, H_q), out_dtype),                             # lse
+            ((B, H_q, L), out_dtype),  # o_unrot
+            ((B, H_q), out_dtype),  # lse
         )
         if is_workspace_manager_initialized():
             attn_logits, o_unrot, lse = current_workspace_manager().get_simultaneous(
@@ -741,6 +734,7 @@ class TritonMLATurboQuantImpl(TritonMLAImpl):
             and self.qk_rope_head_dim == 64
         ):
             import flash_mla.cuda as _fm
+
             if not getattr(self, "_tq4_cuda_store_logged", False):
                 print("[TQ4-CUDA] store branch ACTIVE", flush=True)
                 self._tq4_cuda_store_logged = True
@@ -911,11 +905,13 @@ class TritonMLATurboQuantImpl(TritonMLAImpl):
 
         output = None
         output_lse = None
-        iters = len(prefill_metadata.chunked_context.seq_tot)
-        workspace = prefill_metadata.chunked_context.workspace
+        chunked_context = prefill_metadata.chunked_context
+        assert chunked_context is not None
+        assert prefill_metadata.prefill_backend is not None
+        workspace = chunked_context.workspace
 
-        for i in range(iters):
-            toks = prefill_metadata.chunked_context.seq_tot[i]
+        for chunk in chunked_context.chunks:
+            toks = chunk.num_context_tokens
             if toks <= 0:
                 continue
 
@@ -925,15 +921,13 @@ class TritonMLATurboQuantImpl(TritonMLAImpl):
             #   batch_offset  = token_id - batch_start + seq_starts[batch_id]
             #   block_id      = block_table[batch_id, batch_offset // block_size]
             #   slot_id       = batch_offset % block_size
-            num_tokens = int(prefill_metadata.chunked_context.chunk_total_token[i])
-            token_to_seq = prefill_metadata.chunked_context.token_to_seq[i][
-                :num_tokens
-            ].to(torch.int64)
-            cu_seq_lens = prefill_metadata.chunked_context.cu_seq_lens[i].to(
+            num_tokens = toks
+            token_to_seq = chunk.token_to_seq[:num_tokens].to(torch.int64)
+            cu_seq_lens = chunk.cu_seq_lens.to(torch.int64)
+            seq_starts_t = chunk.starts
+            block_table = prefill_metadata.block_table[chunk.request_slice].to(
                 torch.int64
             )
-            seq_starts_t = prefill_metadata.chunked_context.starts[i]
-            block_table = prefill_metadata.block_table.to(torch.int64)
 
             # All shape-dependent gather math stays on-device (CG-compatible).
             batch_ids = token_to_seq  # (num_tokens,)
@@ -972,11 +966,16 @@ class TritonMLATurboQuantImpl(TritonMLAImpl):
                 # we apply inverse Hadamard as the final bf16 GEMM.
                 if (
                     os.environ.get("VLLM_TQ_MLA_CUDA_DEQUANT") == "1"
-                    and self._kpe_4bit and L == 512 and R == 64
+                    and self._kpe_4bit
+                    and L == 512
+                    and R == 64
                 ):
                     import flash_mla.cuda as _fm
+
                     if not getattr(self, "_tq4_cuda_deq_dense_logged", False):
-                        print("[TQ4-CUDA] prefill dense dequant branch ACTIVE", flush=True)
+                        print(
+                            "[TQ4-CUDA] prefill dense dequant branch ACTIVE", flush=True
+                        )
                         self._tq4_cuda_deq_dense_logged = True
                     _fm.tq4_dequant_fwd(
                         cache_view.contiguous(),
@@ -1022,12 +1021,13 @@ class TritonMLATurboQuantImpl(TritonMLAImpl):
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k = self._concat_k_nope_k_pe(k_nope, k_pe)
 
-            attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
-                prefill=prefill_metadata,
-                chunk_idx=i,
-                q=q,
-                k=k,
-                v=v,
+            attn_output, attn_softmax_lse = (
+                prefill_metadata.prefill_backend.run_prefill_context_chunk(
+                    chunk=chunk,
+                    q=q[chunk.token_slice],
+                    k=k,
+                    v=v,
+                )
             )
             if output is None:
                 output = attn_output
@@ -1099,7 +1099,12 @@ class TritonMLATurboQuantImpl(TritonMLAImpl):
         # P0-2: pool scratch buffers via WorkspaceManager instead of
         # allocating fresh tensors every forward.
         attn_logits, o_unrot, lse = self._get_decode_workspaces(
-            B, H_q, num_kv_splits, L, q.dtype, device,
+            B,
+            H_q,
+            num_kv_splits,
+            L,
+            q.dtype,
+            device,
         )
 
         # 3) Fused stage1 directly on packed uint8 cache.
@@ -1170,7 +1175,12 @@ class TritonMLATurboQuantImpl(TritonMLAImpl):
 
         # P0-2: pool scratch buffers via WorkspaceManager.
         attn_logits, o_unrot, lse = self._get_decode_workspaces(
-            B, H_q, num_kv_splits, L, q.dtype, device,
+            B,
+            H_q,
+            num_kv_splits,
+            L,
+            q.dtype,
+            device,
         )
 
         # Empty centroid placeholder — KEY_FP8 branch never reads it; Triton
@@ -1424,13 +1434,8 @@ class TritonMLATurboQuantSparseMetadataBuilder(TritonMLATurboQuantMetadataBuilde
         vllm_config: VllmConfig,
         device: torch.device,
     ) -> None:
-        super().__init__(
-            kv_cache_spec,
-            layer_names,
-            vllm_config,
-            device,
-            metadata_cls=TritonMLATurboQuantSparseMetadata,
-        )
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.metadata_cls = TritonMLATurboQuantSparseMetadata
         # DCP+MTP fix: the base helper resets reorder_batch_threshold back to 1
         # when decode_context_parallel_size>1 unless supports_dcp_with_varlen is
         # set. Without this, MTP spec-decode (uniform query_len = 1+num_spec) is
@@ -1469,7 +1474,9 @@ class TritonMLATurboQuantSparseMetadataBuilder(TritonMLATurboQuantMetadataBuilde
             torch.from_numpy(req_id_per_token), non_blocking=True
         )
 
-        sparse_fields = {f.name: getattr(base, f.name) for f in fields(MLACommonMetadata)}
+        sparse_fields = {
+            f.name: getattr(base, f.name) for f in fields(MLACommonMetadata)
+        }
         return TritonMLATurboQuantSparseMetadata(
             **sparse_fields,
             req_id_per_token=self.req_id_per_token_buffer[:num_tokens],
@@ -1501,7 +1508,7 @@ class TritonMLATurboQuantSparseBackend(TritonMLATurboQuantBackend):
         return TritonMLATurboQuantSparseImpl
 
     @staticmethod
-    def get_builder_cls() -> type[TritonMLATurboQuantSparseMetadataBuilder]:
+    def get_builder_cls() -> type[TritonMLAMetadataBuilder]:
         return TritonMLATurboQuantSparseMetadataBuilder
 
 
@@ -1517,7 +1524,6 @@ class TritonMLATurboQuantSparseImpl(
     no env toggles required.
     """
 
-    masked_mha_available: ClassVar[bool] = False
     supports_hybrid_prefill: ClassVar[bool] = False
 
     def __init__(
@@ -1552,10 +1558,11 @@ class TritonMLATurboQuantSparseImpl(
             **mla_args,
         )
         self.topk_indices_buffer = (
-            indexer.topk_indices_buffer  # type: ignore[union-attr]
+            indexer.topk_indices_buffer  # type: ignore[attr-defined]
             if indexer is not None
             else topk_indices_buffer
         )
+        self.masked_mha_available = False
         assert self.topk_indices_buffer is not None
         self.softmax_scale = float(scale)
         self.prefill_padding = (
@@ -1573,9 +1580,7 @@ class TritonMLATurboQuantSparseImpl(
         # stays FP8 under DCP; this wires the TQ *main* KV sparse path.
         _pc = vllm_config.parallel_config
         self.dcp_world_size = _pc.decode_context_parallel_size
-        self.dcp_rank = (
-            get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
-        )
+        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.dcp_interleave_size = _pc.cp_kv_cache_interleave_size
 
         topk = self.topk_indices_buffer.shape[1]
@@ -1598,14 +1603,10 @@ class TritonMLATurboQuantSparseImpl(
             reserve_b = max(target, max_tokens)
             num_kv_splits = 1
         else:
-            num_kv_splits = tq_mla_sparse_split_count(
-                topk, self._sm_count * 2
-            )
+            num_kv_splits = tq_mla_sparse_split_count(topk, self._sm_count * 2)
             if envs.VLLM_BATCH_INVARIANT:
                 num_kv_splits = 1
-            num_kv_splits = max(
-                num_kv_splits, self._get_dense_decode_num_kv_splits()
-            )
+            num_kv_splits = max(num_kv_splits, self._get_dense_decode_num_kv_splits())
         # Grow the shared WorkspaceManager blob to decode peak BEFORE taking
         # q_concat_buffer views. Otherwise a later blob grow can reallocate the
         # underlying storage and leave cached q views dangling.
@@ -1619,9 +1620,9 @@ class TritonMLATurboQuantSparseImpl(
         (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
             (q_concat_shape, torch.bfloat16),
         )
-        # Legacy prefill pool: do NOT prealloc here (model load time).  Growing workspace
-        # to max_tokens*topk during __init__ steals memory from KV profiling /
-        # sampler warmup.  It grows via _get_global_topk_dequant_workspace on
+        # Legacy prefill pool: do not preallocate at model load time. Growing
+        # the workspace here steals memory from KV profiling and sampler warmup.
+        # It grows via _get_global_topk_dequant_workspace on
         # first forward, before lock_workspace() after cudagraph capture.
         self._max_decode_tokens = max_tokens
         self._sparse_b_seqlen: torch.Tensor | None = None
@@ -1702,16 +1703,16 @@ class TritonMLATurboQuantSparseImpl(
                 gather_topk = unique_slots.unsqueeze(1)
                 num_out_slots = num_unique
 
-        out_view = self._get_topk_dequant_workspace(
-            num_out_slots, L, R, device
-        )
+        out_view = self._get_topk_dequant_workspace(num_out_slots, L, R, device)
 
         use_fused_topk_gather = not self.tq_config.key_fp8
 
         def _pytorch_gather_cache_view(topk_for_gather: torch.Tensor) -> torch.Tensor:
             cache_flat = packed_cache.view(-1, packed_bytes)
             valid = topk_for_gather >= 0
-            safe = torch.where(valid, topk_for_gather, torch.zeros_like(topk_for_gather))
+            safe = torch.where(
+                valid, topk_for_gather, torch.zeros_like(topk_for_gather)
+            )
             g_rows, g_cols = topk_for_gather.shape
             gathered = cache_flat[safe.reshape(-1)].view(g_rows, g_cols, packed_bytes)
             return gathered.view(g_rows * g_cols, 1, packed_bytes)
@@ -1719,9 +1720,7 @@ class TritonMLATurboQuantSparseImpl(
         if self.tq_config.key_fp8:
             k_scale = self._get_layer_k_scale(layer)
             cache_view = _pytorch_gather_cache_view(gather_topk)
-            kv_c_fp8 = (
-                cache_view[..., : self._kv_c_bytes].contiguous().view(_FP8_DTYPE)
-            )
+            kv_c_fp8 = cache_view[..., : self._kv_c_bytes].contiguous().view(_FP8_DTYPE)
             out_view[..., :L] = (kv_c_fp8.to(torch.float32) * k_scale).to(_BF16)
             self._write_kpe_into_workspace(cache_view, out_view, L, R)
         elif use_fused_topk_gather:
@@ -1730,9 +1729,12 @@ class TritonMLATurboQuantSparseImpl(
             # replaces the Triton dequant pass over the deduped unique slots.
             if (
                 os.environ.get("VLLM_TQ_MLA_CUDA_DEQUANT") == "1"
-                and self._kpe_4bit and L == 512 and R == 64
+                and self._kpe_4bit
+                and L == 512
+                and R == 64
             ):
                 import flash_mla.cuda as _fm
+
                 if not getattr(self, "_tq4_cuda_deq_sparse_logged", False):
                     print("[TQ4-CUDA] sparse gather-dequant branch ACTIVE", flush=True)
                     self._tq4_cuda_deq_sparse_logged = True
@@ -1760,9 +1762,7 @@ class TritonMLATurboQuantSparseImpl(
                 )
             if apply_pi_on_k:
                 kvc = out_view[..., :L].reshape(-1, L)
-                out_view[..., :L] = (kvc @ buf["Pi_bf16"]).view_as(
-                    out_view[..., :L]
-                )
+                out_view[..., :L] = (kvc @ buf["Pi_bf16"]).view_as(out_view[..., :L])
         else:
             cache_view = _pytorch_gather_cache_view(gather_topk)
             fused_mla_dequant_mse(
@@ -1779,9 +1779,7 @@ class TritonMLATurboQuantSparseImpl(
             )
             if apply_pi_on_k:
                 kvc = out_view[..., :L].reshape(-1, L)
-                out_view[..., :L] = (kvc @ buf["Pi_bf16"]).view_as(
-                    out_view[..., :L]
-                )
+                out_view[..., :L] = (kvc @ buf["Pi_bf16"]).view_as(out_view[..., :L])
 
         return out_view, remapped_local
 
@@ -1806,7 +1804,9 @@ class TritonMLATurboQuantSparseImpl(
                 torch.arange(topk, device=device, dtype=torch.int32)
                 .unsqueeze(0)
                 .expand(num_tokens, topk)
-                + torch.arange(num_tokens, device=device, dtype=torch.int32).unsqueeze(1)
+                + torch.arange(num_tokens, device=device, dtype=torch.int32).unsqueeze(
+                    1
+                )
                 * topk
             )
             local_topk = torch.where(
@@ -1815,8 +1815,7 @@ class TritonMLATurboQuantSparseImpl(
 
         if actual_num_heads % self.prefill_padding != 0:
             padded_num_heads = (
-                (actual_num_heads + self.prefill_padding - 1)
-                // self.prefill_padding
+                (actual_num_heads + self.prefill_padding - 1) // self.prefill_padding
             ) * self.prefill_padding
             q_padded = q.new_empty((q.shape[0], padded_num_heads, q.shape[2]))
             q_padded[:, :actual_num_heads, :] = q
@@ -1885,6 +1884,7 @@ class TritonMLATurboQuantSparseImpl(
             and not self.tq_config.key_fp8
         ):
             import flash_mla.cuda as _fm
+
             from vllm.v1.attention.ops.triton_turboquant_mla_decode import (
                 _rotate_qpe_for_kpe_4bit,
             )
@@ -1903,12 +1903,20 @@ class TritonMLATurboQuantSparseImpl(
                     print("[TQ4-CUDA] DCP topk compaction branch ACTIVE", flush=True)
                     self._dcp_compact_logged = True
             o, lse, _, _ = _fm.sparse_decode_tq4_fwd(
-                q_rot.unsqueeze(1),                  # [B, 1, H, 576]
-                kv_c_and_k_pe_cache.unsqueeze(2),    # [nb, page, 1, 292] uint8
-                global_topk.unsqueeze(1),            # [B, 1, topk]
-                _tlen, None, None, None, None, None, None,
-                L, self.softmax_scale,
-                buf["centroids_bf16"], buf["kpe_centroids_bf16"],
+                q_rot.unsqueeze(1),  # [B, 1, H, 576]
+                kv_c_and_k_pe_cache.unsqueeze(2),  # [nb, page, 1, 292] uint8
+                global_topk.unsqueeze(1),  # [B, 1, topk]
+                _tlen,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                L,
+                self.softmax_scale,
+                buf["centroids_bf16"],
+                buf["kpe_centroids_bf16"],
             )
             o = o.view(B, H_run, L)
             lse = lse.reshape(B, H_run)
@@ -1917,12 +1925,15 @@ class TritonMLATurboQuantSparseImpl(
         if envs.VLLM_BATCH_INVARIANT:
             num_kv_splits = 1
         else:
-            num_kv_splits = tq_mla_sparse_split_count(
-                topk, self._sm_count * 2, batch=B
-            )
+            num_kv_splits = tq_mla_sparse_split_count(topk, self._sm_count * 2, batch=B)
 
         attn_logits, o_unrot, lse = self._get_decode_workspaces(
-            B, H_run, num_kv_splits, L, q.dtype, device,
+            B,
+            H_run,
+            num_kv_splits,
+            L,
+            q.dtype,
+            device,
         )
         b_seqlen = self._get_sparse_b_seqlen(B, topk, device)
 
@@ -2010,7 +2021,7 @@ class TritonMLATurboQuantSparseImpl(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: TritonMLATurboQuantSparseMetadata,
+        attn_metadata: MLACommonMetadata,
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Sparse MLA: prefill may use gather+flash; decode uses fused 2-stage.
@@ -2024,6 +2035,7 @@ class TritonMLATurboQuantSparseImpl(
         re-materializing the prefill query into that same buffer (a fresh write)
         means prefill never reads decode-corrupted data, with no extra copy.
         """
+        assert isinstance(attn_metadata, TritonMLATurboQuantSparseMetadata)
         if isinstance(q, tuple):
             q_nope_full, q_pe_full = q
             num_actual_toks = q_nope_full.shape[0]
@@ -2088,10 +2100,9 @@ class TritonMLATurboQuantSparseImpl(
             )
         assert isinstance(global_topk, torch.Tensor)
 
-        # Production sparse prefill: gather+flash (phase1). Opt-out: _TQ_SPARSE_WORKSPACE=0.
-        use_gather_flash_prefill = (
-            os.environ.get("_TQ_SPARSE_WORKSPACE", "1") != "0"
-        )
+        # Production sparse prefill: gather+flash (phase1).
+        # Set _TQ_SPARSE_WORKSPACE=0 to opt out.
+        use_gather_flash_prefill = os.environ.get("_TQ_SPARSE_WORKSPACE", "1") != "0"
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_prefill_tokens = num_actual_toks - num_decode_tokens
         # Non-DCP callers ignore LSE; DCP combine in MLAAttention needs it.
@@ -2170,9 +2181,7 @@ class TritonMLATurboQuantSparseImpl(
         attn_out[num_decode_tokens:] = prefill_out
         if not want_lse:
             return attn_out, None
-        lse = decode_lse.new_empty(
-            (num_actual_toks, out_heads), dtype=torch.float32
-        )
+        lse = decode_lse.new_empty((num_actual_toks, out_heads), dtype=torch.float32)
         lse[:num_decode_tokens] = decode_lse.to(torch.float32)
         lse[num_decode_tokens:] = prefill_lse.to(torch.float32)
         return _dcp_finalize(attn_out, lse)

@@ -1169,6 +1169,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self._k_scale_cpu.fill_(self._k_scale_float)
         self._v_scale_cpu.fill_(self._v_scale_float)
         self.calculate_kv_scales = False
+
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 

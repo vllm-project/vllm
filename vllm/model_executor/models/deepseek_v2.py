@@ -79,7 +79,6 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
     SparseAttnIndexer,
     fused_indexer_q_rope_quant,
 )
-from vllm.v1.attention.ops.indexer_turboquant import indexer_packed_head_dim
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -100,6 +99,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
+from vllm.v1.attention.ops.indexer_turboquant import indexer_packed_head_dim
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 from .interfaces import (
@@ -715,7 +715,7 @@ class Indexer(nn.Module):
             if is_indexer_tq_4bit_enabled() and not disable_dsa:
                 block_size = cache_config.block_size if cache_config else 64
                 warmup_indexer_tq_kernels(
-                    torch.cuda.current_device(),
+                    torch.accelerator.current_device_index(),
                     self.max_model_len,
                     self.n_head,
                     block_size,

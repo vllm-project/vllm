@@ -84,7 +84,11 @@ INDEXER_SYNC_FIXED_GRID = 40960
 def indexer_sync_fixed_grid() -> int:
     return max(
         1,
-        int(os.environ.get("VLLM_INDEXER_TQ_SYNC_FIXED_GRID", str(INDEXER_SYNC_FIXED_GRID))),
+        int(
+            os.environ.get(
+                "VLLM_INDEXER_TQ_SYNC_FIXED_GRID", str(INDEXER_SYNC_FIXED_GRID)
+            )
+        ),
     )
 
 
@@ -196,14 +200,18 @@ def indexer_tq_sync_blocks_per_split() -> int:
 
 
 def indexer_packed_head_dim() -> int:
-    return INDEXER_PACKED_BYTES if is_indexer_tq_4bit_enabled() else INDEXER_FP8_SLOT_BYTES
+    return (
+        INDEXER_PACKED_BYTES if is_indexer_tq_4bit_enabled() else INDEXER_FP8_SLOT_BYTES
+    )
 
 
 def _get_indexer_tq_buffers(device: torch.device) -> dict:
     key = str(device)
     if key not in _INDEXER_TQ_BUFFERS:
         D = INDEXER_HEAD_DIM
-        cents = get_centroids(D, INDEXER_MSE_BITS).to(device=device, dtype=torch.float32)
+        cents = get_centroids(D, INDEXER_MSE_BITS).to(
+            device=device, dtype=torch.float32
+        )
         c_sorted, _ = cents.sort()
         buf: dict = {
             "centroids_bf16": cents.to(_BF16),
@@ -352,7 +360,7 @@ def dequant_packed_rows_torch(packed: torch.Tensor, buf: dict) -> torch.Tensor:
     )
     y_hat = buf["centroids_bf16"][idx.to(torch.int64)].to(torch.float32)
     scale = (
-        packed[:, INDEXER_MSE_BYTES : INDEXER_PACKED_BYTES]
+        packed[:, INDEXER_MSE_BYTES:INDEXER_PACKED_BYTES]
         .contiguous()
         .view(torch.float16)
         .to(torch.float32)
@@ -492,9 +500,7 @@ def _indexer_tq_fused_store_kernel(
         hi = tl.where(y >= mid_val, hi, mid)
     idx = tl.minimum(lo, N_CENTROIDS - 1)
 
-    y_hat = _tq_mla_gather_centroids_1d(
-        Centroids_ptr, idx, d_mask, BLOCK_D, MSE_BITS
-    )
+    y_hat = _tq_mla_gather_centroids_1d(Centroids_ptr, idx, d_mask, BLOCK_D, MSE_BITS)
     c_norm_sq = tl.sum(y_hat * y_hat, axis=0)
     c_norm = tl.sqrt(tl.maximum(c_norm_sq, 1e-8))
     eff_scale = (norm / c_norm).to(tl.float16)
@@ -621,17 +627,15 @@ def _tq4_prefill_gather_dequant_fp8_kernel(
     bit_shift = bit_off % 8
     umask = (1 << MSE_BITS) - 1
 
-    raw0 = tl.load(
-        Packed_cache_ptr + p_base + byte_idx, mask=d_mask, other=0
-    ).to(tl.int32)
-    raw1 = tl.load(
-        Packed_cache_ptr + p_base + byte_idx + 1, mask=d_mask, other=0
-    ).to(tl.int32)
+    raw0 = tl.load(Packed_cache_ptr + p_base + byte_idx, mask=d_mask, other=0).to(
+        tl.int32
+    )
+    raw1 = tl.load(Packed_cache_ptr + p_base + byte_idx + 1, mask=d_mask, other=0).to(
+        tl.int32
+    )
     raw16 = raw0 | (raw1 << 8)
     cidx = (raw16 >> bit_shift) & umask
-    y_hat = _tq_mla_gather_centroids_1d(
-        Centroids_ptr, cidx, d_mask, BLOCK_D, MSE_BITS
-    )
+    y_hat = _tq_mla_gather_centroids_1d(Centroids_ptr, cidx, d_mask, BLOCK_D, MSE_BITS)
     n_lo = tl.load(Packed_cache_ptr + p_base + MSE_BYTES).to(tl.uint16)
     n_hi = tl.load(Packed_cache_ptr + p_base + MSE_BYTES + 1).to(tl.uint16)
     token_scale = (n_lo | (n_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
@@ -733,9 +737,7 @@ def _indexer_tq_sync_decode_kernel(
 
     block_table_id = pos // block_size
     slot_in_block = pos % block_size
-    block_id = tl.load(
-        Block_table_ptr + batch_id * block_table_stride + block_table_id
-    )
+    block_id = tl.load(Block_table_ptr + batch_id * block_table_stride + block_table_id)
 
     packed_base = block_id * stride_packed_nb + slot_in_block * stride_packed_bs
     fp8_base = block_id * stride_ws_nb + slot_in_block * stride_ws_bs
@@ -747,18 +749,16 @@ def _indexer_tq_sync_decode_kernel(
     bit_shift = bit_off % 8
     umask = (1 << MSE_BITS) - 1
 
-    raw0 = tl.load(
-        Packed_cache_ptr + packed_base + byte_idx, mask=d_mask, other=0
-    ).to(tl.int32)
+    raw0 = tl.load(Packed_cache_ptr + packed_base + byte_idx, mask=d_mask, other=0).to(
+        tl.int32
+    )
     raw1 = tl.load(
         Packed_cache_ptr + packed_base + byte_idx + 1, mask=d_mask, other=0
     ).to(tl.int32)
     raw16 = raw0 | (raw1 << 8)
     idx = (raw16 >> bit_shift) & umask
 
-    y_hat = _tq_mla_gather_centroids_1d(
-        Centroids_ptr, idx, d_mask, BLOCK_D, MSE_BITS
-    )
+    y_hat = _tq_mla_gather_centroids_1d(Centroids_ptr, idx, d_mask, BLOCK_D, MSE_BITS)
     n_lo = tl.load(Packed_cache_ptr + packed_base + MSE_BYTES).to(tl.uint16)
     n_hi = tl.load(Packed_cache_ptr + packed_base + MSE_BYTES + 1).to(tl.uint16)
     token_scale = (n_lo | (n_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
@@ -807,9 +807,7 @@ def _indexer_tq_sync_block_vectorized(
     d_mask = d_offs < D
     full_mask = d_mask & slot_mask[None, :]
 
-    packed_base = (
-        block_id * stride_packed_nb + n_offs * stride_packed_bs
-    )
+    packed_base = block_id * stride_packed_nb + n_offs * stride_packed_bs
     fp8_base = block_id * stride_ws_nb + n_offs * stride_ws_bs
 
     bit_off = d_offs * MSE_BITS
@@ -908,7 +906,7 @@ def _indexer_tq_sync_decode_tile_kernel(
     )
 
     d_offs = tl.arange(0, BLOCK_D)[:, None]
-    n_offs = tl.arange(0, TILE)[None, :]
+    tl.arange(0, TILE)[None, :]
     d_mask = d_offs < D
     full_mask = d_mask & pos_ok[None, :]
     bit_off = d_offs * MSE_BITS
@@ -930,9 +928,9 @@ def _indexer_tq_sync_decode_tile_kernel(
     y_hat = _tq_mla_gather_centroids(
         Centroids_ptr, idx, full_mask, BLOCK_D, TILE, MSE_BITS
     )
-    n_lo = tl.load(
-        Packed_cache_ptr + packed_base + MSE_BYTES, mask=pos_ok, other=0
-    ).to(tl.uint16)
+    n_lo = tl.load(Packed_cache_ptr + packed_base + MSE_BYTES, mask=pos_ok, other=0).to(
+        tl.uint16
+    )
     n_hi = tl.load(
         Packed_cache_ptr + packed_base + MSE_BYTES + 1, mask=pos_ok, other=0
     ).to(tl.uint16)
@@ -1098,9 +1096,7 @@ def sync_fp8_workspace_for_decode(
             num_sms = torch.cuda.get_device_properties(
                 packed_cache.device
             ).multi_processor_count
-            sl_for_meta = (
-                seq_lens if seq_lens.dim() == 2 else seq_lens.unsqueeze(-1)
-            )
+            sl_for_meta = seq_lens if seq_lens.dim() == 2 else seq_lens.unsqueeze(-1)
             schedule_metadata = get_paged_mqa_logits_metadata(
                 sl_for_meta, block_size, num_sms
             )
@@ -1264,9 +1260,7 @@ def _tq4_paged_mqa_logits_kernel(
 
     block_table_id = pos // block_size
     slot_in_block = pos % block_size
-    block_id = tl.load(
-        Block_table_ptr + batch_id * block_table_stride + block_table_id
-    )
+    block_id = tl.load(Block_table_ptr + batch_id * block_table_stride + block_table_id)
 
     packed_base = block_id * stride_packed_nb + slot_in_block * stride_packed_bs
 
@@ -1277,18 +1271,16 @@ def _tq4_paged_mqa_logits_kernel(
     bit_shift = bit_off % 8
     umask = (1 << MSE_BITS) - 1
 
-    raw0 = tl.load(
-        Packed_cache_ptr + packed_base + byte_idx, mask=d_mask, other=0
-    ).to(tl.int32)
+    raw0 = tl.load(Packed_cache_ptr + packed_base + byte_idx, mask=d_mask, other=0).to(
+        tl.int32
+    )
     raw1 = tl.load(
         Packed_cache_ptr + packed_base + byte_idx + 1, mask=d_mask, other=0
     ).to(tl.int32)
     raw16 = raw0 | (raw1 << 8)
     idx = (raw16 >> bit_shift) & umask
 
-    y_hat = _tq_mla_gather_centroids_1d(
-        Centroids_ptr, idx, d_mask, BLOCK_D, MSE_BITS
-    )
+    y_hat = _tq_mla_gather_centroids_1d(Centroids_ptr, idx, d_mask, BLOCK_D, MSE_BITS)
     n_lo = tl.load(Packed_cache_ptr + packed_base + MSE_BYTES).to(tl.uint16)
     n_hi = tl.load(Packed_cache_ptr + packed_base + MSE_BYTES + 1).to(tl.uint16)
     token_scale = (n_lo | (n_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
@@ -1367,7 +1359,7 @@ def warmup_indexer_tq_store(
     slot_mapping = torch.zeros(1, device=device, dtype=torch.int32)
     for _ in range(8):
         indexer_tq_store_and_cache_triton(k, kv_cache, slot_mapping)
-    torch.cuda.synchronize(device)
+    torch.accelerator.synchronize(device)
     _INDEXER_TQ_STORE_WARMED.add(key)
     logger.info_once("Indexer TQ4 fused store kernel warmed up.")
 
@@ -1433,6 +1425,6 @@ def warmup_indexer_tq_fused_decode(
         seq_lens,
         max_model_len,
     )
-    torch.cuda.synchronize(device)
+    torch.accelerator.synchronize(device)
     _INDEXER_TQ_FUSED_WARMED.add(key)
     logger.info_once("Indexer TQ4 fused decode logits kernel warmed up.")

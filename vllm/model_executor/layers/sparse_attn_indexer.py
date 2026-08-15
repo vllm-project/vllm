@@ -8,7 +8,6 @@ import torch
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
@@ -32,14 +31,12 @@ from vllm.utils.torch_utils import (
     _resolve_layer_name,
     direct_register_custom_op,
 )
-from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.attention.ops.indexer_turboquant import (
     INDEXER_FP8_SLOT_BYTES,
-    indexer_tq_cp_gather_dequant_fp8,
     indexer_tq_store_and_cache,
     is_indexer_tq_4bit_enabled,
     sync_fp8_workspace_for_decode,
@@ -81,7 +78,7 @@ def _dcp_scatter_indexer_logits_kernel(
     llen = tl.load(seq_lens_local_ptr + row)
     for i in range(0, max_local_cols, BLOCK):
         L = i + tl.arange(0, BLOCK)
-        valid = L < llen
+        valid = llen > L
         val = tl.load(local_ptr + row * local_row_stride + L, mask=valid, other=0.0)
         gcol = (L // S) * (N * S) + RANK * S + (L % S)
         gvalid = valid & (gcol < global_width)
@@ -244,7 +241,7 @@ def _dcp_distributed_topk_indexer(
         (~sc_u32) & 0xFFFFFFFF,
         sc_u32 ^ 0x80000000,
     )
-    key_local = ((ordered << 32) | ((~gcol) & 0xFFFFFFFF))
+    key_local = (ordered << 32) | ((~gcol) & 0xFFFFFFFF)
     key_local = key_local ^ torch.full_like(key_local, sign64)
     all_keys = get_dcp_group().all_gather(key_local.contiguous(), dim=1)  # [R, N*k]
 
@@ -303,9 +300,7 @@ def _dcp_reconstruct_full_indexer_k(
         .view(n, sum_padded, values_width)
     )
     ag_scale = (
-        get_dcp_group()
-        .all_gather(local_scale, dim=0)
-        .view(n, sum_padded, scales_width)
+        get_dcp_group().all_gather(local_scale, dim=0).view(n, sum_padded, scales_width)
     )
 
     # Reorg per request back into global token order, trimmed to ctx.
@@ -899,10 +894,7 @@ def sparse_attn_indexer(
         )
         if use_tq_fused_decode:
             q_decode = padded_q_quant_decode_tokens[:, 0]
-            if seq_lens.dim() > 1:
-                seq_lens_logits = seq_lens.squeeze(-1)
-            else:
-                seq_lens_logits = seq_lens
+            seq_lens_logits = seq_lens.squeeze(-1) if seq_lens.dim() > 1 else seq_lens
             logits = tq4_paged_mqa_logits_triton(
                 q_decode,
                 weights[:batch_size],
@@ -992,7 +984,7 @@ def sparse_attn_indexer(
             and current_platform.has_device_capability(90)
             and not current_platform.is_device_capability_family(120)
         )
-        use_persistent_topk = current_platform.is_cuda() and topk_tokens in (
+        current_platform.is_cuda() and topk_tokens in (
             512,
             1024,
             2048,

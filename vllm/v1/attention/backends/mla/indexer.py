@@ -227,6 +227,10 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     local_cu_seq_lens: torch.Tensor | None = None
     local_total_seq_lens: int = 0
     max_local_total_seq_lens: int = 0
+    # Per-request padded local lengths and original global lengths used to
+    # reconstruct the full index-K after the DCP all-gather.
+    padded_local_seq_lens: list[int] | None = None
+    global_seq_lens_lst: list[int] | None = None
 
 
 _BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS = (
@@ -726,9 +730,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 and num_decodes * max_decode_len == num_decode_tokens
             ):
                 # Uniform decode lengths with no cudagraph token padding.
-                expanded_block_table = self._get_expanded_block_table_buffer(
-                    num_decode_tokens, block_table.shape[1]
-                )
+                expanded_block_table = self.expanded_block_table_buffer[
+                    :num_decode_tokens
+                ]
                 copy_block_table_width = min(
                     block_table.shape[1], expanded_block_table.shape[1]
                 )
@@ -785,9 +789,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 # original request.
                 # B (DCP/TQ4bit): dynamically sized target buffer, width ==
                 # block_table.shape[1].
-                expanded_block_table = self._get_expanded_block_table_buffer(
-                    num_decode_tokens, block_table.shape[1]
-                )
+                expanded_block_table = self.expanded_block_table_buffer[
+                    :num_decode_tokens
+                ]
                 # A (PP+MTP): clamp the repeat_interleave to the target buffer
                 # width. Under B's sizing this equals the full width, so the
                 # column slices below are full-width and the tail zero-fill is a
@@ -804,9 +808,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     )
                 )
                 if copy_block_table_width < expanded_block_table.shape[1]:
-                    expanded_block_table[
-                        :actual_expanded, copy_block_table_width:
-                    ] = 0
+                    expanded_block_table[:actual_expanded, copy_block_table_width:] = 0
                 if actual_expanded < num_decode_tokens:
                     expanded_block_table[actual_expanded:num_decode_tokens, 0] = 0
                 block_table = expanded_block_table
@@ -946,9 +948,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 self.kv_cache_spec.storage_block_size,
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
-                dcp_world_size=self.dcp_world_size,
-                dcp_rank=self.dcp_rank,
-                cp_interleave_size=compressed_cp_interleave_size,
             )
             if self.pcp_world_size > 1:
                 compressed_slot_mapping = get_pcp_group().all_gather(
@@ -1114,7 +1113,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # must read with this rank's LOCAL lengths (it then produces logits
             # for the local tokens in local order); the GLOBAL lengths are kept
             # for the top-k selection after the cross-rank logits all-gather.
-            global_seq_lens = seq_lens
             kernel_seq_lens = seq_lens
             if self.dcp_world_size > 1:
                 local_flat = get_dcp_local_seq_lens(
@@ -1277,7 +1275,8 @@ def build_prefill_chunk_metadata(
         ctx_lens_cpu = compressed_seq_lens_cpu[start_idx:end_idx].to(torch.int32)
         dcp_virtual_block = dcp_world_size * cp_kv_cache_interleave_size
         padded_local_cpu = (
-            (ctx_lens_cpu + dcp_virtual_block - 1) // dcp_virtual_block
+            (ctx_lens_cpu + dcp_virtual_block - 1)
+            // dcp_virtual_block
             * cp_kv_cache_interleave_size
         ).to(torch.int32)
         local_cu_cpu = torch.zeros(num_reqs + 1, dtype=torch.int32)
@@ -1300,4 +1299,6 @@ def build_prefill_chunk_metadata(
         local_cu_seq_lens=local_cu_seq_lens,
         local_total_seq_lens=local_total_seq_lens,
         max_local_total_seq_lens=max_local_total_seq_lens,
+        padded_local_seq_lens=padded_local_seq_lens,
+        global_seq_lens_lst=global_seq_lens_lst,
     )

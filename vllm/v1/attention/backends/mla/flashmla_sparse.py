@@ -566,9 +566,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
         _pc = vllm_config.parallel_config
         self.dcp_world_size = _pc.decode_context_parallel_size
-        self.dcp_rank = (
-            get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
-        )
+        self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         # ★ Read-side interleave MUST match the write side. In 0.23 the KV write
         # (block_table.py _compute_slot_mapping_kernel) uses
         # cp_kv_cache_interleave_size, so we mirror that here (NOT
@@ -616,15 +614,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
             NUM_TOPK_TOKENS=topk_indices.shape[1],
-            return_valid_counts=use_topk_length,
+            return_valid_counts=True,
             dcp_world_size=self.dcp_world_size,
             dcp_rank=self.dcp_rank,
             dcp_interleave_size=self.dcp_interleave_size,
         )
-        if use_topk_length:
-            topk_indices, topk_length = result
-        else:
-            topk_indices, topk_length = result, None
 
         return self._bf16_flash_mla_kernel(
             q,

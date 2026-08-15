@@ -88,6 +88,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
                 LinearBase,
                 UnquantizedLinearMethod,
             )
+
             qm = quant_config.get_quant_method(
                 LinearBase.__new__(LinearBase),
                 eh_proj_prefix,

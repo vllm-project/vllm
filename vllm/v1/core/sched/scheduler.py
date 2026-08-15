@@ -8,7 +8,6 @@ from dataclasses import replace
 from typing import Any
 
 import vllm.envs as envs
-
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (

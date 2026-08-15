@@ -108,29 +108,28 @@ def _load_embedding_from_target_checkpoint(
         raise FileNotFoundError(f"No safetensors found in {model_path}")
 
     with safe_open(shard_path, framework="pt") as _f:
-        if emb_key not in _f.keys():
-            for _alt in ("language_model.model.embed_tokens.weight",
-                         "transformer.embed_tokens.weight",
-                         "transformer.wte.weight"):
-                if _alt in _f.keys():
+        if emb_key not in _f:
+            for _alt in (
+                "language_model.model.embed_tokens.weight",
+                "transformer.embed_tokens.weight",
+                "transformer.wte.weight",
+            ):
+                if _alt in _f:
                     emb_key = _alt
                     break
             else:
-                raise KeyError(
-                    f"Embedding key not found in {shard_path}"
-                )
+                raise KeyError(f"Embedding key not found in {shard_path}")
         _emb_weight = _f.get_tensor(emb_key)
 
-    from vllm.distributed.parallel_state import get_tp_group
     import torch.distributed as dist
+
+    from vllm.distributed.parallel_state import get_tp_group
 
     tp_size = get_tp_group().world_size
     tp_rank = dist.get_rank() % tp_size
     vocab_size = _emb_weight.shape[0]
     if vocab_size % tp_size != 0:
-        raise ValueError(
-            f"vocab_size {vocab_size} not divisible by tp_size {tp_size}"
-        )
+        raise ValueError(f"vocab_size {vocab_size} not divisible by tp_size {tp_size}")
     chunk = vocab_size // tp_size
     _tp_weight = _emb_weight[tp_rank * chunk : (tp_rank + 1) * chunk]
     _tp_weight = _tp_weight.to(device=device, dtype=mtp_embed_tokens.weight.dtype)
@@ -141,7 +140,9 @@ def _load_embedding_from_target_checkpoint(
     logger.info(
         "Loaded draft model embedding from target checkpoint: "
         "shape=%s tp_rank=%d/%d norm=%.4f",
-        list(_tp_weight.shape), tp_rank, tp_size,
+        list(_tp_weight.shape),
+        tp_rank,
+        tp_size,
         _tp_weight.float().norm().item(),
     )
 
