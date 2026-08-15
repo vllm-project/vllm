@@ -1257,7 +1257,7 @@ collect_amd_ci_failure_diagnostics() {
     fi
   fi
 
-  echo "--- :rotating_light: AMD CI failure summary"
+  echo ":rotating_light: AMD CI failure summary"
   printf 'exit=%s signal=%s runtime=%s %s=%s' \
     "${exit_code}" "${exit_signal:-none}" "${runtime}" \
     "${identity_label}" "${identity_value}"
@@ -1610,6 +1610,7 @@ if is_native_runtime; then
 
   echo "Native test commands: $commands"
   run_native_preflight || exit 1
+  echo "--- Test log"
   # Keep AMD CI orchestration variables out of vLLM's runtime environment.
   clear_ci_orchestration_env
   native_process_token="${ci_job_id}-${BASHPID}-${RANDOM}"
