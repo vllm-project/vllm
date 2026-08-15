@@ -45,7 +45,7 @@ def resolve_model_state_cls(
 
         return EncoderOnlyModelState
 
-    if vllm_config.model_config.is_hybrid:
+    if vllm_config.model_config.is_hybrid or vllm_config.model_config.is_attention_free:
         from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
         return MambaHybridModelState
