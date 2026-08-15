@@ -225,6 +225,7 @@ def test_flashinfer_sparse_indices_cache(monkeypatch):
             token_to_req_indices=torch.tensor([0, 1, 1], dtype=torch.int32),
             decode_swa_indices=torch.tensor([[5, 6, -1, -1]], dtype=torch.int32),
             decode_swa_lens=torch.tensor([2], dtype=torch.int32),
+            decode_swa_width=4,
             is_valid_token=torch.tensor([True], dtype=torch.bool),
             num_decodes=1,
             num_prefills=1,
@@ -331,3 +332,85 @@ def test_flashinfer_sparse_indices_cache(monkeypatch):
     assert builder_calls == 4
     assert sparse_indices_third is not sparse_indices_fourth
     assert sparse_lens_third is not sparse_lens_fourth
+
+
+def test_flashinfer_sparse_index_uses_decode_swa_width(monkeypatch):
+    from vllm.models.deepseek_v4.nvidia import flashinfer_sparse as flashinfer_mod
+    from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
+
+    captured_widths: list[int] = []
+
+    def fake_build(*args, **kwargs):
+        # window_size is the 12th positional arg of
+        # build_flashinfer_mixed_sparse_indices.
+        captured_widths.append(args[11])
+        num_tokens = args[0].shape[0] + args[3].shape[0]
+        return (
+            torch.zeros((num_tokens, 1), dtype=torch.int32),
+            torch.zeros((num_tokens,), dtype=torch.int32),
+        )
+
+    monkeypatch.setattr(
+        flashinfer_mod, "build_flashinfer_mixed_sparse_indices", fake_build
+    )
+
+    attn = object.__new__(flashinfer_mod.DeepseekV4FlashInferMLAAttention)
+    attn.compress_ratio = 1
+    attn.window_size = 4
+    attn.topk_indices_buffer = torch.zeros((4, 0), dtype=torch.int32)
+
+    wide_width = 8
+    wide_indices = torch.full((1, wide_width), -1, dtype=torch.int32)
+    wide_indices[0, :2] = torch.tensor([5, 6], dtype=torch.int32)
+    wide_metadata = DeepseekSparseSWAMetadata(
+        block_table=torch.tensor([[0, 1]], dtype=torch.int32),
+        slot_mapping=torch.tensor([0], dtype=torch.int64),
+        block_size=64,
+        seq_lens=torch.tensor([8], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+        token_to_req_indices=torch.tensor([0], dtype=torch.int32),
+        decode_swa_indices=wide_indices,
+        decode_swa_lens=torch.tensor([2], dtype=torch.int32),
+        decode_swa_width=wide_width,
+        is_valid_token=torch.tensor([True], dtype=torch.bool),
+        num_decodes=1,
+        num_prefills=0,
+        num_decode_tokens=1,
+        num_prefill_tokens=0,
+    )
+    attn._build_sparse_index_metadata(
+        kv_cache=None,
+        swa_k_cache=torch.empty((1, 64, 512), dtype=torch.bfloat16),
+        swa_metadata=wide_metadata,
+        attn_metadata=None,
+        swa_only=True,
+    )
+    assert captured_widths == [wide_width]
+
+    empty_width = 8
+    empty_metadata = DeepseekSparseSWAMetadata(
+        block_table=torch.tensor([[0, 1]], dtype=torch.int32),
+        slot_mapping=torch.tensor([0, 1], dtype=torch.int64),
+        block_size=64,
+        seq_lens=torch.tensor([8], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 2], dtype=torch.int32),
+        token_to_req_indices=torch.tensor([0, 0], dtype=torch.int32),
+        decode_swa_indices=torch.empty((0, 1, empty_width), dtype=torch.int32),
+        decode_swa_lens=torch.empty((0,), dtype=torch.int32),
+        decode_swa_width=empty_width,
+        is_valid_token=torch.tensor([True, True], dtype=torch.bool),
+        num_decodes=0,
+        num_prefills=1,
+        num_decode_tokens=0,
+        num_prefill_tokens=2,
+    )
+    attn._build_sparse_index_metadata(
+        kv_cache=None,
+        swa_k_cache=torch.empty((1, 64, 512), dtype=torch.bfloat16),
+        swa_metadata=empty_metadata,
+        attn_metadata=None,
+        swa_only=True,
+    )
+    assert captured_widths == [wide_width, empty_width]
