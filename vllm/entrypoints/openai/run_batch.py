@@ -870,31 +870,29 @@ async def dispatch_batch(
     """
     pending: set[asyncio.Task[BatchRequestOutput]] = set()
 
-    def write_completed(finished: set[asyncio.Task[BatchRequestOutput]]) -> None:
-        for task in finished:
-            print(task.result().model_dump_json(), file=output_file)
-            tracker.completed()
-        output_file.flush()
-
     with open(input_path, encoding="utf-8") as f:
-        for request_json in f:
-            if not request_json.strip():
-                continue
-
-            pending.add(
-                asyncio.create_task(run_one_request(request_json, endpoint_registry))
-            )
-            if len(pending) >= max_inflight:
-                finished, pending = await asyncio.wait(
-                    pending, return_when=asyncio.FIRST_COMPLETED
+        requests = (line for line in f if line.strip())
+        while True:
+            # Top up; the generator resumes where the previous round left off.
+            for request_json in requests:
+                pending.add(
+                    asyncio.create_task(
+                        run_one_request(request_json, endpoint_registry)
+                    )
                 )
-                write_completed(finished)
+                if len(pending) >= max_inflight:
+                    break
 
-    while pending:
-        finished, pending = await asyncio.wait(
-            pending, return_when=asyncio.FIRST_COMPLETED
-        )
-        write_completed(finished)
+            if not pending:
+                break
+
+            finished, pending = await asyncio.wait(
+                pending, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in finished:
+                print(task.result().model_dump_json(), file=output_file)
+                tracker.completed()
+            output_file.flush()
 
 
 async def run_batch(
