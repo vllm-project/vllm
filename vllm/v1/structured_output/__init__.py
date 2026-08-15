@@ -228,6 +228,8 @@ class StructuredOutputManager:
 
         # Covers both speculative decoding and diffusion LLMs (canvas_length).
         max_num_spec_tokens = self.vllm_config.num_speculative_tokens
+        num_bonus_tokens = 0 if self.vllm_config.model_config.is_diffusion else 1
+        max_masks_per_req = max_num_spec_tokens + num_bonus_tokens
 
         if self._grammar_bitmask is None:
             assert self.backend is not None
@@ -237,14 +239,14 @@ class StructuredOutputManager:
             # one for each speculative position, and one more for the
             # bonus token / non-speculative token.
             self._grammar_bitmask = self.backend.allocate_token_bitmask(
-                max_batch_size * (1 + max_num_spec_tokens)
+                max_batch_size * max_masks_per_req
             )
 
         # Generate a batched bitmask for all structured output requests.
         # When speculative decoding is enabled, we need to include multiple
         # masks for each request, one for each possible bonus token position.
-        # These are stored inline in the tensor and unpacked by the gpu runner.
-        cumulative_index = 0
+        # Each request owns a fixed-width block so the GPU can use the actual
+        # per-request logit counts without CPU-side mask compaction.
 
         # Optimized parallel filling of bitmasks for
         # non-spec, large-batch-size cases
@@ -254,7 +256,7 @@ class StructuredOutputManager:
         ):
             promises = []
             batch = []
-            for req_id in structured_output_request_ids:
+            for grammar_idx, req_id in enumerate(structured_output_request_ids):
                 request = requests[req_id]
                 structured_output_request = request.structured_output_request
                 if TYPE_CHECKING:
@@ -264,12 +266,10 @@ class StructuredOutputManager:
                     assert isinstance(grammar, StructuredOutputGrammar)
 
                 apply_bitmask = self.should_fill_bitmask(request)
-                batch.append((grammar, cumulative_index, apply_bitmask))
+                batch.append((grammar, grammar_idx * max_masks_per_req, apply_bitmask))
                 if len(batch) == self.fill_bitmask_parallel_batch_size:
                     promises.append(self._async_submit_fill_bitmask(batch))
                     batch = []
-
-                cumulative_index += 1
             if batch:
                 promises.append(self._async_submit_fill_bitmask(batch))
 
@@ -278,7 +278,7 @@ class StructuredOutputManager:
                 promise.result()
         else:
             # Fallback to serial filling of bitmasks for small-batch-size cases
-            for req_id in structured_output_request_ids:
+            for grammar_idx, req_id in enumerate(structured_output_request_ids):
                 request = requests[req_id]
                 structured_output_request = request.structured_output_request
 
@@ -301,8 +301,9 @@ class StructuredOutputManager:
                 state_advancements = 0
                 post_reasoning_end_in_window = False
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
+                bitmask_index = grammar_idx * max_masks_per_req
                 for i, token in enumerate(req_tokens):
-                    self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
+                    self._fill_bitmasks(((grammar, bitmask_index + i, apply_bitmask),))
                     advance_grammar = apply_bitmask
                     if token == -1:
                         apply_bitmask = False
@@ -336,10 +337,9 @@ class StructuredOutputManager:
                             raise AssertionError(
                                 (token, req_id, scheduled_spec_decode_tokens)
                             )
-                    cumulative_index += 1
                 # Diffusion LLMs don't sample a bonus token after the
                 # scheduled positions, so skip its bitmask in that case.
-                if not (self.vllm_config.model_config.is_diffusion and req_tokens):
+                if num_bonus_tokens or not req_tokens:
                     # bonus_apply must be True when the bonus-row position
                     # should be grammar-constrained. Two triggers:
                     # - should_fill_bitmask(request): reasoning was already
@@ -351,14 +351,16 @@ class StructuredOutputManager:
                     #   reasoning_ended is only persisted later by
                     #   should_advance.
                     bonus_apply = self.should_fill_bitmask(request) or apply_bitmask
-                    self._fill_bitmasks(((grammar, cumulative_index, bonus_apply),))
-                    cumulative_index += 1
+                    self._fill_bitmasks(
+                        ((grammar, bitmask_index + len(req_tokens), bonus_apply),)
+                    )
                 if state_advancements > 0:
                     grammar.rollback(state_advancements)
 
         bitmask_tensor = self._grammar_bitmask
-        if cumulative_index < bitmask_tensor.shape[0]:
-            bitmask_tensor = bitmask_tensor[:cumulative_index]
+        num_masks = len(structured_output_request_ids) * max_masks_per_req
+        if num_masks < bitmask_tensor.shape[0]:
+            bitmask_tensor = bitmask_tensor[:num_masks]
 
         # After finishing with the xgrammar operations, we convert to
         # np.ndarray, because that is much more efficient for serialization
