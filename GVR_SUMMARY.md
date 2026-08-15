@@ -28,6 +28,22 @@ by 5.21%, and improves fixed-batch throughput by 5.50%. Selectors 4--21 now
 take approximately 312 us each (1.96x baseline), not 44.5 us (13.8x). The old
 4.55x selector and 1.111x end-to-end claims are invalid and superseded.
 
+## Full fixed-kernel matrix
+
+The 10K/50K/100K/200K by B1/B8/B32/B64/B128/B1024 rerun is documented in
+`GVR.md`. FP32 standalone GVR crosses over at B64 for 50K and 100K, and B32
+for 200K; it does not beat the baseline at 10K. Forcing GVR in the real model
+accordingly regresses most B1--B32 cells, while the long-context B64--B1024
+cells improve. The production B32 dispatch threshold was restored after the
+forced experiment.
+
+At 199.4K, raw end-to-end speedups are 1.037x at B64, 1.041x at B128, and
+1.061x at B1024. The B1024 runs were separate server profiles and the raw gain
+contains about 0.6% favorable non-selector variation. The native-input BEAM
+trace above remains the strongest causal estimate: **1.055x end-to-end** with
+a 0.112-ms Amdahl residual. FP16 is not uniformly faster after the fix because
+rounded, degenerate hint brackets correctly trigger recovery work.
+
 ## Prior quarantine diagnosis
 
 The 4.55x selector and 1.1110x forward results below are reproducible trace

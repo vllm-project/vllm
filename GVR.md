@@ -2174,3 +2174,174 @@ Final repository checks passed Ruff check/format, typos, mypy, SPDX headers,
 the CUDA-API guard, and `git diff --check`. Whole-file Markdown lint still
 reports the historical MD060 compact-table errors in `GVR.md`; all reported
 lines predate this section (the last is line 1,535 before these additions).
+
+## 2026-08-15 fixed-kernel full performance rerun
+
+This rerun measures the corrected degenerate-hint recovery across the complete
+requested matrix: KV lengths 10K, 50K, 100K, and approximately 200K, and
+batches 1, 8, 32, 64, 128, and 1024. The standalone selector sweep compares
+FP32 and FP16 GVR with the matching production selector under CUDA-graph
+replay and checks every GVR result against exact `torch.topk`. Native real
+captures are available at B1/B8/B32; larger standalone batches repeat real B32
+rows and are therefore throughput-scaling controls, not substitutes for real
+large-batch distributions. The end-to-end sweep uses real GLM-5.2-NVFP4
+weights and prompt tokens, TP4, full decode CUDA graphs, and disabled
+FlashInfer autotuning.
+
+### Standalone selector microbenchmark
+
+Each cell is the median CUDA-graph replay time across 50 saved model nodes and
+50 timed replays per node. All fixed-GVR outputs matched exact `torch.topk`;
+there were zero mismatched rows. Times are in microseconds and speedup is
+baseline divided by fixed GVR.
+
+#### FP32 selector
+
+| KV length | Batch | Baseline (us) | Fixed GVR (us) | Speedup |
+| ---: | ---: | ---: | ---: | ---: |
+| 10K | 1 | 5.057 | 9.771 | 0.518x |
+| 10K | 8 | 5.204 | 9.947 | 0.523x |
+| 10K | 32 | 5.333 | 9.971 | 0.535x |
+| 10K | 64 | 5.521 | 10.252 | 0.539x |
+| 10K | 128 | 5.539 | 9.910 | 0.559x |
+| 10K | 1024 | 34.085 | 43.182 | 0.789x |
+| 50K | 1 | 10.389 | 16.519 | 0.629x |
+| 50K | 8 | 10.536 | 18.325 | 0.575x |
+| 50K | 32 | 13.208 | 18.095 | 0.730x |
+| 50K | 64 | 24.459 | 18.954 | 1.290x |
+| 50K | 128 | 24.657 | 18.439 | 1.337x |
+| 50K | 1024 | 171.777 | 98.240 | 1.749x |
+| 100K | 1 | 11.108 | 14.524 | 0.765x |
+| 100K | 8 | 11.574 | 20.929 | 0.553x |
+| 100K | 32 | 14.610 | 20.671 | 0.707x |
+| 100K | 64 | 29.758 | 23.093 | 1.289x |
+| 100K | 128 | 30.029 | 25.382 | 1.183x |
+| 100K | 1024 | 219.159 | 139.631 | 1.570x |
+| 200K | 1 | 12.611 | 18.359 | 0.687x |
+| 200K | 8 | 15.098 | 19.883 | 0.759x |
+| 200K | 32 | 24.323 | 20.479 | 1.188x |
+| 200K | 64 | 54.789 | 26.194 | 2.092x |
+| 200K | 128 | 67.190 | 34.116 | 1.969x |
+| 200K | 1024 | 487.606 | 281.493 | 1.732x |
+
+The FP32 crossover depends strongly on sequence length. Fixed GVR does not win
+at 10K in this matrix; it crosses over at B64 for 50K and 100K, and at B32 for
+200K. This is consistent with fixed launch/refinement overhead dominating when
+the baseline has little input to scan.
+
+#### FP16 selector
+
+| KV length | Batch | Baseline (us) | Fixed GVR (us) | Speedup |
+| ---: | ---: | ---: | ---: | ---: |
+| 10K | 1 | 9.905 | 9.000 | 1.101x |
+| 10K | 8 | 8.987 | 9.195 | 0.977x |
+| 10K | 32 | 9.737 | 9.380 | 1.038x |
+| 10K | 64 | 8.539 | 9.772 | 0.874x |
+| 10K | 128 | 8.593 | 9.400 | 0.914x |
+| 10K | 1024 | 55.321 | 33.657 | 1.644x |
+| 50K | 1 | 10.347 | 20.807 | 0.497x |
+| 50K | 8 | 10.402 | 20.609 | 0.505x |
+| 50K | 32 | 12.951 | 20.395 | 0.635x |
+| 50K | 64 | 21.258 | 21.047 | 1.010x |
+| 50K | 128 | 21.454 | 20.082 | 1.068x |
+| 50K | 1024 | 146.028 | 94.132 | 1.551x |
+| 100K | 1 | 10.756 | 14.105 | 0.763x |
+| 100K | 8 | 11.300 | 19.806 | 0.571x |
+| 100K | 32 | 14.094 | 19.687 | 0.716x |
+| 100K | 64 | 26.533 | 21.559 | 1.231x |
+| 100K | 128 | 26.733 | 23.539 | 1.136x |
+| 100K | 1024 | 181.450 | 100.657 | 1.803x |
+| 200K | 1 | 12.576 | 26.648 | 0.472x |
+| 200K | 8 | 14.688 | 29.475 | 0.498x |
+| 200K | 32 | 23.096 | 30.092 | 0.768x |
+| 200K | 64 | 48.256 | 38.965 | 1.238x |
+| 200K | 128 | 48.493 | 48.529 | 0.999x |
+| 200K | 1024 | 335.737 | 364.632 | 0.921x |
+
+FP16 is not a monotonic improvement after the correctness fix. Quantization
+can collapse distinct hint values into a degenerate bracket; the corrected
+kernel must then retry cold hints and may perform a full-row bounds recovery.
+The invalid shortcut previously hid that work. FP16 therefore needs a
+separate measured dispatch policy and must not be assumed faster than FP32.
+
+### End-to-end model forward latency
+
+This sweep forced FP32 GVR at every batch size only for measurement; the
+production `num_rows >= 32` dispatch was restored afterward. The table reports
+median per-rank CUDA-graph spans in milliseconds. B1--B128 use one request with
+the requested number of decode candidates. A single B1024 request was rejected
+because scheduler preemption prevented a sustained exact-B1024 plateau at long
+contexts. The replacement uses 1,024 concurrent requests and retains only the
+exact-B1024 plateau; baseline and GVR have identical sample counts per context.
+
+| KV length | Batch | Baseline (ms) | Fixed GVR (ms) | Speedup |
+| ---: | ---: | ---: | ---: | ---: |
+| 10K | 1 | 7.189 | 7.349 | 0.9782x |
+| 10K | 8 | 7.751 | 7.878 | 0.9839x |
+| 10K | 32 | 9.630 | 9.803 | 0.9823x |
+| 10K | 64 | 11.633 | 11.810 | 0.9850x |
+| 10K | 128 | 14.364 | 14.431 | 0.9954x |
+| 10K | 1024 | 52.420 | 51.678 | 1.0143x |
+| 50K | 1 | 7.297 | 7.420 | 0.9834x |
+| 50K | 8 | 7.876 | 8.087 | 0.9739x |
+| 50K | 32 | 10.015 | 10.119 | 0.9898x |
+| 50K | 64 | 12.603 | 12.372 | 1.0187x |
+| 50K | 128 | 15.870 | 15.518 | 1.0227x |
+| 50K | 1024 | 63.039 | 60.055 | 1.0497x |
+| 100K | 1 | 7.351 | 7.638 | 0.9624x |
+| 100K | 8 | 8.025 | 8.302 | 0.9666x |
+| 100K | 32 | 10.549 | 10.659 | 0.9897x |
+| 100K | 64 | 13.527 | 13.134 | 1.0299x |
+| 100K | 128 | 17.257 | 16.847 | 1.0243x |
+| 100K | 1024 | 74.596 | 73.234 | 1.0186x |
+| 199.4K | 1 | 7.437 | 7.966 | 0.9335x |
+| 199.4K | 8 | 8.218 | 8.588 | 0.9569x |
+| 199.4K | 32 | 11.237 | 11.675 | 0.9625x |
+| 199.4K | 64 | 15.204 | 14.661 | 1.0371x |
+| 199.4K | 128 | 20.520 | 19.714 | 1.0409x |
+| 199.4K | 1024 | 99.333 | 93.613 | 1.0611x |
+
+At B1024, the retained rank-event counts for 10K, 50K, 100K, and 199.4K are
+464, 464, 420, and 400 for both implementations. The baseline/GVR median and
+5th--95th percentile ranges are respectively 52.420/51.678 ms
+(52.334--52.519/51.608--51.798), 63.039/60.055 ms
+(62.926--63.261/59.942--60.251), 74.596/73.234 ms
+(74.468--74.847/73.064--73.463), and 99.333/93.613 ms
+(99.127--99.668/93.461--93.929).
+
+### Interpretation and Amdahl check
+
+The qualitative result is clear: forcing GVR at small batches regresses the
+forward pass, while long-context B64 and above generally benefit. The raw
+matrix should not be read as proving every sub-percent difference. Baseline
+and GVR are separate server runs, so graph-level medians include run-to-run
+variation outside the selector.
+
+For example, the 10K B1024 standalone selector is 9.097 us slower per call.
+With 21 selector calls, Amdahl substitution predicts a 0.36% forward
+regression, not the raw 1.43% improvement. That cell is explicitly not a
+causal GVR win. The 50K and 199.4K B1024 raw gains also exceed the savings
+predicted by the repeated-B32-row microbenchmark by about 1.4 ms. At 100K
+B1024, predicted and measured improvements differ by only 0.31 ms.
+
+The strongest causal large-batch check remains the corrected native real
+199.4K B1024 BEAM trace above: its 21 actual selector inputs give a 1.668x
+selector speedup and Amdahl predicts 1.0537x end-to-end versus 1.0550x
+observed. The new 1.0611x matrix cell is directionally consistent but includes
+approximately 0.6% favorable cross-run variation. Thus the defensible real
+model result at B1024/200K is about **5.5% throughput improvement**, not an
+unqualified 6.1%.
+
+### Artifacts
+
+- Standalone logs: `/tmp/gvr_fixed_micro_b1_20260815.log`,
+  `/tmp/gvr_fixed_micro_b8_20260815.log`, and
+  `/tmp/gvr_fixed_micro_b32plus_20260815.log`.
+- B1--B128 traces: `/tmp/gvr_fixed_matrix_baseline_20260815.nsys-rep` and
+  `/tmp/gvr_fixed_matrix_gvr_20260815.nsys-rep` (matching `.sqlite` exports).
+- Exact-B1024 traces:
+  `/tmp/gvr_fixed_b1024_baseline_concurrent_40g_20260815.nsys-rep` and
+  `/tmp/gvr_fixed_b1024_gvr_40g_20260815.nsys-rep` (matching `.sqlite`
+  exports).
+- Driver logs use the same stems with `_driver_20260815.log`; prompt tokens are
+  in `/tmp/gvr_beam_prompt_199400.json`.
