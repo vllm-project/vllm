@@ -240,6 +240,8 @@ class Gemma4Config(VerifyAndUpdateConfig):
             and current_platform.is_device_capability_family(120)
         ):
             vllm_config.attention_config.backend = AttentionBackendEnum.FLASHINFER
+            head_dim = min(head_dims.values())
+            global_head_dim = max(head_dims.values())
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
                 "(head_dim=%d, global_head_dim=%d) with NVFP4 KV cache on "

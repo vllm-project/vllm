@@ -400,15 +400,37 @@ void reshape_and_cache_nvfp4_dispatch(
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       key.scalar_type(), "reshape_and_cache_nvfp4", [&] {
-        vllm::reshape_and_cache_nvfp4_kernel<scalar_t>
-            <<<grid, block, 0, stream>>>(
-                key.const_data_ptr<scalar_t>(),
-                value.const_data_ptr<scalar_t>(),
-                key_cache.mutable_data_ptr<uint8_t>(),
-                value_cache.mutable_data_ptr<uint8_t>(), key_scale_ptr,
-                value_scale_ptr, slot_mapping.const_data_ptr<int64_t>(),
-                k_scale_ptr, v_scale_ptr, key.stride(0), value.stride(0),
-                num_heads, head_size, block_size, data_block_stride,
-                data_head_stride, data_block_offset_stride, scale_block_stride,
-                scale_head_stride, scale_block_offset_stride, swizzle_v_sf);
+        if (kv_cache_dtype == "nvfp4") {
+          vllm::reshape_and_cache_nvfp4_kernel<
+              scalar_t, vllm::NVFP4KVScaleSearch::DEFAULT>
+              <<<grid, block, 0, stream>>>(
+                  key.const_data_ptr<scalar_t>(),
+                  value.const_data_ptr<scalar_t>(),
+                  key_cache.mutable_data_ptr<uint8_t>(),
+                  value_cache.mutable_data_ptr<uint8_t>(), key_scale_ptr,
+                  value_scale_ptr, slot_mapping.const_data_ptr<int64_t>(),
+                  k_scale_ptr, v_scale_ptr, key.stride(0), value.stride(0),
+                  num_heads, head_size, block_size, data_block_stride,
+                  data_head_stride, data_block_offset_stride,
+                  scale_block_stride, scale_head_stride,
+                  scale_block_offset_stride, swizzle_v_sf);
+        } else if (kv_cache_dtype == "nvfp4_4over6") {
+          vllm::reshape_and_cache_nvfp4_kernel<
+              scalar_t, vllm::NVFP4KVScaleSearch::FOUR_OVER_SIX>
+              <<<grid, block, 0, stream>>>(
+                  key.const_data_ptr<scalar_t>(),
+                  value.const_data_ptr<scalar_t>(),
+                  key_cache.mutable_data_ptr<uint8_t>(),
+                  value_cache.mutable_data_ptr<uint8_t>(), key_scale_ptr,
+                  value_scale_ptr, slot_mapping.const_data_ptr<int64_t>(),
+                  k_scale_ptr, v_scale_ptr, key.stride(0), value.stride(0),
+                  num_heads, head_size, block_size, data_block_stride,
+                  data_head_stride, data_block_offset_stride,
+                  scale_block_stride, scale_head_stride,
+                  scale_block_offset_stride, swizzle_v_sf);
+        } else {
+          STD_TORCH_CHECK(false,
+                          "Unsupported NVFP4 KV cache dtype: ", kv_cache_dtype);
+        }
+      });
 }
