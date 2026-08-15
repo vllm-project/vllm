@@ -257,13 +257,6 @@ class DeepseekV4SparseMLAMetadataBuilder(
         assert cm.positions is not None, (
             "positions is required for C128A metadata build"
         )
-        # FULL-cudagraph decode kernels bake this layout's row stride at
-        # capture time (capture builds with max_seq_len = max_model_len), so
-        # the stride must not depend on the batch. A narrower runtime layout
-        # makes the captured kernels read decode rows r >= 1 at the wrong
-        # offset -- stale bytes from earlier, differently-strided builds --
-        # while row 0 stays correct under any stride.
-        active_topk_width = self.c128a_max_compressed
         block_size = self.kv_cache_spec.block_size // self.compress_ratio
         global_decode, decode_lens, prefill_local = build_c128a_topk_metadata(
             cm.positions[:num_total],
@@ -276,7 +269,7 @@ class DeepseekV4SparseMLAMetadataBuilder(
             self.c128a_global_decode_buffer,
             self.c128a_decode_lens_buffer,
             self.c128a_prefill_buffer,
-            max_compressed_tokens=active_topk_width,
+            max_compressed_tokens=self.c128a_max_compressed,
         )
 
         result: dict[str, torch.Tensor | None] = {}
@@ -322,30 +315,25 @@ def build_c128a_topk_metadata(
     Decode tokens: position → block_table lookup → global slot ids + topk_lens.
     Prefill tokens: position → local indices [0, ..., n-1, -1, ...].
 
-    Writes into packed views of pre-allocated buffers for CUDA graph stability.
+    Writes into pre-allocated buffers for CUDA graph address stability.
+    Returns slices of the buffers.
     """
     num_tokens = positions.shape[0]
     num_prefill_tokens = num_tokens - num_decode_tokens
 
-    # view(-1) as 1-d array and then expanded to
-    # [num_decode_tokens, max_compressed_tokens]
-    global_decode = global_decode_buffer.view(-1)[
-        : num_decode_tokens * max_compressed_tokens
-    ].view(num_decode_tokens, max_compressed_tokens)
+    global_decode = global_decode_buffer[:num_decode_tokens]
     decode_lens = decode_lens_buffer[:num_decode_tokens]
-    prefill_local = prefill_buffer.view(-1)[
-        : num_prefill_tokens * max_compressed_tokens
-    ].view(num_prefill_tokens, max_compressed_tokens)
+    prefill_local = prefill_buffer[:num_prefill_tokens]
 
     if num_tokens == 0:
         return global_decode, decode_lens, prefill_local
 
     _build_c128a_topk_metadata_kernel[(num_tokens,)](
         global_decode_buffer,
-        max_compressed_tokens,
+        global_decode_buffer.stride(0),
         decode_lens_buffer,
         prefill_buffer,
-        max_compressed_tokens,
+        prefill_buffer.stride(0),
         positions,
         compress_ratio,
         max_compressed_tokens,
