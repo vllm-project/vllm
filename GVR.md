@@ -1888,3 +1888,67 @@ padded-stride tests passed (`169 deselected`), as did Ruff check/format, Python
 compilation, typos, `GVR_SUMMARY.md` Markdown lint, and `git diff --check`.
 Whole-file Markdown lint for the two historical long-form documents still
 reports their pre-existing MD060 table-spacing errors.
+
+## Independent BEAM-corpus revalidation
+
+The 4.546x real-model selector ratio was independently revalidated with the
+[Kimi Vendor Verifier BEAM corpus][beam]
+instead of the repository-document prompt used by the first event-free trace.
+The source checkout is commit `3dad65a760a8867cda72f6dd8848d876a4e851b4`.
+The downloaded 1M-chat and question objects match their Git-LFS SHA-256 values
+`878eefe2b90273b52ad1b0ddd29e72568a6b218567c0a8cdba78696099cba2ad`
+and `0882ca1ea1dfffa4645463b94c44156277e4da082fb9a1a68ceeca852b4fc2f4`.
+
+The test prompt uses BEAM chat 1 and its first abstention probe. It applies the
+served GLM-5.2 tokenizer's chat template to 592 real conversation messages and
+the official probing prefix, then left-truncates to exactly 199,400 tokens to
+fit the 200,000-token deployment. The resulting token-ID artifact has SHA-256
+`9751fea511c7b08448da6b2b58ea50ad8d3c28244364b64e2f0c90e89b0a5ff7`.
+FlashInfer autotuning remained disabled. Both runs used the same checkpoint,
+TP4 configuration, full-decode CUDA graph, prompt IDs, sampling seed, and
+`temperature=1.0`. Nsight Systems captured CUDA and NVTX activity without
+inserting timing events into the model graph. Analysis retained only ranges
+labeled `execute_context_0(0)_generation_1024(1024)`.
+
+The first baseline profiling range was discarded before inference. The API
+correctly rejected `n=1024` with greedy `temperature=0` sampling, so it contains
+no B1024 model forwards. The rerun uses BEAM's default `temperature=1.0`, which
+is accepted for multi-output generation and produces independently sampled
+child trajectories. The prefix-only B1 warmup completed in 17.232 seconds and
+was outside the discarded profiler range.
+
+The valid pair contains 384 exact-B1024 replays per selector: 96 decode steps
+on each of four TP ranks. Every replay maps to one CUDA graph launch containing
+2,043 kernels. Every baseline replay has exactly 21
+`FilteredTopKUnifiedKernel` launches and no GVR kernel; every GVR replay has
+exactly 21 fused GVR launches and no filtered selector.
+
+| Median event-free graph metric | Baseline | GVR | Baseline / GVR |
+| --- | ---: | ---: | ---: |
+| One TP-rank forward | 99.757 ms | 89.639 ms | 1.1129x |
+| 21 selectors in one TP-rank forward | 12.709 ms | 2.796 ms | 4.5456x |
+| One selector call | 605.204 us | 133.141 us | 4.5456x |
+| TP critical-path forward | 99.814 ms | 89.682 ms | 1.1130x |
+
+The original repository-document trace reported 602.939 us versus 132.639 us,
+or 4.546x. The independent BEAM data changes the absolute times by less than
+0.4% and reproduces the ratio to three decimal places. The individual-rank
+forward distribution is also narrow: the baseline/GVR 5th-to-95th percentile
+ranges are 99.381--100.185 ms and 89.387--90.006 ms.
+
+Using the median per-step TP-rank mean, baseline selector share is 12.74% and
+the measured selector totals are 12.716 ms versus 2.795 ms. Amdahl's Law then
+predicts `99.814 / (99.814 - 12.716 + 2.795) = 1.1104x`; the directly observed
+critical-path result is 1.1130x. The predicted forward is 89.993 ms, only
+0.311 ms slower than the measured 89.682 ms. Thus the large number is a
+selector-only speedup, while the independently reproduced whole-forward gain
+is about 11.3%.
+
+The valid reports and exports are
+`/tmp/gvr_beam_baseline_valid_20260815.{nsys-rep,sqlite}` and
+`/tmp/gvr_beam_gvr_valid_20260815.{nsys-rep,sqlite}`. This is one real BEAM
+conversation and probe, not a corpus-wide model-quality evaluation; its 96
+exact-B1024 decode steps per rank test the performance claim rather than model
+accuracy.
+
+[beam]: https://github.com/MoonshotAI/Kimi-Vendor-Verifier/tree/main/beam

@@ -30,6 +30,16 @@ def make_prompt_ids(model: str, length: int) -> list[int]:
     return token_ids[:length]
 
 
+def load_prompt_ids(path: Path) -> list[int]:
+    payload = json.loads(path.read_text())
+    token_ids = payload.get("token_ids") if isinstance(payload, dict) else payload
+    if not isinstance(token_ids, list) or not all(
+        isinstance(token_id, int) for token_id in token_ids
+    ):
+        raise ValueError(f"{path} must contain a token-id list or token_ids field")
+    return token_ids
+
+
 async def run_wave(
     session: aiohttp.ClientSession,
     url: str,
@@ -109,6 +119,11 @@ async def main() -> None:
     parser.add_argument("--batches", default="1,8,32")
     parser.add_argument("--output-len", type=int, default=2)
     parser.add_argument("--temperature", type=float, default=0)
+    parser.add_argument(
+        "--prompt-ids-file",
+        type=Path,
+        help="Use token IDs from a JSON list or token_ids field instead of docs/.",
+    )
     parser.add_argument("--admission-chunk", type=int, default=0)
     parser.add_argument("--admission-delay", type=float, default=0.1)
     parser.add_argument(
@@ -120,7 +135,15 @@ async def main() -> None:
 
     lengths = [int(value) for value in args.lengths.split(",")]
     batches = [int(value) for value in args.batches.split(",")]
-    all_ids = make_prompt_ids(args.model, max(lengths))
+    all_ids = (
+        load_prompt_ids(args.prompt_ids_file)
+        if args.prompt_ids_file is not None
+        else make_prompt_ids(args.model, max(lengths))
+    )
+    if len(all_ids) < max(lengths):
+        raise ValueError(
+            f"prompt has {len(all_ids)} tokens, but {max(lengths)} are requested"
+        )
     timeout = aiohttp.ClientTimeout(total=7200)
     connector = aiohttp.TCPConnector(limit=0)
     async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:

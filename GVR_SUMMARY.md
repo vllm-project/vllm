@@ -27,6 +27,28 @@ The 1.1098x prediction and 1.1110x observation differ by about 0.1 ms. This is
 the first result in the investigation that is both dispatch-validated and
 explainable from first principles.
 
+### Independent real-corpus reproduction
+
+The selector result was rerun on chat 1 and the first abstention probe from the
+public [Kimi Vendor Verifier BEAM corpus][beam].
+The served GLM tokenizer's chat template produced the prompt, which was
+left-truncated to 199,400 tokens. The matched event-free captures contain 96
+exact-B1024 decode steps on each of four TP ranks.
+
+| Median graph metric | Baseline | GVR | Speedup |
+| --- | ---: | ---: | ---: |
+| Per selector call | 605.204 us | 133.141 us | 4.5456x |
+| TP critical-path forward | 99.814 ms | 89.682 ms | 1.1130x |
+
+Every retained replay contains 21 expected selector kernels and zero kernels
+from the opposite implementation. The original 602.939/132.639-us result is
+therefore reproducible: the real BEAM prompt changes either absolute time by
+less than 0.4% and reproduces the 4.546x ratio. Amdahl's Law predicts 1.1104x
+from the independently measured 12.74% baseline selector share; the observed
+forward result is 1.1130x.
+
+[beam]: https://github.com/MoonshotAI/Kimi-Vendor-Verifier/tree/main/beam
+
 ## Why the previous neutral result was wrong
 
 The former source-of-truth result claimed 99.675 ms baseline versus 99.706 ms
@@ -128,6 +150,7 @@ The difference is visible before taking either ratio:
 | --- | ---: | ---: | ---: |
 | Repeated-B32 standalone | 487.619 us | 283.104 us | 1.722x |
 | Real model, 21-call average | 602.939 us | 132.639 us | 4.546x |
+| Real BEAM prompt, independent rerun | 605.204 us | 133.141 us | 4.546x |
 
 GVR's admission, fallback, and candidate work depends strongly on the score
 and temporal-hint distribution, whereas the baseline is much less
