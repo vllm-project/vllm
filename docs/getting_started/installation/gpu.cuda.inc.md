@@ -156,6 +156,9 @@ cd vllm
 uv pip install -e . --torch-backend=auto
 ```
 
+!!! note "CUDA Architecture & PTX Flags"
+    vLLM normalizes CUDA architectures on a per-source basis to optimize build times and wheel sizes. Global `+PTX` requests in `TORCH_CUDA_ARCH_LIST` (e.g., `TORCH_CUDA_ARCH_LIST="8.0+PTX"`) are ignored for general extension targets; vLLM generates PTX only for specific internal kernels that require it.
+
 !!! tip
     Building from source requires a lot of compilation. If you are building from source repeatedly, it's more efficient to cache the compilation results.
 
