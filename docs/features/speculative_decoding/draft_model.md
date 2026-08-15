@@ -38,7 +38,7 @@ vllm serve Qwen/Qwen3-4B-Thinking-2507 \
     --speculative-config '{"model": "Qwen/Qwen3-0.6B", "num_speculative_tokens": 5, "method": "draft_model"}'
 ```
 
-The code used to request as completions as a client remains unchanged:
+The code used to request completions as a client remains unchanged:
 
 ??? code
 
@@ -80,7 +80,7 @@ The code used to request as completions as a client remains unchanged:
 
   By default, vLLM requires the draft and target models to share the same vocabulary. Setting `use_heterogeneous_vocab: true` enables the **Token-Level Intersection (TLI)** algorithm, which allows draft models from a different model family with a different tokenizer.
   
-  Currently,`use_heterogeneous_vocab` currently requires `draft_sample_method='greedy'` (the default). Probabilistic draft sampling is not yet supported and will be added in a
+  Currently, `use_heterogeneous_vocab` requires `draft_sample_method='greedy'` (the default). Probabilistic draft sampling is not yet supported and will be added in a
   future release.
 
   ```python

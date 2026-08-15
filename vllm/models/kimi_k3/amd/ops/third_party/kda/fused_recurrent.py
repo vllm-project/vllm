@@ -459,6 +459,7 @@ def fused_recurrent_kda_packed_decode_kernel(
     stride_g_token: tl.constexpr,
     stride_beta_token: tl.constexpr,
     stride_state_token: tl.constexpr,
+    stride_state_indices,
     H: tl.constexpr,
     K: tl.constexpr,
     V: tl.constexpr,
@@ -476,7 +477,7 @@ def fused_recurrent_kda_packed_decode_kernel(
     mask_v = o_v < V
     mask_state = mask_v[:, None] & mask_k[None, :]
 
-    state_idx = tl.load(state_indices + i_n).to(tl.int64)
+    state_idx = tl.load(state_indices + i_n * stride_state_indices).to(tl.int64)
     p_out = out + (i_n * H + i_h) * V + o_v
     if state_idx <= 0:
         tl.store(p_out, tl.zeros([BV], dtype=tl.float32), mask=mask_v)
@@ -560,8 +561,8 @@ def fused_recurrent_kda_packed_decode(
         raise ValueError("`raw_beta` heads must be contiguous.")
     if initial_state.stride()[1:] != (V * K, K, 1):
         raise ValueError("`initial_state` must be contiguous within each cache slot.")
-    if state_indices.ndim != 1 or state_indices.stride(0) != 1:
-        raise ValueError("`state_indices` must be contiguous and one-dimensional.")
+    if state_indices.ndim != 1:
+        raise ValueError("`state_indices` must be one-dimensional.")
     if A_log.ndim != 1 or not A_log.is_contiguous():
         raise ValueError("`A_log` must be contiguous and one-dimensional.")
     if not dt_bias.is_contiguous():
@@ -608,6 +609,7 @@ def fused_recurrent_kda_packed_decode(
         stride_g_token=raw_g.stride(1),
         stride_beta_token=raw_beta.stride(1),
         stride_state_token=initial_state.stride(0),
+        stride_state_indices=state_indices.stride(0),
         H=H,
         K=K,
         V=V,

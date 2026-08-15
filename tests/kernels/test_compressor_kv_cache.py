@@ -31,8 +31,21 @@ from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
 )
 from vllm.models.deepseek_v4.compressor import _get_c128_boundary
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.mla.compressor_utils import (
+    get_dspark_swa_index_width,
+)
 
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
+
+
+@pytest.mark.parametrize(
+    ("window_size", "num_speculative_tokens", "expected"),
+    [(128, 5, 192), (512, 5, 576), (1024, 0, 1024)],
+)
+def test_get_dspark_swa_index_width(
+    window_size: int, num_speculative_tokens: int, expected: int
+):
+    assert get_dspark_swa_index_width(window_size, num_speculative_tokens) == expected
 
 
 def test_compute_global_topk_reuses_output_buffers():
