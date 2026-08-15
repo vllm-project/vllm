@@ -1834,9 +1834,13 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
+            observed_spec_decode = False
+            num_draft_tokens = 0
+            num_accepted = 0
             if scheduled_spec_token_ids and (
                 generated_token_ids or self.num_sampled_tokens_per_step == 0
             ):
+                observed_spec_decode = True
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_sampled = self.num_sampled_tokens_per_step
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
@@ -1850,13 +1854,6 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens -= num_rejected
                     if request.num_output_placeholders > 0:
                         request.num_output_placeholders -= num_rejected
-                spec_decoding_stats = self.make_spec_decoding_stats(
-                    spec_decoding_stats,
-                    num_draft_tokens=num_draft_tokens,
-                    num_accepted_tokens=num_accepted,
-                    num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
-                    request_id=req_id,
-                )
 
             # Free encoder inputs only after the step has actually executed.
             if request.has_encoder_inputs:
@@ -1872,6 +1869,40 @@ class Scheduler(SchedulerInterface):
             prefill_stats = None
             status_before_stop = request.status
             num_output_tokens_before = len(request._output_token_ids)
+
+            if (
+                len(new_token_ids) > 1
+                and scheduled_spec_token_ids
+                and request.use_structured_output
+                and not output_is_stale
+            ):
+                new_token_ids, num_grammar_rejected = (
+                    self.structured_output_manager.filter_speculative_grammar_tokens(
+                        request, new_token_ids
+                    )
+                )
+                if num_grammar_rejected > 0:
+                    if request.num_computed_tokens > 0:
+                        request.num_computed_tokens -= num_grammar_rejected
+                    if request.num_output_placeholders > 0:
+                        request.num_output_placeholders -= num_grammar_rejected
+                    # Target-sampled tokens occupy the end of the output block.
+                    # Removing that tail changes the accepted-draft count only
+                    # when the rejected suffix extends into draft positions.
+                    num_accepted -= max(
+                        num_grammar_rejected - self.num_sampled_tokens_per_step,
+                        0,
+                    )
+                    assert num_accepted >= 0
+
+            if observed_spec_decode:
+                spec_decoding_stats = self.make_spec_decoding_stats(
+                    spec_decoding_stats,
+                    num_draft_tokens=num_draft_tokens,
+                    num_accepted_tokens=num_accepted,
+                    num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
+                    request_id=req_id,
+                )
 
             # Check for stop and update request status.
             if new_token_ids:
