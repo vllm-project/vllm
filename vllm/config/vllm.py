@@ -554,6 +554,21 @@ class VllmConfig:
         if self.scheduler_config.async_scheduling:
             if self.use_v2_model_runner:
                 return pp_size + 1
+            # P1/M1 (flag-gated: VLLM_PPMTP_MCB_PLUS1): V1 PP + MTP spec decode.
+            # Give the batch queue the extra async-overlap slot (pp_size+1) that
+            # async scheduling needs to overlap CPU scheduling / MTP-token feedback
+            # across PP stages. The phase-1 async MTP handoff keeps
+            # execute_model/sample_tokens 1:1 regardless of queue depth, so the
+            # single-slot handoff invariant still holds. Prerequisite for
+            # cohort-cadence overlap (M3b); has no effect on its own without
+            # independent decode work to fill the slot (see
+            # prof/V2_PPMTP_why_no_speedup.md). Original-path fallback = mcb=pp_size.
+            if (
+                envs.VLLM_PPMTP_MCB_PLUS1
+                and pp_size > 1
+                and self.num_speculative_tokens > 0
+            ):
+                return pp_size + 1
             # V1 Model Runner does not fully support async scheduling with PP.
             if pp_size <= 1:
                 return 2

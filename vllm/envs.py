@@ -290,6 +290,14 @@ if TYPE_CHECKING:
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
+    # PP+MTP pipeline-overlap flags (prof/HANDOFF_ppmtp_overlap_reimpl.md).
+    # Registered here so they propagate to EngineCore/worker subprocesses
+    # (unregistered VLLM_* vars are dropped when the engine subprocess re-execs).
+    VLLM_PPMTP_MCB_PLUS1: bool = False
+    VLLM_PPMTP_HANDOFF_RING: bool = False
+    VLLM_V1_PP_DECODE_CADENCE: bool = False
+    VLLM_PPMTP_COHORT_BALANCE: bool = False
+    VLLM_PPMTP_ASYNC_BCAST: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -2028,6 +2036,34 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Flag to control the v2 model runner. If unset, use config defaults.
     "VLLM_USE_V2_MODEL_RUNNER": lambda: maybe_convert_bool(
         os.getenv("VLLM_USE_V2_MODEL_RUNNER", None)
+    ),
+    # PP+MTP pipeline-overlap flags (prof/HANDOFF_ppmtp_overlap_reimpl.md).
+    # P1/M1: give the batch queue an extra async-overlap slot (mcb=pp_size+1)
+    # for V1 PP + MTP spec decode.
+    "VLLM_PPMTP_MCB_PLUS1": lambda: bool(int(os.getenv("VLLM_PPMTP_MCB_PLUS1", "0"))),
+    # P2/M3a: upgrade the inline PP+MTP handoff apply to a ring(deque)+deferred
+    # version so the extra mcb=3 batch slot is correction-safe (inline applies
+    # the per-req CPU correction immediately, which races the extra in-flight
+    # batch). ring depth=1 here; becomes pp_size under cadence (M3b).
+    "VLLM_PPMTP_HANDOFF_RING": lambda: bool(
+        int(os.getenv("VLLM_PPMTP_HANDOFF_RING", "0"))
+    ),
+    # P3/M3b: throttle each request's decode to once per pp_size steps so
+    # consecutive steps run independent cohorts that can overlap PP stages.
+    "VLLM_V1_PP_DECODE_CADENCE": lambda: bool(
+        int(os.getenv("VLLM_V1_PP_DECODE_CADENCE", "0"))
+    ),
+    # P4: round-robin the prefill->decode admission residue across pp_size so
+    # cohorts stay balanced (the missing piece that makes cadence a net win).
+    "VLLM_PPMTP_COHORT_BALANCE": lambda: bool(
+        int(os.getenv("VLLM_PPMTP_COHORT_BALANCE", "0"))
+    ),
+    # P7/Phase A: make the PP+MTP handoff broadcasts async (async_op=True) and
+    # relocate the wait + D2H derivation to the deferred ring consume, so the
+    # collective overlaps the next (independent) cohort's forward. Gated on
+    # _pp_decode_cadence (no independent cohort to overlap without cadence).
+    "VLLM_PPMTP_ASYNC_BCAST": lambda: bool(
+        int(os.getenv("VLLM_PPMTP_ASYNC_BCAST", "0"))
     ),
     # Log model inspection after loading.
     # If enabled, logs a transformers-style hierarchical view of the model

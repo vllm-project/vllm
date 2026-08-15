@@ -6,7 +6,7 @@ import gc
 import itertools
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy, deepcopy
@@ -497,6 +497,41 @@ class ExecuteModelState(NamedTuple):
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
 
 
+@dataclass
+class MTPHandoffSlot:
+    """One in-flight PP+MTP handoff (P2/M3a ring, flag VLLM_PPMTP_HANDOFF_RING).
+
+    Received on a non-last PP rank in sample_tokens and applied at the top of a
+    later _update_states, deferred by ``ring_depth`` steps (=1 for M3a; =pp_size
+    once cohort cadence lands in M3b). The GPU tensors + per-req CPU snapshots
+    are stashed here instead of written straight into input_batch at receive
+    time, so the extra mcb=pp_size+1 in-flight batch cannot race the correction
+    (the inline version mutates input_batch at receive time, which the extra
+    batch's CPU-side advance can clobber). All fields are the exact values the
+    inline _pp_apply_mtp_handoff would have applied at receive time.
+    """
+
+    num_reqs: int
+    # Derived handoff fields. Under VLLM_PPMTP_ASYNC_BCAST the non-last rank
+    # stashes these as None at receive (broadcast still in flight) and fills them
+    # at consume time (_apply_pending_mtp_handoff) after bcast_work.wait().
+    prev_sampled_token_ids: "torch.Tensor | None"  # [num_reqs, 1] last valid sampled
+    valid_sampled_token_count_gpu: "torch.Tensor | None"  # [num_reqs] int32
+    draft_token_ids: "torch.Tensor | None"  # [num_reqs, num_spec]
+    nts: "np.ndarray | None"  # [num_reqs] authoritative num_tokens_no_spec (last rank)
+    req_ids: list  # snapshot of input_batch.req_ids at receive
+    num_prompt_tokens: "np.ndarray"  # snapshot [num_reqs]
+    discard_mask: "np.ndarray"  # snapshot of discard_request_mask[:num_reqs]
+    # P7/Phase A async broadcast (VLLM_PPMTP_ASYNC_BCAST). bcast_work: the async
+    # collective handle, waited (both ranks, for symmetry) at consume. raw_handoff:
+    # the receive/send buffer kept alive until the wait (prevents early free); on
+    # the non-last rank it is also the source the deferred derivation reads.
+    # derive_pending: non-last rank must run _derive_mtp_handoff at consume.
+    bcast_work: object = None
+    raw_handoff: "torch.Tensor | None" = None
+    derive_pending: bool = False
+
+
 class GPUModelRunner(
     LoRAModelRunnerMixin, KVConnectorModelRunnerMixin, ECConnectorModelRunnerMixin
 ):
@@ -629,6 +664,10 @@ class GPUModelRunner(
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
         # layers in the draft model.
+        # PP+MTP port: the entire draft model lives only on the last PP rank.
+        # On every other rank set drafter=None so the guards below skip it.
+        if self.speculative_config and not get_pp_group().is_last_rank:
+            self.drafter = None
         if self.speculative_config and get_pp_group().is_last_rank:
             self.drafter: (
                 NgramProposer  # noqa: F823
@@ -944,6 +983,20 @@ class GPUModelRunner(
             self._num_valid_draft_tokens_copy_stream = torch.cuda.Stream()
 
         self._draft_token_req_ids: list[str] | None = None
+        # P2/M3a PP+MTP handoff ring (flag VLLM_PPMTP_HANDOFF_RING). Deferred
+        # apply decouples the correction from the receive so the extra mcb batch
+        # cannot race it. Ring depth is a property (1 for M3a; pp_size under M3b
+        # cadence). See _mtp_handoff_ring_depth / _pp_decode_cadence.
+        self._mtp_ring: deque = deque()
+        # M3b cadence per-req_id state, stashed at ring-pop, drained on re-add.
+        self._mtp_pending_nts: dict[str, int] = {}
+        self._mtp_pending_valid: dict[str, int] = {}
+        # M3b draft/bonus scatter map {req_id: slot_row} for the re-added cohort.
+        self._mtp_cadence_scatter_index: dict[str, int] | None = None
+        # P7/Phase A one-time engagement diag (forkserver+numactl subprocs drop
+        # unregistered VLLM_* vars and /proc/environ is unreliable -> log the
+        # resolved property values from inside the worker to confirm the flags).
+        self._ppmtp_diag_logged = False
         self.transfer_event = torch.Event()
         self.sampled_token_ids_pinned_cpu = torch.empty(
             (self.max_num_reqs, 1),
@@ -999,8 +1052,52 @@ class GPUModelRunner(
             )
         self.layerwise_nvtx_hooks_registered = False
 
+    @property
+    def _is_pp_spec_decode(self) -> bool:
+        """PP>1 + speculative decoding: the case requiring MTP handoff."""
+        return self.num_spec_tokens > 0 and get_pp_group().world_size > 1
+
+    @property
+    def _pp_decode_cadence(self) -> bool:
+        """P3/M3b (flag VLLM_V1_PP_DECODE_CADENCE): throttle each request's decode
+        to once per pp_size steps so consecutive steps run independent cohorts the
+        handoff ring overlaps across PP stages. Must match the scheduler-side
+        Scheduler._pp_decode_cadence gate. Only meaningful for V1 PP + MTP + async;
+        the worker handoff ring deepens to pp_size when on (INV-RING)."""
+        return (
+            envs.VLLM_V1_PP_DECODE_CADENCE
+            and self._is_pp_spec_decode
+            and self.use_async_scheduling
+        )
+
+    @property
+    def _mtp_handoff_ring_depth(self) -> int:
+        """Handoff ring depth: 1 for M3a (apply 1 step after receive == inline
+        timing); pp_size under M3b cadence (defer the correction across the whole
+        cadence gap so it lands when the cohort is re-added). Cadence off -> 1."""
+        return get_pp_group().world_size if self._pp_decode_cadence else 1
+
+    @property
+    def _pp_async_bcast(self) -> bool:
+        """P7/Phase A (flag VLLM_PPMTP_ASYNC_BCAST): issue the PP+MTP handoff
+        broadcasts with async_op=True and relocate the wait + D2H derivation to
+        the deferred ring consume, so the collective overlaps the next
+        (independent) cohort's forward. Gated on _pp_decode_cadence: with cadence
+        off there is no independent cohort to overlap, so async only adds a race
+        surface for zero benefit (and the flag-off path must stay byte-identical).
+        Also requires the handoff ring (VLLM_PPMTP_HANDOFF_RING): the deferred
+        wait + derivation live in _apply_pending_mtp_handoff, so async without the
+        ring would issue collectives that never get waited."""
+        return (
+            envs.VLLM_PPMTP_ASYNC_BCAST
+            and envs.VLLM_PPMTP_HANDOFF_RING
+            and self._pp_decode_cadence
+        )
+
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
+        self.model_config.max_model_len = max_model_len
+        self.vllm_config.model_config.max_model_len = max_model_len
         if self.speculative_config:
             draft_config = self.speculative_config.draft_model_config
             if draft_config is None or draft_config.max_model_len is None:
@@ -1248,6 +1345,15 @@ class GPUModelRunner(
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
         """
+        # P2/M3a ring (flag VLLM_PPMTP_HANDOFF_RING): apply the due deferred
+        # PP+MTP handoff before any composition change, while input_batch still
+        # matches the slot snapshot. No-op on the last PP rank / when the ring is
+        # empty (inline path never populates it).
+        if envs.VLLM_PPMTP_HANDOFF_RING:
+            # Rotate the handoff ring every step (see _apply_pending_mtp_handoff):
+            # the step-based defer must advance even on empty (no-stash) steps.
+            self._apply_pending_mtp_handoff()
+
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             req_state = self.requests.pop(req_id, None)
@@ -1409,6 +1515,29 @@ class GPUModelRunner(
             num_output_tokens = req_data.num_output_tokens[i]
             req_index = self.input_batch.req_id_to_index.get(req_id)
 
+            if (
+                self._pp_decode_cadence
+                and req_index is None
+                and req_id in self._mtp_pending_valid
+            ):
+                # continue34 frontier-fix (M3b): under cadence the re-added cohort
+                # bypasses both the in-batch deferred spec correction and the
+                # (disabled) GPU kernel, so the scheduler's optimistic
+                # num_computed_tokens / num_output_tokens run num_rejected_prev
+                # ahead of the true frontier. Correct BOTH by the same delta using
+                # the handoff ring's authoritative accept count for the previous
+                # decode (_mtp_pending_valid == 1 bonus + accepted drafts). Read
+                # prev_num_draft_len before the block below resets it to 0 -- it
+                # still holds the previous decode's draft count (untouched across
+                # the throttle window since a throttled req is absent from
+                # scheduled_cached_reqs).
+                num_rejected_prev = req_state.prev_num_draft_len - (
+                    self._mtp_pending_valid[req_id] - 1
+                )
+                if num_rejected_prev > 0:
+                    num_computed_tokens -= num_rejected_prev
+                    num_output_tokens -= num_rejected_prev
+
             if req_state.prev_num_draft_len and self.use_async_scheduling:
                 # prev_num_draft_len is used in async scheduling mode with
                 # spec decode. it indicates if need to update num_computed_tokens
@@ -1545,7 +1674,14 @@ class GPUModelRunner(
                     self.input_batch.is_token_ids[
                         req_index, start_token_index:end_token_index
                     ] = True
-                    self.input_batch.num_tokens_no_spec[req_index] = end_token_index
+                    # PP+MTP H3: under async + _is_pp_spec_decode, num_computed_tokens
+                    # (hence end_token_index) is OPTIMISTIC (assumes all drafts
+                    # accepted). Skip this local nts write so nts holds the previous
+                    # step's authoritative value through this forward; the handoff
+                    # sets the correct nts and the GPU kernel corrects
+                    # num_computed_tokens via valid_sampled_token_count_gpu.
+                    if not (self._is_pp_spec_decode and self.use_async_scheduling):
+                        self.input_batch.num_tokens_no_spec[req_index] = end_token_index
 
             # Add spec_token_ids to token_ids_cpu.
             self.input_batch.update_req_spec_token_ids(req_state, scheduled_spec_tokens)
@@ -1820,7 +1956,17 @@ class GPUModelRunner(
 
         Populates self.prev_positions.np[:num_reqs] with the mapping.
         """
-        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        # M3b: on a cadence step re-adding a churned cohort, the draft/bonus
+        # scatter must index the slot-row layout (matching the landed
+        # prev_sampled_token_ids / _draft_token_ids), so use the dedicated slot-row
+        # scatter map. prev_req_id_to_index is deliberately kept at the this-step
+        # layout on the sample rank (for update_async_*), so it cannot be used
+        # here. Off cadence / non-re-add steps: fall back to the normal map.
+        prev_req_id_to_index = (
+            self._mtp_cadence_scatter_index
+            if (self._pp_decode_cadence and self._mtp_cadence_scatter_index)
+            else self.input_batch.prev_req_id_to_index
+        )
         prev_positions = self.prev_positions.np[:num_reqs]
 
         if not prev_req_id_to_index:
@@ -1959,6 +2105,12 @@ class GPUModelRunner(
         # because input_ids dtype is torch.int32,
         # so convert draft_token_ids to torch.int32 here.
         draft_token_ids = self._draft_token_ids.to(dtype=torch.int32)
+        if self._pp_decode_cadence:
+            # M3b: a re-added cohort's draft slots may hold a stale / -1
+            # placeholder id; scattered into input_ids and later read as a vocab
+            # offset an OOB id -> illegal memory (only bites at high-conc + 32k
+            # chunked-prefill). Clamp to [0, vocab).
+            draft_token_ids = draft_token_ids.clamp(0, self.input_batch.vocab_size - 1)
 
         self.input_ids.gpu.scatter_(
             dim=0,
@@ -2208,10 +2360,15 @@ class GPUModelRunner(
         # CPU values are optimistic (all drafts accepted). The kernel
         # corrects on GPU using the previous step's
         # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
+        # M3b: under decode cadence the batch churns (cohort re-added each step),
+        # so this kernel's row layout (prev_positions / prev_req_id_to_index)
+        # assumptions break; the CPU frontier-fix in _update_states corrects
+        # num_computed instead. Disable the GPU correction under cadence.
         if (
             self.use_async_spec_decode
             and self.valid_sampled_token_count_gpu is not None
             and prev_req_id_to_index
+            and not self._pp_decode_cadence
         ):
             self.prev_positions.copy_to_gpu(num_reqs)
             self.prev_num_draft_tokens.copy_to_gpu()
@@ -2640,7 +2797,11 @@ class GPUModelRunner(
                 cm.block_table_tensor = _get_block_table(kv_cache_gid)
                 cm.slot_mapping = slot_mappings[kv_cache_gid]
 
-            if self.speculative_config and spec_decode_common_attn_metadata is None:
+            if (
+                self.speculative_config
+                and spec_decode_common_attn_metadata is None
+                and self.drafter is not None
+            ):
                 if isinstance(
                     self.drafter,
                     (
@@ -4673,7 +4834,11 @@ class GPUModelRunner(
             self.kv_connector_output = None
             # receive sampled token ids from the last PP rank.
             if self.use_async_scheduling and not get_pp_group().is_last_rank:
-                self._pp_receive_prev_sampled_token_ids_to_input_batch()
+                if self._is_pp_spec_decode:
+                    # PP+MTP port: receive the packed MTP handoff.
+                    self._pp_apply_mtp_handoff()
+                else:
+                    self._pp_receive_prev_sampled_token_ids_to_input_batch()
             # In case of PP with kv transfer, we need to pass through the
             # kv_connector_output
             return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
@@ -4712,9 +4877,14 @@ class GPUModelRunner(
             # PP outputs have been broadcasted to all ranks at logits computation.
             # Therefore, here is no need to send sampled token ids again in this case.
             if not self.broadcast_pp_output and pp.world_size > 1 and pp.is_last_rank:
-                self._pp_broadcast_prev_sampled_token_ids(
-                    sampler_output.sampled_token_ids
-                )
+                if self._is_pp_spec_decode:
+                    # PP+MTP port: MTP handoff (sent after propose) supersedes
+                    # this broadcast; skip to avoid duplicate communication.
+                    pass
+                else:
+                    self._pp_broadcast_prev_sampled_token_ids(
+                        sampler_output.sampled_token_ids
+                    )
 
         self._draft_token_ids = None
         self._draft_probs = None
@@ -4866,6 +5036,18 @@ class GPUModelRunner(
                 )
                 self.drafter.dummy_run(num_tokens=1)
 
+        # PP+MTP port: after the drafter produced _draft_token_ids (either at the
+        # use_gpu_toks call above or here after bookkeeping), the last PP rank
+        # packs sampled+draft+nts into one tensor and broadcasts to non-last
+        # ranks. Placed after the whole propose block so it fires regardless of
+        # which propose branch ran.
+        if (
+            self._is_pp_spec_decode
+            and self.use_async_scheduling
+            and get_pp_group().is_last_rank
+        ):
+            self._pp_send_mtp_handoff(sampler_output.sampled_token_ids)
+
         # Finalize KV connector (wait_for_save + clear metadata) after
         # draft model runs. Deferred from target model forward to allow
         # draft model to also save its KV cache.
@@ -4958,12 +5140,11 @@ class GPUModelRunner(
         assert sampled_token_ids.dim() == 2 and sampled_token_ids.shape[-1] == 1, (
             "PP+async expects sampled_token_ids to have shape [num_reqs, 1]"
         )
-        # Skip for chunked prefill: sampled tokens are dummy
-        # and will be discarded, no need to broadcast.
-        if not self._is_all_reqs_chunked_prefill():
-            torch.distributed.broadcast(
-                sampled_token_ids, src=pp.rank, group=pp.device_group
-            )
+        # PP+MTP port: always broadcast (even for chunked prefill) so the
+        # non-last ranks' matching receive stays NCCL-paired.
+        torch.distributed.broadcast(
+            sampled_token_ids, src=pp.rank, group=pp.device_group
+        )
 
     def _pp_receive_prev_sampled_token_ids_to_input_batch(self) -> None:
         """Receive sampled token ids broadcast from last PP stage"""
@@ -4995,6 +5176,379 @@ class GPUModelRunner(
             pos = self.input_batch.num_tokens_no_spec[i]
             self.input_batch.is_token_ids[i, pos] = True
             self.input_batch.num_tokens_no_spec[i] = pos + 1
+        self.input_batch.prev_req_id_to_index = prev_req_id_to_index
+
+    def _pp_send_mtp_handoff(self, sampled_token_ids):
+        """PP last rank: pack MTP handoff and broadcast to non-last ranks.
+
+        layout [num_reqs, 2 + 2*num_spec]:
+          sampled_token_ids [num_reqs, 1+num_spec] | draft [num_reqs, num_spec]
+          | nts [num_reqs, 1]. Always broadcasts (zeros during chunked prefill)
+        to keep NCCL paired.
+        """
+        pp = get_pp_group()
+        assert pp.is_last_rank
+        num_reqs = self.input_batch.num_reqs
+        num_spec = self.num_spec_tokens
+
+        if sampled_token_ids.shape[-1] > 1:
+            stid = sampled_token_ids[:num_reqs].to(torch.int32)
+        else:
+            stid = torch.full(
+                (num_reqs, 1 + num_spec), -1,
+                dtype=torch.int32, device=self.device,
+            )
+            stid[:, 0] = sampled_token_ids[:num_reqs, 0]
+
+        if self._draft_token_ids is not None and isinstance(
+            self._draft_token_ids, torch.Tensor
+        ):
+            did = self._draft_token_ids[:num_reqs].to(torch.int32)
+        else:
+            did = torch.zeros(
+                (num_reqs, num_spec), dtype=torch.int32, device=self.device,
+            )
+
+        nts = torch.tensor(
+            self.input_batch.num_tokens_no_spec[:num_reqs],
+            dtype=torch.int32, device=self.device,
+        ).unsqueeze(1)
+
+        handoff = torch.cat([stid, did, nts], dim=1)
+        send_work = None
+        if self._pp_async_bcast:
+            # Phase A: issue async so the collective overlaps the next cohort's
+            # forward. Keep `handoff` alive via raw_handoff on the slot and wait
+            # at consume (symmetric with the non-last recv wait; NCCL pairing).
+            send_work = torch.distributed.broadcast(
+                handoff, src=pp.rank, group=pp.device_group, async_op=True
+            )
+        else:
+            torch.distributed.broadcast(handoff, src=pp.rank, group=pp.device_group)
+
+        if self._pp_decode_cadence:
+            # Last-rank self-handoff (M3b): stash the same packed data locally so
+            # the sample rank lands its own draft/prev_sampled at the deferred
+            # apply pp_size steps later and reconciles num_computed/output at
+            # re-add, mirroring the non-last-rank receive. Derive prev_sampled /
+            # valid_counts from stid (this rank's own sampled ids), not a broadcast.
+            valid_mask = stid != -1
+            valid_counts = valid_mask.sum(dim=1)
+            last_valid_pos = (valid_counts - 1).clamp(min=0)
+            prev_sampled = stid.gather(1, last_valid_pos.unsqueeze(1))
+            nts_np = nts.squeeze(1).cpu().numpy()
+            # Derivation reads this rank's own stid (ready) -> derive_pending stays
+            # False; only the send collective is deferred. Store send_work (consume
+            # waits it) and raw_handoff (keeps the send buffer alive until then).
+            self._stash_mtp_handoff_slot(
+                num_reqs, prev_sampled, valid_counts.to(torch.int32), did, nts_np,
+                bcast_work=send_work,
+                raw_handoff=handoff if self._pp_async_bcast else None,
+            )
+
+    def _pp_apply_mtp_handoff(self):
+        """Non-last PP rank: receive MTP handoff and apply to input_batch.
+
+        Always communicates (NCCL pairing). During chunked prefill the received
+        tensor is discarded downstream. Two paths:
+          * inline (default): receive + apply immediately (original behavior).
+          * ring (VLLM_PPMTP_HANDOFF_RING): receive + stash into _mtp_ring; the
+            per-req correction is deferred to the top of the next _update_states
+            (_apply_pending_mtp_handoff), so the extra mcb=pp_size+1 in-flight
+            batch cannot race the correction. See P2/M3a in
+            prof/HANDOFF_ppmtp_overlap_reimpl.md.
+        """
+        if envs.VLLM_PPMTP_HANDOFF_RING:
+            self._pp_receive_mtp_handoff_to_ring()
+        else:
+            self._pp_apply_mtp_handoff_inline()
+
+    def _derive_mtp_handoff(self, handoff):
+        """Unpack a received/packed handoff tensor into the per-req fields.
+
+        Reads `handoff` (incl. a blocking nts D2H), so under async broadcast this
+        must run only after the collective completes (bcast_work.wait()). Returns
+        (prev_sampled[num_reqs,1], valid_counts[num_reqs] int32,
+        draft[num_reqs,num_spec], nts_np[num_reqs]).
+        """
+        num_spec = self.num_spec_tokens
+        sampled, draft, nts_col = handoff.split([1 + num_spec, num_spec, 1], dim=1)
+
+        # prev_sampled_token_ids: last valid token per request
+        valid_mask = sampled != -1
+        valid_counts = valid_mask.sum(dim=1)
+        last_valid_pos = (valid_counts - 1).clamp(min=0)
+        prev_sampled = sampled.gather(1, last_valid_pos.unsqueeze(1))
+        # nts (authoritative value from last rank) -- blocking D2H
+        nts = nts_col.squeeze(1).cpu().numpy()
+        return prev_sampled, valid_counts.to(torch.int32), draft, nts
+
+    def _pp_recv_mtp_handoff(self):
+        """Sync receive + unpack the broadcast handoff (inline + ring sync path).
+
+        Returns (num_reqs, prev_sampled[num_reqs,1], valid_counts[num_reqs],
+        draft[num_reqs,num_spec], nts_np[num_reqs]).
+        """
+        pp = get_pp_group()
+        assert not pp.is_last_rank
+        num_reqs = self.input_batch.num_reqs
+        num_spec = self.num_spec_tokens
+
+        handoff = torch.empty(
+            (num_reqs, 2 + 2 * num_spec), dtype=torch.int32, device=self.device,
+        )
+        torch.distributed.broadcast(
+            handoff, src=pp.last_rank, group=pp.device_group
+        )
+        prev_sampled, valid_counts, draft, nts = self._derive_mtp_handoff(handoff)
+        return num_reqs, prev_sampled, valid_counts, draft, nts
+
+    def _pp_apply_mtp_handoff_inline(self):
+        """Original inline path: receive + apply immediately (fallback)."""
+        num_reqs, prev_sampled, valid_counts, draft, nts = (
+            self._pp_recv_mtp_handoff()
+        )
+        self._apply_mtp_handoff_fields(
+            num_reqs, prev_sampled, valid_counts, draft, nts,
+            list(self.input_batch.req_ids),
+            self.input_batch.num_prompt_tokens[:num_reqs],
+            self.discard_request_mask.np[:num_reqs],
+        )
+
+    def _stash_mtp_handoff_slot(
+        self, num_reqs, prev_sampled, valid_counts, draft, nts,
+        bcast_work=None, raw_handoff=None, derive_pending=False,
+    ):
+        """Build an MTPHandoffSlot from handoff fields and append it to the ring
+        (deferred apply). Shared by the non-last-rank receive and (under cadence)
+        the last-rank self-handoff. Snapshots the receive-time per-req CPU state so
+        a deferred apply reproduces the receive-time view. Under async broadcast the
+        derived GPU fields may be None (derive_pending=True on the non-last rank);
+        they are filled at consume after bcast_work.wait()."""
+        slot = MTPHandoffSlot(
+            num_reqs=num_reqs,
+            prev_sampled_token_ids=prev_sampled,
+            valid_sampled_token_count_gpu=valid_counts,
+            draft_token_ids=draft,
+            nts=nts,
+            req_ids=list(self.input_batch.req_ids),
+            num_prompt_tokens=np.asarray(
+                self.input_batch.num_prompt_tokens[:num_reqs]
+            ).copy(),
+            discard_mask=np.asarray(
+                self.discard_request_mask.np[:num_reqs]
+            ).copy(),
+            bcast_work=bcast_work,
+            raw_handoff=raw_handoff,
+            derive_pending=derive_pending,
+        )
+        # Write into the None slot the dispatcher reserved at ring[-1] this step
+        # (1:1 receive/send : consume ordering, holds at any depth). The ring is
+        # sized by _apply_pending_mtp_handoff, which runs earlier this step.
+        assert self._mtp_ring and self._mtp_ring[-1] is None, (
+            "MTP handoff ring slot overwritten before consumption; "
+            "execute_model/sample_tokens ordering assumption violated"
+        )
+        self._mtp_ring[-1] = slot
+
+    def _pp_receive_mtp_handoff_to_ring(self):
+        """Ring path: receive + stash a slot; no apply here (deferred to
+        _apply_pending_mtp_handoff at the next _update_states).
+
+        Under async broadcast (VLLM_PPMTP_ASYNC_BCAST) only ISSUE the collective
+        here and stash the raw buffer + work handle; the wait + derivation run at
+        consume, so this returns immediately and the broadcast overlaps the next
+        (independent) cohort's forward."""
+        if self._pp_async_bcast:
+            pp = get_pp_group()
+            assert not pp.is_last_rank
+            num_reqs = self.input_batch.num_reqs
+            num_spec = self.num_spec_tokens
+            handoff = torch.empty(
+                (num_reqs, 2 + 2 * num_spec), dtype=torch.int32, device=self.device,
+            )
+            work = torch.distributed.broadcast(
+                handoff, src=pp.last_rank, group=pp.device_group, async_op=True
+            )
+            # Stash raw buffer + work; derived fields filled at consume post-wait.
+            self._stash_mtp_handoff_slot(
+                num_reqs, None, None, None, None,
+                bcast_work=work, raw_handoff=handoff, derive_pending=True,
+            )
+            return
+        num_reqs, prev_sampled, valid_counts, draft, nts = (
+            self._pp_recv_mtp_handoff()
+        )
+        self._stash_mtp_handoff_slot(num_reqs, prev_sampled, valid_counts, draft, nts)
+
+    def _apply_pending_mtp_handoff(self):
+        """Advance the handoff ring by one step and apply the due slot at the top
+        of _update_states (before any composition change / consumption).
+
+        Resets the per-step cadence scatter map + pending dicts (repopulated only
+        by a cadence landing this step), then pops the slot buffered
+        _mtp_handoff_ring_depth steps ago (depth 1 = M3a inline timing; pp_size =
+        M3b cadence) and dispatches to the M3a or M3b landing routine.
+        """
+        if not self._ppmtp_diag_logged:
+            self._ppmtp_diag_logged = True
+            logger.info(
+                "[PPMTP-DIAG] rank=%d last=%s cadence=%s async_bcast=%s "
+                "ring_depth=%d (VLLM_PPMTP_ASYNC_BCAST=%s)",
+                get_pp_group().rank_in_group, get_pp_group().is_last_rank,
+                self._pp_decode_cadence, self._pp_async_bcast,
+                self._mtp_handoff_ring_depth, envs.VLLM_PPMTP_ASYNC_BCAST,
+            )
+        # continue31: reset per-step cadence state; a cadence landing repopulates
+        # it. Stale values would misroute the next step's draft scatter / frontier.
+        self._mtp_cadence_scatter_index = None
+        self._mtp_pending_nts = {}
+        self._mtp_pending_valid = {}
+        # Fixed-size ring of `depth` None-placeholder slots, rotated by EXACTLY one
+        # every step (not per-stash). The defer must be step-based so a slot lands
+        # pp_size steps later == when its cohort re-decodes, even when
+        # low-concurrency cadence produces empty (no-stash) steps in between. Size
+        # lazily: depth is a property needing the PP group (unavailable in __init__).
+        depth = self._mtp_handoff_ring_depth
+        if len(self._mtp_ring) != depth:
+            self._mtp_ring = deque([None] * depth, maxlen=depth)
+        slot = self._mtp_ring.popleft()
+        self._mtp_ring.append(None)
+        if slot is None:
+            return
+        # P7/Phase A (VLLM_PPMTP_ASYNC_BCAST): finalize the async handoff. The
+        # collective was issued _mtp_handoff_ring_depth steps ago and has been
+        # overlapping the intervening (independent) cohort forward(s), so this wait
+        # is ~free. Both ranks wait (NCCL symmetry / buffer safety). Then run the
+        # non-last rank's deferred derivation (reads raw_handoff) before applying.
+        # No-op on the sync path (bcast_work is None, derive_pending is False).
+        if slot.bcast_work is not None:
+            slot.bcast_work.wait()
+            slot.bcast_work = None
+        if slot.derive_pending:
+            prev_sampled, valid_counts, draft, nts = self._derive_mtp_handoff(
+                slot.raw_handoff
+            )
+            slot.prev_sampled_token_ids = prev_sampled
+            slot.valid_sampled_token_count_gpu = valid_counts
+            slot.draft_token_ids = draft
+            slot.nts = nts
+            slot.derive_pending = False
+        slot.raw_handoff = None  # release keepalive (draft view retains storage)
+        if self._pp_decode_cadence:
+            self._apply_pending_mtp_handoff_cadence(slot)
+        else:
+            self._apply_pending_mtp_handoff_m3a(slot)
+
+    def _apply_pending_mtp_handoff_m3a(self, slot: "MTPHandoffSlot") -> None:
+        """M3a (cadence off, ring depth 1): land against the still-current (==
+        sender) batch layout. Raw-index writes are valid because nothing churns
+        the batch between receive and this next-step apply."""
+        self._apply_mtp_handoff_fields(
+            slot.num_reqs,
+            slot.prev_sampled_token_ids,
+            slot.valid_sampled_token_count_gpu,
+            slot.draft_token_ids,
+            slot.nts,
+            slot.req_ids,
+            slot.num_prompt_tokens,
+            slot.discard_mask,
+        )
+
+    def _apply_pending_mtp_handoff_cadence(self, slot: "MTPHandoffSlot") -> None:
+        """M3b (cadence on, ring depth pp_size): the cohort this slot belongs to
+        was churned out of the batch and is being re-added THIS step, so nothing
+        can be keyed by raw slot row against the current batch.
+
+        Land the GPU tensors (draft + prev_sampled) so _prepare_input_ids scatters
+        the ring-delivered drafts into the verify input_ids (else the last
+        (sample) rank's draft slots stay -1 -> target verifies against -1 ->
+        acceptance collapses to 1.0). Stash per-req_id authoritative nts + accept
+        count for the re-add frontier-fix (drained in _update_states' cached-req
+        loop). Build the slot-row draft/bonus scatter map. Deliberately does NOT
+        touch output_token_ids / num_computed here: the cohort is re-added via the
+        resumed path this step, which restores output_token_ids from the
+        scheduler's authoritative all_token_ids; the frontier is corrected in the
+        cached-req loop via _mtp_pending_valid.
+        """
+        num_reqs = slot.num_reqs
+        req_ids = slot.req_ids
+        nts = slot.nts
+        valid_counts = slot.valid_sampled_token_count_gpu[:num_reqs].cpu().numpy()
+        discard_set = set(np.nonzero(slot.discard_mask)[0])
+        pending_nts: dict[str, int] = {}
+        pending_valid: dict[str, int] = {}
+        scatter_index: dict[str, int] = {}
+        for i, req_id in enumerate(req_ids):
+            if req_id is None or i in discard_set:
+                continue
+            pending_nts[req_id] = int(nts[i])
+            pending_valid[req_id] = int(valid_counts[i])
+            scatter_index[req_id] = i
+        self._mtp_pending_nts = pending_nts
+        self._mtp_pending_valid = pending_valid
+        # Land draft + prev_sampled (both ranks) so _prepare_input_ids' async path
+        # scatters ring-delivered drafts (prev_sampled bonus + _draft_token_ids)
+        # into the verify slots using the slot-row scatter map below.
+        self._draft_token_ids = slot.draft_token_ids
+        self.input_batch.prev_sampled_token_ids = slot.prev_sampled_token_ids
+        self._mtp_cadence_scatter_index = scatter_index
+        # Last (sample) rank keeps its own this-step prev_req_id_to_index (built by
+        # _bookkeeping_sync, indexed by update_async_* -> a slot-row value there is
+        # out of bounds when cohort size != this-step batch => IndexError). The
+        # non-last rank never samples, so keep its prev_req_id_to_index at slot-row
+        # and land vstc there.
+        if get_pp_group().is_last_rank:
+            return
+        self.input_batch.prev_req_id_to_index = scatter_index
+        self.valid_sampled_token_count_gpu = slot.valid_sampled_token_count_gpu
+
+    def _apply_mtp_handoff_fields(
+        self, num_reqs, prev_sampled, valid_counts, draft, nts,
+        req_ids, num_prompt_tokens, discard_mask,
+    ):
+        """Shared apply body for inline + ring paths (mutates input_batch).
+
+        All args are the values captured at handoff-receive time; the ring path
+        snapshots them so a deferred apply reproduces the inline apply exactly.
+        """
+        self.input_batch.prev_sampled_token_ids = prev_sampled
+        # vstc (derived from sampled_token_ids)
+        self.valid_sampled_token_count_gpu = valid_counts
+        # draft_token_ids
+        self._draft_token_ids = draft
+        # nts (authoritative value from last rank)
+        self.input_batch.num_tokens_no_spec[:num_reqs] = nts
+
+        # Trim output_token_ids (correct length = nts - num_prompt_tokens)
+        for i in range(num_reqs):
+            req_id = req_ids[i]
+            if req_id is None:
+                continue
+            req_state = self.requests.get(req_id)
+            if req_state is None:
+                continue
+            npp = num_prompt_tokens[i]
+            correct_len = int(nts[i]) - npp
+            if 0 <= correct_len < len(req_state.output_token_ids):
+                del req_state.output_token_ids[correct_len:]
+
+        # Construct prev_req_id_to_index
+        discard_req_indices = np.nonzero(discard_mask)[0]
+        discard_req_indices_set = set(discard_req_indices)
+        prev_req_id_to_index: dict[str, int] = {}
+        for i, req_id in enumerate(req_ids):
+            if i in discard_req_indices_set:
+                continue
+            prev_req_id_to_index[req_id] = i
+            if (req_state := self.requests.get(req_id)) is not None:
+                req_state.output_token_ids.append(-1)
+            # PP+MTP §5-C (resolved): stock _pp_receive advances is_token_ids
+            # here, but is_token_ids is only consulted when enable_prompt_embeds
+            # is True (gpu_model_runner.py ~1972 / ~3494). GLM-5.2 is pure text
+            # (enable_prompt_embeds=False) -> is_token_ids is unused on this path,
+            # so this is a no-op for the target. Only prompt-embeds/multimodal
+            # draft models would need it (out of scope).
         self.input_batch.prev_req_id_to_index = prev_req_id_to_index
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
@@ -5439,7 +5993,7 @@ class GPUModelRunner(
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
                     )
-                if hasattr(self, "drafter"):
+                if hasattr(self, "drafter") and self.drafter is not None:
                     logger.info_once("Loading drafter model...")
                     if hasattr(self.drafter, "load_model"):
                         self.drafter.load_model(self.model)
@@ -6276,7 +6830,7 @@ class GPUModelRunner(
             else:
                 hidden_states = outputs
 
-            if self.speculative_config and (
+            if self.speculative_config and self.drafter is not None and (
                 self.speculative_config.use_eagle()
                 or self.speculative_config.uses_draft_model()
                 or self.speculative_config.uses_extract_hidden_states()
@@ -7283,7 +7837,7 @@ class GPUModelRunner(
         self.calculate_reorder_batch_threshold()
 
         # Initialize drafter attention backend
-        if self.speculative_config and (
+        if self.speculative_config and self.drafter is not None and (
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
         ):
@@ -7337,7 +7891,7 @@ class GPUModelRunner(
         )
 
         # Initialize drafter's cudagraph dispatcher if using spec decode.
-        if self.speculative_config and (
+        if self.speculative_config and self.drafter is not None and (
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_draft_model()
             or self.speculative_config.uses_extract_hidden_states()
@@ -7786,17 +8340,19 @@ class GPUModelRunner(
         )
         self._kernel_block_sizes = kernel_block_sizes
 
-        # create metadata builders
-        self.initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
-
         # Reinitialize need to after initialize_attn_backend
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
+
+        # Create metadata builders after InputBatch has the final max_model_len.
+        self.initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
+
         kv_caches = self.initialize_kv_cache_tensors(
             kv_cache_config, kernel_block_sizes
         )
 
         if (
             self.speculative_config
+            and self.drafter is not None
             and self.speculative_config.uses_extract_hidden_states()
         ):
             assert isinstance(self.drafter, ExtractHiddenStatesProposer)

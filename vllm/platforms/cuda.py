@@ -115,6 +115,20 @@ def _get_backend_priorities(
                         AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
                     ]
 
+            if kv_cache_dtype is not None and str(kv_cache_dtype).startswith(
+                "turboquant_"
+            ):
+                return [
+                    AttentionBackendEnum.TRITON_MLA_TURBOQUANT_SPARSE,
+                    AttentionBackendEnum.TRITON_MLA_TURBOQUANT,
+                    AttentionBackendEnum.FLASHINFER_MLA,
+                    AttentionBackendEnum.TOKENSPEED_MLA,
+                    AttentionBackendEnum.CUTLASS_MLA,
+                    AttentionBackendEnum.FLASH_ATTN_MLA,
+                    AttentionBackendEnum.FLASHMLA,
+                    AttentionBackendEnum.TRITON_MLA,
+                    *sparse_backends,
+                ]
             return [
                 AttentionBackendEnum.FLASHINFER_MLA,
                 # R1 dims + FP8 KV only; rejected by supports_combination
@@ -128,12 +142,34 @@ def _get_backend_priorities(
                 *sparse_backends,
             ]
         elif device_capability.major == 12:
+            if kv_cache_dtype is not None and str(kv_cache_dtype).startswith(
+                "turboquant_"
+            ):
+                return [
+                    AttentionBackendEnum.TRITON_MLA_TURBOQUANT_SPARSE,
+                    AttentionBackendEnum.TRITON_MLA_TURBOQUANT,
+                    AttentionBackendEnum.TRITON_MLA,
+                    AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM120,
+                ]
             return [
                 AttentionBackendEnum.TRITON_MLA,
                 AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM120,
             ]
         else:
+            if kv_cache_dtype is not None and str(kv_cache_dtype).startswith(
+                "turboquant_"
+            ):
+                return [
+                    AttentionBackendEnum.TRITON_MLA_TURBOQUANT_SPARSE,
+                    AttentionBackendEnum.TRITON_MLA_TURBOQUANT,
+                    AttentionBackendEnum.FLASH_ATTN_MLA,
+                    AttentionBackendEnum.FLASHMLA,
+                    AttentionBackendEnum.FLASHINFER_MLA,
+                    AttentionBackendEnum.TRITON_MLA,
+                    AttentionBackendEnum.FLASHMLA_SPARSE,
+                ]
             return [
+                AttentionBackendEnum.TRITON_MLA_TURBOQUANT,
                 AttentionBackendEnum.FLASH_ATTN_MLA,
                 AttentionBackendEnum.FLASHMLA,
                 AttentionBackendEnum.FLASHINFER_MLA,

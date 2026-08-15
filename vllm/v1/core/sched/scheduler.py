@@ -7,6 +7,8 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+import vllm.envs as envs
+
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -300,6 +302,34 @@ class Scheduler(SchedulerInterface):
         # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
         self.current_step = 0
+        # P3/M3b (flag VLLM_V1_PP_DECODE_CADENCE): opt-in V1 PP+MTP decode
+        # cadence. Only meaningful for V1 (non-v2) + PP + spec(MTP) + async. When
+        # on, each request's decode is throttled to once per pp_size steps (via
+        # next_decode_eligible_step, enforced at the consume gate below) so each
+        # step schedules one independent cohort that the worker's deep handoff
+        # ring (depth == pp_size, set on the same flag) can overlap across PP
+        # stages. INV-RING: the cadence gap must be EXACTLY pp_size (== worker
+        # ring depth). Requires the worker M3b (ring depth -> pp_size); until that
+        # lands the worker ring stays at depth 1, so keep the flag unset.
+        self._pp_decode_cadence = (
+            envs.VLLM_V1_PP_DECODE_CADENCE
+            and self.use_pp
+            and not self.use_v2_model_runner
+            and self.num_spec_tokens > 0
+            and self.scheduler_config.async_scheduling
+        )
+        # P4 (flag VLLM_PPMTP_COHORT_BALANCE): round-robin the prefill->decode
+        # admission residue across pp_size so bursty synchronized prefill
+        # completions spread across cadence cohorts instead of all landing on the
+        # same residue (which would make one step's cohort full and the next near
+        # empty -- the "coin-flip" that can make cadence a net loss). Only
+        # meaningful with cadence on. Engine-level rotating counter drives the
+        # residue; a request's residue is fixed at its first decode admission
+        # (and re-rotated on preemption resume).
+        self._pp_cohort_balance = (
+            envs.VLLM_PPMTP_COHORT_BALANCE and self._pp_decode_cadence
+        )
+        self._admit_counter = 0
         # DP prefill balancing: Flag to track whether the last cadence-aligned
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
@@ -1121,6 +1151,11 @@ class Scheduler(SchedulerInterface):
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
+                    if self._pp_decode_cadence:
+                        # P3/M3b: a resumed request re-enters the cadence fresh
+                        # (immediately schedulable, then re-throttled on its next
+                        # decode) so preemption churn doesn't strand its residue.
+                        request.next_decode_eligible_step = 0
                 else:
                     raise RuntimeError(f"Invalid request status: {request.status}")
 

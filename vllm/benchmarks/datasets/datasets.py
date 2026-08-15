@@ -1898,6 +1898,10 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "throughput_8k",
             "throughput_16k",
             "throughput_32k",
+            "throughput_128k",
+            "throughput_200k",
+            "throughput_500k",
+            "throughput_over_500k",
         },
         help="Subset of the SPEED-Bench dataset.",
     )

@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -75,7 +76,31 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        # PP+MTP port: ReplicatedLinear (not nn.Linear) so quantized eh_proj
+        # weights load correctly under PP>1. If the quant backend returns
+        # UnquantizedLinearMethod for eh_proj (e.g. GLM-5.2-FP8 keeps eh_proj in
+        # bf16 via modules_to_not_convert), pass quant_config=None so a plain
+        # .weight parameter is created.
+        eh_proj_prefix = maybe_prefix(prefix, "eh_proj")
+        eh_proj_quant_config = quant_config
+        if quant_config is not None:
+            from vllm.model_executor.layers.linear import (
+                LinearBase,
+                UnquantizedLinearMethod,
+            )
+            qm = quant_config.get_quant_method(
+                LinearBase.__new__(LinearBase),
+                eh_proj_prefix,
+            )
+            if qm is None or isinstance(qm, UnquantizedLinearMethod):
+                eh_proj_quant_config = None
+        self.eh_proj = ReplicatedLinear(
+            config.hidden_size * 2,
+            config.hidden_size,
+            bias=False,
+            quant_config=eh_proj_quant_config,
+            prefix=eh_proj_prefix,
+        )
 
         self.device = current_platform.device_type
 
@@ -117,7 +142,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
 
         hidden_states = self.eh_proj(
             torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
-        )
+        )[0]
 
         hidden_states, residual = self.mtp_block(
             positions=positions,

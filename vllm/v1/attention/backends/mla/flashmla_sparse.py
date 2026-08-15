@@ -559,6 +559,22 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
         vllm_config = get_current_vllm_config()
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+
+        # DCP wiring: under DCP the query is all-gathered over heads before the
+        # sparse decode kernel; these drive slot remapping + cross-rank LSE merge.
+        from vllm.distributed import get_dcp_group
+
+        _pc = vllm_config.parallel_config
+        self.dcp_world_size = _pc.decode_context_parallel_size
+        self.dcp_rank = (
+            get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
+        )
+        # ★ Read-side interleave MUST match the write side. In 0.23 the KV write
+        # (block_table.py _compute_slot_mapping_kernel) uses
+        # cp_kv_cache_interleave_size, so we mirror that here (NOT
+        # dcp_kv_cache_interleave_size, which the --dcp-kv-cache-interleave-size
+        # flag sets but the 0.23 sparse write path does not consume).
+        self.dcp_interleave_size = _pc.cp_kv_cache_interleave_size
         q_concat_shape = (max_tokens, num_heads, head_size)
         if is_quantized_kv_cache(kv_cache_dtype):
             assert kv_cache_dtype == "fp8_ds_mla", (
@@ -590,7 +606,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Convert per-request indices to global slots (decode) or workspace
         # offsets (prefill). req_id_per_token covers the whole batch; slice it
         # to the MQA tokens (q may exclude prefill tokens routed to dense MHA).
@@ -600,8 +616,15 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
             NUM_TOPK_TOKENS=topk_indices.shape[1],
-            return_valid_counts=True,
+            return_valid_counts=use_topk_length,
+            dcp_world_size=self.dcp_world_size,
+            dcp_rank=self.dcp_rank,
+            dcp_interleave_size=self.dcp_interleave_size,
         )
+        if use_topk_length:
+            topk_indices, topk_length = result
+        else:
+            topk_indices, topk_length = result, None
 
         return self._bf16_flash_mla_kernel(
             q,
@@ -805,35 +828,45 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         topk_length: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = q.shape[0]
+        # Under DCP the query has been all-gathered over heads (num_heads *
+        # dcp_world_size) before forward_mqa, so self.num_heads (per-rank) is
+        # wrong here; use the head count actually present in q.
+        actual_num_heads = q.shape[1]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
             -1, 1, kv_c_and_k_pe_cache.shape[-1]
         )
 
         # NOTE(Chen): kernel requires num_local_head to be a multiple of
         # 64 on hopper and 128 on blackwell
-        if self.num_heads % self.prefill_padding != 0:
-            assert self.prefill_padding % self.num_heads == 0
+        if actual_num_heads % self.prefill_padding != 0:
+            padded_num_heads = (
+                (actual_num_heads + self.prefill_padding - 1) // self.prefill_padding
+            ) * self.prefill_padding
             logger.warning_once(
-                f"Padding num_heads from {self.num_heads} to "
-                f"{self.prefill_padding} for BF16 sparse prefill kernel"
+                f"Padding num_heads from {actual_num_heads} to "
+                f"{padded_num_heads} for BF16 sparse prefill kernel"
             )
-            q_padded = q.new_empty((q.shape[0], self.prefill_padding, q.shape[2]))
-            q_padded[:, : self.num_heads, :] = q
+            q_padded = q.new_empty((q.shape[0], padded_num_heads, q.shape[2]))
+            q_padded[:, :actual_num_heads, :] = q
             q = q_padded
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
-        output = flash_mla_sparse_fwd(
+        # flash_mla_sparse_fwd returns (output, max_logits, lse).
+        # output: [s_q, h_q, d_v]; lse: [s_q, h_q] -- already the [B, H] layout
+        # the DCP combine (cp_lse_ag_out_rs / dcp_a2a_lse_reduce) expects.
+        output, _max_logits, lse = flash_mla_sparse_fwd(
             q,
             kv_c_and_k_pe_cache,
             topk_indices,
             self.softmax_scale,
             topk_length=topk_length,
-        )[0]
+        )
 
-        output = output[:, : self.num_heads, :]
-        return output
+        output = output[:, :actual_num_heads, :]
+        lse = lse[:, :actual_num_heads]
+        return output, lse
 
     def forward_mqa(
         self,
@@ -860,9 +893,11 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
         use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
 
         if not use_fp8_cache:
-            attn_out = self._forward_bf16_kv(
+            # BF16 sparse path returns the LSE so DCP can merge per-rank partials.
+            attn_out, lse = self._forward_bf16_kv(
                 q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
             )
+            return attn_out, lse
         elif attn_metadata.fp8_use_mixed_batch:
             attn_out = self._forward_fp8_kv_mixed_batch(
                 q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
