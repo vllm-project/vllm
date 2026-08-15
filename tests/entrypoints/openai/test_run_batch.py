@@ -1206,3 +1206,23 @@ async def test_dispatch_batch_cancels_inflight_on_failure(tmp_path, monkeypatch)
     assert all(task is not None and task.done() for task in started), (
         "requests were left in flight"
     )
+
+
+@pytest.mark.asyncio
+async def test_local_input_path_stages_a_descriptor_alias(tmp_path):
+    """A descriptor alias is staged even though it stats as a regular file.
+
+    Reopening /dev/fd/N shares the descriptor's offset on some platforms, so
+    the second pass would start at EOF and the batch would run nothing.
+    """
+    source = tmp_path / "batch.jsonl"
+    source.write_text(INPUT_BATCH + "\n")
+    expected = len(INPUT_BATCH.strip().split("\n"))
+
+    with open(source, encoding="utf-8") as handle:
+        alias = f"/dev/fd/{handle.fileno()}"
+        async with local_input_path(alias, str(tmp_path)) as path:
+            assert path != alias
+            # Readable twice, which is what the two passes need.
+            assert validate_batch(path) == expected
+            assert validate_batch(path) == expected

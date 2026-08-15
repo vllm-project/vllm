@@ -339,6 +339,18 @@ class BatchProgressTracker:
         return self._pbar
 
 
+def needs_staging(path_or_url: str) -> bool:
+    """Whether the input has to be copied before it can be read twice."""
+    if path_or_url.startswith(("http://", "https://")):
+        return True
+    # A descriptor alias such as /dev/stdin or /dev/fd/3 can report itself as a
+    # regular file while still sharing the descriptor's offset when reopened,
+    # which would leave the second pass at EOF.
+    if path_or_url.startswith(("/dev/", "/proc/")):
+        return True
+    return not stat.S_ISREG(os.stat(path_or_url).st_mode)
+
+
 @contextlib.asynccontextmanager
 async def local_input_path(path_or_url: str, tmp_dir: str | None):
     """
@@ -348,10 +360,11 @@ async def local_input_path(path_or_url: str, tmp_dir: str | None):
     cannot be re-read, a URL body or a stream such as a pipe or process
     substitution, is staged to a temporary file first.
     """
-    is_url = path_or_url.startswith(("http://", "https://"))
-    if not is_url and stat.S_ISREG(os.stat(path_or_url).st_mode):
+    if not needs_staging(path_or_url):
         yield path_or_url
         return
+
+    is_url = path_or_url.startswith(("http://", "https://"))
 
     with tempfile.NamedTemporaryFile(
         mode="wb",
