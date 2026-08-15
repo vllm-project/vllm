@@ -684,12 +684,13 @@ class TritonMLATurboQuantImpl(TritonMLAImpl):
         Pi_f32 = Pi.to(torch.float32)
         # W_UK_T: (N, P, L). Fold along last dim.
         wuk = layer.W_UK_T
-        wuk_new = (wuk.to(torch.float32) @ Pi_f32).to(wuk.dtype)
-        layer.W_UK_T = wuk_new
-        # W_UV: (N, L, V). Fold along middle (L) dim: W_UV_new = Pi @ W_UV.
         wuv = layer.W_UV
-        wuv_new = (Pi_f32 @ wuv.to(torch.float32)).to(wuv.dtype)
-        layer.W_UV = wuv_new
+        with torch.no_grad():
+            # Preserve Parameter identity: v0.27.1 registers both tensors as
+            # parameters and rejects replacing them with plain tensors.
+            wuk.copy_((wuk.to(torch.float32) @ Pi_f32).to(wuk.dtype))
+            # W_UV: (N, L, V). Fold along middle (L): W_UV_new = Pi @ W_UV.
+            wuv.copy_((Pi_f32 @ wuv.to(torch.float32)).to(wuv.dtype))
         layer._tq_pi_folded = True
 
     def fold_pi_at_load(self, layer) -> None:
