@@ -1004,14 +1004,11 @@ def sparse_attn_indexer(
             )
             torch.ops._C.cooperative_topk(
                 logits,
-                seq_lens,
-                topk_indices_buffer,
-                num_padded_tokens,
+                topk_seq_lens,
+                topk_indices,
+                topk_workspace,
                 topk_tokens,
                 attn_metadata_narrowed.max_seq_len,
-                decode_metadata.dcp_world_size,
-                decode_metadata.dcp_rank,
-                decode_metadata.cp_interleave_size,
             )
         elif current_platform.is_cuda() and topk_tokens in (512, 1024, 2048):
             workspace_manager = current_workspace_manager()
@@ -1050,7 +1047,7 @@ def sparse_attn_indexer(
                     topk_tokens,
                 )
 
-        if decode_metadata.global_seq_lens is not None:
+        if dcp_distributed_topk:
             _merge_dcp_topk_global(
                 logits,
                 topk_indices,
