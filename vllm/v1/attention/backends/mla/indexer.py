@@ -454,6 +454,9 @@ class DeepSeekV32IndexerDecodeMetadata:
     schedule_metadata: torch.Tensor
     global_seq_lens: torch.Tensor | None = None
     indices: torch.Tensor | None = None
+    dcp_world_size: int = 1
+    dcp_rank: int = 0
+    cp_interleave_size: int = 1
 
 
 @dataclass
@@ -1137,6 +1140,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 schedule_metadata=schedule_metadata,
                 indices=decode_indices,
                 global_seq_lens=global_seq_lens_for_decode,
+                dcp_world_size=self.dcp_world_size,
+                dcp_rank=self.dcp_rank,
+                cp_interleave_size=self.cp_interleave_size,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(
