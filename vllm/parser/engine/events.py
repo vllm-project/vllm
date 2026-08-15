@@ -24,3 +24,4 @@ class SemanticEvent:
     type: EventType
     value: str = ""
     tool_index: int = -1
+    truncated: bool = False
