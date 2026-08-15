@@ -28,7 +28,7 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
@@ -73,6 +73,15 @@ class MooncakeStoreScheduler:
         self.enable_partial_hash_hits = partial_hash_hits_enabled(
             kv_cache_config.kv_cache_groups, self._hash_block_size
         )
+        mamba_groups = {
+            group_id: group.kv_cache_spec
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+            if isinstance(group.kv_cache_spec, MambaSpec)
+        }
+        assert all(
+            spec.mamba_cache_mode == "align" for spec in mamba_groups.values()
+        ), "MooncakeStoreScheduler requires mamba_cache_mode='align'"
+        self._boundary_state_group_ids = frozenset(mamba_groups)
 
         self._gpu_block_pool: BlockPool | None = None
         self._num_workers = vllm_config.parallel_config.world_size
@@ -391,8 +400,7 @@ class MooncakeStoreScheduler:
             block_ids: list[int] = []
             if req_meta.boundary_state_offloads:
                 block_ids.extend(
-                    block_id
-                    for _, block_id, _ in req_meta.boundary_state_offloads
+                    block_id for _, block_id, _ in req_meta.boundary_state_offloads
                 )
             # Every allocated block is referenced, not just the ones covering
             # this job's token range: a rank resumes from its own last
@@ -441,6 +449,8 @@ class MooncakeStoreScheduler:
                 if boundary_tokens > tracker.prefill_end_tokens:
                     continue
                 if block_id == NULL_BLOCK_ID:
+                    continue
+                if group_id not in self._boundary_state_group_ids:
                     continue
                 accepted.append((group_id, block_id, boundary_tokens))
             if not accepted:

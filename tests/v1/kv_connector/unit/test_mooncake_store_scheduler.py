@@ -37,6 +37,7 @@ def _make_bare_scheduler(
     scheduler._num_workers = 1
     scheduler._next_store_job_id = 0
     scheduler._pinned_saves = {}
+    scheduler._boundary_state_group_ids = frozenset({1})
     return scheduler
 
 
@@ -950,6 +951,7 @@ def test_resumed_partial_tail_uses_exact_boundary():
 
 def test_resumed_partial_tail_attached_to_save_keeps_exact_boundary():
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    scheduler._boundary_state_group_ids = frozenset({0})
     request = SimpleNamespace(
         all_token_ids=list(range(48)),
         block_hashes=[b"h0", b"h1", b"h2"],
