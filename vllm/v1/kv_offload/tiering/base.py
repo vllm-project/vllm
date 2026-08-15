@@ -149,7 +149,7 @@ class SecondaryTierManager(ABC):
         offloading_spec: "OffloadingSpec",
         primary_kv_view: memoryview,
         tier_type: str,
-        backpressure_detector: BackpressureDetector | None,  # = None,
+        backpressure_detector: BackpressureDetector | None = None,
     ) -> None:
         """
         Args:
