@@ -76,6 +76,7 @@ class EngineCoreRequest(
     reasoning_parser_kwargs: dict[str, object] | None = None
     abort_immediately: bool = False
     session_id: str | None = None
+    operation_name: str | None = None
 
 
 class EngineCoreOutput(

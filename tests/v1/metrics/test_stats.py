@@ -319,3 +319,50 @@ def test_finished_request_carries_operation_name():
 
     finished_req = iteration_stats.finished_requests[0]
     assert finished_req.operation_name == "chat"
+
+
+def test_operation_name_is_last_engine_core_request_field():
+    from vllm.v1.engine import EngineCoreRequest
+
+    assert EngineCoreRequest.__struct_fields__[-1] == "operation_name"
+
+
+def test_should_observe_token_latency():
+    from vllm.v1.metrics.loggers import should_observe_token_latency
+
+    assert should_observe_token_latency("chat") is True
+    assert should_observe_token_latency("text_completion") is True
+    assert should_observe_token_latency("unknown") is True
+    assert should_observe_token_latency("embeddings") is False
+
+
+def test_embeddings_do_not_record_ttft_or_itl():
+    from unittest.mock import MagicMock
+
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0, operation_name="embeddings")
+    output = MagicMock()
+    output.new_token_ids = []
+    output.prefill_stats = None
+    output.num_nans_in_logits = 0
+    output.events = None
+
+    iteration_stats.update_from_output(
+        output=output,
+        engine_core_timestamp=1.0,
+        is_prefilling=True,
+        req_stats=req_stats,
+        lora_states=MagicMock(),
+        lora_name=None,
+    )
+    assert iteration_stats.time_to_first_tokens_iter == []
+
+    iteration_stats.update_from_output(
+        output=output,
+        engine_core_timestamp=1.2,
+        is_prefilling=False,
+        req_stats=req_stats,
+        lora_states=MagicMock(),
+        lora_name=None,
+    )
+    assert iteration_stats.inter_token_latencies_iter == []

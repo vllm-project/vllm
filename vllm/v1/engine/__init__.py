@@ -128,10 +128,6 @@ class EngineCoreRequest(
     priority: int = 0
 
     trace_headers: Mapping[str, str] | None = None
-    # OTel GenAI `gen_ai.operation.name` for the originating endpoint
-    # (e.g. "chat", "text_completion", "embeddings"). Used for Prometheus
-    # latency histogram labels and request-span tracing.
-    operation_name: str | None = None
     resumable: bool = False
 
     # The user-provided request ID. This field is set internally,
@@ -150,6 +146,13 @@ class EngineCoreRequest(
     abort_immediately: bool = False
 
     session_id: str | None = None
+
+    # OTel GenAI `gen_ai.operation.name` for the originating endpoint
+    # (e.g. "chat", "text_completion", "embeddings"). Used for Prometheus
+    # latency histogram labels and request-span tracing.
+    # Appended last: EngineCoreRequest is array_like, so new fields must
+    # not shift existing wire-format indexes.
+    operation_name: str | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:

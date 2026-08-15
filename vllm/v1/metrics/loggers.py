@@ -40,12 +40,24 @@ WAITING_REASON_DEFERRED = "deferred"
 
 # Bounded OTel GenAI operation.name values for latency histograms.
 # "unknown" covers offline / non-OpenAI entrypoints.
+# Embeddings are included for e2e latency only; TTFT/ITL/TPOT are
+# generative-token metrics and are not observed for embeddings.
 LATENCY_OPERATION_LABELS = (
     "chat",
     "text_completion",
     "embeddings",
     UNKNOWN_OPERATION_NAME,
 )
+
+# Token-level histograms (TTFT / ITL / TPOT) are not meaningful for
+# embedding / pooling requests that do not generate tokens.
+NON_GENERATIVE_OPERATIONS = frozenset({"embeddings"})
+
+
+def should_observe_token_latency(operation: str) -> bool:
+    """Return False for operations that do not generate tokens."""
+    return operation not in NON_GENERATIVE_OPERATIONS
+
 
 PerEngineStatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
 AggregateStatLoggerFactory = type["AggregateStatLoggerBase"]
@@ -808,6 +820,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         # collector can emit gen_ai.server.* metrics with required attributes.
         # Label children are created lazily on observe to avoid empty series.
         self._latency_model_name = model_name
+        # Cache labeled histogram children so ITL (per-token) avoids a
+        # prometheus_client lock + dict lookup on every observe.
+        self._latency_children: dict[tuple[int, int, str], Histogram] = {}
         latency_labelnames = labelnames + ["operation"]
 
         self._histogram_time_to_first_token = self._histogram_cls(
@@ -1220,11 +1235,19 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_n_request[engine_idx].observe(n_param)
         for ttft, operation in iteration_stats.time_to_first_tokens_iter:
             self._observe_operation_histogram(
-                self._histogram_time_to_first_token, engine_idx, operation, ttft
+                self._histogram_time_to_first_token,
+                engine_idx,
+                operation,
+                ttft,
+                token_level=True,
             )
         for itl, operation in iteration_stats.inter_token_latencies_iter:
             self._observe_operation_histogram(
-                self._histogram_inter_token_latency, engine_idx, operation, itl
+                self._histogram_inter_token_latency,
+                engine_idx,
+                operation,
+                itl,
+                token_level=True,
             )
 
         for finished_request in iteration_stats.finished_requests:
@@ -1268,6 +1291,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 engine_idx,
                 operation,
                 finished_request.mean_time_per_output_token,
+                token_level=True,
             )
             if finished_request.max_tokens_param:
                 self.histogram_max_tokens_request[engine_idx].observe(
@@ -1280,14 +1304,26 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         engine_idx: int,
         operation_name: str | None,
         value: float,
+        token_level: bool = False,
     ) -> None:
-        """Observe a latency histogram with the GenAI operation label."""
+        """Observe a latency histogram with the GenAI operation label.
+
+        Token-level histograms (TTFT / ITL / TPOT) are skipped for
+        operations that do not generate tokens, such as embeddings.
+        """
         operation = resolve_operation_name(operation_name)
         if operation not in LATENCY_OPERATION_LABELS:
             operation = UNKNOWN_OPERATION_NAME
-        histogram.labels(self._latency_model_name, str(engine_idx), operation).observe(
-            value
-        )
+        if token_level and not should_observe_token_latency(operation):
+            return
+        key = (id(histogram), engine_idx, operation)
+        child = self._latency_children.get(key)
+        if child is None:
+            child = histogram.labels(
+                self._latency_model_name, str(engine_idx), operation
+            )
+            self._latency_children[key] = child
+        child.observe(value)
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
         awake = 1

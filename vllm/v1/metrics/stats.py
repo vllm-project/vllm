@@ -407,9 +407,12 @@ class IterationStats:
                 self.prompt_token_stats.update_from_output(output.prefill_stats)
 
             first_token_latency = self._time_since(req_stats.arrival_time)
-            self.time_to_first_tokens_iter.append(
-                (first_token_latency, req_stats.operation_name)
-            )
+            # Embeddings / pooling requests do not generate tokens, so TTFT
+            # is not a meaningful metric for them.
+            if req_stats.operation_name != "embeddings":
+                self.time_to_first_tokens_iter.append(
+                    (first_token_latency, req_stats.operation_name)
+                )
             req_stats.first_token_latency = first_token_latency
 
         req_stats.num_generation_tokens += num_new_generation_tokens
@@ -437,7 +440,7 @@ class IterationStats:
         # Process the batch-level "new tokens" engine core event
         if is_prefilling:
             req_stats.first_token_ts = engine_core_timestamp
-        else:
+        elif req_stats.operation_name != "embeddings":
             itl = engine_core_timestamp - req_stats.last_token_ts
             self.inter_token_latencies_iter.append((itl, req_stats.operation_name))
 
