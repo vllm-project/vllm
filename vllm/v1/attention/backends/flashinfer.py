@@ -1197,6 +1197,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         is_sm12x = current_platform.is_device_capability_family(120)
+        # NVFP4 KV on consumer Blackwell is served by the FA2 paged reader
+        # (XQA/trtllm-gen cannot read NVFP4, and head_size > 256 routes
+        # decode through the VO-split prefill wrapper), so the uniform-batch
+        # capture contract does not hold; fall back to per-request capture.
+        if (
+            is_sm12x
+            and vllm_config.cache_config is not None
+            and vllm_config.cache_config.cache_dtype.startswith("nvfp4")
+        ):
+            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
         # XQA does not return LSE and therefore does not support DCP.
         if is_sm12x and vllm_config.parallel_config.decode_context_parallel_size > 1:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
