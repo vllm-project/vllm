@@ -274,9 +274,13 @@ class Gemma4MTPDecoderLayer(nn.Module):
         layer_type = config.layer_types[layer_idx]
         is_full_attention = layer_type == "full_attention"
         head_dim = (
-            getattr(config, "global_head_dim", config.head_dim)
-            if is_full_attention
-            else config.head_dim
+            config.per_layer_config[layer_idx].head_dim
+            if hasattr(config, "per_layer_config") and config.per_layer_config
+            else (
+                getattr(config, "global_head_dim", config.head_dim)
+                if is_full_attention
+                else config.head_dim
+            )
         )
 
         use_k_eq_v = is_full_attention and getattr(config, "attention_k_eq_v", False)

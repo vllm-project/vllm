@@ -559,7 +559,12 @@ class Gemma4DecoderLayer(nn.Module):
         # Gemma4 uses different head dimensions for sliding vs full attention
         layer_type = config.layer_types[layer_idx]
         self.is_full_attention = layer_type == "full_attention"
-        if self.is_full_attention:
+        # For heterogeneous configs (E4B), head_dim varies per layer.
+        # Use per_layer_config if available, otherwise fall back to
+        # global_head_dim / head_dim.
+        if hasattr(config, "per_layer_config") and config.per_layer_config:
+            head_dim = config.per_layer_config[layer_idx].head_dim
+        elif self.is_full_attention:
             head_dim = getattr(config, "global_head_dim", config.head_dim)
         else:
             head_dim = config.head_dim

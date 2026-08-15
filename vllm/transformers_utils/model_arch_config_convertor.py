@@ -572,8 +572,21 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         # Gemma4 uses dual head dimensions: head_dim (sliding attention)
         # and global_head_dim (full attention).  Return the largest so
         # that attention backends allocate buffers large enough for both.
-        head_dim = getattr(self.hf_text_config, "head_dim", 0)
-        global_head_dim = getattr(self.hf_text_config, "global_head_dim", 0)
+        #
+        # Newer transformers versions mark head_dim as a per-layer
+        # attribute on heterogeneous configs (E4B variant), which raises
+        # AmbiguousGlobalPerLayerAttributeError on direct access.
+        # Enable global access since vLLM handles heterogeneous head
+        # dims via per-layer attention backend routing.
+        tc = self.hf_text_config
+        if getattr(tc, "is_heterogeneous", False):
+            tc.allow_global_per_layer_attribute_access = True
+            # For heterogeneous configs, get max head_dim across layers
+            per_layer = getattr(tc, "per_layer_config", None)
+            if per_layer:
+                return max(lc.head_dim for lc in per_layer)
+        head_dim = getattr(tc, "head_dim", 0)
+        global_head_dim = getattr(tc, "global_head_dim", 0)
         return max(head_dim, global_head_dim) or super().get_head_size()
 
 
