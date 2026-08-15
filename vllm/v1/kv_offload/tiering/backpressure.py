@@ -46,19 +46,36 @@ class EMABackpressureDetector(BackpressureDetector):
     comparable regardless of how many blocks are in a job or how large
     each block is.  Water marks are in the same unit.
 
-    Default water marks are derived from fio benchmarks on NVMe storage
-    (WDC H100 cluster): NVMe sustains ~5 GB/s writes, CephFS ~1.5 GB/s.
-    high=0.005 s/MiB (~200 MB/s) catches severe congestion without
-    false-triggering on normal variance; low=0.001 s/MiB (~1 GB/s)
-    requires meaningful recovery before resuming stores.
+    Default water marks are derived from fio benchmarks on the WDC H100
+    cluster.  Two presets are provided:
+
+      LOCAL (NVMe/SSD, ``fs`` tier): NVMe sustains ~5 GB/s writes.
+        high=0.005 s/MiB (~200 MB/s) catches severe congestion;
+        low=0.001 s/MiB (~1 GB/s) requires meaningful recovery.
+
+      NETWORK (CephFS, object store, ``obj``/``p2p`` tiers): CephFS
+        sustains ~1.5 GB/s.  high=0.020 s/MiB (~50 MB/s);
+        low=0.005 s/MiB (~200 MB/s).
+
+    The constructor defaults to LOCAL; callers for networked tiers should
+    pass ``NETWORK_HIGH_WATER_S`` / ``NETWORK_LOW_WATER_S``.
     """
 
     _MIB = 1 << 20
 
+    # EMA smoothing factor: higher values (→1) react faster to latency
+    # spikes but are noisier; lower values (→0) smooth more but lag.
     DEFAULT_ALPHA = 0.3
-    DEFAULT_HIGH_WATER_S = 0.005
-    DEFAULT_LOW_WATER_S = 0.001
     DEFAULT_WARMUP_COMPLETIONS = 3
+
+    LOCAL_HIGH_WATER_S = 0.005
+    LOCAL_LOW_WATER_S = 0.001
+
+    NETWORK_HIGH_WATER_S = 0.020
+    NETWORK_LOW_WATER_S = 0.005
+
+    DEFAULT_HIGH_WATER_S = LOCAL_HIGH_WATER_S
+    DEFAULT_LOW_WATER_S = LOCAL_LOW_WATER_S
 
     def __init__(
         self,

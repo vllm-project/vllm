@@ -47,10 +47,19 @@ class SecondaryTierFactory:
         config = tier_config.copy()
         tier_type = config.pop("type")
         config.pop("module_path", None)
+        bp_config = config.pop("backpressure", None)
+        bp_detector = None
+        if bp_config is not None:
+            from vllm.v1.kv_offload.tiering.backpressure import (
+                EMABackpressureDetector,
+            )
+
+            bp_detector = EMABackpressureDetector(**bp_config)
         return tier_cls(
             offloading_spec=offloading_spec,
             primary_kv_view=primary_kv_view,
             tier_type=tier_type,
+            backpressure_detector=bp_detector,
             **config,
         )
 

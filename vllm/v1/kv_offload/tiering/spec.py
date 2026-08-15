@@ -71,12 +71,15 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+from vllm.v1.kv_offload.tiering.backpressure import EMABackpressureDetector
 from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
 )
+
+_NETWORK_TIER_TYPES = frozenset({"obj", "p2p"})
 
 logger = init_logger(__name__)
 
@@ -295,10 +298,36 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             raise ValueError("secondary_tiers must be a list of tier configurations")
 
         # Apply top-level backpressure defaults to tiers without overrides.
+        # Tier-type-aware water marks are merged first so that a bare
+        # ``"backpressure": {}`` picks up sensible thresholds for the tier's
+        # storage medium (local NVMe vs. networked).
         bp_defaults = self.extra_config.get("backpressure")
         if bp_defaults is not None:
             for tier_cfg in self.secondary_tier_configs:
                 tier_cfg.setdefault("backpressure", bp_defaults)
+        for tier_cfg in self.secondary_tier_configs:
+            bp = tier_cfg.get("backpressure")
+            if bp is None:
+                continue
+            tier_type = tier_cfg.get("type", "")
+            if tier_type in _NETWORK_TIER_TYPES:
+                bp.setdefault(
+                    "high_water_s",
+                    EMABackpressureDetector.NETWORK_HIGH_WATER_S,
+                )
+                bp.setdefault(
+                    "low_water_s",
+                    EMABackpressureDetector.NETWORK_LOW_WATER_S,
+                )
+            else:
+                bp.setdefault(
+                    "high_water_s",
+                    EMABackpressureDetector.LOCAL_HIGH_WATER_S,
+                )
+                bp.setdefault(
+                    "low_water_s",
+                    EMABackpressureDetector.LOCAL_LOW_WATER_S,
+                )
 
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None

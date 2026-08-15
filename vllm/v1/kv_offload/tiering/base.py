@@ -6,7 +6,7 @@ Abstract interfaces and data types for the secondary tiering layer.
 
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Collection, Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -25,7 +25,6 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.tiering.backpressure import (
     BackpressureDetector,
-    EMABackpressureDetector,
 )
 
 if TYPE_CHECKING:
@@ -150,8 +149,7 @@ class SecondaryTierManager(ABC):
         offloading_spec: "OffloadingSpec",
         primary_kv_view: memoryview,
         tier_type: str,
-        backpressure: dict[str, Any] | None = None,
-        backpressure_cls: Callable[..., BackpressureDetector] = EMABackpressureDetector,
+        backpressure_detector: BackpressureDetector | None,  # = None,
     ) -> None:
         """
         Args:
@@ -159,10 +157,8 @@ class SecondaryTierManager(ABC):
             primary_kv_view: Memoryview of the primary tier's CPU KV cache.
             tier_type: Tier type identifier, set by SecondaryTierFactory
                 from the registered tier type.
-            backpressure: Optional backpressure detector configuration.
-            backpressure_cls: Factory or class used to create the detector
-                from ``backpressure`` kwargs.  Defaults to
-                ``EMABackpressureDetector``.
+            backpressure_config: Optional backpressure detector configuration.
+            backpressure_detector: Optional `BackpressureDetector`.
         """
         self._offloading_spec = offloading_spec
         self._primary_kv_view: memoryview = primary_kv_view
@@ -170,10 +166,7 @@ class SecondaryTierManager(ABC):
         self._block_size_bytes: int = shape[1] if shape and len(shape) > 1 else 1
         self.tier_type = tier_type
         self.locality: Locality | None = None
-        self.backpressure_config: dict[str, Any] | None = backpressure
-        self._bp_detector: BackpressureDetector | None = None
-        if backpressure is not None:
-            self._bp_detector = backpressure_cls(**backpressure)
+        self._bp_detector = backpressure_detector
 
     @property
     def block_size_bytes(self) -> int:

@@ -66,9 +66,14 @@ class DelayedSecondaryTierManager(SecondaryTierManager):
     submit_time on the JobMetadata before triggering the completion poll.
     """
 
-    def __init__(self, offloading_spec, primary_kv_view, tier_type, backpressure=None):
+    def __init__(
+        self, offloading_spec, primary_kv_view, tier_type, backpressure_detector=None
+    ):
         super().__init__(
-            offloading_spec, primary_kv_view, tier_type, backpressure=backpressure
+            offloading_spec,
+            primary_kv_view,
+            tier_type,
+            backpressure_detector=backpressure_detector,
         )
         self.blocks: dict[OffloadKey, bool] = {}
         self._held_jobs: list[JobResult] = []
@@ -122,10 +127,10 @@ class TestBackpressure:
             offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=mock_view,
             tier_type="delayed",
-            backpressure={
-                "high_water_s": _BP_HIGH_WATER_S,
-                "low_water_s": _BP_LOW_WATER_S,
-            },
+            backpressure_detector=EMABackpressureDetector(
+                high_water_s=_BP_HIGH_WATER_S,
+                low_water_s=_BP_LOW_WATER_S,
+            ),
         )
         self.manager = TieringOffloadingManager(
             primary_tier=self.primary,

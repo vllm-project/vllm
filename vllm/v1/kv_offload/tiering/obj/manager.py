@@ -20,6 +20,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
+from vllm.v1.kv_offload.tiering.backpressure import EMABackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobResult,
@@ -125,7 +126,15 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             locality: Whether this tier's storage is LOCAL or REMOTE relative
                 to the publishing vLLM instance.
         """
-        super().__init__(offloading_spec, primary_kv_view, tier_type)
+        backpressure_detector = EMABackpressureDetector(
+            # network FS defaults
+        )
+        super().__init__(
+            offloading_spec,
+            primary_kv_view,
+            tier_type,
+            backpressure_detector,
+        )
         self.locality = Locality(locality) if locality is not None else None
 
         self.events: list[OffloadingEvent] | None = None
