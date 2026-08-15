@@ -1106,6 +1106,46 @@ def test_gvr_topk_cold_start_matches_torch(logits_dtype: torch.dtype) -> None:
     ),
     reason="GVR requires CuTe DSL on an SM100-family GPU",
 )
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16])
+@torch.inference_mode()
+def test_gvr_topk_recovers_from_degenerate_hints(logits_dtype: torch.dtype) -> None:
+    """Repeated hint values must not turn into an unchecked identity result."""
+    from vllm.models.deepseek_v32.nvidia.ops.gvr_topk import gvr_topk
+
+    batch_size = 8
+    num_candidates = 65536
+    top_k = 2048
+    logits = torch.randn(batch_size, num_candidates, dtype=logits_dtype, device="cuda")
+    cold_indices = (
+        torch.arange(top_k, dtype=torch.int64, device="cuda")
+        * (num_candidates - 1)
+        // top_k
+        + 1
+    )
+    logits[:, cold_indices] = 0
+    seq_lens = torch.full(
+        (batch_size,), num_candidates, dtype=torch.int32, device="cuda"
+    )
+    request_indices = torch.arange(batch_size, dtype=torch.int64, device="cuda")
+    previous = torch.zeros(batch_size, top_k, dtype=torch.int32, device="cuda")
+    valid = torch.ones(batch_size, dtype=torch.bool, device="cuda")
+    output = torch.empty_like(previous)
+
+    gvr_topk(logits, seq_lens, request_indices, previous, valid, output)
+    expected = torch.topk(logits, top_k, dim=1).indices
+    actual_values = torch.gather(logits, 1, output.long()).sort(dim=1).values
+    expected_values = torch.gather(logits, 1, expected).sort(dim=1).values
+    torch.testing.assert_close(actual_values, expected_values, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and has_cutedsl()
+    ),
+    reason="GVR requires CuTe DSL on an SM100-family GPU",
+)
 @pytest.mark.parametrize("num_candidates", [50000, 100000, 200000])
 @torch.inference_mode()
 def test_gvr_adaptive_rungs_match_torch(num_candidates: int) -> None:

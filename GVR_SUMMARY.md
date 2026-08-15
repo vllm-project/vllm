@@ -1,6 +1,34 @@
 # GVR performance summary
 
-## Current bottom line: the 4.55x result is quarantined
+## Current bottom line: correctness bug fixed
+
+The anomalous 44.5-us later-layer calls were an incorrect early exit, not a
+real GVR speedup and not a short sequence-length input. When all temporal hints
+gathered the same logit value, the kernel returned indices `[0, 2048)` without
+scanning the row. A deterministic reproducer made all 64 rows disagree with
+exact top-k.
+
+The kernel now retries with row-spanning cold hints, then scans the complete
+row for global bounds if those hints are also degenerate. It emits identity
+indices only when the full scan proves all row values are identical. The
+adversarial reproducer, all nine selected GVR tests, and the saved real
+layer-74 B1024-by-W200K input now match exact `torch.topk` with zero bad rows.
+
+The corrected event-free BEAM trace contains 384 exact-B1024 graph replays:
+
+| Median per-rank graph metric | Baseline | Fixed GVR | Baseline / GVR |
+| --- | ---: | ---: | ---: |
+| Forward span | 99.757 ms | 94.557 ms | **1.0550x** |
+| 21-selector total | 12.709 ms | 7.621 ms | **1.668x** |
+
+Baseline top-k occupies 12.74% of the forward. Substitution predicts
+`99.757 - 12.709 + 7.621 = 94.668 ms`; the measured result is 94.557 ms, a
+0.112-ms residual. Fixed GVR reduces selector time by 40.04%, forward latency
+by 5.21%, and improves fixed-batch throughput by 5.50%. Selectors 4--21 now
+take approximately 312 us each (1.96x baseline), not 44.5 us (13.8x). The old
+4.55x selector and 1.111x end-to-end claims are invalid and superseded.
+
+## Prior quarantine diagnosis
 
 The 4.55x selector and 1.1110x forward results below are reproducible trace
 observations, but they are **not currently accepted as valid GVR performance

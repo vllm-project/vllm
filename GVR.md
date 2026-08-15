@@ -2079,3 +2079,98 @@ worker required eager execution, so it changed the execution mode being
 investigated. Its timings are not used to reinterpret the normal CUDA-graph
 trace, and the temporary source hook was removed. No CUDA event or tensor-copy
 node was added to the production graph.
+
+## Correctness investigation of the 44-us anomaly
+
+The saved real BEAM layer-74 input provides a direct correctness check at the
+claimed shape. It contains FP32 logits of shape `(1024, 200000)`, hint indices
+of shape `(1024, 2048)`, and per-row sequence lengths from 199,450 to 199,481.
+On this input, the current GVR kernel returned no invalid indices and every
+row's selected value multiset exactly matched `torch.topk` after masking each
+row at its sequence length. Its CUDA-graph replay time was 668.242 us, not
+44.5 us.
+
+The production fused hint/state path was checked separately on the same
+capture. It also had zero incorrect rows or values, did not modify the input
+sequence-length tensor, and stored output/state-valid data exactly as expected.
+This rules out both the core selector and fused state update as the source of
+the anomalous timing.
+
+As a length-sensitivity control, the same `(1024, 200000)` allocation and
+launch shape took 8.358 us at runtime length 2,048, 41.039 us at 4,096,
+47.235 us at 8,192, and 668.242 us on the real approximately-199.45K rows.
+This initially made the traced 44.5-us calls look like a roughly 4K--8K
+effective runtime length, but duration alone was not unique evidence for that
+explanation.
+
+The subsequent reproducer found a different cause: the old kernel treated an
+unusable hint bracket (`hint_min >= hint_max`, including repeated gathered
+values) as proof that the complete row was degenerate. It immediately emitted
+indices `[0, 2048)` without scanning logits. With random logits and temporal
+hints containing only index zero, all 64/64 rows disagreed with exact top-k and
+the kernel took only 64.422 us at `(64, 65536)`. This shortcut, rather than a
+short runtime sequence length, explains how a nominal full-width graph node
+could take tens of microseconds.
+
+The fix first rebuilds the bracket from evenly spaced cold hints. If those
+values are also degenerate, it scans the complete row for global bounds;
+identity output is now allowed only when that scan proves the entire row has
+one value. Both the ordinary repeated-hint reproducer and an adversarial case
+whose temporal and evenly spaced hints all gather zero now match exact
+`torch.topk` on every row. A regression test covers the adversarial path.
+
+### Corrected real-model result
+
+An event-free Nsight trace repeated the real BEAM experiment after the fix.
+It used the Python frontend, the same 199,400-token prompt, GLM-5.2-NVFP4
+weights, TP4, 20-GiB KV cache per rank, full-decode CUDA graphs captured at B1
+and B1024, FP32 indexer logits, and disabled FlashInfer autotuning. There are
+384 exact-B1024 graph replays, and every replay contains 2,043 kernels and 21
+GVR selectors. Correlation IDs were paired with process IDs because CUPTI
+correlation IDs are only process-local.
+
+| Selector | Layer | Baseline | Fixed GVR | Speedup |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0 | 511.568 us | 296.352 us | 1.726x |
+| 2 | 1 | 542.720 us | 488.448 us | 1.111x |
+| 3 | 2 | 613.888 us | 1,211.968 us | 0.507x |
+| 4 | 6 | 614.080 us | 313.856 us | 1.957x |
+| 5 | 10 | 613.216 us | 312.384 us | 1.963x |
+| 6 | 14 | 612.224 us | 311.712 us | 1.964x |
+| 7 | 18 | 611.904 us | 312.240 us | 1.960x |
+| 8 | 22 | 611.936 us | 311.680 us | 1.963x |
+| 9 | 26 | 612.288 us | 312.384 us | 1.960x |
+| 10 | 30 | 612.432 us | 312.400 us | 1.960x |
+| 11 | 34 | 612.256 us | 311.680 us | 1.964x |
+| 12 | 38 | 612.000 us | 311.552 us | 1.964x |
+| 13 | 42 | 612.416 us | 312.320 us | 1.961x |
+| 14 | 46 | 612.224 us | 312.304 us | 1.960x |
+| 15 | 50 | 612.160 us | 311.776 us | 1.963x |
+| 16 | 54 | 612.256 us | 312.224 us | 1.961x |
+| 17 | 58 | 612.160 us | 311.728 us | 1.964x |
+| 18 | 62 | 612.240 us | 311.663 us | 1.964x |
+| 19 | 66 | 612.016 us | 312.288 us | 1.960x |
+| 20 | 70 | 612.176 us | 311.664 us | 1.964x |
+| 21 | 74 | 612.256 us | 312.256 us | 1.961x |
+
+The median per-replay selector totals are 12.709 ms for baseline and
+7.621 ms for fixed GVR: **1.668x**, a 40.04% selector-time reduction. The
+median per-rank graph spans are 99.757 ms and 94.557 ms: **1.0550x** end-to-end
+throughput, or 5.21% forward-latency reduction. Baseline selector share is
+12.74%. Amdahl substitution predicts
+`99.757 - 12.709 + 7.621 = 94.668 ms` (1.0537x); the observed fixed forward is
+only 0.112 ms faster. The corrected result is therefore first-principles
+consistent. It supersedes the invalid 4.55x selector and 1.111x end-to-end
+claims produced by the unchecked identity shortcut.
+
+Correctness was verified at three levels: the adversarial regression now
+matches exact `torch.topk` for FP32 and FP16; all nine selected GVR tests pass; and the saved
+real layer-74 `(1024, 200000)` input has zero invalid indices and zero
+mismatched rows after the fix, with a 668.662-us standalone graph time. The
+fixed model trace is
+`/tmp/gvr_beam_gvr_fixed_py_20260815.{nsys-rep,sqlite}`.
+
+Final repository checks passed Ruff check/format, typos, mypy, SPDX headers,
+the CUDA-API guard, and `git diff --check`. Whole-file Markdown lint still
+reports the historical MD060 compact-table errors in `GVR.md`; all reported
+lines predate this section (the last is line 1,535 before these additions).

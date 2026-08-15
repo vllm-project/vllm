@@ -1003,6 +1003,52 @@ class GvrTopKKernel:
                 s_iscalars[4] = cutlass.Int32(0)
         cute.arch.barrier()
 
+    @cute.jit
+    def phase1_full_row_bounds(
+        self,
+        input_row,
+        N,
+        smem_wmin_f32,
+        smem_wmax_f32,
+        s_thr,
+        s_iscalars,
+        tidx,
+        warp_id,
+        lane,
+    ):
+        """Recover a sound threshold bracket by scanning the complete row."""
+        local_min = cutlass.Float32(self.FLT_MAX)
+        local_max = cutlass.Float32(self.NEG_FLT_MAX)
+        i = tidx
+        while i < N:
+            value = self._load_fp32(input_row, i)
+            local_min = _fmin_f32_inline(local_min, value)
+            local_max = cute.arch.fmax(local_max, value)
+            i = i + cutlass.Int32(self.num_threads)
+
+        warp_min = self.warp_reduce_min_f32(local_min)
+        warp_max = self.warp_reduce_max_f32(local_max)
+        if lane == cutlass.Int32(0):
+            smem_wmin_f32[warp_id] = warp_min
+            smem_wmax_f32[warp_id] = warp_max
+        cute.arch.barrier()
+
+        if tidx == cutlass.Int32(0):
+            row_min = cutlass.Float32(self.FLT_MAX)
+            row_max = cutlass.Float32(self.NEG_FLT_MAX)
+            for w in cutlass.range_constexpr(self.num_warps):
+                row_min = _fmin_f32_inline(row_min, smem_wmin_f32[w])
+                row_max = cute.arch.fmax(row_max, smem_wmax_f32[w])
+            s_thr[0] = row_min * cutlass.Float32(0.5) + row_max * cutlass.Float32(0.5)
+            s_thr[1] = row_min
+            s_thr[2] = row_max
+            s_iscalars[0] = cutlass.Int32(0)
+            s_iscalars[1] = cutlass.Int32(0)
+            s_iscalars[2] = N
+            s_iscalars[3] = cutlass.Int32(1)
+            s_iscalars[4] = cutlass.Int32(0)
+        cute.arch.barrier()
+
     # ------------------------------------------------------------------
     # P1b — 256-bin SMEM histogram over the prev-topK gathered values
     # (band [v_lo, v_hi] = P1's pmin/pmax = s_thr[1]/s_thr[2]), then M
@@ -4622,11 +4668,49 @@ class GvrTopKKernel:
             cold_prior_len=cold_prior_len,
         )
 
-        # Degenerate threshold init: val_hi <= -self.FLT_MAX or val_lo >= val_hi.
-        # When preIdx values produce an unusable bracket (e.g. all -inf or
-        # identical), skip Phase 2-4 and emit identity output instead.
+        # A stale or low-diversity temporal hint can gather one repeated value.
+        # Retry with row-spanning cold hints before paying for a complete scan.
         v_lo = s_thr[1]
         v_hi = s_thr[2]
+        if v_hi <= cutlass.Float32(self.NEG_FLT_MAX) or v_lo >= v_hi:
+            self.phase1_preidx_stats(
+                input_row,
+                N,
+                pre_idx_row,
+                pre_idx_count,
+                pre_idx_offset,
+                smem_wmin,
+                smem_wmax,
+                smem_wsum,
+                smem_wcnt_p1,
+                s_thr,
+                s_iscalars,
+                tidx,
+                warp_id,
+                lane,
+                smem_gath=smem_gath,
+                s_mt_thr=s_mt_thr,
+                use_cold_hints=cutlass.Boolean(True),
+                cold_prior_len=N - cutlass.Int32(1),
+            )
+        v_lo = s_thr[1]
+        v_hi = s_thr[2]
+        if v_hi <= cutlass.Float32(self.NEG_FLT_MAX) or v_lo >= v_hi:
+            self.phase1_full_row_bounds(
+                input_row,
+                N,
+                smem_wmin,
+                smem_wmax,
+                s_thr,
+                s_iscalars,
+                tidx,
+                warp_id,
+                lane,
+            )
+        v_lo = s_thr[1]
+        v_hi = s_thr[2]
+        # Identity is valid only after the full-row scan proves every value is
+        # identical (or the complete row is -inf).
         if v_hi <= cutlass.Float32(self.NEG_FLT_MAX) or v_lo >= v_hi:
             if cutlass.const_expr(cluster_size == 1):
                 if tidx == 0:
@@ -5373,10 +5457,10 @@ class GvrTopKKernel:
     def _device_num_sms() -> int:
         if GvrTopKKernel._NUM_SMS is None:
             import torch  # local: keep the module importable without torch
+            from vllm.utils.platform_utils import num_compute_units
 
-            GvrTopKKernel._NUM_SMS = torch.cuda.get_device_properties(
-                torch.cuda.current_device()
-            ).multi_processor_count
+            device_index = torch.accelerator.current_device_index()
+            GvrTopKKernel._NUM_SMS = num_compute_units(device_index)
         return GvrTopKKernel._NUM_SMS
 
     @staticmethod
