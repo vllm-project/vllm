@@ -6,6 +6,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
+from vllm.config.reasoning import ReasoningConfig
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
@@ -21,9 +22,10 @@ from vllm.v1.worker.gpu.sample.logprob import (
     LogprobTokenIdsState,
     compute_topk_scores,
 )
-from vllm.v1.worker.gpu.sample.output import SamplerOutput
+from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
+from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 from vllm.v1.worker.gpu.states import RequestState
 
 
@@ -37,6 +39,8 @@ class Sampler:
         logprobs_mode: LogprobsMode = "raw_logprobs",
         num_speculative_tokens: int = 1,
         use_fp64_gumbel: bool = False,
+        reasoning_config: ReasoningConfig | None = None,
+        return_sampling_mask: bool = False,
     ):
         self.logprobs_mode = logprobs_mode
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
@@ -48,8 +52,12 @@ class Sampler:
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
         self.bad_words_state = BadWordsState(req_states)
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
+        self.thinking_budget_state = ThinkingBudgetState(req_states, reasoning_config)
         self.num_speculative_tokens = num_speculative_tokens
-        self.use_flashinfer = flashinfer_sampler_supported()
+        self.return_sampling_mask = return_sampling_mask
+        self.use_flashinfer = (
+            not return_sampling_mask and flashinfer_sampler_supported()
+        )
 
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
@@ -59,6 +67,7 @@ class Sampler:
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
         self.bad_words_state.add_request(req_idx, sampling_params)
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
+        self.thinking_budget_state.add_request(req_idx, sampling_params)
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
@@ -66,6 +75,7 @@ class Sampler:
         self.logit_bias_state.apply_staged_writes()
         self.bad_words_state.apply_staged_writes()
         self.logprob_token_ids_state.apply_staged_writes()
+        self.thinking_budget_state.apply_staged_writes()
 
     def __call__(
         self,
@@ -73,6 +83,7 @@ class Sampler:
         input_batch: InputBatch,
     ) -> SamplerOutput:
         expanded_idx_mapping = input_batch.expanded_idx_mapping
+        idx_mapping = input_batch.idx_mapping
         idx_mapping_np = input_batch.idx_mapping_np
         cu_num_logits_np = input_batch.cu_num_logits_np
         expanded_local_pos = input_batch.expanded_local_pos
@@ -92,6 +103,7 @@ class Sampler:
         sampled, processed_logits = self.sample(
             logits,
             expanded_idx_mapping,
+            idx_mapping,
             idx_mapping_np,
             pos,
             input_ids,
@@ -129,6 +141,12 @@ class Sampler:
             self.req_states.prefill_len.gpu,
         )
 
+        sampling_mask_tensors = None
+        if self.return_sampling_mask:
+            sampling_mask_tensors = SamplingMaskTensors.from_logits(
+                processed_logits, num_sampled
+            )
+
         # These are GPU tensors.
         sampler_output = SamplerOutput(
             # The sampled tokens are expanded to 2D tensor with shape
@@ -139,6 +157,7 @@ class Sampler:
             num_nans=num_nans,
             num_sampled=num_sampled,
             num_rejected=num_rejected,
+            sampling_mask_tensors=sampling_mask_tensors,
         )
         return sampler_output
 
@@ -146,6 +165,7 @@ class Sampler:
         self,
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
+        idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
         input_ids: torch.Tensor,
@@ -176,6 +196,17 @@ class Sampler:
         self.bad_words_state.apply_bad_words(
             logits,
             expanded_idx_mapping,
+            idx_mapping_np,
+            input_ids,
+            expanded_local_pos,
+        )
+
+        # Force the reasoning end marker once a request's thinking budget is
+        # reached; applied before temperature so the forced token is always kept.
+        self.thinking_budget_state.apply(
+            logits,
+            expanded_idx_mapping,
+            idx_mapping,
             idx_mapping_np,
             input_ids,
             expanded_local_pos,
@@ -219,6 +250,7 @@ class Sampler:
         self,
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
+        idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
         input_ids: torch.Tensor,
@@ -228,6 +260,7 @@ class Sampler:
         processed_logits = self.apply_sampling_params(
             logits,
             expanded_idx_mapping,
+            idx_mapping,
             idx_mapping_np,
             pos,
             input_ids,
