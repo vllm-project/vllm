@@ -16,9 +16,48 @@ large-batch kernel grids, but any such row is labeled rather than represented
 as an independently captured request distribution. End-to-end measurements
 use the real model weights and actual forward passes.
 
-## 2026-08-15 full revalidation
+## 2026-08-15 event-free dispatch correction
 
-This section supersedes the separate-server e2e claims below. Every experiment
+This section supersedes the same-day revalidation and "final" paired tables
+below. Their nominal GVR graph used `max_model_len=200032`. Because
+`200032 % 64 == 32`, `should_use_gvr_topk` rejected the logits width even when
+the row threshold was lowered. Event-free Nsight validation shows that graph
+executed the baseline selector plus GVR state storage, not the fused GVR
+selector. Its near-neutral 0.9997x large-case result is invalid as a GVR
+comparison.
+
+The corrected TP4 pair uses real GLM-5.2-NVFP4 weights and document tokens,
+`max_model_len=200000`, full-decode CUDA graphs at B1/B1024, and disabled
+FlashInfer autotuning. A single completion request creates 1,024 child
+sequences; only graph replays labeled with exactly 1,024 generation sequences
+are retained. No timing events are embedded in either graph.
+
+| Case | Baseline forward | GVR forward | Baseline top-k | GVR top-k | Speedup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 199.8K/B1 | 7.615 ms | 7.510 ms | 0.322 ms | 0.341 ms | 1.014x observed |
+| 10K/B1024 | 52.709 ms | 52.030 ms | 1.168 ms | 0.960 ms | 1.013x observed |
+| 199.4K/B1024 | 99.828 ms | 89.857 ms | 12.662 ms | 2.785 ms | **1.1110x** |
+
+At 199.4K/B1024, baseline top-k is 12.68% of the forward and GVR is
+4.55x faster. Amdahl predicts
+`99.828 / (99.828 - 12.662 + 2.785) = 1.1098x`, within about 0.1 ms of the
+observed forward delta. The baseline/GVR traces contain 130/146 analyzed exact
+replays per rank, respectively. Each replay has exactly 21 corresponding
+selector launches and no selector from the other implementation.
+
+Both selectors run on stream 19. Direct intersection of every selector
+interval with kernels on every other stream finds zero overlap. CUDA timing
+events are graph-compatible and add measurable node overhead, but the prior
+claim that they removed selector overlap is unsupported and retracted.
+
+The B1 whole-forward ratio is not a causal GVR gain: GVR's selector is 19 us
+slower there, while other kernels differ between server processes. Production
+dispatch correctly keeps the cooperative selector for that shape.
+
+## Superseded 2026-08-15 full revalidation
+
+This historical section was intended to supersede the separate-server e2e
+claims below, but it did not validate actual GVR dispatch. Every experiment
 was rerun from this checkout with its own `.venv`; FlashInfer autotuning was
 disabled. The e2e experiment uses two CUDA graphs in one warmed TP4 process,
 alternates baseline-first and GVR-first execution, and reports the maximum
@@ -130,15 +169,13 @@ make GVR 12.879/10.973 = 1.174 times slower, rather than 1.722 times faster.
 The admission/hint distribution therefore matters, and the repeated-input
 number must not be substituted into the e2e Amdahl calculation.
 
-The internal events add 42 graph nodes and inflate absolute latency. More
-importantly, they impose ordering around a multi-kernel selector that can
-otherwise overlap surrounding work. The table therefore validates the
-measurement accounting only; its selector sum is not an uninstrumented
-critical-path fraction. Amdahl's law applies to the critical path, not to the
-sum of concurrently executing kernel durations. A second paired run with
-those nodes removed supplies the final e2e table below.
+The original interpretation said the 42 event nodes imposed ordering and
+removed selector overlap. The event-free trace disproves that explanation for
+this workload: selector intervals have zero cross-stream overlap even without
+the event nodes. The events do inflate absolute graph latency, but the paired
+result below failed for the independent dispatch reason documented above.
 
-### Final real e2e result: paired graphs without selector events
+### Superseded paired graphs without selector events
 
 The final run retains only exact-batch decode rows and contains no events
 inside either model graph. For each step, baseline and GVR latency are first
@@ -175,29 +212,17 @@ are trimmed from every sustained run.
 | 199.8K | 128 | 188 | 20.676 ms | 20.673 ms | 1.0002x | +0.018% |
 | 199.8K | 1024 | 114 | 99.675 ms | 99.706 ms | 0.9997x | -0.031% |
 
-The honest result is no material e2e speedup. The range is 0.9968-1.0016x;
-the largest apparent gain is 0.159%, the largest loss is 0.323%, and the
-previously claimed 199.8K/B1024 gain is instead a -0.031% loss at this
-measurement scale. GVR was forced at every size, including sizes where
-production dispatch would select the baseline.
+This table is retained only as a record of the invalid comparison. Lowering the
+row threshold did not bypass the column-width check, so "GVR" cells executed
+the baseline selector plus state storage. The 0.9968-1.0016x range is therefore
+not evidence about GVR end-to-end performance.
 
-This also explains the instrumented result from first principles. At 10K/B1,
-internal selector events add 0.143 ms to the baseline graph but 0.594 ms to
-the multi-kernel GVR graph. Their 0.451-ms differential accounts for nearly
-all of the instrumented 0.459-ms GVR loss. At 199.8K/B1024, they add 14.857 ms
-to baseline and 17.350 ms to GVR; the 2.493-ms differential again accounts for
-nearly all of the apparent 2.524-ms loss. The events impose graph ordering and
-remove overlap, so that experiment measured the instrumented graph rather
-than the production critical path.
-
-In Amdahl notation, `speedup = 1 / ((1 - f) + f / s)`, where `f` must be the
-serial critical-path fraction and `s` the selector speedup. The 1.57-9.58%
-event-measured selector sums are not valid values of `f`: much of that work is
-overlapped, and the events themselves change it. Consequently, multiplying a
-standalone top-k saving by 21 does not predict the clean forward. A true
-zero-cost ceiling would require a logically equivalent graph that supplies
-the exact per-step indices without executing the selector; it cannot be
-inferred from summed, overlap-perturbing event intervals.
+The event-differential calculation also does not establish lost overlap. CUDA
+event nodes add graph work, and their overhead differs between graph shapes,
+but the corrected event-free trace shows the selector is serialized. For the
+valid 199.4K/B1024 pair, the measured selector replacement predicts the full
+forward saving directly through Amdahl's Law, as shown in the correction at the
+top of this file.
 
 The B128 199.8K cell uses a 199K real prompt and retains decode positions
 199,800-200,000 so all 128 requests are resident for a long interval. The

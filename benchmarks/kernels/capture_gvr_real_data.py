@@ -39,6 +39,8 @@ async def run_wave(
     output_len: int,
     admission_chunk: int,
     admission_delay: float,
+    single_request_n: bool,
+    temperature: float,
 ) -> None:
     start = asyncio.Event()
 
@@ -47,10 +49,12 @@ async def run_wave(
         "prompt": prompt_ids,
         "max_tokens": output_len,
         "min_tokens": output_len,
-        "temperature": 0,
+        "temperature": temperature,
         "ignore_eos": True,
         "seed": 0,
     }
+    if single_request_n:
+        payload["n"] = batch
     body = json.dumps(payload).encode()
     headers = {"Content-Type": "application/json"}
 
@@ -69,7 +73,10 @@ async def run_wave(
                 await asyncio.sleep(0.25 * (attempt + 1))
 
     begin = time.perf_counter()
-    if admission_chunk:
+    if single_request_n:
+        tasks = [asyncio.create_task(run_one())]
+        start.set()
+    elif admission_chunk:
         tasks = []
         start.set()
         for offset in range(0, batch, admission_chunk):
@@ -101,8 +108,14 @@ async def main() -> None:
     parser.add_argument("--lengths", default="200000,50000,10000")
     parser.add_argument("--batches", default="1,8,32")
     parser.add_argument("--output-len", type=int, default=2)
+    parser.add_argument("--temperature", type=float, default=0)
     parser.add_argument("--admission-chunk", type=int, default=0)
     parser.add_argument("--admission-delay", type=float, default=0.1)
+    parser.add_argument(
+        "--single-request-n",
+        action="store_true",
+        help="Create the batch as n child sequences in one completion request.",
+    )
     args = parser.parse_args()
 
     lengths = [int(value) for value in args.lengths.split(",")]
@@ -123,6 +136,8 @@ async def main() -> None:
                     args.output_len,
                     args.admission_chunk,
                     args.admission_delay,
+                    args.single_request_n,
+                    args.temperature,
                 )
 
 

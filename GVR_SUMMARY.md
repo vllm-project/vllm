@@ -1,56 +1,104 @@
 # GVR performance summary
 
-## Bottom line
+## Corrected bottom line
 
-GVR has real standalone top-k kernel wins at large batches and long contexts,
-but it does **not** provide a meaningful end-to-end model-forward speedup in
-the tested GLM-5.2-NVFP4 decode workload.
+GVR produces a real end-to-end decode-forward speedup when it actually
+dispatches on a large, long-context batch. The corrected event-free result for
+GLM-5.2-NVFP4 at 199.4K context and batch 1024 is:
 
-With real weights and document inputs, TP4, full-decode CUDA graphs, and
-FlashInfer autotuning disabled, the clean paired result ranges from
-**0.9968x to 1.0016x**. That is effectively performance-neutral. The largest
-apparent gain is 0.159%; the largest loss is 0.323%.
+| Metric | Baseline | GVR |
+| --- | ---: | ---: |
+| TP critical-path forward | 99.828 ms | 89.857 ms |
+| 21 selector launches | 12.662 ms | 2.785 ms |
+| Sparse-attention kernels | 14.164 ms | 13.970 ms |
+| Indexer-logits kernels | 37.583 ms | 37.873 ms |
 
-At the most important large case, 199.8K context and batch 1024:
+The observed forward speedup is **1.1110x**: 11.10% more fixed-batch
+throughput, or 9.99% less latency. The baseline selector occupies **12.68%** of
+the forward and GVR makes it **4.55x** faster.
 
-- baseline: **99.675 ms** per model forward;
-- GVR: **99.706 ms**;
-- speedup: **0.9997x**, or a 0.031% slowdown.
+Amdahl's Law predicts:
 
-The earlier claim of roughly 10% e2e speedup was a measurement artifact and
-should not be used.
+```text
+99.828 / (99.828 - 12.662 + 2.785) = 1.1098x
+```
 
-## Real end-to-end result
+The 1.1098x prediction and 1.1110x observation differ by about 0.1 ms. This is
+the first result in the investigation that is both dispatch-validated and
+explainable from first principles.
 
-The table reports `baseline latency / GVR latency`. Values above 1 favor GVR;
-values below 1 favor the baseline.
+## Why the previous neutral result was wrong
 
-| Batch | 10K | 50K | 100K | 199.8K |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 0.9989x | 0.9975x | 0.9968x | 0.9995x |
-| 8 | 0.9996x | 1.0008x | 1.0010x | 0.9995x |
-| 32 | 0.9998x | 0.9998x | 0.9996x | 0.9997x |
-| 64 | 0.9997x | 0.9992x | 1.0002x | 0.9990x |
-| 128 | 1.0009x | 1.0016x | 1.0003x | 1.0002x |
-| 1024 | 1.0002x | 0.9998x | 0.9998x | 0.9997x |
+The former source-of-truth result claimed 99.675 ms baseline versus 99.706 ms
+"GVR" at 199.8K/B1024. That comparison used a decode-logits width of 200,032.
+GVR requires a width divisible by 64, but `200032 % 64 == 32`, so its
+eligibility check rejected the shape.
 
-These measurements forced GVR at every batch size. Production dispatch would
-normally retain the baseline for some small shapes.
+An event-free Nsight trace reproduced the mistake. The nominal GVR graph
+contained the baseline `FilteredTopKUnifiedKernel` plus 21
+`_store_decode_state_kernel` launches, and contained no fused GVR selector.
+Thus the near-1.0x result compared baseline top-k with baseline top-k plus
+state maintenance. Lowering only the row threshold did not override the column
+alignment check.
 
-### Why this result is trustworthy
+The corrected pair uses `max_model_len=200000`. Its GVR graph contains exactly
+21 fused CuTe GVR launches per retained replay and no cooperative or filtered
+top-k launches. The baseline contains exactly 21 filtered selectors and no GVR
+launches.
 
-- Baseline and GVR were captured as two graphs in the same warmed process.
-- Every decode step ran both graphs on the same model buffers.
-- Baseline-first and GVR-first order alternated every step.
-- Results use the maximum latency across the four TP ranks.
-- Only sustained rows with the exact requested batch were retained.
-- Internal selector timing events were removed from the final graphs.
-- Each cell contains 56 to 230 samples after warmup and tail trimming.
+## CUDA events and overlap
 
-## Standalone top-k result
+The earlier explanation that timing events "suppressed overlap" was also
+wrong.
 
-The kernel optimization itself is real. At 200K context, CUDA-graph replay on
-real captured tensors gives:
+- CUDA events are compatible with CUDA graphs when represented as graph event
+  nodes.
+- Adding start/end timing around 21 selector calls adds 42 nodes and can
+  materially increase graph latency, so those event-instrumented absolute
+  times should not be used as production latency.
+- The GLM-5.2 portable DeepSeek-V3.2 path does not put this selector on an
+  auxiliary stream. In both corrected traces, all selector kernels execute on
+  stream 19.
+- Direct timestamp intersection found **zero selector overlap** with kernels on
+  every other stream for every retained B1024 replay.
+
+Therefore the selector sum is serial critical-path work in this workload. The
+events perturb latency by adding work; there is no evidence that they reveal or
+remove selector overlap.
+
+"21 selector calls" means one top-k selection in each of GLM-5.2's 21 indexer
+layers during one model forward. "42 event nodes" means one start and one end
+record around each of those calls. Neither term means 21 model forwards or
+concurrent selector execution.
+
+## Context and batch dependence
+
+Event-free graph-node attribution gives:
+
+| Case | Baseline forward | GVR forward | Baseline selector | GVR selector | Baseline selector share |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 199.8K/B1 | 7.615 ms | 7.510 ms | 0.322 ms | 0.341 ms | 4.24% |
+| 10K/B1024 | 52.709 ms | 52.030 ms | 1.168 ms | 0.960 ms | 2.21% |
+| 199.4K/B1024 | 99.828 ms | 89.857 ms | 12.662 ms | 2.785 ms | 12.68% |
+
+The B1 whole-forward difference is not a causal GVR win: GVR's selector is
+about 19 us slower there, while unrelated kernels differ across the two server
+processes. Production dispatch retains the cooperative baseline at B1.
+
+At 10K/B1024 the selector can save only 0.208 ms because only 2.21% of the
+forward is in baseline top-k. At 199.4K/B1024 it saves 9.876 ms, and the whole
+forward saves 9.974 ms. The useful ceiling therefore grows sharply with both
+row count and sequence length.
+
+These are fixed-batch GPU graph spans, not HTTP throughput. B1024 was created
+as `n=1024` child sequences from one real document prompt. Only NVTX ranges
+explicitly labeled with 1,024 generation sequences were retained. The long
+plateaus contain 130 baseline and 146 GVR analyzed replays per rank.
+
+## Standalone selector result
+
+The standalone CUDA-graph benchmark remains useful for kernel crossover
+analysis. At 200K context on real captured tensors:
 
 | Batch | Baseline | GVR | Kernel speedup |
 | ---: | ---: | ---: | ---: |
@@ -61,54 +109,13 @@ real captured tensors gives:
 | 128 | 66.379 us | 33.310 us | 1.993x |
 | 1024 | 487.619 us | 283.104 us | 1.722x |
 
-B1, B8, and B32 are native real-model captures. B64, B128, and B1024 repeat
-native B32 rows to measure kernel scaling, so those large rows are not an
-independently captured request distribution.
-
-Across the full kernel matrix:
-
-- GVR loses at every measured batch for 10K context.
-- At 50K and 100K, the crossover is around batch 64.
-- At 200K, the crossover is around batch 32.
-- GVR matches the exact FP32 selected-value set from `torch.topk`.
-
-## Why a faster kernel does not speed up the model
-
-The standalone kernel speedup and model-forward speedup measure different
-things.
-
-First, Amdahl's Law requires the fraction of time on the **serial critical
-path**:
-
-```text
-speedup = 1 / ((1 - f) + f / s)
-```
-
-Here, `s` is the selector speedup and `f` is the selector's serial fraction.
-Summing selector kernel durations does not give `f` when selector work overlaps
-communication or other GPU work. Making overlapped work faster may leave the
-graph's critical path unchanged.
-
-Second, the attempt to time all 21 selector calls from inside the graph changed
-the graph itself. It added 42 event nodes and imposed extra ordering:
-
-- At 10K/B1, events added 0.143 ms to baseline but 0.594 ms to GVR. That
-  differential explains almost the entire apparent instrumented regression.
-- At 199.8K/B1024, events added 14.857 ms to baseline and 17.350 ms to GVR.
-  Again, the differential explains almost the entire instrumented regression.
-
-The event-measured selector shares of 1.57% to 9.58% therefore are not valid
-Amdahl fractions. The event-free paired forward is the authoritative e2e
-measurement.
-
-Third, repeated B32 inputs do not reproduce the hint and admission distribution
-of a real B1024 decode wave. Kernel scaling rows are useful for understanding
-hardware occupancy, but they cannot be substituted directly into an e2e
-prediction.
+B1/B8/B32 are native captures. B64/B128/B1024 repeat native B32 rows, so their
+hint distribution is not a substitute for a real B1024 model run. The
+corrected end-to-end trace is authoritative for the model result.
 
 ## FP16 baseline experiment
 
-Allowing the existing baseline top-k kernel to consume FP16 helps mostly at
+Allowing the existing baseline selector to consume FP16 scores helps most at
 large repeated batches:
 
 | Batch | FP32 | FP16 | Speedup |
@@ -120,29 +127,24 @@ large repeated batches:
 | 128 | 30.072 us | 26.776 us | 1.123x |
 | 1024 | 219.113 us | 181.113 us | 1.210x |
 
-These are 100K-context results. B64 and larger repeat native B32 captures.
-FP16 versus FP32 retains **99.9714%** of selected indices, with 0.585 missing
-indices out of 2048 per row on average and at most two missing. However, the
-exact set changes on 40 of 82 rows, or 48.8%.
+FP16 retains 99.9714% of selected indices in the saved selector corpus, but
+that is index overlap rather than an end-to-end model-quality guarantee. The
+existing GSM8K run found no observed accuracy regression, but broader model
+evaluation is still required before enabling FP16 by default.
 
-This is high index overlap, not an end-to-end model-quality result. FP16 should
-not be enabled by default without a model accuracy evaluation.
+## Current recommendations
 
-## What this means
-
-1. **Do not claim an e2e GVR speedup for this model.** The clean result is
-   neutral across all tested batch sizes and context lengths.
-2. **Do not enable GVR for every size based on standalone kernel results.** It
-   would add complexity without measurable model-forward benefit.
-3. **Keep the kernel work as useful research.** It demonstrates up to a 2.12x
-   top-k win and identifies where GVR amortizes its fixed work.
-4. **Future optimization must target the graph critical path.** Promising
-   directions are fusing selection with its producer or consumer, reducing
-   indexer GEMM/attention cost, or removing synchronization rather than only
-   shortening an overlapped selector.
-5. **Use event-free paired graphs for future e2e decisions.** Internal timing
-   events can materially perturb multi-kernel CUDA graphs.
+1. Keep the production row guard: GVR loses to the cooperative selector at B1
+   and B8 and crosses over near B32 on long contexts.
+2. Require dispatch validation in every benchmark: count 21 GVR launches and
+   zero fallback selectors per retained model forward.
+3. Use widths divisible by 64 or implement and validate an exact tail path
+   before broadening column eligibility.
+4. Use event-free graph-node attribution for component accounting. Internal
+   events are useful diagnostics only after separately quantifying their graph
+   overhead.
+5. Treat **1.1110x at 199.4K/B1024** as the corrected large-case result. Do not
+   use the superseded 0.9997x result.
 
 The detailed experiment history remains in [GVR.md](GVR.md) and
-[GVR_ANS.md](GVR_ANS.md). This file is the concise source of truth for the
-current conclusions.
+[GVR_ANS.md](GVR_ANS.md). This file is the concise source of truth.

@@ -1756,3 +1756,103 @@ before early requests complete and does not affect GPU timing.
 Final validation, using only `/home/woosuk/workspace/vllm/.venv`, passed all
 15 selected GVR and FP32/FP16 padded-stride cases (`169 deselected`). Targeted
 Ruff check/format, Python compilation, and `git diff --check` also passed.
+
+## Event-free selector attribution correction
+
+The explanation that internal selector timing events "suppress overlap" is
+being retracted and rechecked. The GLM-5.2 portable DeepSeek-V3.2 selector runs
+on the ambient CUDA stream; unlike the DeepSeek-V4 implementation, this path
+does not explicitly schedule indexer work on auxiliary streams. Inserting
+start/end event-record nodes around an already ordered single-stream selector
+therefore adds graph work, but does not by itself remove a demonstrated
+selector/neighbor overlap.
+
+CUDA does support pre-created timing events as explicit event-record nodes in
+a graph. A local `.venv` probe on GB200 successfully replayed and timed such a
+graph. A second single-stream probe measured 26.67 us for 21 tiny kernel nodes
+and 208.30 us after adding 42 external timing-event nodes. This establishes
+that the nodes are compatible and non-passive; it does not explain the much
+larger or implementation-dependent deltas in the previous model runs.
+
+The event-instrumented and event-free model results were separate captures, so
+subtracting their absolute latencies does not prove that the difference was
+caused by lost overlap. The recorded latencies remain observations, but it was
+not yet established that the nominal GVR graph actually dispatched GVR. The
+next check will attribute selector
+kernels from an event-free Nsight Systems/CUPTI trace, verify graph streams and
+dependencies, and apply Amdahl's Law only to work shown to lie on the serial
+critical path.
+
+The first replacement capture exposed a separate dispatch mistake before its
+numbers were used. With `max_model_len=200032`, the decode logits width was
+200,032, which fails GVR's `num_columns % 64 == 0` eligibility condition. The
+nominally forced trace consequently contained the baseline selector plus 21
+GVR state-store launches per replay, not the GVR selector. That capture is
+discarded. The controlled event-free pair is being repeated with
+`max_model_len=200000`, which covers the 199,800-token prompt plus 32 generated
+tokens and is a valid GVR width.
+
+## Final event-free attribution result
+
+The corrected capture is complete and overturns both the overlap explanation
+and the neutral-GVR conclusion. Nsight Systems recorded CUDA and NVTX activity
+with `--cuda-graph-trace=node`; no selector timing events were inserted into
+the graphs. Both servers used the real GLM-5.2-NVFP4 checkpoint, TP4, the
+portable DeepSeek-V3.2 implementation, full-decode CUDA graphs at B1/B1024,
+20 GiB KV cache per rank, and disabled FlashInfer autotuning. The only selector
+difference was baseline versus forced GVR.
+
+To obtain a real fixed B1024 plateau, the driver now supports
+`--single-request-n`. One real document prompt creates 1,024 child sequences in
+one completion request. A 199,400-token prompt with 512 requested output tokens
+keeps the children alive through admission; analysis retains only NVTX ranges
+explicitly labeled `execute_context_0(0)_generation_1024(1024)`. The baseline
+and GVR traces contain 130 and 146 analyzed exact replays per rank,
+respectively.
+
+Dispatch validation passed. Every retained baseline replay contains exactly 21
+`FilteredTopKUnifiedKernel` launches and no GVR kernel. Every retained GVR
+replay contains exactly 21 fused CuTe GVR launches and no cooperative or
+filtered selector. Both selectors execute on stream 19. Intersecting every
+selector interval with every kernel interval on all other streams finds zero
+overlap in both traces.
+
+| Case | Baseline forward | GVR forward | Baseline selector | GVR selector | Baseline share |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 199.8K/B1 | 7.615 ms | 7.510 ms | 0.322 ms | 0.341 ms | 4.24% |
+| 10K/B1024 | 52.709 ms | 52.030 ms | 1.168 ms | 0.960 ms | 2.21% |
+| 199.4K/B1024 | 99.828 ms | 89.857 ms | 12.662 ms | 2.785 ms | 12.68% |
+
+At 199.4K/B1024, GVR makes the selector 4.55x faster and saves 9.876 ms.
+Amdahl's Law predicts a complete forward of
+`99.828 - 12.662 + 2.785 = 89.951 ms`, or 1.1098x. The measured forward is
+89.857 ms, or **1.1110x** (11.10% fixed-batch throughput improvement and 9.99%
+latency reduction). The 0.096-ms residual is consistent with the measured
+non-selector differences: indexer logits are 0.290 ms slower under GVR while
+sparse attention is 0.194 ms faster.
+
+The B1 whole-forward ratio must not be attributed to GVR. Its selector is
+about 19 us slower than the cooperative baseline, while unrelated kernels vary
+between the separate servers. This supports retaining the production small-row
+guard.
+
+The prior event-free 0.9997x result did not execute GVR. Its 200,032-column
+shape failed the `% 64 == 0` condition, and the replacement trace shows the
+baseline selector plus state storage. The internal-event experiment did add 42
+event-record nodes, but its earlier "suppressed overlap" explanation is false:
+the uninstrumented selector is already serialized. Event overhead and the
+dispatch error were separate problems.
+
+Reports and SQLite exports are:
+
+- `/tmp/gvr_eventfree_baseline_n200000_20260815.nsys-rep` and `.sqlite`;
+- `/tmp/gvr_eventfree_gvr_n200000_20260815.nsys-rep` and `.sqlite` for B1 and
+  10K/B1024;
+- `/tmp/gvr_eventfree_gvr_long_n200000_20260815.nsys-rep` and `.sqlite` for
+  the exact 199.4K/B1024 plateau.
+
+Final validation used only this checkout's `.venv`: all 15 selected GVR and
+padded-stride tests passed (`169 deselected`), as did Ruff check/format, Python
+compilation, typos, `GVR_SUMMARY.md` Markdown lint, and `git diff --check`.
+Whole-file Markdown lint for the two historical long-form documents still
+reports their pre-existing MD060 table-spacing errors.
