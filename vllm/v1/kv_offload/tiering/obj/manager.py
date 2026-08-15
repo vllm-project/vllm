@@ -20,7 +20,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
-from vllm.v1.kv_offload.tiering.backpressure import EMABackpressureDetector
+from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobResult,
@@ -111,6 +111,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         io_threads: int = 4,
         enable_kv_events: bool = False,
         locality: str | None = None,
+        backpressure_detector: BackpressureDetector | None = None,
     ):
         """
         Args:
@@ -125,10 +126,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                 cache events are enabled globally (kv_events_config).
             locality: Whether this tier's storage is LOCAL or REMOTE relative
                 to the publishing vLLM instance.
+            backpressure_detector: Optional backpressure detector.
         """
-        backpressure_detector = EMABackpressureDetector(
-            # network FS defaults
-        )
         super().__init__(
             offloading_spec,
             primary_kv_view,

@@ -2,16 +2,86 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
+import importlib
 import time
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from vllm.v1.kv_offload.tiering.base import SecondaryTierManager
+_DEFAULT_PACKAGE = "vllm.v1.kv_offload.tiering.backpressure"
+
+
+def _import_class(name: str) -> type:
+    """Import a class by name.
+
+    If ``name`` contains a dot it is treated as a fully qualified path
+    (e.g. ``'my_package.MyDetector'``).  Otherwise it is looked up in
+    the default backpressure module
+    (``vllm.v1.kv_offload.tiering.backpressure``), so short names like
+    ``'DropStorePolicy'`` or ``'EMABackpressureDetector'`` work out of
+    the box.
+    """
+    if "." in name:
+        module_path, _, class_name = name.rpartition(".")
+    else:
+        module_path, class_name = _DEFAULT_PACKAGE, name
+    module = importlib.import_module(module_path)
+    return getattr(module, class_name)
+
+
+class BackpressurePolicy(ABC):
+    """Decides what action to take when a detector signals pressure."""
+
+    @abstractmethod
+    def should_store(self, detector: BackpressureDetector) -> bool: ...
+
+    @abstractmethod
+    def on_store_skipped(self, num_blocks: int) -> None: ...
+
+    @abstractmethod
+    def pop_stores_dropped(self) -> tuple[int, int]:
+        """Return and reset (stores_dropped, blocks_dropped)."""
+        ...
+
+    @abstractmethod
+    def reset(self) -> None: ...
+
+
+class DropStorePolicy(BackpressurePolicy):
+    """Silently drop stores to pressured tiers."""
+
+    def __init__(self):
+        self._stores_dropped: int = 0
+        self._blocks_dropped: int = 0
+
+    def should_store(self, detector) -> bool:
+        return not detector.is_under_pressure()
+
+    def on_store_skipped(self, num_blocks) -> None:
+        self._stores_dropped += 1
+        self._blocks_dropped += num_blocks
+
+    def pop_stores_dropped(self) -> tuple[int, int]:
+        stores, blocks = self._stores_dropped, self._blocks_dropped
+        self._stores_dropped = 0
+        self._blocks_dropped = 0
+        return stores, blocks
+
+    def reset(self) -> None:
+        self._stores_dropped = 0
+        self._blocks_dropped = 0
 
 
 class BackpressureDetector(ABC):
     """Observes store completion signals and determines pressure state."""
+
+    def __init__(
+        self,
+        policy: BackpressurePolicy | None = None,
+    ):
+        self._policy = policy or DropStorePolicy()
+
+    @property
+    def policy(self) -> BackpressurePolicy:
+        return self._policy
 
     @abstractmethod
     def on_store_completed(self, elapsed_s: float, num_bytes: int) -> None: ...
@@ -33,6 +103,13 @@ class BackpressureDetector(ABC):
             return
         elapsed = time.monotonic() - submit_time
         self.on_store_completed(elapsed, num_bytes)
+
+    def should_store(self, num_blocks: int) -> bool:
+        """Check policy and record skip if rejected."""
+        if not self._policy.should_store(self):
+            self._policy.on_store_skipped(num_blocks)
+            return False
+        return True
 
     @property
     def stats(self) -> dict[str, float]:
@@ -83,7 +160,18 @@ class EMABackpressureDetector(BackpressureDetector):
         high_water_s: float = DEFAULT_HIGH_WATER_S,
         low_water_s: float = DEFAULT_LOW_WATER_S,
         warmup_completions: int = DEFAULT_WARMUP_COMPLETIONS,
+        policy_cls: type[BackpressurePolicy] | str | None = None,
     ):
+        if isinstance(policy_cls, str):
+            policy_ctor = _import_class(policy_cls)
+        elif policy_cls is None:
+            policy_ctor = DropStorePolicy
+        else:
+            policy_ctor = policy_cls
+
+        policy = policy_ctor()
+
+        super().__init__(policy=policy)
         if not (0 < alpha <= 1):
             raise ValueError(f"alpha must be in (0, 1], got {alpha}")
         if low_water_s > high_water_s:
@@ -126,6 +214,7 @@ class EMABackpressureDetector(BackpressureDetector):
         self._under_pressure = False
         self._completions = 0
         self._warmup_samples.clear()
+        self._policy.reset()
 
     @property
     def store_latency_ema(self) -> float:
@@ -138,55 +227,3 @@ class EMABackpressureDetector(BackpressureDetector):
     @property
     def stats(self) -> dict[str, float]:
         return {"store_latency_ema": self._ema}
-
-
-class BackpressurePolicy(ABC):
-    """Decides what action to take for a store to a pressured tier."""
-
-    @abstractmethod
-    def should_store(
-        self,
-        tier_key: SecondaryTierManager,
-        detector: BackpressureDetector,
-    ) -> bool: ...
-
-    @abstractmethod
-    def on_store_skipped(
-        self, tier_key: SecondaryTierManager, num_blocks: int
-    ) -> None: ...
-
-    @abstractmethod
-    def pop_stores_dropped(self, tier_key: SecondaryTierManager) -> tuple[int, int]:
-        """Return and reset (stores_dropped, blocks_dropped) for a tier."""
-        ...
-
-    @abstractmethod
-    def reset(self) -> None: ...
-
-
-class DropStorePolicy(BackpressurePolicy):
-    """Silently drop stores to pressured tiers."""
-
-    def __init__(self):
-        self._stores_dropped: dict[SecondaryTierManager, int] = {}
-        self._blocks_dropped: dict[SecondaryTierManager, int] = {}
-
-    def should_store(self, tier_key, detector) -> bool:
-        return not detector.is_under_pressure()
-
-    def on_store_skipped(self, tier_key, num_blocks) -> None:
-        self._stores_dropped[tier_key] = self._stores_dropped.get(tier_key, 0) + 1
-        self._blocks_dropped[tier_key] = (
-            self._blocks_dropped.get(tier_key, 0) + num_blocks
-        )
-
-    def pop_stores_dropped(self, tier_key) -> tuple[int, int]:
-        stores = self._stores_dropped.get(tier_key, 0)
-        blocks = self._blocks_dropped.get(tier_key, 0)
-        self._stores_dropped[tier_key] = 0
-        self._blocks_dropped[tier_key] = 0
-        return stores, blocks
-
-    def reset(self) -> None:
-        self._stores_dropped.clear()
-        self._blocks_dropped.clear()

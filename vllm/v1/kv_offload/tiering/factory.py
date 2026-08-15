@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
+from vllm.v1.kv_offload.tiering.backpressure import _import_class
 from vllm.v1.kv_offload.tiering.base import SecondaryTierManager
 
 if TYPE_CHECKING:
@@ -48,13 +49,9 @@ class SecondaryTierFactory:
         tier_type = config.pop("type")
         config.pop("module_path", None)
         bp_config = config.pop("backpressure", None)
-        bp_detector = None
-        if bp_config is not None:
-            from vllm.v1.kv_offload.tiering.backpressure import (
-                EMABackpressureDetector,
-            )
-
-            bp_detector = EMABackpressureDetector(**bp_config)
+        bp_cls_name = config.pop("backpressure_cls", None)
+        detector_cls = _import_class(bp_cls_name) if bp_cls_name else None
+        bp_detector = detector_cls(**bp_config) if detector_cls else None
         return tier_cls(
             offloading_spec=offloading_spec,
             primary_kv_view=primary_kv_view,

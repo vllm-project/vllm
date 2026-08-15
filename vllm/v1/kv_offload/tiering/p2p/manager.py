@@ -246,7 +246,13 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 entry.
             **kwargs: Reserved for future tier-specific options.
         """
-        super().__init__(offloading_spec, primary_kv_view, tier_type)
+        backpressure_detector = kwargs.pop("backpressure_detector", None)
+        super().__init__(
+            offloading_spec,
+            primary_kv_view,
+            tier_type,
+            backpressure_detector=backpressure_detector,
+        )
         # Block hashes chain from NONE_HASH, seeded from PYTHONHASHSEED
         # (see init_none_hash in v1/core/kv_cache_utils.py). Peers with
         # different seeds compute different hashes for identical content, so

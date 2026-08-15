@@ -47,10 +47,6 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.kv_offload.tiering.backpressure import (
-    BackpressurePolicy,
-    DropStorePolicy,
-)
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobResult,
@@ -187,7 +183,6 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
-        policy: BackpressurePolicy | None = None,
     ):
         """
         Initialize the TieringOffloadingManager.
@@ -196,7 +191,6 @@ class TieringOffloadingManager(OffloadingManager):
             primary_tier: The primary tier manager (CPU-based).
             secondary_tiers: List of secondary tier managers (e.g., Storage,
                             Network). Can be None or empty list.
-            policy: Backpressure remediation policy.
         """
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []
@@ -239,8 +233,6 @@ class TieringOffloadingManager(OffloadingManager):
         self._tier_index: dict[SecondaryTierManager, int] = {
             tier: i for i, tier in enumerate(self.secondary_tiers)
         }
-
-        self._bp_policy: BackpressurePolicy = policy or DropStorePolicy()
 
     @property
     def _transfer_jobs(self) -> dict[JobId, JobMetadata]:
@@ -351,10 +343,7 @@ class TieringOffloadingManager(OffloadingManager):
         detector = tier.bp_detector
         if detector is None:
             return True
-        if not self._bp_policy.should_store(tier, detector):
-            self._bp_policy.on_store_skipped(tier, num_blocks)
-            return False
-        return True
+        return detector.should_store(num_blocks)
 
     def _update_backpressure(
         self, tier: SecondaryTierManager, job_metadata: JobMetadata
@@ -912,7 +901,6 @@ class TieringOffloadingManager(OffloadingManager):
         for tier in self.secondary_tiers:
             if tier.bp_detector is not None:
                 tier.bp_detector.reset()
-        self._bp_policy.reset()
 
     @override
     def get_stats(self) -> OffloadingConnectorStats | None:
@@ -921,7 +909,7 @@ class TieringOffloadingManager(OffloadingManager):
         if stats is not None and stats.is_empty():
             stats = None
 
-        self._metrics.record_backpressure(self.secondary_tiers, self._bp_policy)
+        self._metrics.record_backpressure(self.secondary_tiers)
         metrics_stats = self._metrics.take_stats()
         if metrics_stats is not None:
             if stats is None:

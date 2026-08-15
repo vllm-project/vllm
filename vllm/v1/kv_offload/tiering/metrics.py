@@ -10,9 +10,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
 from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
-from vllm.v1.kv_offload.tiering.backpressure import (
-    BackpressurePolicy,
-)
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
@@ -137,7 +134,6 @@ class TieringMetricsTracker:
     def record_backpressure(
         self,
         tiers: list[SecondaryTierManager],
-        bp_policy: BackpressurePolicy,
     ) -> None:
         for i, tier in enumerate(tiers):
             detector = tier.bp_detector
@@ -151,7 +147,7 @@ class TieringMetricsTracker:
                     ema,
                     labelvalues=label,
                 )
-            stores_dropped, blocks_dropped = bp_policy.pop_stores_dropped(tier)
+            stores_dropped, blocks_dropped = detector.policy.pop_stores_dropped()
             if stores_dropped > 0:
                 self._stats.increase_counter(
                     TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED,

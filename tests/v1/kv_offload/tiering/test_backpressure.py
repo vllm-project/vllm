@@ -308,24 +308,24 @@ class TestBackpressure:
     def test_dropped_store_count_tracked(self, setup):
         bp = self.tier.bp_detector
         bp._under_pressure = True
-        policy = self.manager._bp_policy
-        assert policy.pop_stores_dropped(self.tier) == (0, 0)
+        policy = bp.policy
+        assert policy.pop_stores_dropped() == (0, 0)
 
         self._store_blocks(to_keys([80]))
-        assert policy._stores_dropped.get(self.tier, 0) == 1
-        assert policy._blocks_dropped.get(self.tier, 0) == 1
+        assert policy._stores_dropped == 1
+        assert policy._blocks_dropped == 1
 
         self._store_blocks(to_keys([81, 82]))
-        assert policy._stores_dropped.get(self.tier, 0) == 2
-        assert policy._blocks_dropped.get(self.tier, 0) == 3
+        assert policy._stores_dropped == 2
+        assert policy._blocks_dropped == 3
 
     def test_metrics_reported_via_get_stats(self, setup):
         bp = self.tier.bp_detector
         bp._under_pressure = True
         bp.store_latency_ema = 2.5
-        policy = self.manager._bp_policy
-        policy._stores_dropped[self.tier] = 5
-        policy._blocks_dropped[self.tier] = 12
+        policy = bp.policy
+        policy._stores_dropped = 5
+        policy._blocks_dropped = 12
 
         stats = self.manager.get_stats()
         assert stats is not None
@@ -339,8 +339,8 @@ class TestBackpressure:
         assert reduced[f"{blocks_key}:('1:delayed',)"] == 12
 
         # Dropped counts reset after get_stats.
-        assert policy._stores_dropped.get(self.tier, 0) == 0
-        assert policy._blocks_dropped.get(self.tier, 0) == 0
+        assert policy._stores_dropped == 0
+        assert policy._blocks_dropped == 0
 
     def test_reset_cache_clears_backpressure(self, setup):
         bp = self.tier.bp_detector
