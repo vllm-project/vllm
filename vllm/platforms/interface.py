@@ -641,10 +641,7 @@ class Platform:
 
         # Phase 2: Align block/mamba sizes for hybrid models
         # (may override user settings).
-        if (
-            model_config.is_hybrid
-            and not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
-        ):
+        if model_config.is_hybrid:
             cls._align_hybrid_block_size(vllm_config, backend_cls)
 
         # Phase 3: Align block/page sizes when multiple KV dtypes share the

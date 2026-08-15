@@ -436,11 +436,16 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None:
+            cache_dtype = vllm_config.cache_config.cache_dtype
+            if cache_dtype.startswith("nvfp4") or cache_dtype == "fp8_k_nvfp4_v":
+                return [64]
+
         # Page sizes >= 128 only run on the trtllm-gen dynamic kernel (GQA/MQA
         # on Blackwell); advertise them only when usable so selection never
         # picks a large kernel block we cannot serve.
         use_large_pages = False
-        vllm_config = get_current_vllm_config_or_none()
         if vllm_config is not None and vllm_config.model_config is not None:
             pc = vllm_config.parallel_config
             mc = vllm_config.model_config
