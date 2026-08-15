@@ -257,6 +257,8 @@ class Gemma4Config(VerifyAndUpdateConfig):
 
         max_head_dim = max(head_dims.values())
 
+        from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
+
         if is_fa_version_supported(4) and max_head_dim <= 512:
             if (
                 vllm_config.attention_config.flash_attn_version is None
