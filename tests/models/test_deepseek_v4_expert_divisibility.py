@@ -61,9 +61,7 @@ def test_mega_moe_experts_raises_value_error_when_not_divisible_by_ep_size(
 def test_fused_moe_experts_raises_value_error_when_not_divisible_by_tp_size(
     monkeypatch,
 ):
-    monkeypatch.setattr(
-        deepseek_v4_model, "get_tensor_model_parallel_rank", lambda: 0
-    )
+    monkeypatch.setattr(deepseek_v4_model, "get_tensor_model_parallel_rank", lambda: 0)
 
     moe = _make_moe()
     moe.tp_size = 3
