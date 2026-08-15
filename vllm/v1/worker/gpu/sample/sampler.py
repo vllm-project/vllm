@@ -53,7 +53,7 @@ class Sampler:
         self.bad_words_state = BadWordsState(req_states)
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
         self.thinking_budget_state = ThinkingBudgetState(req_states, reasoning_config)
-        self._needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
+        self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
         self.use_flashinfer = (
@@ -72,7 +72,7 @@ class Sampler:
 
         states = self.sampling_states
         temperature = states.temperature.np[req_idx]
-        self._needs_logits_processing[req_idx] = (
+        self.needs_logits_processing[req_idx] = (
             self.logit_bias_state.use_logit_bias[req_idx]
             or self.penalties_state.use_penalty[req_idx]
             or self.bad_words_state.num_bad_words.np[req_idx] > 0
@@ -189,7 +189,7 @@ class Sampler:
         expanded_local_pos: torch.Tensor,
         skip_top_k_top_p: bool = False,
     ) -> torch.Tensor:
-        if not self._requires_logits_processing(idx_mapping_np):
+        if not np.any(self.needs_logits_processing[idx_mapping_np]):
             return logits
 
         # Copy logits to a new FP32 tensor.
@@ -244,9 +244,6 @@ class Sampler:
         return self.sampling_states.apply_top_k_top_p(
             logits, expanded_idx_mapping, idx_mapping_np
         )
-
-    def _requires_logits_processing(self, idx_mapping_np: np.ndarray) -> bool:
-        return bool(np.any(self._needs_logits_processing[idx_mapping_np]))
 
     def sample(
         self,

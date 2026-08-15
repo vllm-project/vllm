@@ -67,7 +67,7 @@ def test_logits_processing_cache_matches_request_features(
     sampler = _make_sampler()
     sampler.add_request(3, prompt_len=1, sampling_params=sampling_params)
 
-    assert sampler._needs_logits_processing[3] == expected
+    assert sampler.needs_logits_processing[3] == expected
 
 
 def test_logits_processing_cache_is_overwritten_when_slot_is_reused():
@@ -75,7 +75,7 @@ def test_logits_processing_cache_is_overwritten_when_slot_is_reused():
     sampler.add_request(3, 1, SamplingParams.for_sampler_warmup())
     sampler.add_request(3, 1, SamplingParams())
 
-    assert not sampler._needs_logits_processing[3]
+    assert not sampler.needs_logits_processing[3]
 
 
 def test_logits_processing_cache_only_checks_active_requests():
@@ -86,5 +86,5 @@ def test_logits_processing_cache_only_checks_active_requests():
     sampling_only = np.array([0], dtype=np.int32)
     with_processing = np.array([0, 2], dtype=np.int32)
 
-    assert not sampler._requires_logits_processing(sampling_only)
-    assert sampler._requires_logits_processing(with_processing)
+    assert not np.any(sampler.needs_logits_processing[sampling_only])
+    assert np.any(sampler.needs_logits_processing[with_processing])
