@@ -1872,29 +1872,84 @@ Every ordinal has 384 direct measurements. Selectors 4--21 individually span
 13.739x--13.827x; their consistency is measured, not extrapolated from
 selector 4.
 
-The standalone 487.619/283.104-us result is therefore within 5% of the real
-model's first call and gives nearly the same 1.72--1.74x ratio. It never
-measured an average layer. The 4.55x ratio is the sum over a very heterogeneous
-21-call model forward, dominated by calls 4--21. The original document-prompt
-trace reproduces the same ordinal pattern: 284 us, 485 us, and 1,214 us for the
-first three GVR calls, followed by about 45 us for each remaining call.
+### Paper-alignment audit: the 13.8x later-layer result is not credible
+
+Comparing the table with the
+[GVR paper](https://arxiv.org/abs/2604.22312) uncovered a first-principles
+failure. The paper profiles real DeepSeek-V3.2 logits at about 70.7K tokens and
+reports 1.59x--2.04x average per-layer speedup, 1.88x overall, and 2.42x as the
+largest sampled per-layer/per-step speedup. Its early layers 0--1 have only
+about 1--2% previous-step top-k overlap and require 2.1--2.7 threshold-search
+iterations; layers 20--60 have about 35--50% overlap and require 1.1--1.6
+iterations. Thus weaker early layers and faster deeper layers are qualitatively
+expected. An abrupt 13.8x plateau is not.
+
+The 44.5-us number also violates the memory-traffic lower bound. A nominal
+B1024-by-199,400 FP32 selector input contains:
+
+```text
+1024 * 199400 * 4 = 816,742,400 bytes
+816,742,400 / 44.5 us = 18.4 TB/s
+```
+
+That is the bandwidth required for only one read. The local GB200 has about
+8 TB/s HBM bandwidth, while this GVR implementation requires at least a rung
+count scan and a candidate-collection scan, plus hint, refinement, and output
+traffic. Score distribution can change the number of refinement passes, but
+it cannot remove the mandatory full-row scans.
+
+A direct CUDA-graph diagnostic used the same B1024-by-W200K FP32 launch shape
+and changed only the runtime `seq_lens`:
+
+| Runtime sequence length | GVR latency |
+| ---: | ---: |
+| 1 | 8.879 us |
+| 2,048 | 8.358 us |
+| 4,096 | 41.039 us |
+| 8,192 | 47.235 us |
+| 16,384 | 66.343 us |
+| 32,768 | 87.782 us |
+
+The observed 44--45 us for selectors 4--21 matches a 4K--8K effective-row
+path, not a 199.4K full-row path. Because all indexer layers in one forward
+must receive the same sequence lengths, temporal overlap or a favorable layer
+distribution cannot explain this transition. The leading hypotheses are that
+selectors 4--21 see an incorrect runtime length, that an earlier kernel
+corrupts metadata, or that another unintended early-exit condition is active.
+The Nsight trace records launch shape but not argument values, so it cannot
+identify which hypothesis is correct.
+
+The [IndexCache paper](https://arxiv.org/abs/2603.12201) supports only the
+broader observation that layers are heterogeneous. It studies cross-layer
+index reuse, not GVR's same-layer temporal reuse: adjacent layers show
+70--100% top-k overlap, with distinct clusters and sensitive early/transition
+layers. That explains why GLM can retain a nonuniform subset of indexer layers;
+it does not predict a 13.8x top-k kernel speedup for the retained layers.
+
+The 4.55x selector ratio and 1.1110x forward ratio are therefore quarantined.
+Amdahl's Law shows that the measured forward difference equals the measured
+selector difference, but an incorrect early exit would satisfy the same
+identity. Before using either number, native inputs from selectors 4--21 must
+be checked against exact top-k, their runtime sequence lengths must be read
+back, and a profiler must confirm full-row memory traffic.
+
+The standalone 487.619/283.104-us result is within 5% of the traced first call
+and gives nearly the same 1.72--1.74x ratio. It never measured an average
+layer. The traced 4.55x ratio is dominated by the now-quarantined calls 4--21.
+The original document-prompt trace reproduces the same ordinal pattern, but
+reproducing a likely wrong-length path does not validate it.
 
 All 21 exact-B1024 GVR calls use the same compiled launch configuration: grid
 1024, block size 512, 64 registers per thread, and 60,140 bytes of dynamic
 shared memory. The model also owns separate GVR state buffers for every hidden
-layer. The large per-layer variation is therefore an algorithm/data-path
-effect, not different CTA tuning or accidentally shared layer state. GVR's
-rung admission, fallback, and candidate-processing work depends on each
-layer's score distribution and temporal hints; the current trace does not
-include counters that identify which of those mechanisms makes calls 4--21 so
-cheap.
+layer. Those facts rule out launch tuning as the source of the timing cliff,
+but they do not show that each call saw the same runtime `seq_lens` or executed
+the normal full-row path.
 
-The existing trace proves the aggregate 4.55x selector ratio and its causal
-connection to the 1.1110x forward result through Amdahl's Law. It does not
-record rung choice or candidate count, so attributing the remaining difference
-among hint quality, fallback frequency, and candidate count would require
-capturing exact B1024 tensors from all 21 layers or adding event-free
-device-side diagnostic counters.
+The trace proves the aggregate timing ratio and its accounting connection to
+the graph latency; it does not prove exact selector behavior. The next
+diagnostic must inspect runtime lengths and value-set correctness, not merely
+rung choice or candidate counts.
 
 The B1 whole-forward ratio must not be attributed to GVR. Its selector is
 about 19 us slower than the cooperative baseline, while unrelated kernels vary
@@ -1923,6 +1978,11 @@ Whole-file Markdown lint for the two historical long-form documents still
 reports their pre-existing MD060 table-spacing errors.
 
 ## Independent BEAM-corpus revalidation
+
+> **Quarantined by the later paper-alignment audit above.** This section
+> reproduces the same timing path on independent input, but the 44-us calls
+> fail the full-row bandwidth bound. Reproduction is not correctness
+> validation.
 
 The 4.546x real-model selector ratio was independently revalidated with the
 [Kimi Vendor Verifier BEAM corpus][beam]
@@ -1975,9 +2035,10 @@ Using the median per-step TP-rank mean, baseline selector share is 12.74% and
 the measured selector totals are 12.716 ms versus 2.795 ms. Amdahl's Law then
 predicts `99.814 / (99.814 - 12.716 + 2.795) = 1.1104x`; the directly observed
 critical-path result is 1.1130x. The predicted forward is 89.993 ms, only
-0.311 ms slower than the measured 89.682 ms. Thus the large number is a
-selector-only speedup, while the independently reproduced whole-forward gain
-is about 11.3%.
+0.311 ms slower than the measured 89.682 ms. Thus the trace attributes the
+graph difference to the selector path. It does not establish that the path
+performed exact full-length selection; the 11.3% whole-forward difference is
+quarantined with the selector result.
 
 The valid reports and exports are
 `/tmp/gvr_beam_baseline_valid_20260815.{nsys-rep,sqlite}` and
@@ -1990,6 +2051,10 @@ accuracy.
 
 ## Native 21st-selector microbenchmark
 
+> **Quarantined by the paper-alignment audit.** The timing is directly
+> observed, but its 44-us duration is consistent with only a 4K--8K effective
+> row and cannot represent the claimed 199.4K full-row execution.
+
 The requested kernel time does not require adding events or capture nodes to
 the CUDA graph. The normal BEAM model traces above are event-free Nsight
 CUDA/NVTX captures. Sorting the 21 selector kernels on their shared stream 19
@@ -2001,7 +2066,8 @@ within each exact-B1024 graph replay gives the following 21st-call result over
 | Baseline | 612.256 us | 611.991 us | 608.256--614.496 us |
 | GVR | 44.480 us | 44.544 us | 43.904--45.408 us |
 
-The directly observed individual-kernel speedup is therefore 13.765x. Nsight
+The directly observed timing ratio is 13.765x, but it is not a valid full-row
+speedup until runtime length and output correctness are verified. Nsight
 reports one stable configuration for every retained 21st call: baseline uses
 grid/block 1024/1024 with 60 registers and 131,072 bytes dynamic shared memory;
 GVR uses grid/block 1024/512 with 64 registers and 60,140 bytes dynamic shared

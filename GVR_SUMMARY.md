@@ -1,10 +1,38 @@
 # GVR performance summary
 
-## Corrected bottom line
+## Current bottom line: the 4.55x result is quarantined
 
-GVR produces a real end-to-end decode-forward speedup when it actually
-dispatches on a large, long-context batch. The corrected event-free result for
-GLM-5.2-NVFP4 at 199.4K context and batch 1024 is:
+The 4.55x selector and 1.1110x forward results below are reproducible trace
+observations, but they are **not currently accepted as valid GVR performance
+results**. A comparison with the GVR paper exposed a first-principles failure:
+selectors 4--21 report about 44.5 us while ostensibly processing 1,024 rows of
+199.4K FP32 scores.
+
+One read of that tensor is 816,742,400 bytes. Finishing it in 44.5 us would
+require 18.4 TB/s before counting the second mandatory scan, hint reads,
+candidate refinement, or output writes. The local GB200 provides about 8 TB/s
+of HBM bandwidth. The timing therefore cannot represent a full-length exact
+GVR execution.
+
+A direct diagnostic using the same B1024-by-W200K launch shape measured 41.0 us
+with runtime `seq_lens=4096` and 47.2 us with `seq_lens=8192`. The 44--45-us
+model timings have the fingerprint of a 4K--8K effective row, not a 199.4K
+row. Since sequence lengths must not change across layers in one forward, score
+distribution and temporal correlation alone cannot explain the transition
+after selector 3. The leading hypotheses are a wrong runtime length, memory
+corruption, or another early-exit condition. The trace does not expose kernel
+arguments, so it does not distinguish them.
+
+Amdahl's Law explains why the graph becomes faster if those selectors skip
+work; it does not prove that the skipped work is legitimate. The 1.1110x result
+must remain quarantined until selectors 4--21 are value-checked against exact
+top-k on their native inputs and their runtime lengths/full-row traffic are
+verified.
+
+## Quarantined trace result
+
+The event-free trace reported the following result for GLM-5.2-NVFP4 at 199.4K
+context and batch 1024. It is retained for diagnosis, not as a valid benchmark:
 
 | Metric | Baseline | GVR |
 | --- | ---: | ---: |
@@ -23,9 +51,9 @@ Amdahl's Law predicts:
 99.828 / (99.828 - 12.662 + 2.785) = 1.1098x
 ```
 
-The 1.1098x prediction and 1.1110x observation differ by about 0.1 ms. This is
-the first result in the investigation that is both dispatch-validated and
-explainable from first principles.
+The 1.1098x prediction and 1.1110x observation differ by about 0.1 ms. This
+shows internally consistent timing attribution, but not selector correctness:
+an unintended early exit produces the same Amdahl accounting.
 
 ### Independent real-corpus reproduction
 
@@ -45,7 +73,8 @@ from the opposite implementation. The original 602.939/132.639-us result is
 therefore reproducible: the real BEAM prompt changes either absolute time by
 less than 0.4% and reproduces the 4.546x ratio. Amdahl's Law predicts 1.1104x
 from the independently measured 12.74% baseline selector share; the observed
-forward result is 1.1130x.
+forward result is 1.1130x. This reproduces the anomalous execution path, not
+its correctness; the result remains quarantined by the bandwidth check above.
 
 [beam]: https://github.com/MoonshotAI/Kimi-Vendor-Verifier/tree/main/beam
 
@@ -185,9 +214,9 @@ to 0.506x, while selectors 4--21 individually occupy the narrow
 Thus the standalone number is numerically valid for a repeated first-layer
 input, but it was misleadingly labeled as if it predicted a real B1024
 21-layer average. All 21 production calls use the same launch configuration
-and separate per-layer state. Their large variation comes from GVR's
-data-dependent admission/fallback path; identifying the precise rung and
-candidate counts requires additional device-side counters.
+and separate per-layer state. The bandwidth audit now rules out explaining
+the 44-us later calls solely through data-dependent admission or fallback.
+Their runtime lengths and exact outputs must be checked first.
 
 ## FP16 baseline experiment
 
@@ -210,17 +239,22 @@ evaluation is still required before enabling FP16 by default.
 
 ## Current recommendations
 
-1. Keep the production row guard: GVR loses to the cooperative selector at B1
-   and B8 and crosses over near B32 on long contexts.
-2. Require dispatch validation in every benchmark: count 21 GVR launches and
-   zero fallback selectors per retained model forward.
-3. Use widths divisible by 64 or implement and validate an exact tail path
+1. Do not use the quarantined 4.55x selector or 1.1110x forward numbers for a
+   production decision.
+2. Verify runtime `seq_lens`, full-row traffic, and exact output values for
+   selectors 4--21 before rerunning the end-to-end comparison.
+3. Keep the production row guard: validated standalone GVR loses to the
+   cooperative selector at B1 and B8 and crosses over near B32 on long
+   contexts.
+4. Require both dispatch and correctness validation in every benchmark;
+   counting the expected kernel names is necessary but not sufficient.
+5. Use widths divisible by 64 or implement and validate an exact tail path
    before broadening column eligibility.
-4. Use event-free graph-node attribution for component accounting. Internal
+6. Use event-free graph-node attribution for component accounting. Internal
    events are useful diagnostics only after separately quantifying their graph
    overhead.
-5. Treat **1.1110x at 199.4K/B1024** as the corrected large-case result. Do not
-   use the superseded 0.9997x result.
+7. Retain **1.1110x at 199.4K/B1024** only as a quarantined trace observation;
+   neither it nor the superseded 0.9997x result is a valid large-case result.
 
 The detailed experiment history remains in [GVR.md](GVR.md) and
 [GVR_ANS.md](GVR_ANS.md). This file is the concise source of truth.
