@@ -44,6 +44,9 @@ KV_CACHE_DTYPE = ["auto", "fp8"]
 
 RESHAPE_FLASH_IMPLEMENTATIONS = ["cuda", "triton"]
 
+# (head_size_k, head_size_v); 192/128 is the MiMo-V2 shape.
+DIFFKV_HEAD_SIZES = [(192, 128), (128, 128), (64, 64)]
+
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -424,6 +427,115 @@ def test_reshape_and_cache_flash(
     else:
         torch.testing.assert_close(key_cache_compact, cloned_key_cache)
         torch.testing.assert_close(value_cache_compact, cloned_value_cache)
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_sizes", DIFFKV_HEAD_SIZES)
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@torch.inference_mode()
+def test_triton_reshape_and_cache_flash_diffkv(
+    num_tokens: int,
+    num_heads: int,
+    head_sizes: tuple[int, int],
+    block_size: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    kv_cache_dtype: str,
+) -> None:
+    """Key and value land in their own halves of the shared DiffKV cache row.
+
+    The DiffKV kernel packs both projections into one
+    [num_blocks, block_size, num_heads, head_size_k + head_size_v] tensor, so a
+    wrong tile bound writes value bytes over key bytes (or past the row) rather
+    than failing loudly, and a padded token can scribble on a live slot.
+    Nothing else in the suite covers it.
+    """
+    from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+        triton_reshape_and_cache_flash_diffkv,
+    )
+
+    head_size_k, head_size_v = head_sizes
+    if kv_cache_dtype == "fp8" and not current_platform.has_device_capability(89):
+        pytest.skip("Triton fp8 KV cache needs native fp8e4nv (SM89+).")
+
+    set_random_seed(seed)
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    num_blocks = 128
+    num_slots = block_size * num_blocks
+    slot_mapping_lst = random.sample(range(num_slots), num_tokens)
+    # Padded tokens carry slot -1 and must leave the cache untouched; the
+    # whole-tensor comparison below is what catches a stray write.
+    slot_mapping_lst[-2:] = [-1, -1]
+    slot_mapping = torch.tensor(slot_mapping_lst, dtype=torch.long, device=device)
+
+    key = torch.randn(num_tokens, num_heads, head_size_k, dtype=dtype, device=device)
+    value = torch.randn(num_tokens, num_heads, head_size_v, dtype=dtype, device=device)
+    k_scale = (key.amax() / 64.0).to(torch.float32)
+    v_scale = (value.amax() / 64.0).to(torch.float32)
+
+    cache_dtype = current_platform.fp8_dtype() if kv_cache_dtype == "fp8" else dtype
+    kv_cache = torch.randn(
+        num_blocks,
+        block_size,
+        num_heads,
+        head_size_k + head_size_v,
+        dtype=torch.float32,
+        device=device,
+    ).to(cache_dtype)
+
+    def dequant(x: torch.Tensor) -> torch.Tensor:
+        """Each half of the row carries its own scale, so dequantize halves."""
+        if kv_cache_dtype != "fp8":
+            return x.clone()
+        halves = [
+            scaled_dequantize(
+                half.flatten(0, 2).contiguous(),
+                scale,
+                group_shape=None,
+                out_dtype=torch.float16,
+            ).reshape(half.shape)
+            for half, scale in (
+                (x[..., :head_size_k], k_scale),
+                (x[..., head_size_k:], v_scale),
+            )
+        ]
+        return torch.cat(halves, dim=-1)
+
+    # Reference: the unquantized rows written into a dequantized copy, then
+    # compared against the dequantized kernel result (same pattern as
+    # test_reshape_and_cache_flash).
+    expected = dequant(kv_cache)
+
+    triton_reshape_and_cache_flash_diffkv(
+        key,
+        value,
+        kv_cache,
+        slot_mapping,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+    )
+
+    for i, slot in enumerate(slot_mapping_lst):
+        if slot < 0:
+            continue
+        block_idx, block_offset = slot // block_size, slot % block_size
+        expected[block_idx, block_offset, :, :head_size_k] = key[i]
+        expected[block_idx, block_offset, :, head_size_k:] = value[i]
+
+    result = dequant(kv_cache)
+    if kv_cache_dtype == "fp8":
+        torch.testing.assert_close(result, expected, atol=0.001, rtol=0.1)
+    else:
+        torch.testing.assert_close(result, expected)
 
 
 @torch.inference_mode()
