@@ -238,6 +238,10 @@ class SpeculativeConfig:
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
 
+    enable_adaptive_verification: bool = False
+    """Whether to adaptively size the draft-verification budget from per-request
+    confidence. Currently only supported for method="dspark"."""
+
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
         """Mean acceptance length to unconditional per-position rates, using
@@ -626,8 +630,7 @@ class SpeculativeConfig:
             hf_config.model_type = "inkling_mtp"
             hf_config.update(
                 {
-                    # Inkling currently exposes only the first checkpoint depth.
-                    "n_predict": 1,
+                    "n_predict": checkpoint_depths,
                     "num_nextn_predict_layers": checkpoint_depths,
                     "chain_hidden_post_norm": mtp_config.get(
                         "chain_hidden_post_norm", False
@@ -940,7 +943,11 @@ class SpeculativeConfig:
                     self.method = "eagle"
                 elif "eagle3" in self.draft_model_config.model.lower():
                     self.method = "eagle3"
-                elif "dflash" in self.draft_model_config.model.lower():
+                elif (
+                    "dflash" in self.draft_model_config.model.lower()
+                    or "MuseGlimmerAssistantModel"
+                    in self.draft_model_config.architectures
+                ):
                     self.method = "dflash"
                 elif (
                     "dspark" in self.draft_model_config.model.lower()
@@ -1014,6 +1021,9 @@ class SpeculativeConfig:
                     self.draft_model_config.hf_config.architectures = [
                         "DSparkDraftModel"
                     ]
+                    self.draft_model_config.quantization = (
+                        self.target_model_config.quantization
+                    )
                     self.update_arch_()
                 elif (
                     self.method == "dspark"
@@ -1076,43 +1086,11 @@ class SpeculativeConfig:
                         "`num_speculative_tokens` was not provided"
                     )
 
-                if (
-                    self.draft_model_config.hf_config.model_type == "inkling_mtp"
-                    and self.num_speculative_tokens != 1
-                ):
-                    raise ValueError(
-                        "Inkling MTP currently supports exactly one speculative token"
-                    )
-
                 if self.dspark_draft_topk is not None and self.method != "dspark":
                     raise ValueError("dspark_draft_topk is only supported by DSpark")
 
                 dspark_draft_topk = None
                 if self.method == "dspark":
-                    # DSpark is a semi-autoregressive *block* drafter. A
-                    # speculative length smaller than the checkpoint's block
-                    # feeds the block / Markov-head machinery an unsupported
-                    # layout and yields incorrect (garbled) output rather than
-                    # merely lower acceptance. Require num_speculative_tokens to
-                    # be at least the block size (e.g. 5 or 7 for DeepSeek-V4).
-                    dspark_block_size = getattr(
-                        self.draft_model_config.hf_config,
-                        "dspark_block_size",
-                        None,
-                    )
-                    if (
-                        dspark_block_size is not None
-                        and self.num_speculative_tokens < dspark_block_size
-                    ):
-                        raise ValueError(
-                            "DSpark requires num_speculative_tokens >= "
-                            f"dspark_block_size ({dspark_block_size}); got "
-                            f"{self.num_speculative_tokens}. Smaller values "
-                            "produce incorrect output. Use "
-                            f"num_speculative_tokens={dspark_block_size} or "
-                            "larger (e.g. 7)."
-                        )
-
                     hf_config = self.draft_model_config.hf_config
                     dspark_draft_topk = self.dspark_draft_topk
                     if dspark_draft_topk is None:
@@ -1159,6 +1137,10 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
+
+        if self.method != "dspark" and self.enable_adaptive_verification:
+            raise ValueError("Adaptive verification only supported with DSpark")
+
         return self
 
     def _validate_suffix_decoding(self):
@@ -1437,19 +1419,44 @@ class SpeculativeConfig:
 
     @property
     def max_num_new_slots_for_drafting(self) -> int:
+        """Return the maximum additional drafting slots per request.
+
+        The scheduler budget already includes one query slot per decoding request.
+        Let K be ``num_speculative_tokens``. Standard configurations require:
+
+        ==================== ============= ======== ================
+        Algorithm            Method        Parallel Additional slots
+        ==================== ============= ======== ================
+        EAGLE3               eagle3        No       0
+        P-EAGLE              eagle3        Yes      K - 1
+        DFlash               dflash        Yes      K
+        DSpark               dspark        Yes      K - 1
+        MTP                  mtp           No       0
+        N-gram               ngram         No       0
+        Draft model          draft_model   No       1
+        PARD                 draft_model   Yes      K
+        ==================== ============= ======== ================
         """
-        Calculate the maximum number of new slots that might be added to the batch
-        when drafting.
-        """
-        slots_per_req = 0  # for serial non-draft-model methods, no change needed
+        num_draft_tokens = self.num_speculative_tokens
+
+        if self.use_dflash():
+            # DFlash uses one bonus query followed by K mask queries.
+            return num_draft_tokens
+
         if self.parallel_drafting:
-            # For parallel drafting, we need one new slot per 'masked' token
-            slots_per_req = self.num_speculative_tokens - 1
+            if self.uses_draft_model():
+                # PARD does not shift the existing input, so all K query
+                # positions require additional slots.
+                return num_draft_tokens
+
+            # The existing query is reused; only masked queries need new slots.
+            return num_draft_tokens - 1
+
         if self.uses_draft_model():
-            # For draft model-based speculation, we need one new slot per request
-            # Since we do not slice the draft tokens
-            slots_per_req += 1
-        return slots_per_req
+            # The autoregressive draft-model input retains one unsliced token.
+            return 1
+
+        return 0
 
     def use_gemma4_mtp(self) -> bool:
         return (
