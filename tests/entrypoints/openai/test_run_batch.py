@@ -1080,3 +1080,129 @@ async def test_dispatch_batch_respects_max_inflight(tmp_path, monkeypatch):
 
     assert peak <= max_inflight
     assert len(output_path.read_text().strip().split("\n")) == len(requests)
+
+
+def _make_streaming_aiohttp_mocks(body: bytes, chunk_size: int = 8):
+    """Mock a ClientSession whose GET body is read with content.iter_chunked."""
+
+    async def iter_chunked(_size):
+        for start in range(0, len(body), chunk_size):
+            yield body[start : start + chunk_size]
+
+    mock_resp = MagicMock()
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.content.iter_chunked = iter_chunked
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(return_value=mock_resp)
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    return mock_session
+
+
+@pytest.mark.asyncio
+async def test_local_input_path_downloads_a_url(tmp_path):
+    """A URL body is staged to a local file, not held in memory."""
+    payload = ("\n".join(INPUT_BATCH.strip().split("\n")[:2]) + "\n").encode()
+    session = _make_streaming_aiohttp_mocks(payload)
+
+    with patch(
+        "vllm.entrypoints.openai.run_batch.aiohttp.ClientSession",
+        return_value=session,
+    ):
+        async with local_input_path(
+            "https://example.com/batch.jsonl", str(tmp_path)
+        ) as path:
+            assert path != "https://example.com/batch.jsonl"
+            with open(path, "rb") as f:
+                assert f.read() == payload
+            assert validate_batch(path) == 2
+
+
+@pytest.mark.asyncio
+async def test_batch_output_writer_uploads_url_output_once(tmp_path, monkeypatch):
+    """A URL destination is staged locally and uploaded after the batch."""
+    uploaded = {}
+
+    async def fake_upload_data(output_url, data_or_file, from_file):
+        uploaded["url"] = output_url
+        uploaded["from_file"] = from_file
+        with open(data_or_file, encoding="utf-8") as f:
+            uploaded["content"] = f.read()
+
+    monkeypatch.setattr(run_batch_module, "upload_data", fake_upload_data)
+
+    async with batch_output_writer(
+        "https://example.com/output.jsonl", str(tmp_path)
+    ) as output_file:
+        print("first", file=output_file)
+        print("second", file=output_file)
+        assert not uploaded, "upload must wait until the batch finishes"
+
+    assert uploaded == {
+        "url": "https://example.com/output.jsonl",
+        "from_file": True,
+        "content": "first\nsecond\n",
+    }
+
+
+@pytest.mark.asyncio
+async def test_batch_output_writer_url_output_uploads_nothing_on_failure(
+    tmp_path, monkeypatch
+):
+    """A failed batch uploads nothing, so a URL output is all or nothing.
+
+    Incremental writes only make a local output recoverable; this pins the
+    documented limitation so it cannot change silently.
+    """
+    upload = AsyncMock()
+    monkeypatch.setattr(run_batch_module, "upload_data", upload)
+
+    with pytest.raises(RuntimeError):
+        async with batch_output_writer(
+            "https://example.com/output.jsonl", str(tmp_path)
+        ) as output_file:
+            print("first", file=output_file)
+            raise RuntimeError("batch failed")
+
+    upload.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_batch_cancels_inflight_on_failure(tmp_path, monkeypatch):
+    """An aborted batch must not leave requests running behind it."""
+    requests = [
+        {"custom_id": f"request-{i}", "method": "POST", "url": "/v1/chat/completions"}
+        for i in range(8)
+    ]
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text("\n".join(json.dumps(r) for r in requests) + "\n")
+
+    started: list[asyncio.Task | None] = []
+
+    async def fake_run_one_request(request_json, endpoint_registry):
+        started.append(asyncio.current_task())
+        if len(started) == 1:
+            raise RuntimeError("request blew up")
+        await asyncio.Event().wait()  # never finishes on its own
+
+    monkeypatch.setattr(run_batch_module, "run_one_request", fake_run_one_request)
+
+    with (
+        open(tmp_path / "output.jsonl", "w", encoding="utf-8") as output_file,
+        pytest.raises(RuntimeError, match="request blew up"),
+    ):
+        await dispatch_batch(
+            str(input_path),
+            output_file,
+            {},
+            BatchProgressTracker(),
+            max_inflight=4,
+        )
+
+    await asyncio.sleep(0)
+    assert all(task is not None and task.done() for task in started), (
+        "requests were left in flight"
+    )
