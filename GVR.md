@@ -1851,6 +1851,11 @@ medians for each call ordinal over all exact-B1024 graph replays and TP ranks:
 | 4--21, mean of the 18 ordinal medians | 612.347 us | 44.452 us | 13.775x |
 | Sum of all 21 ordinal medians | 12.690 ms | 2.793 ms | 4.544x |
 
+The 4--21 row is a compact summary, not an extrapolation from call 4. Each of
+those 18 ordinals has 384 direct measurements. Their individual median
+speedups range from 13.739x to 13.827x; call 4 is 13.776x and call 21 is
+13.765x.
+
 The standalone 487.619/283.104-us result is therefore within 5% of the real
 model's first call and gives nearly the same 1.72--1.74x ratio. It never
 measured an average layer. The 4.55x ratio is the sum over a very heterogeneous

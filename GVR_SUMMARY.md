@@ -155,6 +155,10 @@ Call 2 is 1.119x, call 3 is a 0.506x regression, and calls 4--21 average
 612.347/44.452 us, or 13.775x. Summing the 21 per-call medians gives
 12.690/2.793 ms, or 4.544x.
 
+Calls 4--21 were each measured separately over 384 exact-B1024 replays; this
+is not an extrapolation from call 4. Their individual median speedups occupy
+the narrow 13.739x--13.827x range.
+
 Thus the standalone number is numerically valid for a repeated first-layer
 input, but it was misleadingly labeled as if it predicted a real B1024
 21-layer average. All 21 production calls use the same launch configuration
