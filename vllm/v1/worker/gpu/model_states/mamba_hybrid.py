@@ -12,7 +12,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
-from vllm.v1.attention.backends.recoverssm_metadata import RecoverSSMMetadata
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
@@ -21,6 +20,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
+from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 from vllm.v1.worker.mamba_utils import (
     MambaSpecDecodeGPUContext,
     preprocess_mamba_align_fused_kernel,
@@ -81,14 +81,15 @@ class MambaHybridModelState(DefaultModelState):
         # kernel reusing the postprocess copy machinery, so the per-step src
         # columns and the running state_idx are kept GPU-resident.
         self._align_mode = self.cache_config.mamba_cache_mode == "align"
-        self._recoverssm_align = (
-            self._align_mode and self.cache_config.use_kda_recoverssm
-        )
-        self._recoverssm_step: tuple[RecoverSSMMetadata, ...] | None = None
-        if self._recoverssm_align:
-            self._recoverssm_committed_gpu = torch.zeros(
-                self.max_num_reqs, dtype=torch.bool, device=self.device
+        self.recoverssm = (
+            RecoverSSMState(
+                self.max_num_reqs,
+                self.device,
+                align=self._align_mode,
             )
+            if self.cache_config.use_kda_recoverssm
+            else None
+        )
         if self._align_mode:
             self._mamba_state_idx_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
@@ -294,15 +295,11 @@ class MambaHybridModelState(DefaultModelState):
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
         )
-        if self.cache_config.use_kda_recoverssm and not for_capture:
-            self._recoverssm_step = tuple(
-                metadata
-                for groups in attn_groups
-                for group in groups
-                if isinstance(
-                    metadata := attn_metadata[group.layer_names[0]],
-                    RecoverSSMMetadata,
-                )
+        if self.recoverssm is not None:
+            self.recoverssm.record_step(
+                attn_metadata,
+                attn_groups,
+                for_capture=for_capture,
             )
         return attn_metadata
 
@@ -312,11 +309,14 @@ class MambaHybridModelState(DefaultModelState):
         num_sampled: torch.Tensor | int,
         num_computed_tokens: torch.Tensor | None = None,
     ) -> None:
-        if self.cache_config.use_kda_recoverssm:
-            if isinstance(num_sampled, int):
-                self._recoverssm_step = None
-            else:
-                self._commit_recoverssm_state(num_sampled, idx_mapping)
+        recoverssm_committed = None
+        if self.recoverssm is not None:
+            self.recoverssm.commit_step(
+                num_sampled,
+                idx_mapping,
+                self._mamba_state_idx_gpu if self._align_mode else None,
+            )
+            recoverssm_committed = self.recoverssm.committed
 
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
@@ -331,14 +331,14 @@ class MambaHybridModelState(DefaultModelState):
                 idx_mapping,
                 num_sampled,
                 self.num_accepted_tokens_gpu,
-                self._recoverssm_committed_gpu if self._recoverssm_align else None,
+                recoverssm_committed,
             )
         else:
             # Fill with single value.
             _fill_num_accepted_kernel[(num_reqs,)](
                 idx_mapping,
                 self.num_accepted_tokens_gpu,
-                self._recoverssm_committed_gpu if self._recoverssm_align else None,
+                recoverssm_committed,
                 max(num_sampled, 1),
             )
 
@@ -357,30 +357,6 @@ class MambaHybridModelState(DefaultModelState):
                 self._mamba_state_idx_gpu,
                 num_computed_tokens,
                 idx_mapping,
-            )
-
-    def _commit_recoverssm_state(
-        self, num_sampled: torch.Tensor, idx_mapping: torch.Tensor
-    ) -> None:
-        step = self._recoverssm_step
-        self._recoverssm_step = None
-        if step is None:
-            return
-        for metadata in step:
-            postprocess_meta = metadata.commit_recoverssm_state(num_sampled)
-            if not self._recoverssm_align or postprocess_meta is None:
-                continue
-            # Preprocess follows the optimistic verify length. Commit restores
-            # the running column to the accepted length.
-            _mark_recoverssm_align_commit_kernel[(postprocess_meta.num_spec_decodes,)](
-                idx_mapping,
-                num_sampled,
-                postprocess_meta.request_indices,
-                postprocess_meta.num_computed_tokens,
-                self._mamba_state_idx_gpu,
-                self._recoverssm_committed_gpu,
-                MAMBA_BLOCK_SIZE=postprocess_meta.block_size,
-                BLOCK_TABLE_WIDTH=postprocess_meta.block_table.shape[1],
             )
 
 
@@ -427,37 +403,3 @@ def _fill_num_accepted_kernel(
         num_sampled = tl.where(committed, 1, num_sampled)
         tl.store(committed_ptr + req_state_idx, False)
     tl.store(num_accepted_ptr + req_state_idx, num_sampled)
-
-
-@triton.heuristics(
-    {"HAS_REQUEST_INDICES": lambda args: args["request_indices_ptr"] is not None}
-)
-@triton.jit
-def _mark_recoverssm_align_commit_kernel(
-    idx_mapping_ptr,
-    num_sampled_ptr,
-    request_indices_ptr,
-    num_computed_ptr,
-    state_idx_ptr,
-    committed_ptr,
-    HAS_REQUEST_INDICES: tl.constexpr,
-    MAMBA_BLOCK_SIZE: tl.constexpr,
-    BLOCK_TABLE_WIDTH: tl.constexpr,
-):
-    spec_idx = tl.program_id(0)
-    batch_idx = spec_idx
-    if HAS_REQUEST_INDICES:
-        batch_idx = tl.load(request_indices_ptr + spec_idx)
-    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
-    if req_state_idx < 0:
-        return
-    num_sampled = tl.load(num_sampled_ptr + batch_idx)
-    num_computed = tl.load(num_computed_ptr + batch_idx)
-    tl.store(
-        state_idx_ptr + req_state_idx,
-        tl.minimum(
-            (num_computed + num_sampled) // MAMBA_BLOCK_SIZE,
-            BLOCK_TABLE_WIDTH - 1,
-        ),
-    )
-    tl.store(committed_ptr + req_state_idx, True)

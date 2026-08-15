@@ -13,6 +13,7 @@ from vllm.v1.attention.backends.recoverssm_metadata import (
     RecoverSSMPostprocessMetadata,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
+from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
@@ -24,9 +25,8 @@ def test_postprocess_state_scalar_with_int32_mapping(
     state.num_accepted_tokens_gpu = torch.full(
         (4,), 9, dtype=torch.int32, device="cuda"
     )
-    state.cache_config = SimpleNamespace(use_kda_recoverssm=False)
     state._align_mode = False
-    state._recoverssm_align = False
+    state.recoverssm = None
     state._mamba_ctx = None
     idx_mapping = torch.tensor([2, -1, 0], dtype=torch.int32, device="cuda")
 
@@ -39,19 +39,19 @@ def test_postprocess_state_scalar_with_int32_mapping(
 
 
 def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
-    state = object.__new__(MambaHybridModelState)
-    state.cache_config = SimpleNamespace(use_kda_recoverssm=True)
+    state = RecoverSSMState(2, torch.device("cpu"), align=False)
     metadata = Mock(spec=RecoverSSMMetadata)
     metadata.commit_recoverssm_state.return_value = None
     num_sampled = torch.tensor([3, 1], dtype=torch.int32)
-
     idx_mapping = torch.tensor([0, 1], dtype=torch.int32)
-    state._recoverssm_align = False
-    state._recoverssm_step = (metadata,)
-    state._commit_recoverssm_state(num_sampled, idx_mapping)
+    group = SimpleNamespace(layer_names=["layer"])
+
+    state.record_step({"layer": metadata}, [[group]], for_capture=False)
+    state.commit_step(num_sampled, idx_mapping, None)
+    state.commit_step(num_sampled, idx_mapping, None)
 
     metadata.commit_recoverssm_state.assert_called_once_with(num_sampled)
-    assert state._recoverssm_step is None
+    assert state.committed is None
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
@@ -60,12 +60,10 @@ def test_recoverssm_align_tracks_final_running_state_and_neutralizes_copy_bias(
     mixed_batch: bool,
 ) -> None:
     state = object.__new__(MambaHybridModelState)
-    state.cache_config = SimpleNamespace(use_kda_recoverssm=True)
-    state._recoverssm_align = True
-    state._align_mode = False
+    state._align_mode = True
     state._mamba_ctx = None
     state._mamba_state_idx_gpu = torch.full((5,), -1, dtype=torch.int32, device="cuda")
-    state._recoverssm_committed_gpu = torch.zeros(5, dtype=torch.bool, device="cuda")
+    state.recoverssm = RecoverSSMState(5, torch.device("cuda"), align=True)
     state.num_accepted_tokens_gpu = torch.full(
         (5,), 9, dtype=torch.int32, device="cuda"
     )
@@ -81,8 +79,9 @@ def test_recoverssm_align_tracks_final_running_state_and_neutralizes_copy_bias(
     )
     num_sampled = torch.tensor([2, 3], dtype=torch.int32, device="cuda")
     idx_mapping = torch.tensor([3, 1], dtype=torch.int32, device="cuda")
+    group = SimpleNamespace(layer_names=["layer"])
 
-    state._recoverssm_step = (metadata,)
+    state.recoverssm.record_step({"layer": metadata}, [[group]], for_capture=False)
 
     state.postprocess_state(idx_mapping, num_sampled)
 
@@ -90,4 +89,5 @@ def test_recoverssm_align_tracks_final_running_state_and_neutralizes_copy_bias(
     assert state._mamba_state_idx_gpu.tolist() == expected_state_indices
     expected_accepted = [9, 1, 9, 2 if mixed_batch else 1, 9]
     assert state.num_accepted_tokens_gpu.tolist() == expected_accepted
-    assert not state._recoverssm_committed_gpu.any().item()
+    assert state.recoverssm.committed is not None
+    assert not state.recoverssm.committed.any().item()
