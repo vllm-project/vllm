@@ -1409,6 +1409,7 @@ class TritonMLATurboQuantSparseMetadata(MLACommonMetadata):
     block_table: torch.Tensor | None = None
     block_size: int = 64
     topk_tokens: int = 2048
+    prefill_max_seq_len: int = 0
 
 
 class TritonMLATurboQuantSparseMetadataBuilder(TritonMLATurboQuantMetadataBuilder):
@@ -1475,6 +1476,7 @@ class TritonMLATurboQuantSparseMetadataBuilder(TritonMLATurboQuantMetadataBuilde
             block_table=common_attn_metadata.block_table_tensor,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            prefill_max_seq_len=base.max_seq_len if base.num_prefills else 0,
         )
 
 
