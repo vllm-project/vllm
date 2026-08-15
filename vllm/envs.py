@@ -714,7 +714,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If true, will load models from ModelScope instead of Hugging Face Hub.
     # note that the value is true or false, not numbers
     "VLLM_USE_MODELSCOPE": lambda: (
-        os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true"
+        os.environ.get("VLLM_USE_MODELSCOPE", "False").strip().lower() in ("1", "true")
     ),
     # If true, replace the Rust BPE backend that powers HF fast tokenizers
     # with the `fastokens` (https://github.com/crusoecloud/fastokens) shim.
