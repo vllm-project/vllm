@@ -558,6 +558,12 @@ class ModelConfig:
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        # Allow global access to per-layer attributes for heterogeneous
+        # models (e.g., Gemma4 with different head_dim per layer type).
+        # vLLM handles heterogeneity explicitly where needed.
+        if hasattr(self.hf_text_config,
+                   "allow_global_per_layer_attribute_access"):
+            self.hf_text_config.allow_global_per_layer_attribute_access = True
         self.model_arch_config = self.get_model_arch_config()
         self.attention_chunk_size = getattr(
             self.hf_text_config, "attention_chunk_size", None

@@ -560,9 +560,19 @@ class Gemma4DecoderLayer(nn.Module):
         layer_type = config.layer_types[layer_idx]
         self.is_full_attention = layer_type == "full_attention"
         if self.is_full_attention:
-            head_dim = getattr(config, "global_head_dim", config.head_dim)
+            # Try per-layer config first (new transformers heterogeneous
+            # config), then fall back to global_head_dim attribute.
+            if hasattr(config, "per_layer_config") and config.per_layer_config:
+                head_dim = getattr(config.per_layer_config[layer_idx],
+                                   "head_dim", config.head_dim)
+            else:
+                head_dim = getattr(config, "global_head_dim", config.head_dim)
         else:
-            head_dim = config.head_dim
+            if hasattr(config, "per_layer_config") and config.per_layer_config:
+                head_dim = getattr(config.per_layer_config[layer_idx],
+                                   "head_dim", config.head_dim)
+            else:
+                head_dim = config.head_dim
 
         # Determine if this full-attention layer uses k_eq_v
         # (laptop variant: no v_proj, K reused as V on full attention layers)

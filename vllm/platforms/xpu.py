@@ -92,6 +92,16 @@ class XPUPlatform(Platform):
                 f"with use_mla: {attn_selector_config.use_mla}"
             )
 
+        # XPU Flash Attention SYCL kernel supports head_size <= 256.
+        # For head_size > 256, also use Flash Attention on Max 1550
+        # (the SYCL kernel handles larger head dims).
+        head_size = attn_selector_config.head_size
+        if head_size is not None and head_size > 256:
+            logger.info_once(
+                "head_size=%d exceeds typical XPU Flash Attention limit. "
+                "Using Flash Attention anyway (Max 1550 supports it).",
+                head_size)
+
         logger.info("Using Flash Attention backend.")
         return AttentionBackendEnum.FLASH_ATTN.get_path()
 

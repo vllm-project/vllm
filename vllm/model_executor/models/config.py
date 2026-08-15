@@ -79,6 +79,16 @@ class Gemma4Config(VerifyAndUpdateConfig):
         head_dim = getattr(hf_text_config, "head_dim", None)
         global_head_dim = getattr(hf_text_config, "global_head_dim", None)
 
+        # For new heterogeneous per-layer configs, derive global_head_dim
+        if global_head_dim is None and hasattr(
+                hf_text_config, "per_layer_config"):
+            per_layer = hf_text_config.per_layer_config
+            if per_layer:
+                max_per_layer = max(
+                    getattr(lc, "head_dim", 0) for lc in per_layer)
+                if max_per_layer > (head_dim or 0):
+                    global_head_dim = max_per_layer
+
         # Only force Triton when head dimensions actually differ AND the
         # larger one exceeds FlashAttention's kernel limit (head_size <= 256).
         # This avoids unnecessary backend forcing on smaller models where
@@ -92,18 +102,35 @@ class Gemma4Config(VerifyAndUpdateConfig):
             and max_head_dim > 256
             and vllm_config.attention_config.backend is None
         ):
-            from vllm.v1.attention.backends.registry import (
-                AttentionBackendEnum,
-            )
+            from vllm.platforms import current_platform
 
-            vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
-            logger.info(
-                "Gemma4 model has heterogeneous head dimensions "
-                "(head_dim=%d, global_head_dim=%d). Forcing TRITON_ATTN "
-                "backend to prevent mixed-backend numerical divergence.",
-                head_dim,
-                global_head_dim,
-            )
+            # On XPU, per-layer backend routing in xpu.py handles
+            # heterogeneous head dims (head_size<=256 → FA, >256 → Triton).
+            # Only force global TRITON_ATTN on other platforms.
+            if not current_platform.is_xpu():
+                from vllm.v1.attention.backends.registry import (
+                    AttentionBackendEnum,
+                )
+
+                vllm_config.attention_config.backend = (
+                    AttentionBackendEnum.TRITON_ATTN
+                )
+                logger.info(
+                    "Gemma4 model has heterogeneous head dimensions "
+                    "(head_dim=%d, global_head_dim=%d). Forcing TRITON_ATTN "
+                    "backend to prevent mixed-backend numerical divergence.",
+                    head_dim,
+                    global_head_dim,
+                )
+            else:
+                logger.info(
+                    "Gemma4 model has heterogeneous head dimensions "
+                    "(head_dim=%d, global_head_dim=%d). Using per-layer "
+                    "backend routing on XPU (FA for head_dim<=256, "
+                    "Triton for head_dim>256).",
+                    head_dim,
+                    global_head_dim,
+                )
 
 
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
