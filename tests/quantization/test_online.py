@@ -4,6 +4,7 @@
 
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -14,6 +15,7 @@ from tests.quantization.utils import (
     is_quant_method_supported,
 )
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm._custom_ops import scaled_fp4_quant
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
@@ -27,6 +29,10 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     _is_tp_sharded,
 )
 from vllm.model_executor.layers.quantization.online.int8 import Int8OnlineMoEMethod
+from vllm.model_executor.layers.quantization.online.mxfp4 import (
+    Mxfp4OnlineLinearMethod,
+    Mxfp4OnlineMoEMethod,
+)
 from vllm.model_executor.layers.quantization.online.nvfp4 import (
     Nvfp4OnlineMoEMethod,
     _quantize_moe_weight_to_nvfp4,
@@ -40,7 +46,65 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx942, on_gfx950
+else:
+
+    def on_gfx950() -> bool:
+        return False
+
+    def on_gfx942() -> bool:
+        return False
+
+
 DEVICE = current_platform.device_type
+
+
+def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
+    monkeypatch,
+) -> None:
+    method = object.__new__(Nvfp4OnlineMoEMethod)
+    method.moe = SimpleNamespace(is_act_and_mul=True)
+    method.nvfp4_backend = object()
+    method.experts_cls = object
+    method.moe_quant_config = None
+    method.moe_kernel = None
+
+    layer = Mock()
+    converted_weights = tuple(object() for _ in range(8))
+    convert_weights = Mock(return_value=converted_weights)
+    process_weights = Mock()
+    kernel = SimpleNamespace(
+        fused_experts=SimpleNamespace(
+            process_weights_after_loading=process_weights,
+        )
+    )
+    make_kernel = Mock(return_value=kernel)
+    get_quant_config = Mock(return_value=object())
+    method.get_fused_moe_quant_config = get_quant_config
+
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.online.nvfp4."
+        "convert_to_nvfp4_moe_kernel_format",
+        convert_weights,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.online.nvfp4.replace_parameter",
+        Mock(),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.online.nvfp4.make_nvfp4_moe_kernel",
+        make_kernel,
+    )
+
+    method._setup_kernel(layer)
+    method._setup_kernel(layer)
+
+    assert method.moe_kernel is kernel
+    assert convert_weights.call_count == 2
+    make_kernel.assert_called_once()
+    get_quant_config.assert_called_once()
+    assert process_weights.call_count == 2
 
 
 @pytest.mark.skipif(
@@ -84,6 +148,12 @@ DEVICE = current_platform.device_type
             Fp8PerTensorOnlineLinearMethod,
             Fp8PerTensorOnlineMoEMethod,
         ),
+        (
+            "mxfp4",
+            None,
+            Mxfp4OnlineLinearMethod,
+            Mxfp4OnlineMoEMethod,
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -106,8 +176,14 @@ def test_online_quantization(
     Does not test performance, peak memory usage, etc.
     """
 
-    if use_rocm_aiter:
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    # TODO: Relax this condition once there is a native MXFP4_MXFP4
+    # linear/moe backend supported on cuda.
+    if quant_scheme == "mxfp4" and not (on_gfx950() or on_gfx942()):
+        pytest.skip("mxfp4 online quantization is only tested on AMD gfx942, gfx950.")
+
+    if current_platform.is_rocm():
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
+        rocm_aiter_ops.refresh_env_variables()
 
     if current_platform.is_xpu() and quant_scheme == "fp8_per_block":
         pytest.skip("Skip test for online fp8_per_block on XPU platform.")
@@ -144,7 +220,10 @@ def test_online_quantization(
             if moe is not None:
                 assert isinstance(moe._quant_method, expected_moe_cls)
 
-            if current_platform.is_cuda() or current_platform.is_xpu():
+            if quant_scheme == "mxfp4":
+                # Packed e2m1 values, two per byte.
+                assert o_proj.weight.dtype == torch.uint8
+            elif current_platform.is_cuda() or current_platform.is_xpu():
                 assert o_proj.weight.dtype == torch.float8_e4m3fn
             elif current_platform.is_rocm():
                 assert o_proj.weight.dtype == current_platform.fp8_dtype()

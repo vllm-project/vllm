@@ -22,6 +22,8 @@ use crate::state::AppState;
 
 pub(crate) type InferenceGrpcService = InferenceServer<InferenceServiceImpl>;
 
+const DATA_PARALLEL_RANK_METADATA_KEY: &str = "x-data-parallel-rank";
+
 /// gRPC inference service backed by the shared application state.
 pub struct InferenceServiceImpl {
     state: Arc<AppState>,
@@ -41,6 +43,7 @@ impl InferenceServiceImpl {
     async fn prepare_request(
         &self,
         mut proto_request: pb::GenerateRequest,
+        data_parallel_rank: Option<u32>,
         stream: bool,
         rpc: &'static str,
     ) -> Result<PreparedGrpcRequest, Status> {
@@ -62,6 +65,7 @@ impl InferenceServiceImpl {
             rpc,
             %model,
             media_count,
+            ?data_parallel_rank,
         );
         info!(parent: &request_span, "gRPC inference request received");
 
@@ -70,6 +74,7 @@ impl InferenceServiceImpl {
             let mut text_request =
                 convert::to_text_request(proto_request, stream, self.state.served_model_names())?;
             text_request.arrival_time = Some(arrival_time);
+            text_request.data_parallel_rank = data_parallel_rank;
 
             let media = convert::media_parts_from_request(media)?;
             if !media.is_empty() {
@@ -115,6 +120,20 @@ impl InferenceServiceImpl {
     }
 }
 
+fn data_parallel_rank_from_metadata(
+    request: &Request<pb::GenerateRequest>,
+) -> Result<Option<u32>, Status> {
+    let Some(value) = request.metadata().get(DATA_PARALLEL_RANK_METADATA_KEY) else {
+        return Ok(None);
+    };
+    let value = value.to_str().map_err(|_| {
+        Status::invalid_argument("x-data-parallel-rank metadata must be an unsigned 32-bit integer")
+    })?;
+    value.trim().parse::<u32>().map(Some).map_err(|_| {
+        Status::invalid_argument("x-data-parallel-rank metadata must be an unsigned 32-bit integer")
+    })
+}
+
 #[tonic::async_trait]
 impl pb::inference_server::Inference for InferenceServiceImpl {
     type GenerateStreamStream =
@@ -125,13 +144,14 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         &self,
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<pb::GenerateResponse>, Status> {
+        let data_parallel_rank = data_parallel_rank_from_metadata(&request)?;
         let proto_req = request.into_inner();
         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
         let PreparedGrpcRequest {
             text_request,
             request_span,
             started_at,
-        } = self.prepare_request(proto_req, false, "Generate").await?;
+        } = self.prepare_request(proto_req, data_parallel_rank, false, "Generate").await?;
 
         let stream = self
             .state
@@ -186,13 +206,16 @@ impl pb::inference_server::Inference for InferenceServiceImpl {
         &self,
         request: Request<pb::GenerateRequest>,
     ) -> Result<Response<Self::GenerateStreamStream>, Status> {
+        let data_parallel_rank = data_parallel_rank_from_metadata(&request)?;
         let proto_req = request.into_inner();
         let response_opts = ResponseOpts::from_proto(proto_req.response.as_ref());
         let PreparedGrpcRequest {
             text_request,
             request_span,
             started_at,
-        } = self.prepare_request(proto_req, true, "GenerateStream").await?;
+        } = self
+            .prepare_request(proto_req, data_parallel_rank, true, "GenerateStream")
+            .await?;
 
         let stream = self
             .state
