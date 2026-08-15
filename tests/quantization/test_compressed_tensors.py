@@ -692,6 +692,56 @@ def test_get_quant_method_returns_none_for_unmatched_parallel_lm_head():
     )
 
 
+def test_w8a8_fp8_sets_partition_sizes_for_parallel_lm_head(
+    default_vllm_config, monkeypatch
+):
+    """W8A8 FP8 must initialize partition metadata on ParallelLMHead."""
+    default_vllm_config.model_config = Mock(dtype=torch.bfloat16)
+    weight_quant = QuantizationArgs(
+        num_bits=8,
+        type=QuantizationType.FLOAT,
+        strategy=QuantizationStrategy.CHANNEL,
+        symmetric=True,
+        dynamic=False,
+    )
+    scheme = CompressedTensorsW8A8Fp8(
+        weight_quant=weight_quant,
+        is_static_input_scheme=False,
+    )
+    kernel = Mock()
+    kernel.input_quant_key.return_value = None
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
+        "compressed_tensors_w8a8_fp8.create_fp8_weight_parameter",
+        Mock(return_value=torch.nn.Parameter(torch.empty(1), requires_grad=False)),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
+        "compressed_tensors_w8a8_fp8.create_fp8_scale_parameter",
+        Mock(return_value=torch.nn.Parameter(torch.empty(1), requires_grad=False)),
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.compressed_tensors.schemes."
+        "compressed_tensors_w8a8_fp8.init_fp8_linear_kernel",
+        Mock(return_value=kernel),
+    )
+    layer = object.__new__(ParallelLMHead)
+    torch.nn.Module.__init__(layer)
+
+    scheme.create_weights(
+        layer=layer,
+        input_size_per_partition=16,
+        output_partition_sizes=[32],
+        input_size=16,
+        output_size=32,
+        params_dtype=torch.bfloat16,
+        weight_loader=Mock(),
+    )
+
+    assert layer.output_size_per_partition == 32
+    assert layer.input_size_per_partition == 16
+
+
 def test_find_matched_target_returns_none_on_no_match():
     result = find_matched_target(
         layer_name="model.layers.0.self_attn.qkv_proj",

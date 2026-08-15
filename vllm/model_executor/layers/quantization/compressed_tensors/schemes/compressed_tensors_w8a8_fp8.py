@@ -101,6 +101,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
     ):
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
         layer.weight_block_size = None
         layer.orig_dtype = params_dtype
 
