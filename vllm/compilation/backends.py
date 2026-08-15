@@ -1081,10 +1081,13 @@ class VllmBackend:
         # Honors opt-outs such as CompilationMode.NONE or VLLM_DISABLE_COMPILE_CACHE.
         disable_cache = not is_compile_cache_enabled(self.inductor_config)
 
-        # TODO(patchy): ngram gpu kernel will cause vllm torch compile cache errors.
+        # TODO(patchy): the V1 torch.compile ngram-gpu kernel causes vllm
+        # torch compile cache errors. The V2 implementation is pure Triton and
+        # does not need the cache disabled.
         is_ngram_gpu_enabled = (
             vllm_config.speculative_config is not None
             and vllm_config.speculative_config.use_ngram_gpu()
+            and not vllm_config.use_v2_model_runner
         )
         disable_cache = disable_cache or is_ngram_gpu_enabled
 

@@ -42,7 +42,7 @@ def init_speculator(vllm_config: VllmConfig, device: torch.device):
         )
 
         return EagleSpeculator(vllm_config, device)
-    elif speculative_config.use_ngram_gpu():
+    elif speculative_config.use_ngram():
         from vllm.v1.worker.gpu.spec_decode.ngram.speculator import (
             NgramGPUSpeculator,
         )

@@ -271,8 +271,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # General request states.
         use_dense_all_token_ids = (
-            self.speculative_config is not None
-            and self.speculative_config.use_ngram_gpu()
+            self.speculative_config is not None and self.speculative_config.use_ngram()
         )
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,

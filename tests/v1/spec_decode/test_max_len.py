@@ -37,10 +37,12 @@ def test_ngram_max_len(num_speculative_tokens: int, vllm_runner):
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1, 3, 10])
-def test_ngram_gpu_max_len(num_speculative_tokens: int, vllm_runner):
+@pytest.mark.parametrize("method", ["ngram", "ngram_gpu"])
+def test_ngram_gpu_max_len(method: str, num_speculative_tokens: int, vllm_runner):
     """V2 GPU n-gram counterpart of ``test_ngram_max_len``.
 
-    Verifies that the V2 model runner with ``method="ngram_gpu"`` correctly
+    Verifies that the V2 model runner (where "ngram" and "ngram_gpu" both
+    resolve to the GPU implementation) correctly
     handles the ``max_model_len`` boundary across various speculative-token
     counts.
     """
@@ -51,7 +53,7 @@ def test_ngram_gpu_max_len(num_speculative_tokens: int, vllm_runner):
         enable_chunked_prefill=None,
         enforce_eager=True,  # For faster initialization.
         speculative_config={
-            "method": "ngram_gpu",
+            "method": method,
             "prompt_lookup_max": 5,
             "prompt_lookup_min": 3,
             "num_speculative_tokens": num_speculative_tokens,

@@ -49,6 +49,7 @@ def _make_vllm_config(
     k: int,
     max_num_seqs: int = 8,
     max_model_len: int = 64,
+    method: str = "ngram_gpu",
 ) -> VllmConfig:
     model_config = ModelConfig(
         model="facebook/opt-125m",
@@ -60,7 +61,7 @@ def _make_vllm_config(
         max_model_len=max_model_len,
     )
     speculative_config = SpeculativeConfig(
-        method="ngram_gpu",
+        method=method,
         prompt_lookup_min=min_n,
         prompt_lookup_max=max_n,
         num_speculative_tokens=k,
@@ -360,14 +361,23 @@ def test_propose_requires_req_states():
         )
 
 
+@pytest.mark.parametrize("method", ["ngram", "ngram_gpu"])
+def test_both_ngram_methods_resolve_to_gpu_speculator(method: str):
+    """On the V2 runner, "ngram" and "ngram_gpu" use the same implementation."""
+    from vllm.v1.worker.gpu.spec_decode import init_speculator
+
+    cfg = _make_vllm_config(min_n=2, max_n=3, k=2, method=method)
+    spec = init_speculator(cfg, DEVICE)
+    assert isinstance(spec, NgramGPUSpeculator)
+
+
 def test_construction_validates_speculative_config():
     spec = _make_speculator(min_n=2, max_n=3, k=2)
     assert spec.min_n == 2
     assert spec.max_n == 3
     assert spec.num_speculative_steps == 2
-    # No-op hooks must not raise.
-    spec.load_model(target_model=None)
-    spec.set_attn()
+    # Inherited no-op hooks must not raise.
+    spec.init_cudagraph_manager(None)
     spec.capture()
 
 
