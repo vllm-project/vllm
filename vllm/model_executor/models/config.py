@@ -234,7 +234,7 @@ class Gemma4Config(VerifyAndUpdateConfig):
         cache_config = vllm_config.cache_config
         if (
             cache_config is not None
-            and cache_config.cache_dtype == "nvfp4"
+            and cache_config.cache_dtype.startswith("nvfp4")
             and envs.VLLM_NVFP4_KV_VOSPLIT
             and vllm_config.attention_config.backend is None
             and current_platform.is_device_capability_family(120)
