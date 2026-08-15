@@ -198,6 +198,8 @@ class ArtifactSchedulerConnector:
         request_id = request.request_id
         state = self._states[request_id]
         if output is None or request_id not in output.requests:
+            if is_stale:
+                return None
             raise RuntimeError(f"artifact worker output is missing {request_id}")
         request_output = output.requests[request_id]
         if is_stale:

@@ -26,9 +26,9 @@ from vllm.distributed.artifact_connector.routed_experts import (
     publish_routed_experts,
     routed_experts_keys,
 )
-from vllm.distributed.artifact_connector.shm import (
+from vllm.distributed.artifact_connector.store import (
     BackgroundArtifactStore,
-    LocalSharedMemoryArtifactStore,
+    InProcessArtifactStore,
 )
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
@@ -136,17 +136,13 @@ class ArtifactWorkerConnector:
         block_nbytes = (
             hash_block_size * int(np.prod(shape_per_token)) * self._dtype.itemsize
         )
-        max_bytes = vllm_config.artifact_config.max_shm_bytes
+        max_bytes = vllm_config.artifact_config.max_bytes
         if max_bytes is None:
             max_bytes = kv_cache_config.num_blocks * hashes_per_kv_block * block_nbytes
         self._store = BackgroundArtifactStore(
-            LocalSharedMemoryArtifactStore(
-                vllm_config.artifact_config.shm_dir,
-                vllm_config.instance_id,
-                vllm_config.parallel_config.data_parallel_rank,
+            InProcessArtifactStore(
                 max_bytes=max_bytes,
                 object_nbytes=block_nbytes,
-                ttl_seconds=vllm_config.artifact_config.shm_ttl_seconds,
             ),
             max_pending_batches=2 * vllm_config.scheduler_config.max_num_seqs,
         )

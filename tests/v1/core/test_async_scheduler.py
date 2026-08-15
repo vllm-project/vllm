@@ -289,6 +289,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids_dict = None
     scheduler.grammar_compile_error_reqs = set()
     scheduler.vllm_config = Mock()
+    scheduler.artifact_connector = None
     scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False

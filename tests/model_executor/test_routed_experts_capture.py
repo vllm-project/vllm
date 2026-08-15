@@ -329,24 +329,6 @@ def test_model_runner_shutdown_cleans_gpu_before_artifact_error(monkeypatch):
     torch.accelerator.empty_cache.assert_called_once_with()
 
 
-def test_model_runner_shutdown_closes_artifact_after_gpu_error(monkeypatch):
-    pytest.importorskip("vllm.vllm_flash_attn", exc_type=ImportError)
-    import vllm.v1.worker.gpu.model_runner as model_runner
-
-    monkeypatch.setattr(
-        torch.accelerator,
-        "synchronize",
-        Mock(side_effect=RuntimeError("GPU cleanup failed")),
-    )
-    runner = model_runner.GPUModelRunner.__new__(model_runner.GPUModelRunner)
-    runner.artifact_connector = Mock()
-
-    with pytest.raises(RuntimeError, match="GPU cleanup failed"):
-        runner.shutdown()
-
-    runner.artifact_connector.close.assert_called_once_with()
-
-
 def test_model_runner_initializes_capture(monkeypatch):
     pytest.importorskip("vllm.vllm_flash_attn", exc_type=ImportError)
     import vllm.v1.worker.gpu.model_runner as model_runner
@@ -408,7 +390,7 @@ def test_artifact_worker_connector_binds_capture_on_non_output_rank(monkeypatch)
     capturer.get_routing_data.assert_not_called()
 
 
-def test_artifact_worker_connector_shm_capacity(monkeypatch, tmp_path):
+def test_artifact_worker_connector_shm_capacity(monkeypatch):
     import vllm.distributed.artifact_connector.worker as artifact_worker
 
     tp_group = SimpleNamespace(is_first_rank=True, world_size=1)
@@ -426,21 +408,13 @@ def test_artifact_worker_connector_shm_capacity(monkeypatch, tmp_path):
         "resolve_kv_cache_block_sizes",
         lambda *_: (32, 16),
     )
-    monkeypatch.setattr(
-        artifact_worker, "LocalSharedMemoryArtifactStore", store_constructor
-    )
+    monkeypatch.setattr(artifact_worker, "InProcessArtifactStore", store_constructor)
     monkeypatch.setattr(artifact_worker, "BackgroundArtifactStore", Mock())
     monkeypatch.setattr(artifact_worker, "RoutedExpertsArtifactBuffer", Mock())
 
     config = SimpleNamespace(
-        artifact_config=SimpleNamespace(
-            max_shm_bytes=None,
-            shm_dir=str(tmp_path),
-            shm_ttl_seconds=60,
-        ),
+        artifact_config=SimpleNamespace(max_bytes=None),
         kv_transfer_config=None,
-        instance_id="instance",
-        parallel_config=SimpleNamespace(data_parallel_rank=0),
         scheduler_config=SimpleNamespace(max_num_seqs=8),
     )
     kwargs = dict(

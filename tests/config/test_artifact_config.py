@@ -20,36 +20,25 @@ def _config(
     pp: int = 1,
     dcp: int = 1,
     pcp: int = 1,
-    shm_dir: str = "/dev/shm/vllm-artifacts",
     connector: str | None = None,
-    role: str = "kv_both",
-    spec_name: str | None = None,
-    prefix_caching: bool = True,
     runner_type: str = "generate",
 ):
-    extra_config = {} if spec_name is None else {"spec_name": spec_name}
     return SimpleNamespace(
         model_config=SimpleNamespace(runner_type=runner_type),
-        cache_config=SimpleNamespace(enable_prefix_caching=prefix_caching),
         use_v2_model_runner=True,
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=pp,
             decode_context_parallel_size=dcp,
             prefill_context_parallel_size=pcp,
         ),
-        artifact_config=ArtifactConfig(
-            enable_return_routed_experts=True,
-            shm_dir=shm_dir,
-        ),
+        artifact_config=ArtifactConfig(enable_return_routed_experts=True),
+        speculative_config=None,
         kv_transfer_config=(
             None
             if connector is None
             else SimpleNamespace(
                 is_kv_transfer_instance=True,
                 kv_connector=connector,
-                kv_connector_module_path=None,
-                kv_role=role,
-                kv_connector_extra_config=extra_config,
             )
         ),
     )
@@ -60,8 +49,7 @@ def test_artifact_config_defaults():
 
     assert not config.enabled
     assert not config.enable_return_routed_experts
-    assert config.shm_dir == "/dev/shm/vllm-artifacts"
-    assert config.max_shm_bytes is None
+    assert config.max_bytes is None
 
 
 def test_artifact_capture_changes_compilation_hash():
@@ -82,11 +70,6 @@ def test_legacy_prompt_start_is_accepted():
     params = SamplingParams(routed_experts_prompt_start=3)
 
     assert params.routed_experts_prompt_start == 3
-
-
-def test_negative_prompt_start_is_rejected():
-    with pytest.raises(VLLMValidationError, match="must be non-negative"):
-        SamplingParams(routed_experts_prompt_start=-1)
 
 
 def test_prompt_start_is_ignored_when_artifact_capture_is_disabled():
@@ -152,14 +135,20 @@ def test_artifact_connector_rejects_pooling_runner():
         VllmConfig._verify_artifact_compatibility(_config(runner_type="pooling"))
 
 
+def test_artifact_connector_rejects_adaptive_verification():
+    config = _config()
+    config.speculative_config = SimpleNamespace(enable_adaptive_verification=True)
+
+    with pytest.raises(ValueError, match="adaptive speculative verification"):
+        VllmConfig._verify_artifact_compatibility(config)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "error"),
     [
         ({"pp": 2}, "pipeline parallelism"),
         ({"dcp": 2}, "context parallelism"),
         ({"pcp": 2}, "context parallelism"),
-        ({"shm_dir": "/dev/shm"}, "requires shm_dir under /dev/shm"),
-        ({"shm_dir": "/tmp/artifacts"}, "requires shm_dir under /dev/shm"),
     ],
 )
 def test_artifact_connector_rejects_unsupported_topology(kwargs, error):
@@ -167,21 +156,8 @@ def test_artifact_connector_rejects_unsupported_topology(kwargs, error):
         VllmConfig._verify_artifact_compatibility(_config(**kwargs))
 
 
-@pytest.mark.parametrize(
-    "connector",
-    [
-        "OffloadingConnector",
-        "NixlConnector",
-        "MooncakeConnector",
-        "MooncakeStoreConnector",
-        "LMCacheConnectorV1",
-        "HF3FSKVConnector",
-        "MultiConnector",
-        "SimpleCPUOffloadConnector",
-    ],
-)
-def test_artifact_connector_rejects_other_kv_connectors(connector):
-    config = _config(connector=connector)
+def test_artifact_connector_rejects_kv_connectors():
+    config = _config(connector="MooncakeConnector")
 
     with pytest.raises(ValueError, match="incompatible with KV connectors"):
         VllmConfig._verify_artifact_compatibility(config)

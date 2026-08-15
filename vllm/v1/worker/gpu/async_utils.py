@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 import contextlib
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -123,7 +121,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
         check_ep_fault: bool = False,
-        pending_artifact_output: PendingArtifactOutput | None = None,
+        pending_artifact_output: "PendingArtifactOutput | None" = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -167,6 +165,10 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
+        if self.pending_artifact_output is not None:
+            self.model_runner_output.artifact_connector_output = (
+                self.pending_artifact_output.finish()
+            )
 
         # NOTE(woosuk): The following code is to ensure compatibility with
         # the existing model runner.
@@ -193,11 +195,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
-        if self.pending_artifact_output is not None:
-            self.model_runner_output.artifact_connector_output = (
-                self.pending_artifact_output.finish()
-            )
-
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()
             raise RuntimeError(

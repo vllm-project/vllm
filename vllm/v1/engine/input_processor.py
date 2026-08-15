@@ -325,6 +325,7 @@ class InputProcessor:
             prompt_token_ids = decoder_inputs["prompt_token_ids"]
             prompt_embeds = None
             prompt_is_token_ids = None
+
         sampling_params = None
         pooling_params = None
         if isinstance(params, SamplingParams):
@@ -334,13 +335,13 @@ class InputProcessor:
                 prompt_len = length_from_prompt_token_ids_or_embeds(
                     prompt_token_ids, prompt_embeds
                 )
-                if sampling_params.routed_experts_prompt_start >= prompt_len:
+                prompt_start = sampling_params.routed_experts_prompt_start
+                if not 0 <= prompt_start < prompt_len:
                     raise VLLMValidationError(
-                        "routed_experts_prompt_start must be smaller than the prompt "
-                        f"length ({prompt_len}), got "
-                        f"{sampling_params.routed_experts_prompt_start}.",
+                        "routed_experts_prompt_start must be in range "
+                        f"[0, {prompt_len}), got {prompt_start}.",
                         parameter="routed_experts_prompt_start",
-                        value=sampling_params.routed_experts_prompt_start,
+                        value=prompt_start,
                     )
             # If unset max tokens, then generate up to the max_model_len.
             if sampling_params.max_tokens is None:

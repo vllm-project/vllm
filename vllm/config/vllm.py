@@ -980,6 +980,14 @@ class VllmConfig:
             )
         if self.model_config.runner_type != "generate":
             raise ValueError("Artifact Connector only supports generate runners.")
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.enable_adaptive_verification
+        ):
+            raise ValueError(
+                "--enable-return-routed-experts is incompatible with "
+                "adaptive speculative verification."
+            )
         if self.parallel_config.pipeline_parallel_size > 1:
             raise ValueError(
                 "--enable-return-routed-experts is incompatible with "
@@ -992,17 +1000,6 @@ class VllmConfig:
             raise ValueError(
                 "--enable-return-routed-experts is incompatible with "
                 "context parallelism (DCP/PCP > 1)."
-            )
-
-        shm_root = os.path.realpath(self.artifact_config.shm_dir)
-        if (
-            os.path.commonpath((shm_root, "/dev/shm")) != "/dev/shm"
-            or shm_root == "/dev/shm"
-        ):
-            raise ValueError(
-                "--enable-return-routed-experts with the SHM artifact backend "
-                "requires shm_dir under /dev/shm; got "
-                f"{self.artifact_config.shm_dir!r}."
             )
 
         kv_transfer_config = self.kv_transfer_config
