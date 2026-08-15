@@ -7,6 +7,7 @@
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <cub/block/block_scan.cuh>
 #include <cstdint>
 
 namespace vllm {
