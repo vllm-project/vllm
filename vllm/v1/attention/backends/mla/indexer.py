@@ -1277,7 +1277,8 @@ def build_prefill_chunk_metadata(
         ctx_lens_cpu = compressed_seq_lens_cpu[start_idx:end_idx].to(torch.int32)
         dcp_virtual_block = dcp_world_size * cp_kv_cache_interleave_size
         padded_local_cpu = (
-            cdiv(ctx_lens_cpu, dcp_virtual_block) * cp_kv_cache_interleave_size
+            (ctx_lens_cpu + dcp_virtual_block - 1) // dcp_virtual_block
+            * cp_kv_cache_interleave_size
         ).to(torch.int32)
         local_cu_cpu = torch.zeros(num_reqs + 1, dtype=torch.int32)
         torch.cumsum(padded_local_cpu, dim=0, out=local_cu_cpu[1:])
