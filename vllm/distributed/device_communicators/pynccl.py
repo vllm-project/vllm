@@ -423,21 +423,14 @@ class PyNcclCommunicator:
         return self.nccl.ncclCommWindowDeregister(self.comm, window)
 
     def suspend(self):
-        """Release dynamic GPU memory, keeping topology/connection state.
-
-        Collective across the group's ranks; idempotent; no-op when the NCCL
-        library lacks suspension support (< 2.29.7).
-        """
+        """Release comm GPU memory (collective, idempotent); keeps topology."""
         if self.disabled or self._suspended:
-            return
-        if not self.nccl.supports_comm_suspension():
             return
         self.nccl.ncclCommSuspend(self.comm, _NCCL_SUSPEND_MEM)
         self._suspended = True
 
     def resume(self):
-        """Restore a suspended communicator (collective); idempotent —
-        resuming a non-suspended comm would fail with "invalid usage"."""
+        """Restore a suspended comm (collective); no-op unless suspended."""
         if self.disabled or not self._suspended:
             return
         self.nccl.ncclCommResume(self.comm)

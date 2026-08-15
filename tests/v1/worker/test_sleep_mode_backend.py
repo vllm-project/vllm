@@ -42,8 +42,7 @@ def test_new_backend_starts_in_running_state():
 
 @pytest.mark.parametrize("requires_suspend", [True, False])
 def test_worker_drives_communicator_suspension(monkeypatch, requires_suspend):
-    """Comm walkers run after backend suspend/resume iff the backend requires
-    it; per-communicator idempotence is covered in test_pynccl.py."""
+    """Comm walkers run around sleep/wake iff the backend requires them."""
     from vllm.v1.worker.gpu_worker import Worker
 
     calls: list[tuple[str, object]] = []

@@ -388,9 +388,6 @@ class NCCLLibrary:
                     f.argtypes = func.argtypes
                     _funcs[func.name] = f
                 except AttributeError:
-                    if func.name in ("ncclCommSuspend", "ncclCommResume"):
-                        # Only present in NCCL >= 2.29.7; suspension no-ops.
-                        continue
                     if func.name in [
                         "ncclCommWindowRegister",
                         "ncclCommWindowDeregister",
@@ -592,9 +589,6 @@ class NCCLLibrary:
 
     def ncclCommAbort(self, comm: ncclComm_t) -> None:
         self.NCCL_CHECK(self._funcs["ncclCommAbort"](comm))
-
-    def supports_comm_suspension(self) -> bool:
-        return "ncclCommSuspend" in self._funcs and "ncclCommResume" in self._funcs
 
     def ncclCommSuspend(self, comm: ncclComm_t, flags: int) -> None:
         self.NCCL_CHECK(self._funcs["ncclCommSuspend"](comm, flags))

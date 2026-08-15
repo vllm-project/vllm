@@ -88,10 +88,7 @@ class SleepModeBackend(ABC):
 
     @classmethod
     def requires_communicator_suspend(cls) -> bool:
-        """If True, the worker suspends device communicators (e.g. NCCL via
-        ``ncclCommSuspend``) after ``suspend`` and resumes them after
-        ``resume``. Backends whose mechanism already covers communicator state
-        (e.g. process checkpoint) must return False."""
+        """Whether the worker must suspend/resume device comms around sleep."""
         return False
 
     @classmethod
@@ -142,8 +139,7 @@ class CuMemBackend(SleepModeBackend):
 
     @classmethod
     def preserves_communicators(cls) -> bool:
-        # Communicator identity and topology survive memory suspension, so no
-        # reinitialization is needed on resume.
+        # Comm identity/topology survive memory suspension; no reinit needed.
         return True
 
     @classmethod

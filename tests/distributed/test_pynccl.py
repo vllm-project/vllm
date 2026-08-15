@@ -475,8 +475,7 @@ def test_ncclGetUniqueId():
 
 
 def test_pynccl_suspend_resume_idempotent():
-    """Repeated suspend/resume calls (e.g. staged wake-ups) must each reach
-    NCCL exactly once; resuming a non-suspended comm is an NCCL error."""
+    """Repeated suspend/resume (e.g. staged wake-ups) reach NCCL once each."""
     from unittest.mock import Mock
 
     comm = object.__new__(PyNcclCommunicator)
@@ -484,7 +483,6 @@ def test_pynccl_suspend_resume_idempotent():
     comm._suspended = False
     comm.comm = object()
     comm.nccl = Mock()
-    comm.nccl.supports_comm_suspension.return_value = True
 
     comm.suspend()
     comm.suspend()
@@ -493,7 +491,3 @@ def test_pynccl_suspend_resume_idempotent():
 
     assert comm.nccl.ncclCommSuspend.call_count == 1
     assert comm.nccl.ncclCommResume.call_count == 1
-
-    comm.nccl.supports_comm_suspension.return_value = False
-    comm.suspend()
-    assert comm.nccl.ncclCommSuspend.call_count == 1
