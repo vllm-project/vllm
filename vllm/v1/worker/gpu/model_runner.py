@@ -1611,7 +1611,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
             self.kv_connector.pre_forward(scheduler_output)
-            model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
+            model_output = self.cudagraph_manager.run_fullgraph(
+                batch_desc, attn_metadata
+            )
         else:
             # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(

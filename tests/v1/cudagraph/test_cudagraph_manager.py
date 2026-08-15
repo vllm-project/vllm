@@ -109,3 +109,49 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
         manager.capture(create_forward_fn)
 
     mock_cuda_graph.assert_called_once()
+
+
+def test_collects_nested_cuda_tensor_addresses():
+    block_table = MagicMock(spec=torch.Tensor)
+    block_table.is_cuda = True
+    block_table.data_ptr.return_value = 123
+    host_tensor = MagicMock(spec=torch.Tensor)
+    host_tensor.is_cuda = False
+    metadata = {"layer": [(block_table, host_tensor)]}
+
+    addresses = gpu_cudagraph_utils._collect_attn_metadata_ptrs(metadata)
+
+    assert addresses == {"[layer][0][0]": 123}
+
+
+@pytest.mark.parametrize(
+    ("captured_ptrs", "error_match"),
+    [
+        ({"[layer].block_table": 1}, "tensor addresses changed"),
+        (None, "No attention metadata addresses"),
+    ],
+    ids=["address-mismatch", "missing-snapshot"],
+)
+def test_invalid_attn_metadata_binding_stops_before_full_graph_replay(
+    monkeypatch, captured_ptrs, error_match
+):
+    manager = object.__new__(gpu_cudagraph_utils.CudaGraphManager)
+    desc = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.FULL,
+        num_tokens=4,
+        num_reqs=4,
+        uniform_token_count=1,
+    )
+    graph = MagicMock()
+    manager.graphs = {desc: graph}
+    manager._captured_attn_metadata_ptrs = (
+        {} if captured_ptrs is None else {desc: captured_ptrs}
+    )
+    offloader = MagicMock()
+    monkeypatch.setattr(gpu_cudagraph_utils, "get_offloader", lambda: offloader)
+
+    with pytest.raises(AssertionError, match=error_match):
+        manager.run_fullgraph(desc, {})
+
+    offloader.sync_prev_onload.assert_not_called()
+    graph.replay.assert_not_called()

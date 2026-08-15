@@ -97,6 +97,8 @@ class DFlashCudaGraphManager(CudaGraphManager):
                 causal=causal,
             )
             attn_metadata, slot_mappings = attn_state
+            if not warmup:
+                self._record_attn_metadata_ptrs(desc, attn_metadata)
 
             return lambda cg_mode: forward_fn(
                 num_reqs,

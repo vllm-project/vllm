@@ -454,7 +454,7 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             assert self.query_cudagraph_manager is not None
-            self.query_cudagraph_manager.run_fullgraph(batch_desc)
+            self.query_cudagraph_manager.run_fullgraph(batch_desc, draft_attn_metadata)
         else:
             self._generate_draft(
                 num_reqs,
