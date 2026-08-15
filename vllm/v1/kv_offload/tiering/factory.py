@@ -5,13 +5,33 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.tiering.backpressure import _import_class
 from vllm.v1.kv_offload.tiering.base import SecondaryTierManager
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
 
 logger = init_logger(__name__)
+
+
+_DEFAULT_PACKAGE = "vllm.v1.kv_offload.tiering.backpressure"
+
+
+def _import_class(name: str) -> type:
+    """Import a class by name.
+
+    If ``name`` contains a dot it is treated as a fully qualified path
+    (e.g. ``'my_package.MyDetector'``).  Otherwise it is looked up in
+    the default backpressure module
+    (``vllm.v1.kv_offload.tiering.backpressure``), so short names like
+    ``'DropStorePolicy'`` or ``'EMABackpressureDetector'`` work out of
+    the box.
+    """
+    if "." in name:
+        module_path, _, class_name = name.rpartition(".")
+    else:
+        module_path, class_name = _DEFAULT_PACKAGE, name
+    module = importlib.import_module(module_path)
+    return getattr(module, class_name)
 
 
 class SecondaryTierFactory:
@@ -49,9 +69,19 @@ class SecondaryTierFactory:
         tier_type = config.pop("type")
         config.pop("module_path", None)
         bp_config = config.pop("backpressure", None)
-        bp_cls_name = config.pop("backpressure_cls", None)
-        detector_cls = _import_class(bp_cls_name) if bp_cls_name else None
-        bp_detector = detector_cls(**bp_config) if detector_cls else None
+        bp_detector = None
+        if bp_config is not None:
+            bp_config = bp_config.copy()
+            bp_cls_name = bp_config.pop("backpressure_cls", None)
+            if bp_cls_name is None:
+                raise ValueError(
+                    "backpressure config must include 'backpressure_cls' "
+                    "(e.g. 'EMABackpressureDetector')"
+                )
+            policy_cls_name = bp_config.pop("policy_cls", None)
+            policy = _import_class(policy_cls_name)() if policy_cls_name else None
+            detector_cls = _import_class(bp_cls_name)
+            bp_detector = detector_cls(policy=policy, **bp_config)
         return tier_cls(
             offloading_spec=offloading_spec,
             primary_kv_view=primary_kv_view,

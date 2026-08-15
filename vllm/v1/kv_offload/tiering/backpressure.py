@@ -2,29 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-import importlib
 import time
 from abc import ABC, abstractmethod
-
-_DEFAULT_PACKAGE = "vllm.v1.kv_offload.tiering.backpressure"
-
-
-def _import_class(name: str) -> type:
-    """Import a class by name.
-
-    If ``name`` contains a dot it is treated as a fully qualified path
-    (e.g. ``'my_package.MyDetector'``).  Otherwise it is looked up in
-    the default backpressure module
-    (``vllm.v1.kv_offload.tiering.backpressure``), so short names like
-    ``'DropStorePolicy'`` or ``'EMABackpressureDetector'`` work out of
-    the box.
-    """
-    if "." in name:
-        module_path, _, class_name = name.rpartition(".")
-    else:
-        module_path, class_name = _DEFAULT_PACKAGE, name
-    module = importlib.import_module(module_path)
-    return getattr(module, class_name)
 
 
 class BackpressurePolicy(ABC):
@@ -160,15 +139,9 @@ class EMABackpressureDetector(BackpressureDetector):
         high_water_s: float = DEFAULT_HIGH_WATER_S,
         low_water_s: float = DEFAULT_LOW_WATER_S,
         warmup_completions: int = DEFAULT_WARMUP_COMPLETIONS,
-        policy_cls: type[BackpressurePolicy] | str | None = None,
+        policy_cls: type[BackpressurePolicy] | None = None,
     ):
-        if isinstance(policy_cls, str):
-            policy_ctor = _import_class(policy_cls)
-        elif policy_cls is None:
-            policy_ctor = DropStorePolicy
-        else:
-            policy_ctor = policy_cls
-
+        policy_ctor = policy_cls if policy_cls else DropStorePolicy
         policy = policy_ctor()
 
         super().__init__(policy=policy)

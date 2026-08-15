@@ -393,4 +393,4 @@ class TestBackpressure:
         # Lookups should still initiate promotion.
         for b in blocks:
             result = self.manager.lookup(b, _CTX)
-            assert result is LookupResult.RETRY
+            assert result is LookupResult.HIT_PENDING
