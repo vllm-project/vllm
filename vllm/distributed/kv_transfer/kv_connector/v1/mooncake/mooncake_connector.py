@@ -962,7 +962,9 @@ class MooncakeConnectorWorker:
         self.seen_base_addresses: list[int] = []
 
         assert (parallel_config := vllm_config.parallel_config)
-        self.dp_rank = parallel_config.data_parallel_index
+        dp_rank = parallel_config.data_parallel_index
+        dp_local_rank = parallel_config.data_parallel_rank_local
+        self.dp_rank = dp_local_rank if parallel_config.local_engines_only else dp_rank
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.pp_rank = get_pp_group().rank_in_group
 
@@ -2128,13 +2130,13 @@ def group_concurrent_contiguous(
 def _get_bootstrap_port(vllm_config: VllmConfig) -> int:
     """Return the bootstrap server port for the current DP rank.
 
-    In external/hybrid LB mode each DP rank gets its own port so that
+    In external LB mode each DP rank gets its own port so that
     every supervised child can run its own bootstrap server without
     colliding.
     """
     parallel_config = vllm_config.parallel_config
     base = envs.VLLM_MOONCAKE_BOOTSTRAP_PORT
-    if parallel_config.local_engines_only:
+    if parallel_config.data_parallel_external_lb:
         return base + parallel_config.data_parallel_index
     return base
 
@@ -2153,9 +2155,9 @@ def should_launch_bootstrap_server(vllm_config: VllmConfig) -> bool:
         return False
 
     # In hybrid or external LB mode,
-    # each DP rank launches its own bootstrap server on a unique port.
+    # each instance should have its own bootstrap server.
     if parallel_config.local_engines_only:
-        return True
+        return parallel_config.data_parallel_rank_local == 0
 
     # In internal LB mode,
     # only the first data-parallel engine should launch the bootstrap server.
