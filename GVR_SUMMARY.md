@@ -113,6 +113,32 @@ B1/B8/B32 are native captures. B64/B128/B1024 repeat native B32 rows, so their
 hint distribution is not a substitute for a real B1024 model run. The
 corrected end-to-end trace is authoritative for the model result.
 
+The 1.722x standalone result and the 4.55x embedded result are not measurements
+of the same selector workload. The standalone dataset retained only the first
+sparse-indexer layer at two consecutive B32 decode steps (`call0` and
+`call21`); an eager debug-capture limitation made the other layer tensors
+invalid. Its B1024 row repeats those 32 rows 32 times and replays fixed logits
+and prepared hints. The model trace instead sums 21 distinct selector layers
+on 1,024 independently evolving sequences, using the production fused
+hint/state path.
+
+The difference is visible before taking either ratio:
+
+| Per selector call at 200K/B1024 | Baseline | GVR | Speedup |
+| --- | ---: | ---: | ---: |
+| Repeated-B32 standalone | 487.619 us | 283.104 us | 1.722x |
+| Real model, 21-call average | 602.939 us | 132.639 us | 4.546x |
+
+GVR's admission, fallback, and candidate work depends strongly on the score
+and temporal-hint distribution, whereas the baseline is much less
+data-dependent. Repeating one layer therefore preserves grid occupancy but
+does not reproduce the work taken by the other 20 layers or by a real B1024
+decode trajectory. Full-graph cache/resource context can also shift absolute
+kernel time. The current traces do not instrument candidate counts, so they do
+not separate those effects further; the 4.55x aggregate is nevertheless
+directly measured and is independently validated by the end-to-end Amdahl
+result.
+
 ## FP16 baseline experiment
 
 Allowing the existing baseline selector to consume FP16 scores helps most at

@@ -1831,6 +1831,38 @@ latency reduction). The 0.096-ms residual is consistent with the measured
 non-selector differences: indexer logits are 0.290 ms slower under GVR while
 sparse attention is 0.194 ms faster.
 
+### Why the standalone B1024 selector reports only 1.722x
+
+The standalone B1024 row is not an independent sample of the selector work in
+the corrected model trace. Its baseline/GVR times are 487.619/283.104 us, but
+the real trace averages 12.661712/21 = 602.939 us and 2.785424/21 = 132.639 us
+per selector call. Thus the 1.722x versus 4.546x difference exists at the
+single-call level; multiplying either measurement by 21 is not the cause.
+
+The offline dataset retained only the first sparse-indexer layer at two
+consecutive native-B32 decode steps (`call0` and `call21`). Later layers from
+that eager debug capture were invalid. The nominal B1024 input repeats each of
+those 32 rows 32 times, and every timed graph replay reuses the same logits and
+prepared hints. By contrast, the corrected model trace covers 21 distinct
+layers, 1,024 independently evolving child sequences, many decode steps, and
+the production fused hint/state path.
+
+This mismatch matters more for GVR than for the baseline. GVR's rung admission,
+fallback search, and candidate-processing cost depends on each layer's score
+distribution and temporal-hint quality. The baseline mostly scans and selects
+the fixed-width row regardless of those values. Repeated B32 rows are therefore
+useful for occupancy and crossover experiments, but they cannot predict the
+aggregate real-model ratio. Full-graph cache and resource context can also
+change absolute kernel duration: here the embedded baseline is 24% slower than
+standalone, while embedded GVR has 53% lower latency.
+
+The existing trace proves the aggregate 4.55x selector ratio and its causal
+connection to the 1.1110x forward result through Amdahl's Law. It does not
+record rung choice or candidate count, so attributing the remaining difference
+among hint quality, fallback frequency, candidate count, and cache state would
+require capturing the exact B1024 tensors from all 21 layers or adding
+event-free device-side diagnostic counters.
+
 The B1 whole-forward ratio must not be attributed to GVR. Its selector is
 about 19 us slower than the cooperative baseline, while unrelated kernels vary
 between the separate servers. This supports retaining the production small-row
