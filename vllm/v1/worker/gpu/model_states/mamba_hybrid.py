@@ -15,7 +15,10 @@ from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilde
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata, compute_spec_metadata
+from vllm.v1.worker.gpu.attn_utils import (
+    build_attn_metadata,
+    compute_common_gdn_attn_metadata,
+)
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
@@ -33,19 +36,20 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
-    spec_sequence_masks_cpu: torch.Tensor | None = None
-    spec_sequence_masks: torch.Tensor | None = None
-    num_spec_decodes: int = 0
-    num_decodes: int = 0
     num_prefills: int = 0
-    num_decode_tokens: int = 0
     num_prefill_tokens: int = 0
+    num_decodes: int = 0
+    num_decode_tokens: int = 0
+    num_spec_decodes: int = 0
     num_spec_decode_tokens: int = 0
-    spec_token_indx: torch.Tensor | None = None
-    non_spec_token_indx: torch.Tensor | None = None
     spec_query_start_loc: torch.Tensor | None = None
     non_spec_query_start_loc: torch.Tensor | None = None
     non_spec_query_start_loc_cpu: torch.Tensor | None = None
+    spec_sequence_masks_cpu: torch.Tensor | None = None
+    spec_sequence_masks: torch.Tensor | None = None
+    non_spec_sequence_masks_cpu: torch.Tensor | None = None
+    spec_token_indx: torch.Tensor | None = None
+    non_spec_token_indx: torch.Tensor | None = None
 
     def get_extra_common_attn_kwargs(
         self,
@@ -77,17 +81,20 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             "spec_sequence_masks": None
             if self.spec_sequence_masks is None
             else self.spec_sequence_masks[:num_reqs],
-            "num_spec_decodes": self.num_spec_decodes,
-            "num_decodes": self.num_decodes,
+            "non_spec_sequence_masks_cpu": None
+            if self.non_spec_sequence_masks_cpu is None
+            else self.non_spec_sequence_masks_cpu[:num_reqs],
             "num_prefills": self.num_prefills,
-            "num_decode_tokens": self.num_decode_tokens,
             "num_prefill_tokens": self.num_prefill_tokens,
+            "num_decodes": self.num_decodes,
+            "num_decode_tokens": self.num_decode_tokens,
+            "num_spec_decodes": self.num_spec_decodes,
             "num_spec_decode_tokens": self.num_spec_decode_tokens,
-            "spec_token_indx": self.spec_token_indx,
-            "non_spec_token_indx": self.non_spec_token_indx,
             "spec_query_start_loc": self.spec_query_start_loc,
             "non_spec_query_start_loc": self.non_spec_query_start_loc,
             "non_spec_query_start_loc_cpu": self.non_spec_query_start_loc_cpu,
+            "spec_token_indx": self.spec_token_indx,
+            "non_spec_token_indx": self.non_spec_token_indx,
         }
 
 
@@ -284,60 +291,64 @@ class MambaHybridModelState(DefaultModelState):
         # compute them during actual (non-capture) forward execution.
         num_accepted_tokens = None
         num_decode_draft_tokens_cpu = None
-        spec_sequence_masks_cpu = None
-        spec_sequence_masks = None
         num_prefills = 0
         num_prefill_tokens = 0
         num_decodes = 0
         num_decode_tokens = 0
         num_spec_decodes = 0
         num_spec_decode_tokens = 0
-        spec_token_indx = None
-        non_spec_token_indx = None
         spec_query_start_loc = None
         non_spec_query_start_loc = None
         non_spec_query_start_loc_cpu = None
-        if not for_capture and self.vllm_config.num_speculative_tokens > 0:
-            num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
-            num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[
-                input_batch.idx_mapping
-            ]
-
-            # GDN uses >= 0 to select spec-decode rows, so non-decode rows
-            # need the -1 sentinel rather than a raw zero draft count.
-            num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
-            num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
-            if num_draft_tokens_per_req is not None:
-                # A row is a spec-decode row only when its whole prompt is already
-                # computed, i.e. exactly one non-draft (decode) token is scheduled.
-                is_decode = (
-                    input_batch.num_scheduled_tokens == num_draft_tokens_per_req + 1
+        spec_sequence_masks_cpu = None
+        spec_sequence_masks = None
+        non_spec_sequence_masks_cpu = None
+        spec_token_indx = None
+        non_spec_token_indx = None
+        if not for_capture:
+            if self.vllm_config.num_speculative_tokens > 0:
+                num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
+                num_accepted_tokens[: input_batch.num_reqs] = (
+                    self.num_accepted_tokens_gpu[input_batch.idx_mapping]
                 )
-                spec_decode_mask = (num_draft_tokens_per_req > 0) & is_decode
-                num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
-                    spec_decode_mask, num_draft_tokens_per_req, -1
-                )
-            num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
-            # Spec metadata only consumed by GDN. Skip the compute for Mamba2
-            # hybrids, which read only num_accepted_tokens.
+                # GDN uses >= 0 to select spec-decode rows, so non-decode rows
+                # need the -1 sentinel rather than a raw zero draft count.
+                num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
+                num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
+                if num_draft_tokens_per_req is not None:
+                    # A row is a spec-decode row only when its whole prompt is already
+                    # computed, i.e. exactly one non-draft (decode) token is scheduled.
+                    is_decode = (
+                        input_batch.num_scheduled_tokens == num_draft_tokens_per_req + 1
+                    )
+                    spec_decode_mask = (num_draft_tokens_per_req > 0) & is_decode
+                    num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
+                        spec_decode_mask, num_draft_tokens_per_req, -1
+                    )
+                num_decode_draft_tokens_cpu = torch.from_numpy(
+                    num_decode_draft_tokens_np
+                )
+
+            # Compute GDN common metadata
             if self.is_gdn(attn_groups):
                 (
-                    spec_sequence_masks_cpu,
-                    spec_sequence_masks,
-                    num_spec_decodes,
-                    num_decodes,
                     num_prefills,
-                    num_decode_tokens,
                     num_prefill_tokens,
+                    num_decodes,
+                    num_decode_tokens,
+                    num_spec_decodes,
                     num_spec_decode_tokens,
-                    spec_token_indx,
-                    non_spec_token_indx,
                     spec_query_start_loc,
                     non_spec_query_start_loc,
                     non_spec_query_start_loc_cpu,
+                    spec_sequence_masks_cpu,
+                    spec_sequence_masks,
+                    non_spec_sequence_masks_cpu,
+                    spec_token_indx,
+                    non_spec_token_indx,
                     num_accepted_tokens,
-                ) = compute_spec_metadata(
+                ) = compute_common_gdn_attn_metadata(
                     num_decode_draft_tokens_cpu,
                     num_accepted_tokens,
                     input_batch.query_start_loc,
@@ -349,19 +360,20 @@ class MambaHybridModelState(DefaultModelState):
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
-            spec_sequence_masks_cpu=spec_sequence_masks_cpu,
-            spec_sequence_masks=spec_sequence_masks,
-            num_spec_decodes=num_spec_decodes,
-            num_decodes=num_decodes,
             num_prefills=num_prefills,
-            num_decode_tokens=num_decode_tokens,
             num_prefill_tokens=num_prefill_tokens,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            num_spec_decodes=num_spec_decodes,
             num_spec_decode_tokens=num_spec_decode_tokens,
-            spec_token_indx=spec_token_indx,
-            non_spec_token_indx=non_spec_token_indx,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,
             non_spec_query_start_loc_cpu=non_spec_query_start_loc_cpu,
+            spec_sequence_masks_cpu=spec_sequence_masks_cpu,
+            spec_sequence_masks=spec_sequence_masks,
+            non_spec_sequence_masks_cpu=non_spec_sequence_masks_cpu,
+            spec_token_indx=spec_token_indx,
+            non_spec_token_indx=non_spec_token_indx,
         )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
