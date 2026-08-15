@@ -41,8 +41,9 @@ def test_fp8_k_nvfp4_v_cache_dtype() -> None:
 
 
 @pytest.mark.parametrize("layout", ["NHD", "HND"])
-def test_fp8_k_nvfp4_v_cache_split_views(layout: str) -> None:
-    num_pages, block_size, num_heads, head_size = 2, 64, 4, 128
+@pytest.mark.parametrize("head_size", [128, 256])
+def test_fp8_k_nvfp4_v_cache_split_views(layout: str, head_size: int) -> None:
+    num_pages, block_size, num_heads = 2, 64, 4
     value_dim = head_size // 2
     scale_dim = head_size // 16
     total_dim = head_size + value_dim + scale_dim

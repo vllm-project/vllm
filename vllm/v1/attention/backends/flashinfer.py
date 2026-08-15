@@ -555,8 +555,8 @@ class FlashInferBackend(AttentionBackend):
             return "fp8_k_nvfp4_v is not supported on SM107"
         if dtype != torch.bfloat16:
             return "fp8_k_nvfp4_v requires bfloat16 model activations"
-        if head_size != 128:
-            return "fp8_k_nvfp4_v requires head_size=128"
+        if head_size not in (128, 256):
+            return "fp8_k_nvfp4_v requires head_size=128 or 256"
         if block_size is not None and block_size != 64:
             return "fp8_k_nvfp4_v requires block_size=64"
         if use_mla or use_sparse or use_mm_prefix:

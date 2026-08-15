@@ -63,6 +63,24 @@ def test_fp8_k_nvfp4_v_rejects_sm107() -> None:
     assert reason == "fp8_k_nvfp4_v is not supported on SM107"
 
 
+@pytest.mark.parametrize("head_size", [128, 256])
+def test_fp8_k_nvfp4_v_accepts_supported_head_sizes(head_size: int) -> None:
+    assert (
+        FlashInferBackend.supports_combination(
+            head_size=head_size,
+            dtype=torch.bfloat16,
+            kv_cache_dtype="fp8_k_nvfp4_v",
+            block_size=64,
+            use_mla=False,
+            has_sink=False,
+            use_sparse=False,
+            use_mm_prefix=False,
+            device_capability=DeviceCapability(10, 3),
+        )
+        is None
+    )
+
+
 def test_fp8_k_nvfp4_v_routes_spec_decode_to_context() -> None:
     builder = FlashInferMetadataBuilder.__new__(FlashInferMetadataBuilder)
     builder.vllm_config = SimpleNamespace(
@@ -125,13 +143,14 @@ def test_fp8_k_nvfp4_v_store_rejects_fp16() -> None:
 
 
 @torch.inference_mode()
-def test_fp8_k_nvfp4_v_store_and_native_decode() -> None:
+@pytest.mark.parametrize("head_size", [128, 256])
+def test_fp8_k_nvfp4_v_store_and_native_decode(head_size: int) -> None:
     from flashinfer.decode import trtllm_batch_decode_with_kv_cache
 
     torch.manual_seed(0)
     num_pages, page_size = 4, 64
     num_kv_heads, group_size = 4, 4
-    num_qo_heads, head_size = num_kv_heads * group_size, 128
+    num_qo_heads = num_kv_heads * group_size
     total_dim = head_size + head_size // 2 + head_size // 16
 
     packed_cache = torch.empty(
