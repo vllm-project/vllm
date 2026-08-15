@@ -71,15 +71,12 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
-from vllm.v1.kv_offload.tiering.backpressure import EMABackpressureDetector
 from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
 )
-
-_NETWORK_TIER_TYPES = frozenset({"obj", "p2p"})
 
 logger = init_logger(__name__)
 
@@ -297,37 +294,26 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         if not isinstance(self.secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
 
-        # Apply top-level backpressure defaults to tiers without overrides.
-        # Tier-type-aware water marks are merged first so that a bare
-        # ``"backpressure": {}`` picks up sensible thresholds for the tier's
-        # storage medium (local NVMe vs. networked).
+        # Backpressure defaults are merged in priority order (highest first):
+        #   1. Per-tier ``backpressure`` dict in the tier config
+        #   2. Top-level ``backpressure`` in kv_connector_extra_config
+        #   3. VLLM_KV_BACKPRESSURE_CONFIG env var entry for the tier type
+        # Within each tier's resolved dict, tier-type-aware water marks
+        # are filled in last so a bare ``"backpressure": {}`` picks up
+        # sensible thresholds for the storage medium.
+        import vllm.envs as envs
+
+        bp_env = envs.VLLM_KV_BACKPRESSURE_CONFIG or {}
         bp_defaults = self.extra_config.get("backpressure")
-        if bp_defaults is not None:
-            for tier_cfg in self.secondary_tier_configs:
-                tier_cfg.setdefault("backpressure", bp_defaults)
+
         for tier_cfg in self.secondary_tier_configs:
-            bp = tier_cfg.get("backpressure")
-            if bp is None:
-                continue
             tier_type = tier_cfg.get("type", "")
-            if tier_type in _NETWORK_TIER_TYPES:
-                bp.setdefault(
-                    "high_water_s",
-                    EMABackpressureDetector.NETWORK_HIGH_WATER_S,
-                )
-                bp.setdefault(
-                    "low_water_s",
-                    EMABackpressureDetector.NETWORK_LOW_WATER_S,
-                )
-            else:
-                bp.setdefault(
-                    "high_water_s",
-                    EMABackpressureDetector.LOCAL_HIGH_WATER_S,
-                )
-                bp.setdefault(
-                    "low_water_s",
-                    EMABackpressureDetector.LOCAL_LOW_WATER_S,
-                )
+            # Layer 3: env var defaults for this tier type
+            if tier_type in bp_env and "backpressure" not in tier_cfg:
+                tier_cfg["backpressure"] = bp_env[tier_type].copy()
+            # Layer 2: top-level config defaults
+            if bp_defaults is not None:
+                tier_cfg.setdefault("backpressure", bp_defaults.copy())
 
         # Scheduler-side mmap (rank=None); kept for cleanup
         self._scheduler_mmap: SharedOffloadRegion | None = None

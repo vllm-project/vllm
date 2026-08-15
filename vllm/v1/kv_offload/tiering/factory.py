@@ -8,6 +8,7 @@ from vllm.logger import init_logger
 from vllm.v1.kv_offload.tiering.base import SecondaryTierManager
 
 if TYPE_CHECKING:
+    from vllm.v1.kv_offload.backpressure import BackpressureDetector
     from vllm.v1.kv_offload.base import OffloadingSpec
 
 logger = init_logger(__name__)
@@ -80,7 +81,11 @@ class SecondaryTierFactory:
                 )
             policy_cls_name = bp_config.pop("policy_cls", None)
             policy = _import_class(policy_cls_name)() if policy_cls_name else None
-            detector_cls = _import_class(bp_cls_name)
+            detector_cls: type[BackpressureDetector] = _import_class(bp_cls_name)
+            defaults = detector_cls.default_config(tier_type)
+            if defaults:
+                for k, v in defaults.items():
+                    bp_config.setdefault(k, v)
             bp_detector = detector_cls(policy=policy, **bp_config)
         return tier_cls(
             offloading_spec=offloading_spec,

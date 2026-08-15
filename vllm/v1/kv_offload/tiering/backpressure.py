@@ -90,6 +90,11 @@ class BackpressureDetector(ABC):
             return False
         return True
 
+    @classmethod
+    def default_config(cls, tier_type: str) -> dict | None:
+        """Return default constructor kwargs for ``tier_type``, or None."""
+        return None
+
     @property
     def stats(self) -> dict[str, float]:
         return {}
@@ -122,6 +127,10 @@ class EMABackpressureDetector(BackpressureDetector):
     # EMA smoothing factor: higher values (→1) react faster to latency
     # spikes but are noisier; lower values (→0) smooth more but lag.
     DEFAULT_ALPHA = 0.3
+
+    # Number of store completions to collect before seeding the EMA.
+    # During warmup, pressure is never signalled; the EMA is initialized
+    # to the mean of the warmup samples to avoid cold-start false positives.
     DEFAULT_WARMUP_COMPLETIONS = 3
 
     LOCAL_HIGH_WATER_S = 0.005
@@ -130,14 +139,25 @@ class EMABackpressureDetector(BackpressureDetector):
     NETWORK_HIGH_WATER_S = 0.020
     NETWORK_LOW_WATER_S = 0.005
 
-    DEFAULT_HIGH_WATER_S = LOCAL_HIGH_WATER_S
-    DEFAULT_LOW_WATER_S = LOCAL_LOW_WATER_S
+    _NETWORK_TIER_TYPES = frozenset({"obj", "p2p"})
+
+    @classmethod
+    def default_config(cls, tier_type: str) -> dict | None:
+        if tier_type in cls._NETWORK_TIER_TYPES:
+            return {
+                "high_water_s": cls.NETWORK_HIGH_WATER_S,
+                "low_water_s": cls.NETWORK_LOW_WATER_S,
+            }
+        return {
+            "high_water_s": cls.LOCAL_HIGH_WATER_S,
+            "low_water_s": cls.LOCAL_LOW_WATER_S,
+        }
 
     def __init__(
         self,
+        high_water_s: float,
+        low_water_s: float,
         alpha: float = DEFAULT_ALPHA,
-        high_water_s: float = DEFAULT_HIGH_WATER_S,
-        low_water_s: float = DEFAULT_LOW_WATER_S,
         warmup_completions: int = DEFAULT_WARMUP_COMPLETIONS,
         policy_cls: type[BackpressurePolicy] | None = None,
     ):
