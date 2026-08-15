@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import json
 import os
 import subprocess
@@ -12,6 +13,7 @@ import pydantic
 import pytest
 
 from vllm.assets.audio import AudioAsset
+from vllm.entrypoints.openai import run_batch as run_batch_module
 from vllm.entrypoints.openai.run_batch import (
     BatchProgressTracker,
     BatchRequestOutput,
@@ -1031,3 +1033,50 @@ def test_max_inflight_must_be_positive():
     """A non-positive bound would silently serialise the batch."""
     with pytest.raises(ValueError, match="max-inflight"):
         validate_run_batch_args(SimpleNamespace(max_inflight=0))
+
+
+@pytest.mark.asyncio
+async def test_dispatch_batch_respects_max_inflight(tmp_path, monkeypatch):
+    """No more than max_inflight requests may be alive at once.
+
+    This bound is what keeps frontend memory flat; without it the whole input
+    file is submitted at once and memory grows with the batch.
+    """
+    requests = [
+        {"custom_id": f"request-{i}", "method": "POST", "url": "/v1/chat/completions"}
+        for i in range(50)
+    ]
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text("\n".join(json.dumps(r) for r in requests) + "\n")
+    output_path = tmp_path / "output.jsonl"
+
+    live = 0
+    peak = 0
+
+    async def fake_run_one_request(request_json, endpoint_registry):
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        await asyncio.sleep(0)
+        live -= 1
+        return BatchRequestOutput(
+            id="vllm-test",
+            custom_id=json.loads(request_json)["custom_id"],
+            response=None,
+            error=None,
+        )
+
+    monkeypatch.setattr(run_batch_module, "run_one_request", fake_run_one_request)
+
+    max_inflight = 8
+    with open(output_path, "w", encoding="utf-8") as output_file:
+        await dispatch_batch(
+            str(input_path),
+            output_file,
+            {},
+            BatchProgressTracker(),
+            max_inflight,
+        )
+
+    assert peak <= max_inflight
+    assert len(output_path.read_text().strip().split("\n")) == len(requests)
