@@ -31,6 +31,7 @@ from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
+from vllm.model_executor.models.config import MambaModelConfig
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionCGSupport
 
@@ -1385,6 +1386,53 @@ def test_validate_mamba_align_subblock_prefill():
     )
 
     VllmConfig.validate_block_size(config)
+
+
+def test_mamba_cache_mode_v2_model_runner_fallback():
+    """Verify that mamba_cache_mode='all' falls back to 'align' on MRv2."""
+
+    # Case 1: MRv2 enabled (e.g. dspark spec decode) -> falls back to align
+    vllm_config_v2 = SimpleNamespace(
+        model_config=SimpleNamespace(
+            architecture="NemotronHForCausalLM",
+            supports_mamba_prefix_caching=True,
+            max_model_len=4096,
+        ),
+        cache_config=SimpleNamespace(
+            enable_prefix_caching=True,
+            mamba_cache_mode="all",
+            mamba_block_size=None,
+            block_size=16,
+        ),
+        scheduler_config=SimpleNamespace(
+            enable_chunked_prefill=True,
+        ),
+        use_v2_model_runner=True,
+    )
+    MambaModelConfig.verify_and_update_config(vllm_config_v2)
+    assert vllm_config_v2.cache_config.mamba_cache_mode == "align"
+    assert vllm_config_v2.cache_config.mamba_block_size == 16
+
+    # Case 2: MRv1 with supports_mamba_prefix_caching=True -> preserves 'all'
+    vllm_config_v1 = SimpleNamespace(
+        model_config=SimpleNamespace(
+            architecture="NemotronHForCausalLM",
+            supports_mamba_prefix_caching=True,
+            max_model_len=4096,
+        ),
+        cache_config=SimpleNamespace(
+            enable_prefix_caching=True,
+            mamba_cache_mode="all",
+            mamba_block_size=None,
+            block_size=16,
+        ),
+        scheduler_config=SimpleNamespace(
+            enable_chunked_prefill=True,
+        ),
+        use_v2_model_runner=False,
+    )
+    MambaModelConfig.verify_and_update_config(vllm_config_v1)
+    assert vllm_config_v1.cache_config.mamba_cache_mode == "all"
 
 
 @pytest.mark.parametrize(

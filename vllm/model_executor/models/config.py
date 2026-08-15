@@ -608,16 +608,20 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                     cache_config.mamba_cache_mode,
                     model_config.architecture,
                 )
-            if (
-                cache_config.mamba_cache_mode == "all"
-                and not model_config.supports_mamba_prefix_caching
-            ):
-                cache_config.mamba_cache_mode = "align"
-                logger.warning(
-                    "Hybrid or mamba-based model detected without support "
-                    "for prefix caching with Mamba cache 'all' mode: "
-                    "falling back to 'align' mode."
-                )
+            if cache_config.mamba_cache_mode == "all":
+                if vllm_config.use_v2_model_runner:
+                    cache_config.mamba_cache_mode = "align"
+                    logger.warning(
+                        "Model Runner V2 only supports Mamba cache 'align' mode "
+                        "for prefix caching: falling back to 'align' mode."
+                    )
+                elif not model_config.supports_mamba_prefix_caching:
+                    cache_config.mamba_cache_mode = "align"
+                    logger.warning(
+                        "Hybrid or mamba-based model detected without support "
+                        "for prefix caching with Mamba cache 'all' mode: "
+                        "falling back to 'align' mode."
+                    )
             if cache_config.mamba_cache_mode == "align":
                 assert vllm_config.scheduler_config.enable_chunked_prefill, (
                     "Chunked prefill is required for mamba cache mode 'align'."
