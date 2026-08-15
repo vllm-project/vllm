@@ -23,6 +23,7 @@ if [[ "${is_rocm}" == "1" ]]; then
             echo "ERROR: invalid ROCm wheel location: ${rocm_wheel}" >&2
             exit 1
         fi
+        rocm_wheel="$(realpath -- "${rocm_wheel}")"
     elif [[ -d /opt/vllm-wheels ]]; then
         shopt -s nullglob
         rocm_wheels=(/opt/vllm-wheels/vllm-*.whl)
