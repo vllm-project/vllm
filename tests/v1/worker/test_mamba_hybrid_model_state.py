@@ -39,19 +39,50 @@ def test_postprocess_state_scalar_with_int32_mapping(
 
 
 def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
-    state = RecoverSSMState(2, torch.device("cpu"), align=False)
+    state = RecoverSSMState()
     metadata = Mock(spec=RecoverSSMMetadata)
     metadata.commit_recoverssm_state.return_value = None
     num_sampled = torch.tensor([3, 1], dtype=torch.int32)
     idx_mapping = torch.tensor([0, 1], dtype=torch.int32)
+    num_accepted_tokens = torch.ones(2, dtype=torch.int32)
     group = SimpleNamespace(layer_names=["layer"])
 
     state.record_step({"layer": metadata}, [[group]], for_capture=False)
-    state.commit_step(num_sampled, idx_mapping, None)
-    state.commit_step(num_sampled, idx_mapping, None)
+    state.commit_step(
+        num_sampled,
+        idx_mapping,
+        state_indices=None,
+        num_accepted_tokens=num_accepted_tokens,
+    )
+    state.commit_step(
+        num_sampled,
+        idx_mapping,
+        state_indices=None,
+        num_accepted_tokens=num_accepted_tokens,
+    )
 
     metadata.commit_recoverssm_state.assert_called_once_with(num_sampled)
-    assert state.committed is None
+
+
+def test_empty_postprocess_clears_recoverssm_step() -> None:
+    state = object.__new__(MambaHybridModelState)
+    state._align_mode = False
+    state.recoverssm = RecoverSSMState()
+    state.num_accepted_tokens_gpu = torch.ones(1, dtype=torch.int32)
+    metadata = Mock(spec=RecoverSSMMetadata)
+    metadata.commit_recoverssm_state.return_value = None
+    group = SimpleNamespace(layer_names=["layer"])
+    state.recoverssm.record_step({"layer": metadata}, [[group]], for_capture=False)
+
+    state.postprocess_state(torch.empty(0, dtype=torch.int32), 0)
+    state.recoverssm.commit_step(
+        torch.ones(1, dtype=torch.int32),
+        torch.zeros(1, dtype=torch.int32),
+        state_indices=None,
+        num_accepted_tokens=state.num_accepted_tokens_gpu,
+    )
+
+    metadata.commit_recoverssm_state.assert_not_called()
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
@@ -63,7 +94,7 @@ def test_recoverssm_align_tracks_final_running_state_and_neutralizes_copy_bias(
     state._align_mode = True
     state._mamba_ctx = None
     state._mamba_state_idx_gpu = torch.full((5,), -1, dtype=torch.int32, device="cuda")
-    state.recoverssm = RecoverSSMState(5, torch.device("cuda"), align=True)
+    state.recoverssm = RecoverSSMState()
     state.num_accepted_tokens_gpu = torch.full(
         (5,), 9, dtype=torch.int32, device="cuda"
     )
@@ -89,5 +120,3 @@ def test_recoverssm_align_tracks_final_running_state_and_neutralizes_copy_bias(
     assert state._mamba_state_idx_gpu.tolist() == expected_state_indices
     expected_accepted = [9, 1, 9, 2 if mixed_batch else 1, 9]
     assert state.num_accepted_tokens_gpu.tolist() == expected_accepted
-    assert state.recoverssm.committed is not None
-    assert not state.recoverssm.committed.any().item()

@@ -13,12 +13,7 @@ from vllm.v1.worker.utils import AttentionGroup
 class RecoverSSMState:
     """Coordinates RecoverSSM metadata between attention and postprocessing."""
 
-    def __init__(self, max_num_reqs: int, device: torch.device, *, align: bool) -> None:
-        self.committed = (
-            torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
-            if align
-            else None
-        )
+    def __init__(self) -> None:
         self._step: tuple[RecoverSSMMetadata, ...] | None = None
 
     def record_step(
@@ -44,7 +39,9 @@ class RecoverSSMState:
         self,
         num_sampled: torch.Tensor | int,
         idx_mapping: torch.Tensor,
+        *,
         state_indices: torch.Tensor | None,
+        num_accepted_tokens: torch.Tensor,
     ) -> None:
         step = self._step
         self._step = None
@@ -55,17 +52,16 @@ class RecoverSSMState:
             postprocess_meta = metadata.commit_recoverssm_state(num_sampled)
             if postprocess_meta is None:
                 continue
-            assert self.committed is not None
             assert state_indices is not None
-            # Preprocess follows the optimistic verify length. Commit restores
-            # the running column to the accepted length.
-            _mark_recoverssm_align_commit_kernel[(postprocess_meta.num_spec_decodes,)](
+            # RecoverSSM already restored the accepted state. Update its running
+            # column and reset the next-step copy bias to the neutral value.
+            _postprocess_recoverssm_align_kernel[(postprocess_meta.num_spec_decodes,)](
                 idx_mapping,
                 num_sampled,
                 postprocess_meta.request_indices,
                 postprocess_meta.num_computed_tokens,
                 state_indices,
-                self.committed,
+                num_accepted_tokens,
                 MAMBA_BLOCK_SIZE=postprocess_meta.block_size,
                 BLOCK_TABLE_WIDTH=postprocess_meta.block_table.shape[1],
             )
@@ -75,13 +71,13 @@ class RecoverSSMState:
     {"HAS_REQUEST_INDICES": lambda args: args["request_indices_ptr"] is not None}
 )
 @triton.jit
-def _mark_recoverssm_align_commit_kernel(
+def _postprocess_recoverssm_align_kernel(
     idx_mapping_ptr,
     num_sampled_ptr,
     request_indices_ptr,
     num_computed_ptr,
     state_idx_ptr,
-    committed_ptr,
+    num_accepted_ptr,
     HAS_REQUEST_INDICES: tl.constexpr,
     MAMBA_BLOCK_SIZE: tl.constexpr,
     BLOCK_TABLE_WIDTH: tl.constexpr,
@@ -102,4 +98,4 @@ def _mark_recoverssm_align_commit_kernel(
             BLOCK_TABLE_WIDTH - 1,
         ),
     )
-    tl.store(committed_ptr + req_state_idx, True)
+    tl.store(num_accepted_ptr + req_state_idx, 1)

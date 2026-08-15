@@ -82,13 +82,7 @@ class MambaHybridModelState(DefaultModelState):
         # columns and the running state_idx are kept GPU-resident.
         self._align_mode = self.cache_config.mamba_cache_mode == "align"
         self.recoverssm = (
-            RecoverSSMState(
-                self.max_num_reqs,
-                self.device,
-                align=self._align_mode,
-            )
-            if self.cache_config.use_kda_recoverssm
-            else None
+            RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
         )
         if self._align_mode:
             self._mamba_state_idx_gpu = torch.zeros(
@@ -309,38 +303,36 @@ class MambaHybridModelState(DefaultModelState):
         num_sampled: torch.Tensor | int,
         num_computed_tokens: torch.Tensor | None = None,
     ) -> None:
-        recoverssm_committed = None
+        # Chunked prefill does not sample a token, so num_sampled can be 0.
+        # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
+        num_reqs = idx_mapping.shape[0]
+        if num_reqs:
+            if not isinstance(num_sampled, int):
+                # idx_mapping may contain -1 sentinels (filtered rows) under PP; the
+                # kernel skips them rather than scattering with a host-side gather.
+                _scatter_num_accepted_kernel[(num_reqs,)](
+                    idx_mapping,
+                    num_sampled,
+                    self.num_accepted_tokens_gpu,
+                )
+            else:
+                # Fill with single value.
+                _fill_num_accepted_kernel[(num_reqs,)](
+                    idx_mapping,
+                    self.num_accepted_tokens_gpu,
+                    max(num_sampled, 1),
+                )
+
         if self.recoverssm is not None:
             self.recoverssm.commit_step(
                 num_sampled,
                 idx_mapping,
-                self._mamba_state_idx_gpu if self._align_mode else None,
+                state_indices=(self._mamba_state_idx_gpu if self._align_mode else None),
+                num_accepted_tokens=self.num_accepted_tokens_gpu,
             )
-            recoverssm_committed = self.recoverssm.committed
 
-        # Chunked prefill does not sample a token, so num_sampled can be 0.
-        # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
-        num_reqs = idx_mapping.shape[0]
         if not num_reqs:
             return
-
-        if not isinstance(num_sampled, int):
-            # idx_mapping may contain -1 sentinels (filtered rows) under PP; the
-            # kernel skips them rather than scattering with a host-side gather.
-            _scatter_num_accepted_kernel[(num_reqs,)](
-                idx_mapping,
-                num_sampled,
-                self.num_accepted_tokens_gpu,
-                recoverssm_committed,
-            )
-        else:
-            # Fill with single value.
-            _fill_num_accepted_kernel[(num_reqs,)](
-                idx_mapping,
-                self.num_accepted_tokens_gpu,
-                recoverssm_committed,
-                max(num_sampled, 1),
-            )
 
         # Align: save the running state to the block-aligned position when
         # spec-decode acceptance leaves the sequence non-block-aligned (mirrors
@@ -360,46 +352,28 @@ class MambaHybridModelState(DefaultModelState):
             )
 
 
-@triton.heuristics(
-    {"HAS_RECOVERSSM_COMMIT": lambda args: args["committed_ptr"] is not None}
-)
 @triton.jit
 def _scatter_num_accepted_kernel(
     idx_mapping_ptr,  # [num_reqs] batch_idx -> req_state_idx (-1 to skip)
     num_sampled_ptr,  # [num_reqs]
     num_accepted_ptr,  # [max_num_reqs]
-    committed_ptr,
-    HAS_RECOVERSSM_COMMIT: tl.constexpr,
 ):
     row = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + row)
     if req_state_idx < 0:
         return
     num_sampled = tl.load(num_sampled_ptr + row)
-    if HAS_RECOVERSSM_COMMIT:
-        committed = tl.load(committed_ptr + req_state_idx)
-        num_sampled = tl.where(committed, 1, num_sampled)
-        tl.store(committed_ptr + req_state_idx, False)
     tl.store(num_accepted_ptr + req_state_idx, tl.maximum(num_sampled, 1))
 
 
-@triton.heuristics(
-    {"HAS_RECOVERSSM_COMMIT": lambda args: args["committed_ptr"] is not None}
-)
 @triton.jit
 def _fill_num_accepted_kernel(
     idx_mapping_ptr,  # [num_reqs] batch_idx -> req_state_idx (-1 to skip)
     num_accepted_ptr,  # [max_num_reqs]
-    committed_ptr,
     num_sampled,
-    HAS_RECOVERSSM_COMMIT: tl.constexpr,
 ):
     row = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + row)
     if req_state_idx < 0:
         return
-    if HAS_RECOVERSSM_COMMIT:
-        committed = tl.load(committed_ptr + req_state_idx)
-        num_sampled = tl.where(committed, 1, num_sampled)
-        tl.store(committed_ptr + req_state_idx, False)
     tl.store(num_accepted_ptr + req_state_idx, num_sampled)
