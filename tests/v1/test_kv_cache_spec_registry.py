@@ -45,13 +45,16 @@ from vllm.v1.kv_cache_spec_registry import (
 )
 
 
-def test_fp8_k_nvfp4_v_page_size_is_between_fp8_and_nvfp4() -> None:
-    common = dict(block_size=64, num_kv_heads=8, head_size=128, dtype=torch.uint8)
+@pytest.mark.parametrize("head_size", [128, 256])
+def test_fp8_k_nvfp4_v_page_size_is_between_fp8_and_nvfp4(head_size: int) -> None:
+    common = dict(
+        block_size=64, num_kv_heads=8, head_size=head_size, dtype=torch.uint8
+    )
     fp8 = FullAttentionSpec(**common, kv_quant_mode=KVQuantMode.FP8_PER_TENSOR)
     mixed = FullAttentionSpec(**common, kv_quant_mode=KVQuantMode.FP8_K_NVFP4_V)
     nvfp4 = FullAttentionSpec(**common, kv_quant_mode=KVQuantMode.NVFP4)
 
-    assert mixed.page_size_bytes == 64 * 8 * (128 + 64 + 8)
+    assert mixed.page_size_bytes == 64 * 8 * (head_size + head_size // 2 + head_size // 16)
     assert nvfp4.page_size_bytes < mixed.page_size_bytes < fp8.page_size_bytes
 
 
