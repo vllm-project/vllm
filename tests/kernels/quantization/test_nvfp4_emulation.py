@@ -770,3 +770,22 @@ def test_nvfp4_moe_correctness(
         atol=0.0 if on_gfx950() else 0.02,
         rtol=0,
     )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_break_fp4_bytes_cuda_input():
+    """Regression test for #52407: ``break_fp4_bytes`` must move the E2M1
+    lookup table to the input tensor's device instead of indexing a CPU
+    tensor with CUDA indices, which raises a device mismatch error."""
+    from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+        break_fp4_bytes,
+    )
+
+    x = torch.randint(0, 256, (2, 8), dtype=torch.uint8, device="cuda")
+    out = break_fp4_bytes(x, torch.float32)
+    assert out.device.type == "cuda"
+    assert out.shape == (2, 16)
+
+    # Numerical parity with the CPU reference on the same data.
+    ref = break_fp4_bytes(x.cpu(), torch.float32)
+    torch.testing.assert_close(out.cpu(), ref)
