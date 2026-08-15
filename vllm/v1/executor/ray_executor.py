@@ -89,6 +89,19 @@ class RayDistributedExecutor(Executor):
         # KV connector setup
         self.has_connector = self.vllm_config.kv_transfer_config is not None
 
+        if (
+            self.vllm_config.ec_transfer_config is not None
+            and self.parallel_config.world_size > 1
+        ):
+            raise NotImplementedError(
+                "EC connector worker metadata is not supported with the "
+                "legacy Ray executor when world_size > 1: only the output "
+                "of a single worker is fetched, silently dropping the "
+                "other workers' EC connector state. Set "
+                "VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1 to use RayExecutorV2, "
+                "or use the multiprocessing executor instead."
+            )
+
         self.uses_sampler = self.vllm_config.model_config.runner_type != "pooling" and (
             self.vllm_config.ec_transfer_config is None
             or self.vllm_config.ec_transfer_config.is_ec_consumer
