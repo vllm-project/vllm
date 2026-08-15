@@ -261,7 +261,7 @@ def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
                 structured_outputs=StructuredOutputsParams(structural_tag=payload)
             )
         )
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, VLLMValidationError) as exc:
         raise VLLMValidationError(
             f"Invalid {parameter} structural_tag specification.",
             parameter=parameter,
