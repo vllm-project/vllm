@@ -486,8 +486,8 @@ class KimiK3MegaMoEExperts(DeepseekV4MegaMoEExperts):
             symm_buffer,
             activation_clamp=activation_clamp,
             activation=self.activation,
-            activation_beta=self.activation_beta,
-            activation_linear_beta=self.activation_linear_beta,
+            situ_beta=self.activation_beta,
+            situ_linear_beta=self.activation_linear_beta,
             fast_math=fast_math,
         )
         return y
