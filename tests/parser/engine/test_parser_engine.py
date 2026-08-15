@@ -33,6 +33,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
+from vllm.parser.parser_manager import ParserManager
 
 # ── Shared test configs ──────────────────────────────────────────────
 
@@ -890,6 +891,129 @@ _CombinedReasoningAdapter, _CombinedToolAdapter = make_adapters(_CombinedTestEng
 class _CombinedDelegating(DelegatingParser):
     reasoning_parser_cls = _CombinedReasoningAdapter
     tool_parser_cls = _CombinedToolAdapter
+
+
+def test_parser_manager_uses_shared_engine_directly(monkeypatch):
+    monkeypatch.setattr(
+        ParserManager,
+        "get_reasoning_parser",
+        classmethod(lambda cls, name: _CombinedReasoningAdapter),
+    )
+    monkeypatch.setattr(
+        ParserManager,
+        "get_tool_parser",
+        classmethod(lambda cls, name, enabled, model: _CombinedToolAdapter),
+    )
+
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="combined",
+        reasoning_parser_name="combined",
+        enable_auto_tools=True,
+    )
+
+    assert parser_cls is not None
+    assert parser_cls is _CombinedTestEngine
+    parser = parser_cls(make_mock_tokenizer(_VOCAB))
+    request = _make_delegating_request()
+    reasoning, content, _ = parser.parse(
+        "ab</think>c",
+        request,
+        model_output_token_ids=[ord("a"), ord("b"), 201, ord("c")],
+    )
+    assert reasoning == "ab"
+    assert content == "c"
+    assert parser.count_reasoning_tokens([]) == 2
+
+
+def test_parser_manager_preserves_reasoning_only_adapter(monkeypatch):
+    monkeypatch.setattr(
+        ParserManager,
+        "get_reasoning_parser",
+        classmethod(lambda cls, name: _CombinedReasoningAdapter),
+    )
+    monkeypatch.setattr(
+        ParserManager,
+        "get_tool_parser",
+        classmethod(lambda cls, name, enabled, model: None),
+    )
+
+    parser_cls = ParserManager.get_parser(reasoning_parser_name="combined")
+
+    assert parser_cls is not None
+    parser = parser_cls(make_mock_tokenizer(_VOCAB))
+    assert parser.reasoning_parser is not None
+    assert parser.tool_parser is None
+    reasoning, content, _ = parser.parse(
+        'ab</think><tool_call>{"name":"h","arguments":{}}</tool_call>',
+        _make_delegating_request(),
+        model_output_token_ids=[ord("a"), ord("b"), 201],
+    )
+    assert reasoning == "ab"
+    assert content == '<tool_call>{"name":"h","arguments":{}}</tool_call>'
+    assert parser.count_reasoning_tokens([ord("a"), ord("b"), 201]) == 2
+
+
+def test_parser_manager_preserves_tool_only_adapter(monkeypatch):
+    monkeypatch.setattr(
+        ParserManager,
+        "get_reasoning_parser",
+        classmethod(lambda cls, name: None),
+    )
+    monkeypatch.setattr(
+        ParserManager,
+        "get_tool_parser",
+        classmethod(lambda cls, name, enabled, model: _CombinedToolAdapter),
+    )
+
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="combined", enable_auto_tools=True
+    )
+
+    assert parser_cls is not None
+    parser = parser_cls(make_mock_tokenizer(_VOCAB))
+    assert parser.reasoning_parser is None
+    assert parser.tool_parser is not None
+    reasoning, content, tool_calls = parser.parse(
+        "<think>ab</think>c",
+        _make_delegating_request(),
+        model_output_token_ids=[200, ord("a"), ord("b"), 201, ord("c")],
+    )
+    assert reasoning is None
+    assert content == "<think>ab</think>c"
+    assert tool_calls == []
+
+
+def test_parser_manager_rejects_non_engine_adapter_metadata():
+    class TraditionalParser:
+        pass
+
+    class InvalidEngineAdapter:
+        _parser_engine_cls = TraditionalParser
+
+    assert ParserManager._get_parser_engine_cls(TraditionalParser) is None
+    assert ParserManager._get_parser_engine_cls(InvalidEngineAdapter) is None
+    assert (
+        ParserManager._get_parser_engine_cls(_CombinedReasoningAdapter)
+        is _CombinedTestEngine
+    )
+
+
+def test_reasoning_adapter_counts_after_final_non_streaming_parse():
+    parser = _CombinedReasoningAdapter(make_mock_tokenizer(_VOCAB))
+    request = _make_delegating_request()
+    token_ids = [ord("a"), ord("b"), 201, ord("c")]
+
+    parser.extract_reasoning_streaming(
+        "",
+        "ab</think>c",
+        "ab</think>c",
+        [],
+        token_ids,
+        token_ids,
+    )
+    parser.extract_reasoning("ab</think>c", request)
+
+    assert parser.count_reasoning_tokens(token_ids) == 2
 
 
 def _make_delegating_request():
