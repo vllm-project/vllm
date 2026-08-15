@@ -855,8 +855,20 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     ) -> torch.Tensor | None:
         if global_seq_lens is None:
             return None
-        if use_native or max_decode_len <= 1:
+        if max_decode_len <= 1:
             return global_seq_lens
+        if use_native:
+            num_decodes = global_seq_lens.shape[0]
+            global_buffer = self.global_decode_seq_lens_buffer[
+                : num_decodes * max_decode_len
+            ].view(num_decodes, max_decode_len)
+            global_buffer[:] = (
+                global_seq_lens.unsqueeze(1)
+                - max_decode_len
+                + 1
+                + self.offsets_buffer[:max_decode_len]
+            )
+            return global_buffer
 
         actual_expanded = int(decode_lens_cpu.sum().item())
         if actual_expanded > 0:
