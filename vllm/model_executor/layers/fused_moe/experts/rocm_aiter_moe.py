@@ -248,6 +248,29 @@ def rocm_aiter_fused_experts(
     moe_sorting_dispatch_policy: int = 0,
 ) -> torch.Tensor:
     """ROCm AITER fused MoE expert computation."""
+    # Guard: MRV2 dummy/profile/capture runs mark all tokens as padding, causing
+    # the hash router to write -1 into topk_ids. rocm_aiter_ops.fused_moe with
+    # quant_method=BLOCK_1X32 crashes on -1 expert indices (OOB access).
+    #
+    # TODO: remove this workaround once rocm_aiter_ops.fused_moe handles
+    # all-padding input gracefully (i.e. skips or no-ops for topk_ids == -1).
+    #
+    # Two cases handled here:
+    #   1. Eager / profile run (not capturing): int(topk_ids.max()) is safe;
+    #      return zeros immediately;
+    #   2. CUDA graph capture: int() would cause "operation not permitted when
+    #      stream is capturing". So we have to clamp -1 -> 0 and zero the
+    #      corresponding weights. The captured graph replays correctly because
+    #      at replay time the routing kernel fills topk_ids with real values(>=0),
+    #      making the clamp and mask no-ops.
+    if topk_ids.numel() > 0:
+        if torch.cuda.is_current_stream_capturing():
+            _valid = topk_ids >= 0
+            topk_ids = topk_ids.clamp(min=0)
+            topk_weights = topk_weights * _valid.to(topk_weights.dtype)
+        elif int(topk_ids.max()) < 0:
+            return torch.zeros_like(hidden_states)
+
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
