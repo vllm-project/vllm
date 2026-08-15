@@ -648,7 +648,7 @@ class FlashInferBackend(AttentionBackend):
             if (
                 vllm_config is not None
                 and vllm_config.cache_config is not None
-                and vllm_config.cache_config.cache_dtype == "nvfp4"
+                and vllm_config.cache_config.cache_dtype.startswith("nvfp4")
             ):
                 return "HND"
         return None
