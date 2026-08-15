@@ -31,11 +31,9 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     KVCacheLayoutType,
-    get_per_layer_parameters,
-    infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -82,13 +80,27 @@ class HpcAttnMetadata(AttentionMetadata):
     # HpcAttentionImpl.forward().  Defaults are safe for the standard
     # (non-RopeNorm) path and for profiling runs (attn_metadata=None).
     hpc_kv_written: bool = False
-    """True when HpcRopeNorm already wrote KV cache."""
+    """True when HpcRopeNorm has already written K/V into the paged cache."""
     hpc_prefill_q_scale: torch.Tensor | None = None
     """FP8 per-token-per-head Q scale for prefill (from RopeNorm)."""
     hpc_decode_q_scale: torch.Tensor | None = None
-    """FP8 per-token-per-head Q scale for decode (from RopeNorm)."""
+    """FP8 per-token-per-head Q scale for decode (persistent buffer).
+    shape = [max_decode_tokens, num_q_heads], contiguous.
+    Only the first num_decode_q_scale_tokens rows are valid."""
     hpc_split_k_flag: torch.Tensor | None = None
-    """Split-K flag tensor for FP8 decode (from RopeNorm)."""
+    """Split-K flag tensor for FP8 decode (persistent buffer).
+    shape = [max_num_seqs, num_kv_heads], int32."""
+
+    # --- MTP (Multi-Token Prediction) fields ---
+    decode_query_len: int = 1
+    """Number of query tokens per decode request.
+    1 for standard decoding, mtp+1 for speculative decoding (2 or 3)."""
+    qo_indptr_decode: torch.Tensor | None = None
+    """Cumulative query offsets for decode requests (GPU tensor).
+    shape = [num_decodes + 1]. Only set when decode_query_len > 1.
+    e.g. 3 requests with dql=2: [0, 2, 4, 6]."""
+    task_map: torch.Tensor | None = None
+    """Used for HPC dynamic schedule attention"""
 
 
 class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
@@ -105,29 +117,68 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.model_config = vllm_config.model_config
-        self.cache_config = vllm_config.cache_config
+        import hpc
 
-        self.num_qo_heads = self.model_config.get_num_attention_heads(
-            vllm_config.parallel_config
-        )
         self.num_kv_heads = kv_cache_spec.num_kv_heads
-        self.head_dim = kv_cache_spec.head_size
-        self.page_size = kv_cache_spec.block_size
+        self.hpc_dynamic_sched_attn_min_split_len = 1024
 
-        self.cache_dtype = self.cache_config.cache_dtype
+        # MTP constraint: HPC decode kernel only supports mtp in {0, 1, 2, 3}
+        spec_config = vllm_config.speculative_config
+        if (
+            spec_config is not None
+            and spec_config.num_speculative_tokens is not None
+            and spec_config.num_speculative_tokens > 3
+        ):
+            raise ValueError(
+                f"HPC attention only supports up to 3 speculative tokens "
+                f"(mtp ∈ {{0, 1, 2, 3}}), got "
+                f"num_speculative_tokens={spec_config.num_speculative_tokens}. "
+                f"Please reduce num_speculative_tokens or use a different "
+                f"attention backend."
+            )
 
-        self.global_hyperparameters = infer_global_hyperparameters(
-            get_per_layer_parameters(vllm_config, layer_names, HpcAttentionImpl)
+        # Dynamic decode threshold for MTP support.
+        # _init_reorder_batch_threshold computes:
+        #   no spec_config → threshold=1 (unchanged)
+        #   with spec_config → threshold=1+num_speculative_tokens
+        self._init_reorder_batch_threshold(
+            reorder_batch_threshold=1,
+            supports_spec_as_decode=True,
         )
+
+        # Dynamic-scheduled decode:
+        #   - fp8 KV cache path always uses task_map (FP8 decode kernel
+        #     requires it).
+        #   - bf16 KV cache path only uses task_map when the installed hpc
+        #     version supports it (hpc >= 6e2eced / PR #73). Older builds
+        #     take the static split-K path with no task_map.
+        kv_cache_dtype = kv_cache_spec.dtype
+        self.use_fp8 = kv_cache_dtype == torch.float8_e4m3fn
+        self._dynamic_sched = True
+        if self._dynamic_sched:
+            self.task_map = hpc.get_attention_decode_task_workspace(
+                vllm_config.scheduler_config.max_num_seqs,
+                vllm_config.model_config.max_model_len or 4096,
+                self.num_kv_heads,
+                min_process_len=self.hpc_dynamic_sched_attn_min_split_len,
+            )
+        else:
+            self.task_map = None
 
     @override  # type: ignore[misc]
     @classmethod
     def get_cudagraph_support(
         cls: type["HpcAttnMetadataBuilder"],
         vllm_config: VllmConfig,
-        kv_cache_spec: AttentionSpec,
+        kv_cache_spec: KVCacheSpec,
     ) -> AttentionCGSupport:
+        spec_config = vllm_config.speculative_config
+        if (
+            spec_config is not None
+            and spec_config.num_speculative_tokens is not None
+            and spec_config.num_speculative_tokens > 0
+        ):
+            return AttentionCGSupport.UNIFORM_BATCH
         return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     def build(
@@ -143,7 +194,8 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold,
-                require_uniform=False,
+                # MTP requires uniform query lengths across decode requests
+                require_uniform=(self.reorder_batch_threshold > 1),
             )
         )
 
@@ -152,7 +204,16 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
         slot_mapping = common_attn_metadata.slot_mapping
         max_query_len = common_attn_metadata.max_query_len
 
+        # Compute decode_query_len (tokens per decode request).
+        # Non-MTP: 1, MTP: mtp+1 (2 or 3).
+        if num_decodes > 0 and num_decode_tokens > num_decodes:
+            decode_query_len = num_decode_tokens // num_decodes
+        else:
+            decode_query_len = 1
+
+        seq_lens_decode = None
         qo_indptr = None
+        qo_indptr_decode = None
         if num_prefills > 0:
             qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
             prefill_start = num_decodes
@@ -160,6 +221,25 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
                 qo_indptr_cpu[prefill_start:] - qo_indptr_cpu[prefill_start]
             )
             qo_indptr = qo_indptr_prefill_cpu.to(self.device, non_blocking=True)
+
+        if num_decodes > 0:
+            seq_lens_decode = seq_lens[:num_decodes]
+            # block_table is per-request, indexed by num_decodes (not tokens)
+            qo_indptr_decode = common_attn_metadata.query_start_loc[: num_decodes + 1]
+
+            # Skip the task-map scheduler pass when dynamic scheduling is off
+            # (bf16 KV cache on an older hpc that lacks bf16 decode task_map).
+            if self._dynamic_sched:
+                import hpc
+
+                hpc.assign_attention_decode_task(
+                    seq_lens_decode,
+                    self.task_map,
+                    self.num_kv_heads,
+                    decode_query_len,
+                    new_kv_included=True,
+                    min_process_len=self.hpc_dynamic_sched_attn_min_split_len,
+                )
 
         return HpcAttnMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -172,10 +252,13 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
             seq_lens=seq_lens,
             block_table_tensor=block_table_tensor,
             qo_indptr=qo_indptr,
-            hpc_kv_written=True,
+            hpc_kv_written=False,
             hpc_prefill_q_scale=None,
             hpc_decode_q_scale=None,
             hpc_split_k_flag=None,
+            decode_query_len=decode_query_len,
+            qo_indptr_decode=qo_indptr_decode,
+            task_map=self.task_map,
         )
 
 
@@ -192,6 +275,7 @@ class HpcAttentionBackend(AttentionBackend):
     ]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
+        "bfloat16",
         "fp8_e4m3",
     ]
 
@@ -238,7 +322,7 @@ class HpcAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability >= DeviceCapability(9, 0)
+        return capability == DeviceCapability(9, 0)
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: "CacheDType | None") -> bool:
@@ -298,10 +382,10 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
                 f"(num_heads={num_heads}, num_kv_heads={num_kv_heads})"
             )
 
-        if kv_cache_dtype not in ("auto", "fp8_e4m3"):
+        if kv_cache_dtype not in ("auto", "fp8_e4m3", "bfloat16"):
             raise ValueError(
                 f"HPC attention only supports kv_cache_dtype 'auto' or "
-                f"'fp8_e4m3', got '{kv_cache_dtype}'"
+                f"'fp8_e4m3' or 'bfloat16', got '{kv_cache_dtype}'"
             )
 
         self.num_heads = num_heads
@@ -322,6 +406,13 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
 
         self.supports_quant_query_input = False
         self.splitk = True
+
+        import hpc
+
+        if self.use_fp8:
+            self._quant_type = hpc.QuantType.QPERTOKEN_PERHEAD_KPERTENSOR_VPERTENSOR
+        else:
+            self._quant_type = None
 
     def forward(
         self,
@@ -361,8 +452,17 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
         num_decode_reqs = attn_metadata.num_decodes
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        # Write KV cache if not already done by HpcRopeNorm.
-        if self.kv_sharing_target_layer_name is None and not hpc_kv_written:
+        # Standard-path KV write: when no upstream fused op wrote KV cache
+        # (i.e. the model didn't wire HpcRopeNorm), fall back to the generic
+        # reshape_and_cache_flash. This is what lets non-HunYuan-V3 models use
+        # the HPC attention backend with bf16 KV cache without any model-side
+        # changes. FP8 KV cache always needs HpcRopeNorm (see check below), so
+        # we never take this path in fp8 mode.
+        if (
+            not self.use_fp8
+            and self.kv_sharing_target_layer_name is None
+            and not hpc_kv_written
+        ):
             torch.ops._C_cache_ops.reshape_and_cache_flash(
                 key,
                 value,
@@ -375,17 +475,17 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
             )
 
         if self.use_fp8:
-            torch_dtype = _get_fp8_dtype_for_kv_cache(self.kv_cache_dtype)
-            kv_cache = kv_cache.view(torch_dtype)
-
-        if self.use_fp8:
             if not hpc_kv_written:
                 raise RuntimeError(
-                    "HpcAttentionImpl: FP8 mode requires HpcRopeNorm. "
-                    "Ensure hpc_rope_norm is enabled or set "
-                    "kv_cache_dtype='auto' for bf16 mode."
+                    "HpcAttentionImpl: FP8 KV cache mode requires HpcRopeNorm "
+                    "(the fused rope_norm_store_kv_fp8 op produces the "
+                    "per-token-per-head Q scales the FP8 attention kernel "
+                    "needs). Ensure the model wires hpc_rope_norm, or switch "
+                    "to --kv-cache-dtype auto / bfloat16."
                     f" (layer={getattr(layer, 'layer_name', '?')})"
                 )
+            torch_dtype = _get_fp8_dtype_for_kv_cache(self.kv_cache_dtype)
+            kv_cache = kv_cache.view(torch_dtype)
             k_scale = layer._k_scale.reshape(1)
             v_scale = layer._v_scale.reshape(1)
 
@@ -417,6 +517,7 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
                     block_table_prefill,
                     seq_lens_prefill,
                     max_seqlens,
+                    quant_type=self._quant_type,
                     output=output_prefill,
                 )
             else:
@@ -439,6 +540,8 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
             q_decode = query[:num_decode_tokens]
             output_decode = output[:num_decode_tokens]
 
+            mtp = attn_metadata.decode_query_len - 1
+
             if self.use_fp8:
                 hpc.attention_decode_fp8(
                     q_decode,
@@ -449,21 +552,38 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
                     hpc_decode_q_scale,
                     k_scale,
                     v_scale,
+                    mtp=mtp,
+                    # MTP: split_flag from rope_norm is unavailable
+                    # when using prefill-mode kernel; let HPC decide.
+                    # splitk=(self.splitk if mtp == 0 else True),
                     new_kv_included=True,
+                    quant_type=self._quant_type,
                     splitk=self.splitk,
+                    task_map=attn_metadata.task_map,
                     split_flag=hpc_split_k_flag,
                     output=output_decode,
                 )
             else:
+                # Older hpc's bf16 decode has no task_map kwarg; the map is
+                # only ever built when the installed hpc supports it (see
+                # HpcAttnMetadataBuilder._dynamic_sched). Pass task_map
+                # conditionally to stay compatible with both versions
+                task_map_kwargs = (
+                    {"task_map": attn_metadata.task_map}
+                    if attn_metadata.task_map is not None
+                    else {}
+                )
                 hpc.attention_decode_bf16(
                     q_decode,
                     kv_cache[:, 0],
                     kv_cache[:, 1],
                     block_table_decode,
                     num_seq_kvcache,
+                    mtp=mtp,
                     output=output_decode,
                     new_kv_included=True,
                     splitk=self.splitk,
+                    **task_map_kwargs,
                 )
 
         return output_padded

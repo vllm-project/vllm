@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -18,6 +19,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.reasoning import ReasoningConfig
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
@@ -33,6 +35,10 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
+from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+    ROCMAiterMLASparseBackend,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
@@ -45,6 +51,11 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.worker.block_table import (
+    MultiGroupBlockTable,
+    SlotMappingMode,
+    get_block_table_width,
+)
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
@@ -88,6 +99,7 @@ def initialize_kv_cache(runner: GPUModelRunner):
         kernel_block_sizes=[
             kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
         ],
+        max_num_blocks_per_req=[NUM_BLOCKS],
     )
     runner.initialize_attn_backend(kv_cache_config)
 
@@ -117,6 +129,34 @@ def get_vllm_config():
         parallel_config=parallel_config,
     )
     return vllm_config
+
+
+@pytest.mark.parametrize("gc_initially_enabled", [True, False])
+def test_freeze_gc_disables_and_restores_automatic_gc(
+    monkeypatch: pytest.MonkeyPatch,
+    gc_initially_enabled: bool,
+):
+    monkeypatch.setenv("VLLM_ENABLE_CUDAGRAPH_GC", "0")
+    original_gc_state = gc.isenabled()
+    try:
+        if gc_initially_enabled:
+            gc.enable()
+        else:
+            gc.disable()
+
+        with (
+            pytest.raises(RuntimeError, match="capture failed"),
+            GPUModelRunner._freeze_gc(),
+        ):
+            assert not gc.isenabled()
+            raise RuntimeError("capture failed")
+
+        assert gc.isenabled() is gc_initially_enabled
+    finally:
+        if original_gc_state:
+            gc.enable()
+        else:
+            gc.disable()
 
 
 @pytest.fixture
@@ -255,6 +295,41 @@ def test_select_common_block_size_uses_largest_shared_int():
     assert selected_size == 64
 
 
+def test_select_common_block_size_accepts_rocm_sparse_block_size_16(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+
+    selected_size = select_common_block_size(
+        16,
+        [DeepseekV32IndexerBackend, ROCMAiterMLASparseBackend],
+    )
+    assert selected_size == 16
+
+
+def test_reasoning_config_without_custom_logitsprocs_does_not_need_output_token_ids(
+    dist_init,
+):
+    vllm_config = get_vllm_config()
+    assert vllm_config.model_config.logits_processors is None
+    reasoning_config = ReasoningConfig(
+        reasoning_start_str="<think>", reasoning_end_str="</think>"
+    )
+    reasoning_config._reasoning_start_token_ids = [1]
+    reasoning_config._reasoning_end_token_ids = [2]
+    vllm_config.reasoning_config = reasoning_config
+
+    with set_current_vllm_config(vllm_config):
+        model_config = vllm_config.model_config
+        num_heads = model_config.get_num_kv_heads(vllm_config.parallel_config)
+        head_size = model_config.get_head_size()
+        vllm_config.compilation_config.static_forward_context["layer.0"] = Attention(
+            num_heads, head_size, 0.1
+        )
+        runner = GPUModelRunner(vllm_config, torch.device("cpu"))
+
+    assert runner.input_batch.thinking_budget_state_holder is not None
+    assert runner.input_batch.logitsprocs_need_output_token_ids is False
+
+
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     ("world_size", "is_last_rank", "expected_calls"),
@@ -319,9 +394,13 @@ def test_select_common_block_size_no_valid_option():
 
 def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     model = Mock()
-    model.get_num_mm_encoder_tokens.side_effect = lambda num_embeds: num_embeds + 1
+    model.get_mm_lora_token_counts.side_effect = (
+        lambda *, modality, mm_kwargs, num_mm_embeds: (
+            num_mm_embeds + 1,
+            num_mm_embeds + 11,
+        )
+    )
     model.get_mm_mapping.return_value = SimpleNamespace(connector=True)
-    model.get_num_mm_connector_tokens.side_effect = lambda num_tokens: num_tokens + 10
 
     lora_manager = Mock()
     lora_manager.supports_tower_connector_lora.return_value = True
@@ -492,7 +571,8 @@ def test_update_states_request_resumed(model_runner, dist_init):
     assert _is_req_state_block_table_match(model_runner, req_id)
 
 
-def test_get_nans_in_logits(model_runner, dist_init):
+def test_get_nans_in_logits(model_runner, dist_init, monkeypatch):
+    monkeypatch.setattr(gpu_model_runner_module.envs, "VLLM_RAISE_ON_LOGIT_NANS", False)
     req_ids = ("req_0", "req_1")
 
     scheduler_output = _schedule_new_request(*req_ids)
@@ -768,9 +848,10 @@ def test_kv_cache_stride_order(monkeypatch, model_runner):
     )
 
     # TODO mla test
-    default_stride = tuple(range(5))
+    default_stride = tuple(range(len(expected_kv_cache_shape)))
+    non_default_stride = (*default_stride[1:], default_stride[0])
     # Permutation that gets you back to expected kv shape
-    for test_stride in ((1, 4, 0, 2, 3), (0, 1, 2, 3, 4)):
+    for test_stride in (non_default_stride, default_stride):
 
         def rnd_stride_order(
             include_num_layers_dimension: bool = False, test_stride=test_stride
@@ -803,7 +884,7 @@ def test_update_config(model_runner):
     model_runner.update_config({"load_config": {"load_format": "dummy"}})
     assert model_runner.load_config.load_format == "dummy"
     # Raise error on non-existing config
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="do_not_exist_config"):
         model_runner.update_config({"do_not_exist_config": "dummy"})
 
 
@@ -860,6 +941,37 @@ def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
         dim=0,
     )
     assert torch.equal(passed_draft_probs, expected_draft_probs)
+
+
+def test_dummy_sampler_run_warms_all_greedy_rejection_sampler(monkeypatch):
+    runner = object.__new__(GPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(multimodal_config=None)
+    )
+    runner.model = SimpleNamespace(compute_logits=Mock(return_value=torch.randn(3, 8)))
+    runner.sampler = Mock(return_value="sampler_output")
+    runner.sampler.logprobs_mode = "processed_logprobs"
+    runner.speculative_config = SimpleNamespace(
+        rejection_sample_method="standard",
+        draft_sample_method="greedy",
+    )
+    runner.rejection_sampler = Mock()
+    synchronize = Mock()
+    monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
+
+    output = GPUModelRunner._dummy_sampler_run(runner, torch.randn(3, 4))
+
+    assert output == "sampler_output"
+    assert runner.rejection_sampler.call_count == 2
+    mixed_metadata = runner.rejection_sampler.call_args_list[0].args[3]
+    all_greedy_metadata = runner.rejection_sampler.call_args_list[1].args[3]
+    assert not mixed_metadata.all_greedy
+    assert mixed_metadata.temperature is not None
+    assert all_greedy_metadata.all_greedy
+    assert not all_greedy_metadata.all_random
+    assert all_greedy_metadata.temperature is None
+    synchronize.assert_called_once_with()
 
 
 def test_invalid_draft_suffixes_remain_rejected_in_metadata():
@@ -1273,9 +1385,10 @@ def test_hybrid_attention_mamba_tensor_shapes():
             actual_kv = vllm_ctx[layer].kv_cache[kernel_block, :]
             expected = attn_blocks_constant[i]
 
-            # Check K and V separately
-            assert torch.equal(actual_kv[0], expected)
-            assert torch.equal(actual_kv[1], expected)
+            # Packed layout: (num_kv_heads, block_size, 2*head_size). Every
+            # head in the block was filled with the same constant.
+            for head_idx in range(actual_kv.shape[0]):
+                assert torch.equal(actual_kv[head_idx], expected)
 
     for layer in [layer_2, layer_3, layer_4, layer_5]:
         for i, kv_block in enumerate(kv_blocks_for_mamba):
@@ -1351,6 +1464,29 @@ def test_hybrid_block_table_initialization():
     )
 
 
+def test_get_block_table_width_aligns_to_128_tokens():
+    assert get_block_table_width(1875, 64) == 1876
+
+
+def test_get_block_table_width_splits_virtual_blocks():
+    assert get_block_table_width(235, 256, 64) == 940
+
+
+def test_mamba_state_table_width_is_not_aligned():
+    block_tables = MultiGroupBlockTable(
+        max_num_reqs=1,
+        max_num_batched_tokens=1,
+        pin_memory=False,
+        device=torch.device("cpu"),
+        block_sizes=[39664],
+        kernel_block_sizes=[39664],
+        max_num_blocks=[1],
+        slot_mapping_modes=[SlotMappingMode.NONE],
+    )
+
+    assert block_tables[0].max_num_blocks_per_req == 1
+
+
 def test_input_batch_with_kernel_block_sizes():
     """Test InputBatch initialization with kernel_block_sizes parameter."""
     max_num_reqs = 10
@@ -1371,6 +1507,7 @@ def test_input_batch_with_kernel_block_sizes():
         vocab_size=vocab_size,
         block_sizes=block_sizes,
         kernel_block_sizes=kernel_block_sizes,
+        max_num_blocks_per_req=[16, 8],
     )
 
     # Verify that block tables were created with kernel block sizes
@@ -1431,6 +1568,7 @@ def test_hybrid_cache_integration(default_vllm_config, dist_init):
         vocab_size=runner.model_config.get_vocab_size(),
         block_sizes=[kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size],
         kernel_block_sizes=[16],
+        max_num_blocks_per_req=[NUM_BLOCKS],
     )  # Use kernel block size
 
     runner.initialize_attn_backend(kv_cache_config)
@@ -1638,3 +1776,59 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
 
         with pytest.raises(ValueError, match="max_num_seqs"):
             runner.initialize_kv_cache(kv_cache_config)
+
+
+class TestInitFp8KvScalesHybridModels:
+    """Verify init_fp8_kv_scales handles heterogeneous kv_caches entries.
+
+    Hybrid models (Mamba, DeltaNet) store per-layer state as a list of tensors
+    rather than a single tensor. init_fp8_kv_scales must iterate both forms.
+    """
+
+    @staticmethod
+    def _make_runner_stub(kv_caches):
+        runner = Mock(spec=GPUModelRunner)
+        runner.cache_config = SimpleNamespace(cache_dtype="fp8_e4m3")
+        runner.kv_caches = kv_caches
+        runner.compilation_config = SimpleNamespace(static_forward_context={})
+        runner.init_fp8_kv_scales = GPUModelRunner.init_fp8_kv_scales.__get__(
+            runner, GPUModelRunner
+        )
+        return runner
+
+    def test_zeroes_both_tensor_and_list_entries(self):
+        single_tensor = torch.ones(4, 8)
+        list_tensors = [torch.ones(2, 4), torch.ones(3, 6)]
+
+        runner = self._make_runner_stub([single_tensor, list_tensors])
+        runner.init_fp8_kv_scales()
+
+        assert (single_tensor == 0).all()
+        assert all((t == 0).all() for t in list_tensors)
+
+    def test_skips_none_entries(self):
+        tensor = torch.ones(4, 8)
+        runner = self._make_runner_stub([None, tensor, None])
+        runner.init_fp8_kv_scales()
+
+        assert (tensor == 0).all()
+
+    def test_noop_when_kv_cache_not_quantized(self):
+        tensor = torch.ones(4, 8)
+        runner = self._make_runner_stub([tensor])
+        runner.cache_config.cache_dtype = "auto"
+        runner.init_fp8_kv_scales()
+
+        assert (tensor == 1).all()
+
+    def test_mixed_none_tensor_and_list(self):
+        t1 = torch.ones(2, 2)
+        t2 = torch.ones(3, 3)
+        list_entry = [torch.ones(1, 1), torch.ones(1, 1)]
+
+        runner = self._make_runner_stub([None, t1, list_entry, None, t2])
+        runner.init_fp8_kv_scales()
+
+        assert (t1 == 0).all()
+        assert (t2 == 0).all()
+        assert all((t == 0).all() for t in list_entry)

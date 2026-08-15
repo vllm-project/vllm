@@ -80,6 +80,10 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Base connector with common logic shared by pull and push modes."""
 
     @property
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        return True
+
+    @property
     def prefer_cross_layer_blocks(self) -> bool:
         if any(
             [
@@ -207,11 +211,12 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
-    def set_xfer_handshake_metadata(
-        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
     ) -> None:
         """
-        Set the KV connector handshake metadata for this connector.
+        Set handshake metadata keyed by (pp_rank, tp_rank) so the side
+        channel can serve every PP stage's agent metadata.
 
         Args:
             metadata (dict): the handshake metadata to set.

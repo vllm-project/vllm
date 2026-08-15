@@ -1,9 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use super::types::GenerateRequest;
 use crate::error::{ApiError, bail_invalid_request};
 
 /// Enforce the minimal compatibility contract for the Rust token generate
 /// route.
-pub(super) fn validate_request_compat(
+pub(crate) fn validate_request_compat(
     request: &GenerateRequest,
     served_model_names: &[String],
 ) -> Result<(), ApiError> {

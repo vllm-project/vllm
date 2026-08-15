@@ -4,12 +4,12 @@ depends_on:
 steps:
 - label: Distributed Model Tests (2 GPUs)
   key: distributed-model-tests-2-gpus
-  timeout_in_minutes: 50
+  timeout_in_minutes: 65
   device: intel_gpu
   agent_tags:
     label: production
     gpu: 2+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:

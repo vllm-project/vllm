@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
+from transformers import MistralCommonBackend
 
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
@@ -95,13 +96,20 @@ class GuidanceBackend(StructuredOutputBackend):
 
         if is_mistral_tokenizer(self.tokenizer):
             self.ll_tokenizer = self.tokenizer.llg_tokenizer
+        elif isinstance(self.tokenizer, MistralCommonBackend):
+            from mistral_common.guidance.tokenizer import from_mistral_tokenizer
+
+            self.ll_tokenizer = from_mistral_tokenizer(self.tokenizer.tokenizer)
         else:
             self.ll_tokenizer = llguidance_hf.from_tokenizer(
                 self.tokenizer, max(self.vocab_size, len(self.tokenizer))
             )
 
     def compile_grammar(
-        self, request_type: StructuredOutputOptions, grammar_spec: str
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        stop_token_ids: set[int] | None = None,
     ) -> StructuredOutputGrammar:
         self.serialized_grammar = serialize_guidance_grammar(
             request_type,

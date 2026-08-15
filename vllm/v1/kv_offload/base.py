@@ -6,30 +6,24 @@ Core abstractions for KV cache offloading in vLLM v1.
 
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, NamedTuple, NewType
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, NewType, TypeVar
 
 import numpy as np
 import torch
-from typing_extensions import override
-
-from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
         OffloadingConnectorStats,
     )
-    from vllm.v1.kv_cache_interface import KVCacheConfig
+
+from vllm.v1.kv_offload.config import OffloadingConfig
 
 # `OffloadKey` identifies an offloaded block. It combines a block hash with
 # its KV cache group index, encoded as raw bytes to avoid tuple GC overhead.
 # Use the helper functions below to construct / decompose keys.
 OffloadKey = NewType("OffloadKey", bytes)
-
-logger = init_logger(__name__)
 
 
 def make_offload_key(block_hash: bytes, group_idx: int) -> OffloadKey:
@@ -47,10 +41,67 @@ def get_offload_group_idx(key: OffloadKey) -> int:
     return int.from_bytes(key[-4:], "big", signed=False)
 
 
+_T = TypeVar("_T")
+
+
+class Medium(Enum):
+    """Storage medium of an offloading tier."""
+
+    CPU = "CPU"
+    STORAGE = "STORAGE"
+
+
+class Locality(Enum):
+    """Locality of a tier's storage relative to the publishing instance."""
+
+    LOCAL = "LOCAL"
+    REMOTE = "REMOTE"
+
+
+class TierMatcher(NamedTuple):
+    medium: Medium | None = None
+    locality: Locality | None = None
+
+    def matches(self, medium: Medium | None, locality: Locality | None) -> bool:
+        medium_matches = self.medium is None or medium is None or self.medium == medium
+        locality_matches = (
+            self.locality is None or locality is None or self.locality == locality
+        )
+        return medium_matches and locality_matches
+
+
+@dataclass(frozen=True)
+class TierFilter:
+    """Per-request filter controlling which tiers participate."""
+
+    matchers: tuple[TierMatcher, ...] = ()
+
+    ALL: ClassVar["TierFilter"]
+
+    def allows(self, medium: Medium | None, locality: Locality | None) -> bool:
+        if self is TierFilter.ALL:
+            return True
+        return any(m.matches(medium, locality) for m in self.matchers)
+
+
+TierFilter.ALL = TierFilter(matchers=(TierMatcher(),))
+
+
 @dataclass
 class ReqContext:
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
+    load_tier_filter: TierFilter = TierFilter.ALL
+    # Per-request scratch space keyed by value type, so a tier can parse
+    # kv_transfer_params once (in on_new_request) and read the result back
+    # on later calls for the same request.
+    _state: dict[type, Any] = field(default_factory=dict, repr=False, init=False)
+
+    def set_state(self, val: Any) -> None:
+        self._state[type(val)] = val
+
+    def get_state(self, cls: type[_T]) -> _T | None:
+        return self._state.get(cls)
 
 
 class LookupResult(Enum):
@@ -85,20 +136,11 @@ class ScheduleEndContext(NamedTuple):
     preempted_req_ids: Collection[str]
 
 
-class LoadStoreSpec(ABC):
+class LoadStoreSpec:
     """
-    Abstract metadata that encapsulates information allowing a worker
+    Metadata that encapsulates information allowing a worker
     to load, and optionally also to store, blocks of KV data.
     """
-
-    @staticmethod
-    @abstractmethod
-    def medium() -> str:
-        """
-        Returns a string representation of the medium type
-        this store/load targets.
-        """
-        pass
 
 
 @dataclass
@@ -111,9 +153,10 @@ class PrepareStoreOutput:
 @dataclass
 class OffloadingEvent:
     keys: list[OffloadKey]
-    medium: str
+    medium: Medium
     # True if blocks are removed, False if stored
     removed: bool
+    locality: Locality | None = None
 
 
 """
@@ -313,6 +356,10 @@ class OffloadingManager(ABC):
         """
         Take the offloading events from the manager.
 
+        A tier manager emits only events for storage state it owns. A
+        composing manager may aggregate child event streams, but should not
+        synthesize events on behalf of a child tier.
+
         Yields:
             New OffloadingEvents collected since the last call.
         """
@@ -392,11 +439,6 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
         self.group_sizes: Sequence[int] = group_sizes
         self.block_indices: Sequence[int] = block_indices
 
-    @staticmethod
-    @override
-    def medium() -> str:
-        return "GPU"
-
 
 @dataclass
 class CanonicalKVCacheTensor:
@@ -415,6 +457,48 @@ class CanonicalKVCacheTensor:
     page_size_bytes: int
 
 
+@dataclass(frozen=True)
+class CopyRun:
+    """A strided byte correspondence between this worker's physical page and
+    a canonical page: for i in range(num_fragments), fragment i spans
+    [local_offset + i * local_stride, +fragment_size) in the worker's page and
+    [canonical_offset + i * canonical_stride, +fragment_size) canonically."""
+
+    local_offset: int
+    canonical_offset: int
+    fragment_size: int
+    num_fragments: int
+    local_stride: int
+    canonical_stride: int
+
+
+@dataclass(frozen=True)
+class CanonicalPageMapping:
+    """How this worker's page maps into a canonical (parallelism-free) page.
+    In-process only, never serialized. Runs cover the full local page in both
+    directions; ranks holding identical bytes take turns writing them.
+    """
+
+    # Size of the canonical page in bytes
+    canonical_page_size_bytes: int
+    # Size of this worker's (un-padded) page in bytes
+    local_page_size_bytes: int
+    # Byte correspondences between this worker's page and a canonical page
+    runs: tuple[CopyRun, ...]
+    # Number of ranks holding these exact bytes
+    num_writers: int
+    # This worker's index among those ranks
+    writer_index: int
+    # Canonical bytes identical under any parallel config with this block span
+    parallelism_agnostic: bool
+
+    def is_writer(self, block_id: int) -> bool:
+        """Whether this worker stores the canonical page of the given block.
+        Rotating by block spreads writes across ranks holding identical bytes.
+        """
+        return block_id % self.num_writers == self.writer_index
+
+
 @dataclass
 class CanonicalKVCacheRef:
     """
@@ -426,6 +510,8 @@ class CanonicalKVCacheRef:
     tensor_idx: int
     # The un-padded page size per block in bytes
     page_size_bytes: int
+    # How this worker's page maps into a canonical page; None = uncertified
+    mapping: CanonicalPageMapping | None = None
 
 
 @dataclass
@@ -493,22 +579,12 @@ class OffloadingSpec(ABC):
         """Return Prometheus metric definitions emitted by this spec."""
         return {}
 
-    def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
-        logger.warning(
-            "Initializing OffloadingSpec. This API is experimental and "
-            "subject to change in the future as we iterate the design."
-        )
-        self.vllm_config = vllm_config
-        self.kv_cache_config = kv_cache_config
-
-        kv_transfer_config = vllm_config.kv_transfer_config
-        assert kv_transfer_config is not None
-        self.extra_config = kv_transfer_config.kv_connector_extra_config
-        kv_events_config = vllm_config.kv_events_config
+    def __init__(self, config: OffloadingConfig):
+        self.config = config
+        self.extra_config = config.extra_config
+        self.replicated_layout: bool = False
         self.kv_events_config = OffloadingKVEventsConfig(
-            enable_kv_cache_events=(
-                kv_events_config is not None and kv_events_config.enable_kv_cache_events
-            ),
+            enable_kv_cache_events=config.enable_kv_cache_events,
             self_describing_kv_events=bool(
                 self.extra_config.get("self_describing_kv_events", False)
             ),
@@ -522,48 +598,9 @@ class OffloadingSpec(ABC):
             self.extra_config.get("offload_prompt_only", True)
         )
 
-        parallel_config = vllm_config.parallel_config
-        context_parallel_factor = (
-            parallel_config.decode_context_parallel_size
-            * parallel_config.prefill_context_parallel_size
-        )
-
-        # gpu block size per group
-        self.gpu_block_size: tuple[int, ...] = tuple(
-            kv_cache_group.kv_cache_spec.block_size * context_parallel_factor
-            for kv_cache_group in kv_cache_config.kv_cache_groups
-        )
-
-        # hash_block_size must match what the scheduler uses for
-        # Request.block_hashes (resolved via resolve_kv_cache_block_sizes).
-        _, self.hash_block_size = resolve_kv_cache_block_sizes(
-            kv_cache_config, vllm_config
-        )
-
-        for block_size in self.gpu_block_size:
-            assert block_size % self.hash_block_size == 0, (
-                f"gpu_block_size={block_size} not divisible by "
-                f"hash_block_size={self.hash_block_size}. "
-                f"Hybrid models (e.g. Mamba+Attention) need "
-                f"--enable-prefix-caching to align block sizes."
-            )
-
-        # offloaded_block_size / gpu_block_size
-        self.block_size_factor: int = 1
-
-        offloaded_block_size = self.extra_config.get("block_size")
-        if offloaded_block_size is not None:
-            offloaded_block_size_int = int(offloaded_block_size)
-            gpu_block_sizes = set(self.gpu_block_size)
-            assert len(gpu_block_sizes) == 1, (
-                "If 'block_size' is specified in kv_connector_extra_config, "
-                "there must be at least one KV cache group, "
-                "and all groups must have the same block size."
-            )
-            gpu_block_size = gpu_block_sizes.pop()
-
-            assert offloaded_block_size_int % gpu_block_size == 0
-            self.block_size_factor = offloaded_block_size_int // gpu_block_size
+        self.tokens_per_block = tuple(group.tokens_per_block for group in config.groups)
+        self.tokens_per_hash = config.cache.tokens_per_hash
+        self.blocks_per_chunk = config.cache.blocks_per_chunk
 
     @abstractmethod
     def get_manager(self) -> OffloadingManager:
