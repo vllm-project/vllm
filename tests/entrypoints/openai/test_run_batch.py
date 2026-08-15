@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import os
 import subprocess
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pydantic
@@ -17,7 +19,9 @@ from vllm.entrypoints.openai.run_batch import (
     dispatch_batch,
     download_bytes_from_url,
     is_same_local_file,
+    local_input_path,
     validate_batch,
+    validate_run_batch_args,
 )
 
 CHAT_MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
@@ -1002,3 +1006,28 @@ async def test_dispatch_batch_counts_error_responses_as_completed(tmp_path):
                 str(input_path), output_file, {}, tracker, max_inflight=2
             )
         assert pbar.n == num_requests
+
+
+@pytest.mark.asyncio
+async def test_local_input_path_stages_a_stream(tmp_path):
+    """A non-seekable input must be staged so the batch can be read twice.
+
+    The batch is validated in one pass and run in another; a pipe would be
+    drained by the first, leaving the second with nothing.
+    """
+    payload = '{"custom_id": "request-1"}\n'
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, payload.encode())
+    os.close(write_fd)
+
+    async with local_input_path(f"/dev/fd/{read_fd}", str(tmp_path)) as path:
+        with open(path, encoding="utf-8") as f:
+            assert f.read() == payload
+        with open(path, encoding="utf-8") as f:
+            assert f.read() == payload
+
+
+def test_max_inflight_must_be_positive():
+    """A non-positive bound would silently serialise the batch."""
+    with pytest.raises(ValueError, match="max-inflight"):
+        validate_run_batch_args(SimpleNamespace(max_inflight=0))

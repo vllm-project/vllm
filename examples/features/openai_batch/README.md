@@ -67,6 +67,10 @@ vllm run-batch \
 
 You should now have your results at `results.jsonl`. You can check your results by running `cat results.jsonl`
 
+Responses are written as each request finishes, so their order does not follow
+the input file. Match a response to its request with `custom_id` rather than by
+line number.
+
 ```bash
 cat results.jsonl
 {"id":"vllm-383d1c59835645aeb2e07d004d62a826","custom_id":"request-1","response":{"id":"cmpl-61c020e54b964d5a98fa7527bfcdd378","object":"chat.completion","created":1715633336,"model":"meta-llama/Meta-Llama-3-8B-Instruct","choices":[{"index":0,"message":{"role":"assistant","content":"Hello! It's great to meet you! I'm here to help with any questions or tasks you may have. What's on your mind today?"},"logprobs":null,"finish_reason":"stop","stop_reason":null}],"usage":{"prompt_tokens":25,"total_tokens":56,"completion_tokens":31}},"error":null}
