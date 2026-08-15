@@ -379,9 +379,7 @@ async def test_start_server_disables_access_log(monkeypatch):
     """disable_uvicorn_access_log=True sets access_log=False."""
     captured: dict = {}
 
-    monkeypatch.setattr(
-        dp_sup, "get_uvicorn_log_config", lambda _args: None
-    )
+    monkeypatch.setattr(dp_sup, "get_uvicorn_log_config", lambda _args: None)
 
     original_config_init = uvicorn.Config.__init__
 
@@ -417,9 +415,7 @@ async def test_start_server_no_log_config_when_no_filter(monkeypatch):
     """Without filtering options, no log_config is passed to uvicorn."""
     captured: dict = {}
 
-    monkeypatch.setattr(
-        dp_sup, "get_uvicorn_log_config", lambda _args: None
-    )
+    monkeypatch.setattr(dp_sup, "get_uvicorn_log_config", lambda _args: None)
 
     original_config_init = uvicorn.Config.__init__
 
