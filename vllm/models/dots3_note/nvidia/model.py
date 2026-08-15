@@ -497,6 +497,7 @@ class Dots3NoteDecoderLayer(DeepseekV32DecoderLayer):
         layer_idx = int(prefix.split(sep=".")[-1])
         self.layer_idx = layer_idx
         self.use_mha = False
+        self.use_sequence_parallel = False
         attention_cls = (
             Dots3NoteSlidingAttention
             if config.layer_types[layer_idx] == "sliding_attention"
@@ -536,11 +537,7 @@ class Dots3NoteDecoderLayer(DeepseekV32DecoderLayer):
                 prefix=f"{prefix}.mlp",
                 reduce_results=False,
             )
-        self.use_sequence_parallel_moe = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
-            and isinstance(self.mlp, DeepseekV2MoE)
-        )
+        self.use_sequence_parallel_moe = False
         self.tp_size = parallel_config.tensor_parallel_size
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
@@ -559,6 +556,7 @@ class Dots3NoteModel(DeepseekV32Model):
         self.config = config
         self.device = current_platform.device_type
         self.vocab_size = config.vocab_size
+        self.use_sequence_parallel = False
         self.is_v32 = True
         self._weight_block_size = getattr(quant_config, "weight_block_size", None)
         topk_indices_buffer = torch.empty(

@@ -16,6 +16,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     is_conv_state_dim_first,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
@@ -754,7 +755,23 @@ class MambaSpecDecodeGPUContext:
         """
         if self.is_initialized:
             return
+        # This only runs once per worker.
+        with gpu_sync_allowed():
+            self._populate_metadata(
+                kv_cache_config,
+                forward_context,
+                mamba_state_copy_funcs,
+                block_tables,
+            )
 
+
+    def _populate_metadata(
+        self,
+        kv_cache_config: KVCacheConfig,
+        forward_context: dict[str, Any],
+        mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
+        block_tables: list[torch.Tensor],
+    ) -> None:
         # Collect pointer values into lists first, then create tensors in one
         # shot. PyTorch's element-wise assignment (tensor[idx] = large_int)
         # fails for data_ptr() values >= 2^63 on XPU because the scalar

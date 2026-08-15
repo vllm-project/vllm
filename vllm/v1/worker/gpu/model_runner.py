@@ -372,7 +372,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.model_memory_usage = m.consumed_memory
         logger.info(
-            "Model loading took %s GiB and %.6f seconds",
+            "Model loading took %s GiB memory and %.6f seconds",
             format_gib(m.consumed_memory),
             time_after_load - time_before_load,
         )
@@ -398,6 +398,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_speculative_tokens=self.decode_query_len,
                 use_fp64_gumbel=self.model_config.use_fp64_gumbel,
                 reasoning_config=self.vllm_config.reasoning_config,
+                return_sampling_mask=self.model_config.return_sampling_mask,
             )
             custom = self.model_state.custom_sampler(self.sampler)
 
@@ -841,10 +842,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return 0
 
         assert self.cudagraph_manager is not None
-        if not self.cudagraph_manager.needs_capture():
+        capture_encoder = (
+            self.model_state.supports_mm_inputs
+            and self.model_state.encoder_runner.has_cudagraph()
+        )
+        capture_decoder = self.cudagraph_manager.needs_capture()
+        if not capture_encoder and not capture_decoder:
             logger.warning(
-                "Skipping CUDA graph capture. To turn on CUDA graph capture, "
-                "ensure `cudagraph_mode` was not manually set to `NONE`"
+                "Skipping encoder and decoder CUDA graph capture. To enable "
+                "encoder capture, ensure `cudagraph_mm_encoder` is enabled; "
+                "to enable decoder capture, ensure `cudagraph_mode` is not `NONE`."
             )
             return 0
 
@@ -856,27 +863,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
-            self.cudagraph_manager.capture(
-                self.model,
-                self.model_state,
-                self.input_buffers,
-                self.intermediate_tensors,
-                self.block_tables,
-                self.attn_groups,
-                self.kv_cache_config,
-                has_lora=self.lora_config is not None,
-                use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
-                lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
-            )
-            if self.speculator is not None:
-                self.speculator.capture()
-            if self.adaptive_verification is not None:
-                with self.step_timing.collect() as timings:
-                    for batch in self.adaptive_verification.batches_to_profile(
-                        self.cudagraph_manager.captured_token_counts()
-                    ):
-                        self._dummy_run(**batch)
-                self.adaptive_verification.set_initial_cost_curves(timings)
+            if capture_encoder:
+                self.model_state.encoder_runner.capture()
+
+            if capture_decoder:
+                self.cudagraph_manager.capture(
+                    self.model,
+                    self.model_state,
+                    self.input_buffers,
+                    self.intermediate_tensors,
+                    self.block_tables,
+                    self.attn_groups,
+                    self.kv_cache_config,
+                    has_lora=self.lora_config is not None,
+                    use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
+                    lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
+                )
+                if self.speculator is not None:
+                    self.speculator.capture()
+                if self.adaptive_verification is not None:
+                    with self.step_timing.collect() as timings:
+                        for batch in self.adaptive_verification.batches_to_profile(
+                            self.cudagraph_manager.captured_token_counts()
+                        ):
+                            self._dummy_run(**batch)
+                    self.adaptive_verification.set_initial_cost_curves(timings)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
@@ -1878,12 +1889,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
+        self.cudagraph_manager = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
         if hasattr(self, "attn_groups"):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):
             del self.kv_cache_config
+        if hasattr(self, "model_state") and self.model_state.supports_mm_inputs:
+            self.model_state.encoder_runner.clear()
         free_before_shutdown(self.vllm_config)
         if hasattr(self, "model_state"):
             del self.model_state
