@@ -991,3 +991,11 @@ def init_batch_invariance():
         torch.backends.cuda.matmul.fp32_precision = "ieee"
         torch.backends.cudnn.conv.fp32_precision = "ieee"
         torch.backends.cudnn.rnn.fp32_precision = "ieee"
+
+        # fp32_precision only constrains rounding, not algorithm selection:
+        # cuDNN/MIOpen can still pick a nondeterministic reduction order for
+        # convolution (e.g. vision patch-embed conv3d, diffusion VAE blocks),
+        # and the autotuner (benchmark=True) can pick a different algorithm
+        # across runs, which also changes the floating-point result.
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
