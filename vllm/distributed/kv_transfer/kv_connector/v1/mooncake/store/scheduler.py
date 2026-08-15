@@ -63,6 +63,7 @@ class MooncakeStoreScheduler:
         self.lookup_async = kvc_extra_config.get("lookup_async", False)
         # Skips lookup CPU cost on instances that never load KV from the store.
         self.enable_lookup = kvc_extra_config.get("enable_lookup", True)
+        self.save_decode_cache = kvc_extra_config.get("save_decode_cache", False)
         self.client = LookupKeyClient(vllm_config)
 
         # Align with the engine's own scheduler_block_size and hash_block_size.
@@ -182,7 +183,8 @@ class MooncakeStoreScheduler:
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         """Build connector metadata for this scheduler step."""
-        force_skip_save = self.kv_role == "kv_consumer"
+        is_consumer = self.kv_role == "kv_consumer"
+        can_process_cached = not is_consumer or self.save_decode_cache
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self.client.discard(finished_req_id)
@@ -240,7 +242,9 @@ class MooncakeStoreScheduler:
                 request_tracker,
                 self._block_size,
                 load_spec=load_spec,
-                skip_save=force_skip_save,
+                # A consumer may write decode KV without becoming a prefill
+                # producer. Loads are still carried by the same metadata.
+                skip_save=is_consumer,
                 block_hashes=request_real.block_hashes,
                 is_last_chunk=(request_tracker.token_len >= last_chunk_tokens_num),
             )
@@ -249,15 +253,15 @@ class MooncakeStoreScheduler:
 
         # Handle cached (running, or MRV1 resumed-from-preemption) requests
         cached_reqs = scheduler_output.scheduled_cached_reqs
-        if not force_skip_save:
+        if can_process_cached:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 new_block_ids = cached_reqs.new_block_ids[i]
-                if not new_block_ids:
-                    continue
 
                 req_meta = None
                 if req_id in cached_reqs.resumed_req_ids:
                     # Resumed after preemption
+                    if not new_block_ids:
+                        continue
                     if isinstance(new_block_ids, tuple):
                         new_block_ids = tuple(b.copy() for b in new_block_ids)
                     else:
@@ -289,7 +293,7 @@ class MooncakeStoreScheduler:
                         request_tracker,
                         self._block_size,
                         load_spec=load_spec,
-                        skip_save=force_skip_save,
+                        skip_save=is_consumer,
                         block_hashes=request_real.block_hashes,
                         is_last_chunk=(
                             request_tracker.token_len >= last_chunk_tokens_num
@@ -307,17 +311,26 @@ class MooncakeStoreScheduler:
                             num_current_tokens : num_current_tokens + num_new_tokens
                         ]
                         request_tracker.token_len += len(new_token_ids)
+                        if request_tracker.token_ids is not None:
+                            request_tracker.token_ids.extend(new_token_ids)
                     else:
                         raise ValueError(
                             f"Request {req_id} is not in _unfinished_requests"
                         )
+                    # A block is usually allocated before the step that fills
+                    # it, so reaching a save boundary does not imply that this
+                    # step has new block ids.
+                    if new_block_ids:
+                        request_tracker.update(new_block_ids)
                     num_computed_token = cached_reqs.num_computed_tokens[i]
                     # Use the tracker's snapshot of the prefill range so resumed
                     # requests keep saving past the original prompt boundary.
                     prefill_end = request_tracker.prefill_end_tokens
-                    if num_computed_token >= prefill_end:
+                    is_decode = num_computed_token >= prefill_end
+                    if is_decode and not self.save_decode_cache:
                         continue
-                    request_tracker.update(new_block_ids)
+                    if is_consumer and not is_decode:
+                        continue
 
                     last_chunk_tokens_num = (
                         prefill_end // self._block_size * self._block_size
@@ -326,7 +339,7 @@ class MooncakeStoreScheduler:
                         request_tracker,
                         self._block_size,
                         load_spec=None,
-                        skip_save=force_skip_save,
+                        skip_save=False,
                         block_hashes=unfinished_req.block_hashes,
                         is_last_chunk=(
                             request_tracker.token_len >= last_chunk_tokens_num
@@ -370,7 +383,7 @@ class MooncakeStoreScheduler:
         # emit an offload-only ReqMeta (token_len_chunk=0 skips the normal
         # save; can_save=True takes the normal enqueue path).
         step_partial_tails = getattr(scheduler_output, "partial_tail_offloads", None)
-        if step_partial_tails and not force_skip_save:
+        if step_partial_tails and not is_consumer:
             pending = dict(step_partial_tails)
             for req_meta in meta.requests:
                 if req_meta.can_save:

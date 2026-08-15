@@ -409,7 +409,9 @@ class ReqMeta:
 
         token_ids = None
         if tracker.token_ids:
-            token_ids = tracker.token_ids
+            # Scheduler tracking continues while this job is handled by an
+            # asynchronous worker, so metadata must own a stable snapshot.
+            token_ids = tracker.token_ids.copy()
 
         if load_spec is not None and load_spec.can_load:
             logger.debug(

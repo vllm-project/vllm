@@ -1274,15 +1274,25 @@ class MooncakeStoreWorker:
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_size > 1 else 0
 
         assert vllm_config.kv_transfer_config is not None
-        self.kv_role = vllm_config.kv_transfer_config.kv_role
+        kv_role = vllm_config.kv_transfer_config.kv_role
+        assert kv_role is not None
+        self.kv_role = kv_role
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        self.can_put = self.kv_role in ("kv_producer", "kv_both") or (
+            extra_config.get("save_decode_cache", False)
+        )
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", True
         )
         # Mirrors MooncakeStoreConnector._capacity_only.
-        self._capacity_only = self.kv_role == "kv_consumer" and not (
-            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                "enable_lookup", True
+        self._capacity_only = (
+            self.kv_role == "kv_consumer"
+            and not (
+                vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                    "enable_lookup", True
+                )
             )
+            and not self.can_put
         )
         self.cache_config = vllm_config.cache_config
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
@@ -1294,11 +1304,6 @@ class MooncakeStoreWorker:
 
         # Initialize MooncakeDistributedStore with its own TransferEngine
         store_config = MooncakeStoreConfig.load_from_config()
-        extra_config = (
-            vllm_config.kv_transfer_config.kv_connector_extra_config
-            if vllm_config.kv_transfer_config
-            else {}
-        )
         self.store = MooncakeDistributedStore()
         local_ip = get_ip()
         local_hostname = rdma_utils.get_requester_local_hostname(local_ip)
@@ -1617,7 +1622,7 @@ class MooncakeStoreWorker:
             db.set_block_len(block_lens)
 
         # Start transfer threads
-        if self.kv_role in ["kv_producer", "kv_both"]:
+        if self.can_put:
             ready_event_sending = threading.Event()
             self.kv_send_thread = KVCacheStoreSendingThread(
                 self.store,
@@ -1700,7 +1705,7 @@ class MooncakeStoreWorker:
 
         assert self.load_async, "load_async must be True for better performance."
         # Issue stores with CUDA event synchronization.
-        if self.kv_role in ["kv_producer", "kv_both"]:
+        if self.can_put:
             current_event = None
             for request in meta.requests:
                 if request.can_save:
@@ -1715,7 +1720,7 @@ class MooncakeStoreWorker:
                 assert self.kv_send_thread is not None
                 self.kv_send_thread.add_request(request)
 
-        if self.kv_role in ["kv_producer", "kv_both"]:
+        if self.can_put:
             self._close_ended_store_requests(finished_req_ids, meta)
 
         # Blocks read by a store job are released by the scheduler when the job

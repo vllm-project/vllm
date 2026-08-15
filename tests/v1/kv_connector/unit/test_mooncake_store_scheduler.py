@@ -16,10 +16,15 @@ from vllm.v1.core.block_pool import BlockPool
 
 
 def _make_bare_scheduler(
-    *, hash_block_size: int = 16, enable_partial_hash_hits: bool = False
+    *,
+    hash_block_size: int = 16,
+    enable_partial_hash_hits: bool = False,
+    kv_role: str = "kv_both",
+    save_decode_cache: bool = False,
 ) -> MooncakeStoreScheduler:
     scheduler = object.__new__(MooncakeStoreScheduler)
-    scheduler.kv_role = "kv_both"
+    scheduler.kv_role = kv_role
+    scheduler.save_decode_cache = save_decode_cache
     scheduler.lookup_async = False
     scheduler.enable_lookup = True
     scheduler._block_size = 16
@@ -53,6 +58,25 @@ def _make_scheduler_output(*, scheduled_spec_tokens: list[int] | None):
         scheduled_spec_decode_tokens=(
             {"req-0": scheduled_spec_tokens} if scheduled_spec_tokens else {}
         ),
+    )
+
+
+def _make_decode_scheduler_output(
+    *, num_computed_tokens: int, num_scheduled_tokens: int = 1
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["req-0"],
+            # The block that becomes full was allocated on an earlier step.
+            new_block_ids=[()],
+            num_computed_tokens=[num_computed_tokens],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={"req-0": num_scheduled_tokens},
+        scheduled_spec_decode_tokens={},
     )
 
 
@@ -147,6 +171,127 @@ def test_cached_request_without_spec_decode_keeps_current_step_save_overlap():
     tracker = scheduler._request_trackers["req-0"]
     assert tracker.token_len == 48
     assert tracker.num_saved_tokens == 48
+
+
+def test_consumer_does_not_save_decode_by_default():
+    scheduler = _make_bare_scheduler(kv_role="kv_consumer")
+    _add_unfinished_request(
+        scheduler,
+        token_ids=list(range(48)),
+        block_hashes=[b"h0", b"h1", b"h2"],
+        prefill_end_tokens=32,
+    )
+    tracker = scheduler._request_trackers["req-0"]
+    tracker.token_len = 47
+    tracker.allocated_block_ids = ([0, 1, 2],)
+
+    meta = scheduler.build_connector_meta(
+        _make_decode_scheduler_output(num_computed_tokens=47)
+    )
+
+    assert meta.requests == []
+    # Preserve the existing consumer behavior when the feature is disabled.
+    assert tracker.token_len == 47
+    assert tracker.num_saved_tokens == 32
+
+
+def test_kv_both_does_not_save_decode_by_default():
+    scheduler = _make_bare_scheduler(kv_role="kv_both")
+    _add_unfinished_request(
+        scheduler,
+        token_ids=list(range(48)),
+        block_hashes=[b"h0", b"h1", b"h2"],
+        prefill_end_tokens=32,
+    )
+    tracker = scheduler._request_trackers["req-0"]
+    tracker.token_len = 47
+    tracker.allocated_block_ids = ([0, 1, 2],)
+
+    meta = scheduler.build_connector_meta(
+        _make_decode_scheduler_output(num_computed_tokens=47)
+    )
+
+    assert meta.requests == []
+    assert tracker.token_len == 48
+    assert tracker.num_saved_tokens == 32
+
+
+def test_consumer_decode_offload_does_not_save_prefill():
+    scheduler = _make_bare_scheduler(
+        kv_role="kv_consumer",
+        save_decode_cache=True,
+    )
+    _add_unfinished_request(
+        scheduler,
+        token_ids=list(range(48)),
+        block_hashes=[b"h0", b"h1", b"h2"],
+        prefill_end_tokens=48,
+    )
+
+    meta = scheduler.build_connector_meta(
+        _make_scheduler_output(scheduled_spec_tokens=None)
+    )
+
+    assert meta.requests == []
+    tracker = scheduler._request_trackers["req-0"]
+    assert tracker.token_len == 48
+    assert tracker.num_saved_tokens == 32
+
+
+def test_consumer_saves_full_decode_block_without_new_allocation():
+    scheduler = _make_bare_scheduler(
+        kv_role="kv_consumer",
+        save_decode_cache=True,
+    )
+    _add_unfinished_request(
+        scheduler,
+        token_ids=list(range(48)),
+        block_hashes=[b"h0", b"h1", b"h2"],
+        prefill_end_tokens=32,
+    )
+    tracker = scheduler._request_trackers["req-0"]
+    tracker.token_len = 47
+    tracker.allocated_block_ids = ([0, 1, 2],)
+    tracker.token_ids = list(range(47))
+
+    meta = scheduler.build_connector_meta(
+        _make_decode_scheduler_output(num_computed_tokens=47)
+    )
+
+    assert len(meta.requests) == 1
+    req_meta = meta.requests[0]
+    assert req_meta.can_save is True
+    assert req_meta.token_len_chunk == 48
+    assert req_meta.block_ids == ([0, 1, 2],)
+    assert req_meta.token_ids == list(range(48))
+    assert tracker.num_saved_tokens == 48
+    tracker.token_ids.append(999)
+    assert req_meta.token_ids == list(range(48))
+
+
+def test_consumer_does_not_save_partial_decode_block():
+    scheduler = _make_bare_scheduler(
+        kv_role="kv_consumer",
+        save_decode_cache=True,
+    )
+    _add_unfinished_request(
+        scheduler,
+        token_ids=list(range(47)),
+        block_hashes=[b"h0", b"h1", b"h2"],
+        prefill_end_tokens=32,
+    )
+    tracker = scheduler._request_trackers["req-0"]
+    tracker.token_len = 46
+    tracker.allocated_block_ids = ([0, 1, 2],)
+    tracker.token_ids = list(range(46))
+
+    meta = scheduler.build_connector_meta(
+        _make_decode_scheduler_output(num_computed_tokens=46)
+    )
+
+    assert meta.requests == []
+    assert tracker.token_len == 47
+    assert tracker.num_saved_tokens == 32
 
 
 def test_preemption_resets_tracker():
