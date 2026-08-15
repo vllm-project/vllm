@@ -24,6 +24,7 @@ from fastapi import FastAPI, Response
 
 import vllm.envs as envs
 from vllm.entrypoints.launchers.launcher import NoSignalServer
+from vllm.entrypoints.launchers.utils.server_utils import get_uvicorn_log_config
 from vllm.logger import init_logger
 from vllm.utils.system_utils import (
     decorate_logs,
@@ -325,16 +326,24 @@ class DPSupervisor:
         """
         app = _build_dp_supervisor_app(self)
         host = self.args.host or "0.0.0.0"
+
+        uvicorn_kwargs: dict = {}
+        log_config = get_uvicorn_log_config(self.args)
+        if log_config is not None:
+            uvicorn_kwargs["log_config"] = log_config
+
         config = uvicorn.Config(
             app,
             host=host,
             port=self.supervisor_port,
             log_level=self.args.uvicorn_log_level,
+            access_log=not self.args.disable_uvicorn_access_log,
             ssl_keyfile=self.args.ssl_keyfile,
             ssl_certfile=self.args.ssl_certfile,
             ssl_ca_certs=self.args.ssl_ca_certs,
             ssl_cert_reqs=self.args.ssl_cert_reqs,
             ssl_ciphers=self.args.ssl_ciphers,
+            **uvicorn_kwargs,
         )
         supervisor_server = NoSignalServer(config)
         supervisor_server_task = asyncio.create_task(
