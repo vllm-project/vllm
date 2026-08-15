@@ -137,9 +137,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
 ```
 
 To also offload newly completed decode KV blocks, add the following extra
-configuration to the decoder's `MooncakeStoreConnector` entry. This currently
-requires the prefill and decode instances to use the same tensor-parallel size
-and compatible KV-cache topology.
+configuration to the decoder's `MooncakeStoreConnector` entry.
 
 When decode processing starts, the consumer checks the block-aligned prompt
 prefix and fills any blocks missing from the Store. Subsequent saves append
@@ -250,9 +248,22 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
 - `cache_prefix` (str): Namespace prepended to every store key. Lets separate deployments share one Mooncake master without polluting each other — instances configured with different prefixes never see each other's cached blocks, even for identical prompts. All instances that should share a prefix cache must use the same value. Default: `""` (no prefix; keys are byte-identical to the unprefixed format).
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
+- `store_tp_size` (int): Store KV heads in a layout shared by different local TP sizes. Set this to the prefill TP size on both prefill and decode instances. The first implementation requires `store_tp_size >= local_tp_size` and `store_tp_size % local_tp_size == 0`. It supports a single full-attention cache group with PCP/DCP disabled and cross-layer blocks disabled. For GQA and MHA, the total KV-head count must also be divisible by `store_tp_size`; KV heads are stored in canonical shards of this width. Configurations outside these conditions keep the existing rank-local layout and key format.
 
-Decode offloading uses the existing TP-rank key namespace. Cross-TP sharing is
-not yet supported.
+For example, with prefill TP 4, decode TP 2, and eight KV heads, set
+`store_tp_size` to 4 on both instances. Each decode rank reads and writes two
+of the four canonical store shards.
+
+MQA with one total KV head uses the replicated-head layout instead of canonical
+shards. For the supported prefill TP 4 to decode TP 2 case, every rank uses the
+same rank-0 key namespace. The four prefill replicas stripe block PUTs so each
+object is stored once, while both decode ranks GET every block into their local
+KV replica. `store_tp_size` does not appear in MQA keys, so identical MQA
+objects written at different store TP sizes share the same pool entry.
+
+Tensor-parallel collectives and low-precision arithmetic are not bitwise
+invariant across TP sizes, so heterogeneous-TP reuse does not guarantee the
+same greedy output as recomputing the prefix at the decode TP size.
 
 ## Notes
 

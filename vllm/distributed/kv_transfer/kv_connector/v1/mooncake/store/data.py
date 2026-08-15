@@ -111,6 +111,9 @@ class KeyMetadata:
     # share one Mooncake master without colliding on identical block hashes.
     # Empty (the default) keeps keys byte-identical to the unprefixed format.
     cache_prefix: str = ""
+    # Canonical TP width used by heterogeneous-TP store sharing. Unset keeps
+    # the existing key format and rank-local value layout.
+    store_tp_size: int | None = None
 
 
 @dataclass(order=True)
@@ -125,6 +128,7 @@ class PoolKey:
             (
                 self.key_metadata.cache_prefix,
                 self.key_metadata.model_name,
+                self.key_metadata.store_tp_size,
                 self.key_metadata.tp_rank,
                 self.key_metadata.pcp_rank,
                 self.key_metadata.dcp_rank,
@@ -145,9 +149,15 @@ class PoolKey:
     ) -> str:
         """Return the stable prefix for a Mooncake pool key."""
         prefix = f"{key_metadata.cache_prefix}@" if key_metadata.cache_prefix else ""
+        store_tp = (
+            f"@store_tp:{key_metadata.store_tp_size}"
+            if key_metadata.store_tp_size is not None
+            else ""
+        )
         return (
             f"{prefix}"
             f"{key_metadata.model_name}"
+            f"{store_tp}"
             f"@tp_rank:{key_metadata.tp_rank if tp_rank is None else tp_rank}"
             f"@pcp{key_metadata.pcp_rank if pcp_rank is None else pcp_rank}"
             f"@dcp{key_metadata.dcp_rank if dcp_rank is None else dcp_rank}"
@@ -298,6 +308,136 @@ class ChunkedTokenDatabase:
             end_idx = min(start_idx + self.block_size, token_len)
             h = block_hashes[end_idx // self.hash_block_size - 1]
             yield start_idx, end_idx, h
+
+
+class TPSharedChunkedTokenDatabase(ChunkedTokenDatabase):
+    """Maps a local TP rank to canonical store-TP KV-head shards."""
+
+    def __init__(
+        self,
+        metadata: KeyMetadata,
+        block_size: int,
+        local_tp_size: int,
+        store_tp_size: int,
+        tp_rank: int,
+        num_kv_heads: int,
+        hash_block_size: int | None = None,
+    ):
+        super().__init__(metadata, block_size, hash_block_size)
+        self.shards_per_rank = store_tp_size // local_tp_size
+        first_shard = tp_rank * self.shards_per_rank
+        self.store_shard_ids = tuple(
+            range(first_shard, first_shard + self.shards_per_rank)
+        )
+        self.heads_per_store_shard = num_kv_heads // store_tp_size
+        self.local_num_kv_heads = num_kv_heads // local_tp_size
+        self._shard_key_prefixes = tuple(
+            PoolKey.build_prefix(metadata, tp_rank=shard_id)
+            for shard_id in self.store_shard_ids
+        )
+        self._layer_layouts: list[tuple[int, int, int, int, int, bool]] = []
+
+    def key_for_shard(self, store_shard_id: int, chunk_hash: BlockHash) -> str:
+        local_shard = store_shard_id - self.store_shard_ids[0]
+        return PoolKey.build_key_string(
+            self._shard_key_prefixes[local_shard], chunk_hash.hex()
+        )
+
+    def set_kv_cache_tensors(
+        self, kv_caches: Sequence[torch.Tensor], num_blocks: int
+    ) -> None:
+        """Record packed KV tensor strides for direct scatter/gather."""
+        layouts = []
+        for cache in kv_caches:
+            if cache.ndim != 4 or tuple(cache.shape[:3]) != (
+                num_blocks,
+                self.local_num_kv_heads,
+                self.block_size,
+            ):
+                raise ValueError(
+                    "TP-shared Mooncake store requires packed KV caches with "
+                    "logical shape (num_blocks, local_kv_heads, block_size, content)"
+                )
+
+            element_size = cache.element_size()
+            block_stride, head_stride, token_stride, content_stride = (
+                stride * element_size for stride in cache.stride()
+            )
+            content_bytes = cache.shape[3] * element_size
+            if content_stride != element_size:
+                raise ValueError(
+                    "TP-shared Mooncake store requires a contiguous "
+                    "KV content dimension"
+                )
+
+            is_nhd = (
+                head_stride == content_bytes
+                and token_stride == self.local_num_kv_heads * content_bytes
+            )
+            is_hnd = (
+                token_stride == content_bytes
+                and head_stride == self.block_size * content_bytes
+            )
+            if not (is_nhd or is_hnd):
+                raise ValueError(
+                    "TP-shared Mooncake store supports only packed NHD or HND KV layout"
+                )
+            layouts.append(
+                (
+                    cache.data_ptr(),
+                    block_stride,
+                    head_stride,
+                    token_stride,
+                    content_bytes,
+                    is_nhd,
+                )
+            )
+        self._layer_layouts = layouts
+
+    def prepare_values_for_shards(
+        self,
+        chunks: Sequence[tuple[int, int]],
+        block_ids: list[int],
+        store_shard_ids: Sequence[int],
+    ) -> tuple[list[list[int]], list[list[int]], list[int]]:
+        """Build direct GPU segments for canonical store shards."""
+        addr_lists: list[list[int]] = []
+        size_lists: list[list[int]] = []
+        chunk_block_ids: list[int] = []
+        first_shard = self.store_shard_ids[0]
+
+        for (start, end), store_shard_id in zip(chunks, store_shard_ids, strict=True):
+            if end - start != self.block_size:
+                raise ValueError("TP-shared Mooncake store requires full KV blocks")
+            block_id = block_ids[start // self.block_size]
+            head_start = (store_shard_id - first_shard) * self.heads_per_store_shard
+            addrs: list[int] = []
+            sizes: list[int] = []
+            for (
+                base_addr,
+                block_stride,
+                head_stride,
+                token_stride,
+                content_bytes,
+                is_nhd,
+            ) in self._layer_layouts:
+                block_addr = base_addr + block_id * block_stride
+                if is_nhd:
+                    segment_size = self.heads_per_store_shard * content_bytes
+                    for token_idx in range(self.block_size):
+                        addrs.append(
+                            block_addr
+                            + token_idx * token_stride
+                            + head_start * head_stride
+                        )
+                        sizes.append(segment_size)
+                else:
+                    addrs.append(block_addr + head_start * head_stride)
+                    sizes.append(self.heads_per_store_shard * head_stride)
+            addr_lists.append(addrs)
+            size_lists.append(sizes)
+            chunk_block_ids.append(block_id)
+        return addr_lists, size_lists, chunk_block_ids
 
 
 @dataclass

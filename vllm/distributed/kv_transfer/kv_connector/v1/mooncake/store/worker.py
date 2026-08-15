@@ -48,6 +48,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     MooncakeStoreWorkerMetadata,
     PoolKey,
     ReqMeta,
+    TPSharedChunkedTokenDatabase,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import (  # noqa: E501
     LOOKUP_MSG,
@@ -65,6 +66,7 @@ from vllm.v1.core.kv_cache_utils import (
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -103,7 +105,12 @@ def _make_mooncake_group_id(metadata: KeyMetadata, chunk_hash: str) -> str:
     # Mooncake group ids describe the lifecycle unit. For vLLM, that unit is
     # a prefix chunk, so shard dimensions stay only in the object key.
     prefix = f"{metadata.cache_prefix}@" if metadata.cache_prefix else ""
-    return f"vllm-mooncake-store:{prefix}{metadata.model_name}@{chunk_hash}"
+    store_tp = (
+        f"@store_tp:{metadata.store_tp_size}"
+        if metadata.store_tp_size is not None
+        else ""
+    )
+    return f"vllm-mooncake-store:{prefix}{metadata.model_name}{store_tp}@{chunk_hash}"
 
 
 # Mirrors FileStorageConfig::local_buffer_size in Mooncake C++.
@@ -877,6 +884,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             keys: list[str] = []
             kv_event_block_hashes: list[BlockHash] = []
             group_indices: list[int] = []
+            store_shard_ids: list[int | None] = []
             for g_idx, db in enumerate(self.token_databases):
                 # Rotate the stride phase per group to balance load across ranks.
                 put_step = self.group_put_steps[g_idx]
@@ -902,12 +910,24 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             block_idx,
                         )
                         continue
-                    starts.append(start)
-                    ends.append(end)
-                    keys.append(db.key_for(block_hash))
-                    if self.enable_kv_event:
-                        kv_event_block_hashes.append(block_hash)
-                    group_indices.append(g_idx)
+                    shard_ids: Sequence[int | None] = (
+                        db.store_shard_ids
+                        if isinstance(db, TPSharedChunkedTokenDatabase)
+                        else (None,)
+                    )
+                    for store_shard_id in shard_ids:
+                        starts.append(start)
+                        ends.append(end)
+                        keys.append(
+                            db.key_for_shard(store_shard_id, block_hash)
+                            if isinstance(db, TPSharedChunkedTokenDatabase)
+                            and store_shard_id is not None
+                            else db.key_for(block_hash)
+                        )
+                        if self.enable_kv_event:
+                            kv_event_block_hashes.append(block_hash)
+                        group_indices.append(g_idx)
+                        store_shard_ids.append(store_shard_id)
 
             if not keys:
                 self._record_saved(req_meta, token_len)
@@ -950,6 +970,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         kv_event_block_hashes[i] for i in missing_indices
                     ]
                 group_indices = [group_indices[i] for i in missing_indices]
+                store_shard_ids = [store_shard_ids[i] for i in missing_indices]
 
             group_ids = (
                 [
@@ -976,15 +997,31 @@ class KVCacheStoreSendingThread(KVTransferThread):
             chunks_per_group: list[list[tuple[int, int]]] = [
                 [] for _ in self.token_databases
             ]
-            for start, end, g_idx in zip(starts, ends, group_indices, strict=True):
+            shards_per_group: list[list[int]] = [[] for _ in self.token_databases]
+            for start, end, g_idx, store_shard_id in zip(
+                starts,
+                ends,
+                group_indices,
+                store_shard_ids,
+                strict=True,
+            ):
                 chunks_per_group[g_idx].append((start, end))
+                if store_shard_id is not None:
+                    shards_per_group[g_idx].append(store_shard_id)
             for g_idx, chunks in enumerate(chunks_per_group):
                 if not chunks:
                     continue
                 db = self.token_databases[g_idx]
-                group_addrs, group_sizes, _ = db.prepare_values(
-                    chunks, block_ids_per_group[g_idx]
-                )
+                if isinstance(db, TPSharedChunkedTokenDatabase):
+                    group_addrs, group_sizes, _ = db.prepare_values_for_shards(
+                        chunks,
+                        block_ids_per_group[g_idx],
+                        shards_per_group[g_idx],
+                    )
+                else:
+                    group_addrs, group_sizes, _ = db.prepare_values(
+                        chunks, block_ids_per_group[g_idx]
+                    )
                 addrs.extend(group_addrs)
                 sizes.extend(group_sizes)
 
@@ -1185,17 +1222,31 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         for g_idx, db in enumerate(self.token_databases):
             mask = load_mask_per_group[g_idx]
             chunks: list[tuple[int, int]] = []
+            store_shard_ids: list[int] = []
             for start, end, block_hash in db.process_tokens(
                 token_len, req_meta.block_hashes, mask_num
             ):
                 chunk_idx = start // db.block_size
                 if chunk_idx >= len(mask) or not mask[chunk_idx]:
                     continue
-                key_list.append(db.key_for(block_hash))
-                chunks.append((start, end))
-            g_addrs, g_sizes, g_block_ids = db.prepare_values(
-                chunks, req_meta.block_ids[g_idx]
-            )
+                if isinstance(db, TPSharedChunkedTokenDatabase):
+                    for store_shard_id in db.store_shard_ids:
+                        key_list.append(db.key_for_shard(store_shard_id, block_hash))
+                        chunks.append((start, end))
+                        store_shard_ids.append(store_shard_id)
+                else:
+                    key_list.append(db.key_for(block_hash))
+                    chunks.append((start, end))
+            if isinstance(db, TPSharedChunkedTokenDatabase):
+                g_addrs, g_sizes, g_block_ids = db.prepare_values_for_shards(
+                    chunks,
+                    req_meta.block_ids[g_idx],
+                    store_shard_ids,
+                )
+            else:
+                g_addrs, g_sizes, g_block_ids = db.prepare_values(
+                    chunks, req_meta.block_ids[g_idx]
+                )
             addr_list.extend(g_addrs)
             size_list.extend(g_sizes)
             block_id_list.extend(g_block_ids)
@@ -1520,6 +1571,42 @@ class MooncakeStoreWorker:
             use_eagle=use_eagle,
             retention_interval=kv_cache_config.prefix_cache_retention_interval,
         )
+        requested_store_tp_size = extra_config.get("store_tp_size")
+        share_tp_topology = (
+            self.pcp_size == 1
+            and self.dcp_size == 1
+            and len(self._kv_cache_groups) == 1
+            and type(self._kv_cache_groups[0].kv_cache_spec) is FullAttentionSpec
+            and str(extra_config.get("enable_cross_layers_blocks", "False")).lower()
+            != "true"
+        )
+        share_tp_layout = (
+            type(requested_store_tp_size) is int
+            and requested_store_tp_size >= self.tp_size
+            and requested_store_tp_size % self.tp_size == 0
+            and self.num_kv_head % requested_store_tp_size == 0
+            and share_tp_topology
+        )
+        share_replicated_mqa = (
+            type(requested_store_tp_size) is int
+            and requested_store_tp_size >= self.tp_size
+            and requested_store_tp_size % self.tp_size == 0
+            and self.num_kv_head == 1
+            and share_tp_topology
+        )
+        self.store_tp_size = requested_store_tp_size if share_tp_layout else None
+        if share_replicated_mqa:
+            logger.info(
+                "Mooncake heterogeneous-TP store sharing uses the replicated "
+                "MQA layout for store_tp_size=%d",
+                requested_store_tp_size,
+            )
+        elif requested_store_tp_size is not None and not share_tp_layout:
+            logger.info(
+                "Mooncake heterogeneous-TP store sharing is disabled for "
+                "store_tp_size=%r; using the rank-local store layout",
+                requested_store_tp_size,
+            )
         # One ChunkedTokenDatabase per group; addresses populated in
         # register_kv_caches once the kv-cache layout is known. Each group's
         # key namespace is its TP shard id: ranks holding identical bytes
@@ -1536,22 +1623,39 @@ class MooncakeStoreWorker:
                     "cache_prefix", ""
                 )
             ),
+            store_tp_size=self.store_tp_size,
         )
         self._group_tp_replication_factors: tuple[int, ...] = (
             self._compute_group_tp_replication_factors()
         )
-        self.token_dbs = [
-            ChunkedTokenDatabase(
-                dataclasses.replace(
-                    metadata,
-                    group_id=g_idx,
-                    tp_rank=self.tp_rank // self._group_tp_replication_factors[g_idx],
-                ),
-                g.kv_cache_spec.block_size,
-                hash_block_size=self.hash_block_size,
-            )
-            for g_idx, g in enumerate(self._kv_cache_groups)
-        ]
+        if self.store_tp_size is not None:
+            group = self._kv_cache_groups[0]
+            self.token_dbs = [
+                TPSharedChunkedTokenDatabase(
+                    dataclasses.replace(metadata, group_id=0),
+                    group.kv_cache_spec.block_size,
+                    local_tp_size=self.tp_size,
+                    store_tp_size=self.store_tp_size,
+                    tp_rank=self.tp_rank,
+                    num_kv_heads=self.num_kv_head,
+                    hash_block_size=self.hash_block_size,
+                )
+            ]
+        else:
+            self.token_dbs = [
+                ChunkedTokenDatabase(
+                    dataclasses.replace(
+                        metadata,
+                        group_id=g_idx,
+                        tp_rank=(
+                            self.tp_rank // self._group_tp_replication_factors[g_idx]
+                        ),
+                    ),
+                    g.kv_cache_spec.block_size,
+                    hash_block_size=self.hash_block_size,
+                )
+                for g_idx, g in enumerate(self._kv_cache_groups)
+            ]
         self._init_lookup_key_prefixes()
 
     def _spec_tp_replication_factor(self, spec: KVCacheSpec) -> int:
@@ -1585,6 +1689,21 @@ class MooncakeStoreWorker:
         )
 
     def _init_lookup_key_prefixes(self) -> None:
+        if self.store_tp_size is not None:
+            self._lookup_key_prefixes = tuple(
+                tuple(
+                    PoolKey.build_prefix(
+                        db.metadata,
+                        tp_rank=store_shard_id,
+                        pp_rank=pp_rank,
+                    )
+                    for store_shard_id in range(self.store_tp_size)
+                    for pp_rank in range(self.pp_size)
+                )
+                for db in self.token_dbs
+            )
+            return
+
         def rank_namespaces(factor: int) -> tuple[tuple[int, int, int, int], ...]:
             if self.dcp_size > 1:
                 # DCP is a TP subdivision: dcp_rank == tp_rank % dcp_size.
@@ -1651,9 +1770,11 @@ class MooncakeStoreWorker:
         seen_ptrs: set[int] = set()
         addrs: list[int] = []
         block_lens: list[int] = []
+        cache_tensors: list[torch.Tensor] = []
 
         for value in kv_caches.values():
             cache = _repr_tensor(value)
+            cache_tensors.append(cache)
             cache_storage = cache.untyped_storage()
             base_addr = cache_storage.data_ptr()
             if base_addr in seen_ptrs:
@@ -1697,9 +1818,14 @@ class MooncakeStoreWorker:
             self.num_blocks,
         )
 
-        for db in self.token_dbs:
-            db.set_kv_caches_base_addr(addrs)
-            db.set_block_len(block_lens)
+        if self.store_tp_size is not None:
+            db = self.token_dbs[0]
+            assert isinstance(db, TPSharedChunkedTokenDatabase)
+            db.set_kv_cache_tensors(cache_tensors, self.num_blocks)
+        else:
+            for db in self.token_dbs:
+                db.set_kv_caches_base_addr(addrs)
+                db.set_block_len(block_lens)
 
         # Start transfer threads
         if self.can_put:
