@@ -534,6 +534,7 @@ class FullAttentionSpec(AttentionSpec):
         )
         return merged_spec
 
+
 def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
     if spec.alignment is None:
         return
