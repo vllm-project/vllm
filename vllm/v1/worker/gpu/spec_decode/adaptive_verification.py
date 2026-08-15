@@ -210,6 +210,7 @@ def maybe_create_draft_trimmer(
         )
         return None
 
+    logger.info("GPU draft trimming enabled for variable-length drafts.")
     return VariableDraftTrimmer(
         num_valid_drafts,
         query_start_loc,
