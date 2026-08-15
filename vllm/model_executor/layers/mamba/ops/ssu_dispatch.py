@@ -16,7 +16,11 @@ ReplaySSM backends:
     (``selective_state_update_replayssm_flashinfer``)
 """
 
+import os
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 
 import torch
 
@@ -28,6 +32,41 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
 logger = init_logger(__name__)
+
+_FLASHINFER_SSU_PIPELINE_STAGES_ENV = "FLASHINFER_SSU_MAIN_PIPELINE_STAGES"
+_FLASHINFER_SSU_CTA_PER_SM_ENV = "FLASHINFER_SSU_MAIN_CTA_PER_SM"
+
+
+@dataclass(frozen=True)
+class FlashInferReplaySSMTactic:
+    algorithm: str
+    pipeline_stages: int | None = None
+    ctas_per_sm: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.algorithm not in {"auto", "monolith", "two-kernel"}:
+            raise ValueError(f"Unsupported ReplaySSM algorithm: {self.algorithm}")
+        has_launch_config = (
+            self.pipeline_stages is not None or self.ctas_per_sm is not None
+        )
+        if self.algorithm == "two-kernel":
+            if self.pipeline_stages not in {1, 2}:
+                raise ValueError("two-kernel requires pipeline_stages in {1, 2}")
+            if self.ctas_per_sm is None or self.ctas_per_sm <= 0:
+                raise ValueError("two-kernel requires a positive ctas_per_sm")
+        elif has_launch_config:
+            raise ValueError(
+                f"{self.algorithm} does not accept pipeline or CTA settings"
+            )
+
+    @property
+    def name(self) -> str:
+        if self.algorithm != "two-kernel":
+            return self.algorithm
+        return f"two_kernel_s{self.pipeline_stages}_c{self.ctas_per_sm}"
+
+
+FLASHINFER_REPLAYSSM_AUTO_TACTIC = FlashInferReplaySSMTactic("auto")
 
 
 @triton.jit
@@ -43,9 +82,7 @@ def _update_replayssm_ring_trackers_kernel(
 ) -> None:
     offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offsets < n_slots
-    slots = tl.load(
-        state_batch_indices + offsets, mask=mask, other=pad_slot_id
-    )
+    slots = tl.load(state_batch_indices + offsets, mask=mask, other=pad_slot_id)
     valid = mask & (slots != pad_slot_id)
     prev = tl.load(prev_num_accepted + slots, mask=valid, other=0)
     start = tl.load(ring_start + slots, mask=valid, other=0)
@@ -71,9 +108,7 @@ def _reset_replayssm_ring_trackers_kernel(
 ) -> None:
     offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offsets < n_slots
-    slots = tl.load(
-        state_batch_indices + offsets, mask=mask, other=pad_slot_id
-    )
+    slots = tl.load(state_batch_indices + offsets, mask=mask, other=pad_slot_id)
     valid = mask & (slots != pad_slot_id)
     tl.store(ring_start + slots, 0, mask=valid)
     tl.store(prev_num_accepted + slots, 0, mask=valid)
@@ -453,6 +488,7 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
                 "pip install flashinfer-python"
             ) from e
         self._kernel = _fi_checkpointing_ssu
+        self._algorithm = FLASHINFER_REPLAYSSM_AUTO_TACTIC.algorithm
 
     @property
     def name(self) -> str:
@@ -481,7 +517,7 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
         cb_scaled: torch.Tensor | None = None,
         cumAdt_vec: torch.Tensor | None = None,
         cb_old: torch.Tensor | None = None,
-        algorithm: str = "auto",
+        algorithm: str | None = None,
     ) -> torch.Tensor:
         # AR decode currently passes (batch, nheads, dim); checkpointing_ssu
         # expects a predicted-token axis T. Unsqueeze T=1 here.
@@ -526,7 +562,7 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
             cb_scaled=cb_scaled,
             cumAdt_vec=cumAdt_vec,
             cb_old=cb_old,
-            algorithm=algorithm,
+            algorithm=self._algorithm if algorithm is None else algorithm,
         )
         if indices is not None:
             update_replayssm_ring_trackers(
@@ -537,6 +573,44 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
                 pad_slot_id=null_block_id,
             )
         return result
+
+
+@contextmanager
+def use_flashinfer_replayssm_tactic(
+    tactic: FlashInferReplaySSMTactic,
+) -> Iterator[None]:
+    """Apply a ReplaySSM launch tactic during serial warmup or graph capture."""
+    backend = get_replayssm_backend()
+    if not isinstance(backend, FlashInferReplaySSMBackend):
+        yield
+        return
+
+    old_algorithm = backend._algorithm
+    old_stages = os.environ.get(_FLASHINFER_SSU_PIPELINE_STAGES_ENV)
+    old_ctas = os.environ.get(_FLASHINFER_SSU_CTA_PER_SM_ENV)
+    backend._algorithm = tactic.algorithm
+    try:
+        if tactic.algorithm == "two-kernel":
+            assert tactic.pipeline_stages is not None
+            assert tactic.ctas_per_sm is not None
+            os.environ[_FLASHINFER_SSU_PIPELINE_STAGES_ENV] = str(
+                tactic.pipeline_stages
+            )
+            os.environ[_FLASHINFER_SSU_CTA_PER_SM_ENV] = str(tactic.ctas_per_sm)
+        else:
+            os.environ.pop(_FLASHINFER_SSU_PIPELINE_STAGES_ENV, None)
+            os.environ.pop(_FLASHINFER_SSU_CTA_PER_SM_ENV, None)
+        yield
+    finally:
+        backend._algorithm = old_algorithm
+        if old_stages is None:
+            os.environ.pop(_FLASHINFER_SSU_PIPELINE_STAGES_ENV, None)
+        else:
+            os.environ[_FLASHINFER_SSU_PIPELINE_STAGES_ENV] = old_stages
+        if old_ctas is None:
+            os.environ.pop(_FLASHINFER_SSU_CTA_PER_SM_ENV, None)
+        else:
+            os.environ[_FLASHINFER_SSU_CTA_PER_SM_ENV] = old_ctas
 
 
 _REPLAYSSM_BACKEND_REGISTRY: dict[MambaBackendEnum, type[ReplaySSMBackend]] = {
@@ -659,7 +733,7 @@ def selective_state_update_replayssm_flashinfer(
     cb_scaled: torch.Tensor | None = None,
     cumAdt_vec: torch.Tensor | None = None,
     cb_old: torch.Tensor | None = None,
-    algorithm: str = "auto",
+    algorithm: str | None = None,
 ) -> torch.Tensor:
     """FlashInfer ReplaySSM decode (``checkpointing_ssu``)."""
     backend = get_replayssm_backend()
