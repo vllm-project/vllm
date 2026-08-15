@@ -147,6 +147,18 @@ class _WeightLoaderLayer(nn.Module):
         self.mlp.gate_up_proj = _FusedWeightModule(calls)
 
 
+class _KDAWeightLoaderLayer(nn.Module):
+    def __init__(
+        self,
+        projection_calls: list[tuple[torch.Tensor, int]],
+        conv_calls: list[tuple[torch.Tensor, int]],
+    ) -> None:
+        super().__init__()
+        self.self_attn = nn.Module()
+        self.self_attn.in_proj_qkvgfab = _FusedWeightModule(projection_calls)
+        self.self_attn.conv1d = _FusedWeightModule(conv_calls)
+
+
 class _WrapperModel(nn.Module):
     def __init__(self, *, vllm_config: object, prefix: str) -> None:
         super().__init__()
@@ -600,6 +612,66 @@ def test_xpu_kimi_linear_model_loads_fused_mlp_shards() -> None:
     assert calls[1][0] is up_weight and calls[1][1] == 1
 
 
+def test_xpu_kimi_linear_model_declares_kimi_k3_packed_modules() -> None:
+    assert kimi_xpu.KimiLinearModel.packed_modules_mapping == {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvgfab": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "b_proj",
+            "f_a_proj",
+        ],
+        "conv1d": ["q_conv1d", "k_conv1d", "v_conv1d"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+    }
+
+
+def test_xpu_kimi_linear_model_loads_full_rank_kda_shards() -> None:
+    projection_calls: list[tuple[torch.Tensor, int]] = []
+    conv_calls: list[tuple[torch.Tensor, int]] = []
+    model = object.__new__(kimi_xpu.KimiLinearModel)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(
+        linear_attn_config={"use_full_rank_gate": True},
+        q_lora_rank=None,
+        is_moe=False,
+        num_nextn_predict_layers=0,
+    )
+    model.layers = nn.ModuleList(
+        [_KDAWeightLoaderLayer(projection_calls, conv_calls)]
+    )
+    projection_names = (
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "g_proj",
+        "f_a_proj",
+        "b_proj",
+    )
+    projection_weights = [torch.full((1,), index) for index in range(6)]
+    conv_names = ("q_conv1d", "k_conv1d", "v_conv1d")
+    conv_weights = [torch.full((1,), index + 6) for index in range(3)]
+
+    loaded = model.load_weights(
+        [
+            (f"layers.0.self_attn.{name}.weight", weight)
+            for name, weight in zip(projection_names, projection_weights)
+        ]
+        + [
+            (f"layers.0.self_attn.{name}.weight", weight)
+            for name, weight in zip(conv_names, conv_weights)
+        ]
+    )
+
+    assert loaded == {
+        "layers.0.self_attn.in_proj_qkvgfab.weight",
+        "layers.0.self_attn.conv1d.weight",
+    }
+    assert projection_calls == list(zip(projection_weights, range(6)))
+    assert conv_calls == list(zip(conv_weights, range(3)))
+
+
 def test_xpu_kimi_linear_for_causal_lm_wraps_model(monkeypatch) -> None:
     monkeypatch.setattr(kimi_xpu, "get_pp_group", lambda: _SingleRankPPGroup())
     monkeypatch.setattr(kimi_xpu, "KimiLinearModel", _WrapperModel)
@@ -695,24 +767,46 @@ def test_xpu_kimi_linear_for_causal_lm_loads_weights(monkeypatch) -> None:
             captured["model"] = model
             captured["skip_prefixes"] = skip_prefixes
 
-        def load_weights(
-            self, weights: list[tuple[str, torch.Tensor]]
-        ) -> set[str]:
-            captured["weights"] = weights
-            return {"model.weight"}
+        def load_weights(self, weights, *, mapper) -> set[str]:
+            mapped_weights = list(mapper.apply(weights))
+            captured["weights"] = mapped_weights
+            captured["mapper"] = mapper
+            return {name for name, _ in mapped_weights}
 
     monkeypatch.setattr(kimi_xpu, "AutoWeightsLoader", _Loader)
     model = object.__new__(kimi_xpu.KimiLinearForCausalLM)
     nn.Module.__init__(model)
     model.config = SimpleNamespace(tie_word_embeddings=True)
-    weights = [("model.weight", torch.ones(1))]
+    model_weight = torch.ones(1)
+    legacy_layer_weight = torch.full((1,), 2.0)
+    lm_head_weight = torch.full((1,), 3.0)
+    plain_text_weight = torch.full((1,), 4.0)
+    vision_weight = torch.full((1,), 5.0)
+    projector_weight = torch.full((1,), 6.0)
+    weights = [
+        ("language_model.model.norm.weight", model_weight),
+        ("language_model.layers.0.input_layernorm.weight", legacy_layer_weight),
+        ("language_model.lm_head.weight", lm_head_weight),
+        ("model.embed_tokens.weight", plain_text_weight),
+        ("vision_tower.encoder.weight", vision_weight),
+        ("mm_projector.proj.0.weight", projector_weight),
+    ]
 
-    assert model.load_weights(weights) == {"model.weight"}
-    assert captured == {
-        "model": model,
-        "skip_prefixes": ["lm_head."],
-        "weights": weights,
+    assert model.load_weights(weights) == {
+        "model.norm.weight",
+        "model.layers.0.input_layernorm.weight",
+        "lm_head.weight",
+        "model.embed_tokens.weight",
     }
+    assert captured["model"] is model
+    assert captured["skip_prefixes"] == ["lm_head."]
+    assert captured["mapper"] is model.hf_to_vllm_mapper
+    assert captured["weights"] == [
+        ("model.norm.weight", model_weight),
+        ("model.layers.0.input_layernorm.weight", legacy_layer_weight),
+        ("lm_head.weight", lm_head_weight),
+        ("model.embed_tokens.weight", plain_text_weight),
+    ]
 
 
 def test_xpu_decoder_layer_uses_three_attn_res_states(monkeypatch) -> None:

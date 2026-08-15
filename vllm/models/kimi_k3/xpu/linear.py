@@ -56,6 +56,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
 	AutoWeightsLoader,
 	PPMissingLayer,
+	WeightsMapper,
 	get_spec_layer_idx_from_weight_name,
 	is_pp_missing_parameter,
 	make_layers,
@@ -667,6 +668,19 @@ class KimiDecoderLayer(nn.Module):
 
 
 class KimiLinearModel(nn.Module, EagleModelMixin):
+	packed_modules_mapping = {
+		"gate_up_proj": ["gate_proj", "up_proj"],
+		"in_proj_qkvgfab": [
+			"q_proj",
+			"k_proj",
+			"v_proj",
+			"b_proj",
+			"f_a_proj",
+		],
+		"conv1d": ["q_conv1d", "k_conv1d", "v_conv1d"],
+		"fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+	}
+
 	def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
 		super().__init__()
 		config = vllm_config.model_config.hf_text_config
@@ -1006,6 +1020,15 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 class KimiLinearForCausalLM(
 	nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
 ):
+	hf_to_vllm_mapper = WeightsMapper(
+		orig_to_new_prefix={
+			"language_model.model.": "model.",
+			"language_model.layers.": "model.layers.",
+			"language_model.lm_head.": "lm_head.",
+			"vision_tower.": None,
+			"mm_projector.": None,
+		}
+	)
 
 	def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
 		super().__init__()
@@ -1102,7 +1125,7 @@ class KimiLinearForCausalLM(
 				["lm_head."] if self.config.tie_word_embeddings else None
 			),
 		)
-		return loader.load_weights(weights)
+		return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 __all__ = [
 	"KimiDecoderLayer",
