@@ -307,10 +307,20 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ),
     ],
 )
-def test_is_default_v2_model_runner_model(model_config, expected):
+def test_is_default_v2_model_runner_model(model_config, expected, monkeypatch):
+    from vllm.config.vllm import default_v2_model_runner_architectures
+    from vllm.platforms import current_platform
+
+    # The expectations below are the platform-independent defaults; ROCm's
+    # DeepSeek V4 carve-out is covered by test_rocm_defaults_deepseek_v4_to_mrv1.
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    default_v2_model_runner_architectures.cache_clear()
     config = SimpleNamespace(model_config=model_config)
 
-    assert VllmConfig._is_default_v2_model_runner_model(config) is expected
+    try:
+        assert VllmConfig._is_default_v2_model_runner_model(config) is expected
+    finally:
+        default_v2_model_runner_architectures.cache_clear()
 
 
 @pytest.mark.skip_global_cleanup
