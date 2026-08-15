@@ -547,9 +547,17 @@ class HF3FSKVConnector(KVConnectorBase_V1):
             f"expected a [B, H, N, C] KV cache view, got {tuple(first_cache.shape)}"
         )
         num_blocks, num_heads, block_size, content_dim = first_cache.shape
+        cache_strides = first_cache.stride()
+        assert all(
+            cache.shape == first_cache.shape and cache.stride() == cache_strides
+            for cache in self._kv_caches.values()
+        ), "HF3FS requires uniform KV cache shapes and strides."
 
         self._local_total_tokens = num_blocks * block_size
         self._local_block_size = block_size
+        self._num_heads = num_heads
+        self._content_dim = content_dim
+        self._kv_cache_strides = cache_strides
 
         layer_block_size = num_heads * block_size * content_dim * element_size
         self._bytes_per_page = layer_block_size * len(self._kv_caches)
@@ -982,7 +990,10 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                     self._local_total_tokens,
                     buffer_tensor,
                     token_indices,
-                    is_mla=self._use_mla,
+                    self._local_block_size,
+                    self._num_heads,
+                    self._content_dim,
+                    self._kv_cache_strides,
                 )
             else:
                 gather_scatter_helper.scatter_kv_caches(
@@ -990,7 +1001,10 @@ class HF3FSKVConnector(KVConnectorBase_V1):
                     self._local_total_tokens,
                     buffer_tensor,
                     token_indices,
-                    is_mla=self._use_mla,
+                    self._local_block_size,
+                    self._num_heads,
+                    self._content_dim,
+                    self._kv_cache_strides,
                 )
 
     def _compute_prefix_hash(

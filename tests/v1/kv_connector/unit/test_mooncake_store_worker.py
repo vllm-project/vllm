@@ -2783,7 +2783,7 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
 
     db = worker.token_dbs[0]
     if layout.heads_outside_blocks:
-        # Each head group is its own plane, so a block spans L*H regions.
+        # Each head group is its own region, so a block spans L*H regions.
         head_cache = caches[0][:, 0]
         assert db.kv_caches_base_addr == [
             cache[:, head_idx].data_ptr()
@@ -2803,7 +2803,7 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
 
 
 def test_register_kv_caches_separate_head_groups():
-    # LHBNC is the layout that gives each head group its own plane; the K/V
+    # LHBNC gives each head group its own region; the K/V
     # split only doubles the head count.
     layout = KVCacheLayout.LHBNC
     num_blocks = 3

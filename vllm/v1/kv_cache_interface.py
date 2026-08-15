@@ -268,6 +268,15 @@ class KVCacheLayout(Enum):
     def heads_outside_blocks(self) -> bool:
         return self.value.index(_DIM_H) < self.value.index(_DIM_B)
 
+    def swap_layer_and_block(self) -> KVCacheLayout:
+        """Return the equivalent layout with the L and B axes exchanged."""
+        return KVCacheLayout(
+            tuple(
+                _DIM_B if dim == _DIM_L else _DIM_L if dim == _DIM_B else dim
+                for dim in self.stride_order
+            )
+        )
+
 
 def compute_layer_kv_cache_shape_bytes(
     spec: KVCacheSpec,
@@ -302,13 +311,19 @@ def compute_layout_strides(
         assert block_size is None or block_size == spec.block_size, (
             "Padded KV pages do not support kernel block splitting."
         )
-        assert {inv_order[_DIM_L], inv_order[_DIM_B]} == {0, 1}, (
-            f"Padded KV pages need L and B outermost, got {layout.name}."
+        lb = (inv_order[_DIM_L], inv_order[_DIM_B])
+        assert all(physical_shape[i] == 1 for i in range(max(lb) + 1) if i not in lb), (
+            "Padded KV pages need L and B outermost (any dim hoisted between "
+            f"them must have extent 1), got {layout.name}."
         )
 
-    logical_tail = prod(physical_shape[2:])
+    # Splitting the meta tensor at the inner of L and B makes the padded
+    # storage tail span exactly one page; without padding any split point
+    # yields the same dense strides.
+    split = max(inv_order[_DIM_L], inv_order[_DIM_B]) + 1
+    logical_tail = prod(physical_shape[split:])
     storage_tail = padded if padded is not None else logical_tail
-    physical = torch.empty((*physical_shape[:2], storage_tail), device="meta")
+    physical = torch.empty((*physical_shape[:split], storage_tail), device="meta")
     strides = list(
         physical[..., :logical_tail].view(physical_shape).permute(*inv_order).stride()
     )
@@ -380,6 +395,7 @@ class AttentionSpec(KVCacheSpec):
     state_content_bytes: int | None = None
     """C in bytes when packed; None defaults to ``(hs_k + hs_v) * dtype`` content."""
     tokens_per_state: int = 1
+    states_per_token: int = 1
 
     def __post_init__(self):
         if self.head_size_v is None:
@@ -390,6 +406,12 @@ class AttentionSpec(KVCacheSpec):
         if self.num_head_slots is not None:
             return self.num_head_slots
         return self.num_kv_heads
+
+    @property
+    def storage_block_size(self) -> int:
+        num_states = self.block_size * self.states_per_token
+        assert num_states % self.tokens_per_state == 0
+        return num_states // self.tokens_per_state
 
     @property
     def state_content_size_bytes(self) -> int:
@@ -498,6 +520,7 @@ class FullAttentionSpec(AttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
+            states_per_token=specs[0].states_per_token,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             # If any layer in the group is non-causal, treat the group as
@@ -544,10 +567,6 @@ class MLAAttentionSpec(FullAttentionSpec):
         super().__post_init__()
         _apply_alignment_padding(self)
 
-    @property
-    def storage_block_size(self) -> int:
-        return self.block_size // self.tokens_per_state
-
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, MLAAttentionSpec) for spec in specs), (
@@ -575,6 +594,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             state_content_bytes=specs[0].state_content_bytes,
             cache_dtype_str=cache_dtype_str_set.pop(),
             tokens_per_state=tokens_per_state_set.pop(),
+            states_per_token=specs[0].states_per_token,
             model_version=model_version_set.pop(),
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs
@@ -630,6 +650,7 @@ class RSWASpec(FullAttentionSpec):
             page_size_padded=base.page_size_padded,
             num_head_slots=base.num_head_slots,
             state_content_bytes=base.state_content_bytes,
+            states_per_token=base.states_per_token,
             sliding_window=base.sliding_window,
             attention_chunk_size=base.attention_chunk_size,
             non_causal=base.non_causal,
@@ -754,10 +775,6 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         super().__post_init__()
         _apply_alignment_padding(self)
 
-    @property
-    def storage_block_size(self) -> int:
-        return self.block_size // self.tokens_per_state
-
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, SlidingWindowMLASpec) for spec in specs), (
@@ -792,6 +809,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             extra_retained_tokens=extra_retained_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
             tokens_per_state=tokens_per_state_set.pop(),
+            states_per_token=specs[0].states_per_token,
             model_version=model_version_set.pop(),
         )
 

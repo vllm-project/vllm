@@ -199,13 +199,13 @@ class TestDensePacking:
         vllm_config = _mock_vllm_config()
         get_kv_cache_config_from_groups(vllm_config, groups, MEMORY)
         assert not get_kv_cache_layout().is_layer_compact
-        assert vllm_config.cache_config.kv_cache_layout == "BLHNC"
+        assert vllm_config.cache_config.kv_cache_layout == "BLNHC"
 
-    def test_explicit_layer_outer_layout_rejected_for_overlays(self):
+    def test_explicit_layer_outer_layout_preserves_inner_order_for_overlays(self):
         groups, _, _ = _mixed_page_groups()
         set_kv_cache_layout("LBNHC")
-        with pytest.raises(ValueError, match="places layers outside blocks"):
-            get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
+        get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
+        assert get_kv_cache_layout().name == "BLNHC"
 
     def test_head_outer_layout_rejected_for_mixed_pages(self):
         groups, _, _ = _mixed_page_groups()

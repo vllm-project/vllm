@@ -70,22 +70,22 @@ def test_reshape_separate_kv_head_groups_matches_aiter_block_interior():
         dtype=torch.float32,
     )
     packed = FullAttentionSpec(**common)
-    planes = FullAttentionSpec(
+    separate_groups = FullAttentionSpec(
         **common,
         num_head_slots=2,
         state_content_bytes=num_kv_heads * head_size * 4,
     )
 
     # Pure repermutation: same bytes per page, K/V regrouped out of the content.
-    assert planes.page_size_bytes == packed.page_size_bytes
-    assert planes.num_heads == 2
-    assert planes.state_content_size_bytes == num_kv_heads * head_size * 4
+    assert separate_groups.page_size_bytes == packed.page_size_bytes
+    assert separate_groups.num_heads == 2
+    assert separate_groups.state_content_size_bytes == num_kv_heads * head_size * 4
 
     raw = torch.zeros(
-        num_blocks * num_layers * planes.page_size_bytes, dtype=torch.int8
+        num_blocks * num_layers * separate_groups.page_size_bytes, dtype=torch.int8
     )
     views = dense_kv_cache_views(
-        raw, planes, num_blocks, num_layers, KVCacheLayout.LBHNC
+        raw, separate_groups, num_blocks, num_layers, KVCacheLayout.LBHNC
     )
 
     def is_contiguous_from_dim1(t: torch.Tensor) -> bool:
@@ -236,7 +236,7 @@ def test_copy_kv_cache_blocks_shared_storage(layout: KVCacheLayout):
 
 
 def test_copy_kv_cache_blocks_separate_head_groups():
-    # LHBNC is the layout that puts each head group in its own plane, so a
+    # LHBNC stores each head group separately, so a
     # block's bytes are scattered across L*H regions.
     layout = KVCacheLayout.LHBNC
     num_blocks = 4

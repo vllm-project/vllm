@@ -128,6 +128,11 @@ def create_whisper_attention_backend_with_block_pooling(
             vllm_config: VllmConfig,
             device: torch.device,
         ):
+            kv_cache_spec = replace(
+                kv_cache_spec,
+                block_size=kv_cache_spec.block_size * block_pool_size,
+                states_per_token=1,
+            )
             if isinstance(kv_cache_spec, SlidingWindowSpec):
                 # The manager keeps `sliding_window` in pooled units; the kernel
                 # runs on the expanded sequence, so give it the model's window in
@@ -317,11 +322,9 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
     def get_kv_cache_spec(self, vllm_config: VllmConfig):
         kv_cache_spec = super().get_kv_cache_spec(vllm_config)
         assert isinstance(kv_cache_spec, AttentionSpec)
-        assert kv_cache_spec.num_kv_heads % self.block_pool_size == 0
         kv_cache_spec = replace(
             kv_cache_spec,
-            block_size=kv_cache_spec.block_size * self.block_pool_size,
-            num_kv_heads=kv_cache_spec.num_kv_heads // self.block_pool_size,
+            states_per_token=self.block_pool_size,
         )
         if isinstance(kv_cache_spec, SlidingWindowSpec):
             # The manager counts blocks in pooled units, so express the window in

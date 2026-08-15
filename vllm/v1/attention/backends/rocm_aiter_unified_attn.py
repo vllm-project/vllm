@@ -159,7 +159,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Split the per-layer cache into K/V views shaped [B, N, H, hs].
 
-        With separate planes the cache is [B, 2, N, H*hs] and each side is a
+        With separate head groups the cache is [B, 2, N, H*hs] and each side is a
         contiguous, token-major block region. Otherwise K/V are packed in the
         content dim of [B, H, N, 2*hs] and the split is a strided view.
         """
@@ -328,7 +328,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
     def fused_qk_norm_rope_kvcache_supported(self):
         # The fused kernel needs K and V as separate block-contiguous caches,
-        # which only the separate-planes allocation provides.
+        # which only separate head-group storage provides.
         return self.separate_kv_head_groups
 
     def do_qk_norm_rope_kvcache_update(
@@ -366,7 +366,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             k_scale=layer._k_scale_cpu,
             v_scale=layer._v_scale_cpu,
             kv_cache_dtype=self.kv_cache_dtype,
-            # Separate planes and the shuffle layout are mutually exclusive
+            # Separate head groups and the shuffle layout are mutually exclusive
             # (see _use_separate_kv_head_groups), so this path is never shuffled.
             use_shuffle_layout=False,
         )

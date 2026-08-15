@@ -1107,7 +1107,7 @@ async def test_worker_get_finished_timeout(monkeypatch):
         (KVCacheLayout.LBHNC, False),
         (KVCacheLayout.BLHNC, False),
         (KVCacheLayout.BHLNC, False),
-        # LHBNC gives each head group its own plane; the K/V split doubles the
+        # LHBNC gives each head group its own region; the K/V split doubles the
         # head count but the registration shape is driven by the layout.
         (KVCacheLayout.LHBNC, False),
         (KVCacheLayout.LHBNC, True),

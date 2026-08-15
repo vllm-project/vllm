@@ -211,7 +211,7 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_kv_connector(cls) -> bool:
-        # ROCM_ATTN requires the LHBNC layout (K/V planes spanning all
+        # ROCM_ATTN requires the LHBNC layout (K/V groups spanning all
         # blocks), which is incompatible with KV connectors that require
         # blocks-first layout.
         return False
@@ -247,8 +247,8 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
-        """K and V as two head-group planes so the native HIP kernels can
-        address each side as one contiguous plane spanning all blocks
+        """K and V as two head groups so the native HIP kernels can
+        address each side as one contiguous region spanning all blocks
         (with the x-packed interior applied privately in split_kv_cache)."""
         if spec.state_content_bytes is not None:
             return spec
@@ -265,8 +265,8 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
-        # The native HIP write/decode kernels hardcode plane-contiguous
-        # block addressing, so K and V planes must span all blocks (H
+        # The native HIP write/decode kernels hardcode group-contiguous
+        # block addressing, so K and V groups must span all blocks (H
         # outermost within the layer).
         return "LHBNC"
 
@@ -405,7 +405,7 @@ class RocmAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: logical [num_blocks, 2, block_size, num_kv_heads *
-                head_size] under LHBNC (physically K/V-plane-first)
+                head_size] under LHBNC (physically K/V-group-first)
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -444,7 +444,7 @@ class RocmAttentionImpl(AttentionImpl):
             )
 
         # The bound view is logical [B, 2, N, H*hs]; split_kv_cache expects
-        # the K/V planes first.
+        # the K/V groups first.
         key_cache, value_cache = PagedAttention.split_kv_cache(
             kv_cache.transpose(0, 1), self.num_kv_heads, self.head_size
         )

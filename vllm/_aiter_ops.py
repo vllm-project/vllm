@@ -2799,7 +2799,7 @@ class rocm_aiter_ops:
     ) -> None:
         """Run the fused QK-norm+RoPE+KV-cache op on already-split k/v caches.
 
-        The caller passes the two K/V plane views of a separate-planes cache,
+        The caller passes the two K/V views of separately grouped cache storage,
         each shaped [num_blocks, block_size, num_kv_heads, head_size] and
         contiguous within a block, which is the interior this kernel indexes
         (block_id * stride(0) + token * H*hs + head * hs).

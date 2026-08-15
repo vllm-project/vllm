@@ -42,7 +42,10 @@ from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
-from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    copy_kv_blocks,
+    get_current_attn_backends,
+)
 from vllm.distributed.parallel_state import (
     GraphCaptureContext,
     get_dcp_group,
@@ -152,6 +155,7 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     get_kv_cache_layout,
     reorder_batch_to_split_decodes_and_prefills,
+    resolve_kv_cache_layout,
 )
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
@@ -7665,6 +7669,9 @@ class GPUModelRunner(
         """
         if has_ec_transfer() and not get_ec_transfer().is_consumer:
             return {}
+        resolve_kv_cache_layout(
+            get_current_attn_backends(self.vllm_config), self.cache_config
+        )
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         layer_type = cast(type[Any], AttentionLayerBase)
         attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type)

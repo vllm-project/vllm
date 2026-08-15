@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import (
     get_flashinfer_layout_string,
     set_kv_cache_layout,
@@ -51,7 +52,9 @@ def test_dense_kv_cache_views(layout):
     )
     num_slots = 2
     total_bytes = spec.page_size_bytes * NUM_BLOCKS * num_slots
-    raw = torch.zeros(total_bytes, dtype=torch.int8, device="cuda")
+    raw = torch.zeros(
+        total_bytes, dtype=torch.int8, device=current_platform.device_type
+    )
     views = dense_kv_cache_views(raw, spec, NUM_BLOCKS, num_slots, layout)
 
     byte_4d = compute_layer_kv_cache_shape_bytes(spec, NUM_BLOCKS)

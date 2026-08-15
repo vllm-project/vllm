@@ -40,7 +40,7 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     get_kv_cache_layout,
-    initialize_kv_cache_layout,
+    resolve_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -494,8 +494,8 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
                 backend_cfg, config, device, dtype
             )
             # Publish any backend-required layout (e.g. FlashInfer TRTLLM)
-            # before allocating the cache, mirroring selector-time resolution.
-            initialize_kv_cache_layout(backend_class, vllm_config.cache_config)
+            # before allocating the cache; the benchmark runs one backend.
+            resolve_kv_cache_layout([backend_class], vllm_config.cache_config)
 
             common_metadata = _build_common_attn_metadata(
                 q_lens, kv_lens, config.block_size, device

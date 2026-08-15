@@ -2304,6 +2304,51 @@ def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
     ) == (544, 136)
 
 
+def test_multi_run_layer_compact_strides_place_hoisted_heads():
+    """A layer-compact run region is its own dense allocation: under LHBNC
+    the head groups sit between the layers and the blocks, so a run's block
+    stride is one head group's slice, not the whole page (regression test for
+    setStorage out-of-bounds on ROCm hybrid models)."""
+    import vllm.v1.attention.backends.utils as attn_backend_utils
+    from vllm.v1.kv_cache_interface import KVCacheLayout
+
+    full = new_kv_cache_spec()
+    swa = new_sliding_window_spec(sliding_window=full.block_size * 2)
+    page = full.page_size_bytes
+    assert swa.page_size_bytes == page
+
+    prev = attn_backend_utils._RESOLVED_KV_CACHE_LAYOUT
+    attn_backend_utils._RESOLVED_KV_CACHE_LAYOUT = KVCacheLayout.LHBNC
+    try:
+        config = kv_cache_utils.get_kv_cache_config_from_groups(
+            VllmConfig(model_config=ModelConfig(max_model_len=16)),
+            [
+                KVCacheGroupSpec(["full.0", "full.1"], full),
+                KVCacheGroupSpec(["swa.0", "swa.1"], swa),
+            ],
+            available_memory=4 * page * 8,
+        )
+    finally:
+        attn_backend_utils._RESOLVED_KV_CACHE_LAYOUT = prev
+
+    num_blocks = config.num_blocks
+    head_group = full.block_size * full.state_content_size_bytes
+    for tensor in config.kv_cache_tensors:
+        # One head group per block, head groups between the layers and blocks.
+        assert tensor.block_stride == head_group
+        assert tensor.layer_stride == full.num_heads * num_blocks * head_group
+        # The last block of the last layer's last head group must stay
+        # within the allocation (the old page-based stride overran it).
+        end = (
+            tensor.offset
+            + tensor.layer_stride * (len(tensor.layers) - 1)
+            + (full.num_heads - 1) * num_blocks * head_group
+            + tensor.block_stride * (num_blocks - 1)
+            + head_group
+        )
+        assert end <= tensor.size
+
+
 def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
     specs = {
         "target.0.attn": new_mla_spec(),

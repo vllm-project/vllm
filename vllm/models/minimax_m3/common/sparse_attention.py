@@ -114,7 +114,7 @@ class MiniMaxM3SparseBackend(AttentionBackend):
 
     @classmethod
     def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
-        # AITER sparse PA unbinds K and V as separate contiguous planes, which
+        # AITER sparse PA unbinds K and V as separate contiguous regions, which
         # requires the head dimension to sit outside the block dimension.
         return "LHBNC" if _minimax_m3_aiter_sparse_pa_requested() else None
 

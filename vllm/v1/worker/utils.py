@@ -67,7 +67,7 @@ def _zero_kv_blocks_kernel(
 
     Each segment is a contiguous region of one block's data.  Layer-compact
     layouts have one segment per layer buffer; dimensions physically outside
-    the block dim (head-group planes under LHBNC) and virtual block splits
+    the block dim (separate head groups under LHBNC) and virtual block splits
     each get their own segment.
 
     Segments may have different block strides and page sizes (e.g. packed
@@ -123,7 +123,7 @@ class KVBlockZeroer:
         GPU, so segments in different CUDA allocations work correctly.
 
         Per-layer views are standardized ``[B, H, N, C]`` with blocks at dim
-        0; dimensions physically outside B (head-group planes under LHBNC)
+        0; dimensions physically outside B (separate head groups under LHBNC)
         each get their own segment. A segment's page spans everything inside
         its block, so under BHLNC (layers interleaved inside the block) it
         also covers co-located slots of the block's other layers — safe,
@@ -647,6 +647,7 @@ def copy_kv_cache_blocks_inplace(
     indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
     indices: torch.Tensor | None = None
     seen: set[tuple[torch.device, int]] = set()
+    copied_storages: set[tuple[torch.device, int]] = set()
     for cache in kv_caches:
         # Layers sharing KV (cross-layer sharing) alias the same view; copy it
         # once. data_ptr distinguishes per-layer views of a shared allocation.
@@ -665,9 +666,22 @@ def copy_kv_cache_blocks_inplace(
             f"{cache.shape[0]} kernel blocks not divisible by "
             f"{num_blocks} scheduler blocks"
         )
-        # Fold virtual block splitting into the shape so that dim 0 counts
-        # scheduler blocks; unflatten of dim 0 is always a view.
-        blocks = cache.unflatten(0, (num_blocks, kernel_blocks_per_block))
+        storage = cache.untyped_storage()
+        storage_key = (cache.device, storage.data_ptr())
+        scheduler_block_stride = (
+            cache.stride(0) * cache.element_size() * kernel_blocks_per_block
+        )
+        if storage.nbytes() == num_blocks * scheduler_block_stride:
+            if storage_key in copied_storages:
+                continue
+            copied_storages.add(storage_key)
+            blocks = torch.empty(0, dtype=torch.uint8, device=cache.device)
+            blocks.set_(storage)
+            blocks = blocks.view(num_blocks, -1)
+        else:
+            # Fold virtual block splitting into the shape so that dim 0 counts
+            # scheduler blocks; unflatten of dim 0 is always a view.
+            blocks = cache.unflatten(0, (num_blocks, kernel_blocks_per_block))
         blocks[dst] = blocks[src]
 
 

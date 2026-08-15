@@ -1931,7 +1931,7 @@ def test_register_kv_caches(
         }
 
         if KVCacheLayout[layout].heads_outside_blocks:
-            # Each head group is its own plane, so one region per (layer, head).
+            # Each head group is separate, so one region per (layer, head).
             expected_base_addrs = [
                 cache[:, head_idx].data_ptr()
                 for cache in (tensor0, tensor1, tensor2)
