@@ -180,9 +180,6 @@ class ModelState(ABC):
         mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
             scheduled_encoder_inputs
         )
-        mm_hashes, mm_kwargs = self.encoder_cache.cache_passthrough_embeds(
-            mm_hashes, mm_kwargs, self.device
-        )
         if mm_kwargs:
             with self.encoder_runner.timed_encoder_operation(
                 scheduled_encoder_inputs.keys()

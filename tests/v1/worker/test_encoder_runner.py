@@ -249,48 +249,66 @@ def test_execute_mm_encoder_is_a_noop_without_scheduled_items():
     state.encoder_runner.execute_mm_encoder.assert_not_called()
 
 
-def test_execute_mm_encoder_passes_prompt_embeds_through():
+def _pe_feature(identifier: str, embeds: torch.Tensor, offset: int = 0):
+    return MultiModalFeatureSpec(
+        data=_embeds_item(embeds),
+        modality="prompt_embeds",
+        identifier=identifier,
+        mm_position=PlaceholderRange(offset=offset, length=embeds.shape[0]),
+    )
+
+
+def test_prepare_mm_inputs_passes_prompt_embeds_through():
     """`prompt_embeds` is already in embedding space, so no encoder may run.
 
     The renderer delivers prompt_embeds mixed with real media as an ordinary MM
-    modality. The tensor must land in the encoder cache directly -- the vision
-    encoder cannot consume it, and a missing cache entry makes the subsequent
-    gather raise "Encoder cache miss".
+    modality. prepare_mm_inputs must cache the tensor directly and keep it out
+    of the encoder batch -- the vision encoder cannot consume it, and a missing
+    cache entry makes the subsequent gather raise "Encoder cache miss".
     """
-    cache = EncoderCache()
-    state = _model_state(cache)
     prompt_embeds = torch.arange(2 * HIDDEN, dtype=torch.float32).view(2, HIDDEN)
-    image_embeds = torch.ones(2, HIDDEN)
-    state.encoder_runner.prepare_mm_inputs.return_value = (
-        ["hash_pe", "hash_img"],
-        [("prompt_embeds", _embeds_item(prompt_embeds)), ("image", MagicMock())],
+    image_feature = MultiModalFeatureSpec(
+        data=MagicMock(),
+        modality="image",
+        identifier="hash_img",
+        mm_position=PlaceholderRange(offset=2, length=2),
     )
-    state.encoder_runner.execute_mm_encoder.return_value = [image_embeds]
+    runner = _make_runner(
+        [_pe_feature("hash_pe", prompt_embeds), image_feature], cached=[]
+    )
 
-    ModelState.execute_mm_encoder(state, {"req0": [0, 1]})
+    mm_hashes, mm_kwargs = runner.prepare_mm_inputs({"req0": [0, 1]})
 
-    # The encoder saw only the image, but both items are cached and correctly
-    # paired with their hashes.
-    (encoded,) = state.encoder_runner.execute_mm_encoder.call_args.args
-    assert [modality for modality, _ in encoded] == ["image"]
-    assert torch.equal(cache.encoder_outputs["hash_pe"], prompt_embeds)
-    assert torch.equal(cache.encoder_outputs["hash_img"], image_embeds)
+    # Only the image remains for the encoder; the embeds are already cached.
+    assert mm_hashes == ["hash_img"]
+    assert [modality for modality, _ in mm_kwargs] == ["image"]
+    assert torch.equal(runner.encoder_cache.encoder_outputs["hash_pe"], prompt_embeds)
+
+
+def test_prepare_mm_inputs_skips_cached_prompt_embeds():
+    """A prompt_embeds item already in the cache must not be re-uploaded."""
+    prompt_embeds = torch.ones(3, HIDDEN)
+    feature = _pe_feature("hash_pe", prompt_embeds)
+    runner = _make_runner([feature], cached=[feature])
+    sentinel = runner.encoder_cache.encoder_outputs["hash_pe"]
+
+    mm_hashes, mm_kwargs = runner.prepare_mm_inputs({"req0": [0]})
+
+    assert mm_hashes == [] and mm_kwargs == []
+    assert runner.encoder_cache.encoder_outputs["hash_pe"] is sentinel
 
 
 def test_execute_mm_encoder_skips_encoder_for_prompt_embeds_only():
     """A batch of nothing but prompt_embeds must not invoke the encoder."""
-    cache = EncoderCache()
-    state = _model_state(cache)
     prompt_embeds = torch.ones(3, HIDDEN)
-    state.encoder_runner.prepare_mm_inputs.return_value = (
-        ["hash_pe"],
-        [("prompt_embeds", _embeds_item(prompt_embeds))],
-    )
+    runner = _make_runner([_pe_feature("hash_pe", prompt_embeds)], cached=[])
+    state = _model_state(runner.encoder_cache)
+    state.encoder_runner.prepare_mm_inputs.side_effect = runner.prepare_mm_inputs
 
     ModelState.execute_mm_encoder(state, {"req0": [0]})
 
     state.encoder_runner.execute_mm_encoder.assert_not_called()
-    assert torch.equal(cache.encoder_outputs["hash_pe"], prompt_embeds)
+    assert torch.equal(runner.encoder_cache.encoder_outputs["hash_pe"], prompt_embeds)
 
 
 def test_encoder_timing_stats_registry():
