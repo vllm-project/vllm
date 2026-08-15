@@ -14,7 +14,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable, Generator, Iterable
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import IO, Any
 
@@ -991,6 +991,55 @@ def multi_thread_safetensors_weights_iterator(
             del future
             for key in list(state_dict):
                 yield key, state_dict.pop(key)
+
+
+def st_prefetch_safetensors_weights_iterator(
+    hf_weights_files: list[str],
+    use_tqdm_on_load: bool,
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Stream whole shards to the current GPU via safetensors' CUDA prefetch.
+
+    All shards are opened upfront so reads pipeline across files, bounded by
+    safetensors' in-flight budget; tensors are yielded in completion order and
+    freed by the weight loaders as they copy their slices out. Ranks start at
+    different files so their cold-cache reads do not collide.
+    """
+    device_str = f"cuda:{current_platform.current_device()}"
+    sorted_files = sorted(hf_weights_files, key=_natural_sort_key)
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        world_size = torch.distributed.get_world_size()
+        if world_size > 1 and len(sorted_files) > 1:
+            start = torch.distributed.get_rank() * len(sorted_files) // world_size
+            sorted_files = sorted_files[start:] + sorted_files[:start]
+    with ExitStack() as stack:
+        try:
+            handles = [
+                stack.enter_context(
+                    safe_open(
+                        st_file,
+                        framework="pt",
+                        device=device_str,
+                        backend="pread",
+                        prefetch=True,
+                    )
+                )
+                for st_file in sorted_files
+            ]
+        except TypeError as err:
+            raise RuntimeError(
+                'st_load_mode="prefetch" needs a safetensors build with the CUDA '
+                "prefetch API, which is not released yet. Install it with: "
+                "pip install 'safetensors @ git+https://github.com/huggingface/"
+                "safetensors@poc/prefetch_cuda_fast_path#subdirectory="
+                "bindings/python' (builds from source, needs a Rust toolchain)."
+            ) from err
+        for f in tqdm(
+            handles,
+            desc="Loading safetensors (CUDA prefetch)",
+            disable=not enable_tqdm(use_tqdm_on_load),
+            bar_format=_BAR_FORMAT,
+        ):
+            yield from f.tensor_stream()
 
 
 def runai_safetensors_weights_iterator(
