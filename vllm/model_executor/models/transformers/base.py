@@ -279,14 +279,8 @@ class Base(
         )(cls)
 
     def _decorate_for_torch_compile(self):
-        """
-        Decorate the model's decoder class to indicate to vLLM that it supports torch
-        compile if `can_enable_torch_compile` is True.
-
-        Args:
-            kwargs: The kwargs to create the model, which are needed to get the decoder
-                class.
-        """
+        """Decorate the model's decoder class to indicate to vLLM that it
+        supports torch compile if `can_enable_torch_compile` is True."""
         self._decorate_cls_for_torch_compile(
             cls=self._pre_trained_model_classes.decoder,
             # Applied to a PreTrainedModel so the batch dimension will exist

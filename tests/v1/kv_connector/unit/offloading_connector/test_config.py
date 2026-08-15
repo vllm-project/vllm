@@ -326,13 +326,17 @@ def test_dcp_scales_attention_but_not_mamba_group_blocks():
     ] == [1, 3]
 
 
-def test_preserves_data_parallel_index():
+def test_preserves_data_parallel_config():
     config = _make_vllm_config()
     config.parallel_config.data_parallel_index = 2
+    config.parallel_config.data_parallel_size = 4
+    config.parallel_config.data_parallel_rank_local = 1
 
     offloading_config = build_offloading_config(config, _make_kv_cache_config())
 
     assert offloading_config.parallel.data_parallel_index == 2
+    assert offloading_config.parallel.data_parallel_size == 4
+    assert offloading_config.parallel.data_parallel_rank_local == 1
 
 
 def test_resolves_heterogeneous_hybrid_block_sizes():
@@ -659,6 +663,34 @@ def test_canonical_layout_certifies_v2_model_runner():
     assert build_offloading_config(
         config, kv_cache_config
     ).parallel.is_parallelism_agnostic
+
+
+def test_prefer_cross_layer_blocks_yields_to_canonical_layout():
+    """The connector must not request cross-layer blocks under
+    canonical_layout: cross-layer slabs have no per-layer refs to certify."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+        OffloadingConnector,
+    )
+
+    kv_cache_config = _make_kv_cache_config()
+    connector_module = "vllm.distributed.kv_transfer.kv_connector.v1"
+
+    def make_connector(extra_config: dict[str, Any] | None) -> OffloadingConnector:
+        with (
+            patch(f"{connector_module}.offloading_connector.OffloadingSpecFactory"),
+            patch(
+                f"{connector_module}.offloading_connector.OffloadingConnectorScheduler"
+            ),
+        ):
+            return OffloadingConnector(
+                _make_vllm_config(extra_config=extra_config),
+                KVConnectorRole.SCHEDULER,
+                kv_cache_config,
+            )
+
+    assert make_connector(None).prefer_cross_layer_blocks
+    assert not make_connector({"canonical_layout": True}).prefer_cross_layer_blocks
 
 
 def test_parallelism_agnostic_disabled_on_v2_model_runner():
