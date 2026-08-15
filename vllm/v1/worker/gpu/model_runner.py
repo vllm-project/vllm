@@ -154,6 +154,7 @@ from vllm.v1.worker.workspace import (
     PersistentWorkspaceLease,
     current_workspace_manager,
     lock_workspace,
+    use_workspace_lane,
     use_workspace_ubatch_id,
 )
 
@@ -171,6 +172,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
+        self._draft_workspace_lane = int(
+            self.speculative_config is not None and self.speculative_config.use_dspark()
+        )
         self.observability_config = vllm_config.observability_config
 
         self.device = device
@@ -371,15 +375,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 assert self.speculative_config is not None
                 set_eagle3_aux_hidden_state_layers(self.model, self.speculative_config)
             if isinstance(self.speculator, DraftModelSpeculator):
-                self.speculator.load_model(self.model)
-                eplb_models_added = self.eplb.maybe_register_speculator(
-                    self.speculator, self.speculative_config, load_dummy_weights
-                )
+                with use_workspace_lane(self._draft_workspace_lane):
+                    self.speculator.load_model(self.model)
+                    eplb_models_added = self.eplb.maybe_register_speculator(
+                        self.speculator, self.speculative_config, load_dummy_weights
+                    )
         time_after_load = time.perf_counter()
 
         self.model_memory_usage = m.consumed_memory
         logger.info(
-            "Model loading took %s GiB and %.6f seconds",
+            "Model loading took %s GiB memory and %.6f seconds",
             format_gib(m.consumed_memory),
             time_after_load - time_before_load,
         )
@@ -742,27 +747,28 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
-            self.speculator.propose(
-                input_batch=input_batch,
-                attn_metadata=attn_metadata,
-                slot_mappings=slot_mappings_by_layer,
-                last_hidden_states=spec_hidden_states,
-                aux_hidden_states=aux_hidden_states,
-                num_sampled=torch.ones(
-                    input_batch.num_reqs, dtype=torch.int32, device=self.device
-                ),
-                num_rejected=torch.zeros(
-                    input_batch.num_reqs, dtype=torch.int32, device=self.device
-                ),
-                last_sampled=self.req_states.last_sampled_tokens,
-                next_prefill_tokens=self.req_states.next_prefill_tokens,
-                temperature=self.sampler.sampling_states.temperature.gpu,
-                seeds=self.sampler.sampling_states.seeds.gpu,
-                dummy_run=True,
-                skip_attn_for_dummy_run=skip_attn,
-                mm_inputs=mm_inputs,
-                is_profile=is_profile,
-            )
+            with use_workspace_lane(self._draft_workspace_lane):
+                self.speculator.propose(
+                    input_batch=input_batch,
+                    attn_metadata=attn_metadata,
+                    slot_mappings=slot_mappings_by_layer,
+                    last_hidden_states=spec_hidden_states,
+                    aux_hidden_states=aux_hidden_states,
+                    num_sampled=torch.ones(
+                        input_batch.num_reqs, dtype=torch.int32, device=self.device
+                    ),
+                    num_rejected=torch.zeros(
+                        input_batch.num_reqs, dtype=torch.int32, device=self.device
+                    ),
+                    last_sampled=self.req_states.last_sampled_tokens,
+                    next_prefill_tokens=self.req_states.next_prefill_tokens,
+                    temperature=self.sampler.sampling_states.temperature.gpu,
+                    seeds=self.sampler.sampling_states.seeds.gpu,
+                    dummy_run=True,
+                    skip_attn_for_dummy_run=skip_attn,
+                    mm_inputs=mm_inputs,
+                    is_profile=is_profile,
+                )
             self.step_timing.drafter_end()
 
         assert hidden_states is not None  # Last PP rank always has hidden_states
@@ -1293,10 +1299,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return 0
 
         assert self.cudagraph_manager is not None
-        if not self.cudagraph_manager.needs_capture():
+        capture_encoder = (
+            self.model_state.supports_mm_inputs
+            and self.model_state.encoder_runner.has_cudagraph()
+        )
+        capture_decoder = self.cudagraph_manager.needs_capture()
+        if not capture_encoder and not capture_decoder:
             logger.warning(
-                "Skipping CUDA graph capture. To turn on CUDA graph capture, "
-                "ensure `cudagraph_mode` was not manually set to `NONE`"
+                "Skipping encoder and decoder CUDA graph capture. To enable "
+                "encoder capture, ensure `cudagraph_mm_encoder` is enabled; "
+                "to enable decoder capture, ensure `cudagraph_mode` is not `NONE`."
             )
             return 0
 
@@ -1310,27 +1322,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_free_gpu_memory = torch.accelerator.get_memory_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
-            self.cudagraph_manager.capture(
-                self.model,
-                self.model_state,
-                self.input_buffers,
-                self.intermediate_tensors,
-                self.block_tables,
-                self.attn_groups,
-                self.kv_cache_config,
-                has_lora=self.lora_config is not None,
-                use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
-                lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
-            )
-            if self.speculator is not None:
-                self.speculator.capture()
-            if self.adaptive_verification is not None:
-                with self.step_timing.collect() as timings:
-                    for batch in self.adaptive_verification.batches_to_profile(
-                        self.cudagraph_manager.captured_token_counts()
-                    ):
-                        self._dummy_run(**batch)
-                self.adaptive_verification.set_initial_cost_curves(timings)
+            if capture_encoder:
+                self.model_state.encoder_runner.capture()
+
+            if capture_decoder:
+                self.cudagraph_manager.capture(
+                    self.model,
+                    self.model_state,
+                    self.input_buffers,
+                    self.intermediate_tensors,
+                    self.block_tables,
+                    self.attn_groups,
+                    self.kv_cache_config,
+                    has_lora=self.lora_config is not None,
+                    use_aux_hidden_state_outputs=self.use_aux_hidden_state_outputs,
+                    lora_capture_hook=create_lora_capture_hook(self.lora_config, self),
+                )
+                if self.speculator is not None:
+                    with use_workspace_lane(self._draft_workspace_lane):
+                        self.speculator.capture()
+                if self.adaptive_verification is not None:
+                    with self.step_timing.collect() as timings:
+                        for batch in self.adaptive_verification.batches_to_profile(
+                            self.cudagraph_manager.captured_token_counts()
+                        ):
+                            self._dummy_run(**batch)
+                    self.adaptive_verification.set_initial_cost_curves(timings)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
@@ -2243,20 +2260,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
-            draft_tokens = self.speculator.propose(
-                input_batch,
-                attn_metadata,
-                slot_mappings_by_layer,
-                spec_hidden_states,
-                aux_hidden_states,
-                num_sampled,
-                num_rejected,
-                self.req_states.last_sampled_tokens,
-                self.req_states.next_prefill_tokens,
-                self.sampler.sampling_states.temperature.gpu,
-                self.sampler.sampling_states.seeds.gpu,
-                mm_inputs=mm_inputs,
-            )
+            with use_workspace_lane(self._draft_workspace_lane):
+                draft_tokens = self.speculator.propose(
+                    input_batch,
+                    attn_metadata,
+                    slot_mappings_by_layer,
+                    spec_hidden_states,
+                    aux_hidden_states,
+                    num_sampled,
+                    num_rejected,
+                    self.req_states.last_sampled_tokens,
+                    self.req_states.next_prefill_tokens,
+                    self.sampler.sampling_states.temperature.gpu,
+                    self.sampler.sampling_states.seeds.gpu,
+                    mm_inputs=mm_inputs,
+                )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.adaptive_verification is not None:
                 self.adaptive_verification.record_confidences(
@@ -2333,12 +2351,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
+        self.cudagraph_manager = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
         if hasattr(self, "attn_groups"):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):
             del self.kv_cache_config
+        if hasattr(self, "model_state") and self.model_state.supports_mm_inputs:
+            self.model_state.encoder_runner.clear()
         free_before_shutdown(self.vllm_config)
         if hasattr(self, "model_state"):
             del self.model_state

@@ -3,7 +3,7 @@
 """Attention layer with FlashInfer."""
 
 import weakref
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import partial
 from typing import Any, ClassVar, NamedTuple
@@ -47,10 +47,12 @@ from vllm.utils.flashinfer import (
     supports_trtllm_attention,
     use_trtllm_attention,
 )
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
     PIN_MEMORY,
     canonicalize_singleton_dim_strides,
+    get_dtype_size,
     is_quantized_kv_cache,
     is_strictly_contiguous,
     nvfp4_kv_cache_full_dim,
@@ -502,6 +504,21 @@ class BatchDCPPrefillWrapper:
 
 
 class FlashInferBackend(AttentionBackend):
+    @classmethod
+    def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
+        """NVFP4 stores K and V as separate per-head slots of packed fp4 data
+        plus fp8 block scales."""
+        if spec.state_content_bytes is not None or not spec.kv_quant_mode.is_nvfp4:
+            return spec
+        hs_k = nvfp4_kv_cache_full_dim(spec.head_size)
+        hs_v = nvfp4_kv_cache_full_dim(spec.head_size_v)
+        assert hs_k == hs_v, "nvfp4 with asymmetric K/V head sizes not yet supported"
+        return replace(
+            spec,
+            num_head_slots=2 * spec.num_kv_heads,
+            state_content_bytes=hs_k * get_dtype_size(spec.dtype),
+        )
+
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -2204,13 +2221,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # seq_lens_cpu is not needed since TRTLLM paths use GPU tensors
         # (block_tables, seq_lens) directly.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not all_uses_trtllm
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
-        seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
-        num_blocks_np = (
-            (seq_lens_np + (page_size - 1)) // page_size
-            if seq_lens_np is not None
-            else None
-        )
+        if needs_seq_lens_cpu:
+            with gpu_sync_allowed():
+                seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+            seq_lens_np = seq_lens_cpu.numpy()
+            num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
+        else:
+            seq_lens_cpu = None
+            seq_lens_np = None
+            num_blocks_np = None
 
         # Adjust seq_lens_cpu for DCP
         if self.use_dcp:
