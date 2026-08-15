@@ -146,6 +146,7 @@ def parse_non_streaming(
         full_text,
         request,
         enable_auto_tools=True,
+        model_output_token_ids=[token_id for token_id, _ in sample.tokens],
     )
     tc_list: list[dict] = []
     if tool_calls:
