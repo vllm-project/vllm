@@ -25,7 +25,7 @@ See https://docs.cohere.com/reference/chat for the upstream spec.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from cohere import types as _sdk
 from cohere.types import (
@@ -46,6 +46,7 @@ from cohere.types import (
 )
 from pydantic import BaseModel, Field, field_validator
 
+import vllm.envs as envs
 from vllm.exceptions import VLLMValidationError
 
 # Re-export the SDK wire-format types alongside our local extensions so
@@ -152,7 +153,9 @@ class CohereChatV2Request(BaseModel):
     response_format: ResponseFormatV2 | None = None
     safety_mode: ChatRequestSafetyMode | None = None
     max_tokens: int | None = None
-    stop_sequences: list[str] | None = None
+    stop_sequences: (
+        Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
+    ) = None
 
     # Sampling
     temperature: float | None = None
