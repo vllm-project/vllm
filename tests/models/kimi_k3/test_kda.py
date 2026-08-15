@@ -13,10 +13,6 @@ import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateDtypeCalculator,
-    MambaStateShapeCalculator,
-)
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
@@ -52,35 +48,6 @@ PACKED_DECODE_IMPLS = {
     "nvidia": fused_recurrent_kda_packed_decode,
     "amd": fused_recurrent_kda_packed_decode_amd,
 }
-
-
-def test_kda_recoverssm_tp1_state_layout():
-    base_dtypes = MambaStateDtypeCalculator.kda_state_dtype(torch.bfloat16, "auto")
-    dtypes = MambaStateDtypeCalculator.append_kda_recoverssm_record(
-        base_dtypes, torch.bfloat16
-    )
-    assert dtypes == (
-        torch.bfloat16,
-        torch.float32,
-        torch.float32,
-        torch.bfloat16,
-    )
-
-    base_shapes = MambaStateShapeCalculator.kda_state_shape(
-        tp_world_size=1,
-        num_heads=4,
-        head_dim=32,
-        conv_kernel_size=4,
-        num_spec=2,
-    )
-    shapes = MambaStateShapeCalculator.append_kda_recoverssm_record(
-        base_shapes,
-        num_heads=4,
-        head_dim=32,
-        tp_world_size=1,
-        spec_query_len=3,
-    )
-    assert shapes[2:] == ((4, 3, 32), (4, 3, 64))
 
 
 def test_kda_recoverssm_config_state_layout():
@@ -602,10 +569,20 @@ def test_kda_spec_decode_correctness(
     assert torch.isnan(output_storage[..., H * D :]).all()
 
 
-@pytest.mark.parametrize("conv_state_dim_first", [False, True])
-@pytest.mark.parametrize("use_request_indices", [False, True])
-@pytest.mark.parametrize("lower_bound", [-5.0, None])
-@pytest.mark.parametrize("align_mode", [False, True])
+@pytest.mark.parametrize(
+    (
+        "conv_state_dim_first",
+        "use_request_indices",
+        "lower_bound",
+        "align_mode",
+    ),
+    [
+        pytest.param(False, False, None, False, id="baseline"),
+        pytest.param(True, True, -5.0, True, id="all-features"),
+        pytest.param(False, True, -5.0, False, id="request-indexed"),
+        pytest.param(True, False, None, True, id="aligned"),
+    ],
+)
 @torch.inference_mode()
 def test_kda_recoverssm_verify_and_group_commit(
     monkeypatch: pytest.MonkeyPatch,

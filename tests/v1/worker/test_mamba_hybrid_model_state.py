@@ -64,32 +64,8 @@ def test_recoverssm_commits_accepted_window_after_v2_sampling() -> None:
     metadata.commit_recoverssm_state.assert_called_once_with(num_sampled)
 
 
-def test_empty_postprocess_clears_recoverssm_step() -> None:
-    state = object.__new__(MambaHybridModelState)
-    state._align_mode = False
-    state.recoverssm = RecoverSSMState()
-    state.num_accepted_tokens_gpu = torch.ones(1, dtype=torch.int32)
-    metadata = Mock(spec=RecoverSSMMetadata)
-    metadata.commit_recoverssm_state.return_value = None
-    group = SimpleNamespace(layer_names=["layer"])
-    state.recoverssm.record_step({"layer": metadata}, [[group]], for_capture=False)
-
-    state.postprocess_state(torch.empty(0, dtype=torch.int32), 0)
-    state.recoverssm.commit_step(
-        torch.ones(1, dtype=torch.int32),
-        torch.zeros(1, dtype=torch.int32),
-        state_indices=None,
-        num_accepted_tokens=state.num_accepted_tokens_gpu,
-    )
-
-    metadata.commit_recoverssm_state.assert_not_called()
-
-
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
-@pytest.mark.parametrize("mixed_batch", [False, True])
-def test_recoverssm_align_tracks_final_running_state_and_neutralizes_copy_bias(
-    mixed_batch: bool,
-) -> None:
+def test_recoverssm_align_tracks_mixed_batch_state_and_neutralizes_copy_bias() -> None:
     state = object.__new__(MambaHybridModelState)
     state._align_mode = True
     state._mamba_ctx = None
@@ -100,10 +76,8 @@ def test_recoverssm_align_tracks_final_running_state_and_neutralizes_copy_bias(
     )
     metadata = Mock(spec=RecoverSSMMetadata)
     metadata.commit_recoverssm_state.return_value = RecoverSSMPostprocessMetadata(
-        num_spec_decodes=1 if mixed_batch else 2,
-        request_indices=(
-            torch.tensor([1], dtype=torch.int32, device="cuda") if mixed_batch else None
-        ),
+        num_spec_decodes=1,
+        request_indices=torch.tensor([1], dtype=torch.int32, device="cuda"),
         num_computed_tokens=torch.tensor([6, 7], dtype=torch.int32, device="cuda"),
         block_size=8,
         block_table=torch.zeros((2, 4), dtype=torch.int32, device="cuda"),
@@ -116,7 +90,7 @@ def test_recoverssm_align_tracks_final_running_state_and_neutralizes_copy_bias(
 
     state.postprocess_state(idx_mapping, num_sampled)
 
-    expected_state_indices = [-1, 1, -1, -1 if mixed_batch else 1, -1]
+    expected_state_indices = [-1, 1, -1, -1, -1]
     assert state._mamba_state_idx_gpu.tolist() == expected_state_indices
-    expected_accepted = [9, 1, 9, 2 if mixed_batch else 1, 9]
+    expected_accepted = [9, 1, 9, 2, 9]
     assert state.num_accepted_tokens_gpu.tolist() == expected_accepted

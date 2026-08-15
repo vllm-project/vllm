@@ -6,6 +6,9 @@ The request classification and cudagraph staging intentionally mirror
 ``GDNAttentionMetadataBuilder``. Kimi-K3 builds the metadata required by its
 prefill KDA kernel internally, so this builder omits the shared FLA chunk
 metadata construction.
+
+For Kimi-K3 speculative decoding, ``--use-replayssm`` selects the simplified
+RecoverSSM path implemented here instead of the Mamba2 ReplaySSM kernel.
 """
 
 from dataclasses import dataclass, field
@@ -366,6 +369,13 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             num_spec_decodes = 0
         else:
             spec_sequence_masks_cpu = num_decode_draft_tokens_cpu >= 0
+            if self.use_recoverssm:
+                assert m.is_prefilling is not None
+                assert m.is_prefilling.device.type == "cpu"
+                active_decode_mask_cpu = (~m.is_prefilling) & (
+                    query_start_loc_cpu.diff() > 0
+                )
+                spec_sequence_masks_cpu |= active_decode_mask_cpu
             # Native KDA can use its regular decode path when no draft token
             # was scheduled. RecoverSSM must preserve its extended conv window.
             if (

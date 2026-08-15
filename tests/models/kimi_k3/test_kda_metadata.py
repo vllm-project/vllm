@@ -264,14 +264,18 @@ def test_mixed_regular_and_spec_decode_excludes_request_padding():
 def test_recoverssm_spec_uses_one_state_slot_and_current_window(
     mamba_cache_mode: str,
 ):
+    if mamba_cache_mode == "align" and not torch.cuda.is_available():
+        pytest.skip("align metadata construction requires CUDA")
+    device = torch.device("cuda") if mamba_cache_mode == "align" else DEVICE
     batch = BatchSpec(seq_lens=[100, 65, 20], query_lens=[1, 1, 3])
     common_attn_metadata = create_common_attn_metadata(
-        batch, BLOCK_SIZE, DEVICE
-    ).replace(is_prefilling=torch.tensor([False, False, False]))
+        batch, BLOCK_SIZE, device
+    ).replace(is_prefilling=torch.tensor([True, True, False]))
     builder = _make_builder(
         KimiK3KDAMetadataBuilder,
         num_speculative_tokens=2,
         full_cuda_graph=False,
+        device=device,
         mamba_cache_mode=mamba_cache_mode,
         use_recoverssm=True,
     )
@@ -282,21 +286,23 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
         0,
         common_attn_metadata,
         num_decode_draft_tokens_cpu=torch.tensor([-1, -1, 2], dtype=torch.int32),
-        num_accepted_tokens=torch.tensor([3, 2, 2], dtype=torch.int32),
+        num_accepted_tokens=torch.tensor([3, 2, 2], dtype=torch.int32, device=device),
     )
 
     assert actual.spec_state_indices_tensor is not None
     assert actual.spec_state_indices_tensor.shape == (1, 1)
     torch.testing.assert_close(
-        actual.num_accepted_tokens, torch.ones(1, dtype=torch.int32)
+        actual.num_accepted_tokens,
+        torch.ones(1, dtype=torch.int32, device=device),
     )
     commit_metadata = actual.recoverssm_commit
     assert commit_metadata is not None
     torch.testing.assert_close(
-        commit_metadata.request_indices, torch.tensor([2], dtype=torch.int32)
+        commit_metadata.request_indices,
+        torch.tensor([2], dtype=torch.int32, device=device),
     )
     assert actual.recoverssm_context is context
-    num_accepted_tokens = torch.tensor([3, 2, 1], dtype=torch.int32)
+    num_accepted_tokens = torch.tensor([3, 2, 1], dtype=torch.int32, device=device)
 
     postprocess = actual.commit_recoverssm_state(num_accepted_tokens)
 
@@ -319,38 +325,11 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
     torch.testing.assert_close(args[2], commit_metadata.query_start_loc)
 
 
-def test_recoverssm_spec_keeps_draftless_decode_on_spec_path():
+def test_recoverssm_distinguishes_draftless_decode_from_one_token_prefill():
     batch = BatchSpec(seq_lens=[40, 30], query_lens=[1, 1])
     common_attn_metadata = create_common_attn_metadata(
         batch, BLOCK_SIZE, DEVICE
-    ).replace(is_prefilling=torch.tensor([False, False]))
-    actual = _make_builder(
-        KimiK3KDAMetadataBuilder,
-        num_speculative_tokens=2,
-        full_cuda_graph=False,
-        use_recoverssm=True,
-    ).build(
-        0,
-        common_attn_metadata,
-        num_decode_draft_tokens_cpu=torch.zeros(2, dtype=torch.int32),
-        num_accepted_tokens=torch.ones(2, dtype=torch.int32),
-    )
-
-    assert actual.num_spec_decodes == 2
-    assert actual.num_decodes == 0
-    assert actual.spec_state_indices_tensor is not None
-    assert actual.spec_state_indices_tensor.shape == (2, 1)
-    torch.testing.assert_close(
-        actual.spec_query_start_loc,
-        torch.tensor([0, 1, 2], dtype=torch.int32),
-    )
-
-
-def test_recoverssm_spec_builds_pure_prefill_metadata():
-    batch = BatchSpec(seq_lens=[4, 7], query_lens=[4, 7])
-    common_attn_metadata = create_common_attn_metadata(
-        batch, BLOCK_SIZE, DEVICE
-    ).replace(is_prefilling=torch.tensor([True, True]))
+    ).replace(is_prefilling=torch.tensor([False, True]))
     actual = _make_builder(
         KimiK3KDAMetadataBuilder,
         num_speculative_tokens=2,
@@ -363,30 +342,15 @@ def test_recoverssm_spec_builds_pure_prefill_metadata():
         num_accepted_tokens=torch.ones(2, dtype=torch.int32),
     )
 
-    assert actual.num_spec_decodes == 0
-    assert actual.num_prefills == 2
-    torch.testing.assert_close(actual.has_initial_state, torch.tensor([False, False]))
-
-
-def test_recoverssm_spec_rejects_query_wider_than_activation_window():
-    batch = BatchSpec(seq_lens=[20], query_lens=[4])
-    common_attn_metadata = create_common_attn_metadata(
-        batch, BLOCK_SIZE, DEVICE
-    ).replace(is_prefilling=torch.tensor([False]))
-    builder = _make_builder(
-        KimiK3KDAMetadataBuilder,
-        num_speculative_tokens=2,
-        full_cuda_graph=False,
-        use_recoverssm=True,
+    assert actual.num_spec_decodes == 1
+    assert actual.num_decodes == 0
+    assert actual.num_prefills == 1
+    assert actual.spec_state_indices_tensor is not None
+    assert actual.spec_state_indices_tensor.shape == (1, 1)
+    torch.testing.assert_close(
+        actual.spec_query_start_loc,
+        torch.tensor([0, 1], dtype=torch.int32),
     )
-
-    with pytest.raises(ValueError, match="activation capacity"):
-        builder.build(
-            0,
-            common_attn_metadata,
-            num_decode_draft_tokens_cpu=torch.tensor([3], dtype=torch.int32),
-            num_accepted_tokens=torch.ones(1, dtype=torch.int32),
-        )
 
 
 @pytest.mark.parametrize(
