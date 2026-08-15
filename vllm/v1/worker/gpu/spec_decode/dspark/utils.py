@@ -21,12 +21,18 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
     from vllm.model_executor.models.utils import get_draft_quant_config
 
+    # None re-runs backend auto-selection for the draft, which can pick a
+    # different attention class than the target; fall back to the target's.
+    draft_attention_backend = (
+        speculative_config.attention_backend or vllm_config.attention_config.backend
+    )
+
     draft_vllm_config = replace(
         vllm_config,
         attention_config=replace(
             vllm_config.attention_config,
             use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
-            backend=speculative_config.attention_backend,
+            backend=draft_attention_backend,
         ),
         cache_config=(
             replace(
