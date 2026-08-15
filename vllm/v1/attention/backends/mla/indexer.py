@@ -586,8 +586,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             else parallel_config.cp_kv_cache_interleave_size
         )
         if self.dcp_world_size > 1:
-            from vllm.distributed import get_dcp_group
-
             self.dcp_rank = get_dcp_group().rank_in_group
         else:
             self.dcp_rank = 0
