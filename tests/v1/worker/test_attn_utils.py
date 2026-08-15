@@ -189,6 +189,10 @@ def test_reshape_flashinfer_nvfp4_mixed_kv_cache_passes_head_size_v():
         head_size_v=64,
         dtype=torch.uint8,
         kv_quant_mode=KVQuantMode.NVFP4,
+        # FlashInferBackend.customize_spec packs K and V into a single head
+        # slot when the head sizes differ.
+        num_head_slots=1,
+        state_content_bytes=(nvfp4_kv_cache_full_dim(32) + nvfp4_kv_cache_full_dim(64)),
     )
 
     raw_tensors = {
