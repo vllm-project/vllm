@@ -506,6 +506,9 @@ def test_moriio_wrapper_waits_scoped_statuses_without_global_drain():
     wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
     wrapper.lock = threading.Lock()
     wrapper._transfer_timeout = 1
+    # Pin the Python polling path: this asserts on per-status Succeeded() calls,
+    # which the batched mori wait does not make.
+    wrapper._wait_all_supported = False
     global_status = FakeStatus()
     scoped_status = FakeStatus()
     wrapper.transfer_status = [global_status]
