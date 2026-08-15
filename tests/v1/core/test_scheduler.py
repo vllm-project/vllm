@@ -1280,6 +1280,30 @@ def test_reset_connector_cache_no_connector_is_no_op_success():
     assert scheduler.reset_prefix_cache(reset_connector=True) is True
 
 
+def test_draft_slots_budgeted_per_scheduled_request(tmp_path, monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    (tmp_path / "config.json").write_text(
+        '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
+    )
+    scheduler = create_scheduler(
+        model=str(tmp_path),
+        max_num_seqs=16,
+        max_num_batched_tokens=20,
+        num_speculative_tokens=4,
+        parallel_drafting=True,
+        skip_tokenizer_init=True,
+    )
+    speculative_config = scheduler.vllm_config.speculative_config
+    assert speculative_config is not None
+    assert scheduler.max_num_scheduled_tokens == 20
+    assert speculative_config.max_num_new_slots_for_drafting == 3
+
+    for request in create_requests(num_requests=2, num_tokens=10):
+        scheduler.add_request(request)
+
+    assert scheduler.schedule().num_scheduled_tokens == {"0": 10, "1": 4}
+
+
 # Note - these test cases mirror some of those in test_rejection_sampler.py
 @pytest.mark.parametrize(
     "spec_tokens,output_tokens,expected",
@@ -3257,6 +3281,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.vllm_config = Mock()
     scheduler.vllm_config.model_config.enable_return_routed_experts = False
     scheduler.enable_return_routed_experts = False
+    scheduler.return_sampling_mask = False
     scheduler.recompute_kv_load_failures = False
     scheduler.defer_block_free = False
     scheduler.make_stats = Mock(return_value=None)
@@ -3610,6 +3635,90 @@ def test_scheduler_no_ec_connector_by_default():
     """Test scheduler doesn't have EC connector by default."""
     scheduler = create_scheduler()
     assert scheduler.ec_connector is None
+
+
+def test_mamba_align_encoder_cache_cap_makes_progress():
+    """Two individually cacheable images must not deadlock Mamba alignment."""
+    block_size = 768
+    encoder_cache_size = 600
+    scheduler = create_scheduler(
+        max_num_batched_tokens=8192,
+        block_size=block_size,
+        enable_prefix_caching=True,
+    )
+    scheduler.need_mamba_block_aligned_split = True
+    scheduler.max_num_encoder_input_tokens = encoder_cache_size
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=encoder_cache_size)
+
+    first_image_end = 510
+    request = create_requests(
+        num_requests=1,
+        num_tokens=1010,
+        mm_positions=[
+            [
+                PlaceholderRange(offset=0, length=500),
+                PlaceholderRange(offset=first_image_end, length=500),
+            ]
+        ],
+        max_tokens=1,
+        block_size=block_size,
+        req_ids=["req"],
+    )[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == first_image_end
+    assert output.scheduled_encoder_inputs[request.request_id] == [0]
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    output = scheduler.schedule()
+    next_block_boundary = block_size
+    assert output.num_scheduled_tokens[request.request_id] == (
+        next_block_boundary - first_image_end
+    )
+    assert output.scheduled_encoder_inputs[request.request_id] == [1]
+
+
+def test_mamba_align_eagle_schedules_encoder_at_boundary():
+    """EAGLE lookahead at an aligned MM boundary requires encoder cache."""
+    block_size = 512
+    scheduler = create_scheduler(
+        max_num_batched_tokens=700,
+        max_model_len=2048,
+        block_size=block_size,
+        enable_prefix_caching=True,
+    )
+    scheduler.need_mamba_block_aligned_split = True
+    scheduler.use_eagle = True
+    scheduler.num_prefill_lookahead = 1
+    scheduler.max_num_encoder_input_tokens = 2048
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=2048)
+
+    request = create_requests(
+        num_requests=1,
+        num_tokens=1200,
+        mm_positions=[[PlaceholderRange(offset=block_size, length=100)]],
+        max_tokens=1,
+        block_size=block_size,
+        req_ids=["req"],
+    )[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+
+    assert output.num_scheduled_tokens[request.request_id] == block_size
+    assert output.scheduled_encoder_inputs[request.request_id] == [0]
 
 
 @pytest.mark.parametrize("use_kv_connector", [False, True])
@@ -5233,8 +5342,9 @@ def test_free_encoder_inputs_defers_for_eagle_lookahead():
     worker-side token-embedding fallback is only a backstop."""
     scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
     # create_scheduler only builds ngram spec configs; force the eagle path that
-    # _free_encoder_inputs keys off (self.use_eagle).
+    # _free_encoder_inputs keys off (its read-ahead deferral).
     scheduler.use_eagle = True
+    scheduler.num_prefill_lookahead = 1
     mm_positions = [[PlaceholderRange(offset=50, length=100)]]
     request = create_requests(
         num_requests=1,

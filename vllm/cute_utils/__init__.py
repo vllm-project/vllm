@@ -40,6 +40,18 @@ def recast_val(x, dtype, *, loc=None, ip=None):
     return dtype(llvm.bitcast(dtype.mlir_type, x.ir_value(loc=loc, ip=ip)))
 
 
+@dsl_user_op
+def to_cta0_smem(ptr: cute.Pointer, *, loc=None, ip=None):
+    return cute.make_ptr(
+        ptr.dtype,
+        ptr.toint(loc=loc, ip=ip) & 0xFEFF_FFFF,
+        cute.AddressSpace.smem,
+        assumed_align=8,
+        loc=loc,
+        ip=ip,
+    )
+
+
 def simple_tma_copy(atom, src, dst, mbar=None, cache_policy=None):
     """A simple helper that wraps group_modes() and tma_partition()
     NOTE: this should be called WITHOUT cute.elect_one()

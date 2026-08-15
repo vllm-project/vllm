@@ -429,11 +429,15 @@ initialize_native_environment() {
   # datasets uses POSIX locks that are unsupported by the shared HF NFS cache.
   # Keep processed datasets job-local while retaining the persistent Hub cache.
   HF_DATASETS_CACHE="${native_root}/cache/huggingface/datasets"
+  # openai-harmony downloads its tiktoken vocab on first use and caches it under
+  # $TMPDIR by default, which is job-local; keep it with the persistent Hub cache.
+  TIKTOKEN_RS_CACHE_DIR="${HF_HOME}/tiktoken-rs-cache"
   : "${HF_HUB_DOWNLOAD_TIMEOUT:=300}"
   : "${HF_HUB_ETAG_TIMEOUT:=60}"
   export TMPDIR VLLM_RPC_BASE_PATH
   export TORCHINDUCTOR_CACHE_DIR TRITON_CACHE_DIR VLLM_CACHE_ROOT XDG_CACHE_HOME
   export HF_HOME HF_DATASETS_CACHE HF_HUB_DOWNLOAD_TIMEOUT HF_HUB_ETAG_TIMEOUT
+  export TIKTOKEN_RS_CACHE_DIR
   export PYTORCH_ROCM_ARCH=""
 
   mkdir -p "${TMPDIR}" \
@@ -442,6 +446,7 @@ initialize_native_environment() {
     "${VLLM_CACHE_ROOT}" \
     "${XDG_CACHE_HOME}" \
     "${HF_HOME}" \
+    "${TIKTOKEN_RS_CACHE_DIR}" \
     "${HF_DATASETS_CACHE}" || return 1
 
   echo "Native compile caches: VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT} TORCHINDUCTOR_CACHE_DIR=${TORCHINDUCTOR_CACHE_DIR}"
@@ -1092,7 +1097,7 @@ container_job_id="${container_job_id//[^A-Za-z0-9_.-]/_}"
 container_job_id_short="${container_job_id:0:8}"
 CONTAINER_TMPDIR="/tmp/vllm-${container_job_id_short}"
 CONTAINER_CACHE_ROOT="/tmp/vllm-buildkite-${container_job_id}/cache"
-CONTAINER_PREFLIGHT="mkdir -p \"\$TMPDIR\" \"\$TORCHINDUCTOR_CACHE_DIR\" \"\$TRITON_CACHE_DIR\" \"\$VLLM_CACHE_ROOT\" \"\$XDG_CACHE_HOME\" && python -c \"import encodings, importlib.metadata as im, importlib.util as iu; [im.version(d) for d in ('transformers', 'torch', 'ray', 'sympy', 'markupsafe', 'vllm')]; missing=[m for m in ('torch.utils.model_zoo', 'transformers.models.nomic_bert', 'ray.dag', 'sympy.physics', 'markupsafe._speedups') if iu.find_spec(m) is None]; assert not missing, missing\""
+CONTAINER_PREFLIGHT="mkdir -p \"\$TMPDIR\" \"\$TIKTOKEN_RS_CACHE_DIR\" \"\$TORCHINDUCTOR_CACHE_DIR\" \"\$TRITON_CACHE_DIR\" \"\$VLLM_CACHE_ROOT\" \"\$XDG_CACHE_HOME\" && python -c \"import encodings, importlib.metadata as im, importlib.util as iu; [im.version(d) for d in ('transformers', 'torch', 'ray', 'sympy', 'markupsafe', 'vllm')]; missing=[m for m in ('torch.utils.model_zoo', 'transformers.models.nomic_bert', 'ray.dag', 'sympy.physics', 'markupsafe._speedups') if iu.find_spec(m) is None]; assert not missing, missing\""
 
 # Verify GPU access
 render_gid=$(getent group render | cut -d: -f3)
@@ -1210,6 +1215,7 @@ else
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
     -e "TMPDIR=${CONTAINER_TMPDIR}/tmp" \
+    -e "TIKTOKEN_RS_CACHE_DIR=${HF_MOUNT}/tiktoken-rs-cache" \
     -e "TORCHINDUCTOR_CACHE_DIR=${CONTAINER_CACHE_ROOT}/torchinductor" \
     -e "TRITON_CACHE_DIR=${CONTAINER_CACHE_ROOT}/triton" \
     -e "VLLM_CACHE_ROOT=${CONTAINER_CACHE_ROOT}/vllm" \
