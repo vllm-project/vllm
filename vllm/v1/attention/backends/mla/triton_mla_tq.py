@@ -1517,6 +1517,7 @@ class TritonMLATurboQuantSparseImpl(
     no env toggles required.
     """
 
+    masked_mha_available: ClassVar[bool] = False
     supports_hybrid_prefill: ClassVar[bool] = False
 
     def __init__(
