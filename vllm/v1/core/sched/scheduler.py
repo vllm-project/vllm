@@ -1623,7 +1623,9 @@ class Scheduler(SchedulerInterface):
             # only cover part of the mm input, roll back to before the mm item.
             if (
                 self.scheduler_config.disable_chunked_mm_input
-                and num_computed_tokens < start_pos
+                # `<=`, not `<`: a chunk that starts exactly at the item still
+                # splits it when it cannot cover the whole item.
+                and num_computed_tokens <= start_pos
                 and (num_computed_tokens + num_new_tokens)
                 < (start_pos + num_encoder_tokens)
             ):
