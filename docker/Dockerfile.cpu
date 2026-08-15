@@ -100,13 +100,19 @@ ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE="copy"
 
+# PyTorch provides its own indexes for standard and nightly builds. Resolve the
+# CPU wheels from this index rather than with uv's --torch-backend cpu, which
+# only understands the stable channels and would ignore this URL.
+ARG PYTORCH_CPU_INDEX_BASE_URL=https://download.pytorch.org/whl/test
+
 # Copy requirements files for installation
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cpu.txt requirements/cpu.txt
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --upgrade pip && \
-    uv pip install -r requirements/cpu.txt --torch-backend cpu
+    uv pip install -r requirements/cpu.txt \
+        --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/cpu
 
 ENV TARGETARCH=${TARGETARCH}
 
@@ -212,8 +218,11 @@ RUN if [ "$TARGETARCH" = "arm64" ] && [ "$VLLM_CPU_X86" != "0" ]; then \
 # Copy build requirements
 COPY requirements/build/cpu.txt requirements/build/cpu.txt
 
+ARG PYTORCH_CPU_INDEX_BASE_URL=https://download.pytorch.org/whl/test
+
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements/build/cpu.txt --torch-backend cpu
+    uv pip install -r requirements/build/cpu.txt \
+        --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/cpu
 
 COPY . .
 
@@ -284,9 +293,10 @@ FROM base-arch AS vllm-test-deps
 WORKDIR /vllm-workspace
 
 # Test requirements are compiled from requirements/test/cuda.in into
-# requirements/test/cpu.txt by the pip-compile-cpu pre-commit hook, which
-# resolves CPU wheels via uv's --torch-backend cpu.
+# requirements/test/cpu.txt by the pip-compile-cpu pre-commit hook.
 COPY requirements/test/cpu.txt requirements/test/cpu.txt
+
+ARG PYTORCH_CPU_INDEX_BASE_URL=https://download.pytorch.org/whl/test
 
 # cpu.txt is compiled for x86_64, so platform markers are resolved away. Drop
 # packages unavailable on aarch64 (decord, terratorch) for arm builds.
@@ -295,7 +305,8 @@ RUN case "$(uname -m)" in \
     esac
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements/test/cpu.txt --torch-backend cpu
+    uv pip install -r requirements/test/cpu.txt \
+        --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/cpu
 
 ######################### DEV IMAGE #########################
 FROM vllm-src AS vllm-dev
@@ -319,9 +330,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY --from=vllm-test-deps /vllm-workspace/requirements/test/cpu.txt requirements/test/cpu.txt
 
+ARG PYTORCH_CPU_INDEX_BASE_URL=https://download.pytorch.org/whl/test
+
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/lint.txt && \
-    uv pip install -r requirements/test/cpu.txt --torch-backend cpu && \
+    uv pip install -r requirements/test/cpu.txt \
+        --extra-index-url ${PYTORCH_CPU_INDEX_BASE_URL}/cpu && \
     pre-commit install --hook-type pre-commit --hook-type commit-msg
 
 # Installed after requirements/test/cpu.txt (which pins triton==3.6.0) so the
