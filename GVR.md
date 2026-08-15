@@ -1521,14 +1521,15 @@ changes 50K/B1024 from 1.400x to 1.750x and 200K/B1024 from 0.836x to 1.724x,
 while preserving the 100K behavior. It does not solve short-row fixed cost:
 10K loses at every batch, and B1-B32 still lose at 50K/100K.
 
-### Fixed-GVR matched real-model e2e rerun
+### Fixed-GVR separate-server e2e rerun
 
-The matched rerun used the real GLM-5.2-NVFP4 weights and document inputs,
-TP4, full-decode CUDA graphs captured at B1/B8/B32/B64/B128/B1024, and
-FlashInfer autotuning disabled. GVR was forced at all sizes for measurement.
-Each cell is the median of 56-242 exact rank-0 full-forward CUDA-event samples;
-the 200K/B1024 row has 127 samples. Baseline B64 was rerun with the new exact
-B64 graph. Other baseline cells reuse the same configuration's earlier run.
+The two server processes used matching real GLM-5.2-NVFP4 weights and document
+inputs, TP4, full-decode CUDA graphs captured at
+B1/B8/B32/B64/B128/B1024, and disabled FlashInfer autotuning. GVR was forced
+at all sizes for measurement. Each cell is the median of 56-242 rank-0
+full-forward CUDA-event samples; the 200K/B1024 row has 127 samples. Baseline
+B64 was rerun with the new exact B64 graph. Other baseline cells reuse the same
+configuration's earlier, separate server run.
 
 | KV length | Batch | Baseline | Fixed GVR | Speedup | Change |
 |---:|---:|---:|---:|---:|---:|
@@ -1557,22 +1558,38 @@ B64 graph. Other baseline cells reuse the same configuration's earlier run.
 | 200K | 128 | 20.513 ms | 19.074 ms | 1.075x | +7.54% |
 | 200K | 1024 | 99.351 ms | 89.501 ms | **1.110x** | **+11.01%** |
 
-The structural fix is decisive on the pathological repeated-capture kernel
-rows, but it changes real B1024 e2e only slightly: old/fixed forward medians
-are 59.501/59.484 ms at 50K, 69.536/69.581 ms at 100K, and 89.787/89.501 ms
-at 200K. The old e2e workload's 1,024 independent rows did not follow the bad
-duplicated-B32 admission distribution, so it was already on a good path. The
-fix removes that worst observed kernel path rather than promising the full
-microbenchmark delta in every data distribution.
+#### 2026-08-15 correction: the e2e attribution fails Amdahl's-law accounting
 
-B64 is the most informative new e2e point: fixed GVR improves the forward by
-2.72%, 7.31%, and 10.48% at 50K, 100K, and 200K. Conversely, forcing GVR at
-10K still loses through B128. The isolated 4-6% B1 losses at 10K/200K are
-larger than the selector-only prediction and conflict with the faster fixed
-200K microkernel, so they include whole-server/run variation; they should not
-be attributed wholly to the rung change without repeated matched server runs.
-The production dispatch remains essential: this experiment intentionally
-overrides it to expose every regime.
+At 200K/B1024, the baseline selector share estimate is
+`21 * 0.488980 / 99.351 = 10.34%`. The measured 1.724x fixed-GVR selector
+speedup can save 4.314 ms, predicting a 95.037-ms forward and 1.045x speedup.
+Even a 2x selector gives only 1.054x. The observed 89.501-ms forward saves
+9.850 ms, leaving 5.536 ms unexplained; top-k alone would need about a 24.5x
+speedup to produce that result. The reported 1.110x must therefore not be
+claimed as a causal GVR e2e speedup.
+
+The old-to-fixed comparison is independently inconsistent. At 200K/B1024 the
+repeated-capture selector improves from roughly 585 to 284 us, which would
+save about 6.3 ms across 21 layers, while the forward changes only 0.286 ms.
+At 50K the selector improves by roughly 25 us per layer and the forward is
+essentially unchanged. This shows that the duplicated native-B32 capture does
+not model the real B1024 GVR admission distribution, while the separate server
+runs also contain unrelated graph/kernel, TP-rank-wait, clock, and system
+variation.
+
+One possible causal path was checked: different output ordering could alter
+the downstream sparse-attention memory pattern even with an identical selected
+set. On the repeated 200K/B1024 capture, baseline and GVR selected identical
+FP32 value sets, but adjacent indices occupied the same 64-token block 19.3%
+and 13.2% of the time respectively. This provides no evidence for a GVR
+locality benefit and cannot explain the missing 5.536 ms.
+
+The forward table is retained as raw separate-run data, not as a valid GVR
+speedup table. A corrected experiment must profile selector totals on the
+actual e2e rows, take the TP critical path instead of rank 0 alone, repeat each
+server configuration, and preferably alternate paired baseline/GVR CUDA graphs
+inside one warmed process. Until then, only the captured-input kernel results
+are defensible.
 
 ### Cleanup and validation
 

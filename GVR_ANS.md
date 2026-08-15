@@ -71,12 +71,13 @@ from 0.836x to 1.724x and improves 50K/B1024 from 1.400x to 1.750x without
 materially changing 100K. It still cannot amortize its fixed work at 10K or at
 B1-B32 for 50K/100K, so it is not unconditionally faster than the baseline.
 
-### Fixed-GVR real-model forward latency
+### Separate-server forward measurements (causal attribution invalid)
 
-The matched TP4 GLM-5.2-NVFP4 rerun used real document requests, full-decode
-CUDA graphs captured at every listed batch, and FlashInfer autotuning disabled.
-GVR was forced at all sizes. Each value is the median rank-0 CUDA-event time
-around the complete model forward; it excludes HTTP, scheduling, and sampling.
+The baseline and GVR servers used matching TP4 GLM-5.2-NVFP4 configurations,
+real document requests, full-decode CUDA graphs, and disabled FlashInfer
+autotuning. They were separate server processes rather than paired graph
+variants in one process. Each value is the median rank-0 CUDA-event time around
+the complete model forward; it excludes HTTP, scheduling, and sampling.
 
 | KV length | Batch | Baseline | Fixed GVR | Speedup | Change |
 |---:|---:|---:|---:|---:|---:|
@@ -105,20 +106,33 @@ around the complete model forward; it excludes HTTP, scheduling, and sampling.
 | 200K | 128 | 20.513 ms | 19.074 ms | 1.075x | +7.54% |
 | 200K | 1024 | 99.351 ms | 89.501 ms | **1.110x** | **+11.01%** |
 
-B64 is the clearest new practical result: the forward improves by 2.72% at
-50K, 7.31% at 100K, and 10.48% at 200K. At B1024, fixed GVR preserves the
-old real-workload gains rather than reproducing the dramatic repeated-capture
-kernel delta: old/fixed medians are 59.501/59.484 ms at 50K,
-69.536/69.581 ms at 100K, and 89.787/89.501 ms at 200K. The old real B1024
-workload already had 1,024 independent score/hint rows on a favorable path;
-the fix principally removes the pathological duplicated-B32 path.
+These raw forward deltas must not be attributed to GVR. At 200K/B1024, the
+baseline selector share estimate is `21 * 0.488980 / 99.351 = 10.34%`. A
+1.724x selector speedup predicts
+`99.351 - 21 * (0.488980 - 0.283554) = 95.037 ms`, or only 1.045x e2e. Even an
+exact 2x selector speedup predicts only 1.054x. The observed 89.501 ms is 5.536
+ms faster than the measured selector saving can explain; reproducing it from
+top-k alone would require approximately a 24.5x selector speedup.
 
-Forcing GVR remains a poor policy at 10K through B128. The 4-6% B1 losses at
-10K/200K exceed the selector-only prediction and, at 200K, disagree with the
-faster fixed microkernel. They therefore include run-level full-server
-variation and require repeated matched server runs before assigning the whole
-difference to GVR. The robust conclusion is the multi-percent B64+ gain at
-long context, not universal benefit at small batch.
+The old-to-fixed inconsistency gives the same warning. The 200K/B1024
+microkernel changed from about 585 to 284 us, which would save roughly 6.3 ms
+over 21 layers, but the separate-server forward changed only 0.286 ms. At 50K
+the microkernel improved by about 25 us per layer while the forward was
+essentially unchanged. The repeated-B32 selector capture is not representative
+of the real B1024 GVR admission distribution, and the separate server runs also
+permit unrelated graph/kernel, TP-rank-wait, clock, and system variation.
+
+An output-order audit found identical selected FP32 value sets, but no evidence
+that GVR created a downstream locality win: on the repeated 200K/B1024 capture,
+adjacent indices stayed in the same 64-token block 13.2% of the time for GVR
+versus 19.3% for baseline. This indirect check does not replace profiling, but
+it makes index ordering an unsupported explanation for the extra 5.536 ms.
+
+Therefore the kernel table remains valid for its stated captured inputs, while
+the forward table is retained only as a record of separate-run observations.
+A causal e2e result requires baseline and GVR kernel totals from the actual
+forward rows, repeated runs, the TP critical path rather than rank 0 alone,
+and preferably paired baseline/GVR CUDA graphs in the same warmed process.
 
 ## Progress log
 
