@@ -32,7 +32,7 @@ def test_cumem_capability_flags():
     assert CuMemBackend.preserves_compiled_artifacts() is False
     assert CuMemBackend.preserves_graphs_with_communicators() is False
     assert CuMemBackend.supports_durable_storage() is False
-    assert DummyBackend.requires_communicator_suspend() is False
+    assert SleepModeBackend.requires_communicator_suspend() is False
 
 
 def test_new_backend_starts_in_running_state():
@@ -40,11 +40,10 @@ def test_new_backend_starts_in_running_state():
     assert CuMemBackend().state() == "RUNNING"
 
 
-def test_worker_suspends_comms_once_across_staged_wake(monkeypatch):
-    """Worker drives communicator suspension; comms resume exactly once even
-    when the wake is staged (weights first, then kv_cache)."""
-    from unittest.mock import Mock
-
+@pytest.mark.parametrize("requires_suspend", [True, False])
+def test_worker_drives_communicator_suspension(monkeypatch, requires_suspend):
+    """Comm walkers run after backend suspend/resume iff the backend requires
+    it; per-communicator idempotence is covered in test_pynccl.py."""
     from vllm.v1.worker.gpu_worker import Worker
 
     calls: list[tuple[str, object]] = []
@@ -58,37 +57,36 @@ def test_worker_suspends_comms_once_across_staged_wake(monkeypatch):
 
         @classmethod
         def requires_communicator_suspend(cls) -> bool:
-            return True
+            return requires_suspend
 
     worker = object.__new__(Worker)
     worker._sleep_mode_backend = Backend()
-    worker._comms_suspended = False
     worker._sleep_saved_buffers = {}
     worker._sleep_saved_draft_buffers = {}
-    worker.model_runner = Mock()
 
     monkeypatch.setattr("torch.accelerator.synchronize", lambda: None)
     monkeypatch.setattr("torch.accelerator.get_memory_info", lambda: (0, 0))
     monkeypatch.setattr(
-        "vllm.distributed.parallel_state.suspend_device_comms",
+        "vllm.v1.worker.gpu_worker.suspend_device_comms",
         lambda: calls.append(("comms.suspend", None)),
     )
     monkeypatch.setattr(
-        "vllm.distributed.parallel_state.resume_device_comms",
+        "vllm.v1.worker.gpu_worker.resume_device_comms",
         lambda: calls.append(("comms.resume", None)),
     )
 
     worker.sleep(level=1)
     worker.wake_up(tags=["weights"])
-    worker.wake_up(tags=["kv_cache"])
 
-    assert calls == [
+    expected = [
         ("backend.suspend", 1),
         ("comms.suspend", None),
         ("backend.resume", ("weights",)),
         ("comms.resume", None),
-        ("backend.resume", ("kv_cache",)),
     ]
+    if not requires_suspend:
+        expected = [c for c in expected if not c[0].startswith("comms.")]
+    assert calls == expected
 
 
 def test_unknown_backend_raises():

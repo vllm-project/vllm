@@ -148,8 +148,7 @@ class CuMemBackend(SleepModeBackend):
 
     @classmethod
     def requires_communicator_suspend(cls) -> bool:
-        # NCCL buffers live outside the allocator pool; the worker reclaims
-        # them via communicator suspend hooks.
+        # NCCL buffers live outside the allocator pool.
         return True
 
 

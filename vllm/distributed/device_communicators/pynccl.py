@@ -27,9 +27,7 @@ logger = init_logger(__name__)
 
 _NCCL_SYMM_OPS_REGISTERED = False
 
-# ncclCommSuspend flag: release dynamic GPU memory, keep topology/connection.
 _NCCL_SUSPEND_MEM = 0x01
-_NCCL_SUSPEND_MIN_VERSION = 22907  # NCCL 2.29.7
 
 
 def register_nccl_symmetric_ops(pynccl_comm):
@@ -427,15 +425,12 @@ class PyNcclCommunicator:
     def suspend(self):
         """Release dynamic GPU memory, keeping topology/connection state.
 
-        Collective across the group's ranks; idempotent; no-op when
-        NCCL < 2.29.7 or the symbols are absent.
+        Collective across the group's ranks; idempotent; no-op when the NCCL
+        library lacks suspension support (< 2.29.7).
         """
-        if (
-            self.disabled
-            or self._suspended
-            or self.nccl_version < _NCCL_SUSPEND_MIN_VERSION
-            or not self.nccl.supports_comm_suspension()
-        ):
+        if self.disabled or self._suspended:
+            return
+        if not self.nccl.supports_comm_suspension():
             return
         self.nccl.ncclCommSuspend(self.comm, _NCCL_SUSPEND_MEM)
         self._suspended = True

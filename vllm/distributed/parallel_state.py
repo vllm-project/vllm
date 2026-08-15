@@ -150,15 +150,12 @@ def _apply_to_device_comms(
 
 
 def suspend_device_comms() -> None:
-    """Release reclaimable device communicator memory (collective).
-
-    Must run on every rank while communicators are idle.
-    """
+    """Release device communicator memory (collective; comms must be idle)."""
     _apply_to_device_comms(lambda comm: comm.suspend())
 
 
 def resume_device_comms() -> None:
-    """Restore all suspended device communicators before reuse (collective)."""
+    """Restore suspended device communicators (collective)."""
     _apply_to_device_comms(lambda comm: comm.resume())
 
 

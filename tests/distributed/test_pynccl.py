@@ -482,7 +482,6 @@ def test_pynccl_suspend_resume_idempotent():
     comm = object.__new__(PyNcclCommunicator)
     comm.disabled = False
     comm._suspended = False
-    comm.nccl_version = 23007
     comm.comm = object()
     comm.nccl = Mock()
     comm.nccl.supports_comm_suspension.return_value = True

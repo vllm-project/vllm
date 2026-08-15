@@ -45,6 +45,8 @@ from vllm.distributed.parallel_state import (
     checkpoint_restore_distributed_state,
     get_pp_group,
     get_tp_group,
+    resume_device_comms,
+    suspend_device_comms,
 )
 from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
@@ -178,8 +180,6 @@ class Worker(WorkerBase):
 
         # Resolved lazily on first sleep/wake; persists worker-process state.
         self._sleep_mode_backend: SleepModeBackend | None = None
-        # True while device-communicator memory is released (see sleep()).
-        self._comms_suspended = False
 
     def _get_sleep_mode_backend(self) -> "SleepModeBackend":
         if self._sleep_mode_backend is None:
@@ -210,12 +210,7 @@ class Worker(WorkerBase):
 
         backend = self._get_sleep_mode_backend()
         backend.suspend(level)
-        if backend.requires_communicator_suspend() and not self._comms_suspended:
-            from vllm.distributed.parallel_state import suspend_device_comms
-
-            # Set first: if the walker partially fails, wake_up() must still
-            # attempt to resume every communicator.
-            self._comms_suspended = True
+        if backend.requires_communicator_suspend():
             suspend_device_comms()
 
         torch.accelerator.synchronize()
@@ -236,14 +231,10 @@ class Worker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        self._get_sleep_mode_backend().resume(tags)
-        if self._comms_suspended:
-            from vllm.distributed.parallel_state import resume_device_comms
-
+        backend = self._get_sleep_mode_backend()
+        backend.resume(tags)
+        if backend.requires_communicator_suspend():
             resume_device_comms()
-            # Cleared only after the full walk succeeds, so a failed resume
-            # stays retryable.
-            self._comms_suspended = False
 
         # Restore the buffers after level 2 sleep
         wake_weights = tags is None or "weights" in tags
