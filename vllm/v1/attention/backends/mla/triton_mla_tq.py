@@ -56,6 +56,9 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadata,
     MLACommonMetadataBuilder,
 )
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLACommonImpl,
+)
 from vllm.model_executor.layers.quantization.turboquant.centroids import (
     get_centroids,
 )
@@ -69,13 +72,12 @@ from vllm.v1.attention.backend import (
     AttentionLayer,
     CommonAttentionMetadata,
     MultipleOf,
-    SparseMLAAttentionImpl,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
-    triton_convert_and_compact,
+    triton_filter_and_convert_dcp_index,
 )
+from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.attention.ops.flashmla import flash_mla_sparse_fwd
 from vllm.platforms import current_platform
 from vllm import _custom_ops as ops
@@ -1501,7 +1503,7 @@ class TritonMLATurboQuantSparseBackend(TritonMLATurboQuantBackend):
 
 
 class TritonMLATurboQuantSparseImpl(
-    SparseMLAAttentionImpl[TritonMLATurboQuantSparseMetadata],
+    SparseMLACommonImpl[TritonMLATurboQuantSparseMetadata],
     TritonMLATurboQuantImpl,
 ):
     """Sparse MLA over a TurboQuant byte-packed cache.
@@ -2059,15 +2061,15 @@ class TritonMLATurboQuantSparseImpl(
             and num_actual_toks == attn_metadata.num_decode_tokens
         )
         if self._dcp_compact_active:
-            global_topk, _ = triton_convert_and_compact(
+            global_topk = triton_filter_and_convert_dcp_index(
                 attn_metadata.req_id_per_token[:num_actual_toks],
                 attn_metadata.block_table,
                 topk_indices,
+                dcp_size=self.dcp_world_size,
+                dcp_rank=self.dcp_rank,
+                cp_kv_cache_interleave_size=self.dcp_interleave_size,
                 BLOCK_SIZE=attn_metadata.block_size,
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
-                dcp_world_size=self.dcp_world_size,
-                dcp_rank=self.dcp_rank,
-                dcp_interleave_size=self.dcp_interleave_size,
             )
         else:
             global_topk = triton_convert_req_index_to_global_index(
