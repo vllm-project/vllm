@@ -16,7 +16,208 @@ large-batch kernel grids, but any such row is labeled rather than represented
 as an independently captured request distribution. End-to-end measurements
 use the real model weights and actual forward passes.
 
-## Updated result with the fixed adaptive GVR
+## 2026-08-15 full revalidation
+
+This section supersedes the separate-server e2e claims below. Every experiment
+was rerun from this checkout with its own `.venv`; FlashInfer autotuning was
+disabled. The e2e experiment uses two CUDA graphs in one warmed TP4 process,
+alternates baseline-first and GVR-first execution, and reports the maximum
+CUDA-event forward latency across TP ranks. Only sustained decode runs whose
+actual request and token counts equal the requested batch are retained.
+
+### Standalone selector, real captured tensors
+
+B1/B8/B32 are native real-model captures. B64/B128/B1024 repeat the native B32
+rows; those rows measure kernel scaling, not the real large-batch distribution.
+Every GVR row matched the exact FP32 selected-value set from `torch.topk`.
+
+| KV | Batch | FP32 baseline | FP32 GVR | Speedup |
+|---:|---:|---:|---:|---:|
+| 10K | 1 | 5.044 us | 9.727 us | 0.519x |
+| 10K | 8 | 5.198 us | 9.902 us | 0.525x |
+| 10K | 32 | 5.434 us | 9.910 us | 0.548x |
+| 10K | 64 | 5.637 us | 10.286 us | 0.548x |
+| 10K | 128 | 5.639 us | 9.934 us | 0.568x |
+| 10K | 1024 | 34.178 us | 42.657 us | 0.801x |
+| 50K | 1 | 10.008 us | 16.424 us | 0.609x |
+| 50K | 8 | 10.521 us | 18.049 us | 0.583x |
+| 50K | 32 | 13.281 us | 18.404 us | 0.722x |
+| 50K | 64 | 24.567 us | 18.882 us | 1.301x |
+| 50K | 128 | 24.822 us | 18.269 us | 1.359x |
+| 50K | 1024 | 171.683 us | 98.163 us | 1.749x |
+| 100K | 1 | 10.992 us | 14.384 us | 0.764x |
+| 100K | 8 | 11.562 us | 20.804 us | 0.556x |
+| 100K | 32 | 14.603 us | 20.579 us | 0.710x |
+| 100K | 64 | 29.812 us | 23.001 us | 1.296x |
+| 100K | 128 | 30.072 us | 25.124 us | 1.197x |
+| 100K | 1024 | 219.113 us | 139.686 us | 1.569x |
+| 200K | 1 | 12.641 us | 18.305 us | 0.691x |
+| 200K | 8 | 15.133 us | 19.812 us | 0.764x |
+| 200K | 32 | 24.337 us | 20.455 us | 1.190x |
+| 200K | 64 | 55.402 us | 26.105 us | 2.122x |
+| 200K | 128 | 66.379 us | 33.310 us | 1.993x |
+| 200K | 1024 | 487.619 us | 283.104 us | 1.722x |
+
+These numbers are internally plausible: fixed launch and synchronization work
+dominates short/small rows, while the amount of baseline score traffic grows
+with both dimensions. GVR therefore loses through B32 except at 200K, crosses
+over at B64 for 50K or longer, and still loses at 10K. A speedup below 1 means
+a regression; for example, 0.519x means GVR takes 1.93 times as long.
+
+### Native FP16 version of the baseline selector
+
+The baseline kernel itself was generalized to consume FP16 without an untimed
+FP32 conversion. On native 100K captures, CUDA-graph replay gave:
+
+| Batch | FP32 | FP16 | FP16 speedup |
+|---:|---:|---:|---:|
+| 1 | 10.992 us | 10.767 us | 1.021x |
+| 8 | 11.562 us | 11.332 us | 1.020x |
+| 32 | 14.603 us | 14.174 us | 1.030x |
+| 64 | 29.812 us | 26.648 us | 1.119x |
+| 128 | 30.072 us | 26.776 us | 1.123x |
+| 1024 | 219.113 us | 181.113 us | 1.210x |
+
+B64 and larger again repeat B32 captures. Each dtype matched `torch.topk` on
+that same dtype. Comparing FP16 selection with the FP32 reference changed the
+set on 40 of 82 real rows, but only 0.585 of 2048 indices per row on average
+(99.9714% index overlap, maximum two missing). This is the distinction behind
+the earlier apparently contradictory accuracy statement: row-level exact-set
+equality is strict, while index-level overlap is extremely high. It is not a
+model-quality result, so FP16 still needs an end-to-end evaluation before it
+can be enabled by default.
+
+### Paired component accounting
+
+As a diagnostic run, CUDA events were embedded around all 21 sparse-indexer
+selectors in each of the two full graphs. The table uses the TP critical path
+after trimming eight warmup and four tail samples, with equal baseline-first
+and GVR-first counts. `Top-k share` is the measured baseline selector total
+divided by baseline forward; `predicted` applies Amdahl's law directly.
+
+| KV | B | Baseline | GVR | Observed | Predicted | Base top-k | GVR top-k | Share |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10K | 1 | 7.524 ms | 7.983 ms | 0.942x | 0.941x | 0.242 ms | 0.713 ms | 3.21% |
+| 10K | 8 | 9.145 ms | 9.525 ms | 0.960x | 0.959x | 0.250 ms | 0.640 ms | 2.73% |
+| 10K | 32 | 12.051 ms | 12.454 ms | 0.968x | 0.969x | 0.261 ms | 0.642 ms | 2.17% |
+| 10K | 64 | 14.454 ms | 14.817 ms | 0.975x | 0.975x | 0.267 ms | 0.641 ms | 1.85% |
+| 10K | 128 | 17.375 ms | 17.637 ms | 0.985x | 0.986x | 0.273 ms | 0.518 ms | 1.57% |
+| 10K | 1024 | 56.573 ms | 57.048 ms | 0.992x | 0.990x | 0.956 ms | 1.504 ms | 1.69% |
+| 50K | 1 | 7.807 ms | 8.252 ms | 0.946x | 0.949x | 0.396 ms | 0.818 ms | 5.07% |
+| 50K | 8 | 9.424 ms | 9.874 ms | 0.954x | 0.960x | 0.377 ms | 0.773 ms | 4.00% |
+| 50K | 32 | 12.821 ms | 13.070 ms | 0.981x | 0.981x | 0.516 ms | 0.771 ms | 4.03% |
+| 50K | 64 | 15.631 ms | 15.711 ms | 0.995x | 0.991x | 0.684 ms | 0.830 ms | 4.38% |
+| 50K | 128 | 19.350 ms | 19.420 ms | 0.996x | 0.997x | 0.783 ms | 0.839 ms | 4.05% |
+| 50K | 1024 | 67.801 ms | 67.205 ms | 1.009x | 1.008x | 3.198 ms | 2.643 ms | 4.72% |
+| 100K | 1 | 7.857 ms | 8.312 ms | 0.945x | 0.945x | 0.403 ms | 0.857 ms | 5.13% |
+| 100K | 8 | 9.488 ms | 9.856 ms | 0.963x | 0.963x | 0.402 ms | 0.769 ms | 4.23% |
+| 100K | 32 | 13.115 ms | 13.292 ms | 0.987x | 0.986x | 0.630 ms | 0.813 ms | 4.80% |
+| 100K | 64 | 16.531 ms | 16.545 ms | 0.999x | 1.001x | 1.004 ms | 0.992 ms | 6.07% |
+| 100K | 128 | 20.958 ms | 20.945 ms | 1.001x | 1.001x | 0.917 ms | 0.889 ms | 4.37% |
+| 100K | 1024 | 81.925 ms | 81.963 ms | 1.000x | 1.001x | 5.156 ms | 5.098 ms | 6.29% |
+| 199.8K | 1 | 7.801 ms | 8.346 ms | 0.935x | 0.938x | 0.440 ms | 0.958 ms | 5.64% |
+| 199.8K | 8 | 9.844 ms | 10.257 ms | 0.960x | 0.958x | 0.459 ms | 0.889 ms | 4.66% |
+| 199.8K | 32 | 14.076 ms | 14.227 ms | 0.989x | 0.987x | 0.850 ms | 1.029 ms | 6.04% |
+| 199.8K | 64 | 18.397 ms | 18.167 ms | 1.013x | 1.012x | 1.332 ms | 1.111 ms | 7.24% |
+| 199.8K | 128 | 24.441 ms | 24.200 ms | 1.010x | 1.009x | 1.704 ms | 1.490 ms | 6.97% |
+| 199.8K | 1024 | 114.532 ms | 117.056 ms | 0.978x | 0.984x | 10.973 ms | 12.879 ms | 9.58% |
+
+For 23 of 24 cells, the unexplained median saving is under 0.1 ms. The one
+exception is 199.8K/B1024 at -0.618 ms: GVR is still slower, so this does not
+create a false gain. More importantly, actual B1024 selector behavior differs
+from the repeated-B32 microbenchmark. At 199.8K/B1024 the real forward rows
+make GVR 12.879/10.973 = 1.174 times slower, rather than 1.722 times faster.
+The admission/hint distribution therefore matters, and the repeated-input
+number must not be substituted into the e2e Amdahl calculation.
+
+The internal events add 42 graph nodes and inflate absolute latency. More
+importantly, they impose ordering around a multi-kernel selector that can
+otherwise overlap surrounding work. The table therefore validates the
+measurement accounting only; its selector sum is not an uninstrumented
+critical-path fraction. Amdahl's law applies to the critical path, not to the
+sum of concurrently executing kernel durations. A second paired run with
+those nodes removed supplies the final e2e table below.
+
+### Final real e2e result: paired graphs without selector events
+
+The final run retains only exact-batch decode rows and contains no events
+inside either model graph. For each step, baseline and GVR latency are first
+reduced to the maximum across TP ranks. Samples are split by which graph ran
+first; the first-position and second-position medians are computed separately,
+then averaged. This balances the 0.33-0.78 ms cache/order effect instead of
+misattributing it to either selector. Eight leading and four trailing samples
+are trimmed from every sustained run.
+
+| KV | B | Samples | Baseline | GVR | Speedup | Change |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10K | 1 | 60 | 7.381 ms | 7.389 ms | 0.9989x | -0.113% |
+| 10K | 8 | 56 | 7.962 ms | 7.965 ms | 0.9996x | -0.042% |
+| 10K | 32 | 56 | 9.902 ms | 9.904 ms | 0.9998x | -0.021% |
+| 10K | 64 | 56 | 11.862 ms | 11.866 ms | 0.9997x | -0.032% |
+| 10K | 128 | 56 | 14.612 ms | 14.599 ms | 1.0009x | +0.088% |
+| 10K | 1024 | 230 | 52.549 ms | 52.541 ms | 1.0002x | +0.015% |
+| 50K | 1 | 60 | 7.492 ms | 7.511 ms | 0.9975x | -0.250% |
+| 50K | 8 | 56 | 8.139 ms | 8.133 ms | 1.0008x | +0.079% |
+| 50K | 32 | 114 | 10.168 ms | 10.170 ms | 0.9998x | -0.015% |
+| 50K | 64 | 112 | 12.711 ms | 12.720 ms | 0.9992x | -0.075% |
+| 50K | 128 | 110 | 15.939 ms | 15.914 ms | 1.0016x | +0.159% |
+| 50K | 1024 | 228 | 63.125 ms | 63.138 ms | 0.9998x | -0.021% |
+| 100K | 1 | 60 | 7.518 ms | 7.543 ms | 0.9968x | -0.323% |
+| 100K | 8 | 56 | 8.255 ms | 8.247 ms | 1.0010x | +0.096% |
+| 100K | 32 | 114 | 10.564 ms | 10.567 ms | 0.9996x | -0.036% |
+| 100K | 64 | 110 | 13.605 ms | 13.602 ms | 1.0002x | +0.020% |
+| 100K | 128 | 110 | 17.422 ms | 17.417 ms | 1.0003x | +0.031% |
+| 100K | 1024 | 220 | 74.915 ms | 74.933 ms | 0.9998x | -0.024% |
+| 199.8K | 1 | 60 | 7.588 ms | 7.592 ms | 0.9995x | -0.052% |
+| 199.8K | 8 | 56 | 8.460 ms | 8.464 ms | 0.9995x | -0.053% |
+| 199.8K | 32 | 114 | 11.354 ms | 11.357 ms | 0.9997x | -0.026% |
+| 199.8K | 64 | 110 | 15.350 ms | 15.366 ms | 0.9990x | -0.103% |
+| 199.8K | 128 | 188 | 20.676 ms | 20.673 ms | 1.0002x | +0.018% |
+| 199.8K | 1024 | 114 | 99.675 ms | 99.706 ms | 0.9997x | -0.031% |
+
+The honest result is no material e2e speedup. The range is 0.9968-1.0016x;
+the largest apparent gain is 0.159%, the largest loss is 0.323%, and the
+previously claimed 199.8K/B1024 gain is instead a -0.031% loss at this
+measurement scale. GVR was forced at every size, including sizes where
+production dispatch would select the baseline.
+
+This also explains the instrumented result from first principles. At 10K/B1,
+internal selector events add 0.143 ms to the baseline graph but 0.594 ms to
+the multi-kernel GVR graph. Their 0.451-ms differential accounts for nearly
+all of the instrumented 0.459-ms GVR loss. At 199.8K/B1024, they add 14.857 ms
+to baseline and 17.350 ms to GVR; the 2.493-ms differential again accounts for
+nearly all of the apparent 2.524-ms loss. The events impose graph ordering and
+remove overlap, so that experiment measured the instrumented graph rather
+than the production critical path.
+
+In Amdahl notation, `speedup = 1 / ((1 - f) + f / s)`, where `f` must be the
+serial critical-path fraction and `s` the selector speedup. The 1.57-9.58%
+event-measured selector sums are not valid values of `f`: much of that work is
+overlapped, and the events themselves change it. Consequently, multiplying a
+standalone top-k saving by 21 does not predict the clean forward. A true
+zero-cost ceiling would require a logically equivalent graph that supplies
+the exact per-step indices without executing the selector; it cannot be
+inferred from summed, overlap-perturbing event intervals.
+
+The B128 199.8K cell uses a 199K real prompt and retains decode positions
+199,800-200,000 so all 128 requests are resident for a long interval. The
+large-request driver serializes the identical temperature-zero JSON once per
+wave; the old per-coroutine serialization delayed admission and its partial
+rows were excluded. All other cells use prompts at the table's stated length.
+
+Final validation used only this checkout's `.venv`:
+
+```text
+.venv/bin/python -m pytest tests/kernels/test_top_k_per_row.py \
+    -k 'gvr or workspace_topk_padded_stride' -v
+15 passed, 169 deselected
+```
+
+Targeted Ruff check/format, Python compilation, and `git diff --check` also
+pass. The paired measurement hooks were removed from production model code;
+only the reusable request-admission fix remains in the benchmark driver.
+
+## Superseded 2026-08-14 result with the fixed adaptive GVR
 
 The fixed kernel uses one three-column graph-compatible implementation but
 changes the rung interpretation from the device-side runtime sequence length.

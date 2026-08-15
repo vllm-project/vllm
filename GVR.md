@@ -1649,3 +1649,110 @@ must compare the same proposer and acceptance trace, report both target-forward
 latency and accepted output tokens/s, and check exact top-k under variable
 decode lengths and CUDA-graph padding. Until that support and benchmark exist,
 no speculative GVR speedup should be claimed.
+
+## Full revalidation: paired, component-accounted experiment
+
+The earlier separate-server end-to-end table failed an Amdahl consistency
+check and is being rerun from scratch. The new measurement-only harness
+captures two FULL decode CUDA graphs in one warmed process: one forces the
+existing FP32 selector and one forces GVR. Every decode step replays both
+graphs on the same real-model input buffers and alternates which graph runs
+first. It records, on every TP rank, both the complete graph time and the sum
+of CUDA-event intervals around all indexer top-k calls. FlashInfer autotuning
+remains disabled.
+
+Each result must satisfy the following accounting identity within paired-run
+noise:
+
+```text
+predicted GVR forward = baseline forward
+                      - baseline selector total
+                      + GVR selector total
+predicted speedup = baseline forward / predicted GVR forward
+```
+
+The TP critical path is the maximum rank time, not rank 0 alone. The report
+will also split samples by execution order, because a cache/clock/order effect
+that changes sign when the order alternates is not a kernel speedup. A claimed
+gain larger than the measured selector saving is invalid unless another
+specific component is measured and explains the difference.
+
+The instrumentation passed targeted Ruff, formatting, Python compilation, and
+the existing GVR correctness suite (`7 passed, 177 deselected`). A standalone
+CUDA-graph probe also verified that preallocated external timing events can be
+re-recorded during capture and read after replay; creating ordinary timing
+events inside capture was rejected by CUDA and was not used for model data.
+
+The first real-checkpoint smoke run was discarded before analysis. Although
+the API process started from this checkout, its spawned TP workers resolved a
+stale editable vLLM install at `/home/woosuk/workspace-agents/vllm-3`; this was
+confirmed by worker traceback paths, a graph-capture log line that mapped only
+to that checkout, and the absence of all paired CSVs. The environment was
+reinstalled with
+`VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=auto`; the installed
+version then changed from the stale `gc79475406` source to this branch's
+`gefbfdd3df` source. No latency from the discarded run is used below.
+
+The first no-internal-selector-events control also produced no measurements:
+the globally enabled Rust frontend exited at its fixed 600-second engine
+registration timeout while the 432.9-GiB checkpoint load and paired graph
+capture were still in progress. The model workers had not failed, but their
+parent then terminated them. The control was restarted with
+`VLLM_USE_RUST_FRONTEND=0`, using the in-process Python frontend so startup is
+not bounded by that registration timer. This changes only frontend startup;
+the TP4 model, weights, input workload, CUDA graphs, and GPU-event forward
+measurement are unchanged.
+
+The standalone CUDA-graph matrix has now been rerun with the repaired local
+extension and real captures. Native B1/B8/B32 GVR speedups range from 0.519x
+to 1.190x; B64/B128/B1024 repeated-B32 scaling reaches 2.122x, 1.993x, and
+1.722x at 200K. The native 100K FP16 baseline improves by only 1.021x,
+1.020x, and 1.030x at B1/B8/B32; repeated-row B64/B128/B1024 improves by
+1.119x, 1.123x, and 1.210x. FP16 versus FP32 retains 99.9714% of selected
+indices but changes the exact set on 40/82 rows, so this is selector overlap,
+not an end-to-end model-accuracy result.
+
+The component-accounted paired run is also complete. All retained samples
+contain exactly 21 baseline and 21 GVR selector intervals. In 23/24 matrix
+cells, the observed full-forward delta differs from the measured selector
+delta by under 0.1 ms, validating the Amdahl accounting. Crucially, the actual
+199.8K/B1024 rows measure 10.973 ms baseline selector total versus 12.879 ms
+for GVR: the real B1024 hint/admission distribution reverses the 1.722x win on
+the repeated-B32 microbenchmark. A no-internal-events paired control is in
+progress to remove the 42 timing nodes from the final absolute e2e latencies.
+
+The first no-events workload pass produced all requested requests, but its
+driver serialized the same large token-ID JSON separately in every coroutine.
+At 100K/199.8K this delayed later admissions long enough that early requests
+completed before the full B1024 wave was resident; several long-context B128
+runs were shortened for the same reason. Those partial rows are excluded. The
+driver now serializes the identical temperature-zero payload once per wave and
+reuses the bytes for every HTTP request. This removes client CPU serialization
+from admission without changing prompts, model execution, or the GPU-event
+latency metric. Only the affected exact-batch cells are being rerun.
+
+The no-events control and targeted admission reruns are complete. Every one of
+the 24 cells now has 56-230 retained exact-batch samples after trimming, with
+equal baseline-first and GVR-first counts. The order-balanced real-forward
+speedup range is only 0.9968-1.0016x. The largest apparent win is 0.159% at
+50K/B128, the largest loss is 0.323% at 100K/B1, and 199.8K/B1024 is
+0.9997x (99.675 versus 99.706 ms), not the old 1.110x claim.
+
+The component events were causal perturbations, not passive measurements. At
+10K/B1 they add 0.143 ms to baseline but 0.594 ms to GVR; that 0.451-ms
+differential explains almost the entire instrumented 0.459-ms loss. At
+199.8K/B1024 they add 14.857 and 17.350 ms respectively; the 2.493-ms
+differential explains almost the entire instrumented 2.524-ms loss. The
+selector's summed event duration is therefore not the serial Amdahl fraction:
+the events impose ordering and suppress overlap. The final report uses only
+the no-internal-events graph times for real e2e conclusions.
+
+All paired measurement hooks have now been removed from production model code.
+The reusable real-data driver keeps the admission fix: it serializes one
+temperature-zero request body per wave and shares those immutable bytes across
+the concurrent posts. This is necessary to reach the requested large batch
+before early requests complete and does not affect GPU timing.
+
+Final validation, using only `/home/woosuk/workspace/vllm/.venv`, passed all
+15 selected GVR and FP32/FP16 padded-stride cases (`169 deselected`). Targeted
+Ruff check/format, Python compilation, and `git diff --check` also passed.

@@ -5,6 +5,7 @@
 
 import argparse
 import asyncio
+import json
 import time
 from pathlib import Path
 
@@ -41,20 +42,23 @@ async def run_wave(
 ) -> None:
     start = asyncio.Event()
 
-    async def run_one(request_id: int) -> None:
-        payload = {
-            "model": model_name,
-            "prompt": prompt_ids,
-            "max_tokens": output_len,
-            "min_tokens": output_len,
-            "temperature": 0,
-            "ignore_eos": True,
-            "seed": request_id,
-        }
+    payload = {
+        "model": model_name,
+        "prompt": prompt_ids,
+        "max_tokens": output_len,
+        "min_tokens": output_len,
+        "temperature": 0,
+        "ignore_eos": True,
+        "seed": 0,
+    }
+    body = json.dumps(payload).encode()
+    headers = {"Content-Type": "application/json"}
+
+    async def run_one() -> None:
         await start.wait()
         for attempt in range(3):
             try:
-                async with session.post(url, json=payload) as response:
+                async with session.post(url, data=body, headers=headers) as response:
                     if response.status != 200:
                         raise RuntimeError(await response.text())
                     await response.read()
@@ -70,12 +74,12 @@ async def run_wave(
         start.set()
         for offset in range(0, batch, admission_chunk):
             tasks.extend(
-                asyncio.create_task(run_one(i))
-                for i in range(offset, min(offset + admission_chunk, batch))
+                asyncio.create_task(run_one())
+                for _ in range(offset, min(offset + admission_chunk, batch))
             )
             await asyncio.sleep(admission_delay)
     else:
-        tasks = [asyncio.create_task(run_one(i)) for i in range(batch)]
+        tasks = [asyncio.create_task(run_one()) for _ in range(batch)]
         await asyncio.sleep(0)
         start.set()
     results = await asyncio.gather(*tasks, return_exceptions=True)
