@@ -3,16 +3,21 @@
 """Intel XPU Kimi-K3 text model interfaces."""
 
 from collections.abc import Iterable
+from typing import Any
 
 import torch
 import torch.nn as nn
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
+	get_pp_group,
 	get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.activation import SiluAndMul, SituAndMul
-from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe import (
+	FusedMoEFactory,
+	fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -26,6 +31,20 @@ from vllm.model_executor.layers.mla import (
 	MultiHeadLatentAttentionWrapper,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+	VocabParallelEmbedding,
+)
+from vllm.model_executor.model_loader.weight_utils import (
+	default_weight_loader,
+	maybe_remap_kv_scale_name,
+)
+from vllm.model_executor.models.interfaces import EagleModelMixin
+from vllm.model_executor.models.utils import (
+	PPMissingLayer,
+	get_spec_layer_idx_from_weight_name,
+	is_pp_missing_parameter,
+	make_layers,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
@@ -631,6 +650,343 @@ class KimiDecoderLayer(nn.Module):
 		return hidden_states, prefix_sum, residual
 
 
+class KimiLinearModel(nn.Module, EagleModelMixin):
+	def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+		super().__init__()
+		config = vllm_config.model_config.hf_text_config
+		self.config = config
+		self.vocab_size = config.vocab_size
+
+		if get_pp_group().is_first_rank:
+			self.embed_tokens = VocabParallelEmbedding(
+				config.vocab_size,
+				config.hidden_size,
+				prefix=f"{prefix}.embed_tokens",
+			)
+		else:
+			self.embed_tokens = PPMissingLayer()
+
+		def get_layer(layer_prefix: str) -> KimiDecoderLayer:
+			return KimiDecoderLayer(config, vllm_config, layer_prefix)
+
+		self.start_layer, self.end_layer, self.layers = make_layers(
+			config.num_hidden_layers,
+			get_layer,
+			prefix=f"{prefix}.layers",
+		)
+
+		if get_pp_group().is_last_rank:
+			self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+			if config.attn_res_block_size is not None:
+				self.output_attn_res_norm = RMSNorm(
+					config.hidden_size, eps=config.rms_norm_eps
+				)
+				self.output_attn_res_proj = ReplicatedLinear(
+					config.hidden_size,
+					1,
+					bias=False,
+					quant_config=None,
+					prefix=f"{prefix}.output_attn_res_proj",
+				)
+		else:
+			self.norm = PPMissingLayer()
+			if config.attn_res_block_size is not None:
+				self.output_attn_res_norm = PPMissingLayer()
+				self.output_attn_res_proj = PPMissingLayer()
+
+		world_size = get_tensor_model_parallel_world_size()
+		if config.num_attention_heads % world_size != 0:
+			raise ValueError(
+				"num_attention_heads must be divisible by tensor parallel size"
+			)
+
+	def make_empty_intermediate_tensors(
+		self,
+		batch_size: int,
+		dtype: torch.dtype,
+		device: torch.device,
+	) -> IntermediateTensors:
+		hidden_shape = (batch_size, self.config.hidden_size)
+		if self.config.attn_res_block_size is None:
+			return IntermediateTensors(
+				{
+					"hidden_states": torch.zeros(
+						hidden_shape, dtype=dtype, device=device
+					),
+					"residual": torch.zeros(
+						hidden_shape, dtype=dtype, device=device
+					),
+				}
+			)
+
+		residual_shape = (
+			batch_size,
+			cdiv(self.start_layer, self.config.attn_res_block_size),
+			self.config.hidden_size,
+		)
+		return IntermediateTensors(
+			{
+				"hidden_states": torch.zeros(
+					hidden_shape, dtype=dtype, device=device
+				),
+				"prefix_sum": torch.zeros(
+					hidden_shape, dtype=dtype, device=device
+				),
+				"residual": torch.zeros(
+					residual_shape, dtype=dtype, device=device
+				),
+			}
+		)
+
+	def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+		return self.embed_tokens(input_ids)
+
+	def _maybe_add_hidden_state(
+		self,
+		aux_hidden_states: list[torch.Tensor],
+		layer_idx: int,
+		hidden_states: torch.Tensor,
+		residual: torch.Tensor | None,
+	) -> list[torch.Tensor]:
+		if self.config.attn_res_block_size is not None:
+			residual = None
+		return super()._maybe_add_hidden_state(
+			aux_hidden_states, layer_idx, hidden_states, residual
+		)
+
+	def forward(
+		self,
+		input_ids: torch.Tensor | None,
+		positions: torch.Tensor,
+		intermediate_tensors: IntermediateTensors | None,
+		inputs_embeds: torch.Tensor | None = None,
+		**kwargs: object,
+	) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+		del kwargs
+		if get_pp_group().is_first_rank:
+			if inputs_embeds is not None:
+				hidden_states = inputs_embeds
+			else:
+				if input_ids is None:
+					raise ValueError("input_ids or inputs_embeds must be provided")
+				hidden_states = self.embed_input_ids(input_ids)
+			residual = None
+			prefix_sum = None
+		else:
+			if intermediate_tensors is None:
+				raise ValueError("intermediate_tensors must be provided on PP ranks")
+			hidden_states = intermediate_tensors["hidden_states"]
+			residual = intermediate_tensors["residual"]
+			prefix_sum = (
+				intermediate_tensors["prefix_sum"]
+				if self.config.attn_res_block_size is not None
+				else None
+			)
+
+		initial_hidden_states = hidden_states
+		if prefix_sum is not None:
+			initial_hidden_states = prefix_sum + hidden_states
+		aux_hidden_states = self._maybe_add_hidden_state(
+			[], self.start_layer, initial_hidden_states, residual
+		)
+		if self.config.attn_res_block_size is None:
+			for layer_idx, layer in enumerate(
+				self.layers[self.start_layer : self.end_layer],
+				start=self.start_layer,
+			):
+				hidden_states, prefix_sum, residual = layer(
+					positions=positions,
+					hidden_states=hidden_states,
+					residual=residual,
+					prefix_sum=prefix_sum,
+				)
+				self._maybe_add_hidden_state(
+					aux_hidden_states, layer_idx + 1, hidden_states, residual
+				)
+
+			if not get_pp_group().is_last_rank:
+				return IntermediateTensors(
+					{"hidden_states": hidden_states, "residual": residual}
+				)
+			if residual is not None:
+				hidden_states = hidden_states + residual
+			if aux_hidden_states:
+				return hidden_states, aux_hidden_states
+			return hidden_states
+
+		attn_res_block_size = self.config.attn_res_block_size
+		assert attn_res_block_size is not None
+		attn_res_block_num = cdiv(self.end_layer, attn_res_block_size)
+		block_residual = hidden_states.new_empty(
+			hidden_states.size(0), attn_res_block_num, hidden_states.size(1)
+		)
+		if residual is not None:
+			block_residual[:, : residual.size(1), :].copy_(residual)
+		residual = block_residual
+		if prefix_sum is None:
+			prefix_sum = hidden_states
+			hidden_states = None
+
+		for layer_idx, layer in enumerate(
+			self.layers[self.start_layer : self.end_layer],
+			start=self.start_layer,
+		):
+			hidden_states, prefix_sum, residual = layer(
+				positions=positions,
+				hidden_states=hidden_states,
+				residual=residual,
+				prefix_sum=prefix_sum,
+			)
+			if (layer_idx + 1) in self.aux_hidden_state_layers:
+				assert prefix_sum is not None
+				aux_state = prefix_sum + hidden_states
+				self._maybe_add_hidden_state(
+					aux_hidden_states, layer_idx + 1, aux_state, residual
+				)
+
+		assert prefix_sum is not None
+		if not get_pp_group().is_last_rank:
+			return IntermediateTensors(
+				{
+					"hidden_states": hidden_states,
+					"prefix_sum": prefix_sum,
+					"residual": residual,
+				}
+			)
+
+		hidden_states = attn_res(
+			prefix_sum,
+			hidden_states,
+			residual,
+			self.output_attn_res_norm.weight,
+			self.output_attn_res_proj.weight.squeeze(0),
+			None,
+			num_blocks=attn_res_block_num,
+			block_write_idx=-1,
+			eps=self.output_attn_res_norm.variance_epsilon,
+			output_norm_eps=0.0,
+		)
+		if aux_hidden_states:
+			return hidden_states, aux_hidden_states
+		return hidden_states
+
+	def load_weights(
+		self,
+		weights: Iterable[
+			tuple[str, torch.Tensor] | tuple[str, torch.Tensor, dict[str, Any]]
+		],
+	) -> set[str]:
+		kda_config = self.config.linear_attn_config
+		use_full_rank_gate = bool(
+			kda_config and kda_config.get("use_full_rank_gate", False)
+		)
+		beta_shard_id = 5 if use_full_rank_gate else 3
+		stacked_params_mapping = [
+			(".in_proj_qkvgfab", ".q_proj", 0),
+			(".in_proj_qkvgfab", ".k_proj", 1),
+			(".in_proj_qkvgfab", ".v_proj", 2),
+			(".in_proj_qkvgfab", ".b_proj", beta_shard_id),
+			(".in_proj_qkvgfab", ".f_a_proj", 4),
+			(".conv1d", ".q_conv1d", 0),
+			(".conv1d", ".k_conv1d", 1),
+			(".conv1d", ".v_conv1d", 2),
+			(".gate_up_proj", ".gate_proj", 0),
+			(".gate_up_proj", ".up_proj", 1),
+		]
+		if use_full_rank_gate:
+			stacked_params_mapping.append(
+				(".in_proj_qkvgfab", ".g_proj", 3)
+			)
+		if self.config.q_lora_rank is not None:
+			stacked_params_mapping.extend(
+				[
+					(".fused_qkv_a_proj", ".q_a_proj", 0),
+					(".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
+				]
+			)
+		expert_params_mapping = (
+			fused_moe_make_expert_params_mapping(
+				self,
+				ckpt_gate_proj_name="w1",
+				ckpt_down_proj_name="w2",
+				ckpt_up_proj_name="w3",
+				num_experts=self.config.num_experts,
+			)
+			if self.config.is_moe
+			else []
+		)
+		params_dict = dict(self.named_parameters())
+		experts_unpacked = not any(
+			name.endswith("w13_weight_packed") for name in params_dict
+		)
+		loaded_params: set[str] = set()
+		for weight in weights:
+			name, loaded_weight = weight[0], weight[1]
+			loader_kwargs: dict[str, Any] = weight[2] if len(weight) > 2 else {}
+			if "rotary_emb.inv_freq" in name:
+				continue
+			if experts_unpacked and name.endswith(".weight_packed"):
+				name = name.replace(".weight_packed", ".weight")
+			if get_spec_layer_idx_from_weight_name(self.config, name) is not None:
+				continue
+			if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
+				continue
+
+			for param_name, weight_name, shard_id in stacked_params_mapping:
+				if weight_name not in name:
+					continue
+				if "mlp.experts." in name and name not in params_dict:
+					continue
+				mapped_name = name.replace(weight_name, param_name)
+				if mapped_name not in params_dict:
+					continue
+				name = mapped_name
+				if is_pp_missing_parameter(name, self):
+					break
+				param = params_dict[name]
+				param.weight_loader(param, loaded_weight, shard_id)
+				loaded_params.add(name)
+				break
+			else:
+				for (
+					expert_param_name,
+					expert_weight_name,
+					expert_id,
+					expert_shard_id,
+				) in expert_params_mapping:
+					if expert_weight_name not in name:
+						continue
+					name = name.replace(expert_weight_name, expert_param_name)
+					if is_pp_missing_parameter(name, self):
+						break
+					param = params_dict[name]
+					param.weight_loader(
+						param,
+						loaded_weight,
+						name,
+						expert_id=expert_id,
+						shard_id=expert_shard_id,
+					)
+					loaded_params.add(name)
+					break
+				else:
+					if name.endswith(".bias") and name not in params_dict:
+						continue
+					mapped_name = maybe_remap_kv_scale_name(name, params_dict)
+					if mapped_name is None:
+						continue
+					name = mapped_name
+					if is_pp_missing_parameter(name, self):
+						continue
+					param = params_dict[name]
+					weight_loader = getattr(
+						param, "weight_loader", default_weight_loader
+					)
+					weight_loader(param, loaded_weight, **loader_kwargs)
+					loaded_params.add(name)
+		return loaded_params
+
+
 class KimiLinearForCausalLM(nn.Module):
 	"""Placeholder for the native Intel XPU Kimi-K3 text model."""
 
@@ -669,6 +1025,7 @@ class KimiLinearForCausalLM(nn.Module):
 __all__ = [
 	"KimiDecoderLayer",
 	"KimiLinearForCausalLM",
+	"KimiLinearModel",
 	"KimiMLAAttention",
 	"KimiMoE",
 ]

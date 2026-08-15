@@ -3,7 +3,12 @@
 """Intel XPU implementation of Kimi-K3."""
 
 from .kda import KimiK3DeltaAttention, KimiLinearDeltaAttention
-from .linear import KimiDecoderLayer, KimiLinearForCausalLM, KimiMLAAttention
+from .linear import (
+    KimiDecoderLayer,
+    KimiLinearForCausalLM,
+    KimiLinearModel,
+    KimiMLAAttention,
+)
 from .model import KimiK3ForConditionalGeneration
 from .mtp import KimiK3MTP
 
@@ -14,5 +19,6 @@ __all__ = [
     "KimiK3MTP",
     "KimiLinearDeltaAttention",
     "KimiLinearForCausalLM",
+    "KimiLinearModel",
     "KimiMLAAttention",
 ]

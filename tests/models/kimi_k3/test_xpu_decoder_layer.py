@@ -72,6 +72,70 @@ class _FakeMLA(nn.Module):
         return torch.full((1, 1), 4.0)
 
 
+class _SingleRankPPGroup:
+    is_first_rank = True
+    is_last_rank = True
+
+
+class _StandardModelLayer(nn.Module):
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        prefix_sum: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, None, torch.Tensor]:
+        del positions
+        if residual is None:
+            residual = hidden_states * 10
+        return hidden_states + 1, prefix_sum, residual
+
+
+class _AttnResModelLayer(nn.Module):
+    def __init__(self, expected_delta: torch.Tensor | None, increment: float) -> None:
+        super().__init__()
+        self.expected_delta = expected_delta
+        self.increment = increment
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor | None,
+        residual: torch.Tensor,
+        prefix_sum: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        del positions
+        if self.expected_delta is None:
+            assert hidden_states is None
+        else:
+            torch.testing.assert_close(hidden_states, self.expected_delta)
+        delta = prefix_sum.new_full(prefix_sum.shape, self.increment)
+        return delta, prefix_sum + self.increment * 10, residual
+
+
+class _FusedWeightModule(nn.Module):
+    def __init__(self, calls: list[tuple[torch.Tensor, int]]) -> None:
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(4, 2))
+
+        def weight_loader(
+            param: torch.Tensor,
+            loaded_weight: torch.Tensor,
+            shard_id: int,
+        ) -> None:
+            assert param is self.weight
+            calls.append((loaded_weight, shard_id))
+
+        self.weight.weight_loader = weight_loader  # type: ignore[attr-defined]
+
+
+class _WeightLoaderLayer(nn.Module):
+    def __init__(self, calls: list[tuple[torch.Tensor, int]]) -> None:
+        super().__init__()
+        self.mlp = nn.Module()
+        self.mlp.gate_up_proj = _FusedWeightModule(calls)
+
+
 @pytest.mark.parametrize(
     ("attention_cls", "gate_lower_bound"),
     [
@@ -292,6 +356,124 @@ def test_xpu_decoder_layer_runs_attention_then_mlp() -> None:
     torch.testing.assert_close(output, torch.tensor([[14.0, 18.0]]))
     assert prefix_sum is None
     torch.testing.assert_close(residual, torch.tensor([[6.0, 8.0]]))
+
+
+def test_xpu_kimi_linear_model_combines_standard_residual(monkeypatch) -> None:
+    monkeypatch.setattr(kimi_xpu, "get_pp_group", lambda: _SingleRankPPGroup())
+    model = object.__new__(kimi_xpu.KimiLinearModel)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(attn_res_block_size=None)
+    model.start_layer = 0
+    model.end_layer = 2
+    model.layers = nn.ModuleList([_StandardModelLayer(), _StandardModelLayer()])
+    inputs_embeds = torch.tensor([[1.0, 2.0]])
+
+    output = model(
+        input_ids=None,
+        positions=torch.tensor([0]),
+        intermediate_tensors=None,
+        inputs_embeds=inputs_embeds,
+    )
+
+    assert isinstance(output, torch.Tensor)
+    torch.testing.assert_close(output, torch.tensor([[13.0, 24.0]]))
+
+
+def test_xpu_kimi_linear_model_preserves_attn_res_states(monkeypatch) -> None:
+    monkeypatch.setattr(kimi_xpu, "get_pp_group", lambda: _SingleRankPPGroup())
+    model = object.__new__(kimi_xpu.KimiLinearModel)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(attn_res_block_size=2)
+    model.start_layer = 0
+    model.end_layer = 2
+    first_delta = torch.ones(1, 2)
+    model.layers = nn.ModuleList(
+        [
+            _AttnResModelLayer(None, 1.0),
+            _AttnResModelLayer(first_delta, 2.0),
+        ]
+    )
+    model.output_attn_res_norm = _WeightedNorm(2)
+    model.output_attn_res_proj = _Projection(2)
+    calls: list[tuple[torch.Tensor, torch.Tensor | None, torch.Size]] = []
+
+    def fake_attn_res(
+        prefix: torch.Tensor,
+        delta: torch.Tensor | None,
+        blocks: torch.Tensor,
+        *args: object,
+        **kwargs: object,
+    ) -> torch.Tensor:
+        del args, kwargs
+        calls.append((prefix, delta, blocks.shape))
+        assert delta is not None
+        return prefix + delta
+
+    monkeypatch.setattr(kimi_xpu, "attn_res", fake_attn_res)
+    inputs_embeds = torch.tensor([[1.0, 2.0]])
+
+    output = model(
+        input_ids=None,
+        positions=torch.tensor([0]),
+        intermediate_tensors=None,
+        inputs_embeds=inputs_embeds,
+    )
+
+    assert isinstance(output, torch.Tensor)
+    assert len(calls) == 1
+    torch.testing.assert_close(calls[0][0], torch.tensor([[31.0, 32.0]]))
+    torch.testing.assert_close(calls[0][1], torch.full((1, 2), 2.0))
+    assert calls[0][2] == torch.Size([1, 1, 2])
+    torch.testing.assert_close(output, torch.tensor([[33.0, 34.0]]))
+
+
+def test_xpu_kimi_linear_model_allocates_attn_res_intermediates() -> None:
+    model = object.__new__(kimi_xpu.KimiLinearModel)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(attn_res_block_size=2, hidden_size=4)
+    model.start_layer = 4
+
+    intermediate_tensors = model.make_empty_intermediate_tensors(
+        batch_size=3,
+        dtype=torch.bfloat16,
+        device=torch.device("cpu"),
+    )
+
+    assert set(intermediate_tensors.tensors) == {
+        "hidden_states",
+        "prefix_sum",
+        "residual",
+    }
+    assert intermediate_tensors["hidden_states"].shape == (3, 4)
+    assert intermediate_tensors["prefix_sum"].shape == (3, 4)
+    assert intermediate_tensors["residual"].shape == (3, 2, 4)
+
+
+def test_xpu_kimi_linear_model_loads_fused_mlp_shards() -> None:
+    calls: list[tuple[torch.Tensor, int]] = []
+    model = object.__new__(kimi_xpu.KimiLinearModel)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(
+        linear_attn_config=None,
+        q_lora_rank=None,
+        is_moe=False,
+        num_nextn_predict_layers=0,
+    )
+    model.layers = nn.ModuleList([_WeightLoaderLayer(calls)])
+    gate_weight = torch.ones(2, 2)
+    up_weight = torch.full((2, 2), 2.0)
+
+    loaded = model.load_weights(
+        [
+            ("layers.0.mlp.gate_proj.weight", gate_weight),
+            ("layers.0.mlp.up_proj.weight", up_weight),
+        ]
+    )
+
+    assert loaded == {"layers.0.mlp.gate_up_proj.weight"}
+    assert len(calls) == 2
+    assert calls[0][0] is gate_weight and calls[0][1] == 0
+    assert calls[1][0] is up_weight and calls[1][1] == 1
 
 
 def test_xpu_decoder_layer_uses_three_attn_res_states(monkeypatch) -> None:
