@@ -111,7 +111,13 @@ def get_model_structural_tag(
         return None
 
     if tool_choice == "auto" and not _any_tool_strict(tools):
-        return None
+        # Trigger-based models use TriggeredTagsFormat for auto tool choice,
+        # which only enforces the format when the model emits a tool call
+        # trigger. It does not force a tool call, so it's safe to apply
+        # even without strict tools. This prevents malformed/empty-argument
+        # tool calls at the decoding level.
+        if model not in ("qwen_3_coder", "qwen_3_5", "qwen_3"):
+            return None
 
     dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
     dumped_tool_choice = _dump_tool_choice_for_xgrammar(tool_choice)
