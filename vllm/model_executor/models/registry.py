@@ -141,6 +141,7 @@ _TEXT_GENERATION_MODELS = {
     "IquestMoeV13ForCausalLM": ("iquest_moe_v13", "IquestMoeV13ForCausalLM"),
     "IquestMoeV12ForCausalLM": ("iquest_moe_v12", "IquestMoeV12ForCausalLM"),
     "IquestMoeV11ForCausalLM": ("iquest_moe_v11", "IquestMoeV11ForCausalLM"),
+    "M2ForCausalLM": ("iquest_moe_m2_v10", "IquestMoeM2ForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "Jais2ForCausalLM": ("jais2", "Jais2ForCausalLM"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),

@@ -96,6 +96,51 @@ AttnTypeStr = Literal[
 ]
 
 
+# The IQuest M2 family spells the over-encoding and sink-attention switches
+# differently from v1.3.  Identify the family from ``model_type`` and translate,
+# rather than probing for either spelling on every config: that keeps the two
+# families strictly separated, and leaves every non-M2 config with the exact
+# attribute lookup it had before these aliases existed.
+_M2_MODEL_TYPES = frozenset({"m2"})
+
+_M2_CONFIG_ALIASES = {
+    # v1.3 spelling -> M2 spelling
+    "use_over_encoding": "oe_enable",
+    "n_head_per_ngram": "oe_n_head_per_ngram",
+    "n_embed_per_ngram": "oe_n_embed_per_ngram",
+    "max_ngram_size": "oe_max_ngram_size",
+    "oe_padding_token_id": "oe_pad_token_id",
+    "enable_sink_attention": "enable_sink_token",
+}
+
+
+def _get_iquest_attr(config: Any, name: str, default: Any) -> Any:
+    """Read an IQuest feature switch, honouring the M2 spelling of ``name``.
+
+    For anything that is not an M2 config this is exactly
+    ``getattr(config, name, default)``.
+    """
+    if getattr(config, "model_type", None) in _M2_MODEL_TYPES:
+        name = _M2_CONFIG_ALIASES.get(name, name)
+    elif name in _M2_CONFIG_ALIASES and not hasattr(config, name):
+        # An M2-shaped checkpoint whose model_type we do not recognise would
+        # quietly lose over-encoding / sink attention -- the server would still
+        # start and still emit fluent text -- so make the mismatch audible.
+        alias = _M2_CONFIG_ALIASES[name]
+        if getattr(config, alias, None) is not None:
+            logger.warning_once(
+                "Config defines %r but not %r, and its model_type %r is not a "
+                "known M2 variant, so %r will be treated as unset. If this is "
+                "an M2 checkpoint, add its model_type to _M2_MODEL_TYPES in "
+                "vllm/config/model.py.",
+                alias,
+                name,
+                getattr(config, "model_type", None),
+                name,
+            )
+    return getattr(config, name, default)
+
+
 @config(config=ConfigDict(arbitrary_types_allowed=True))
 class ModelConfig:
     """Configuration for the model."""
@@ -1268,8 +1313,10 @@ class ModelConfig:
         return chunk_size
 
     # NOTE(yxing): over encoding configuration
+    # NOTE: these getters name the IQuest v1.3 keys; `_get_iquest_attr`
+    # translates them for the M2 family so both checkpoints work unmodified.
     def get_enable_oe_embedding(self) -> bool:
-        return getattr(self.hf_text_config, "use_over_encoding", False)
+        return _get_iquest_attr(self.hf_text_config, "use_over_encoding", False)
 
     def get_oe_eos_token_id(self) -> int:
         return getattr(self.hf_text_config, "eos_token_id", 151645)
@@ -1279,22 +1326,22 @@ class ModelConfig:
         return getattr(self.hf_text_config, "num_sink_tokens", 0)
 
     def get_enable_sink_attention(self) -> bool:
-        return getattr(self.hf_text_config, "enable_sink_attention", False)
+        return _get_iquest_attr(self.hf_text_config, "enable_sink_attention", False)
 
     def get_oe_vocab_size(self) -> int:
         return getattr(self.hf_text_config, "oe_vocab_size", 0)
 
     def get_n_head_per_ngram(self) -> int:
-        return getattr(self.hf_text_config, "n_head_per_ngram", 0)
+        return _get_iquest_attr(self.hf_text_config, "n_head_per_ngram", 0)
 
     def get_n_embed_per_ngram(self) -> int:
-        return getattr(self.hf_text_config, "n_embed_per_ngram", 0)
+        return _get_iquest_attr(self.hf_text_config, "n_embed_per_ngram", 0)
 
     def get_max_ngram_size(self) -> int:
-        return getattr(self.hf_text_config, "max_ngram_size", 0)
+        return _get_iquest_attr(self.hf_text_config, "max_ngram_size", 0)
 
     def get_oe_padding_token_id(self) -> int:
-        return getattr(self.hf_text_config, "oe_padding_token_id", 0)
+        return _get_iquest_attr(self.hf_text_config, "oe_padding_token_id", 0)
 
     def get_oe_base_scale(self) -> float:
         return getattr(self.hf_text_config, "embed_scale", 1.0)
