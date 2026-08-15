@@ -5,12 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import torch
-import torch.nn as nn
 
 from vllm.config import VllmConfig
-from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.states import RequestState
@@ -151,16 +150,8 @@ def _ngram_finalize_kernel(
     tl.store(drafts_ptr + b * K + k_iota, out, mask=k_in_range)
 
 
-class NgramGPUSpeculator:
-    """V2-compatible GPU n-gram speculator.
-
-    Drafts are proposed entirely on GPU by scanning each request's token
-    history (`RequestState.all_token_ids`) in place for the longest n-gram
-    suffix match. The per-request count of usable drafts is written to the
-    persistent `num_valid_drafts` tensor, which the model runner's draft
-    trimmer consumes at the next step to shrink verification on GPU without
-    any CPU<->GPU synchronization.
-    """
+class NgramGPUSpeculator(BaseSpeculator):
+    """V2-compatible GPU n-gram speculator."""
 
     supports_mm_inputs = False
     draft_logits = None
@@ -220,22 +211,6 @@ class NgramGPUSpeculator:
         )
 
         self.req_states: RequestState | None = None
-
-    def load_model(self, target_model: nn.Module) -> None:
-        """No weights to load — ngram is a data-only proposer."""
-        pass
-
-    def set_attn(self, *args: Any, **kwargs: Any) -> None:
-        """No attention layers owned by this speculator."""
-        pass
-
-    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        """N-gram kernels are launched directly; no explicit CG capture."""
-        pass
-
-    def capture(self, *args: Any, **kwargs: Any) -> None:
-        """No graph capture phase required."""
-        pass
 
     @torch.inference_mode()
     def propose(

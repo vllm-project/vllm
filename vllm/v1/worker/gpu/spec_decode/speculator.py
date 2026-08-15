@@ -30,13 +30,11 @@ logger = init_logger(__name__)
 
 
 class BaseSpeculator(ABC):
-    @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
-        pass
+        return None
 
-    @abstractmethod
     def capture(self) -> None:
-        pass
+        return None
 
     @abstractmethod
     def propose(
