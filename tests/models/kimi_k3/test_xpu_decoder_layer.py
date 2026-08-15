@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import nullcontext
 from types import MethodType, SimpleNamespace
 
 import pytest
@@ -11,6 +12,7 @@ import torch.nn.functional as F
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.models.kimi_k3.xpu import kda as kimi_xpu_kda
 from vllm.models.kimi_k3.xpu import linear as kimi_xpu
+from vllm.models.kimi_k3.xpu import model as kimi_xpu_model
 from vllm.models.kimi_k3.xpu.ops.attn_res import attn_res
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -213,6 +215,57 @@ class _WrapperLogitsProcessor:
     ) -> torch.Tensor:
         del lm_head
         return hidden_states * self.args[1]
+
+
+class _FakeMambaCache:
+    def __init__(self) -> None:
+        self.copied_inputs: tuple[object, dict[str, object]] | None = None
+
+    def copy_inputs_before_cuda_graphs(
+        self, input_buffers: object, **kwargs: object
+    ) -> None:
+        self.copied_inputs = (input_buffers, kwargs)
+
+    def get_seqlen_agnostic_capture_inputs(
+        self, batch_size: int
+    ) -> dict[str, torch.Tensor]:
+        return {"state": torch.full((batch_size,), 7)}
+
+
+class _TopLevelLanguageModel(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.mamba_cache = _FakeMambaCache()
+        self.forward_args: tuple[object, ...] | None = None
+
+    def make_empty_intermediate_tensors(
+        self,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> IntermediateTensors:
+        return IntermediateTensors(
+            {"hidden_states": torch.zeros(batch_size, 2, dtype=dtype, device=device)}
+        )
+
+    def forward(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None,
+    ) -> torch.Tensor:
+        self.forward_args = (
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+        )
+        return torch.full((1, 2), 9.0)
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return hidden_states + 1
 
 
 @pytest.mark.parametrize(
@@ -435,6 +488,53 @@ def test_xpu_decoder_layer_runs_attention_then_mlp() -> None:
     torch.testing.assert_close(output, torch.tensor([[14.0, 18.0]]))
     assert prefix_sum is None
     torch.testing.assert_close(residual, torch.tensor([[6.0, 8.0]]))
+
+
+def test_xpu_kimi_linear_model_layer_factory_accepts_prefix(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeDecoder(nn.Module):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__()
+            captured["layer_args"] = args
+            captured["layer_kwargs"] = kwargs
+
+    class _FakeLayer(nn.Module):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__()
+
+    def fake_make_layers(num_layers, layer_fn, prefix):
+        layer = layer_fn(prefix=f"{prefix}.0")
+        return 0, num_layers, nn.ModuleList([layer])
+
+    monkeypatch.setattr(kimi_xpu, "KimiDecoderLayer", _FakeDecoder)
+    monkeypatch.setattr(kimi_xpu, "VocabParallelEmbedding", _FakeLayer)
+    monkeypatch.setattr(kimi_xpu, "RMSNorm", _FakeLayer)
+    monkeypatch.setattr(kimi_xpu, "make_layers", fake_make_layers)
+    monkeypatch.setattr(kimi_xpu, "get_pp_group", lambda: _SingleRankPPGroup())
+    monkeypatch.setattr(
+        kimi_xpu, "get_tensor_model_parallel_world_size", lambda: 1
+    )
+    config = SimpleNamespace(
+        vocab_size=8,
+        hidden_size=4,
+        num_hidden_layers=1,
+        rms_norm_eps=1e-5,
+        attn_res_block_size=None,
+        num_attention_heads=2,
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=config),
+    )
+
+    model = kimi_xpu.KimiLinearModel(
+        vllm_config=vllm_config,  # type: ignore[arg-type]
+        prefix="model",
+    )
+
+    assert len(model.layers) == 1
+    assert captured["layer_args"] == (config, vllm_config, "model.layers.0")
+    assert captured["layer_kwargs"] == {}
 
 
 def test_xpu_kimi_linear_model_combines_standard_residual(monkeypatch) -> None:
@@ -806,6 +906,108 @@ def test_xpu_kimi_linear_for_causal_lm_loads_weights(monkeypatch) -> None:
         ("model.layers.0.input_layernorm.weight", legacy_layer_weight),
         ("lm_head.weight", lm_head_weight),
         ("model.embed_tokens.weight", plain_text_weight),
+    ]
+
+
+def test_xpu_kimi_k3_text_only_wrapper_delegates_serving(monkeypatch) -> None:
+    language_model = _TopLevelLanguageModel()
+    captured: dict[str, object] = {}
+
+    def fake_init_registered_model(**kwargs: object) -> nn.Module:
+        captured.update(kwargs)
+        return language_model
+
+    monkeypatch.setattr(
+        kimi_xpu_model,
+        "init_vllm_registered_model",
+        fake_init_registered_model,
+    )
+    monkeypatch.setattr(
+        kimi_xpu_model.KimiK3ForConditionalGeneration,
+        "_mark_language_model",
+        lambda self, vllm_config: nullcontext(),
+    )
+    text_config = SimpleNamespace(hidden_size=2)
+    outer_config = SimpleNamespace(text_config=text_config)
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_config=outer_config),
+        quant_config="quant",
+    )
+
+    model = kimi_xpu_model.KimiK3ForConditionalGeneration(
+        vllm_config,  # type: ignore[arg-type]
+        prefix="root",
+    )
+
+    assert captured == {
+        "vllm_config": vllm_config,
+        "hf_config": text_config,
+        "prefix": "root.language_model",
+        "architectures": ["KimiLinearForCausalLM"],
+    }
+    assert model.embed_multimodal(pixel_values=None, grid_thws=torch.ones(1)) is None
+    with pytest.raises(NotImplementedError, match="--limit-mm-per-prompt"):
+        model.embed_multimodal(pixel_values=torch.ones(1))
+
+    input_ids = torch.tensor([1])
+    positions = torch.tensor([0])
+    inputs_embeds = torch.ones(1, 2)
+    output = model(input_ids, positions, inputs_embeds=inputs_embeds)
+    torch.testing.assert_close(output, torch.full((1, 2), 9.0))
+    assert language_model.forward_args == (
+        input_ids,
+        positions,
+        None,
+        inputs_embeds,
+    )
+    torch.testing.assert_close(
+        model.compute_logits(torch.ones(1, 2)), torch.full((1, 2), 2.0)
+    )
+
+    input_buffers = {"state": torch.zeros(1)}
+    model.copy_inputs_before_cuda_graphs(input_buffers, token_count=1)
+    assert language_model.mamba_cache.copied_inputs == (
+        input_buffers,
+        {"token_count": 1},
+    )
+    capture_inputs = model.get_seqlen_agnostic_capture_inputs(3)
+    torch.testing.assert_close(capture_inputs["state"], torch.full((3,), 7))
+
+
+def test_xpu_kimi_k3_text_only_weight_mapping(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _Loader:
+        def __init__(self, model: nn.Module) -> None:
+            captured["model"] = model
+
+        def load_weights(self, weights, *, mapper) -> set[str]:
+            mapped = list(mapper.apply(weights))
+            captured["mapped"] = mapped
+            return {name for name, _ in mapped}
+
+    monkeypatch.setattr(kimi_xpu_model, "AutoWeightsLoader", _Loader)
+    model = object.__new__(kimi_xpu_model.KimiK3ForConditionalGeneration)
+    nn.Module.__init__(model)
+    current_weight = torch.ones(1)
+    legacy_weight = torch.full((1,), 2.0)
+    vision_weight = torch.full((1,), 3.0)
+    projector_weight = torch.full((1,), 4.0)
+    weights = [
+        ("language_model.model.norm.weight", current_weight),
+        ("language_model.layers.0.input_layernorm.weight", legacy_weight),
+        ("vision_tower.encoder.weight", vision_weight),
+        ("mm_projector.proj.0.weight", projector_weight),
+    ]
+
+    assert model.load_weights(weights) == {
+        "language_model.model.norm.weight",
+        "language_model.model.layers.0.input_layernorm.weight",
+    }
+    assert captured["model"] is model
+    assert captured["mapped"] == [
+        ("language_model.model.norm.weight", current_weight),
+        ("language_model.model.layers.0.input_layernorm.weight", legacy_weight),
     ]
 
 

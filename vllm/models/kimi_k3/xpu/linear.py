@@ -698,8 +698,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 		else:
 			self.embed_tokens = PPMissingLayer()
 
-		def get_layer(layer_prefix: str) -> KimiDecoderLayer:
-			return KimiDecoderLayer(config, vllm_config, layer_prefix)
+		def get_layer(prefix: str) -> KimiDecoderLayer:
+			return KimiDecoderLayer(config, vllm_config, prefix)
 
 		self.start_layer, self.end_layer, self.layers = make_layers(
 			config.num_hidden_layers,
