@@ -671,6 +671,8 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 		super().__init__()
 		config = vllm_config.model_config.hf_text_config
 		self.config = config
+		self.attn_res_block_size: int | None = config.attn_res_block_size
+		self.use_attn_res = self.attn_res_block_size is not None
 		self.vocab_size = config.vocab_size
 
 		if get_pp_group().is_first_rank:
@@ -689,6 +691,11 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 			config.num_hidden_layers,
 			get_layer,
 			prefix=f"{prefix}.layers",
+		)
+		self.num_attn_res_blocks = (
+			cdiv(self.end_layer, self.attn_res_block_size)
+			if self.attn_res_block_size is not None
+			else 0
 		)
 
 		if get_pp_group().is_last_rank:
@@ -723,7 +730,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 		device: torch.device,
 	) -> IntermediateTensors:
 		hidden_shape = (batch_size, self.config.hidden_size)
-		if self.config.attn_res_block_size is None:
+		if not self.use_attn_res:
 			return IntermediateTensors(
 				{
 					"hidden_states": torch.zeros(
@@ -735,17 +742,15 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 				}
 			)
 
+		assert self.attn_res_block_size is not None
 		residual_shape = (
 			batch_size,
-			cdiv(self.start_layer, self.config.attn_res_block_size),
+			cdiv(self.start_layer, self.attn_res_block_size),
 			self.config.hidden_size,
 		)
 		return IntermediateTensors(
 			{
 				"hidden_states": torch.zeros(
-					hidden_shape, dtype=dtype, device=device
-				),
-				"prefix_sum": torch.zeros(
 					hidden_shape, dtype=dtype, device=device
 				),
 				"residual": torch.zeros(
@@ -793,11 +798,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 				raise ValueError("intermediate_tensors must be provided on PP ranks")
 			hidden_states = intermediate_tensors["hidden_states"]
 			residual = intermediate_tensors["residual"]
-			prefix_sum = (
-				intermediate_tensors["prefix_sum"]
-				if self.config.attn_res_block_size is not None
-				else None
-			)
+			prefix_sum = None
 
 		initial_hidden_states = hidden_states
 		if prefix_sum is not None:
@@ -805,7 +806,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 		aux_hidden_states = self._maybe_add_hidden_state(
 			[], self.start_layer, initial_hidden_states, residual
 		)
-		if self.config.attn_res_block_size is None:
+		if not self.use_attn_res:
 			for layer_idx, layer in enumerate(
 				self.layers[self.start_layer : self.end_layer],
 				start=self.start_layer,
@@ -830,11 +831,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 				return hidden_states, aux_hidden_states
 			return hidden_states
 
-		attn_res_block_size = self.config.attn_res_block_size
+		attn_res_block_size = self.attn_res_block_size
 		assert attn_res_block_size is not None
-		attn_res_block_num = cdiv(self.end_layer, attn_res_block_size)
 		block_residual = hidden_states.new_empty(
-			hidden_states.size(0), attn_res_block_num, hidden_states.size(1)
+			hidden_states.size(0), self.num_attn_res_blocks, hidden_states.size(1)
 		)
 		if residual is not None:
 			block_residual[:, : residual.size(1), :].copy_(residual)
@@ -862,10 +862,10 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 
 		assert prefix_sum is not None
 		if not get_pp_group().is_last_rank:
+			assert hidden_states is not None
 			return IntermediateTensors(
 				{
-					"hidden_states": hidden_states,
-					"prefix_sum": prefix_sum,
+					"hidden_states": prefix_sum + hidden_states,
 					"residual": residual,
 				}
 			)
@@ -877,7 +877,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
 			self.output_attn_res_norm.weight,
 			self.output_attn_res_proj.weight.squeeze(0),
 			None,
-			num_blocks=attn_res_block_num,
+			num_blocks=self.num_attn_res_blocks,
 			block_write_idx=-1,
 			eps=self.output_attn_res_norm.variance_epsilon,
 			output_norm_eps=0.0,

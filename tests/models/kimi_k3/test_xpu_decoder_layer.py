@@ -78,6 +78,16 @@ class _SingleRankPPGroup:
     is_last_rank = True
 
 
+class _FirstPPGroup:
+    is_first_rank = True
+    is_last_rank = False
+
+
+class _LastPPGroup:
+    is_first_rank = False
+    is_last_rank = True
+
+
 class _StandardModelLayer(nn.Module):
     def forward(
         self,
@@ -420,6 +430,9 @@ def test_xpu_kimi_linear_model_combines_standard_residual(monkeypatch) -> None:
     model = object.__new__(kimi_xpu.KimiLinearModel)
     nn.Module.__init__(model)
     model.config = SimpleNamespace(attn_res_block_size=None)
+    model.attn_res_block_size = None
+    model.use_attn_res = False
+    model.num_attn_res_blocks = 0
     model.start_layer = 0
     model.end_layer = 2
     model.layers = nn.ModuleList([_StandardModelLayer(), _StandardModelLayer()])
@@ -441,6 +454,9 @@ def test_xpu_kimi_linear_model_preserves_attn_res_states(monkeypatch) -> None:
     model = object.__new__(kimi_xpu.KimiLinearModel)
     nn.Module.__init__(model)
     model.config = SimpleNamespace(attn_res_block_size=2)
+    model.attn_res_block_size = 2
+    model.use_attn_res = True
+    model.num_attn_res_blocks = 1
     model.start_layer = 0
     model.end_layer = 2
     first_delta = torch.ones(1, 2)
@@ -488,6 +504,8 @@ def test_xpu_kimi_linear_model_allocates_attn_res_intermediates() -> None:
     model = object.__new__(kimi_xpu.KimiLinearModel)
     nn.Module.__init__(model)
     model.config = SimpleNamespace(attn_res_block_size=2, hidden_size=4)
+    model.attn_res_block_size = 2
+    model.use_attn_res = True
     model.start_layer = 4
 
     intermediate_tensors = model.make_empty_intermediate_tensors(
@@ -498,12 +516,61 @@ def test_xpu_kimi_linear_model_allocates_attn_res_intermediates() -> None:
 
     assert set(intermediate_tensors.tensors) == {
         "hidden_states",
-        "prefix_sum",
         "residual",
     }
     assert intermediate_tensors["hidden_states"].shape == (3, 4)
-    assert intermediate_tensors["prefix_sum"].shape == (3, 4)
     assert intermediate_tensors["residual"].shape == (3, 2, 4)
+
+
+def test_xpu_kimi_linear_model_attn_res_crosses_pp_boundary(monkeypatch) -> None:
+    model = object.__new__(kimi_xpu.KimiLinearModel)
+    nn.Module.__init__(model)
+    model.config = SimpleNamespace(attn_res_block_size=2)
+    model.attn_res_block_size = 2
+    model.use_attn_res = True
+    model.num_attn_res_blocks = 1
+    model.start_layer = 0
+    model.end_layer = 1
+    model.layers = nn.ModuleList([_AttnResModelLayer(None, 1.0)])
+    inputs_embeds = torch.tensor([[1.0, 2.0]])
+    monkeypatch.setattr(kimi_xpu, "get_pp_group", lambda: _FirstPPGroup())
+
+    intermediate = model(
+        input_ids=None,
+        positions=torch.tensor([0]),
+        intermediate_tensors=None,
+        inputs_embeds=inputs_embeds,
+    )
+
+    assert isinstance(intermediate, IntermediateTensors)
+    assert set(intermediate.tensors) == {"hidden_states", "residual"}
+    torch.testing.assert_close(
+        intermediate["hidden_states"], torch.tensor([[12.0, 13.0]])
+    )
+    assert intermediate["residual"].shape == (1, 1, 2)
+
+    model.start_layer = 1
+    model.end_layer = 2
+    model.layers = nn.ModuleList(
+        [nn.Identity(), _AttnResModelLayer(None, 2.0)]
+    )
+    model.output_attn_res_norm = _WeightedNorm(2)
+    model.output_attn_res_proj = _Projection(2)
+    monkeypatch.setattr(kimi_xpu, "get_pp_group", lambda: _LastPPGroup())
+    monkeypatch.setattr(
+        kimi_xpu,
+        "attn_res",
+        lambda prefix, delta, blocks, *args, **kwargs: prefix + delta,
+    )
+
+    output = model(
+        input_ids=None,
+        positions=torch.tensor([0]),
+        intermediate_tensors=intermediate,
+    )
+
+    assert isinstance(output, torch.Tensor)
+    torch.testing.assert_close(output, torch.tensor([[34.0, 35.0]]))
 
 
 def test_xpu_kimi_linear_model_loads_fused_mlp_shards() -> None:
