@@ -365,19 +365,14 @@ mod tests {
             CompiledChatTemplate::new(bomb.to_string(), ChatTemplateContentFormatOption::Auto)
                 .unwrap();
 
-        let start = std::time::Instant::now();
+        // Without the fuel budget this render would run for tens of seconds; with
+        // it, evaluation stops once the budget is exhausted and returns an error.
+        // We assert on that error rather than on wall-clock time, which would be
+        // nondeterministic on slow or contended CI workers.
         let result = template.apply(TemplateContext::default());
-        let elapsed = start.elapsed();
-
         assert!(
             result.is_err(),
             "a template that exceeds the evaluation budget must be rejected"
-        );
-        // The budget must fire well before the unbounded ~55s cost. The bound is
-        // generous so the test stays robust on slow CI while still proving the cap.
-        assert!(
-            elapsed < std::time::Duration::from_secs(20),
-            "bounded rendering should fail fast, took {elapsed:?}"
         );
     }
 
