@@ -1658,6 +1658,11 @@ class VllmConfig:
         self._resolve_mm_processor_device()
         self._validate_mm_processor_device()
 
+        if self.observability_config.debug_tensor_dump_output_folder is not None and (
+            not self.use_v2_model_runner or not self.model_config.enforce_eager
+        ):
+            raise ValueError("Tensor dumping requires eager Model Runner V2")
+
         if self.use_v2_model_runner:
             self._validate_v2_model_runner()
         else:
