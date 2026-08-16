@@ -1534,6 +1534,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
         use_original_num_layers=True,  # DSpark backbone requires all layers
     ),
+    "Lfm2DSparkDraftModel": _HfExamplesInfo(
+        "LiquidAI/LFM2.5-2.6B",
+        speculative_model="LiquidAI/LFM2.5-2.6B-DSpark-Draft-v1",
+        is_available_online=False,
+        use_original_num_layers=True,
+    ),
     "Gemma4DSparkModel": _HfExamplesInfo(
         "google/gemma-4-12B-it",
         speculative_model="deepseek-ai/dspark_gemma4_12b_block7",

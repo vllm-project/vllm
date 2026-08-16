@@ -564,6 +564,7 @@ class Lfm2MoeForCausalLM(
             tp_world_size=parallel_config.tensor_parallel_size,
             intermediate_size=hf_config.hidden_size,
             conv_kernel=hf_config.conv_L_cache,
+            num_spec=vllm_config.num_speculative_tokens,
         )
 
     @classmethod

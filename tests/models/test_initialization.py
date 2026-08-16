@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import partial
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -50,6 +51,46 @@ MINIMAL_MODEL_ARCH_LIST = [
 OTHER_MODEL_ARCH_LIST = set(HF_EXAMPLE_MODELS.get_supported_archs()) - set(
     MINIMAL_MODEL_ARCH_LIST
 )
+
+
+@pytest.mark.parametrize("architecture", ["dense", "moe", "vl"])
+def test_lfm2_speculative_cache_shape_reserves_rollback_state(architecture):
+    from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
+    from vllm.model_executor.models.lfm2 import Lfm2ForCausalLM
+    from vllm.model_executor.models.lfm2_moe import Lfm2MoeForCausalLM
+    from vllm.model_executor.models.lfm2_vl import Lfm2VLForConditionalGeneration
+
+    model_cls, hf_config = {
+        "dense": (
+            Lfm2ForCausalLM,
+            SimpleNamespace(conv_dim=2048, conv_L_cache=3),
+        ),
+        "moe": (
+            Lfm2MoeForCausalLM,
+            SimpleNamespace(hidden_size=2048, conv_L_cache=3),
+        ),
+        "vl": (
+            Lfm2VLForConditionalGeneration,
+            SimpleNamespace(
+                text_config=SimpleNamespace(hidden_size=2048, conv_L_cache=3)
+            ),
+        ),
+    }[architecture]
+
+    vllm_config = SimpleNamespace(
+        num_speculative_tokens=9,
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        model_config=SimpleNamespace(hf_config=hf_config),
+    )
+
+    shape = model_cls.get_mamba_state_shape_from_config(vllm_config)
+
+    assert shape == MambaStateShapeCalculator.short_conv_state_shape(
+        tp_world_size=1,
+        intermediate_size=2048,
+        conv_kernel=3,
+        num_spec=9,
+    )
 
 
 @create_new_process_for_each_test()

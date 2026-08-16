@@ -34,7 +34,15 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP, SupportsQuant
+from .interfaces import (
+    EagleModelMixin,
+    HasInnerState,
+    IsHybrid,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsQuant,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -295,7 +303,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class Lfm2Model(nn.Module):
+class Lfm2Model(nn.Module, EagleModelMixin):
     # HF uses .conv. but vLLM uses .short_conv. to avoid LoRA regex collision
     # with the inner .conv.conv child (ShortConv has a child self.conv, so
     # naming the container .conv too makes _match_target_modules match both).
@@ -362,7 +370,7 @@ class Lfm2Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -374,17 +382,28 @@ class Lfm2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        aux_hidden_states = self._maybe_add_hidden_state(
+            [], self.start_layer, hidden_states, residual
+        )
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
+            )
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, residual
             )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.embedding_norm(hidden_states, residual)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -393,7 +412,13 @@ class Lfm2Model(nn.Module):
 
 
 class Lfm2ForCausalLM(
-    nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid, SupportsQuant
+    nn.Module,
+    HasInnerState,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsEagle3,
+    IsHybrid,
+    SupportsQuant,
 ):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -448,6 +473,7 @@ class Lfm2ForCausalLM(
             tp_world_size=parallel_config.tensor_parallel_size,
             intermediate_size=hf_config.conv_dim,
             conv_kernel=hf_config.conv_L_cache,
+            num_spec=vllm_config.num_speculative_tokens,
         )
 
     @classmethod
@@ -497,7 +523,7 @@ class Lfm2ForCausalLM(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )

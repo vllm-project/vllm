@@ -296,8 +296,8 @@ class SpeculativeConfig:
     usage."""
 
     dspark_draft_topk: int | None = Field(default=None, ge=1)
-    """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
-    top-k base-logit candidates. Requires draft tensor parallel size 1."""
+    """For supported dense DSpark drafters, evaluate the Markov projection only
+    for the top-k base-logit candidates. Requires draft tensor parallel size 1."""
 
     def compute_hash(self) -> str:
         """
@@ -953,6 +953,7 @@ class SpeculativeConfig:
                     "dspark" in self.draft_model_config.model.lower()
                     or "Qwen3DSparkModel" in self.draft_model_config.architectures
                     or "Gemma4DSparkModel" in self.draft_model_config.architectures
+                    or "Lfm2DSparkDraftModel" in self.draft_model_config.architectures
                 ):
                     self.method = "dspark"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
@@ -1014,6 +1015,8 @@ class SpeculativeConfig:
                     "Qwen3DSparkModel" not in self.draft_model_config.architectures
                     and "Gemma4DSparkModel" not in self.draft_model_config.architectures
                     and "K3DSparkModel" not in self.draft_model_config.architectures
+                    and "Lfm2DSparkDraftModel"
+                    not in self.draft_model_config.architectures
                 ):
                     # DeepSeek-V4 DSpark reuses the full DeepSeek-V4 config
                     # and its weights ship in the target checkpoint.
@@ -1042,6 +1045,21 @@ class SpeculativeConfig:
                         and getattr(hf, "block_size", None) is not None
                     ):
                         hf.n_predict = hf.block_size
+                elif (
+                    self.method == "dspark"
+                    and "Lfm2DSparkDraftModel" in self.draft_model_config.architectures
+                ):
+                    hf = self.draft_model_config.hf_config
+                    if (
+                        getattr(hf, "n_predict", None) is None
+                        and getattr(hf, "block_size", None) is not None
+                    ):
+                        hf.n_predict = hf.block_size
+                    hf.is_neox_style = getattr(hf, "rope_is_neox_style", False)
+                    if getattr(hf, "enable_confidence_head", False) and not hasattr(
+                        hf, "confidence_head_with_markov"
+                    ):
+                        hf.confidence_head_with_markov = True
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
@@ -1107,13 +1125,16 @@ class SpeculativeConfig:
                                 "dspark_draft_topk must be between 1 and the "
                                 f"draft vocabulary size ({draft_vocab_size})"
                             )
-                        if (
-                            "Qwen3DSparkModel"
-                            not in self.draft_model_config.architectures
+                        if not any(
+                            arch in self.draft_model_config.architectures
+                            for arch in (
+                                "Qwen3DSparkModel",
+                                "Lfm2DSparkDraftModel",
+                            )
                         ):
                             raise ValueError(
                                 "dspark_draft_topk is only supported by "
-                                "Qwen3DSparkModel"
+                                "Qwen3DSparkModel and Lfm2DSparkDraftModel"
                             )
                         hf_config.dspark_draft_topk = dspark_draft_topk
 
