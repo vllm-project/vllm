@@ -81,8 +81,8 @@ class MooncakeStoreScheduler:
 
         self._gpu_block_pool: BlockPool | None = None
         self._num_workers = vllm_config.parallel_config.world_size
-        self._next_save_seq = 0
-        # save_seq -> (referenced block ids, ranks yet to report completion)
+        self._next_store_job_id = 0
+        # store_job_id -> (referenced block ids, ranks yet to report completion)
         self._pinned_saves: dict[int, tuple[list[int], int]] = {}
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
@@ -408,11 +408,9 @@ class MooncakeStoreScheduler:
     def _reference_save_blocks(self, meta: MooncakeStoreConnectorMetadata) -> None:
         """Take a GPU block reference for every store job this step emits.
 
-        The worker DMAs KV out of these blocks after the step that scheduled
-        them, so the allocator must not reuse them in the meantime. Holding a
-        reference is what makes preemption safe: freeing the request drops the
-        block's count to a still-positive value, keeping it out of the free
-        queue until every rank reports the job done.
+        The worker DMAs out of these blocks after the step that scheduled them,
+        so a reference keeps them out of the free queue even once the request
+        itself is freed, until every rank reports the job done.
         """
         pool = self._gpu_block_pool
         for req_meta in meta.requests:
@@ -421,8 +419,8 @@ class MooncakeStoreScheduler:
             assert pool is not None, (
                 "GPU block pool must be bound before any store job is emitted"
             )
-            req_meta.save_seq = save_seq = self._next_save_seq
-            self._next_save_seq += 1
+            req_meta.store_job_id = store_job_id = self._next_store_job_id
+            self._next_store_job_id += 1
             # Every allocated block is referenced, not just the ones covering
             # this job's token range: a rank resumes from its own last
             # successful offset, which lags the scheduler's whenever a save was
@@ -435,7 +433,7 @@ class MooncakeStoreScheduler:
                 block_ids += [bid for _, bid, _ in req_meta.partial_tail_offloads]
             if not block_ids:
                 continue
-            self._pinned_saves[save_seq] = (block_ids, self._num_workers)
+            self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
             pool.touch([pool.blocks[bid] for bid in block_ids])
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
@@ -445,18 +443,20 @@ class MooncakeStoreScheduler:
             return
         pool = self._gpu_block_pool
         assert pool is not None
-        for save_seq, count in meta.completed_saves.items():
-            pinned = self._pinned_saves.get(save_seq)
+        for store_job_id, count in meta.completed_saves.items():
+            pinned = self._pinned_saves.get(store_job_id)
             if pinned is None:
                 # The job referenced no blocks, so nothing was recorded for it.
                 continue
             block_ids, remaining = pinned
             remaining -= count
             if remaining > 0:
-                self._pinned_saves[save_seq] = (block_ids, remaining)
+                self._pinned_saves[store_job_id] = (block_ids, remaining)
                 continue
-            assert remaining == 0, f"store job {save_seq} reported by too many ranks"
-            del self._pinned_saves[save_seq]
+            assert remaining == 0, (
+                f"store job {store_job_id} reported by too many ranks"
+            )
+            del self._pinned_saves[store_job_id]
             pool.free_blocks([pool.blocks[bid] for bid in block_ids])
 
     def has_pending_push_work(self) -> bool:

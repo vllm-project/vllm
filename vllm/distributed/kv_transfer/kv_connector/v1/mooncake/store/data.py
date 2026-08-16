@@ -370,7 +370,7 @@ class ReqMeta:
     # Identifies this store job for the engine's lifetime. A request id cannot
     # serve that purpose: it is reused once a preempted request resumes, so it
     # would release the wrong job's blocks.
-    save_seq: int | None = None
+    store_job_id: int | None = None
     # Core-provided per-mamba-group
     # (group_id, cow_block_id, boundary_tokens) for this request's partial tail.
     # Present only on the producer's CoW step; drives the connector's offload
@@ -441,7 +441,7 @@ class ReqMeta:
 
 @dataclass
 class MooncakeStoreWorkerMetadata(KVConnectorWorkerMetadata):
-    """Maps ``ReqMeta.save_seq`` to the number of ranks done with that job."""
+    """Maps ``ReqMeta.store_job_id`` to the number of ranks done with that job."""
 
     completed_saves: dict[int, int] = field(default_factory=dict)
 
@@ -449,9 +449,9 @@ class MooncakeStoreWorkerMetadata(KVConnectorWorkerMetadata):
         self, other: "KVConnectorWorkerMetadata"
     ) -> "MooncakeStoreWorkerMetadata":
         assert isinstance(other, MooncakeStoreWorkerMetadata)
-        for save_seq, count in other.completed_saves.items():
-            self.completed_saves[save_seq] = (
-                self.completed_saves.get(save_seq, 0) + count
+        for store_job_id, count in other.completed_saves.items():
+            self.completed_saves[store_job_id] = (
+                self.completed_saves.get(store_job_id, 0) + count
             )
         return self
 

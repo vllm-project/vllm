@@ -163,8 +163,8 @@ _TEST_SAVE_SEQ = itertools.count(1)
 
 def _run_store_req(thread, req_meta: ReqMeta) -> None:
     """Register, enqueue and run a store job the way the worker does."""
-    if req_meta.save_seq is None:
-        req_meta.save_seq = next(_TEST_SAVE_SEQ)
+    if req_meta.store_job_id is None:
+        req_meta.store_job_id = next(_TEST_SAVE_SEQ)
     thread.add_request(req_meta)
     thread._handle_request(thread.request_queue.get())
 
@@ -910,7 +910,7 @@ def test_store_sending_thread_reports_job_when_store_raises(failing_call):
     with contextlib.suppress(RuntimeError):
         _run_store_req(thread, req)
 
-    assert thread.take_completed_saves() == {req.save_seq: 1}
+    assert thread.take_completed_saves() == {req.store_job_id: 1}
 
 
 def test_stale_store_job_cannot_touch_a_reused_request_id():
@@ -918,13 +918,13 @@ def test_stale_store_job_cannot_touch_a_reused_request_id():
     # the retired generation carries a req_id that now belongs to a live one.
     thread = _make_store_sending_thread(MagicMock())
     stale = _make_store_req("req-a", [b"a0", b"a1"])
-    stale.save_seq = 1
+    stale.store_job_id = 1
     thread.add_request(stale)
     thread._record_saved(stale, 32)
     thread.delete_finished_stored_request("req-a")
 
     live = _make_store_req("req-a", [b"a0", b"a1"])
-    live.save_seq = 2
+    live.store_job_id = 2
     thread.add_request(live)
 
     thread.finish_store_job(stale)

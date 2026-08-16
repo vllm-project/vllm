@@ -33,7 +33,7 @@ def _make_bare_scheduler(
         num_gpu_blocks=64, enable_caching=True, hash_block_size=hash_block_size
     )
     scheduler._num_workers = 1
-    scheduler._next_save_seq = 0
+    scheduler._next_store_job_id = 0
     scheduler._pinned_saves = {}
     return scheduler
 
@@ -813,11 +813,11 @@ def test_partial_tail_cow_block_is_referenced_for_the_job():
 
     meta = scheduler.build_connector_meta(out)
 
-    save_seq = meta.requests[0].save_seq
-    assert scheduler._pinned_saves[save_seq][0] == [0, 7]
+    store_job_id = meta.requests[0].store_job_id
+    assert scheduler._pinned_saves[store_job_id][0] == [0, 7]
     assert pool.blocks[7].ref_cnt == 1
 
-    scheduler.update_connector_output(_make_worker_output({save_seq: 1}))
+    scheduler.update_connector_output(_make_worker_output({store_job_id: 1}))
     assert pool.blocks[7].ref_cnt == 0
 
 
@@ -840,15 +840,15 @@ def test_store_job_blocks_are_released_once_every_rank_reports():
     meta = scheduler.build_connector_meta(
         _make_scheduler_output(scheduled_spec_tokens=None)
     )
-    save_seq = meta.requests[0].save_seq
+    store_job_id = meta.requests[0].store_job_id
     assert pool.blocks[2].ref_cnt == 1
     assert scheduler.has_pending_push_work() is True
 
-    scheduler.update_connector_output(_make_worker_output({save_seq: 1}))
+    scheduler.update_connector_output(_make_worker_output({store_job_id: 1}))
     assert pool.blocks[2].ref_cnt == 1
     assert scheduler.has_pending_push_work() is True
 
-    scheduler.update_connector_output(_make_worker_output({save_seq: 1}))
+    scheduler.update_connector_output(_make_worker_output({store_job_id: 1}))
     assert pool.blocks[2].ref_cnt == 0
     assert scheduler.has_pending_push_work() is False
 

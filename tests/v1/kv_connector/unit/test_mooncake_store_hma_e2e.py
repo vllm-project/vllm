@@ -228,7 +228,7 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
         block_ids=([0, 1, 2, 3], [0, 1, 2, 3]),
         block_hashes=hs,
         can_save=True,
-        save_seq=1,
+        store_job_id=1,
     )
     # add_request also queues the job, so task_done() doesn't underflow.
     send_thread.add_request(save_req)
@@ -498,7 +498,7 @@ def test_offload_syncs_event_before_put():
         can_save=True,
         num_prompt_tokens=12,
         partial_tail_offloads=[(1, 7, 12)],
-        save_seq=1,
+        store_job_id=1,
     )
     req.current_event = event
 

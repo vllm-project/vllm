@@ -506,15 +506,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.group_put_steps = group_put_steps
         self.coord = coord
         self.kv_role = kv_role
-        # req_id -> save_seqs of its store jobs that are still queued or running.
-        # Keying by save_seq, which never repeats for the engine's lifetime,
+        # req_id -> ids of its store jobs that are still queued or running.
+        # Keying by store_job_id, which never repeats for the engine's lifetime,
         # rather than counting jobs per request id makes the ledger immune to id
         # reuse across preemption: a job left over from a retired generation is
         # missing from the set its resumed generation builds, so it can no longer
         # retire that generation, rewind its resume offset, or mark it skipped.
         self.stored_requests: dict[str, set[int]] = {}
-        # save_seq -> times this rank finished with it, drained every step so the
-        # scheduler can release the blocks it referenced for those jobs.
+        # store_job_id -> times this rank finished with it, drained every step
+        # so the scheduler can release the blocks it referenced for those jobs.
         self._completed_saves: dict[int, int] = {}
         self.enable_kv_event = enable_kv_event
         # Caller always passes a non-None ReplicateConfig — see
@@ -533,14 +533,18 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
     def add_request(self, request: ReqMeta) -> None:
         # Register before enqueueing so a job is never picked up unledgered.
-        assert request.save_seq is not None
+        assert request.store_job_id is not None
         with self.done_task_lock:
-            self.stored_requests.setdefault(request.req_id, set()).add(request.save_seq)
+            self.stored_requests.setdefault(request.req_id, set()).add(
+                request.store_job_id
+            )
         super().add_request(request)
 
     def is_live_store_job(self, req_meta: ReqMeta) -> bool:
         with self.done_task_lock:
-            return req_meta.save_seq in self.stored_requests.get(req_meta.req_id, ())
+            return req_meta.store_job_id in self.stored_requests.get(
+                req_meta.req_id, ()
+            )
 
     def delete_finished_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -556,13 +560,17 @@ class KVCacheStoreSendingThread(KVTransferThread):
         job that never reports leaves its blocks referenced for the rest of the
         run. The discard is a no-op for a job whose generation already retired.
         """
-        save_seq = req_meta.save_seq
-        assert save_seq is not None, "a queued store job always carries a save_seq"
+        store_job_id = req_meta.store_job_id
+        assert store_job_id is not None, (
+            "a queued store job always carries a store_job_id"
+        )
         with self.done_task_lock:
             live = self.stored_requests.get(req_meta.req_id)
             if live is not None:
-                live.discard(save_seq)
-            self._completed_saves[save_seq] = self._completed_saves.get(save_seq, 0) + 1
+                live.discard(store_job_id)
+            self._completed_saves[store_job_id] = (
+                self._completed_saves.get(store_job_id, 0) + 1
+            )
 
     def take_completed_saves(self) -> dict[int, int]:
         with self.done_task_lock:
@@ -574,7 +582,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # Guard on job liveness so neither a concurrent finish/preempt pop nor a
         # stale job's offset is written back over the live generation's.
         with self.done_task_lock:
-            if req_meta.save_seq in self.stored_requests.get(req_meta.req_id, ()):
+            if req_meta.store_job_id in self.stored_requests.get(req_meta.req_id, ()):
                 self._saved_offset[req_meta.req_id] = token_len
 
     def _should_skip_request(self, req_id: str) -> bool:
@@ -588,7 +596,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self._store_pressure_active = True
             # The pressure itself is global, but only a live job may sentence its
             # own request to being skipped.
-            if req_meta.save_seq in self.stored_requests.get(req_id, ()):
+            if req_meta.store_job_id in self.stored_requests.get(req_id, ()):
                 self._skip_store_requests.add(req_id)
         return already_skipped
 
