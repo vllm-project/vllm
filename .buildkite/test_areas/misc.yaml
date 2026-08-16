@@ -270,8 +270,10 @@ steps:
   device: h200_18gb
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
+  - tests/test_setup_precompiled_wheel.py
   - setup.py
   commands:
+  - pytest --noconftest -q test_setup_precompiled_wheel.py
   - bash standalone_tests/python_only_compile.sh
   mirror:
     amd:
@@ -282,6 +284,7 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - tests/standalone_tests/python_only_compile.sh
+      - tests/test_setup_precompiled_wheel.py
       - setup.py
       - vllm/platforms/rocm.py
 
