@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CPU regression for the packed-DSV4 KV zeroer geometry (upstream #50276).
 
-Four DSV4 fp8_ds_mla layers share one cross-layer allocation: each block row
-packs the four alignment-padded pages side by side (layout BLHNC). The zeroer
-must step by the full packed row per block while zeroing only each layer's
-meaningful page — never the alignment padding, never an adjacent layer's page.
+Four DSV4 fp8_ds_mla layers share one cross-layer allocation: each block row packs
+the four alignment-padded pages side by side (layout BLHNC). The zeroer must step by
+the full packed row per block while zeroing only each layer's meaningful page — never
+the alignment padding, never an adjacent layer's page.
 
-CPU only: the zeroer's ``__init__`` precomputes the segment tables; no kernel
-is launched.
+CPU only: the zeroer's ``__init__`` precomputes the segment tables; no kernel is
+launched.
 """
 
 from types import SimpleNamespace
@@ -17,10 +17,7 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
-from vllm.v1.kv_cache_interface import (
-    KVCacheLayout,
-    MLAAttentionSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheLayout, MLAAttentionSpec
 from vllm.v1.worker.utils import (
     AttentionGroup,
     KVBlockZeroer,
@@ -101,17 +98,14 @@ def test_packed_dsv4_zeroer_zeroes_only_each_layers_page():
 
 
 def test_overlaid_zeroer_dedups_segments_with_max_span():
-    """Two groups overlay one allocation; the zeroer must emit one segment
-    per distinct byte offset, spanning the widest overlaid page, so a newly
-    allocated block is fully zeroed no matter which group owns it."""
+    """Two groups overlay one allocation; the zeroer must emit one segment per distinct
+    byte offset, spanning the widest overlaid page, so a newly allocated block is fully
+    zeroed no matter which group owns it."""
     from unittest.mock import MagicMock
 
     from vllm.v1.attention.backends.utils import get_kv_cache_layout
     from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
-    from vllm.v1.kv_cache_interface import (
-        KVCacheGroupSpec,
-        UniformTypeKVCacheSpecs,
-    )
+    from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
 
     def make_spec(head_size):
         return MLAAttentionSpec(

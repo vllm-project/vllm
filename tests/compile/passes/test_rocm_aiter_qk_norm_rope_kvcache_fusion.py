@@ -132,8 +132,8 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
             self.attn._k_scale = self.attn._k_scale.to(device)
             self.attn._v_scale = self.attn._v_scale.to(device)
 
-        # Mirror the worker spec-collection loop: the backend publishes its
-        # packing (separate K/V head groups when the fused kernel is usable).
+        # Mirror the worker spec-collection loop: the backend publishes the
+        # packing it needs.
         self.kv_cache_spec = self.attn.attn_backend.customize_spec(
             AttentionSpec(
                 block_size=self.block_size,
@@ -160,12 +160,6 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
 
-        # A backend-required layout wins over the parametrized one, mirroring
-        # selector-time resolution (separate K/V head groups force LBHNC).
-        required = self.attn.attn_backend.get_required_kv_cache_layout()
-        if required is not None:
-            layout = KVCacheLayout[required]
-
         raw_tensor = torch.zeros(
             num_blocks * self.kv_cache_spec.page_size_bytes,
             dtype=torch.int8,
@@ -180,8 +174,9 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         )[0]
 
         # Store as a bare tensor (not wrapped in a list) to match production
-        # `bind_kv_cache` behavior. `get_attention_context` returns this
-        # attribute directly to the fused/unfused cache update implementations.
+        # `bind_kv_cache` behavior.  `get_attention_context` returns this
+        # attribute directly to the fused/unfused `do_kv_cache_update` impls,
+        # which call `kv_cache.unbind(0)` and therefore require a tensor.
         self.attn.kv_cache = kv_cache
 
         attn_metadata = self.builder.build(

@@ -211,9 +211,8 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_kv_connector(cls) -> bool:
-        # ROCM_ATTN requires the LHBNC layout (K/V groups spanning all
-        # blocks), which is incompatible with KV connectors that require
-        # blocks-first layout.
+        # ROCM_ATTN uses (2, num_blocks, ...) KV cache layout which is
+        # incompatible with KV connectors that require blocks-first layout.
         return False
 
     forward_includes_kv_cache_update: bool = False
@@ -247,9 +246,8 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
-        """K and V as two head groups so the native HIP kernels can
-        address each side as one contiguous region spanning all blocks
-        (with the x-packed interior applied privately in split_kv_cache)."""
+        """K and V as two head groups so the native HIP kernels address each side
+        as one contiguous region (x-packed interior applied in split_kv_cache)."""
         if spec.state_content_bytes is not None:
             return spec
         assert spec.head_size == spec.head_size_v, (
@@ -265,16 +263,15 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
-        # The native HIP write/decode kernels hardcode group-contiguous
-        # block addressing, so K and V groups must span all blocks (H
-        # outermost within the layer).
+        # The native HIP kernels hardcode group-contiguous block addressing, so
+        # the K and V groups must span all blocks (H outermost within the layer).
         return "LHBNC"
 
     @classmethod
     def supports_kv_cache_layout(cls, layout: "KVCacheLayout") -> bool:
-        # TODO(ROCm): models mixing ROCM_ATTN with TRITON_ATTN (e.g. sink
-        # layers) fail at startup because TRITON_ATTN does not declare LHBNC
-        # support; opt TRITON_ATTN in once validated on AMD.
+        # TODO(ROCm): models mixing ROCM_ATTN with TRITON_ATTN (e.g. sink layers)
+        # fail at startup since TRITON_ATTN does not declare LHBNC support; opt
+        # TRITON_ATTN in once validated on AMD.
         return layout is KVCacheLayout.LHBNC or not layout.heads_outside_blocks
 
     @staticmethod

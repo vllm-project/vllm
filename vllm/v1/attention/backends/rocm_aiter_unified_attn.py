@@ -16,7 +16,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionLayer, AttentionType, MultipleOf
-from vllm.v1.attention.backends.rocm_aiter_fa import _use_separate_kv_head_groups
 from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionBackend,
     RocmAttentionImpl,
@@ -30,21 +29,6 @@ logger = init_logger(__name__)
 
 
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
-    @classmethod
-    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
-        """Separate K/V head groups, as the AITER fused QK-norm+RoPE+cache
-        kernel addresses them; the shuffle-layout variant keeps the packed
-        content dim."""
-        if not _use_separate_kv_head_groups():
-            return spec
-        return super().customize_spec(spec)
-
-    @classmethod
-    def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
-        # Separate K/V head groups need H inside the block and L outermost so
-        # each side is a token-major, block-contiguous [B, N, H*hs] region.
-        return "LBHNC" if _use_separate_kv_head_groups() else None
-
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -94,6 +78,24 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["RocmAiterUnifiedAttentionImpl"]:
         return RocmAiterUnifiedAttentionImpl
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        """Keep K and V packed in the content dim, unlike the native HIP
+        kernels the base class targets."""
+        # block_size == 1 is the per-token page-size probe (see
+        # Platform.get_page_size_bytes); real blocks must be gatherable in
+        # 16-token units by the ROCm kernel.
+        if spec.block_size != 1 and spec.block_size % 16 != 0:
+            raise ValueError("Block size must be a multiple of 16.")
+        return spec
+
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
+        # Main allocated the packed cache contiguous in (B, H, N, 2*hs) —
+        # head-major within the block — and the AITER kernels have only been
+        # exercised with that geometry, so pin it.
+        return "LBHNC"
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -152,21 +154,11 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
         self.unified_attention = unified_attention
         self.supports_quant_query_input = True
-        self.separate_kv_head_groups = _use_separate_kv_head_groups()
 
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Split the per-layer cache into K/V views shaped [B, N, H, hs].
-
-        With separate head groups the cache is [B, 2, N, H*hs] and each side is a
-        contiguous, token-major block region. Otherwise K/V are packed in the
-        content dim of [B, H, N, 2*hs] and the split is a strided view.
-        """
-        if self.separate_kv_head_groups:
-            key_cache, value_cache = kv_cache.unbind(1)
-            shape = (*key_cache.shape[:-1], self.num_kv_heads, self.head_size)
-            return key_cache.view(shape), value_cache.view(shape)
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
         return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
     def forward(
@@ -188,7 +180,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [num_blocks, num_kv_heads, block_size, 2 * head_size]
+                [num_blocks, 2, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -327,9 +319,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         return rocm_aiter_ops.is_enabled()
 
     def fused_qk_norm_rope_kvcache_supported(self):
-        # The fused kernel needs K and V as separate block-contiguous caches,
-        # which only separate head-group storage provides.
-        return self.separate_kv_head_groups
+        return rocm_aiter_ops.is_enabled()
 
     def do_qk_norm_rope_kvcache_update(
         self,
@@ -366,8 +356,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             k_scale=layer._k_scale_cpu,
             v_scale=layer._v_scale_cpu,
             kv_cache_dtype=self.kv_cache_dtype,
-            # Separate head groups and the shuffle layout are mutually exclusive
-            # (see _use_separate_kv_head_groups), so this path is never shuffled.
             use_shuffle_layout=False,
         )
 

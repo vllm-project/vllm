@@ -445,8 +445,8 @@ class CanonicalKVCacheTensor:
     """
     A canonicalized KV cache tensor whose first dimension is num_blocks.
 
-    With standardized layouts (RFC #42082) num_blocks is always the
-    leading logical dimension.
+    With standardized layouts (RFC #42082) num_blocks is always the leading
+    logical dimension.
     """
 
     # The KV cache tensor with shape (num_blocks, ...)

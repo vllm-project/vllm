@@ -21,6 +21,7 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
 
 if is_flash_attn_varlen_func_available():
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
+
 from .flash_attn import (
     FlashAttentionBackend,
     FlashAttentionImpl,
@@ -180,7 +181,6 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
                 layer,
             )
 
-        # (B, H, N, C) -> (B, N, H, C) for kernel compatibility.
         # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).

@@ -3,7 +3,8 @@
 """
 Standalone unit tests for trtllm_prefill_attn_kvfp8_dequant.
 
-Tests KV cache layouts against a pure-PyTorch reference implementation.
+Tests both contiguous and non-contiguous (cross-layer unified) KV cache
+layouts against a pure-PyTorch reference implementation.
 """
 
 import pytest
@@ -42,11 +43,13 @@ def make_random_kv_cache(
     layout=KVCacheLayout.LBHNC,
     num_layers=None,
 ):
-    """Create a random fp8 KV cache in 5D ``(B, 2, H, N, hs)`` format.
+    """
+    Create a random fp8 KV cache mimicking the production allocation.
 
-    The cache is allocated in the physical 5D layout, then one logical layer
-    is selected and reshaped. Cross-layer layouts therefore retain their
-    inter-layer stride gaps, matching the actual forward path.
+    Physical layout: [L, B, H, N, 2 * hs] permuted by ``layout.stride_order``
+    Returned view:   (num_blocks, 2, num_kv_heads, block_size, head_size)
+    with non-contiguous strides under cross-layer layouts (they skip over
+    num_layers), matching the actual forward path.
     """
     logical_4d = (num_blocks, num_kv_heads, block_size, 2 * head_size)
     if num_layers is None:
@@ -377,11 +380,11 @@ def test_large_block_size():
     torch.testing.assert_close(mock_kv_cache[1:], ref[1:], atol=1e-3, rtol=1e-3)
 
 
+@torch.inference_mode()
 def test_cross_layer_many_layers():
-    """Non-contiguous with 36 layers -- matches real gpt-oss-120b.
-
-    Cross-layer (BLHNC) strides are far from contiguous (factor of 36 in the
-    inter-layer gaps).
+    """
+    Non-contiguous with 36 layers -- matches real gpt-oss-120b.
+    Cross-layer (BLHNC) strides are far from contiguous (factor of 36 in the gaps).
     """
     from vllm.v1.attention.backends.flashinfer import (
         trtllm_prefill_attn_kvfp8_dequant,

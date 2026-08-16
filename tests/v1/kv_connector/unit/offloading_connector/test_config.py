@@ -94,20 +94,13 @@ def _make_kv_cache_config() -> KVCacheConfig:
 def _make_sizing_kv_cache_config(packed: bool) -> KVCacheConfig:
     """One 16 byte-per-block allocation, described two ways.
 
-    Packed: both layers are one dense run. Unpacked: the same bytes as two
-    runs, the second starting after the first layer's region. Either way the
-    connector accounts for 16 KV bytes per block.
+    Packed: both layers are one dense run. Unpacked: the same bytes as two runs, the
+    second starting after the first layer's region. Either way the connector accounts
+    for 16 KV bytes per block.
     """
     num_blocks = 4
     page = 8
     size = 2 * page * num_blocks
-    spec = FullAttentionSpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-    )
-    kv_cache_groups = [KVCacheGroupSpec(["layer0", "layer1"], spec)]
     if packed:
         kv_cache_tensors = [
             KVCacheTensor(
@@ -132,7 +125,17 @@ def _make_sizing_kv_cache_config(packed: bool) -> KVCacheConfig:
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
-        kv_cache_groups=kv_cache_groups,
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer0", "layer1"],
+                FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            )
+        ],
     )
 
 
@@ -199,8 +202,8 @@ def _make_hybrid_kv_cache_config() -> KVCacheConfig:
     num_blocks = 4
     full_spec = _full_attention_spec(block_size=12)
     mla_spec = _mla_spec()
-    # Mixed page sizes across overlaying groups: a block is a window of the
-    # largest group's packing, so the layer dim sits inside the block dim.
+    # Mixed page sizes across overlaying groups: a block is a window of the largest
+    # group's packing, so the layer dim sits inside the block dim.
     window = max(full_spec.page_size_bytes, mla_spec.page_size_bytes)
     return KVCacheConfig(
         num_blocks=num_blocks,
@@ -302,9 +305,6 @@ def test_worker_kv_bytes_preserves_tensor_layout(packed: bool):
 
 
 def test_zero_blocks_skips_tensor_layout_validation():
-    # Partially-packed layouts are no longer expressible: packing is
-    # structural (the runs of one allocation) rather than a per-tensor
-    # block_stride flag, so the old rejects-partially-packed test is gone.
     kv_cache_config = _make_sizing_kv_cache_config(packed=False)
     kv_cache_config.num_blocks = 0
 
@@ -453,8 +453,7 @@ def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
             "hidden-state",
         ),
         (
-            # One group packing two page sizes: layer1's run starts past
-            # layer0's whole region.
+            # One group, two page sizes: layer1's run starts past layer0's region.
             KVCacheConfig(
                 num_blocks=4,
                 kv_cache_tensors=[
@@ -488,8 +487,8 @@ def test_replicated_layout_enabled_for_pure_mla_tp_mp_single_node(
             "uniform-wrapper",
         ),
         (
-            # Overlaid groups with different page sizes: a block is a window
-            # of the largest group's packing.
+            # Overlaid groups with different page sizes: a block is a window of
+            # the largest group's packing.
             KVCacheConfig(
                 num_blocks=4,
                 kv_cache_tensors=[
@@ -579,8 +578,8 @@ def test_replicated_layout_rejects_bare_mla_with_mixed_page_accounting():
     indexer_spec = _mla_spec(head_size=128, dtype=torch.uint8)
     main_layers = [f"main_{i}" for i in range(61)]
     indexer_layers = [f"indexer_{i}" for i in range(61)]
-    # A DSA-style group: the main pages and the smaller indexer pages are
-    # packed one after the other, so a block holds more than 61 MLA pages.
+    # A DSA-style group: the main pages and the smaller indexer pages are packed one
+    # after the other, so a block holds more than 61 MLA pages.
     main_bytes = main_spec.page_size_bytes * len(main_layers)
     indexer_bytes = indexer_spec.page_size_bytes * len(indexer_layers)
     size = (main_bytes + indexer_bytes) * num_blocks

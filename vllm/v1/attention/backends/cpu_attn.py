@@ -41,17 +41,6 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 
-def _split_cpu_kv_cache(
-    kv_cache: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Split a logical CPU KV cache into contiguous-token K and V views."""
-    num_blocks, num_kv_heads, block_size, content_size = kv_cache.shape
-    kv_cache = kv_cache.view(
-        num_blocks, num_kv_heads, block_size * 2, content_size // 2
-    )
-    return kv_cache.chunk(2, dim=2)
-
-
 class CPUAttentionBackend(AttentionBackend):
     forward_includes_kv_cache_update: bool = False
 
@@ -389,7 +378,12 @@ class CPUAttentionBackendImpl(AttentionImpl):
             # For encoder attention,
             kv_cache = attn_metadata.encoder_cache
 
-        key_cache, value_cache = _split_cpu_kv_cache(kv_cache)
+        # KV cache size are [num_blocks, num_kv_heads, block_size,
+        # 2 * head_size]. Make a view [num_blocks, num_kv_heads,
+        # block_size * 2, head_size]. Then slice KV at dim 2
+        num_blocks, num_kv_heads, block_size, _ = kv_cache.size()
+        kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
+        key_cache, value_cache = kv_cache.chunk(2, dim=2)
 
         if is_encoder_attention:
             ops.cpu_attn_reshape_and_cache(
@@ -438,7 +432,9 @@ class CPUAttentionBackendImpl(AttentionImpl):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
 
-        key_cache, value_cache = _split_cpu_kv_cache(kv_cache)
+        num_blocks, num_kv_heads, block_size, _ = kv_cache.size()
+        kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
+        key_cache, value_cache = kv_cache.chunk(2, dim=2)
         ops.cpu_attn_reshape_and_cache(
             key,
             value,

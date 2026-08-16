@@ -36,8 +36,8 @@ BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
 def get_kv_connector_cache_layout():
-    # NOTE (NickLucche) When running disaggregated PD with NIXL, the LBHNC
-    # layout is used for faster transfer.
+    # NOTE (NickLucche) When running disaggregated PD with NIXL, LBHNC layout is
+    # used for faster transfer.
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None:
         return None
@@ -287,8 +287,8 @@ def kv_postprocess_layout_on_receive(cache, indices):
 
 def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_ratio):
     """
-    Transforms the layout of received KV cache to the local block_size
-    and LBHNC. (Only works for local blocksize > remote blocksize)
+    Transforms the layout of received KV cache to the local block_size and LBHNC.
+    (Only works for local blocksize > remote blocksize)
 
     prefill is LBHNC, smaller block_size
     decode(local) is LBNHC, larger block_size

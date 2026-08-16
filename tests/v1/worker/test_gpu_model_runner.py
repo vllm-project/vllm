@@ -1353,7 +1353,8 @@ def test_hybrid_attention_mamba_tensor_shapes():
             actual_kv = vllm_ctx[layer].kv_cache[kernel_block, :]
             expected = attn_blocks_constant[i]
 
-            # Every head slot of the block must match.
+            # Packed layout: (num_kv_heads, block_size, 2*head_size). Every
+            # head in the block was filled with the same constant.
             for head_idx in range(actual_kv.shape[0]):
                 assert torch.equal(actual_kv[head_idx], expected)
 

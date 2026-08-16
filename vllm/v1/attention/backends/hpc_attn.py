@@ -265,9 +265,7 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
 class HpcAttentionBackend(AttentionBackend):
     """HPC attention backend (pure attention, no RoPE/Norm).
 
-    KV cache layout: NHD; the logical per-layer view is
-    (num_blocks, num_kv_heads, block_size, 2 * head_size) with K and V
-    packed along the content dim.
+    KV cache layout: LBNHC (num_blocks, num_kv_heads, block_size, 2 * head_size).
     """
 
     accept_output_buffer: bool = True

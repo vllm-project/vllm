@@ -541,8 +541,8 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         self._dtype = first_cache.dtype
         element_size = first_cache.element_size()
 
-        # Standardized per-layer [B, H, N, C] view; MLA is just H == 1 with
-        # the latent vector as the content dim.
+        # Standardized per-layer [B, H, N, C] view; MLA is just H == 1 with the
+        # latent vector as the content dim.
         assert len(first_cache.shape) == 4, (
             f"expected a [B, H, N, C] KV cache view, got {tuple(first_cache.shape)}"
         )

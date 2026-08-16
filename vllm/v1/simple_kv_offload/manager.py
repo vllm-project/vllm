@@ -194,8 +194,8 @@ class SimpleCPUOffloadScheduler:
 
         assert len(gpu_config.kv_cache_tensors) > 0
 
-        # All tensors place layers within one backing allocation, so any
-        # tensor's size is the total GPU KV cache size.
+        # Every KVCacheTensor describes placement within the same backing allocation,
+        # so its size is the total GPU KV cache size.
         gpu_total_bytes = gpu_config.kv_cache_tensors[0].size
         num_gpu_blocks = gpu_config.num_blocks
         num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)

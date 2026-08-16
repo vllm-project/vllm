@@ -98,14 +98,37 @@ def _create_nvfp4_hnd_kv_cache(
     common_attn_metadata,
     kv_scale_val,
 ):
-    """Create an nvfp4 KV cache with 2H head layout.
+    """Create an nvfp4 KV cache by quantizing bf16 context via
+    reshape_and_cache_flash, using the same block-table layout as
+    create_and_prepopulate_kv_cache.
 
-    The returned tensor is dtype ``uint8`` with logical shape
-    ``(num_blocks, 2 * num_kv_heads, block_size, full_dim)`` where K occupies
-    the first H heads and V occupies the next H heads, and
-    ``full_dim = head_size // 2 + head_size // 16`` packs FP4 data and
-    FP8 block scales per head.
+    The returned tensor is dtype ``uint8`` with head-group layout
+      ``(num_blocks, 2 * num_kv_heads, block_size, full_dim)``
+    where K heads occupy the first ``num_kv_heads`` heads and V heads the second.
+    Each ``full_dim = head_size // 2 + head_size // 16`` block packs two regions:
+      - **FP4 data** (``head_size // 2`` bytes): pairs of E2M1 values,
+        two per byte.
+      - **FP8 block scales** (``head_size // 16`` bytes): one E4M3
+        scale per 16-element block.
+
+    Args:
+        k_contexts: List of key context tensors, one per sequence.
+        v_contexts: List of value context tensors, one per sequence.
+        block_size: Number of tokens per cache block.
+        num_kv_heads: Number of key/value heads.
+        head_size: Head dimension (must be divisible by 16).
+        dtype: Source data type for the bf16 intermediate cache.
+        device: Target device.
+        num_blocks: Total number of blocks to allocate.
+        common_attn_metadata: Metadata containing block tables and
+            sequence lengths.
+        kv_scale_val: Scalar float used as both k_scale and v_scale
+            during quantization.
+
+    Returns:
+        ``torch.Tensor``: The nvfp4 kv_cache tensor (uint8, LBHNC-strided).
     """
+    # First create a bf16 cache so block tables are populated.
     bf16_cache = create_and_prepopulate_kv_cache(
         k_contexts,
         v_contexts,
@@ -119,6 +142,7 @@ def _create_nvfp4_hnd_kv_cache(
         layout=KVCacheLayout.LBHNC,
     )
 
+    # (num_blocks, 2 * num_kv_heads, block_size, full_dim) — K heads first, then V heads
     full_dim = nvfp4_kv_cache_full_dim(head_size)
     nvfp4_cache = torch.zeros(
         (num_blocks, 2 * num_kv_heads, block_size, full_dim),
@@ -127,6 +151,8 @@ def _create_nvfp4_hnd_kv_cache(
     )
     k_cache, v_cache = nvfp4_cache.split(num_kv_heads, dim=1)
 
+    # Flatten bf16 context into tokens and quantize via reshape_and_cache_flash.
+    # bf16_cache is (B, H, N, 2*hs); split K/V on the content dim.
     block_table = common_attn_metadata.block_table_tensor
     seq_lens = common_attn_metadata.seq_lens.cpu()
     query_lens = (
@@ -139,9 +165,9 @@ def _create_nvfp4_hnd_kv_cache(
         ctx_len = int(seq_lens[i]) - int(query_lens[i])
         if ctx_len == 0:
             continue
+        # Gather context tokens from the bf16 cache using block table.
         n_ctx_blocks = (ctx_len + block_size - 1) // block_size
         blocks = block_table[i, :n_ctx_blocks]
-        # bf16_cache is (B, H, N, 2*head_size); extract K and V from last dim.
         k_ctx = (
             bf16_cache[blocks, :, :, :head_size]
             .transpose(1, 2)
@@ -152,11 +178,12 @@ def _create_nvfp4_hnd_kv_cache(
             .transpose(1, 2)
             .reshape(-1, num_kv_heads, head_size)[:ctx_len]
         )
+        # Build slot mapping for these context tokens.
         token_offsets = torch.arange(ctx_len, device=device)
         block_indices = token_offsets // block_size
         intra_offsets = token_offsets % block_size
         slots = block_table[i, block_indices] * block_size + intra_offsets
-        # reshape_and_cache_flash expects (B, N, H, D) cache views
+        # reshape_and_cache_flash expects (B, N, H, D) cache views.
         torch.ops._C_cache_ops.reshape_and_cache_flash(
             k_ctx,
             v_ctx,

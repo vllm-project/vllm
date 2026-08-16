@@ -87,9 +87,8 @@ def _convert_req_index_to_global_index_kernel(
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
     is_invalid_tok |= ~valid_block | is_remote
     base = tl.load(bt_ptr, mask=valid_block & ~is_prefill & ~is_remote, other=0)
-    # Rows between consecutive physical blocks of this layer's view; equals
-    # BLOCK_SIZE for dense caches, larger when other layers' pages interleave
-    # inside the block stride (overlaid block-outermost layouts).
+    # Row pitch between physical blocks: BLOCK_SIZE for tight caches, larger
+    # when other layers' pages share the block stride (overlaid layouts).
     out_val = base * BLOCK_STRIDE_ROWS + inblock_off
 
     # Override with prefill output if prefill is enabled
@@ -209,6 +208,9 @@ def triton_convert_req_index_to_global_index(
         assert prefill_workspace_request_ids.dtype == torch.int32
         assert prefill_workspace_starts.dtype == torch.int32
 
+    if BLOCK_STRIDE_ROWS is None:
+        BLOCK_STRIDE_ROWS = BLOCK_SIZE
+
     num_tokens = req_id.shape[0]
     max_num_blocks_per_req = block_table.shape[1]
 
@@ -254,7 +256,7 @@ def triton_convert_req_index_to_global_index(
         # shapes / constexprs
         max_num_blocks_per_req,
         BLOCK_SIZE,
-        BLOCK_STRIDE_ROWS if BLOCK_STRIDE_ROWS is not None else BLOCK_SIZE,
+        BLOCK_STRIDE_ROWS,
         block_n,
         HAS_PREFILL_WORKSPACE,
         return_valid_counts,

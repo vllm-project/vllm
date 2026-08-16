@@ -557,7 +557,7 @@ class TritonAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [num_blocks, 2, block_size, num_kv_heads, head_size]
+                [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -609,9 +609,9 @@ class TritonAttentionImpl(AttentionImpl):
             q_descale = k_descale = v_descale = None
         # FP8 per-tensor / auto path (original flow).
         else:
-            # (B, H, N, C) -> (B, N, H, C) for kernel compatibility.
             kv_cache = kv_cache.transpose(1, 2)
-            key_cache, value_cache = kv_cache.split(self.head_size, dim=-1)
+            hs = self.head_size
+            key_cache, value_cache = kv_cache.split(hs, dim=-1)
             if (
                 is_quantized_kv_cache(self.kv_cache_dtype)
                 and key_cache.dtype != self.fp8_dtype

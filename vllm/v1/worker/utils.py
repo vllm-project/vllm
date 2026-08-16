@@ -122,13 +122,11 @@ class KVBlockZeroer:
         Each entry is the absolute byte address of a segment start on the
         GPU, so segments in different CUDA allocations work correctly.
 
-        Per-layer views are standardized ``[B, H, N, C]`` with blocks at dim
-        0; dimensions physically outside B (separate head groups under LHBNC)
-        each get their own segment. A segment's page spans everything inside
-        its block, so under BHLNC (layers interleaved inside the block) it
-        also covers co-located slots of the block's other layers — safe,
-        since block IDs are global pool indices and a newly allocated block
-        owns its whole tile.
+        Per-layer views are standardized ``[B, H, N, C]`` with blocks at dim 0; dims
+        physically outside B (separate head groups under LHBNC) each get their own
+        segment. A segment's page spans everything inside its block, so under BHLNC it
+        also covers the block's other layers -- safe, since block IDs are global pool
+        indices and a newly allocated block owns its whole tile.
 
         Block IDs from the scheduler reference logical blocks whose size
         may differ from the kernel block size (virtual block splitting).
@@ -387,10 +385,9 @@ def allocate_and_reshape_kv_cache(
 ) -> dict[str, torch.Tensor]:
     """Allocate the KV cache and view it as ``[B, H, N, C]`` per layer.
 
-    Every KVCacheTensor places its layers in the same backing allocation:
-    layer ``l`` of block ``b`` starts at
-    ``offset + l * layer_stride + b * block_stride``. Cache groups overlay
-    each other, so tensors may address the same bytes.
+    Every KVCacheTensor places its layers in the same backing allocation: layer ``l`` of
+    block ``b`` starts at ``offset + l * layer_stride + b * block_stride``. Cache
+    groups overlay each other, so tensors may address the same bytes.
     """
     if not kv_cache_config.kv_cache_tensors:
         return {}

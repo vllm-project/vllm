@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Layout resolution across all of a model's attention backends.
 
-resolve_kv_cache_layout sees every backend at once, so its answer -- and the
-errors it raises -- must not depend on the order backends were selected in.
+resolve_kv_cache_layout sees every backend at once, so its answer -- and the errors it
+raises -- must not depend on the order the backends were selected in.
 """
 
 import pytest

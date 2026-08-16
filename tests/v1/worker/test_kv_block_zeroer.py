@@ -15,7 +15,11 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.worker import utils as worker_utils
-from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer, _zero_kv_blocks_kernel
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    KVBlockZeroer,
+    _zero_kv_blocks_kernel,
+)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -300,10 +304,9 @@ def test_warmup_respects_available_block_count():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("layout", list(KVCacheLayout))
 def test_zeroes_exactly_one_block_per_layer(layout: KVCacheLayout):
-    """The zeroer must zero every byte of the target block in every layer and
-    nothing outside it — per head-group region under LHBNC, and never past the
-    target block's tile under block-major layouts (no out-of-bounds writes,
-    no clobbering other blocks' data)."""
+    """The zeroer must zero every byte of the target block in every layer and nothing
+    outside it — per head-group region under LHBNC, and never past the target block's
+    tile under block-major layouts (no out-of-bounds writes, no clobbering)."""
     device = torch.device("cuda")
     num_blocks, num_layers = 4, 2
     spec = FullAttentionSpec(

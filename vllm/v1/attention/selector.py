@@ -182,7 +182,7 @@ def get_attn_backend(
         )
         backend = attention_config.backend_per_kind.get(kind.value, backend)
 
-    # The KV cache layout is resolved once across all of the model's backends
+    # The KV cache layout is resolved across all of the model's backends at once
     # in get_kv_cache_spec(); a single selection cannot see its peers.
     return _cached_get_attn_backend(
         backend=backend,

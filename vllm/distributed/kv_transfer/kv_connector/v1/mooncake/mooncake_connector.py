@@ -1652,9 +1652,8 @@ class MooncakeConnectorWorker:
                     layer_name,
                 )
                 continue
-            # Standardized allocation exposes one raw page tensor per layer.
-            # For Mamba that page contains all recurrent states; the layer
-            # unpacks it only when binding the cache for model execution.
+            # One raw page tensor per layer; for Mamba that page holds all the
+            # recurrent states, unpacked only when binding the cache for execution.
             self._log_debug_cache_registration(layer_name, cache)
             if layout.heads_outside_blocks:
                 region_caches = [cache[:, head] for head in range(cache.shape[1])]

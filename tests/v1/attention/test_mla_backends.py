@@ -254,15 +254,10 @@ def _prefill_backend_dimension_params():
                 current_platform.is_rocm()
                 and prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
             ):
-                # Pre-existing on main: upstream flash-attn MLA prefill
-                # produces incorrect outputs and intermittent GPU memory
-                # faults on ROCm (fails identically on the pre-standardized
-                # base commit). Skip until the ROCm FA MLA path is fixed.
+                # Pre-existing on main: flash-attn MLA prefill returns wrong
+                # outputs and faults on ROCm, so it fails on the base commit too.
                 marks.append(
-                    pytest.mark.skip(
-                        reason="FLASH_ATTN MLA prefill is broken on ROCm "
-                        "(pre-existing; see PR #44458 discussion)"
-                    )
+                    pytest.mark.skip(reason="FLASH_ATTN MLA prefill broken on ROCm")
                 )
             params.append(
                 pytest.param(
@@ -405,7 +400,6 @@ def create_and_prepopulate_kv_cache(
         else:
             kv_entry_size = head_size
 
-        # Create MLA KV cache: (num_blocks, num_heads=1, block_size, kv_entry_size)
         kv_cache = torch.zeros(
             num_blocks, 1, block_size, kv_entry_size, dtype=torch.uint8, device=device
         )
@@ -558,8 +552,7 @@ class MockSparseMLAAttentionLayer:
         kv_cache_dtype = getattr(self.impl, "kv_cache_dtype", "auto")
         fp8_attention = kv_cache_dtype.startswith("fp8")
 
-        # Impls receive the bind-time-squeezed [B, N, C] cache; mirror
-        # mla_attention.py's bind_kv_cache squeeze here.
+        # Impls see the bind-time-squeezed [B, N, C] cache; mirror bind_kv_cache.
         if kv_cache.ndim == 4:
             kv_cache = kv_cache.squeeze(1)
 
@@ -698,8 +691,7 @@ class MockMLAAttentionLayer(MLAAttention):
         output: torch.Tensor,
     ) -> torch.Tensor:
         """Replicates MLAAttention.forward_impl logic for testing."""
-        # Impls receive the bind-time-squeezed [B, N, C] cache; mirror
-        # mla_attention.py's bind_kv_cache squeeze here.
+        # Impls see the bind-time-squeezed [B, N, C] cache; mirror bind_kv_cache.
         if kv_cache.ndim == 4:
             kv_cache = kv_cache.squeeze(1)
 

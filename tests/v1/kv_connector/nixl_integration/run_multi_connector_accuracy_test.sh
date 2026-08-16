@@ -8,8 +8,8 @@
 # wrapping NixlConnector and OffloadingConnector, then runs gsm8k accuracy via
 # test_accuracy.py.
 #
-# Runs two configurations:
-#   1. Standard KV layout (LBHNC)
+# By default runs two configurations:
+#   1. Normal KV layout (LBHNC)
 #   2. Cross-layer KV layout (BLHNC) via VLLM_KV_CACHE_LAYOUT
 #
 # Usage:

@@ -1066,6 +1066,7 @@ class TestNixlHandshake:
             worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
 
             # Metadata with different kv_cache_layout than local worker
+            # prefill TP=1, decode TP=2, remote block_lens is double to local
             remote_block_lens = [i * 2 for i in worker.block_len_per_layer]
             meta = NixlAgentMetadata(
                 engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
@@ -1856,8 +1857,8 @@ def test_register_kv_caches(
         patch(f"{nixl_worker}.get_current_attn_backends") as mock_get_attn_backends,
     ):
         mock_get_attn_backends.return_value = [backend_cls]
-        num_blocks = 8
         block_size = 16
+        num_blocks = 8
         num_heads = 4
         head_size = 16
 

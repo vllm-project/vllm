@@ -1060,10 +1060,9 @@ def unify_kv_cache_spec_page_size(
     the maximum instead: Mamba layers, whose page size comes from state shapes
     and is independent of block size; and non-MLA attention layers whose page
     does not evenly divide the maximum (the padded page is read through a
-    strided view). MLA layers are excluded: their kernels address custom
-    packed page interiors (e.g. the 656-byte fp8_ds_mla layout, the sparse
-    indexer k-cache) rather than the view's block stride, so a padded page
-    would be misread. Raise NotImplementedError if failed to unify the page
+    strided view). MLA is excluded because its kernels address packed page
+    interiors (e.g. fp8_ds_mla, the sparse indexer k-cache) rather than the
+    view's block stride. Raise NotImplementedError if failed to unify the page
     size.
 
     Args:
@@ -1274,16 +1273,15 @@ def _get_per_layer_spec(
 def _get_packed_kv_cache_layout(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> tuple[int, list[tuple[int, list[str], KVCacheSpec]]]:
-    """Lay each group's layers out densely, one after another.
+    """Lay out each cache group densely in one shared block slab.
 
-    Each group packs its layers with no holes starting from offset 0, so the
-    groups overlay each other: a group's layers may reuse another group's
-    bytes, which is sound because a block ID is owned by one cache group at
-    a time. Returns the packed block stride (the largest group's packing) and,
-    per run of consecutive same-spec layers, its byte offset within a block.
+    A block ID is owned by one cache group at a time, so layouts from different
+    groups may overlap. Layers within a group remain disjoint.
 
-    Runs are the unit of allocation: layers in a run share one spec, so they
-    form a rectangular layer dimension.
+    Returns the packed block stride (the largest group's packing) and, per run
+    of consecutive same-spec layers, its byte offset within a block. Runs are
+    the unit of allocation: layers in a run share one spec, so they form a
+    rectangular layer dimension.
     """
     runs: list[tuple[int, list[str], KVCacheSpec]] = []
     packed_block_stride = 0
@@ -1339,7 +1337,8 @@ def get_kv_cache_config_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
-    """Generate the KV cache configuration from the KV cache groups and spec
+    """
+    Generate the KV cache configuration from the KV cache groups and spec
     of each layer.
 
     Args:
@@ -1874,10 +1873,12 @@ def _max_memory_usage_bytes_from_groups(
     """
     Calculate maximum memory usage in bytes from KV cache groups.
 
-    A request needs blocks from *every* group simultaneously. The total
-    blocks consumed per request is the **sum** across groups (each group
-    independently claims blocks from the shared pool). Total memory is
-    ``bytes_per_block * sum_of_blocks``.
+    This correctly accounts for padding in hybrid models. For example, if a
+    model has 8 full attention layers and 9 sliding window layers, they will
+    be padded to 9 full + 9 sliding window for uniform group sizes.
+
+    Each group independently claims blocks from the shared pool, so a request consumes
+    the sum of the per-group block counts, i.e. ``bytes_per_block * total_blocks``.
     """
     if not kv_cache_groups:
         return 0

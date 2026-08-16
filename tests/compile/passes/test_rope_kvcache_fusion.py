@@ -7,7 +7,11 @@ from torch._higher_order_ops import auto_functionalized
 
 import vllm.config
 from tests.compile.backend import TestBackend
-from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    dense_kv_cache_views,
+)
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.compilation.passes.fusion import rope_kvcache_fusion
 from vllm.compilation.passes.fusion.matcher_utils import ROTARY_OP
@@ -38,9 +42,10 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
-    compute_layer_kv_cache_shape_bytes,
+    KVCacheLayout,
 )
 
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
@@ -153,9 +158,20 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
             FP8_DTYPE if kv_cache_dtype_str.startswith("fp8") else self.dtype
         )
 
+        # Mirror the worker spec-collection loop: the backend publishes its
+        # packing (e.g. ROCM_ATTN's separate K/V head groups).
+        self.kv_cache_spec = self.attn_backend.customize_spec(
+            FullAttentionSpec(
+                block_size=self.block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                dtype=self.kv_cache_dtype,
+            )
+        )
+
         # Initialize attn MetadataBuilder
         self.builder = self.attn_backend.get_builder_cls()(
-            kv_cache_spec=self.attn.get_kv_cache_spec(vllm_config),
+            kv_cache_spec=self.kv_cache_spec,
             layer_names=[self.attn.layer_name],
             vllm_config=vllm_config,
             device=device,
@@ -172,23 +188,25 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
 
-        kv_cache_shape = compute_layer_kv_cache_shape_bytes(
-            FullAttentionSpec(
-                block_size=self.block_size,
-                num_kv_heads=self.num_kv_heads,
-                head_size=self.head_size,
-                dtype=self.kv_cache_dtype,
-            ),
-            num_blocks,
-        )
+        # A backend-required layout wins over the default, mirroring
+        # selector-time resolution (e.g. ROCM_ATTN's head groups force LHBNC).
+        layout = get_kv_cache_layout()
+        required = self.attn_backend.get_required_kv_cache_layout()
+        if required is not None:
+            layout = KVCacheLayout[required]
 
-        kv_cache = torch.zeros(
-            kv_cache_shape,
+        raw_tensor = torch.zeros(
+            num_blocks * self.kv_cache_spec.page_size_bytes,
             dtype=torch.int8,
             device=self.device,
-        ).view(self.kv_cache_dtype)
-
-        self.attn.kv_cache = kv_cache
+        )
+        self.attn.kv_cache = dense_kv_cache_views(
+            raw_tensor,
+            self.kv_cache_spec,
+            num_blocks,
+            num_layers=1,
+            layout=layout,
+        )[0]
 
         # Build attn metadata
         attn_metadata = self.builder.build(

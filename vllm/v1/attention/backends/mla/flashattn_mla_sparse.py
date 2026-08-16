@@ -213,9 +213,8 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
 
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
-        # Under overlaid block-outermost layouts other layers' pages sit
-        # inside the block stride, so index tokens by physical row rather
-        # than assuming blocks are tight.
+        # Blocks may not be tight (overlaid block-outermost layouts put other
+        # layers' pages inside the block stride), so index by physical row.
         block_stride_rows = kv_c_and_k_pe_cache.stride(0) // self.head_size
         topk_indices, valid_counts = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token[:num_actual_toks],
@@ -230,14 +229,15 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
         cu_seqlens_q = torch.arange(
             0, num_actual_toks + 1, dtype=torch.int32, device=q_rope.device
         )
-        num_rows = (
-            kv_c_and_k_pe_cache.shape[0] - 1
-        ) * block_stride_rows + attn_metadata.block_size
+        # Flat row view ending at the last block's final token so the view
+        # stays in bounds; interleaved rows exist but are never indexed.
+        num_blocks = kv_c_and_k_pe_cache.shape[0]
+        num_rows = (num_blocks - 1) * block_stride_rows + attn_metadata.block_size
         kv_rows = kv_c_and_k_pe_cache.as_strided(
             (num_rows, self.head_size), (self.head_size, 1)
         )
-        k_cache = kv_rows[:, self.kv_lora_rank :].unsqueeze(1).unsqueeze(1)
-        v_cache = kv_rows[:, : self.kv_lora_rank].unsqueeze(1).unsqueeze(1)
+        k_cache = kv_rows[:, None, None, self.kv_lora_rank :]
+        v_cache = kv_rows[:, None, None, : self.kv_lora_rank]
 
         out = flash_attn_varlen_func(
             q=q_rope,

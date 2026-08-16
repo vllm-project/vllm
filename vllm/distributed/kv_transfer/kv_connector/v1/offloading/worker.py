@@ -69,8 +69,7 @@ class OffloadingConnectorWorker:
             self.vllm_config, kv_cache_config, kv_caches
         )
 
-        # layer_name -> (num_blocks, page_size_bytes) int8 view.
-        # Standardized layouts always have num_blocks as the leading dim.
+        # layer_name -> (num_blocks, page_size_bytes) tensor
         tensors_per_block: dict[str, tuple[torch.Tensor, ...]] = {}
         # layer_name -> size of (un-padded) page in bytes
         unpadded_page_size_bytes: dict[str, int] = {}
@@ -91,10 +90,9 @@ class OffloadingConnectorWorker:
                 page = layer_kv_cache_spec.page_size_bytes
                 elem_size = ref.element_size()
                 byte_offset = ref.storage_offset() * elem_size
-                # Packed layouts (e.g. DSv4) interleave layers per block, so
-                # the attention tensor's stride(0) (the manager-block stride)
-                # exceeds page_size_bytes. Non-packed layouts have
-                # stride(0) == page_size_bytes.
+                # Packed layouts (e.g. DSv4) interleave layers per block, so the
+                # attention tensor's stride(0) (the manager-block stride) exceeds
+                # page_size_bytes; other layouts have stride(0) == page_size_bytes.
                 block_stride_bytes = (
                     ref.stride(0) * elem_size
                     if isinstance(layer_kv_cache_spec, AttentionSpec)
@@ -121,9 +119,9 @@ class OffloadingConnectorWorker:
                 else:
                     raise NotImplementedError
 
-        # Packed layouts (e.g. DSv4) interleave all layers within each
-        # manager block: a layer view's block stride exceeds its page size.
-        # Offload the whole packed block as a single transfer region.
+        # Packed layouts (e.g. DSv4) interleave all layers within each manager
+        # block: a layer view's block stride exceeds its page size. Offload the
+        # whole packed block as a single transfer region.
         packed_layer_name = next(
             (
                 layer_name
@@ -153,9 +151,8 @@ class OffloadingConnectorWorker:
 
         block_tensors: list[CanonicalKVCacheTensor] = []
         block_data_refs: dict[str, list[CanonicalKVCacheRef]] = defaultdict(list)
-        # Layers that alias the same bytes (cache groups overlay each other)
-        # share one transfer region; they are exactly the layers whose views
-        # have the same address and strides.
+        # Layers that alias the same bytes (cache groups overlay each other) share
+        # one transfer region: exactly the views with equal address and strides.
         aliased_layers: dict[tuple[int, tuple[int, ...]], list[str]] = defaultdict(list)
         for layer_name, layer_tensors in tensors_per_block.items():
             view = layer_tensors[0]

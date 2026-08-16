@@ -591,8 +591,11 @@ class RocmPlatform(Platform):
             getattr(getattr(vllm_config, "model_config", None), "attn_type", None)
             == "encoder_decoder"
         )
-        # ROCM_ATTN is incompatible with the encoder backends used for
-        # encoder-decoder models. Keep both attention types on a common backend.
+        # ROCM_ATTN still uses a legacy attention layout (KV is the outer
+        # dimension) that is incompatible with the encoder backend layouts. The
+        # encoder and decoder need the layouts to match. This is currently
+        # enforced implicitly.
+        # TODO: Make this explicit in the selector in a future PR.
         if is_encoder_decoder and AttentionBackendEnum.ROCM_ATTN in backend_priorities:
             backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
         for priority, backend in enumerate(backend_priorities):

@@ -31,7 +31,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.turboquant.centroids import (
     get_centroids,
 )
-from vllm.model_executor.layers.quantization.turboquant.config import TurboQuantConfig
 from vllm.triton_utils import triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import (
@@ -143,6 +142,9 @@ class TurboQuantAttentionBackend(AttentionBackend):
         """TurboQuant packs K+V into one slot per head."""
         if spec.state_content_bytes is not None or not spec.kv_quant_mode.is_turboquant:
             return spec
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            TurboQuantConfig,
+        )
 
         # KVQuantMode member names mirror the preset strings.
         tq = TurboQuantConfig.from_cache_dtype(
@@ -554,6 +556,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             return output.fill_(0)
 
         q = query[:N].view(N, self.num_heads, self.head_size)
+
         # Get TQ buffers, ensure on device (one-time migration).
         # Use Any-typed alias for dynamic _tq_* attrs set by _ensure_on_device.
         tq_layer: Any = layer

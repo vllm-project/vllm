@@ -92,8 +92,8 @@ def build_offloading_config(
 
     worker_kv_bytes_per_block = 0
     if kv_cache_config.num_blocks > 0 and kv_cache_config.kv_cache_tensors:
-        # Every KVCacheTensor describes placement within the same backing
-        # allocation, so its size is the total, not a per-tensor share.
+        # Every KVCacheTensor describes placement within the same backing allocation,
+        # so its size is the total, not a per-tensor share.
         total_gpu_kv_bytes = kv_cache_config.kv_cache_tensors[0].size
         worker_kv_bytes_per_block = total_gpu_kv_bytes // kv_cache_config.num_blocks
 

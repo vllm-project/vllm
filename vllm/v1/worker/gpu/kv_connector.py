@@ -50,7 +50,7 @@ class ActiveKVConnector(KVConnector):
     ):
         self.vllm_config = vllm_config
         self.kv_connector = get_kv_transfer_group()
-        # Register kv caches with KV Connector.
+        # Register kv caches with KV Connector if applicable.
         self.kv_connector.register_kv_caches(kv_caches_dict)
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
 

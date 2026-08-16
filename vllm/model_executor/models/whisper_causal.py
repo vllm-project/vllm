@@ -5,6 +5,7 @@ import functools
 import logging
 import math
 from dataclasses import replace
+from fractions import Fraction
 from functools import partial
 
 import torch
@@ -131,7 +132,7 @@ def create_whisper_attention_backend_with_block_pooling(
             kv_cache_spec = replace(
                 kv_cache_spec,
                 block_size=kv_cache_spec.block_size * block_pool_size,
-                states_per_token=1,
+                tokens_per_state=1,
             )
             if isinstance(kv_cache_spec, SlidingWindowSpec):
                 # The manager keeps `sliding_window` in pooled units; the kernel
@@ -324,7 +325,7 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
         assert isinstance(kv_cache_spec, AttentionSpec)
         kv_cache_spec = replace(
             kv_cache_spec,
-            states_per_token=self.block_pool_size,
+            tokens_per_state=Fraction(1, self.block_pool_size),
         )
         if isinstance(kv_cache_spec, SlidingWindowSpec):
             # The manager counts blocks in pooled units, so express the window in

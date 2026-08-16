@@ -129,9 +129,8 @@ class ExampleConnector(KVConnectorBase_V1):
             """Inject the KV cache into the layer.
 
             Args:
-                dst_kv_cache_layer (torch.Tensor): the destination KV cache
-                    layer, a standardized [B, H, N, C] per-layer view
-                    (H == 1 for MLA).
+                dst_kv_cache_layer (torch.Tensor): the destination KV cache layer,
+                    a standardized [B, H, N, C] per-layer view (H == 1 for MLA).
                 src_kv_cache (torch.Tensor): the source KV cache.
                 slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
@@ -223,8 +222,7 @@ class ExampleConnector(KVConnectorBase_V1):
         ) -> torch.Tensor:
             """Extract the KV cache from the layer.
 
-            The layer is a standardized [B, H, N, C] per-layer view
-            (H == 1 for MLA).
+            The layer is a standardized [B, H, N, C] per-layer view (H == 1 for MLA).
             """
             slot_mapping = slot_mapping.to(layer.device, non_blocking=True)
             if isinstance(attn_metadata, MLACommonMetadata):

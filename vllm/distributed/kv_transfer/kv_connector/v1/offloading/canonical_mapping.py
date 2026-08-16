@@ -34,9 +34,9 @@ CANONICAL_FORMAT_VERSION = 1
 def canonical_format_id() -> str:
     """Identity of the canonical byte format, for namespacing persisted KV.
     Canonical pages keep the worker's KV layout family, so the id couples the
-    format version with that family; consumers must match it exactly.
-    The family keeps its historical NHD/HND spelling so ids stay stable for
-    KV persisted before the layout enum existed."""
+    format version with that family; consumers must match it exactly. The family
+    keeps its historical NHD/HND spelling so ids stay stable for KV persisted
+    before the layout enum existed."""
     from vllm.v1.attention.backends.utils import get_kv_cache_layout
     from vllm.v1.kv_cache_interface import KVCacheLayout
 

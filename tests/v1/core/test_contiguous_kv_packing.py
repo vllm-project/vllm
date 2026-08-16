@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for KV cache packing.
+"""Tests for contiguous KV cache packing.
 
-Every cache group packs its layers densely into one block; groups overlay
-each other (a block ID is owned by one group at a time), so the packed block
-stride is the largest group's packing. The layout decides whether the layer
-dim sits outside the block dim (a contiguous region per layer) or inside it
-(all layers' pages within each block); the allocation is the same either way.
+Every cache group packs its layers densely into one block; groups overlay each other
+(a block ID is owned by one group at a time), so the packed block stride is the
+largest group's packing. The layout decides whether the layer dim sits outside the
+block dim (a contiguous region per layer) or inside it (all layers' pages within each
+block); the allocation is the same either way.
 """
 
 from unittest.mock import MagicMock
@@ -14,10 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from vllm.v1.attention.backends.utils import (
-    get_kv_cache_layout,
-    set_kv_cache_layout,
-)
+from vllm.v1.attention.backends.utils import get_kv_cache_layout, set_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
     _get_packed_kv_cache_layout,
     _pool_bytes_per_block,
@@ -225,3 +222,7 @@ class TestDensePacking:
         for i, name in enumerate(specs):
             assert (views[name].to(torch.int32) == i + 1).all(), name
             assert views[name].shape[0] == config.num_blocks
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

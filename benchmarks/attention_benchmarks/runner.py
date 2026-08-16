@@ -359,8 +359,7 @@ def _create_kv_cache(
         head_size=config.head_dim,
         dtype=cache_dtype,
     )
-    # Backends that repack the page (e.g. ROCM_ATTN's separate K/V head groups)
-    # publish it here, exactly as the worker does when building the real spec.
+    # Apply the backend's page customization, as the worker does for the real spec.
     spec = backend_class.customize_spec(spec)
     layout = get_kv_cache_layout()
     total_bytes = (
@@ -497,8 +496,8 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             backend_class, impl, layer = _create_backend_impl(
                 backend_cfg, config, device, dtype
             )
-            # Publish any backend-required layout (e.g. FlashInfer TRTLLM)
-            # before allocating the cache; the benchmark runs one backend.
+            # Set KV cache layout if the backend requires a specific one
+            # (e.g., FlashInfer requires LBHNC on SM100/Blackwell for TRTLLM attention)
             resolve_kv_cache_layout([backend_class], vllm_config.cache_config)
 
             common_metadata = _build_common_attn_metadata(

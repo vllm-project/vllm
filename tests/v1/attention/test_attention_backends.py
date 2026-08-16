@@ -135,13 +135,25 @@ def create_and_prepopulate_kv_cache(
 ) -> torch.Tensor:
     """Create and prepopulate a KV cache with context data.
 
-    Mirrors production's ``reshape_kv_cache``: allocates a flat buffer in
-    the physical order dictated by *layout*, then permutes to the logical
-    ``[B, H, N, C]`` shape that every backend expects.
+    Args:
+        k_contexts: List of key context tensors for each sequence
+        v_contexts: List of value context tensors for each sequence
+        block_size: Size of each block
+        num_kv_heads: Number of KV heads
+        head_size: Size of each head
+        dtype: Data type for the cache
+        device: Device to create the cache on
+        num_blocks: Total number of blocks in the cache
+        common_attn_metadata: Provides seq lens, block table and slot mapping
+        layout: Physical layout to allocate in; the cache is returned as the
+                logical ``[B, H, N, C]`` view (as ``reshape_kv_cache`` does)
+        randomize_blocks: Whether to randomly permute blocks
+                          or use sequential order
+        kv_cache_dtype: Cache dtype string; fp8 caches use fp8 storage
 
     Returns:
         A 4D tensor in logical ``(num_blocks, num_kv_heads, block_size,
-        2 * head_size)`` order with strides determined by *layout*.
+        2 * head_size)`` order with strides determined by ``layout``.
     """
     batch_size = len(k_contexts)
     seq_lens = common_attn_metadata.seq_lens.cpu()
@@ -174,7 +186,8 @@ def create_and_prepopulate_kv_cache(
     # Write context tokens into the cache via the logical view:
     # kv_cache[block, :, token_in_block, :] routes correctly regardless
     # of physical layout.
-    start_block_idx = 1  # block 0 is the null block
+    # Start from block_id=1 since block_id=0 is considered the null block
+    start_block_idx = 1
     for i in range(batch_size):
         k_context, v_context = k_contexts[i], v_contexts[i]
         t = torch.arange(k_context.shape[0], device=device)
@@ -184,17 +197,21 @@ def create_and_prepopulate_kv_cache(
         # index_put is dtype-strict; cast like the scalar path would.
         kv_cache[blk, :, off, :head_size] = k_context.to(kv_cache.dtype)
         kv_cache[blk, :, off, head_size:] = v_context.to(kv_cache.dtype)
+        # Stay block aligned and allocate enough blocks for the new tokens
         start_block_idx += cdiv(int(seq_lens[i]), block_size)
 
     blocks_end = start_block_idx
 
     # Permute the context blocks (excluding block 0 which is null)
     if randomize_blocks:
+        # Random permutation starting from block 1
         perm = torch.randperm(blocks_end - 1) + 1
     else:
+        # Sequential order starting from block 1
         perm = torch.arange(1, blocks_end)
 
     inv_perm = torch.zeros(blocks_end, dtype=torch.long, device=device)
+    # Add 1 to account for starting from block 1
     inv_perm[1:] = torch.argsort(perm) + 1
     kv_cache[1:blocks_end, ...] = kv_cache[perm, ...]
 
@@ -236,6 +253,22 @@ class MockAttentionLayer:
         self._q_scale_float = 1.0
         self._k_scale_float = 1.0
         self._v_scale_float = 1.0
+
+
+def _clone_kv_cache_in_layout(
+    kv_cache: torch.Tensor, layout: KVCacheLayout
+) -> torch.Tensor:
+    """Copy a logical [B, H, N, C] cache into a fresh allocation in `layout`."""
+    logical_5d = (1, *kv_cache.shape)
+    physical = torch.zeros(
+        tuple(logical_5d[i] for i in layout.stride_order),
+        dtype=kv_cache.dtype,
+        device=kv_cache.device,
+    )
+    inv_order = [layout.stride_order.index(i) for i in range(5)]
+    view = physical.permute(*inv_order)[0]
+    view.copy_(kv_cache)
+    return view
 
 
 def run_attention_backend(
@@ -576,10 +609,20 @@ def _test_backend_correctness(
             continue
 
         kv_cache_for_backend = kv_cache
+        backend_layout = layout
+
+        if not backend_cls.supports_kv_cache_layout(backend_layout):
+            # Production resolution never pairs this backend with the shared
+            # layout (e.g. flex is LBNHC-only next to FlashInfer's LBHNC);
+            # give it a copy of the cache in a layout it supports.
+            backend_layout = next(
+                m for m in KVCacheLayout if backend_cls.supports_kv_cache_layout(m)
+            )
+            kv_cache_for_backend = _clone_kv_cache_in_layout(kv_cache, backend_layout)
 
         # FlashInfer reads the layout at plan time; override to match
         # the physical order of the test cache.
-        set_kv_cache_layout(layout.name)
+        set_kv_cache_layout(backend_layout.name)
 
         try:
             backend_output = run_attention_backend(

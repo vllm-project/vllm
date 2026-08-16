@@ -554,9 +554,9 @@ class NixlBaseConnectorWorker:
         # This is not used for SSM layers, which use the counterpart `mamba_ssm_size`.
         self.block_len_per_layer = list[int]()
 
-        # Per-block physical stride per layer (bytes). Read from each
-        # registered tensor's stride(0) so it stays correct under layouts
-        # that interleave layers within a block (BLHNC/BHLNC).
+        # Per-region block stride in bytes. Taken from the registered tensor's
+        # stride(0) so it stays correct under layouts that interleave layers
+        # within a block (BLHNC/BHLNC), where stride > block_len.
         self.block_stride_per_layer = list[int]()
 
         # Per-engine TP mappings. Generated during handshake.
@@ -775,11 +775,10 @@ class NixlBaseConnectorWorker:
                             logger.info_once(
                                 "'enable_permute_local_kv' flag is enabled while "
                                 "device KV Layout is LBNHC. Init host buffer with"
-                                " LBHNC to better support Decode/Prefill "
-                                "TP_ratio > 1."
+                                " LBHNC to better support Decode/Prefill TP_ratio > 1."
                             )
-                            # Since LBNHC will not support Decode/Prefill
-                            # TP_ratio > 1, we can leverage host_buffer for permute.
+                            # Since LBNHC will not support Decode/Prefill TP_ratio > 1,
+                            # we can leverage host_buffer for permute.
                             self.host_buffer_kv_cache_layout = "LBHNC"
                         else:
                             # Packed KV layout is logical (B, H, N, 2*D). Allocate
@@ -1001,13 +1000,10 @@ class NixlBaseConnectorWorker:
         seen_storage_addresses: set[int] = set()
         seen_base_addresses: list[int] = []
 
-        # DSv4-style packed allocation: every layer is a distinct strided view
-        # into one block-major storage, so a block's bytes are a single
-        # contiguous row spanning all layers. Registering that row as one
-        # region keeps transfers at one descriptor per block instead of one per
-        # (layer, block). Models whose layers sit in separate allocations
-        # already get one region per layer, and Mamba layers register their own
-        # conv/ssm sub-regions, so both keep the per-layer path.
+        # DSv4-style packed allocation: every layer is a distinct strided view into
+        # one block-major storage, so a block's bytes form one contiguous row across
+        # all layers. Registering that row as a single region keeps transfers at one
+        # descriptor per block instead of one per (layer, block).
         storage_ptrs = {
             cache.untyped_storage().data_ptr() for cache in xfer_buffers.values()
         }
@@ -1017,8 +1013,8 @@ class NixlBaseConnectorWorker:
         )
 
         # K and V are packed into the content dim, so each attention layer is a
-        # single NIXL region whose block transfers as one unit. Mamba layers
-        # instead register separate conv/ssm sub-regions.
+        # single NIXL region whose block transfers as one unit. Mamba layers instead
+        # register separate conv/ssm sub-regions (see `_build_mamba_local`).
         for layer_name, cache in xfer_buffers.items():
             # NOTE (NickLucche) Hybrid SSM mamba/FA physical page_size may differ when
             # kernel requires a specific block size. This leads to SSM and FA layers
@@ -1053,9 +1049,9 @@ class NixlBaseConnectorWorker:
             )
             storage = cache.untyped_storage()
             storage_addr = storage.data_ptr()
-            # Memory registration follows allocations, while transfer regions
-            # follow logical layers (or contiguous head segments). This keeps
-            # strided cross-layer views inside their registered allocation.
+            # Memory registration follows allocations, while transfer regions follow
+            # logical layers (or contiguous head segments). This keeps strided
+            # cross-layer views inside their registered allocation.
             if storage_addr not in seen_storage_addresses:
                 seen_storage_addresses.add(storage_addr)
                 self.device_id = max(cache.get_device(), 0)
@@ -1077,18 +1073,17 @@ class NixlBaseConnectorWorker:
                 ]
             else:
                 if cache.ndim == 1:
-                    # Flat byte view: HMA tensors shared between layer types
-                    # carry no block dimension, so stride(0) is 1 byte rather
-                    # than a block stride. Consecutive blocks abut here, so the
-                    # stride is the page size.
+                    # Flat byte view: HMA tensors shared between layer types carry
+                    # no block dimension, so stride(0) is 1 byte. Blocks abut, so
+                    # the stride is the page size.
                     block_stride = physical_page_size
                 else:
                     block_stride = cache.stride(0) * cache.element_size()
                 storage_is_block_major = num_blocks * block_stride == storage.nbytes()
-                # A layer whose [H, N, C] interior is dense addresses its own
-                # page as one chunk, so it can own a region. When it does not,
-                # or when every layer is packed into this one storage, the
-                # block's whole row is the only contiguous unit.
+                # A layer whose [H, N, C] interior is dense addresses its own page
+                # as one chunk, so it can own a region. When it does not, or when
+                # every layer is packed into this one storage, the block's whole
+                # row is the only contiguous unit.
                 hnc_contiguous = (
                     cache.ndim == 4
                     and cache.stride(2) == cache.shape[3]
@@ -1123,9 +1118,8 @@ class NixlBaseConnectorWorker:
                 if base_addr in seen_base_addresses:
                     if is_mla_region:
                         # Dual-purpose HMA tensor: an MLA layer shares a region
-                        # a non-MLA layer registered first. MLA is not
-                        # head-sharded, so the region must be flagged MLA
-                        # regardless of which layer type got here first.
+                        # that a non-MLA layer registered first. MLA is not
+                        # head-sharded, so the region must be flagged MLA.
                         idx = seen_base_addresses.index(base_addr)
                         self._region_is_mla[idx] = True
                     continue
@@ -1351,10 +1345,10 @@ class NixlBaseConnectorWorker:
         block_arange = np.arange(num_blocks, dtype=np.uint64)
         parts: list[np.ndarray] = []
         for i, base_addr in enumerate(base_addresses):
-            kv_block_len = self.block_len_per_layer[i] // block_size_ratio
-            page_stride = self.block_stride_per_layer[i] // block_size_ratio
-            addrs = base_addr + block_arange * page_stride
-            parts.append(self._stack_descs(addrs, kv_block_len, device_id))
+            block_len = self.block_len_per_layer[i] // block_size_ratio
+            block_stride = self.block_stride_per_layer[i] // block_size_ratio
+            addrs = base_addr + block_arange * block_stride
+            parts.append(self._stack_descs(addrs, block_len, device_id))
         return np.concatenate(parts)
 
     def _build_fa_remote(
@@ -1743,8 +1737,8 @@ class NixlBaseConnectorWorker:
             self.enable_heterogeneous_attn_post_process = True
 
         # Heterogeneous TP requires head-splitting, which only works with
-        # block-contiguous layouts (H before N, e.g. LBHNC / BHLNC).
-        # MLA and replicated-KV cases don't split on heads.
+        # block-contiguous layouts (e.g. LBHNC). MLA and replicated-KV cases
+        # don't split on heads. Mamba doesn't support heterogeneous TP.
         if (
             abs(tp_ratio) != 1
             and not self.use_mla
@@ -1901,7 +1895,7 @@ class NixlBaseConnectorWorker:
         """
         Post process device kv cache after receiving from remote.
 
-        3 types of post processing supported:
+        3 types of conversion supported (``convert``):
             * kv_cache_postprocess_layout => convert from HND to NHD
             * kv_cache_postprocess_blksize => convert from small block size
               to large block size

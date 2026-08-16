@@ -22,10 +22,7 @@ if not current_platform.is_cuda_alike():
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.v1.attention.backends.utils import set_kv_cache_layout
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheLayout,
-)
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
     CU_MEMCPY_SRC_ACCESS_ORDER_ANY,

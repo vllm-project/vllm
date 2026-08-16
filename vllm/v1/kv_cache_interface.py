@@ -8,6 +8,7 @@ from collections import Counter
 from collections.abc import Collection
 from dataclasses import dataclass, fields, replace
 from enum import Enum, IntEnum
+from fractions import Fraction
 from math import prod
 from typing import TYPE_CHECKING, TypeVar
 
@@ -152,7 +153,7 @@ class KVCacheSpec:
         raise NotImplementedError
 
     @property
-    def tokens_per_state(self) -> int:
+    def tokens_per_state(self) -> int | Fraction:
         raise NotImplementedError
 
     @property
@@ -393,9 +394,11 @@ class AttentionSpec(KVCacheSpec):
     slot per KV head. None means one slot per KV head. Published by the backend.
     """
     state_content_bytes: int | None = None
-    """C in bytes when packed; None defaults to ``(hs_k + hs_v) * dtype`` content."""
-    tokens_per_state: int = 1
-    states_per_token: int = 1
+    """C in bytes when packed; None means dense K/V content."""
+    tokens_per_state: int | Fraction = 1
+    """Tokens covered by one stored state. Ints > 1 compress multiple tokens
+    into one state (DSv4 sparse MLA); fractions < 1 store multiple states per
+    token (Whisper block pooling: ``Fraction(1, block_pool_size)``)."""
 
     def __post_init__(self):
         if self.head_size_v is None:
@@ -409,9 +412,12 @@ class AttentionSpec(KVCacheSpec):
 
     @property
     def storage_block_size(self) -> int:
-        num_states = self.block_size * self.states_per_token
-        assert num_states % self.tokens_per_state == 0
-        return num_states // self.tokens_per_state
+        num_states = Fraction(self.block_size) / self.tokens_per_state
+        assert num_states.denominator == 1, (
+            f"block_size {self.block_size} not divisible by "
+            f"tokens_per_state {self.tokens_per_state}"
+        )
+        return int(num_states)
 
     @property
     def state_content_size_bytes(self) -> int:
@@ -520,7 +526,7 @@ class FullAttentionSpec(AttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
-            states_per_token=specs[0].states_per_token,
+            tokens_per_state=specs[0].tokens_per_state,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             # If any layer in the group is non-causal, treat the group as
@@ -594,7 +600,6 @@ class MLAAttentionSpec(FullAttentionSpec):
             state_content_bytes=specs[0].state_content_bytes,
             cache_dtype_str=cache_dtype_str_set.pop(),
             tokens_per_state=tokens_per_state_set.pop(),
-            states_per_token=specs[0].states_per_token,
             model_version=model_version_set.pop(),
             non_causal_multi_token_decode=any(
                 spec.non_causal_multi_token_decode for spec in specs
@@ -650,7 +655,7 @@ class RSWASpec(FullAttentionSpec):
             page_size_padded=base.page_size_padded,
             num_head_slots=base.num_head_slots,
             state_content_bytes=base.state_content_bytes,
-            states_per_token=base.states_per_token,
+            tokens_per_state=base.tokens_per_state,
             sliding_window=base.sliding_window,
             attention_chunk_size=base.attention_chunk_size,
             non_causal=base.non_causal,
@@ -794,8 +799,8 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             and len(extra_retained_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
-            "quantization method, tokens per state, model version, and "
-            "sliding window size and retained token count."
+            "quantization method, tokens per state, model version, sliding "
+            "window size, and retained token count."
         )
         return cls(
             block_size=specs[0].block_size,
@@ -809,7 +814,6 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             extra_retained_tokens=extra_retained_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
             tokens_per_state=tokens_per_state_set.pop(),
-            states_per_token=specs[0].states_per_token,
             model_version=model_version_set.pop(),
         )
 
@@ -1095,8 +1099,10 @@ def get_kv_cache_spec_sliding_window(kv_cache_spec: KVCacheSpec) -> int | None:
 
 @dataclass
 class KVCacheTensor:
-    """Placement of a set of same-shaped layers in the KV cache allocation.
+    """
+    A class for specifying how the workers should initialize the KV cache.
 
+    Placement of a set of same-shaped layers in the KV cache allocation.
     Layer ``layers[l]``'s page for block ``b`` starts at
     ``offset + l * layer_stride + b * block_stride`` bytes into the backing
     allocation of ``size`` bytes. Layer-outermost layouts give each layer a

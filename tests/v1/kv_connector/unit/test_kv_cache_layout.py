@@ -66,9 +66,9 @@ def test_dense_kv_cache_views(layout):
         assert v.shape == expected_shape
         assert v.dtype == spec.dtype
 
-    # The per-layer view preserves the physical order of B, H, N, and C
-    # after the layer dimension is selected. Dimensions later in that order
-    # have smaller strides, including when layer interleaving creates gaps.
+    # The per-layer view preserves the physical order of B, H, N, and C after the layer
+    # dimension is selected. Dimensions later in that order have smaller strides,
+    # including when layer interleaving creates gaps.
     stride_order = layout.layer_view_order
     strides = views[0].stride()
     for i in range(3):

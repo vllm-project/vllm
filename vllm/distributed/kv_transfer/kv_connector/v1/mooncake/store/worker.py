@@ -1584,12 +1584,11 @@ class MooncakeStoreWorker:
                 addrs.append(base_addr)
                 block_lens.append(region_len // self.num_blocks)
             elif cache.stride(0) * cache.element_size() * self.num_blocks == region_len:
-                # Packed layout (and single-layer tensors): the block
-                # stride spans the whole per-block window, which may hold
-                # other layers' pages at higher offsets. Register the storage
-                # once as one whole-window region; per-layer regions would
-                # copy overlapping windows and run past the storage for
-                # offset layers.
+                # Packed layout (and single-layer tensors): the block stride spans
+                # the whole per-block window, which may hold other layers' pages at
+                # higher offsets. Register the storage once as one whole-window
+                # region; per-layer regions would copy overlapping windows and run
+                # past the storage for offset layers.
                 if base_addr in seen_region_ptrs:
                     continue
                 seen_region_ptrs.add(base_addr)

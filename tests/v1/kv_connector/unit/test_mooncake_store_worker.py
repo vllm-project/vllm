@@ -1974,11 +1974,9 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
 
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
-
-    def _put_ok(keys, addrs, sizes, *_args):
-        return [256] * len(keys)
-
-    store.batch_put_from_multi_buffers.side_effect = _put_ok
+    store.batch_put_from_multi_buffers.side_effect = (
+        lambda keys, addrs, sizes, *_args: [256] * len(keys)
+    )
 
     full_spec = FullAttentionSpec(
         block_size=32, num_kv_heads=8, head_size=64, dtype=None
@@ -2803,8 +2801,7 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
 
 
 def test_register_kv_caches_separate_head_groups():
-    # LHBNC gives each head group its own region; the K/V
-    # split only doubles the head count.
+    # LHBNC gives each head group its own region; the K/V split doubles heads.
     layout = KVCacheLayout.LHBNC
     num_blocks = 3
     num_layers = 2

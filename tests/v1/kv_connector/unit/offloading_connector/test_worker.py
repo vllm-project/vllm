@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheLayout,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
@@ -69,7 +70,6 @@ def _allocate_and_reshape_kv_caches(
     device: torch.device,
 ):
     """Allocate kv_caches exactly as the model runner does at startup."""
-    from vllm.v1.kv_cache_interface import KVCacheLayout
     from vllm.v1.worker.utils import allocate_and_reshape_kv_cache
 
     kernel_block_sizes = [BLOCK_SIZE] * len(kv_cache_config.kv_cache_groups)
@@ -298,9 +298,9 @@ def test_register_kv_caches(backend):
     Creates one FullAttention group, one MLA group, one Mamba group, and
     one Mamba-padded group. Each group has GROUP_SIZE layers.
 
-    KVCacheTensors mirror the real allocation in kv_cache_utils.py: each
-    group is one run of the shared allocation starting at offset 0, so layer
-    i of every group aliases the same bytes.
+    KVCacheTensors mirror the real allocation in kv_cache_utils.py: each group is one
+    run of the shared allocation starting at offset 0, so layer i of every group
+    aliases the same bytes.
 
     Uses the real GPUModelRunner.initialize_kv_cache_tensors to produce
     the raw per-layer kv_caches registered by the connector.
@@ -389,8 +389,6 @@ def test_register_kv_caches(backend):
         aligned_mamba_layer_names,
     ]
 
-    # Every group packs its layers densely into the same allocation and all
-    # start at offset 0, so layer i of every group aliases the same bytes.
     kv_cache_tensors: list[KVCacheTensor] = [
         KVCacheTensor(
             size=PAGE_SIZE_BYTES * NUM_BLOCKS * GROUP_SIZE,
@@ -555,8 +553,8 @@ def test_register_kv_caches_uniform_type(backend):
         kv_cache_specs={layer_a: spec_a, layer_b: spec_b},
     )
 
-    # The group packs its two layers densely, one run each as their pages
-    # differ: layer_a occupies the first page of every block, layer_b the rest.
+    # The group packs its two layers densely, one run each as their pages differ:
+    # layer_a occupies the first page of every block, layer_b the rest.
     window = spec_a.page_size_bytes + spec_b.page_size_bytes
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,

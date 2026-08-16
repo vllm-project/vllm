@@ -750,8 +750,8 @@ def test_registration_regions_use_layer_num_blocks():
 
 
 def test_unsupported_shape_raises_value_error():
-    # A 4-D view whose head/state/content dims all disagree with the spec
-    # (a standardized [B, H, N, C] view for _full_spec would be (8, 2, 4, 6)).
+    # A 4-D view whose head/state/content dims all disagree with the spec (a
+    # standardized [B, H, N, C] view for _full_spec would be (8, 2, 4, 6)).
     cache = torch.empty((8, 3, 5, 7), dtype=torch.bfloat16)
     worker = _worker({"layer": cache}, {"layer": _full_spec()})
 
@@ -760,9 +760,9 @@ def test_unsupported_shape_raises_value_error():
 
 
 def test_standardized_view_geometry_and_padded_registration():
-    """Production per-layer views come from ``reshape_kv_cache``: geometry
-    must track the [B, H, N, C] shape, and padded pages must register the
-    full strided span (not just the meaningful block_len)."""
+    """Production per-layer views come from ``reshape_kv_cache``: geometry must track
+    the [B, H, N, C] shape, and padded pages must register the full strided span (not
+    just the meaningful block_len)."""
     num_blocks = 8
     spec = _full_spec()
     raw = torch.zeros(num_blocks * spec.page_size_bytes, dtype=torch.int8)

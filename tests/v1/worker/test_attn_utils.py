@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Padded-page handling in reshape_kv_cache.
 
-Guards that a page_size_padded spec strides the block dimension by the
-padded page while keeping per-block content compact, so padding bytes at
-the end of each page are never addressed by the logical view.
+Guards that a page_size_padded spec strides the block dimension by the padded page
+while keeping per-block content compact, so padding bytes at the end of each page are
+never addressed by the logical view.
 """
 
 import pytest
@@ -98,12 +98,7 @@ def test_reshape_separate_kv_head_groups_matches_aiter_block_interior():
         return True
 
     for kv_cache in views:
-        assert kv_cache.shape == (
-            num_blocks,
-            2,
-            block_size,
-            num_kv_heads * head_size,
-        )
+        assert kv_cache.shape == (num_blocks, 2, block_size, num_kv_heads * head_size)
         key_cache, value_cache = kv_cache.unbind(1)
         shape = (num_blocks, block_size, num_kv_heads, head_size)
         key_cache, value_cache = key_cache.view(shape), value_cache.view(shape)
@@ -133,11 +128,10 @@ def test_reshape_quantized_kv_cache_content_includes_inline_scales():
         page_size_padded=384,
     )
     spec = TritonAttentionBackend.customize_spec(spec)
-    # Per-token-head scales live inline in the content dim as
-    # [K | K_scale | V | V_scale] per (head, slot), matching
-    # TritonAttentionImpl._ensure_scale_caches. The view must address
-    # every budgeted byte, including the scales; only alignment padding
-    # past unpadded_page_size_bytes stays unaddressed.
+    # Per-token-head scales live inline in the content dim as [K | K_scale | V |
+    # V_scale] per (head, slot), matching TritonAttentionImpl._ensure_scale_caches.
+    # The view must address every budgeted byte, including the scales; only the
+    # alignment padding past unpadded_page_size_bytes stays unaddressed.
     scale_bytes = 2 * spec.block_size * spec.num_kv_heads * 4
     assert spec.unpadded_page_size_bytes == 128 + scale_bytes
     assert spec.real_page_size_bytes == spec.unpadded_page_size_bytes
@@ -193,12 +187,7 @@ def test_allocate_compressed_mla_cache(
         config, torch.device("cpu"), KVCacheLayout.LBHNC, kernel_block_sizes
     )
 
-    assert caches["layer.0"].shape == (
-        expected_num_blocks,
-        1,
-        expected_num_states,
-        128,
-    )
+    assert caches["layer.0"].shape == (expected_num_blocks, 1, expected_num_states, 128)
 
 
 @pytest.mark.parametrize("layout", list(KVCacheLayout))
@@ -211,10 +200,7 @@ def test_copy_kv_cache_blocks_shared_storage(layout: KVCacheLayout):
         head_size=2,
         dtype=torch.float32,
     )
-    raw = torch.zeros(
-        num_blocks * num_layers * spec.page_size_bytes,
-        dtype=torch.int8,
-    )
+    raw = torch.zeros(num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8)
     caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
 
     for layer_idx, cache in enumerate(caches):
@@ -236,8 +222,8 @@ def test_copy_kv_cache_blocks_shared_storage(layout: KVCacheLayout):
 
 
 def test_copy_kv_cache_blocks_separate_head_groups():
-    # LHBNC stores each head group separately, so a
-    # block's bytes are scattered across L*H regions.
+    # LHBNC stores each head group separately, so a block's bytes are scattered
+    # across L*H regions.
     layout = KVCacheLayout.LHBNC
     num_blocks = 4
     num_layers = 2
@@ -249,10 +235,7 @@ def test_copy_kv_cache_blocks_separate_head_groups():
         num_head_slots=2,
         state_content_bytes=2 * 2 * 4,
     )
-    raw = torch.zeros(
-        num_blocks * num_layers * spec.page_size_bytes,
-        dtype=torch.int8,
-    )
+    raw = torch.zeros(num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8)
     caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
 
     for layer_idx, cache in enumerate(caches):
@@ -289,10 +272,7 @@ def test_copy_kv_cache_blocks_with_virtual_block_splitting(layout: KVCacheLayout
         head_size=2,
         dtype=torch.float32,
     )
-    raw = torch.zeros(
-        num_blocks * num_layers * spec.page_size_bytes,
-        dtype=torch.int8,
-    )
+    raw = torch.zeros(num_blocks * num_layers * spec.page_size_bytes, dtype=torch.int8)
     caches = dense_kv_cache_views(
         raw,
         spec,

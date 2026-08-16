@@ -241,16 +241,7 @@ if TYPE_CHECKING:
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
     VLLM_KV_CACHE_LAYOUT: (
-        Literal[
-            "LBNHC",
-            "LBHNC",
-            "LHBNC",
-            "NHD",
-            "HND",
-            "BLHNC",
-            "BLNHC",
-            "BHLNC",
-        ]
+        Literal["LBNHC", "LBHNC", "LHBNC", "NHD", "HND", "BLHNC", "BLNHC", "BHLNC"]
         | None
     ) = None
     VLLM_SSM_CONV_STATE_LAYOUT: Literal["SD", "DS"] | None = None
@@ -1786,25 +1777,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Some common values are:
     # - LBNHC
     # - LBHNC
-    # Where N=num_states, H=num_heads and C=state_content. The default value
-    # will leave the layout choice to the backend. Mind that backends may only
+    # Where N=num_states, H=num_heads and C=state_content. The default value will
+    # leave the layout choice to the backend. Mind that backends may only
     # implement and support a subset of all possible layouts.
-    # Note: LHBNC hoists the head dim outside the block dim; backends reject
-    # it at selection time via AttentionBackend.supports_kv_cache_layout()
-    # unless they explicitly support separated head-group addressing.
+    # LHBNC hoists the head dim outside the block dim; backends must opt in via
+    # AttentionBackend.supports_kv_cache_layout().
     "VLLM_KV_CACHE_LAYOUT": env_with_choices(
         "VLLM_KV_CACHE_LAYOUT",
         None,
-        [
-            "LBNHC",
-            "LBHNC",
-            "LHBNC",
-            "NHD",
-            "HND",
-            "BLHNC",
-            "BLNHC",
-            "BHLNC",
-        ],
+        ["LBNHC", "LBHNC", "LHBNC", "NHD", "HND", "BLHNC", "BLNHC", "BHLNC"],
     ),
     # SSM conv state layout used for Mamba models.
     # - SD: (state_len, dim) — dim contiguous (default)

@@ -17,11 +17,7 @@ from typing_extensions import runtime_checkable
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
-from vllm.v1.kv_cache_interface import (
-    KVCacheLayout,
-    KVCacheSpec,
-    MambaSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpec, MambaSpec
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -42,7 +38,6 @@ from vllm.v1.attention.backend import (
 )
 
 logger = init_logger(__name__)
-
 KVCacheLayoutType = Literal["LBNHC", "LBHNC", "LHBNC", "BLHNC", "BLNHC", "BHLNC"]
 _KV_CACHE_LAYOUT_OVERRIDE: KVCacheLayoutType | None = None
 
@@ -173,7 +168,7 @@ def get_flashinfer_layout_string() -> str:
     return _FLASHINFER_LAYOUT_NAMES[name]
 
 
-def set_kv_cache_layout(cache_layout: "KVCacheLayoutType | None"):
+def set_kv_cache_layout(cache_layout: KVCacheLayoutType | None):
     """Install a test-only layout override (highest priority)."""
     global _KV_CACHE_LAYOUT_OVERRIDE, _RESOLVED_KV_CACHE_LAYOUT
     _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
@@ -261,10 +256,9 @@ def resolve_kv_cache_layout(
 def require_block_outer_kv_cache_layout(cache_config=None) -> KVCacheLayout:
     """Publish a block-outermost layout for models that overlay cache groups.
 
-    Overlaid groups with different page sizes need the layer dim inside the
-    block dim, so the model's allocation dictates the layout the same way a
-    backend requirement does. Preserve the requested H/N/C ordering while
-    moving blocks before layers.
+    Overlaid groups with different page sizes need the layer dim inside the block dim,
+    so the model's allocation dictates the layout the same way a backend requirement
+    does. Preserve the requested H/N/C ordering while moving blocks before layers.
     """
     global _KV_CACHE_LAYOUT_OVERRIDE, _RESOLVED_KV_CACHE_LAYOUT
     layout = get_kv_cache_layout(cache_config)
@@ -284,10 +278,9 @@ def require_block_outer_kv_cache_layout(cache_config=None) -> KVCacheLayout:
 def get_kv_cache_layout(cache_config=None) -> KVCacheLayout:
     """Return the resolved physical KV cache layout.
 
-    Read-only: prefers the test override, then an explicit or current config,
-    then the process-local value published by ``resolve_kv_cache_layout``.
-    Processes where backend selection never runs fall back to
-    env > connector > LBNHC.
+    Read-only: prefers the test override, then an explicit or current config, then the
+    process-local value published by ``resolve_kv_cache_layout``. Processes where
+    backend selection never runs fall back to env > connector > LBNHC.
     """
     if _KV_CACHE_LAYOUT_OVERRIDE is not None:
         return _layout_from_name(_KV_CACHE_LAYOUT_OVERRIDE)

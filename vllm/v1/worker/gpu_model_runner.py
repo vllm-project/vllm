@@ -167,7 +167,6 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
-    KVCacheLayout,
     KVCacheSpec,
     KVCacheSpecKind,
     SlidingWindowSpec,
@@ -7447,20 +7446,6 @@ class GPUModelRunner(
         for attn_groups in self.attn_groups:
             yield from attn_groups
 
-    def _allocate_and_reshape_kv_cache(
-        self,
-        kv_cache_config: KVCacheConfig,
-        kernel_block_sizes: list[int],
-        layout: KVCacheLayout,
-    ) -> dict[str, torch.Tensor]:
-        """Allocate the KV cache and view it as [B, H, N, C] per layer."""
-        return allocate_and_reshape_kv_cache(
-            kv_cache_config,
-            self.device,
-            layout,
-            kernel_block_sizes,
-        )
-
     def initialize_kv_cache_tensors(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
     ) -> dict[str, torch.Tensor]:
@@ -7476,9 +7461,8 @@ class GPUModelRunner(
             corresponding memory buffer for KV cache.
         """
 
-        layout = get_kv_cache_layout()
-        kv_caches = self._allocate_and_reshape_kv_cache(
-            kv_cache_config, kernel_block_sizes, layout=layout
+        kv_caches = allocate_and_reshape_kv_cache(
+            kv_cache_config, self.device, get_kv_cache_layout(), kernel_block_sizes
         )
 
         # Set up cross-layer KV cache sharing

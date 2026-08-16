@@ -67,6 +67,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
+    KVCacheLayoutType,
     get_dcp_local_seq_lens,
     get_flashinfer_layout_string,
     get_kv_cache_layout,
@@ -522,7 +523,7 @@ class FlashInferBackend(AttentionBackend):
         ) and supports_trtllm_attention(is_prefill=True)
 
     @classmethod
-    def get_required_kv_cache_layout(cls) -> str | None:
+    def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
         capability = current_platform.get_device_capability()
         if capability is not None and capability.major == 10:
             return "LBHNC"
@@ -1956,9 +1957,31 @@ class FlashInferImpl(AttentionImpl):
         output_padded = output
         output = output[:num_actual_tokens]
 
-        # Permute to FlashInfer's expected layout (metadata-only).
+        if attn_metadata.use_cascade:
+            # Cascade attention (rare case).
+            assert attn_metadata.cascade_wrapper is not None
+            stride_order = get_kv_cache_layout().layer_view_order
+            if self.is_kvcache_nvfp4:
+                kv_cache_views = tuple(
+                    cache.permute(*stride_order)
+                    for cache in kv_cache.split(self.num_kv_heads, dim=1)
+                )
+            else:
+                kv_perm = kv_cache.permute(*stride_order)
+                kv_cache_views = kv_perm.split(self.head_size, dim=-1)
+            kv_tuple = tuple(
+                canonicalize_singleton_dim_strides(cache) for cache in kv_cache_views
+            )
+            output.copy_(attn_metadata.cascade_wrapper.run(query, kv_tuple))
+            return output
+
+        # When using spec decoding, num_decodes can be < num_decode_tokens
+        # because some decode requests may have more than one query token.
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+
         stride_order = get_kv_cache_layout().layer_view_order
-        kv_cache_permute = kv_cache.permute(*stride_order)
+        kv_cache_permute = kv_cache.permute(*stride_order)  # HND and contiguous
         # Fix degenerate strides on any size-1 dimension (e.g. num_kv_heads=1
         # with TP=8).  PyTorch permits non-canonical strides on size-1 dims;
         # CUDA TMA requires ≥16-byte alignment on all non-outermost strides.
@@ -1992,14 +2015,6 @@ class FlashInferImpl(AttentionImpl):
             nvfp4_kv_block_scales = (k_sf, v_sf)
         else:
             kv_cache_tuple = kv_cache_permute.split(hs, dim=-1)
-
-        if attn_metadata.use_cascade:
-            assert attn_metadata.cascade_wrapper is not None
-            output.copy_(attn_metadata.cascade_wrapper.run(query, kv_cache_tuple))
-            return output
-
-        num_decode_tokens = attn_metadata.num_decode_tokens
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
 
         use_dcp = self.dcp_world_size > 1
         decode_with_dedicated_xqa = (

@@ -309,26 +309,24 @@ def test_aiter_mha_backend_contract():
     )
 
 
-def test_aiter_mha_backend_publishes_separate_kv_head_groups(monkeypatch):
-    """K and V must be published as two token-major head groups, which is how
-    the fused QK-norm+RoPE+cache kernel addresses the cache."""
-    from vllm.v1.attention.backends import rocm_aiter_fa
+def test_aiter_mha_backend_validates_kv_cache_block_size():
+    """The backend should reject KV cache specs that cannot be gathered
+    correctly by the ROCm kernel."""
     from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionBackend
     from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-    spec = FullAttentionSpec(
-        block_size=16, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
+    with pytest.raises(ValueError, match="Block size must be a multiple of 16"):
+        AiterFlashAttentionBackend.customize_spec(
+            FullAttentionSpec(
+                block_size=15, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
+            )
+        )
+    # block_size == 1 is the per-token page-size probe and must pass through.
+    AiterFlashAttentionBackend.customize_spec(
+        FullAttentionSpec(
+            block_size=1, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
+        )
     )
-
-    monkeypatch.setattr(rocm_aiter_fa, "_use_separate_kv_head_groups", lambda: True)
-    published = AiterFlashAttentionBackend.customize_spec(spec)
-    assert (published.num_head_slots, published.state_content_bytes) == (2, 8 * 128 * 2)
-    assert published.page_size_bytes == spec.page_size_bytes
-    assert AiterFlashAttentionBackend.get_required_kv_cache_layout() == "LBHNC"
-
-    monkeypatch.setattr(rocm_aiter_fa, "_use_separate_kv_head_groups", lambda: False)
-    assert AiterFlashAttentionBackend.customize_spec(spec) == spec
-    assert AiterFlashAttentionBackend.get_required_kv_cache_layout() is None
 
 
 def test_aiter_mha_backend_supports_compute_capability_matches_mi3xx_probe():

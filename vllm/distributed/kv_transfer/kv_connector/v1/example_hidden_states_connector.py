@@ -303,8 +303,8 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Block size must match the indexed buffer, else reads hit the wrong
         # slots. Raise (not assert) so the check survives `python -O`.
-        # Views are [num_blocks, num_heads, block_size, head_size], matching
-        # what extract_from_kv_cache() indexes.
+        # Views are [num_blocks, num_heads, block_size, head_size], matching what
+        # extract_from_kv_cache() indexes.
         if self._block_size != self._kv_cache.shape[2]:
             raise ValueError(
                 f"Hidden-states block-size mismatch: derived {self._block_size} "

@@ -124,9 +124,8 @@ class AttentionQuantPatternModel(torch.nn.Module):
             kv_quant_mode=get_kv_quant_mode(self.attn.kv_cache_dtype),
         )
         layout = get_kv_cache_layout()
-        num_layer_slots = 1 if layout.is_layer_compact else 2
         raw_tensor = torch.zeros(
-            num_layer_slots * num_blocks * spec.page_size_bytes,
+            num_blocks * spec.page_size_bytes,
             dtype=torch.int8,
             device=self.device,
         )
@@ -134,8 +133,8 @@ class AttentionQuantPatternModel(torch.nn.Module):
             raw_tensor,
             spec,
             num_blocks,
-            num_layer_slots,
-            layout,
+            num_layers=1,
+            layout=layout,
         )[0]
 
         self.attn.kv_cache = kv_cache

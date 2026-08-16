@@ -79,7 +79,7 @@ def _allocate_main_kv_via_contract(
 ) -> torch.Tensor:
     """Build the main KV cache exactly as the production allocator does for the
     currently active layout: allocate the physical (permuted) tensor, then
-    expose the inverse-permuted logical [B, H, N, C] view the kernels see."""
+    expose the inverse-permuted logical [B, H, N, C] view the backend sees."""
     logical_shape = _main_kv_logical_shape(num_pages)
     stride_order = _layer_stride_order(len(logical_shape))
     physical_shape = tuple(logical_shape[i] for i in stride_order)
@@ -951,6 +951,36 @@ def test_main_cache_layout_contract():
         assert set(order) == set(range(len(order)))
 
 
+def test_aiter_sparse_pa_layout_contract(monkeypatch):
+    """The shuffle-only AITER path retains separately contiguous K/V storage."""
+    import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod
+
+    monkeypatch.setattr(sparse_attn_mod.rocm_aiter_ops, "is_enabled", lambda: True)
+    monkeypatch.setattr(
+        sparse_attn_mod.rocm_aiter_ops,
+        "is_shuffle_kv_cache_enabled",
+        lambda: True,
+    )
+
+    backend = sparse_attn_mod.MiniMaxM3SparseBackend
+    assert backend.get_required_kv_cache_layout() == "LHBNC"
+
+    nb, h = 7, 1
+    spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=h,
+        head_size=HEAD_DIM,
+        dtype=DTYPE,
+        num_head_slots=2,
+        state_content_bytes=h * HEAD_DIM * DTYPE.itemsize,
+    )
+    raw = torch.zeros(nb * spec.page_size_bytes, dtype=torch.int8)
+    view = dense_kv_cache_views(raw, spec, nb, 1, KVCacheLayout.LHBNC)[0]
+    key_cache, value_cache = view.unbind(1)
+    assert key_cache.is_contiguous()
+    assert value_cache.is_contiguous()
+
+
 def test_unknown_layout_raises():
     """An unrecognized layout override is rejected at resolution time."""
     try:
@@ -1332,7 +1362,7 @@ def test_decode_wrong_layout_breaks_parity():
 
 def test_main_cache_byte_identical_through_production_allocator():
     """AC-2: drive the real allocator (`reshape_kv_cache`) for the M3 main
-    `FullAttentionSpec` under HND and assert the kernel-visible view has the
+    `FullAttentionSpec` under HND and assert the backend-visible view has the
     same shape, stride, and storage offset as the packed-HND allocation."""
     nb = 4
     spec = _main_spec()
