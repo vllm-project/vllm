@@ -783,22 +783,20 @@ class KVCacheStoreSendingThread(KVTransferThread):
         return True
 
     def _handle_request(self, req_meta: ReqMeta):
-        # Cache hits are always a multiple of ``lcm_block_size`` tokens, which
-        # is also ``store_mask``'s precondition.
-        lcm_block_size = self.coord.lcm_block_size
-        token_len = req_meta.token_len_chunk // lcm_block_size * lcm_block_size
-        block_ids_per_group = req_meta.block_ids
-        req_id = req_meta.req_id
-        current_event = req_meta.current_event
-
-        if not self.is_live_store_job(req_meta):
-            self.finish_store_job(req_meta)
-            self.request_queue.task_done()
-            return
-
-        # Finish in `finally` so the scheduler releases this job's GPU block
-        # references even when the store path raises.
+        # The single `finally` is the only way out, so the scheduler releases
+        # this job's GPU block references however the job ends.
         try:
+            # Cache hits are always a multiple of ``lcm_block_size`` tokens,
+            # which is also ``store_mask``'s precondition.
+            lcm_block_size = self.coord.lcm_block_size
+            token_len = req_meta.token_len_chunk // lcm_block_size * lcm_block_size
+            block_ids_per_group = req_meta.block_ids
+            req_id = req_meta.req_id
+            current_event = req_meta.current_event
+
+            if not self.is_live_store_job(req_meta):
+                return
+
             if self._should_skip_request(req_id):
                 logger.debug(
                     "Skipping Mooncake store for request %s while CPU/disk "
