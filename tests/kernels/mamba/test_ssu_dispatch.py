@@ -67,6 +67,40 @@ def test_flashinfer_replayssm_ring_tracker_lifecycle():
     assert observed[32] == (15, 1)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_flashinfer_replayssm_batched_ring_tracker_update():
+    ring_start = torch.tensor(
+        [[0, 2, 4, 6], [1, 3, 5, 7], [8, 10, 12, 14]],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    prev_num_accepted = torch.tensor(
+        [[0, 4, 8, 12], [1, 5, 9, 13], [2, 6, 10, 14]],
+        dtype=torch.int32,
+        device="cuda",
+    )
+    expected_ring_start = ring_start.clone()
+    expected_prev_num_accepted = prev_num_accepted.clone()
+    state_batch_indices = torch.tensor([1, 3], dtype=torch.int32, device="cuda")
+
+    update_replayssm_ring_trackers(
+        ring_start,
+        prev_num_accepted,
+        state_batch_indices,
+        logical_window=16,
+    )
+    for layer_index in range(ring_start.shape[0]):
+        update_replayssm_ring_trackers(
+            expected_ring_start[layer_index],
+            expected_prev_num_accepted[layer_index],
+            state_batch_indices,
+            logical_window=16,
+        )
+
+    torch.testing.assert_close(ring_start, expected_ring_start)
+    torch.testing.assert_close(prev_num_accepted, expected_prev_num_accepted)
+
+
 def _kv_cache_config_with_ssu(
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2,
 ) -> KVCacheConfig:

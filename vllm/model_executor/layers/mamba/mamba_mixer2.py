@@ -531,6 +531,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.kv_cache = tuple(torch.tensor([]) for _ in range(_n_state))
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
+        self._updates_replayssm_trackers = True
+        self._replayssm_ring_starts_to_update: torch.Tensor | None = None
+        self._replayssm_prev_num_accepted_to_update: torch.Tensor | None = None
 
         self.num_spec = vllm_config.num_speculative_tokens
         if self.num_spec > 0:
@@ -1136,6 +1139,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         cb_scaled=attn_metadata.cb_scaled,
                         cumAdt_vec=attn_metadata.cumAdt_vec,
                         cb_old=attn_metadata.cb_old,
+                        update_trackers=self._updates_replayssm_trackers,
+                        ring_starts_to_update=self._replayssm_ring_starts_to_update,
+                        prev_num_accepted_to_update=(
+                            self._replayssm_prev_num_accepted_to_update
+                        ),
                     )
                 else:
                     selective_state_update_replayssm_triton(
@@ -1226,6 +1234,51 @@ class MambaMixer2(MambaBase, PluggableLayer):
     @property
     def mamba_type(self) -> MambaAttentionBackendEnum:
         return MambaAttentionBackendEnum.MAMBA2
+
+
+def batch_replayssm_ring_tracker_updates(mixers: list[MambaMixer2]) -> None:
+    """Keep per-layer cursors and update them together after the final layer."""
+    if not mixers:
+        return
+
+    first_ring_start = mixers[0]._replayssm_ring_start
+    first_prev_num_accepted = mixers[0]._replayssm_prev_num_accepted
+    expected = (
+        first_ring_start.shape,
+        first_ring_start.device,
+        first_ring_start.dtype,
+        first_prev_num_accepted.shape,
+        first_prev_num_accepted.device,
+        first_prev_num_accepted.dtype,
+    )
+    for mixer in mixers:
+        actual = (
+            mixer._replayssm_ring_start.shape,
+            mixer._replayssm_ring_start.device,
+            mixer._replayssm_ring_start.dtype,
+            mixer._replayssm_prev_num_accepted.shape,
+            mixer._replayssm_prev_num_accepted.device,
+            mixer._replayssm_prev_num_accepted.dtype,
+        )
+        if actual != expected:
+            raise ValueError("ReplaySSM tracker sidecars must have matching layouts")
+
+    ring_starts = torch.zeros(
+        (len(mixers), *first_ring_start.shape),
+        dtype=first_ring_start.dtype,
+        device=first_ring_start.device,
+    )
+    prev_num_accepted = torch.zeros_like(ring_starts)
+    for layer_index, mixer in enumerate(mixers):
+        mixer._replayssm_ring_start = ring_starts[layer_index]
+        mixer._replayssm_prev_num_accepted = prev_num_accepted[layer_index]
+        mixer._updates_replayssm_trackers = False
+        mixer._replayssm_ring_starts_to_update = None
+        mixer._replayssm_prev_num_accepted_to_update = None
+
+    mixers[-1]._updates_replayssm_trackers = True
+    mixers[-1]._replayssm_ring_starts_to_update = ring_starts
+    mixers[-1]._replayssm_prev_num_accepted_to_update = prev_num_accepted
 
 
 def mamba_mixer2(
