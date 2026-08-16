@@ -614,47 +614,46 @@ WrapperFn: TypeAlias = Callable[[Callable], Callable]
 class EndpointConfig(TypedDict):
     """How a batch request URL is matched to the handler that serves it."""
 
-    # The URL this endpoint accepts, either in full or as a "*" suffix pattern.
-    url_pattern: str
+    url: str
+    # Score and rerank are served at several versioned paths, so they accept
+    # any URL ending in theirs. Every other endpoint matches exactly.
+    match_suffix: bool
     handler_getter: Callable[[], Callable | None]
     wrapper_fn: WrapperFn | None
 
 
-def url_matches(url_pattern: str, url: str) -> bool:
-    """Whether a request URL is served by an endpoint pattern."""
-    if url_pattern.startswith("*"):
-        return url.endswith(url_pattern[1:])
-    return url == url_pattern
+def url_matches(config: EndpointConfig, url: str) -> bool:
+    """Whether a request URL is served by this endpoint."""
+    if config["match_suffix"]:
+        return url.endswith(config["url"])
+    return url == config["url"]
 
 
 def handle_endpoint_request(
     request: BatchRequestInput,
-    url_pattern: str,
-    handler_getter: Callable[[], Callable | None],
-    wrapper_fn: WrapperFn | None = None,
+    config: EndpointConfig,
 ) -> Awaitable[BatchRequestOutput] | None:
     """
     Generic handler for endpoint requests.
 
     Args:
         request: The batch request input
-        url_pattern: The URL, or suffix pattern, this endpoint serves
-        handler_getter: Function that returns the handler function or None
-        wrapper_fn: Optional function to wrap the handler (e.g., for transcriptions)
+        config: The endpoint's URL matching rule and handler
 
     Returns:
         Awaitable[BatchRequestOutput] if the request was handled,
         None if URL didn't match
     """
-    if not url_matches(url_pattern, request.url):
+    if not url_matches(config, request.url):
         return None
 
-    handler_fn = handler_getter()
+    handler_fn = config["handler_getter"]()
     if handler_fn is None:
         error_msg = f"Model does not support endpoint: {request.url}"
         return make_async_error_request_output(request, error_msg=error_msg)
 
     # Apply wrapper if provided (e.g., for transcriptions/translations)
+    wrapper_fn = config["wrapper_fn"]
     if wrapper_fn is not None:
         handler_fn = wrapper_fn(handler_fn)
 
@@ -772,7 +771,8 @@ async def build_endpoint_registry(
     # Registry of endpoint configurations
     endpoint_registry: dict[str, EndpointConfig] = {
         "completions": {
-            "url_pattern": "/v1/chat/completions",
+            "url": "/v1/chat/completions",
+            "match_suffix": False,
             "handler_getter": lambda: (
                 openai_serving_chat.create_chat_completion
                 if openai_serving_chat is not None
@@ -781,28 +781,32 @@ async def build_endpoint_registry(
             "wrapper_fn": None,
         },
         "embeddings": {
-            "url_pattern": "/v1/embeddings",
+            "url": "/v1/embeddings",
+            "match_suffix": False,
             "handler_getter": lambda: (
                 serving_embedding if serving_embedding is not None else None
             ),
             "wrapper_fn": None,
         },
         "score": {
-            "url_pattern": "*/score",
+            "url": "/score",
+            "match_suffix": True,
             "handler_getter": lambda: (
                 serving_scores if serving_scores is not None else None
             ),
             "wrapper_fn": None,
         },
         "rerank": {
-            "url_pattern": "*/rerank",
+            "url": "/rerank",
+            "match_suffix": True,
             "handler_getter": lambda: (
                 serving_scores if serving_scores is not None else None
             ),
             "wrapper_fn": None,
         },
         "transcriptions": {
-            "url_pattern": "/v1/audio/transcriptions",
+            "url": "/v1/audio/transcriptions",
+            "match_suffix": False,
             "handler_getter": lambda: (
                 openai_serving_transcription.create_transcription
                 if openai_serving_transcription is not None
@@ -814,7 +818,8 @@ async def build_endpoint_registry(
             ),
         },
         "translations": {
-            "url_pattern": "/v1/audio/translations",
+            "url": "/v1/audio/translations",
+            "match_suffix": False,
             "handler_getter": lambda: (
                 openai_serving_translation.create_translation
                 if openai_serving_translation is not None
@@ -869,26 +874,20 @@ async def run_one_request(
     """Route a single line of the batch to its endpoint handler."""
     request = BatchRequestInput.model_validate_json(request_json)
 
-    # Use the last segment of the URL as the endpoint key.
-    # More advanced URL matching is done in url_matcher of endpoint_registry.
+    # Use the last segment of the URL as the endpoint key. The endpoint's own
+    # rule decides whether the full URL is one it serves.
     endpoint_key = request.url.split("/")[-1]
 
     result = None
     if endpoint_key in endpoint_registry:
-        endpoint_config = endpoint_registry[endpoint_key]
-        result = handle_endpoint_request(
-            request,
-            url_pattern=endpoint_config["url_pattern"],
-            handler_getter=endpoint_config["handler_getter"],
-            wrapper_fn=endpoint_config["wrapper_fn"],
-        )
+        result = handle_endpoint_request(request, endpoint_registry[endpoint_key])
 
     if result is None:
         result = make_async_error_request_output(
             request,
             error_msg=f"URL {request.url} is not a supported endpoint. "
             "Supported endpoints: "
-            + ", ".join(config["url_pattern"] for config in endpoint_registry.values())
+            + ", ".join(config["url"] for config in endpoint_registry.values())
             + ".",
         )
 

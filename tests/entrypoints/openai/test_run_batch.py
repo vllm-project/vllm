@@ -1236,7 +1236,8 @@ async def test_unsupported_url_error_lists_registry_endpoints(tmp_path):
     """
     registry = {
         "widgets": {
-            "url_pattern": "/v1/widgets",
+            "url": "/v1/widgets",
+            "match_suffix": False,
             "handler_getter": lambda: None,
             "wrapper_fn": None,
         }
