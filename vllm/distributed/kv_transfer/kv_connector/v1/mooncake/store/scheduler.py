@@ -421,16 +421,19 @@ class MooncakeStoreScheduler:
             )
             req_meta.store_job_id = store_job_id = self._next_store_job_id
             self._next_store_job_id += 1
+            block_ids: list[int] = []
+            if req_meta.partial_tail_offloads:
+                # A partial-tail CoW block is deliberately kept out of the
+                # request's block table, so it is absent from `block_ids` even
+                # though the worker DMAs out of it just as asynchronously. It
+                # leads the list as in `KVCacheManager.pop_blocks_for_free`,
+                # which the reversed free below relies on.
+                block_ids += [bid for _, bid, _ in req_meta.partial_tail_offloads]
             # Every allocated block is referenced, not just the ones covering
             # this job's token range: a rank resumes from its own last
             # successful offset, which lags the scheduler's whenever a save was
             # skipped or failed, so it may read anywhere below the range.
-            block_ids = [bid for group in req_meta.block_ids for bid in group]
-            if req_meta.partial_tail_offloads:
-                # A partial-tail CoW block is deliberately kept out of the
-                # request's block table, so it is absent from `block_ids` even
-                # though the worker DMAs out of it just as asynchronously.
-                block_ids += [bid for _, bid, _ in req_meta.partial_tail_offloads]
+            block_ids += [bid for group in req_meta.block_ids for bid in group]
             if not block_ids:
                 continue
             self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
@@ -457,7 +460,9 @@ class MooncakeStoreScheduler:
                 f"store job {store_job_id} reported by too many ranks"
             )
             del self._pinned_saves[store_job_id]
-            pool.free_blocks([pool.blocks[bid] for bid in block_ids])
+            # Reversed, as the other batch frees of a request's blocks are, so
+            # that a block table's tail is evicted before its prefix.
+            pool.free_blocks(pool.blocks[bid] for bid in reversed(block_ids))
 
     def has_pending_push_work(self) -> bool:
         """Keep the engine stepping while any store job still holds block refs.
