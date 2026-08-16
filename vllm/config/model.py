@@ -863,6 +863,11 @@ class ModelConfig:
         if cached is not None:
             return cached
 
+        # Draft models never process multimodal inputs directly (embeddings
+        # are produced target-side), so they are always text-only here.
+        if getattr(self, "runner_type", None) == "draft":
+            return False
+
         if self.multimodal_config is None:
             # Early call before multimodal init — do not clear mm_prefix yet.
             return True

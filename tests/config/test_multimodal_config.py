@@ -128,6 +128,20 @@ def test_supports_multimodal_for_mm_prefix_before_multimodal_config():
     assert not hasattr(model_config, "_supports_multimodal_inputs_cached")
 
 
+def test_supports_multimodal_for_mm_prefix_skips_registry_for_draft():
+    """Draft models never process multimodal inputs directly, so querying the
+    registry misfires ("no registered multimodal processor") on MTP drafts."""
+    model_config = _make_mm_prefix_model_config()
+    model_config.runner_type = "draft"
+
+    with patch(
+        "vllm.multimodal.MULTIMODAL_REGISTRY.supports_multimodal_inputs",
+        side_effect=AssertionError("draft must not query the registry"),
+    ):
+        assert model_config._supports_multimodal_for_mm_prefix() is False
+    assert not hasattr(model_config, "_supports_multimodal_inputs_cached")
+
+
 def test_language_model_only_disables_via_supports_multimodal_inputs():
     """language_model_only zeros all limits, so registry reports text-only."""
     model_config = _make_mm_prefix_model_config(language_model_only=True)
