@@ -136,6 +136,7 @@ class DeepseekV4SparseMLAMetadataBuilder(
             (max_num_batched_tokens,), dtype=torch.int32, device=device
         )
 
+        assert isinstance(self.kv_cache_spec.tokens_per_state, int)
         self.compress_ratio = self.kv_cache_spec.tokens_per_state
 
         # Pre-allocate compressed slot mapping buffer for CUDA graph address
@@ -190,7 +191,7 @@ class DeepseekV4SparseMLAMetadataBuilder(
                 cm.query_start_loc,
                 cm.seq_lens,
                 cm.block_table_tensor.clamp_(min=0),
-                int(self.kv_cache_spec.storage_block_size),
+                int(self.kv_cache_spec.num_states),
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
             )

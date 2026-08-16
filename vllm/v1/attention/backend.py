@@ -30,7 +30,7 @@ if TYPE_CHECKING:
         KVQuantMode,
     )
 
-from vllm.v1.kv_cache_interface import get_kv_quant_mode
+from vllm.v1.kv_cache_interface import KVCacheLayout, get_kv_quant_mode
 
 
 class AttentionType(str, Enum):
@@ -362,16 +362,15 @@ class AttentionBackend(ABC):
         return invalid_reasons
 
     @classmethod
-    def get_required_kv_cache_layout(cls) -> str | None:
-        return None
-
-    @classmethod
-    def supports_kv_cache_layout(cls, layout: "KVCacheLayout") -> bool:
-        """Whether this backend's kernels can consume caches allocated with
-        ``layout``. Generic attention kernels address a block as a single
-        strided [H, N, C] region, so layouts that hoist the head dim outside
-        the block dim (e.g. LHBNC) need explicit backend support."""
-        return not layout.heads_outside_blocks
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        """Layouts this backend's kernels can consume, most preferred first"""
+        return (
+            KVCacheLayout.LBNHC,
+            KVCacheLayout.LBHNC,
+            KVCacheLayout.BLNHC,
+            KVCacheLayout.BLHNC,
+            KVCacheLayout.BHLNC,
+        )
 
     @classmethod
     def is_ssm(cls) -> bool:

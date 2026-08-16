@@ -51,10 +51,13 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
-    KVCacheLayoutType,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayout,
+    is_quantized_kv_cache,
+)
 
 logger = init_logger(__name__)
 
@@ -113,10 +116,12 @@ class MiniMaxM3SparseBackend(AttentionBackend):
         return True
 
     @classmethod
-    def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
         # AITER sparse PA unbinds K and V as separate contiguous regions, which
         # requires the head dimension to sit outside the block dimension.
-        return "LHBNC" if _minimax_m3_aiter_sparse_pa_requested() else None
+        if _minimax_m3_aiter_sparse_pa_requested():
+            return (KVCacheLayout.LHBNC,)
+        return super().supported_kv_cache_layouts()
 
 
 @dataclass

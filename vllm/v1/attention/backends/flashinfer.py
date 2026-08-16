@@ -67,7 +67,6 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
-    KVCacheLayoutType,
     get_dcp_local_seq_lens,
     get_flashinfer_layout_string,
     get_kv_cache_layout,
@@ -81,6 +80,7 @@ from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    KVCacheLayout,
     KVCacheSpec,
     KVQuantMode,
     UniformTypeKVCacheSpecs,
@@ -523,11 +523,13 @@ class FlashInferBackend(AttentionBackend):
         ) and supports_trtllm_attention(is_prefill=True)
 
     @classmethod
-    def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
         capability = current_platform.get_device_capability()
         if capability is not None and capability.major == 10:
-            return "LBHNC"
-        return None
+            # The trtllm-gen kernels consume head-major block interiors; the L/B
+            # nesting outside the block is immaterial to them.
+            return (KVCacheLayout.LBHNC, KVCacheLayout.BLHNC)
+        return super().supported_kv_cache_layouts()
 
     forward_includes_kv_cache_update: bool = False
 

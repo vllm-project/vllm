@@ -30,10 +30,9 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
-    KVCacheLayoutType,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout, KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -313,8 +312,8 @@ class HpcAttentionBackend(AttentionBackend):
         return kv_cache_dtype in cls.supported_kv_cache_dtypes
 
     @classmethod
-    def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
-        return "LBNHC"
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        return (KVCacheLayout.LBNHC,)
 
 
 class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):

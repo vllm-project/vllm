@@ -164,6 +164,9 @@ class TestDensePacking:
 
     def test_overlaid_groups_alias_and_stay_isolated(self):
         groups, g1, g2 = _mixed_page_groups()
+        # Overlay models resolve to a block-outer layout at backend selection (the
+        # model's backend declares it); mirror that here.
+        set_kv_cache_layout("BLNHC")
         config = get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
         assert config.num_blocks == MEMORY // _packed_block_stride(groups)
         assert _pool_bytes_per_block(groups) == _packed_block_stride(groups)
@@ -191,23 +194,25 @@ class TestDensePacking:
         for i, name in enumerate(list(g1)[1:], start=1):
             assert (views[name][0].to(torch.int32) == i + 1).all()
 
-    def test_overlaid_groups_select_a_block_outer_layout(self):
+    @pytest.mark.parametrize("layout", [None, "LBNHC"])
+    def test_layer_compact_layout_rejected_for_overlaid_groups(self, layout):
+        # The layout has a single writer (backend-selection resolution); a layer-
+        # compact layout reaching an overlay model's allocation is an error, not a
+        # silent flip.
         groups, _, _ = _mixed_page_groups()
-        vllm_config = _mock_vllm_config()
-        get_kv_cache_config_from_groups(vllm_config, groups, MEMORY)
-        assert not get_kv_cache_layout().is_layer_compact
-        assert vllm_config.cache_config.kv_cache_layout == "BLNHC"
-
-    def test_explicit_layer_outer_layout_preserves_inner_order_for_overlays(self):
-        groups, _, _ = _mixed_page_groups()
-        set_kv_cache_layout("LBNHC")
-        get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
-        assert get_kv_cache_layout().name == "BLNHC"
+        if layout is not None:
+            set_kv_cache_layout(layout)
+        with pytest.raises(
+            ValueError, match="cannot express this model's mixed page sizes"
+        ):
+            get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
 
     def test_head_outer_layout_rejected_for_mixed_pages(self):
         groups, _, _ = _mixed_page_groups()
         set_kv_cache_layout("LHBNC")
-        with pytest.raises(ValueError, match="hoists heads outside the block"):
+        with pytest.raises(
+            ValueError, match="cannot express this model's mixed page sizes"
+        ):
             get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
 
     @pytest.mark.parametrize("layout", ["LBNHC", "BLHNC"])

@@ -27,7 +27,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import KVCacheLayoutType
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
     has_native_kv_cache_layout,
@@ -262,17 +261,13 @@ class RocmAttentionBackend(AttentionBackend):
         )
 
     @classmethod
-    def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
         # The native HIP kernels hardcode group-contiguous block addressing, so
         # the K and V groups must span all blocks (H outermost within the layer).
-        return "LHBNC"
-
-    @classmethod
-    def supports_kv_cache_layout(cls, layout: "KVCacheLayout") -> bool:
         # TODO(ROCm): models mixing ROCM_ATTN with TRITON_ATTN (e.g. sink layers)
         # fail at startup since TRITON_ATTN does not declare LHBNC support; opt
         # TRITON_ATTN in once validated on AMD.
-        return layout is KVCacheLayout.LHBNC or not layout.heads_outside_blocks
+        return (KVCacheLayout.LHBNC,)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:

@@ -211,7 +211,7 @@ def get_layer_transfer_geometry(
         isinstance(spec, AttentionSpec)
         and len(shape) == 4
         and shape[1] == spec.num_heads
-        and shape[2] == spec.storage_block_size
+        and shape[2] == spec.num_states
         and shape[3] * element_size == spec.state_content_size_bytes
     ):
         # Standardized per-layer [B, H, N, C] view (MLA is just H == 1).

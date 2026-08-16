@@ -36,7 +36,7 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
 
@@ -163,6 +163,13 @@ class DeepseekV32IndexerBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V32_INDEXER"
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # The indexer cache overlays the MLA latent cache with a different page
+        # size, so every group must agree on which bytes belong to a block: the
+        # layer dim has to sit inside the block dim.
+        return (KVCacheLayout.BLHNC, KVCacheLayout.BLNHC)
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -595,6 +602,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.compress_ratio = 1
         # Get compress_ratio for DeepseekV4 support
         if isinstance(self.kv_cache_spec, MLAAttentionSpec):
+            # MLA compression is a whole number of tokens per state (fractions
+            # are whisper block pooling and never reach MLA).
+            assert isinstance(self.kv_cache_spec.tokens_per_state, int)
             self.compress_ratio = self.kv_cache_spec.tokens_per_state
         if self.dcp_world_size > 1 and self.compress_ratio > 1:
             raise NotImplementedError(
@@ -839,7 +849,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 query_start_loc,
                 seq_lens,
                 block_table,
-                self.kv_cache_spec.storage_block_size,
+                self.kv_cache_spec.num_states,
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
             )
@@ -1007,7 +1017,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if current_platform.is_cuda() and has_deep_gemm():
                 metadata = get_paged_mqa_logits_metadata(
                     seq_lens,
-                    self.kv_cache_spec.storage_block_size,
+                    self.kv_cache_spec.num_states,
                     self.num_sms,
                     indices=decode_indices,
                 )

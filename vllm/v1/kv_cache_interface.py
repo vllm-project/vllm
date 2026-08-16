@@ -171,7 +171,7 @@ class KVCacheSpec:
         raise NotImplementedError
 
     @property
-    def storage_block_size(self) -> int:
+    def num_states(self) -> int:
         return self.block_size
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
@@ -286,7 +286,7 @@ def compute_layer_kv_cache_shape_bytes(
 ) -> tuple[int, ...]:
     """Return the 4D logical shape ``(B, H, N, C)`` where C is in bytes."""
     bs = block_size if block_size is not None else spec.block_size
-    num_states = spec.storage_block_size * bs // spec.block_size
+    num_states = spec.num_states * bs // spec.block_size
     return (num_blocks, spec.num_heads, num_states, spec.state_content_size_bytes)
 
 
@@ -411,7 +411,7 @@ class AttentionSpec(KVCacheSpec):
         return self.num_kv_heads
 
     @property
-    def storage_block_size(self) -> int:
+    def num_states(self) -> int:
         num_states = Fraction(self.block_size) / self.tokens_per_state
         assert num_states.denominator == 1, (
             f"block_size {self.block_size} not divisible by "
@@ -428,7 +428,7 @@ class AttentionSpec(KVCacheSpec):
 
     @property
     def unpadded_page_size_bytes(self) -> int:
-        return self.num_heads * self.storage_block_size * self.state_content_size_bytes
+        return self.num_heads * self.num_states * self.state_content_size_bytes
 
     @property
     def page_size_bytes(self) -> int:
@@ -839,7 +839,7 @@ class MambaSpec(KVCacheSpec):
     tokens_per_state: int = -1
 
     @property
-    def storage_block_size(self) -> int:
+    def num_states(self) -> int:
         return 1  # recurrent: a single state per block
 
     @property

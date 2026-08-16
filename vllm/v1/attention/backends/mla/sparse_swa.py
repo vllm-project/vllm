@@ -397,6 +397,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         assert isinstance(self.kv_cache_spec, SlidingWindowMLASpec | MLAAttentionSpec)
         mla_spec = cast(SlidingWindowMLASpec | MLAAttentionSpec, self.kv_cache_spec)
         self.head_size = mla_spec.head_size  # Already considered quantization.
+        assert isinstance(mla_spec.tokens_per_state, int)
         self.compress_ratio = mla_spec.tokens_per_state
         self.block_size = mla_spec.block_size
         self.max_model_len = self.vllm_config.model_config.max_model_len

@@ -26,6 +26,7 @@ from vllm.utils.torch_utils import (
     set_random_seed,
 )
 from vllm.v1.attention.backend import (
+    AttentionBackend,
     AttentionCGSupport,
     AttentionType,
     CommonAttentionMetadata,
@@ -33,7 +34,6 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends import utils as attn_utils
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
-    _layout_from_name,
     get_kv_cache_layout,
     set_kv_cache_layout,
 )
@@ -572,16 +572,21 @@ def _test_backend_correctness(
     # Mirror selector-time resolution locally (test override, then any
     # backend-required layout, then the default chain) without publishing
     # process-global state that would leak between tests.
-    required_layouts = {
-        name
+    declared = [
+        supported
         for backend in backend_to_test
-        if (name := _actual_backend(backend).get_class().get_required_kv_cache_layout())
-        is not None
-    }
-    assert len(required_layouts) <= 1, "conflicting required layouts under test"
+        if (
+            supported := _actual_backend(backend)
+            .get_class()
+            .supported_kv_cache_layouts()
+        )
+        != AttentionBackend.supported_kv_cache_layouts()
+    ]
     layout = get_kv_cache_layout()
-    if required_layouts and attn_utils._KV_CACHE_LAYOUT_OVERRIDE is None:
-        layout = _layout_from_name(required_layouts.pop())
+    if declared and attn_utils._KV_CACHE_LAYOUT_OVERRIDE is None:
+        # Mirror the resolver: the shared cache uses the declared sets' preferred
+        # layout; backends that don't support it get a per-backend copy below.
+        layout = min(declared, key=len)[0]
     kv_cache = create_and_prepopulate_kv_cache(
         k_contexts=k_contexts,
         v_contexts=v_contexts,
@@ -611,13 +616,11 @@ def _test_backend_correctness(
         kv_cache_for_backend = kv_cache
         backend_layout = layout
 
-        if not backend_cls.supports_kv_cache_layout(backend_layout):
-            # Production resolution never pairs this backend with the shared
-            # layout (e.g. flex is LBNHC-only next to FlashInfer's LBHNC);
-            # give it a copy of the cache in a layout it supports.
-            backend_layout = next(
-                m for m in KVCacheLayout if backend_cls.supports_kv_cache_layout(m)
-            )
+        if backend_layout not in backend_cls.supported_kv_cache_layouts():
+            # Production resolution never pairs this backend with the shared layout
+            # (e.g. flex is LBNHC-only next to FlashInfer's LBHNC); give it a copy
+            # of the cache in a layout it supports.
+            backend_layout = backend_cls.supported_kv_cache_layouts()[0]
             kv_cache_for_backend = _clone_kv_cache_in_layout(kv_cache, backend_layout)
 
         # FlashInfer reads the layout at plan time; override to match

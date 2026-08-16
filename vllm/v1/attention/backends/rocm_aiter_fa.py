@@ -28,11 +28,10 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import (
-    KVCacheLayoutType,
     split_decodes_prefills_and_extends,
 )
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 _PARTITION_SIZE_ROCM = 256
 _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
@@ -773,11 +772,10 @@ class AiterFlashAttentionBackend(AttentionBackend):
         return spec
 
     @classmethod
-    def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
-        # Main allocated the packed cache contiguous in (B, H, N, 2*hs) —
-        # head-major within the block — and the AITER kernels have only been
-        # exercised with that geometry, so pin it.
-        return "LBHNC"
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # The AITER kernels have only been exercised with the packed cache
+        # contiguous in (B, H, N, 2*hs), head-major within the block.
+        return (KVCacheLayout.LBHNC,)
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:

@@ -15,26 +15,39 @@ from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.kv_cache_interface import KVCacheLayout
 
 
-class _RequiresLHBNC(TritonAttentionBackend):
-    """Stands in for ROCM_ATTN: requires a layout its peers cannot read."""
+class _OnlyLHBNC(TritonAttentionBackend):
+    """Stands in for ROCM_ATTN: supports a layout its peers cannot read."""
 
     @classmethod
     def get_name(cls) -> str:
-        return "REQUIRES_LHBNC"
+        return "ONLY_LHBNC"
 
     @classmethod
-    def get_required_kv_cache_layout(cls) -> str:
-        return "LHBNC"
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        return (KVCacheLayout.LHBNC,)
 
 
-class _RequiresLBHNC(TritonAttentionBackend):
+class _OnlyLBHNC(TritonAttentionBackend):
     @classmethod
     def get_name(cls) -> str:
-        return "REQUIRES_LBHNC"
+        return "ONLY_LBHNC"
 
     @classmethod
-    def get_required_kv_cache_layout(cls) -> str:
-        return "LBHNC"
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        return (KVCacheLayout.LBHNC,)
+
+
+class _BlockOuter(TritonAttentionBackend):
+    """Stands in for the DeepSeek sparse indexer: overlaid groups need the
+    layer dim inside the block dim."""
+
+    @classmethod
+    def get_name(cls) -> str:
+        return "BLOCK_OUTER"
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        return (KVCacheLayout.BLHNC, KVCacheLayout.BLNHC)
 
 
 @pytest.fixture(autouse=True)
@@ -44,36 +57,59 @@ def clear_resolved_layout(monkeypatch):
     monkeypatch.setattr(attn_backend_utils.envs, "VLLM_KV_CACHE_LAYOUT", None)
 
 
-def test_required_layout_wins_over_peers_in_either_order():
+def test_narrow_supported_set_wins_over_peers_in_either_order():
     for backends in (
-        [_RequiresLBHNC, TritonAttentionBackend],
-        [TritonAttentionBackend, _RequiresLBHNC],
+        [_OnlyLBHNC, TritonAttentionBackend],
+        [TritonAttentionBackend, _OnlyLBHNC],
     ):
         assert resolve_kv_cache_layout(backends) is KVCacheLayout.LBHNC
 
 
-def test_peer_that_cannot_read_the_required_layout_is_rejected():
+def test_peer_that_cannot_read_the_narrowed_layout_is_rejected():
     # TRITON_ATTN does not support LHBNC; resolving late must not hide that.
     for backends in (
-        [_RequiresLHBNC, TritonAttentionBackend],
-        [TritonAttentionBackend, _RequiresLHBNC],
+        [_OnlyLHBNC, TritonAttentionBackend],
+        [TritonAttentionBackend, _OnlyLHBNC],
     ):
-        with pytest.raises(ValueError, match="not supported by the TRITON_ATTN"):
+        with pytest.raises(ValueError, match="No KV cache layout satisfies"):
             resolve_kv_cache_layout(backends)
 
 
-def test_conflicting_requirements_are_rejected():
+def test_disjoint_supported_sets_are_rejected():
     for backends in (
-        [_RequiresLHBNC, _RequiresLBHNC],
-        [_RequiresLBHNC, _RequiresLHBNC],
+        [_OnlyLHBNC, _OnlyLBHNC],
+        [_OnlyLBHNC, _OnlyLHBNC],
     ):
-        with pytest.raises(ValueError, match="conflicting layouts"):
+        with pytest.raises(ValueError, match="No KV cache layout satisfies"):
             resolve_kv_cache_layout(backends)
+
+
+def test_block_outer_declaration_narrows_the_default():
+    # DeepSeek-style overlay models land block-outermost with no env var.
+    for backends in (
+        [_BlockOuter, TritonAttentionBackend],
+        [TritonAttentionBackend, _BlockOuter],
+    ):
+        assert resolve_kv_cache_layout(backends) is KVCacheLayout.BLHNC
+
+
+def test_explicit_user_layout_conflicting_with_supported_set_fails(monkeypatch):
+    monkeypatch.setattr(attn_backend_utils.envs, "VLLM_KV_CACHE_LAYOUT", "LBNHC")
+    with pytest.raises(ValueError, match="VLLM_KV_CACHE_LAYOUT=LBNHC"):
+        resolve_kv_cache_layout([_OnlyLBHNC, TritonAttentionBackend])
+
+
+def test_explicit_user_layout_in_supported_set_is_honored(monkeypatch):
+    monkeypatch.setattr(attn_backend_utils.envs, "VLLM_KV_CACHE_LAYOUT", "BLNHC")
+    layout = resolve_kv_cache_layout([_BlockOuter, TritonAttentionBackend])
+    assert layout is KVCacheLayout.BLNHC
 
 
 def test_ssm_backends_do_not_veto_the_layout():
     # Mamba pages are single-head and single-state, so SSM backends leave
-    # supports_kv_cache_layout() at the head-inside-block default.
-    assert not Mamba2AttentionBackend.supports_kv_cache_layout(KVCacheLayout.LHBNC)
-    layout = resolve_kv_cache_layout([_RequiresLHBNC, Mamba2AttentionBackend])
+    # supported_kv_cache_layouts() at the head-inside-block default.
+    assert (
+        KVCacheLayout.LHBNC not in Mamba2AttentionBackend.supported_kv_cache_layouts()
+    )
+    layout = resolve_kv_cache_layout([_OnlyLHBNC, Mamba2AttentionBackend])
     assert layout is KVCacheLayout.LHBNC

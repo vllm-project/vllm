@@ -7,7 +7,6 @@ from typing import (
     Any,
     Literal,
     Protocol,
-    cast,
 )
 
 import numpy as np
@@ -163,7 +162,7 @@ def get_flashinfer_layout_string() -> str:
     name = get_kv_cache_layout().name
     assert name in _FLASHINFER_LAYOUT_NAMES, (
         f"KV cache layout {name} has no FlashInfer equivalent; FlashInfer "
-        "rejects it in supports_kv_cache_layout"
+        "rejects it in supported_kv_cache_layouts"
     )
     return _FLASHINFER_LAYOUT_NAMES[name]
 
@@ -189,28 +188,17 @@ def _layout_from_name(layout_name: str) -> KVCacheLayout:
         ) from None
 
 
-def _validate_backend_supports_layout(
-    backend: type[AttentionBackend], layout: KVCacheLayout
-) -> None:
-    if not backend.supports_kv_cache_layout(layout):
-        supported = [
-            m.name for m in KVCacheLayout if backend.supports_kv_cache_layout(m)
-        ]
-        raise ValueError(
-            f"KV cache layout {layout.name} is not supported by the "
-            f"{backend.get_name()} attention backend. Supported layouts: {supported!r}."
-        )
-
-
 def resolve_kv_cache_layout(
     backends: Iterable[type[AttentionBackend]], cache_config=None
 ) -> KVCacheLayout:
     """Resolve one layout for all of the model's backends and publish it.
 
-    A backend that names a required layout dictates it (silently correcting the
-    environment setting); two backends requiring different layouts is a hard
-    error. Otherwise the env > connector > default chain picks the layout, and
-    every backend without a requirement of its own must support the result.
+    Every backend declares the layouts its kernels support, most preferred first
+    (``supported_kv_cache_layouts``); the resolver picks the most often preferred
+    layout from the intersection of those sets. An explicit
+    ``VLLM_KV_CACHE_LAYOUT`` must be in the intersection or resolution fails; the
+    connector's preference is used when compatible and silently dropped otherwise.
+    An empty intersection is a hard error naming each backend's supported set.
 
     The layout is published on ``cache_config.kv_cache_layout`` and in a
     process-local mirror for callers without a config handle.
@@ -222,54 +210,53 @@ def resolve_kv_cache_layout(
     # SSM backends get a single-head, single-state page, so every layout is the
     # same bytes to them and they never declare support for any of them.
     backends = [backend for backend in backends if not backend.is_ssm()]
-    required = {
-        backend.get_name(): name
-        for backend in backends
-        if (name := backend.get_required_kv_cache_layout()) is not None
+
+    supported_sets = {
+        backend: backend.supported_kv_cache_layouts() for backend in backends
     }
-    if len(set(required.values())) > 1:
-        conflict = ", ".join(f"{b} requires {n}" for b, n in sorted(required.items()))
-        raise ValueError(f"Attention backends need conflicting layouts: {conflict}.")
-
-    if required:
-        backend_name, layout_name = next(iter(required.items()))
-        logger.info_once(
-            "Using %s KV cache layout for %s backend.", layout_name, backend_name
+    # Order candidates by how strongly they are requested: the sum of preference
+    # ranks across backends that narrowed their set (default-set backends express
+    # no preference). Ties and the no-preference case follow the default order.
+    default_set = AttentionBackend.supported_kv_cache_layouts()
+    narrowed = [s for s in supported_sets.values() if s != default_set]
+    canonical = list(default_set) + [m for m in KVCacheLayout if m not in default_set]
+    candidates = sorted(
+        (
+            layout
+            for layout in canonical
+            if all(layout in supported for supported in supported_sets.values())
+        ),
+        key=lambda layout: sum(s.index(layout) for s in narrowed),
+    )
+    if not candidates:
+        listing = ", ".join(
+            f"{backend.get_name()} supports {[m.name for m in supported]}"
+            for backend, supported in sorted(
+                supported_sets.items(), key=lambda kv: kv[0].get_name()
+            )
         )
+        raise ValueError(
+            f"No KV cache layout satisfies every attention backend: {listing}."
+        )
+
+    if (requested := envs.VLLM_KV_CACHE_LAYOUT) is not None:
+        layout = _layout_from_name(requested)
+        if layout not in candidates:
+            raise ValueError(
+                f"VLLM_KV_CACHE_LAYOUT={requested} is not supported by every "
+                f"attention backend; supported layouts: "
+                f"{[m.name for m in candidates]}."
+            )
+    elif (connector := get_kv_connector_cache_layout()) is not None and (
+        connector_layout := _layout_from_name(connector)
+    ) in candidates:
+        layout = connector_layout
     else:
-        layout_name = envs.VLLM_KV_CACHE_LAYOUT or get_kv_connector_cache_layout()
-
-    layout = _layout_from_name(layout_name or "LBNHC")
-    for backend in backends:
-        # A backend that requires this layout supports it by construction; some
-        # only declare the requirement and leave supports_kv_cache_layout() at
-        # the head-inside-block default.
-        if backend.get_name() not in required:
-            _validate_backend_supports_layout(backend, layout)
+        layout = candidates[0]
+        if narrowed:
+            logger.info_once("Using %s KV cache layout.", layout.name)
 
     _RESOLVED_KV_CACHE_LAYOUT = layout
-    if cache_config is not None:
-        cache_config.kv_cache_layout = layout.name
-    return layout
-
-
-def require_block_outer_kv_cache_layout(cache_config=None) -> KVCacheLayout:
-    """Publish a block-outermost layout for models that overlay cache groups.
-
-    Overlaid groups with different page sizes need the layer dim inside the block dim,
-    so the model's allocation dictates the layout the same way a backend requirement
-    does. Preserve the requested H/N/C ordering while moving blocks before layers.
-    """
-    global _KV_CACHE_LAYOUT_OVERRIDE, _RESOLVED_KV_CACHE_LAYOUT
-    layout = get_kv_cache_layout(cache_config)
-    if not layout.is_layer_compact:
-        return layout
-
-    layout = layout.swap_layer_and_block()
-    logger.info_once("Using %s KV cache layout for overlaid cache groups.", layout.name)
-    _RESOLVED_KV_CACHE_LAYOUT = layout
-    if _KV_CACHE_LAYOUT_OVERRIDE is not None:
-        _KV_CACHE_LAYOUT_OVERRIDE = cast(KVCacheLayoutType, layout.name)
     if cache_config is not None:
         cache_config.kv_cache_layout = layout.name
     return layout

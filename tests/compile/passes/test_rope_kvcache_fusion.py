@@ -45,7 +45,6 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
-    KVCacheLayout,
 )
 
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
@@ -188,12 +187,12 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
 
-        # A backend-required layout wins over the default, mirroring
+        # A backend's preferred supported layout wins over the default, mirroring
         # selector-time resolution (e.g. ROCM_ATTN's head groups force LHBNC).
         layout = get_kv_cache_layout()
-        required = self.attn_backend.get_required_kv_cache_layout()
-        if required is not None:
-            layout = KVCacheLayout[required]
+        supported = self.attn_backend.supported_kv_cache_layouts()
+        if len(supported) == 1:
+            layout = supported[0]
 
         raw_tensor = torch.zeros(
             num_blocks * self.kv_cache_spec.page_size_bytes,

@@ -123,10 +123,10 @@ class FlexAttentionBackend(AttentionBackend):
         return True
 
     @classmethod
-    def supports_kv_cache_layout(cls, layout: "KVCacheLayout") -> bool:
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
         # Flex flattens the (B, N) block/token axes into a single token dim, which
         # only LBNHC's strides allow as a zero-copy view of the layer cache.
-        return layout is KVCacheLayout.LBNHC
+        return (KVCacheLayout.LBNHC,)
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:

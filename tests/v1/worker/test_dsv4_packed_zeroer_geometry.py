@@ -46,7 +46,7 @@ def test_packed_dsv4_zeroer_zeroes_only_each_layers_page():
     )
     # DSV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per stored state.
     assert spec.state_content_size_bytes == 584
-    assert spec.storage_block_size == 64
+    assert spec.num_states == 64
     unpadded_page = spec.unpadded_page_size_bytes
     padded_page = spec.page_size_bytes
     assert unpadded_page == 64 * 584
@@ -126,7 +126,7 @@ def test_overlaid_zeroer_dedups_segments_with_max_span():
     ]
     vllm_config = MagicMock()
     vllm_config.cache_config.num_gpu_blocks_override = None
-    vllm_config.cache_config.kv_cache_layout = None
+    vllm_config.cache_config.kv_cache_layout = "BLHNC"
     config = get_kv_cache_config_from_groups(vllm_config, groups, 8 * 1024 * 1024)
     views = allocate_and_reshape_kv_cache(
         config, torch.device("cpu"), get_kv_cache_layout(), None

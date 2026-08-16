@@ -21,7 +21,6 @@ from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.utils import (
     get_kv_cache_layout,
-    require_block_outer_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -1308,7 +1307,13 @@ def _resolve_layout_for_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
     cache_config=None,
 ) -> KVCacheLayout:
-    """Resolve the layout this model's packing can be expressed in."""
+    """Validate that the resolved layout can express this model's packing.
+
+    Read-only: the layout was chosen once at backend selection from the backends'
+    supported sets; a backend whose model overlays cache groups (e.g. the DeepSeek
+    sparse indexer) declares block-outermost layouts there, so an inexpressible
+    layout reaching this point is an error.
+    """
     layout = get_kv_cache_layout(cache_config)
     page_sizes = {
         _get_per_layer_spec(group, layer_name).page_size_bytes
@@ -1319,16 +1324,18 @@ def _resolve_layout_for_groups(
         # A rectangular layer dim exists; every layout can express it.
         return layout
 
-    if layout.heads_outside_blocks:
+    # Mixed page sizes pack pages side by side within a block, which needs each page to
+    # be one contiguous chunk inside its block (heads inside blocks) and, when groups
+    # overlay, the layer dim inside the block dim.
+    if layout.heads_outside_blocks or (
+        len(kv_cache_groups) > 1 and layout.is_layer_compact
+    ):
         raise ValueError(
-            f"KV cache layout {layout.name} hoists heads outside the block "
-            "dim, which cannot express layers with different page sizes "
-            f"(page sizes: {sorted(page_sizes)})."
+            f"KV cache layout {layout.name} cannot express this model's "
+            f"mixed page sizes ({sorted(page_sizes)}); a backend should "
+            "declare block-outermost supported layouts (e.g. BLHNC), or "
+            "set VLLM_KV_CACHE_LAYOUT=BLHNC."
         )
-    if len(kv_cache_groups) > 1:
-        # Groups overlay each other, so every group must agree on which bytes
-        # belong to a block: the layer dim has to sit inside the block dim.
-        layout = require_block_outer_kv_cache_layout(cache_config)
     return layout
 
 

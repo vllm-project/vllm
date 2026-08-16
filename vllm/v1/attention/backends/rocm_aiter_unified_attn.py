@@ -22,8 +22,7 @@ from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionMetadata,
     RocmAttentionMetadataBuilder,
 )
-from vllm.v1.attention.backends.utils import KVCacheLayoutType
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
 logger = init_logger(__name__)
 
@@ -91,11 +90,10 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
         return spec
 
     @classmethod
-    def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
-        # Main allocated the packed cache contiguous in (B, H, N, 2*hs) —
-        # head-major within the block — and the AITER kernels have only been
-        # exercised with that geometry, so pin it.
-        return "LBHNC"
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # The AITER kernels have only been exercised with the packed cache
+        # contiguous in (B, H, N, 2*hs), head-major within the block.
+        return (KVCacheLayout.LBHNC,)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:

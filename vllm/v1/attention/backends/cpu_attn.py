@@ -36,6 +36,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     CrossAttentionSpec,
     EncoderOnlyAttentionSpec,
+    KVCacheLayout,
 )
 
 logger = init_logger(__name__)
@@ -65,11 +66,9 @@ class CPUAttentionBackend(AttentionBackend):
         return [32, 64, 80, 96, 112, 128, 160, 192, 224, 256, 512]
 
     @classmethod
-    def get_required_kv_cache_layout(cls) -> str | None:
-        # The CPU backend only reads head-major block interiors; declare
-        # the requirement so an NHD-style env override is corrected
-        # instead of failing at first forward (main parity).
-        return "LBHNC"
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # The CPU backend only reads head-major block interiors.
+        return (KVCacheLayout.LBHNC,)
 
     @staticmethod
     def get_name() -> str:

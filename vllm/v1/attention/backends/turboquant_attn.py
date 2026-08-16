@@ -64,7 +64,7 @@ from vllm.v1.attention.ops.triton_turboquant_decode import (
     triton_turboquant_decode_attention,
 )
 from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_store
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
     is_workspace_manager_initialized,
@@ -157,8 +157,8 @@ class TurboQuantAttentionBackend(AttentionBackend):
         return "TURBOQUANT"
 
     @classmethod
-    def get_required_kv_cache_layout(cls) -> str | None:
-        return "LBNHC"
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        return (KVCacheLayout.LBNHC,)
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:

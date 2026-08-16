@@ -963,7 +963,7 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch):
     )
 
     backend = sparse_attn_mod.MiniMaxM3SparseBackend
-    assert backend.get_required_kv_cache_layout() == "LHBNC"
+    assert KVCacheLayout.LHBNC in backend.supported_kv_cache_layouts()
 
     nb, h = 7, 1
     spec = FullAttentionSpec(
