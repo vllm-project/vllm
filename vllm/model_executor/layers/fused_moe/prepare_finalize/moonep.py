@@ -24,8 +24,9 @@ PoC limitations:
   (memory-heavy). Production Kimi-K3 serving requires sharded
   symmetric-memory expert ownership, where rows ``[0, E)`` physically alias
   each home rank's parameter memory.
-- Route weights are applied inside the reference expert runner, so
-  ``finalize`` ignores ``weight_and_reduce_impl``.
+- Route weights are applied inside the expert compute and MoonEP's
+  ``combine`` performs the K-sum, so ``finalize`` requires
+  ``TopKWeightAndReduceNoOP``.
 """
 
 from typing import Any, NamedTuple
@@ -35,6 +36,9 @@ import torch.nn.functional as F
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceNoOP,
+)
 
 MOONEP_DEFAULT_NUM_PREFETCH_SLOTS = 4
 MOONEP_DEFAULT_TOKEN_PADDING = 128
@@ -47,6 +51,11 @@ class MoonEPExpertWeightLayout(NamedTuple):
     Rows ``[0, E)`` hold expert weights in global expert order; rows
     ``[E, E+B)`` are mutable prefetch slots filled by
     ``Buffer.prefetch_weight``.
+
+    The prefetch slots never need re-zeroing between calls: the planner
+    marks unused slots with ``-1`` in ``plan.experts_to_copy`` (skipped by
+    ``prefetch_weight``) and gives them an empty ``cu_seqlens`` segment, so
+    stale slot contents are never read; used slots are fully overwritten.
     """
 
     full_gate_weight: torch.Tensor
@@ -110,41 +119,6 @@ def make_moonep_weight_layout(
     )
 
 
-def run_moonep_bf16_reference_experts(
-    hidden_nvsh: torch.Tensor,
-    route_weights_nvs: torch.Tensor | None,
-    cu_seqlens: torch.Tensor,
-    weight_layout: MoonEPExpertWeightLayout,
-    activation: str = "silu",
-) -> torch.Tensor:
-    """Correctness-first segment loop over MoonEP's expert-grouped layout.
-
-    ``prefetch_weight`` has already materialized redundant experts' weights
-    in rows ``[E, E+B)``, so every segment reads its own row.
-    """
-    if activation != "silu":
-        raise NotImplementedError(
-            f"MoonEP BF16 PoC runner only supports silu, got {activation!r}"
-        )
-    output = torch.empty_like(hidden_nvsh)
-    cu = cu_seqlens.tolist()
-    prev = 0
-    for row, cur in enumerate(cu):
-        if cur == prev:
-            continue
-        x = hidden_nvsh[prev:cur]
-        gate = F.linear(x, weight_layout.full_gate_weight[row])
-        up = F.linear(x, weight_layout.full_up_weight[row])
-        y = F.linear(F.silu(gate) * up, weight_layout.full_down_weight[row])
-        if route_weights_nvs is not None:
-            y = y * route_weights_nvs[prev:cur].to(dtype=y.dtype).unsqueeze(-1)
-        output[prev:cur].copy_(y)
-        prev = cur
-    if prev < hidden_nvsh.shape[0]:
-        output[prev:].zero_()
-    return output
-
-
 class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """Prepare/Finalize using MoonEP balanced dispatch/combine.
 
@@ -152,8 +126,7 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     dispatches, runs ``prefetch_weight`` for the planned redundant experts,
     and stashes the ``plan`` for ``finalize`` (the same pattern DeepEP-HT
     uses for its handle). Downstream expert compute must consume the
-    expert-grouped ``[NvS, H]`` layout via ``cu_seqlens`` — the PoC pairs
-    this class with ``run_moonep_bf16_reference_experts``.
+    expert-grouped ``[NvS, H]`` layout via ``cu_seqlens``.
     """
 
     def __init__(
@@ -244,18 +217,17 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
         if a1.dtype != torch.bfloat16:
-            raise NotImplementedError(
-                "MoonEP PoC supports BF16 hidden states only."
-            )
+            raise NotImplementedError("MoonEP PoC supports BF16 hidden states only.")
         if quant_config.quant_dtype is not None:
-            raise NotImplementedError(
-                "MoonEP PoC does not support quantized dispatch."
-            )
+            raise NotImplementedError("MoonEP PoC does not support quantized dispatch.")
         if apply_router_weight_on_input:
             raise NotImplementedError(
                 "MoonEP PoC applies router weights in the expert runner."
             )
         assert num_experts == self.num_global_experts
+        assert self._plan is None, (
+            "MoonEPPrepareAndFinalize.prepare() called again before finalize()"
+        )
 
         a1, topk_ids, topk_weights, self._num_tokens = self._pad_to_capacity(
             a1, topk_ids, topk_weights
@@ -286,9 +258,7 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # per local expert, and NvS rows are expert-grouped rather than
         # token-major — only MoonEP-aware expert implementations can consume
         # this activation layout.
-        expert_num_tokens = torch.diff(
-            cu_seqlens, prepend=cu_seqlens.new_zeros(1)
-        )
+        expert_num_tokens = torch.diff(cu_seqlens, prepend=cu_seqlens.new_zeros(1))
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens,
             expert_num_tokens_cpu=None,
@@ -307,8 +277,13 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        # Route weights were applied by the expert runner; combine only sums
-        # each token's K expert outputs back to token-major order.
+        # Route weights are applied in the expert compute and MoonEP's
+        # combine performs the K-sum, so any weight/reduce work in finalize
+        # means MoonEP was paired with the wrong kind of experts.
+        assert isinstance(weight_and_reduce_impl, TopKWeightAndReduceNoOP), (
+            "MoonEP requires TopKWeightAndReduceNoOP, got "
+            f"{type(weight_and_reduce_impl).__name__}"
+        )
         combined, _, _ = self.buffer.combine(
             plan=self.plan,
             hidden_nvsh=fused_expert_output,
