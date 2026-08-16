@@ -218,8 +218,14 @@ class ServingTokens(GenerateBaseServing):
 
         if self.force_no_detokenize:
             sampling_params.detokenize = False
-        if request.stream:
-            sampling_params.output_kind = RequestOutputKind.DELTA
+        # Match the OpenAI serving path (CompletionRequest.to_sampling_params):
+        # non-streaming must use FINAL_ONLY. Under the SamplingParams default
+        # (CUMULATIVE) serve_tokens_full_generator keeps only the last streamed
+        # RequestOutput, and sequences that finished earlier are already pruned
+        # from it, so with n > 1 they silently never reach `choices`.
+        sampling_params.output_kind = (
+            RequestOutputKind.DELTA if request.stream else RequestOutputKind.FINAL_ONLY
+        )
 
         self._log_inputs(
             request_id,

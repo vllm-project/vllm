@@ -462,3 +462,24 @@ async def test_generate_with_lora_adapter(client, tokenizer, messages):
     completions_res = completions_data["choices"][0]["message"]["content"]
 
     assert generate_res == completions_res
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("n", [2, 4])
+async def test_generate_endpoint_returns_all_n_choices(client, n):
+    # Regression test for #52398: a non-streaming /inference/v1/generate
+    # request with n > 1 must return exactly n choices. The handler previously
+    # left output_kind at the SamplingParams default (CUMULATIVE) for
+    # non-streaming requests, so sequences that finished before the final
+    # streamed step were dropped and fewer than n choices came back.
+    payload = {
+        "model": MODEL_NAME,
+        "token_ids": [9707, 1879, 11],
+        "sampling_params": {"max_tokens": 5, "temperature": 1.0, "n": n},
+        "stream": False,
+    }
+    resp = await client.post(GEN_ENDPOINT, json=payload)
+    resp.raise_for_status()
+    data = resp.json()
+    assert len(data["choices"]) == n
+    assert sorted(c["index"] for c in data["choices"]) == list(range(n))
