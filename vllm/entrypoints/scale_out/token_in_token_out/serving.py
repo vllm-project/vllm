@@ -14,6 +14,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import AsyncMultiModalItemTracker
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
+    build_per_request_timing_metrics,
     clamp_prompt_logprobs,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -70,6 +71,7 @@ class ServingTokens(GenerateBaseServing):
         force_no_detokenize: bool = False,
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
+        enable_per_request_metrics: bool = False,
         enable_log_outputs: bool = False,
     ):
         super().__init__(
@@ -80,6 +82,7 @@ class ServingTokens(GenerateBaseServing):
         )
         self.online_renderer = online_renderer
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
+        self.enable_per_request_metrics = enable_per_request_metrics
         self.enable_log_outputs = enable_log_outputs
         self.force_no_detokenize = force_no_detokenize
         if force_no_detokenize:
@@ -345,6 +348,15 @@ class ServingTokens(GenerateBaseServing):
 
         request_metadata.final_usage_info = usage
 
+        request_metrics = (
+            build_per_request_timing_metrics(
+                final_res.metrics,
+                num_generated_tokens,
+            )
+            if self.enable_per_request_metrics
+            else None
+        )
+
         response = GenerateResponse(
             request_id=request_id,
             created=created_time,
@@ -354,6 +366,7 @@ class ServingTokens(GenerateBaseServing):
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
+            request_metrics=request_metrics,
         )
 
         # Log complete response if output logging is enabled

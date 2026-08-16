@@ -2026,6 +2026,12 @@ def test_kv_connector_basic(is_async: bool):
 
     # Ensure ScheduleOutput is correct.
     output = scheduler.schedule()
+    for request in requests:
+        if is_async:
+            assert request.remote_kv_wait_time > 0
+            assert request.remote_kv_wait_started_at is None
+        else:
+            assert request.remote_kv_wait_time == 0
     _assert_right_scheduler_output(
         output=output,
         num_requests=NUM_REQUESTS,

@@ -159,6 +159,7 @@ class PerRequestMetrics(OpenAIBaseModel):
     tokens_per_second: float | None = None
     # Experimental, subject to change.
     speculative_decoding: SpeculativeDecodingMetrics | None = None
+    remote_kv_wait_time_ms: float | None = None
 
 
 class RequestResponseMetadata(BaseModel):

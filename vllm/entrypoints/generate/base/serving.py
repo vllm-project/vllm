@@ -101,6 +101,11 @@ def build_per_request_timing_metrics(
         queue_time_ms=queue_time_ms,
         mean_itl_ms=mean_itl_ms,
         tokens_per_second=tokens_per_second,
+        remote_kv_wait_time_ms=(
+            metrics.remote_kv_wait_time * 1000
+            if metrics.remote_kv_wait_time is not None
+            else None
+        ),
     )
 
 

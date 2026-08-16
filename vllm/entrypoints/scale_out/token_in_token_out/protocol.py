@@ -20,7 +20,11 @@ from vllm.entrypoints.openai.completion.protocol import (
     CompletionRequest,
     CompletionStreamResponse,
 )
-from vllm.entrypoints.openai.engine.protocol import StreamOptions, UsageInfo
+from vllm.entrypoints.openai.engine.protocol import (
+    PerRequestMetrics,
+    StreamOptions,
+    UsageInfo,
+)
 from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import SamplingParams
@@ -266,6 +270,10 @@ class GenerateResponse(BaseModel):
         description=(
             "ECTransfer parameters used for encoder-cache disaggregated serving."
         ),
+    )
+    request_metrics: PerRequestMetrics | None = Field(
+        default=None,
+        description="Per-request generation and remote KV wait timings.",
     )
 
 

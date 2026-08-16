@@ -23,6 +23,7 @@ from vllm.renderers import renderer_from_config
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.metrics.stats import RequestStateStats
 
 MODEL_NAME = "openai-community/gpt2"
 BASE_MODEL_PATHS = [
@@ -125,6 +126,7 @@ def _make_request_output(
     logprobs: list[dict[int, Any] | None] | None = None,
     num_cached_tokens: int | None = None,
     index: int = 0,
+    metrics: RequestStateStats | None = None,
 ) -> RequestOutput:
     return RequestOutput(
         request_id=request_id,
@@ -142,7 +144,7 @@ def _make_request_output(
             )
         ],
         finished=finished,
-        metrics=None,
+        metrics=metrics,
         lora_request=None,
         encoder_prompt=None,
         encoder_prompt_token_ids=None,
@@ -197,10 +199,51 @@ async def test_serve_tokens_skips_mm_cache_for_remote_engine_execution():
     response = await serving.serve_tokens(request)
 
     assert isinstance(response, GenerateResponse)
+    assert response.request_metrics is None
     assert (
         serving.online_renderer.preprocess_completion.call_args.kwargs["skip_mm_cache"]
         is True
     )
+
+
+@pytest.mark.asyncio
+async def test_serve_tokens_returns_enabled_request_metrics():
+    engine = _mock_engine()
+    metrics = RequestStateStats(
+        queued_ts=1.0,
+        scheduled_ts=2.0,
+        first_token_ts=5.0,
+        last_token_ts=9.0,
+        first_token_latency=6.0,
+        remote_kv_wait_time=0.75,
+    )
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10],
+            finish_reason="stop",
+            finished=True,
+            metrics=metrics,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine, enable_per_request_metrics=True)
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=1),
+        model=MODEL_NAME,
+        stream=False,
+    )
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, GenerateResponse)
+    assert response.request_metrics is not None
+    assert response.request_metrics.queue_time_ms == 1000.0
+    assert response.request_metrics.time_to_first_token_ms == 3000.0
+    assert response.request_metrics.generation_time_ms == 4000.0
+    assert response.request_metrics.remote_kv_wait_time_ms == 750.0
 
 
 @pytest.mark.asyncio
