@@ -43,6 +43,8 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 MOONEP_DEFAULT_NUM_PREFETCH_SLOTS = 4
 MOONEP_DEFAULT_TOKEN_PADDING = 128
 MOONEP_DEFAULT_NUM_SMS = 32
+# MoonEP's weight-prefetch kernel tiles hidden and intermediate dims by 128.
+MOONEP_WEIGHT_TILE = 128
 
 
 class MoonEPExpertWeightLayout(NamedTuple):
@@ -87,6 +89,12 @@ def make_moonep_weight_layout(
             f"w2_weight shape {tuple(w2_weight.shape)} does not match "
             f"w13_weight shape {tuple(w13_weight.shape)}"
         )
+    if hidden_size % MOONEP_WEIGHT_TILE or intermediate_size % MOONEP_WEIGHT_TILE:
+        raise ValueError(
+            "MoonEP weight prefetch requires hidden_size and intermediate_size "
+            f"to be multiples of {MOONEP_WEIGHT_TILE}; got H={hidden_size}, "
+            f"I={intermediate_size}"
+        )
 
     full_gate_weight = torch.empty(
         num_experts + num_prefetch_slots,
@@ -117,6 +125,35 @@ def make_moonep_weight_layout(
         full_down_weight=full_down_weight.contiguous(),
         num_prefetch_slots=num_prefetch_slots,
     )
+
+
+def gather_moonep_weight_layout(
+    w13_local: torch.Tensor,
+    w2_local: torch.Tensor,
+    num_global_experts: int,
+    num_prefetch_slots: int,
+) -> MoonEPExpertWeightLayout:
+    """Build the replicated ``[E+B, ...]`` layout from this rank's local experts.
+
+    PoC bridge: each EP rank loads only its own experts (linear placement),
+    so all-gather them once at load time into global expert order on every
+    rank. Production MoonEP instead maps rows ``[0, E)`` onto each home
+    rank's parameter memory via symmetric memory (RFC #52095 item 5).
+    """
+    from vllm.distributed import get_ep_group
+
+    ep_group = get_ep_group()
+    ep_size = ep_group.world_size
+    if ep_size == 1:
+        return make_moonep_weight_layout(w13_local, w2_local, num_prefetch_slots)
+    if w13_local.size(0) * ep_size != num_global_experts:
+        raise NotImplementedError(
+            "MoonEP PoC requires num_experts to be evenly divisible across EP "
+            f"ranks: {num_global_experts} experts, {ep_size} ranks"
+        )
+    w13_global = ep_group.all_gather(w13_local.contiguous(), dim=0)
+    w2_global = ep_group.all_gather(w2_local.contiguous(), dim=0)
+    return make_moonep_weight_layout(w13_global, w2_global, num_prefetch_slots)
 
 
 class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
