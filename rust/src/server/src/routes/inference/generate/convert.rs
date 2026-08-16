@@ -1,10 +1,14 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_text::{Prompt, TextDecodeOptions, TextRequest};
 
 use super::types::GenerateRequest;
 use super::validate;
 use crate::error::ApiError;
 use crate::lora::LoraModelResolution;
-use crate::utils::{ResolvedRequestContext, merge_kv_transfer_params};
+use crate::utils::{ResolvedRequestContext, merge_ec_transfer_params, merge_kv_transfer_params};
 
 /// Lowered generate request plus the response request ID.
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +38,7 @@ pub(super) fn prepare_generate_request(
     request: GenerateRequest,
     lora_resolution: &LoraModelResolution,
     ctx: ResolvedRequestContext,
+    mm_features: Option<MmFeatures>,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, &lora_resolution.model_names)?;
 
@@ -56,11 +61,15 @@ pub(super) fn prepare_generate_request(
         sampling_params.vllm_xargs,
         request.kv_transfer_params.as_ref(),
     );
+    sampling_params.vllm_xargs = merge_ec_transfer_params(
+        sampling_params.vllm_xargs,
+        request.ec_transfer_params.as_ref(),
+    );
 
     let text_request = TextRequest {
         request_id: ctx.request_id.clone(),
         prompt: Prompt::TokenIds(request.token_ids),
-        mm_features: None,
+        mm_features,
         sampling_params,
         decode_options: TextDecodeOptions::default(),
         intermediate: false,
@@ -68,6 +77,7 @@ pub(super) fn prepare_generate_request(
         cache_salt: request.cache_salt,
         add_special_tokens: false,
         data_parallel_rank: ctx.data_parallel_rank,
+        session_id: ctx.session_id,
         reasoning_parser_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
         arrival_time: None,
@@ -126,6 +136,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            None,
         )
         .expect("prepare");
 
@@ -167,6 +178,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            None,
         )
         .expect("prepare");
 
@@ -196,6 +208,7 @@ mod tests {
             request,
             &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
             ResolvedRequestContext::default(),
+            None,
         )
         .expect("prepare");
 

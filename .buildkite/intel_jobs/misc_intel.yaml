@@ -3,7 +3,7 @@ depends_on:
   - image-build-xpu
 steps:
 - label: V1 Core + KV + Metrics
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:
     label: production
@@ -33,7 +33,7 @@ steps:
       pytest -v -s v1/executor'
 
 - label: V1 Sample + Logits
-  timeout_in_minutes: 30
+  timeout_in_minutes: 90
   device: intel_gpu
   agent_tags:
     label: production
@@ -125,13 +125,13 @@ steps:
       pytest -v -s v1/kv_offload &&
       pytest -v -s v1/kv_connector/unit/test_offloading_connector.py'
 
-- label: NixlConnector PD accuracy (2 GPUs)
+- label: NixlConnector PD accuracy (4 GPUs)
   timeout_in_minutes: 60
-  num_devices: 2
+  num_devices: 4
   device: intel_gpu
   agent_tags:
     label: production
-    gpu: 2+
+    gpu: 4+
     mem: 16+
   no_plugin: true
   working_dir: "."
@@ -140,7 +140,7 @@ steps:
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - vllm/distributed/kv_transfer/kv_connector/
     - vllm/v1/worker/kv_connector_model_runner_mixin.py
     - tests/v1/kv_connector/nixl_integration/
     - vllm/platforms/xpu.py
@@ -148,11 +148,14 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh'
+      bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh &&
+      PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=1 bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh &&
+      PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh &&
+      PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2 bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh'
 
 - label: Regression
   key: regression
-  timeout_in_minutes: 30
+  timeout_in_minutes: 50
   device: intel_gpu
   agent_tags:
     label: production
@@ -186,7 +189,7 @@ steps:
 
 - label: Metrics, Tracing (2 GPUs)
   key: metrics-tracing-2-gpus
-  timeout_in_minutes: 30
+  timeout_in_minutes: 45
   num_devices: 2
   device: intel_gpu
   agent_tags:
@@ -222,7 +225,7 @@ steps:
 
 - label: Async Engine, Inputs, Utils, Worker
   key: async-engine-inputs-utils-worker
-  timeout_in_minutes: 30
+  timeout_in_minutes: 55
   device: intel_gpu
   agent_tags:
     label: production
@@ -259,3 +262,25 @@ steps:
     pytest -v -s detokenizer &&
     pytest -v -s -m "not cpu_test" ./multimodal &&
     pytest -v -s utils_ --ignore=utils_/test_mem_utils.py'
+
+- label: Fusion Unit Tests
+  timeout_in_minutes: 30
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/compilation/
+    - tests/compile/passes/test_qk_norm_rope_fusion.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s compile/passes/test_qk_norm_rope_fusion.py'

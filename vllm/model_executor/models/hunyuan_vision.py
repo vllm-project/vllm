@@ -73,6 +73,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.hunyuan_vl import (
@@ -550,15 +551,22 @@ def _hunyuan_vl_field_config(hf_inputs: Mapping[str, torch.Tensor]):
 
 
 class HunYuanVLMultiModalDataParser(MultiModalDataParser):
+    # The patch grid is what sizes the placeholder range.
+    embedding_fields = {
+        "image": {"image_embeds": "values", "image_grid_thw": "metadata"},
+    }
+
     def _parse_image_data(
         self,
         data: dict[str, torch.Tensor] | ModalityData[ImageItem],
     ) -> ModalityDataItems[Any, Any] | None:
         if isinstance(data, dict):
+            required, optional = self.embedding_field_sets("image")
             return DictEmbeddingItems(
                 data,
                 modality="image",
-                required_fields={"image_embeds", "image_grid_thw"},
+                required_fields=required,
+                optional_fields=optional,
                 fields_factory=_hunyuan_vl_field_config,
             )
 
@@ -591,6 +599,7 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         return HunYuanVLMultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
+            embeds_from_ec_connector=self.embeds_from_ec_connector,
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -697,9 +706,12 @@ class HunYuanVLDummyInputsBuilder(BaseDummyInputsBuilder[HunYuanVLProcessingInfo
         num_images = mm_counts.get("image", 0)
 
         hf_processor = self.info.get_hf_processor(typ=HunYuanVLProcessor)
-        image_token: str = hf_processor.image_token
+        image_placeholder = (
+            f"{hf_processor.image_start_token}{hf_processor.image_token}"
+            f"{hf_processor.image_end_token}"
+        )
 
-        return image_token * num_images
+        return image_placeholder * num_images
 
     def get_dummy_mm_data(
         self,
@@ -751,8 +763,10 @@ class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingIn
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
 
-        placeholder = {
+        token_ids = {
             "image": hf_processor.image_token_id,
+            "image_start": hf_processor.image_start_token_id,
+            "image_end": hf_processor.image_end_token_id,
         }
 
         merge_size = image_processor.merge_size
@@ -766,12 +780,21 @@ class HunYuanVLMultiModalProcessor(BaseMultiModalProcessor[HunYuanVLProcessingIn
             num_tokens = (int(grid_h) // merge_size) * (
                 int(grid_w) // merge_size + 1
             ) + 2
-            return [placeholder[modality]] * num_tokens
+            tokens = (
+                [token_ids[f"{modality}_start"]]
+                + [token_ids[modality]] * num_tokens
+                + [token_ids[f"{modality}_end"]]
+            )
+            return PromptUpdateDetails.select_token_id(tokens, token_ids[modality])
 
         return [
             PromptReplacement(
                 modality=modality,
-                target=[placeholder[modality]],
+                target=[
+                    token_ids[f"{modality}_start"],
+                    token_ids[modality],
+                    token_ids[f"{modality}_end"],
+                ],
                 replacement=partial(get_replacement_hunyuan_vl, modality=modality),
             )
             for modality in ("image",)

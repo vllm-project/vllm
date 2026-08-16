@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
 
 import numpy as np
 import pytest
 
-from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     LookupResult,
+    Medium,
     OffloadingEvent,
     OffloadKey,
     PrepareStoreOutput,
@@ -37,6 +38,7 @@ _EMPTY_REQ_CTX = make_req_context()
 def make_cpu_manager(
     num_blocks: int = 4,
     cache_policy: str = "lru",
+    cache_policy_module_path: str | None = None,
     enable_events: bool = False,
     store_threshold: int = 0,
     max_tracker_size: int = 64_000,
@@ -44,6 +46,7 @@ def make_cpu_manager(
     return CPUOffloadingManager(
         num_blocks=num_blocks,
         cache_policy=cache_policy,
+        cache_policy_module_path=cache_policy_module_path,
         enable_events=enable_events,
         store_threshold=store_threshold,
         max_tracker_size=max_tracker_size,
@@ -55,6 +58,17 @@ class ExpectedPrepareStoreOutput:
     keys_to_store: list[int]
     store_block_ids: list[int]
     evicted_keys: list[int]
+
+
+class _CountingOrderedDict(OrderedDict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.items_yielded = 0
+
+    def items(self):
+        for item in super().items():
+            self.items_yielded += 1
+            yield item
 
 
 def to_key(int_hash: int) -> OffloadKey:
@@ -92,6 +106,21 @@ def verify_load_output(
     assert np.array_equal(expected_array, prepare_load_output.block_ids)
 
 
+def check_split_usage_stats(
+    manager: CPUOffloadingManager, write: float, read: float, total: float
+):
+    stats = manager.get_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[CPUOffloadingMetrics.CPU_CACHE_WRITE_USAGE_PERC] == pytest.approx(
+        write
+    )
+    assert reduced[CPUOffloadingMetrics.CPU_CACHE_READ_USAGE_PERC] == pytest.approx(
+        read
+    )
+    assert reduced[CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC] == pytest.approx(total)
+
+
 def verify_events(
     events: Iterable[OffloadingEvent],
     expected_stores: tuple[set[int], ...] = (),
@@ -100,7 +129,7 @@ def verify_events(
     stores: list[set[OffloadKey]] = []
     evictions: list[set[OffloadKey]] = []
     for event in events:
-        assert event.medium == MEDIUM_CPU
+        assert event.medium == Medium.CPU
         if event.removed:
             evictions.append(set(event.keys))
         else:
@@ -300,6 +329,40 @@ def test_cpu_manager_reports_allocation_size_on_eviction_failure():
     reduced = stats.reduce()
     assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count"] == 1
     assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_sum"] == 1
+
+
+def test_cpu_manager_reports_cache_write_and_read_usage_gauges():
+    manager = make_cpu_manager(num_blocks=4)
+
+    # Store path: pins write usage until complete_store.
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.5, read=0.0, total=0.5)
+
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
+
+    # Load path: pins read usage until complete_load.
+    assert manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.HIT
+    manager.prepare_load(to_keys([1]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.0, read=0.25, total=0.25)
+
+    manager.complete_load(to_keys([1]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
+
+    # Concurrent write + read pins are both reflected and additive.
+    manager.prepare_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
+    manager.prepare_load(to_keys([2]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.5, read=0.25, total=0.75)
+
+
+def test_cpu_manager_clears_write_usage_after_failed_store():
+    manager = make_cpu_manager(num_blocks=4)
+
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    check_split_usage_stats(manager, write=0.5, read=0.0, total=0.5)
+
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX, success=False)
+    check_split_usage_stats(manager, write=0.0, read=0.0, total=0.0)
 
 
 def test_cpu_manager():
@@ -634,6 +697,106 @@ class TestARCPolicy:
         assert to_keys([1])[0] in arc_policy.b1
         # block 5 should be in T1
         assert to_keys([5])[0] in arc_policy.t1
+
+    def test_batch_eviction_scans_t1_and_t2_once(self):
+        """ARC batch eviction must preserve order without restarting scans."""
+        cpu_manager, arc_policy = self._make_manager(
+            num_blocks=256, enable_events=False
+        )
+        keys = to_keys(list(range(256)))
+        cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
+        cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
+
+        cpu_manager.touch(keys[128:], _EMPTY_REQ_CTX)
+        arc_policy.target_t1_size = 64
+
+        protected = {keys[0], keys[2], keys[255]}
+        arc_policy.t1[keys[1]].ref_cnt = 1
+        arc_policy.t2[keys[254]].ref_cnt = 1
+
+        num_evictions = 124
+        num_t1_evictions = len(arc_policy.t1) - int(arc_policy.target_t1_size) + 1
+        num_t2_evictions = num_evictions - num_t1_evictions
+        t1_order = list(arc_policy.t1)
+        t2_order = list(arc_policy.t2)
+        expected_t1 = [
+            key
+            for key, block in arc_policy.t1.items()
+            if block.ref_cnt == 0 and key not in protected
+        ][:num_t1_evictions]
+        expected_t2 = [
+            key
+            for key, block in arc_policy.t2.items()
+            if block.ref_cnt == 0 and key not in protected
+        ][:num_t2_evictions]
+        expected_t1_scans = t1_order.index(expected_t1[-1]) + 1
+        expected_t2_scans = t2_order.index(expected_t2[-1]) + 1
+
+        counting_t1 = _CountingOrderedDict(arc_policy.t1)
+        counting_t2 = _CountingOrderedDict(arc_policy.t2)
+        arc_policy.t1 = counting_t1
+        arc_policy.t2 = counting_t2
+
+        evicted = arc_policy.evict(num_evictions, protected)
+
+        assert evicted is not None
+        assert [key for key, _ in evicted] == expected_t1 + expected_t2
+        assert counting_t1.items_yielded == expected_t1_scans
+        assert counting_t2.items_yielded == expected_t2_scans
+
+    def test_batch_eviction_falls_back_after_t1_iterator_exhausted(self):
+        """An exhausted T1 scan must keep falling back to T2."""
+        cpu_manager, arc_policy = self._make_manager(num_blocks=8, enable_events=False)
+        keys = to_keys(list(range(8)))
+        cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
+        cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
+
+        cpu_manager.touch(keys[6:], _EMPTY_REQ_CTX)
+        arc_policy.target_t1_size = 4
+
+        t1_order = list(arc_policy.t1)
+        t2_order = list(arc_policy.t2)
+        protected = set(t1_order[1:3])
+        for key in t1_order[3:]:
+            arc_policy.t1[key].ref_cnt = 1
+
+        # Selecting the sole eligible T1 entry leaves virtual_t1_size above
+        # the target, so each remaining selection must retry T1 then use T2.
+        eligible_t1 = [
+            key
+            for key, block in arc_policy.t1.items()
+            if block.ref_cnt == 0 and key not in protected
+        ]
+        assert eligible_t1 == t1_order[:1]
+        assert len(t1_order) - 1 >= int(arc_policy.target_t1_size)
+
+        counting_t1 = _CountingOrderedDict(arc_policy.t1)
+        counting_t2 = _CountingOrderedDict(arc_policy.t2)
+        arc_policy.t1 = counting_t1
+        arc_policy.t2 = counting_t2
+
+        evicted = arc_policy.evict(3, protected)
+
+        assert evicted is not None
+        assert [key for key, _ in evicted] == [t1_order[0], *t2_order]
+        assert counting_t1.items_yielded == len(t1_order)
+        assert counting_t2.items_yielded == len(t2_order)
+
+    def test_batch_eviction_failure_is_atomic(self):
+        """Finding only some candidates must not partially evict the cache."""
+        cpu_manager, arc_policy = self._make_manager(num_blocks=4, enable_events=False)
+        keys = to_keys(list(range(4)))
+        cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
+        cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
+
+        before_t1 = list(arc_policy.t1.items())
+        protected = set(keys[1:])
+
+        assert arc_policy.evict(2, protected) is None
+        assert list(arc_policy.t1.items()) == before_t1
+        assert not arc_policy.t2
+        assert not arc_policy.b1
+        assert not arc_policy.b2
 
     def test_ghost_list_bounds(self):
         """
