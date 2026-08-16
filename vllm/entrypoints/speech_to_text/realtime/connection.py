@@ -211,6 +211,8 @@ class RealtimeConnection:
 
         prompt_token_ids_len: int = 0
         completion_tokens_len: int = 0
+        result_gen = None
+        should_abort = True
 
         try:
             # Create sampling params
@@ -251,6 +253,9 @@ class RealtimeConnection:
                     # finish because websocket connection was killed
                     break
 
+            if not self._is_connected:
+                return
+
             usage = UsageInfo(
                 prompt_tokens=prompt_token_ids_len,
                 completion_tokens=completion_tokens_len,
@@ -263,12 +268,26 @@ class RealtimeConnection:
             # Clear queue for next utterance
             while not self.audio_queue.empty():
                 self.audio_queue.get_nowait()
+            should_abort = False
 
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.exception("Error in generation: %s", e)
             # The socket may already be closed; nothing more we can do.
             with contextlib.suppress(Exception):
                 await self.send_error(sanitize_message(str(e)), "processing_error")
+        finally:
+            if result_gen is not None:
+                aclose = getattr(result_gen, "aclose", None)
+                if aclose is not None:
+                    with contextlib.suppress(Exception):
+                        await aclose()
+            if should_abort:
+                await asyncio.gather(
+                    self.serving.engine_client.abort(request_id),
+                    return_exceptions=True,
+                )
 
     async def send(
         self, event: SessionCreated | TranscriptionDelta | TranscriptionDone
