@@ -24,6 +24,7 @@ from vllm.entrypoints.openai.run_batch import (
     is_same_local_file,
     local_input_path,
     needs_staging,
+    url_matches,
     validate_batch,
     validate_run_batch_args,
     write_finished,
@@ -1240,7 +1241,7 @@ async def test_unsupported_url_error_lists_registry_endpoints(tmp_path):
     registry = {
         "widgets": {
             "url": "/v1/widgets",
-            "match_suffix": False,
+            "versioned": False,
             "handler_getter": lambda: None,
             "wrapper_fn": None,
         }
@@ -1315,3 +1316,29 @@ async def test_write_finished_keeps_responses_that_completed_with_a_failure(tmp_
         for line in output_path.read_text().strip().split("\n")
     ]
     assert written == ["request-0", "request-1", "request-2"]
+
+
+def test_url_matches_accepts_versioned_endpoints():
+    """Score and rerank are served under an optional version prefix.
+
+    The previous suffix match also accepted unrelated paths ending in the same
+    segment, such as /foo/score.
+    """
+
+    def config(url, versioned):
+        return {
+            "url": url,
+            "versioned": versioned,
+            "handler_getter": lambda: None,
+            "wrapper_fn": None,
+        }
+
+    score = config("/score", versioned=True)
+    for url in ("/score", "/v1/score", "/v2/score", "/v10/score"):
+        assert url_matches(score, url), url
+    for url in ("/foo/score", "/a/b/score", "/scorecard", "/vX/score"):
+        assert not url_matches(score, url), url
+
+    embeddings = config("/v1/embeddings", versioned=False)
+    assert url_matches(embeddings, "/v1/embeddings")
+    assert not url_matches(embeddings, "/v2/embeddings")

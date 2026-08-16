@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 import aiohttp
 import pybase64 as base64
 import pydantic
+import regex as re
 import torch
 from fastapi import UploadFile
 from prometheus_client import start_http_server
@@ -630,18 +631,19 @@ class EndpointConfig(TypedDict):
     """How a batch request URL is matched to the handler that serves it."""
 
     url: str
-    # Score and rerank are served at several versioned paths, so they accept
-    # any URL ending in theirs. Every other endpoint matches exactly.
-    match_suffix: bool
+    # Score and rerank are also served under a version prefix, /v1/score.
+    versioned: bool
     handler_getter: Callable[[], Callable | None]
     wrapper_fn: WrapperFn | None
 
 
 def url_matches(config: EndpointConfig, url: str) -> bool:
     """Whether a request URL is served by this endpoint."""
-    if config["match_suffix"]:
-        return url.endswith(config["url"])
-    return url == config["url"]
+    if url == config["url"]:
+        return True
+    return config["versioned"] and bool(
+        re.fullmatch(rf"/v\d+{re.escape(config['url'])}", url)
+    )
 
 
 def handle_endpoint_request(
@@ -787,7 +789,7 @@ async def build_endpoint_registry(
     endpoint_registry: dict[str, EndpointConfig] = {
         "completions": {
             "url": "/v1/chat/completions",
-            "match_suffix": False,
+            "versioned": False,
             "handler_getter": lambda: (
                 openai_serving_chat.create_chat_completion
                 if openai_serving_chat is not None
@@ -797,7 +799,7 @@ async def build_endpoint_registry(
         },
         "embeddings": {
             "url": "/v1/embeddings",
-            "match_suffix": False,
+            "versioned": False,
             "handler_getter": lambda: (
                 serving_embedding if serving_embedding is not None else None
             ),
@@ -805,7 +807,7 @@ async def build_endpoint_registry(
         },
         "score": {
             "url": "/score",
-            "match_suffix": True,
+            "versioned": True,
             "handler_getter": lambda: (
                 serving_scores if serving_scores is not None else None
             ),
@@ -813,7 +815,7 @@ async def build_endpoint_registry(
         },
         "rerank": {
             "url": "/rerank",
-            "match_suffix": True,
+            "versioned": True,
             "handler_getter": lambda: (
                 serving_scores if serving_scores is not None else None
             ),
@@ -821,7 +823,7 @@ async def build_endpoint_registry(
         },
         "transcriptions": {
             "url": "/v1/audio/transcriptions",
-            "match_suffix": False,
+            "versioned": False,
             "handler_getter": lambda: (
                 openai_serving_transcription.create_transcription
                 if openai_serving_transcription is not None
@@ -834,7 +836,7 @@ async def build_endpoint_registry(
         },
         "translations": {
             "url": "/v1/audio/translations",
-            "match_suffix": False,
+            "versioned": False,
             "handler_getter": lambda: (
                 openai_serving_translation.create_translation
                 if openai_serving_translation is not None
