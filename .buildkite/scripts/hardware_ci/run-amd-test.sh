@@ -52,7 +52,8 @@ amd_diagnostics_collected=0
 amd_diagnostics_memory_events_path=""
 amd_diagnostics_probe_budget_seconds=25
 amd_diagnostics_command_timeout_seconds=5
-amd_diagnostics_upload_timeout_seconds=20
+# Leave enough time for the uploader to retry after one slow DNS failure.
+amd_diagnostics_upload_timeout_seconds=45
 if [[ " ${PYTEST_ADDOPTS:-} " != *" --color"* ]]; then
   PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }--color=yes"
 fi
@@ -1071,8 +1072,16 @@ collect_amd_ci_failure_diagnostics() {
   local identity_value="${HOSTNAME:-unknown}"
   local k8s_pod="unknown"
   local k8s_namespace="${amd_diagnostics_k8s_namespace}"
-  local artifact_status="unavailable"
+  local artifact_uploaded=0
+  local artifact_failure="upload failed"
+  local artifact_upload_exit_code=0
+  local artifact_upload_output=""
+  local artifact_upload_output_lower=""
+  local artifact_summary=""
+  local diagnostics_logged=0
   local oom_kill_count=""
+  local summary_identity_label="Runner"
+  local -a summary_rows=()
 
   if [[ "${amd_diagnostics_collected}" == "1" ]]; then
     return 0
@@ -1123,6 +1132,7 @@ collect_amd_ci_failure_diagnostics() {
     upload_root=$(dirname "${diagnostics_path}")
     upload_path=$(basename "${diagnostics_path}")
   fi
+  artifact_summary="upload unavailable; saved locally: ${diagnostics_path}"
 
   if [[ "${exit_code}" -gt 128 && "${exit_code}" -le 192 ]]; then
     exit_signal=$(kill -l "$((exit_code - 128))" 2>/dev/null || true)
@@ -1229,20 +1239,44 @@ collect_amd_ci_failure_diagnostics() {
   if command -v buildkite-agent >/dev/null 2>&1 \
     && [[ -n "${BUILDKITE_JOB_ID:-}" ]]; then
     if ! command -v timeout >/dev/null 2>&1; then
-      artifact_status="timeout-unavailable"
-    elif (
-      cd "${upload_root}" \
-        && BUILDKITE_AGENT_DEBUG=false \
-          BUILDKITE_AGENT_DEBUG_HTTP=false \
-          BUILDKITE_AGENT_TRACE_HTTP=false \
-          BUILDKITE_AGENT_LOG_LEVEL=error \
-          timeout --kill-after=2s "${amd_diagnostics_upload_timeout_seconds}s" \
-          buildkite-agent artifact upload "${upload_path}" \
-          >/dev/null 2>&1
-    ); then
-      artifact_status="uploaded"
+      artifact_summary="upload skipped (timeout unavailable): ${diagnostics_path}"
     else
-      artifact_status="failed"
+      artifact_upload_output=$(
+        (
+          cd "${upload_root}" \
+            && BUILDKITE_AGENT_DEBUG=false \
+              BUILDKITE_AGENT_DEBUG_HTTP=false \
+              BUILDKITE_AGENT_TRACE_HTTP=false \
+              BUILDKITE_AGENT_LOG_LEVEL=error \
+              timeout --kill-after=2s \
+                "${amd_diagnostics_upload_timeout_seconds}s" \
+                buildkite-agent artifact upload "${upload_path}"
+        ) 2>&1
+      )
+      artifact_upload_exit_code=$?
+      if [[ "${artifact_upload_exit_code}" -eq 0 ]]; then
+        artifact_uploaded=1
+        artifact_summary="uploaded: ${upload_path}"
+      elif [[ "${artifact_upload_exit_code}" -eq 124 \
+        || "${artifact_upload_exit_code}" -eq 137 ]]; then
+        artifact_summary="upload timed out after ${amd_diagnostics_upload_timeout_seconds}s: ${upload_path}"
+      else
+        artifact_upload_output_lower="${artifact_upload_output,,}"
+        case "${artifact_upload_output_lower}" in
+          *"temporary failure in name resolution"* | *"no such host"* | \
+            *"server misbehaving"* | *"network is unreachable"* | \
+            *"i/o timeout"* | *"connection timed out"*)
+            artifact_failure="network/DNS failure"
+            ;;
+          *"unauthorized"* | *"forbidden"* | *"permission denied"*)
+            artifact_failure="authorization failure"
+            ;;
+          *"no such file"* | *"no matches found"*)
+            artifact_failure="file unavailable"
+            ;;
+        esac
+        artifact_summary="${artifact_failure} (exit ${artifact_upload_exit_code}): ${upload_path}"
+      fi
     fi
   fi
 
@@ -1257,31 +1291,46 @@ collect_amd_ci_failure_diagnostics() {
     fi
   fi
 
-  echo ":rotating_light: AMD CI failure summary"
-  printf 'exit=%s signal=%s runtime=%s %s=%s' \
-    "${exit_code}" "${exit_signal:-none}" "${runtime}" \
-    "${identity_label}" "${identity_value}"
-  if [[ -n "${amd_diagnostics_k8s_node_name}" ]]; then
-    printf ' node=%s' "${amd_diagnostics_k8s_node_name}"
+  if ((artifact_uploaded == 0)) && [[ -n "${BUILDKITE_JOB_ID:-}" ]]; then
+    printf '\nAMD CI diagnostics fallback (artifact upload did not succeed)\n'
+    if cat "${diagnostics_path}"; then
+      diagnostics_logged=1
+    else
+      echo "WARNING: unable to copy diagnostics into the Buildkite log"
+    fi
+    printf '\nEnd AMD CI diagnostics fallback\n'
   fi
-  if [[ -n "${oom_kill_count}" ]]; then
-    printf ' cgroup_oom_kill=%s' "${oom_kill_count}"
-  fi
-  printf '\n'
-  case "${artifact_status}" in
-    uploaded)
-      echo "Full diagnostics uploaded as Buildkite artifact: ${upload_path}"
+
+  case "${identity_label}" in
+    pod)
+      summary_identity_label="Kubernetes pod"
       ;;
-    failed)
-      echo "WARNING: failed to upload full diagnostics artifact: ${upload_path}"
-      ;;
-    timeout-unavailable)
-      echo "WARNING: timeout unavailable; diagnostics artifact upload skipped: ${diagnostics_path}"
-      ;;
-    *)
-      echo "Full diagnostics saved locally (Buildkite upload unavailable): ${diagnostics_path}"
+    container_hostname)
+      summary_identity_label="Container hostname"
       ;;
   esac
+
+  summary_rows=(
+    "Field" "Value"
+    "----------------------" "-----"
+    "Exit code" "${exit_code}"
+    "Signal" "${exit_signal:-none}"
+    "Runtime" "${runtime}"
+    "${summary_identity_label}" "${identity_value}"
+  )
+  if [[ -n "${amd_diagnostics_k8s_node_name}" ]]; then
+    summary_rows+=("Kubernetes node" "${amd_diagnostics_k8s_node_name}")
+  fi
+  if [[ -n "${oom_kill_count}" ]]; then
+    summary_rows+=("Cgroup OOM kills" "${oom_kill_count}")
+  fi
+  summary_rows+=("Diagnostics artifact" "${artifact_summary}")
+  if ((diagnostics_logged)); then
+    summary_rows+=("Diagnostics fallback" "included in job log")
+  fi
+
+  printf '\nAMD CI failure summary\n'
+  printf '%-22s | %s\n' "${summary_rows[@]}"
 
   return 0
 }
