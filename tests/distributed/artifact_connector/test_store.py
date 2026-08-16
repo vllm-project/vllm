@@ -188,7 +188,10 @@ def _make_connector(*, enable_prefix_caching: bool = True):
     )
 
 
-def _make_worker(max_num_seqs: int) -> ArtifactWorkerConnector:
+def _make_worker(
+    max_num_seqs: int,
+    max_num_batched_tokens: int | None = None,
+) -> ArtifactWorkerConnector:
     store = BackgroundArtifactStore(
         _make_store(object_nbytes=_BLOCK_SIZE * int(np.prod(_SHAPE))),
         max_pending_batches=2,
@@ -196,7 +199,11 @@ def _make_worker(max_num_seqs: int) -> ArtifactWorkerConnector:
     worker = object.__new__(ArtifactWorkerConnector)
     worker._store = store
     worker._buffer = RoutedExpertsArtifactBuffer(
-        _DTYPE, _SHAPE, _BLOCK_SIZE, max_num_seqs, max_num_seqs * _BLOCK_SIZE
+        _DTYPE,
+        _SHAPE,
+        _BLOCK_SIZE,
+        max_num_seqs,
+        max_num_batched_tokens or max_num_seqs * _BLOCK_SIZE,
     )
     worker._requests = {}
     worker._generation = -1
@@ -297,6 +304,40 @@ def test_logical_buffer_captures_one_row_per_decode_step():
 
     assert len(completed) == 1
     np.testing.assert_array_equal(completed[0][1], logical)
+
+
+def test_logical_buffer_moves_completed_tail_to_retained_pool():
+    buffer = RoutedExpertsArtifactBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 4)
+    logical = np.arange(9 * 3 * 2, dtype=_DTYPE).reshape(9, *_SHAPE)
+
+    assert not buffer.capture("request", 0, logical[:2])
+    first = buffer.capture("request", 2, logical[2:6])
+    first_retained = buffer.retain_block(first[0][1])
+    second = buffer.capture("request", 6, logical[6:])
+    second_retained = buffer.retain_block(second[0][1])
+
+    np.testing.assert_array_equal(first_retained, logical[:4])
+    np.testing.assert_array_equal(second_retained, logical[4:8])
+    buffer.release_block(first_retained)
+    buffer.release_block(second_retained)
+
+
+def test_logical_buffer_retains_two_full_steps():
+    buffer = RoutedExpertsArtifactBuffer(_DTYPE, _SHAPE, _BLOCK_SIZE, 1, 16)
+    logical = np.arange(32 * 3 * 2, dtype=_DTYPE).reshape(32, *_SHAPE)
+
+    retained = [
+        buffer.retain_block(rows)
+        for _, rows in buffer.capture("first", 0, logical[:16])
+    ]
+    retained += [
+        buffer.retain_block(rows)
+        for _, rows in buffer.capture("second", 0, logical[16:])
+    ]
+
+    assert len(retained) == 8
+    for rows in retained:
+        buffer.release_block(rows)
 
 
 def _make_store(
@@ -537,6 +578,54 @@ def test_worker_defers_full_block_until_kv_hash_arrives():
         ),
         logical[:4],
     )
+    worker.close()
+
+
+def test_worker_releases_newly_keyed_blocks_before_capture():
+    worker = _make_worker(1, max_num_batched_tokens=16)
+    connector = _make_connector()
+    block_hashes = [b"a" * 32]
+    request = _scheduler_request("request", block_hashes, num_tokens=100)
+    connector.request_started(request)
+    logical = np.arange(52 * 3 * 2, dtype=np.uint8).reshape(52, 3, 2)
+
+    for token_start, num_tokens in [(0, 4), (4, 16), (20, 16)]:
+        metadata = connector.build_connector_meta(
+            _step_output([request.request_id], [token_start], [num_tokens]),
+            {request.request_id: request},
+        )
+        _process_output(
+            worker,
+            metadata,
+            logical[token_start : token_start + num_tokens],
+            [request.request_id],
+            np.array([0]),
+        )
+
+    block_hashes.extend(bytes([value]) * 32 for value in range(1, 5))
+    metadata = connector.build_connector_meta(
+        _step_output([request.request_id], [36], [16]),
+        {request.request_id: request},
+    )
+    _process_output(
+        worker,
+        metadata,
+        logical[36:52],
+        [request.request_id],
+        np.array([0]),
+    )
+
+    state = worker._requests[(request.request_id, 0)]
+    assert [start for start, _ in state.pending_blocks] == [
+        20,
+        24,
+        28,
+        32,
+        36,
+        40,
+        44,
+        48,
+    ]
     worker.close()
 
 
@@ -1121,21 +1210,33 @@ def test_scheduler_connector_restarts_preempted_request_epoch():
     assert list(resumed.requests[0].block_hashes) == [b"a" * 32]
 
 
+def test_scheduler_connector_skips_preempted_request_that_was_freed():
+    connector = _make_connector()
+    preempted = _step_output([], [], [])
+    preempted.preempted_req_ids = {"finished"}
+
+    metadata = connector.build_connector_meta(preempted, {})
+
+    assert not metadata.requests
+
+
 def test_scheduler_consumes_ordered_stale_artifact_outputs():
     connector = _make_connector()
-    request = _scheduler_request("request", [], num_tokens=1)
+    request = _scheduler_request("request", [], num_tokens=6)
     connector.request_started(request)
-    first_rows = np.arange(2 * 3 * 2, dtype=np.uint8).reshape(2, 3, 2)
-    second_rows = first_rows + 20
+    first_rows = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2)
+    second_rows = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, 3, 2) + 40
     first = ArtifactConnectorOutput({"request": ArtifactRequestOutput(0, first_rows)})
-    second = ArtifactConnectorOutput({"request": ArtifactRequestOutput(1, second_rows)})
+    second = ArtifactConnectorOutput({"request": ArtifactRequestOutput(4, second_rows)})
 
     np.testing.assert_array_equal(
         connector.take_output(request, True, first, is_stale=True), first_rows
     )
     np.testing.assert_array_equal(
-        connector.take_output(request, True, second, is_stale=True), second_rows[1:]
+        connector.take_output(request, True, second, is_stale=True), second_rows[:1]
     )
+    later = ArtifactConnectorOutput({"request": ArtifactRequestOutput(6, second_rows)})
+    assert connector.take_output(request, True, later, is_stale=True) is None
 
 
 def test_scheduler_ignores_stale_output_without_new_artifacts():
@@ -1156,7 +1257,7 @@ def test_scheduler_ignores_stale_output_without_new_artifacts():
 
 def test_scheduler_rejects_stale_artifact_token_gap():
     connector = _make_connector()
-    request = _scheduler_request("request", [], num_tokens=1)
+    request = _scheduler_request("request", [], num_tokens=3)
     connector.request_started(request)
     output = ArtifactConnectorOutput(
         {"request": ArtifactRequestOutput(1, np.zeros((1, 3, 2), dtype=np.uint8))}

@@ -128,7 +128,9 @@ class ArtifactSchedulerConnector:
         requests: dict[str, Request],
     ) -> ArtifactConnectorMetadata:
         for request_id in scheduler_output.preempted_req_ids or ():
-            self.request_restarted(requests[request_id])
+            request = requests.get(request_id)
+            if request is not None:
+                self.request_restarted(request)
         token_starts = {
             request.req_id: request.num_computed_tokens
             for request in scheduler_output.scheduled_new_reqs
@@ -204,13 +206,15 @@ class ArtifactSchedulerConnector:
         request_output = output.requests[request_id]
         if is_stale:
             output_end = request_output.token_start + len(request_output.rows)
+            token_end = min(output_end, request.num_tokens - 1)
+            if token_end <= state.emit_cursor:
+                return None
             local_start = state.emit_cursor - request_output.token_start
             if local_start < 0:
                 raise RuntimeError("stale artifact worker output has a token gap")
-            if output_end <= state.emit_cursor:
-                return None
-            state.emit_cursor = max(state.emit_cursor, output_end)
-            return request_output.rows[local_start:]
+            local_end = token_end - request_output.token_start
+            state.emit_cursor = token_end
+            return request_output.rows[local_start:local_end]
         token_end = min(
             request.num_tokens - 1,
             request.num_computed_tokens - request.num_in_flight_tokens,

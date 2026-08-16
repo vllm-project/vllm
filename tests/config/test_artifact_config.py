@@ -22,9 +22,10 @@ def _config(
     pcp: int = 1,
     connector: str | None = None,
     runner_type: str = "generate",
+    is_moe: bool = True,
 ):
     return SimpleNamespace(
-        model_config=SimpleNamespace(runner_type=runner_type),
+        model_config=SimpleNamespace(runner_type=runner_type, is_moe=is_moe),
         use_v2_model_runner=True,
         parallel_config=SimpleNamespace(
             pipeline_parallel_size=pp,
@@ -133,6 +134,11 @@ def test_artifact_connector_requires_model_runner_v2():
 def test_artifact_connector_rejects_pooling_runner():
     with pytest.raises(ValueError, match="only supports generate runners"):
         VllmConfig._verify_artifact_compatibility(_config(runner_type="pooling"))
+
+
+def test_artifact_connector_rejects_dense_model():
+    with pytest.raises(ValueError, match="only supports MoE models"):
+        VllmConfig._verify_artifact_compatibility(_config(is_moe=False))
 
 
 def test_artifact_connector_rejects_adaptive_verification():

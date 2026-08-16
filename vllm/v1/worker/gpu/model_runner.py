@@ -1918,6 +1918,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
+        artifact_error = None
+        artifact_connector = getattr(self, "artifact_connector", None)
+        if artifact_connector is not None:
+            self.artifact_connector = None
+            try:
+                artifact_connector.close()
+            except BaseException as error:
+                error.__traceback__ = None
+                artifact_error = error
+            finally:
+                artifact_connector = None
         self.cudagraph_manager = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
@@ -1938,8 +1949,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         gc.collect()
         torch.accelerator.empty_cache()
         logger.debug("Cleaned up model weights, KV caches, and workspace")
-        if artifact_connector := getattr(self, "artifact_connector", None):
-            artifact_connector.close()
+        if artifact_error is not None:
+            raise artifact_error
 
     ########### EPLB methods start ###########
     @property

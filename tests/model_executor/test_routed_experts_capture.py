@@ -315,7 +315,8 @@ def test_model_runner_shutdown_cleans_gpu_before_artifact_error(monkeypatch):
     runner.speculator = Mock()
     runner.model = Mock()
     runner.artifact_connector = Mock()
-    runner.artifact_connector.close.side_effect = RuntimeError("publication failed")
+    artifact_connector = runner.artifact_connector
+    artifact_connector.close.side_effect = RuntimeError("publication failed")
 
     with pytest.raises(RuntimeError, match="publication failed"):
         runner.shutdown()
@@ -326,6 +327,8 @@ def test_model_runner_shutdown_cleans_gpu_before_artifact_error(monkeypatch):
     assert not hasattr(runner, "model_state")
     assert runner.speculator is None
     assert not hasattr(runner, "model")
+    assert runner.artifact_connector is None
+    artifact_connector.close.assert_called_once_with()
     torch.accelerator.empty_cache.assert_called_once_with()
 
 

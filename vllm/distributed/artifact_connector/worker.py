@@ -212,6 +212,7 @@ class ArtifactWorkerConnector:
         num_rejected: np.ndarray,
     ) -> dict[str, ArtifactRequestOutput]:
         assert self._store is not None and self._buffer is not None
+        self._publish_keyed_blocks(metadata.requests, metadata.block_size)
         by_request = {request.request_id: request for request in metadata.requests}
         captured: list[
             tuple[
@@ -429,6 +430,31 @@ class ArtifactWorkerConnector:
                     state.finished_block_hashes = block_hashes
                 else:
                     self._finish_request(key, state, block_hashes, metadata.block_size)
+
+    def _publish_keyed_blocks(
+        self,
+        requests: Sequence[ArtifactRequestMetadata],
+        block_size: int,
+    ) -> None:
+        assert self._store is not None and self._buffer is not None
+        batches: list[tuple[Sequence[str], list[tuple[int, np.ndarray]]]] = []
+        rows_to_release: list[np.ndarray] = []
+        for request in requests:
+            state = self._requests[(request.request_id, request.epoch)]
+            if not state.pending_blocks:
+                continue
+            _, ready = self._take_available_blocks(state, [], block_size)
+            if ready:
+                batches.append((state.artifact_keys, ready))
+                rows_to_release.extend(rows for _, rows in ready)
+        if batches:
+            publish_routed_experts(
+                self._store,
+                batches=batches,
+                block_size=block_size,
+            )
+        for rows in rows_to_release:
+            self._buffer.release_block(rows)
 
     def output_finished(self, metadata: ArtifactConnectorMetadata) -> None:
         if self._buffer is None:

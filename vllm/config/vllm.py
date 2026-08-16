@@ -980,6 +980,8 @@ class VllmConfig:
             )
         if self.model_config.runner_type != "generate":
             raise ValueError("Artifact Connector only supports generate runners.")
+        if not self.model_config.is_moe:
+            raise ValueError("Artifact Connector only supports MoE models.")
         if (
             self.speculative_config is not None
             and self.speculative_config.enable_adaptive_verification

@@ -48,7 +48,10 @@ class RoutedExpertsArtifactBuffer:
         self._rows: np.ndarray = np.empty(
             (2 * max_num_seqs, block_size, *shape_per_token), dtype=dtype
         )
-        max_retained_blocks = (max_num_batched_tokens + block_size - 1) // block_size
+        max_step_blocks = (
+            max_num_batched_tokens + block_size - 1
+        ) // block_size + max_num_seqs
+        max_retained_blocks = 2 * max_step_blocks
         self._retained_rows: np.ndarray = np.empty(
             (max_retained_blocks, block_size, *shape_per_token), dtype=dtype
         )
@@ -150,14 +153,15 @@ class RoutedExpertsArtifactBuffer:
 
     def retain_block(self, rows: np.ndarray) -> np.ndarray:
         """Retain one unkeyed block after the current capture call."""
-        if id(rows) in self._completed_slots:
-            return rows
         if not self._free_retained_slots:
             raise RuntimeError("artifact retained-block pool is exhausted")
         slot = self._free_retained_slots.pop()
         retained = self._retained_rows[slot]
         retained[...] = rows
         self._retained_slots[id(retained)] = slot
+        completed_slot = self._completed_slots.pop(id(rows), None)
+        if completed_slot is not None:
+            self._free_slots.append(completed_slot)
         return retained
 
     def release_block(self, rows: np.ndarray) -> None:
