@@ -566,6 +566,19 @@ class ParallelLMHead(VocabParallelEmbedding):
         else:
             self.register_parameter("bias", None)
 
+        # Expose the LinearBase-shaped geometry that quantization schemes read off the layer.
+        # ParallelLMHead is the only quantizable projection in the model that does NOT derive
+        # from LinearBase, so schemes such as CompressedTensorsW8A16Fp8 raise
+        # `AttributeError: 'ParallelLMHead' object has no attribute 'output_partition_sizes'`
+        # when a checkpoint quantizes lm_head. These are derived from state the layer already
+        # tracks; nothing new is computed or stored.
+        self.output_partition_sizes = [self.num_embeddings_per_partition]
+        self.logical_widths = [self.num_embeddings_per_partition]
+        self.output_size_per_partition = self.num_embeddings_per_partition
+        self.input_size = self.embedding_dim
+        self.input_size_per_partition = self.embedding_dim
+        self.has_bias = bias
+
     def _register_bias(self):
         data = torch.empty(self.num_embeddings_per_partition, dtype=self.params_dtype)
         self.bias = Parameter(data, requires_grad=False)
