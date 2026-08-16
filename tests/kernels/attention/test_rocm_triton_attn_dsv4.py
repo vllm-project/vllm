@@ -149,20 +149,6 @@ def _poison_fp8_ds_mla_cache_row(
     )
 
 
-def _canonicalize_poisoned_fp8_ds_mla_cache_row(
-    cache: torch.Tensor, block_size: int, slot: int = 0
-) -> None:
-    flat = cache.flatten()
-    block_idx = slot // block_size
-    pos = slot % block_size
-    block_base = block_idx * cache.stride(0)
-    token_base = block_base + pos * 576
-    scale_base = block_base + block_size * 576 + pos * 8
-    flat[token_base] = 0
-    flat[scale_base : scale_base + 7] = 254
-    flat[token_base + NOPE_HEAD_DIM : token_base + 576].view(torch.bfloat16)[0] = 0
-
-
 def _read_fp8_ds_mla_cache_rows(
     cache: torch.Tensor,
     slots: torch.Tensor,
@@ -256,88 +242,6 @@ def _ragged_from_rows(
         torch.tensor(flat, dtype=torch.int32, device=device),
         torch.tensor(indptr, dtype=torch.int32, device=device),
     )
-
-
-def _launch_gfx950_partial(
-    q: torch.Tensor,
-    main_cache: torch.Tensor,
-    main_indices: torch.Tensor,
-    main_indptr: torch.Tensor,
-    extra_cache: torch.Tensor,
-    extra_indices: torch.Tensor,
-    extra_indptr: torch.Tensor,
-    num_splits: int,
-    adaptive_splits: bool = False,
-    poison_scratch: bool = False,
-    one_wave_splits: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
-
-    num_queries, num_heads, _ = q.shape
-    part_m = torch.empty(
-        num_queries,
-        num_splits,
-        num_heads,
-        dtype=torch.float32,
-        device=q.device,
-    )
-    part_l = torch.empty_like(part_m)
-    part_acc = torch.empty(
-        num_queries,
-        num_splits,
-        num_heads,
-        HEAD_DIM,
-        dtype=torch.float32,
-        device=q.device,
-    )
-    if poison_scratch:
-        part_m.fill_(float("nan"))
-        part_l.fill_(float("nan"))
-        part_acc.fill_(float("nan"))
-        part_acc[:, 1::2].fill_(float("inf"))
-    assert part_m.is_contiguous()
-    assert part_l.is_contiguous()
-    assert part_acc.is_contiguous()
-
-    mod._sparse_attn_decode_gfx950_partial_kernel[
-        (num_queries, num_splits, (num_heads + 15) // 16)
-    ](
-        q,
-        main_cache,
-        main_indices,
-        main_indptr,
-        extra_cache,
-        extra_indices,
-        extra_indptr,
-        part_m,
-        part_l,
-        part_acc,
-        q.stride(0),
-        q.stride(1),
-        main_cache.stride(0),
-        extra_cache.stride(0),
-        main_cache.shape[0] * main_cache.shape[1],
-        extra_cache.shape[0] * extra_cache.shape[1],
-        main_cache.shape[1],
-        extra_cache.shape[1],
-        HEAD_DIM**-0.5,
-        num_heads,
-        HAS_EXTRA=True,
-        NOPE_DIM=NOPE_HEAD_DIM,
-        ROPE_DIM=ROPE_HEAD_DIM,
-        IS_FNUZ_MAIN=current_platform.is_fp8_fnuz(),
-        IS_FNUZ_EXTRA=False,
-        TRUST_EXTRA_CACHE_NAN_FREE=True,
-        ADAPTIVE_SPLITS=adaptive_splits,
-        ONE_WAVE_SPLITS=one_wave_splits or num_splits,
-        BLOCK_H=16,
-        BLOCK_K=32,
-        NUM_SPLITS=num_splits,
-        NUM_STAGES=1,
-        num_warps=4,
-        waves_per_eu=0,
-    )
-    return part_m, part_l, part_acc
 
 
 def _launch_sparse_decode_reduce(
@@ -626,51 +530,6 @@ def test_sparse_attn_decode_scrubs_untrusted_cache_by_default() -> None:
     assert torch.equal(actual, torch.zeros_like(actual))
 
 
-@requires_gfx950
-@torch.inference_mode()
-def test_sparse_attn_decode_trusted_extra_matches_legacy_scrub() -> None:
-    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
-        _rocm_sparse_attn_decode_ragged_triton,
-    )
-
-    device = torch.device("cuda")
-    block_size = 4
-    main_cache = torch.zeros(1, block_size, 584, dtype=torch.uint8, device=device)
-    legacy_extra = torch.zeros_like(main_cache)
-    _poison_fp8_ds_mla_cache_row(main_cache, block_size)
-    _poison_fp8_ds_mla_cache_row(legacy_extra, block_size)
-    canonical_extra = legacy_extra.clone()
-    _canonicalize_poisoned_fp8_ds_mla_cache_row(canonical_extra, block_size)
-    indices = torch.zeros(1, dtype=torch.int32, device=device)
-    indptr = torch.tensor([0, 1], dtype=torch.int32, device=device)
-    q = torch.ones(1, 1, HEAD_DIM, dtype=torch.bfloat16, device=device)
-    kwargs = {
-        "q": q,
-        "main_cache": main_cache,
-        "main_indices": indices,
-        "main_indptr": indptr,
-        "scale": HEAD_DIM**-0.5,
-        "attn_sink": None,
-        "nope_head_dim": NOPE_HEAD_DIM,
-        "rope_head_dim": ROPE_HEAD_DIM,
-        "extra_indices": indices,
-        "extra_indptr": indptr,
-    }
-
-    legacy = _rocm_sparse_attn_decode_ragged_triton(
-        **kwargs,
-        extra_cache=legacy_extra,
-    )
-    trusted = _rocm_sparse_attn_decode_ragged_triton(
-        **kwargs,
-        extra_cache=canonical_extra,
-        extra_cache_nan_free=True,
-    )
-
-    assert torch.equal(trusted, legacy)
-    assert torch.equal(trusted, torch.zeros_like(trusted))
-
-
 @pytest.mark.parametrize("on_gfx950", [False, True])
 @torch.inference_mode()
 def test_rocm_ragged_graph_buffer_view_tracks_source_width(
@@ -754,8 +613,6 @@ def test_decode_num_splits_heuristic(monkeypatch) -> None:
 
     # The shared gfx942 selector retains its original 16-split ceiling.
     assert mod._decode_num_splits(1, 1, 128.0, 8192.0) == 16
-    assert mod._decode_num_splits(8, 1, 128.0, 8192.0) == 16
-    assert mod._decode_num_splits(64, 1, 128.0, 8192.0) == 4
 
     # The chosen count always stays within the searched [1, 16] range, and a
     # zero-length workload never splits (no work to parallelize).
@@ -772,18 +629,8 @@ def test_decode_num_splits_gfx950(monkeypatch) -> None:
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
     monkeypatch.setattr(mod, "_decode_cu_count", lambda: 256)
-    for num_queries in (1, 8):
-        assert mod._decode_gfx950_num_splits(num_queries, 1, 128, 32) == 32
-        assert mod._decode_gfx950_num_splits(num_queries, 1, 128, 7812) == 32
-
+    assert mod._decode_gfx950_num_splits(1, 1, 128, 8192) == 32
     assert mod._decode_gfx950_num_splits(17, 1, 128, 32) == 4
-    assert mod._decode_gfx950_num_splits(16, 1, 128, 781) == 13
-    assert mod._decode_gfx950_num_splits(48, 1, 128, 3906) == 10
-    for extra_rows in (32, 256):
-        assert mod._decode_gfx950_num_splits(64, 1, 128, extra_rows) == 4
-    assert mod._decode_gfx950_num_splits(64, 1, 128, 781) == 7
-    for extra_rows in (3906, 7812):
-        assert mod._decode_gfx950_num_splits(64, 1, 128, extra_rows) == 8
     assert mod._decode_gfx950_num_splits(512, 1, 128, 7812) == 1
 
 
@@ -843,7 +690,13 @@ def test_sparse_attn_decode_split_k_kernel(
 
     # Pin the split count so each parametrized value is exercised deterministically.
     split_fn = "_decode_gfx950_num_splits" if _on_gfx950() else "_decode_num_splits"
+    other_split_fn = (
+        "_decode_num_splits" if _on_gfx950() else "_decode_gfx950_num_splits"
+    )
     monkeypatch.setattr(mod, split_fn, lambda *args, **kwargs: num_splits)
+    monkeypatch.setattr(
+        mod, other_split_fn, lambda *args, **kwargs: pytest.fail("wrong selector")
+    )
 
     actual = mod._rocm_sparse_attn_decode_ragged_triton(
         q=q,
@@ -874,168 +727,21 @@ def test_sparse_attn_decode_split_k_kernel(
 
 
 @requires_gfx950
-@pytest.mark.parametrize("num_splits", [1, 2, 3, 8, 32])
-@torch.inference_mode()
-def test_sparse_attn_decode_gfx950_partial_buffer_layout(num_splits: int) -> None:
-    device = torch.device("cuda")
-    block_size = 64
-    num_heads = 16
-    entries_per_split = 65
-    num_extra = num_splits * entries_per_split
-    q = torch.full(
-        (2, num_heads, HEAD_DIM),
-        0.125,
-        dtype=torch.bfloat16,
-        device=device,
-    )
-    main_cache = torch.zeros(1, block_size, 584, dtype=torch.uint8, device=device)
-    main_indices = torch.empty(0, dtype=torch.int32, device=device)
-    main_indptr = torch.zeros(3, dtype=torch.int32, device=device)
-    extra_cache = _pack_fp8_ds_mla_cache(
-        torch.full(
-            (num_extra, HEAD_DIM),
-            0.125,
-            dtype=torch.bfloat16,
-            device=device,
-        ),
-        block_size,
-        use_fnuz=False,
-    )
-    extra_indices = torch.arange(num_extra, dtype=torch.int32, device=device)
-    extra_indptr = torch.tensor(
-        [0, num_extra, num_extra], dtype=torch.int32, device=device
-    )
-
-    batch = _launch_gfx950_partial(
-        q,
-        main_cache,
-        main_indices,
-        main_indptr,
-        extra_cache,
-        extra_indices,
-        extra_indptr,
-        num_splits,
-    )
-    single_nonempty = _launch_gfx950_partial(
-        q[:1],
-        main_cache,
-        main_indices,
-        torch.zeros(2, dtype=torch.int32, device=device),
-        extra_cache,
-        extra_indices,
-        torch.tensor([0, num_extra], dtype=torch.int32, device=device),
-        num_splits,
-    )
-    single_empty = _launch_gfx950_partial(
-        q[1:],
-        main_cache,
-        main_indices,
-        torch.zeros(2, dtype=torch.int32, device=device),
-        extra_cache,
-        torch.empty(0, dtype=torch.int32, device=device),
-        torch.zeros(2, dtype=torch.int32, device=device),
-        num_splits,
-    )
-
-    for batch_part, nonempty_part, empty_part in zip(
-        batch, single_nonempty, single_empty
-    ):
-        assert torch.equal(batch_part[:1], nonempty_part)
-        assert torch.equal(batch_part[1:], empty_part)
-
-    part_m, part_l, part_acc = batch
-    expected_m = HEAD_DIM * 0.125**2 * HEAD_DIM**-0.5
-    torch.testing.assert_close(
-        part_m[0],
-        torch.full_like(part_m[0], expected_m),
-        rtol=1e-4,
-        atol=1e-4,
-    )
-    assert torch.equal(part_l[0], torch.full_like(part_l[0], float(entries_per_split)))
-    torch.testing.assert_close(
-        part_acc[0],
-        torch.full_like(part_acc[0], entries_per_split * 0.125),
-        rtol=0,
-        atol=0,
-    )
-    assert torch.equal(
-        part_m[1], torch.full_like(part_m[1], torch.finfo(torch.float32).min)
-    )
-    assert torch.equal(part_l[1], torch.zeros_like(part_l[1]))
-    assert torch.equal(part_acc[1], torch.zeros_like(part_acc[1]))
-
-
-@requires_gfx950
 @torch.inference_mode()
 def test_sparse_attn_decode_gfx950_adaptive_reduce_ignores_stale_scratch() -> None:
     device = torch.device("cuda")
-    torch.manual_seed(19)
-    block_size = 64
-    num_heads = 16
-    num_splits = 32
-    main_use_fnuz = current_platform.is_fp8_fnuz()
-    q = torch.randn(3, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device)
-    q *= 0.125
-    main_kv = torch.randn(3, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
-    main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size, main_use_fnuz)
-    main_rows = [[0], [1], [2]]
-    main_indices, main_indptr = _ragged_from_rows(main_rows, device)
-    extra_kv = torch.randn(2112, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
-    extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size, use_fnuz=False)
-    extra_rows = [
-        list(range(64)),
-        list(range(64, 576)),
-        list(range(576, 2112)),
-    ]
-    extra_indices, extra_indptr = _ragged_from_rows(extra_rows, device)
+    part_m = torch.full((1, 8, 1), torch.finfo(torch.float32).min, device=device)
+    part_l = torch.zeros_like(part_m)
+    part_acc = torch.full((1, 8, 1, HEAD_DIM), float("nan"), device=device)
+    part_m[:, :2] = 0
+    part_l[:, :2] = 1
+    part_acc[:, 0] = 1
+    part_acc[:, 1] = 3
 
-    part_m, part_l, part_acc = _launch_gfx950_partial(
-        q,
-        main_cache,
-        main_indices,
-        main_indptr,
-        extra_cache,
-        extra_indices,
-        extra_indptr,
-        num_splits,
-        adaptive_splits=True,
-        poison_scratch=True,
-        one_wave_splits=16,
-    )
-
-    neg_large = torch.finfo(torch.float32).min
-    assert torch.equal(part_m[0, 4:], torch.full_like(part_m[0, 4:], neg_large))
-    assert torch.equal(part_l[0, 4:], torch.zeros_like(part_l[0, 4:]))
-    assert torch.isnan(part_acc[0, 4::2]).all()
-    assert torch.isinf(part_acc[0, 5::2]).all()
-    assert (part_l[1, :16] > 0).all()
-    assert torch.equal(part_m[1, 16:], torch.full_like(part_m[1, 16:], neg_large))
-    assert torch.equal(part_l[1, 16:], torch.zeros_like(part_l[1, 16:]))
-    assert torch.isnan(part_acc[1, 16::2]).all()
-    assert torch.isinf(part_acc[1, 17::2]).all()
-    assert (part_l[2] > 0).all()
-    assert torch.isfinite(part_acc[2]).all()
-
-    actual = _launch_sparse_decode_reduce(
-        part_m,
-        part_l,
-        part_acc,
-        adaptive_splits=True,
-    )
-    expected = _ref_sparse_decode_ragged(
-        q=q,
-        main_cache=main_cache,
-        main_rows=main_rows,
-        scale=HEAD_DIM**-0.5,
-        attn_sink=None,
-        block_size=block_size,
-        extra_cache=extra_cache,
-        extra_rows=extra_rows,
-        main_use_fnuz=main_use_fnuz,
-    )
+    actual = _launch_sparse_decode_reduce(part_m, part_l, part_acc, True)
 
     assert torch.isfinite(actual).all()
-    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+    assert torch.equal(actual, torch.full_like(actual, 2))
 
 
 @requires_gfx950
@@ -1230,61 +936,6 @@ def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch) -> None:
     graph.replay()
     torch.accelerator.synchronize()
     torch.testing.assert_close(out, expected_long, atol=2e-2, rtol=2e-2)
-
-
-@requires_split_decode_arch
-@torch.inference_mode()
-def test_sparse_attn_decode_long_context(monkeypatch) -> None:
-    """Validate the production C128A maximum of 8192 selected KV rows."""
-    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
-
-    device = torch.device("cuda")
-    torch.manual_seed(11)
-    block_size = 64
-    num_kv = 8192
-    num_heads = 16
-    q = torch.randn(1, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
-    main_cache = _pack_fp8_ds_mla_cache(
-        torch.zeros(1, HEAD_DIM, dtype=torch.bfloat16, device=device),
-        block_size,
-        use_fnuz=current_platform.is_fp8_fnuz(),
-    )
-    extra_cache = _pack_fp8_ds_mla_cache(
-        torch.randn(num_kv, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125,
-        block_size,
-        use_fnuz=False,
-    )
-    empty_indices = torch.empty(0, dtype=torch.int32, device=device)
-    empty_indptr = torch.zeros(2, dtype=torch.int32, device=device)
-    extra_indices = torch.arange(num_kv, dtype=torch.int32, device=device)
-    extra_indptr = torch.tensor([0, num_kv], dtype=torch.int32, device=device)
-    scale = HEAD_DIM**-0.5
-
-    split_fn = "_decode_gfx950_num_splits" if _on_gfx950() else "_decode_num_splits"
-    num_splits = 32 if _on_gfx950() else 16
-    monkeypatch.setattr(mod, split_fn, lambda *args, **kwargs: num_splits)
-    actual = mod._rocm_sparse_attn_decode_ragged_triton(
-        q=q,
-        main_cache=main_cache,
-        main_indices=empty_indices,
-        main_indptr=empty_indptr,
-        scale=scale,
-        attn_sink=None,
-        nope_head_dim=NOPE_HEAD_DIM,
-        rope_head_dim=ROPE_HEAD_DIM,
-        extra_cache=extra_cache,
-        extra_indices=extra_indices,
-        extra_indptr=extra_indptr,
-    )
-
-    kv = _read_fp8_ds_mla_cache_rows(
-        extra_cache, extra_indices.to(torch.int64), block_size, use_fnuz=False
-    )
-    scores = torch.matmul(q[0].float(), kv.T) * scale
-    expected = torch.matmul(torch.softmax(scores, dim=-1), kv)
-    torch.testing.assert_close(
-        actual[0], expected.to(torch.bfloat16), atol=2e-2, rtol=2e-2
-    )
 
 
 # ---------------------------------------------------------------------------

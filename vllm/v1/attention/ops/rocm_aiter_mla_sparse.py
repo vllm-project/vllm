@@ -1869,115 +1869,6 @@ def _sparse_attn_decode_partial_kernel(
 
 
 @triton.jit
-def _sparse_attn_decode_gfx950_partial_tail_tile(
-    q_combined,
-    cache_ptr,
-    indices_ptr,
-    index_start,
-    k_start,
-    k_hi,
-    cache_stride0,
-    num_rows,
-    scale: tl.constexpr,
-    head_mask,
-    m_i,
-    l_i,
-    acc_nope_0a,
-    acc_nope_0b,
-    acc_nope_1,
-    acc_tail,
-    BLOCK_SIZE: tl.constexpr,
-    NOPE_DIM: tl.constexpr,
-    BLOCK_K: tl.constexpr,
-    IS_FNUZ: tl.constexpr,
-    TRUST_EXTRA_CACHE_NAN_FREE: tl.constexpr,
-):
-    k_offsets = tl.arange(0, BLOCK_K)
-    k_pos = k_start + k_offsets
-    in_range = k_pos < k_hi
-    slot = tl.load(indices_ptr + index_start + k_pos, mask=in_range, other=-1)
-    valid = in_range & (slot >= 0) & (slot < num_rows)
-    safe_slot = tl.where(valid, slot, 0)
-
-    block_idx = safe_slot // BLOCK_SIZE
-    pos_in_block = safe_slot % BLOCK_SIZE
-    cache_block_ptr = cache_ptr + block_idx.to(tl.int64) * cache_stride0
-    token_data_ptr = cache_block_ptr + pos_in_block * 576
-    token_scale_ptr = cache_block_ptr + BLOCK_SIZE * 576 + pos_in_block * 8
-    k_nope_0a = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
-        token_data_ptr,
-        token_scale_ptr,
-        valid,
-        0,
-        128,
-        BLOCK_K,
-        IS_FNUZ,
-    )
-    k_nope_0b = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
-        token_data_ptr,
-        token_scale_ptr,
-        valid,
-        128,
-        128,
-        BLOCK_K,
-        IS_FNUZ,
-    )
-    k_nope_1 = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
-        token_data_ptr,
-        token_scale_ptr,
-        valid,
-        256,
-        128,
-        BLOCK_K,
-        IS_FNUZ,
-    )
-    k_tail = _load_fp8_ds_mla_gfx950_tail128(
-        token_data_ptr,
-        token_scale_ptr,
-        valid,
-        NOPE_DIM,
-        BLOCK_K,
-        IS_FNUZ,
-    )
-    if not TRUST_EXTRA_CACHE_NAN_FREE:
-        zero = tl.zeros((BLOCK_K, 128), dtype=tl.bfloat16)
-        k_nope_0a = tl.where(k_nope_0a == k_nope_0a, k_nope_0a, zero)
-        k_nope_0b = tl.where(k_nope_0b == k_nope_0b, k_nope_0b, zero)
-        k_nope_1 = tl.where(k_nope_1 == k_nope_1, k_nope_1, zero)
-        k_tail = tl.where(k_tail == k_tail, k_tail, zero)
-    k_nope_0 = tl.cat(k_nope_0a, k_nope_0b, dim=1)
-    k_tail_256 = tl.cat(k_nope_1, k_tail, dim=1)
-    k_combined = tl.cat(k_nope_0, k_tail_256, dim=1)
-
-    scores = tl.dot(q_combined, tl.trans(k_combined))
-    scores *= scale * 1.4426950408889634
-    scores = tl.where(
-        head_mask[:, None] & valid[None, :],
-        scores,
-        -3.4028234663852886e38,
-    )
-    m_block = tl.max(scores, axis=1)
-    m_new = tl.maximum(m_i, m_block)
-    alpha = tl.exp2(m_i - m_new)
-    p = tl.exp2(scores - m_new[:, None])
-    p = tl.where(head_mask[:, None] & valid[None, :], p, 0.0)
-    l_new = l_i * alpha + tl.sum(p, axis=1)
-    p_bf16 = p.to(k_nope_0a.dtype)
-    acc_nope_0a = acc_nope_0a * alpha[:, None] + tl.dot(p_bf16, k_nope_0a)
-    acc_nope_0b = acc_nope_0b * alpha[:, None] + tl.dot(p_bf16, k_nope_0b)
-    acc_nope_1 = acc_nope_1 * alpha[:, None] + tl.dot(p_bf16, k_nope_1)
-    acc_tail = acc_tail * alpha[:, None] + tl.dot(p_bf16, k_tail)
-    return (
-        m_new,
-        l_new,
-        acc_nope_0a,
-        acc_nope_0b,
-        acc_nope_1,
-        acc_tail,
-    )
-
-
-@triton.jit
 def _sparse_attn_decode_gfx950_partial_loaded_tile(
     q_combined,
     cache_ptr,
@@ -2202,76 +2093,33 @@ def _sparse_attn_decode_gfx950_partial_kernel(
         in_range = k_pos < main_hi
         slot = tl.load(main_indices_ptr + main_start + k_pos, mask=in_range, other=-1)
         valid = in_range & (slot >= 0) & (slot < main_num_rows)
-        safe_slot = tl.where(valid, slot, 0)
-
-        block_idx = safe_slot // MAIN_BLOCK_SIZE
-        pos_in_block = safe_slot % MAIN_BLOCK_SIZE
-        cache_block_ptr = main_cache_ptr + block_idx.to(tl.int64) * main_cache_stride0
-        token_data_ptr = cache_block_ptr + pos_in_block * 576
-        token_scale_ptr = cache_block_ptr + MAIN_BLOCK_SIZE * 576 + pos_in_block * 8
-
-        k_nope_0a = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
-            token_data_ptr,
-            token_scale_ptr,
+        (
+            m_i,
+            l_i,
+            acc_nope_0a,
+            acc_nope_0b,
+            acc_nope_1,
+            acc_tail,
+        ) = _sparse_attn_decode_gfx950_partial_loaded_tile(
+            q_combined,
+            main_cache_ptr,
+            slot,
             valid,
-            0,
-            128,
-            BLOCK_K,
-            IS_FNUZ_MAIN,
-        )
-        k_nope_0b = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
-            token_data_ptr,
-            token_scale_ptr,
-            valid,
-            128,
-            128,
-            BLOCK_K,
-            IS_FNUZ_MAIN,
-        )
-        k_nope_1 = _load_fp8_ds_mla_gfx950_nope_exact_chunk(
-            token_data_ptr,
-            token_scale_ptr,
-            valid,
-            256,
-            128,
-            BLOCK_K,
-            IS_FNUZ_MAIN,
-        )
-        k_tail = _load_fp8_ds_mla_gfx950_tail128(
-            token_data_ptr,
-            token_scale_ptr,
-            valid,
+            main_cache_stride0,
+            scale,
+            head_mask,
+            m_i,
+            l_i,
+            acc_nope_0a,
+            acc_nope_0b,
+            acc_nope_1,
+            acc_tail,
+            MAIN_BLOCK_SIZE,
             NOPE_DIM,
             BLOCK_K,
             IS_FNUZ_MAIN,
+            False,
         )
-        zero = tl.zeros((BLOCK_K, 128), dtype=tl.bfloat16)
-        k_nope_0a = tl.where(k_nope_0a == k_nope_0a, k_nope_0a, zero)
-        k_nope_0b = tl.where(k_nope_0b == k_nope_0b, k_nope_0b, zero)
-        k_nope_1 = tl.where(k_nope_1 == k_nope_1, k_nope_1, zero)
-        k_tail = tl.where(k_tail == k_tail, k_tail, zero)
-        k_nope_0 = tl.cat(k_nope_0a, k_nope_0b, dim=1)
-        k_tail_256 = tl.cat(k_nope_1, k_tail, dim=1)
-        k_combined = tl.cat(k_nope_0, k_tail_256, dim=1)
-
-        scores = tl.dot(q_combined, tl.trans(k_combined))
-        scores *= scale * 1.4426950408889634
-        scores = tl.where(head_mask[:, None] & valid[None, :], scores, neg_large)
-
-        m_block = tl.max(scores, axis=1)
-        m_new = tl.maximum(m_i, m_block)
-        alpha = tl.exp2(m_i - m_new)
-        p = tl.exp2(scores - m_new[:, None])
-        p = tl.where(head_mask[:, None] & valid[None, :], p, 0.0)
-        l_new = l_i * alpha + tl.sum(p, axis=1)
-
-        p_bf16 = p.to(k_nope_0a.dtype)
-        acc_nope_0a = acc_nope_0a * alpha[:, None] + tl.dot(p_bf16, k_nope_0a)
-        acc_nope_0b = acc_nope_0b * alpha[:, None] + tl.dot(p_bf16, k_nope_0b)
-        acc_nope_1 = acc_nope_1 * alpha[:, None] + tl.dot(p_bf16, k_nope_1)
-        acc_tail = acc_tail * alpha[:, None] + tl.dot(p_bf16, k_tail)
-        m_i = m_new
-        l_i = l_new
 
     if HAS_EXTRA:
         if not ADAPTIVE_SPLITS:
@@ -2353,68 +2201,44 @@ def _sparse_attn_decode_gfx950_partial_kernel(
                 IS_FNUZ_EXTRA,
                 TRUST_EXTRA_CACHE_NAN_FREE,
             )
-        if extra_hi_full < extra_hi:
-            (
-                m_i,
-                l_i,
-                acc_nope_0a,
-                acc_nope_0b,
-                acc_nope_1,
-                acc_tail,
-            ) = _sparse_attn_decode_gfx950_partial_tail_tile(
-                q_combined,
-                extra_cache_ptr,
-                extra_indices_ptr,
-                extra_start,
-                extra_hi_full,
-                extra_hi,
-                extra_cache_stride0,
-                extra_num_rows,
-                scale,
-                head_mask,
-                m_i,
-                l_i,
-                acc_nope_0a,
-                acc_nope_0b,
-                acc_nope_1,
-                acc_tail,
-                EXTRA_BLOCK_SIZE,
-                NOPE_DIM,
-                BLOCK_K,
-                IS_FNUZ_EXTRA,
-                TRUST_EXTRA_CACHE_NAN_FREE,
-            )
-        if extra_hi_full + BLOCK_K < extra_hi:
-            (
-                m_i,
-                l_i,
-                acc_nope_0a,
-                acc_nope_0b,
-                acc_nope_1,
-                acc_tail,
-            ) = _sparse_attn_decode_gfx950_partial_tail_tile(
-                q_combined,
-                extra_cache_ptr,
-                extra_indices_ptr,
-                extra_start,
-                extra_hi_full + BLOCK_K,
-                extra_hi,
-                extra_cache_stride0,
-                extra_num_rows,
-                scale,
-                head_mask,
-                m_i,
-                l_i,
-                acc_nope_0a,
-                acc_nope_0b,
-                acc_nope_1,
-                acc_tail,
-                EXTRA_BLOCK_SIZE,
-                NOPE_DIM,
-                BLOCK_K,
-                IS_FNUZ_EXTRA,
-                TRUST_EXTRA_CACHE_NAN_FREE,
-            )
+        for tail_idx in tl.static_range(2):
+            tail_start = extra_hi_full + tail_idx * BLOCK_K
+            if tail_start < extra_hi:
+                k_pos = tail_start + k_offsets
+                in_range = k_pos < extra_hi
+                slot = tl.load(
+                    extra_indices_ptr + extra_start + k_pos,
+                    mask=in_range,
+                    other=-1,
+                )
+                valid = in_range & (slot >= 0) & (slot < extra_num_rows)
+                (
+                    m_i,
+                    l_i,
+                    acc_nope_0a,
+                    acc_nope_0b,
+                    acc_nope_1,
+                    acc_tail,
+                ) = _sparse_attn_decode_gfx950_partial_loaded_tile(
+                    q_combined,
+                    extra_cache_ptr,
+                    slot,
+                    valid,
+                    extra_cache_stride0,
+                    scale,
+                    head_mask,
+                    m_i,
+                    l_i,
+                    acc_nope_0a,
+                    acc_nope_0b,
+                    acc_nope_1,
+                    acc_tail,
+                    EXTRA_BLOCK_SIZE,
+                    NOPE_DIM,
+                    BLOCK_K,
+                    IS_FNUZ_EXTRA,
+                    TRUST_EXTRA_CACHE_NAN_FREE,
+                )
 
     pm_base = (query_idx * NUM_SPLITS + split_id) * num_heads + head_offsets
     m_store = tl.where(l_i > 0.0, m_i * 0.6931471805599453, neg_large)
