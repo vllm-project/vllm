@@ -10,7 +10,7 @@ import math
 import statistics
 import time
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -38,9 +38,11 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_CACHE_SCHEMA_VERSION = 1
-_TUNING_FIXTURE = "t1_mixed_history_cycle_v2"
+_CACHE_SCHEMA_VERSION = 3
+_TUNING_FIXTURE = "t1_mixed_history_cycle_v4"
 _CACHE_FILE_NAME = "replayssm_autotune_configs.json"
+_PRECOMPUTE_MAIN_TACTIC_COUNT = 2
+_RELATIVE_TIE_TOLERANCE = 0.001
 
 FLASHINFER_REPLAYSSM_TUNING_CANDIDATES = (
     FLASHINFER_REPLAYSSM_AUTO_TACTIC,
@@ -59,6 +61,56 @@ FLASHINFER_REPLAYSSM_TUNING_CANDIDATES = (
 _TACTICS_BY_NAME = {
     tactic.name: tactic for tactic in FLASHINFER_REPLAYSSM_TUNING_CANDIDATES
 }
+
+
+def _tactic_from_name(name: str) -> FlashInferReplaySSMTactic | None:
+    if tactic := _TACTICS_BY_NAME.get(name):
+        return tactic
+    for base in FLASHINFER_REPLAYSSM_TUNING_CANDIDATES:
+        if base.algorithm != "two-kernel":
+            continue
+        prefix = f"{base.name}_h"
+        if name.startswith(prefix):
+            try:
+                heads_per_cta = int(name.removeprefix(prefix))
+                return replace(base, precompute_heads_per_cta=heads_per_cta)
+            except ValueError:
+                return None
+    return None
+
+
+def _precompute_heads_per_cta_candidates(heads_per_group: int) -> tuple[int, ...]:
+    """Return the distinct HEADS_PER_GROUP >> k launch geometries."""
+    if heads_per_group <= 0:
+        raise ValueError("heads_per_group must be positive")
+    candidates = set()
+    value = heads_per_group
+    while value:
+        candidates.add(value)
+        value >>= 1
+    return tuple(sorted(candidates))
+
+
+def _expanded_precompute_tactics(
+    main_timings: list[float], heads_per_group: int
+) -> tuple[FlashInferReplaySSMTactic, ...]:
+    ranked = sorted(
+        (
+            index
+            for index, tactic in enumerate(
+                FLASHINFER_REPLAYSSM_TUNING_CANDIDATES
+            )
+            if tactic.algorithm == "two-kernel"
+            and math.isfinite(main_timings[index])
+        ),
+        key=lambda index: (main_timings[index], index),
+    )[:_PRECOMPUTE_MAIN_TACTIC_COUNT]
+    return tuple(
+        replace(base, precompute_heads_per_cta=heads_per_cta)
+        for index in ranked
+        for base in (FLASHINFER_REPLAYSSM_TUNING_CANDIDATES[index],)
+        for heads_per_cta in _precompute_heads_per_cta_candidates(heads_per_group)
+    )
 
 
 @dataclass
@@ -86,23 +138,39 @@ def _make_cache_key(fingerprint: dict[str, Any], batch: int, T: int) -> str:
             "batch_sequences": batch,
             "spec_query_len": T,
             "fixture": _TUNING_FIXTURE,
-            "candidate_schema": [
-                tactic.name for tactic in FLASHINFER_REPLAYSSM_TUNING_CANDIDATES
-            ],
+            "candidate_schema": {
+                "main": [
+                    tactic.name
+                    for tactic in FLASHINFER_REPLAYSSM_TUNING_CANDIDATES
+                ],
+                "precompute": "top2_main_x_heads_per_group_shift_chain",
+                "relative_tie_tolerance": _RELATIVE_TIE_TOLERANCE,
+            },
         },
         sort_keys=True,
         separators=(",", ":"),
     )
 
 
-def _select_fastest(timings: list[float]) -> FlashInferReplaySSMTactic | None:
-    if len(timings) != len(FLASHINFER_REPLAYSSM_TUNING_CANDIDATES):
+def _select_fastest(
+    timings: list[float],
+    candidates: tuple[FlashInferReplaySSMTactic, ...] = (
+        FLASHINFER_REPLAYSSM_TUNING_CANDIDATES
+    ),
+) -> FlashInferReplaySSMTactic | None:
+    if len(timings) != len(candidates):
         raise ValueError("one timing is required for each ReplaySSM tactic")
     finite = [i for i, timing in enumerate(timings) if math.isfinite(timing)]
     if not finite:
         return None
-    winner = min(finite, key=lambda i: (timings[i], i))
-    return FLASHINFER_REPLAYSSM_TUNING_CANDIDATES[winner]
+    best_timing = min(timings[i] for i in finite)
+    tied = [
+        i
+        for i in finite
+        if timings[i] <= best_timing * (1 + _RELATIVE_TIE_TOLERANCE)
+    ]
+    winner = min(tied)
+    return candidates[winner]
 
 
 def _load_cache(path: Path) -> dict[str, str]:
@@ -120,7 +188,9 @@ def _load_cache(path: Path) -> dict[str, str]:
     return {
         key: value
         for key, value in entries.items()
-        if isinstance(key, str) and isinstance(value, str) and value in _TACTICS_BY_NAME
+        if isinstance(key, str)
+        and isinstance(value, str)
+        and _tactic_from_name(value) is not None
     }
 
 
@@ -338,7 +408,7 @@ class _ReplaySSMBenchmark:
             cb_scaled=self.cb_scaled,
             cumAdt_vec=self.cumAdt_vec,
             cb_old=self.cb_old,
-            precompute_heads_per_cta=0,
+            precompute_heads_per_cta=tactic.precompute_heads_per_cta,
             algorithm=tactic.algorithm,
         )
         update_replayssm_ring_trackers(
@@ -531,8 +601,11 @@ def flashinfer_replayssm_autotune_warmup(worker: Worker) -> None:
     for batch in batches:
         cache_key = _make_cache_key(fingerprint, batch, T)
         cached_name = cached_entries.get(cache_key)
-        if cached_name in _TACTICS_BY_NAME:
-            tactic = _TACTICS_BY_NAME[cached_name]
+        cached_tactic = (
+            _tactic_from_name(cached_name) if cached_name is not None else None
+        )
+        if cached_tactic is not None:
+            tactic = cached_tactic
             selected[batch] = tactic
             if world.rank_in_group == 0:
                 logger.info(
@@ -582,7 +655,39 @@ def flashinfer_replayssm_autotune_warmup(worker: Worker) -> None:
                     exc_info=True,
                 )
         timings = _aggregate_timings(local_timings)
-        tactic = _select_fastest(timings)
+        _, _, _, _, B_cache, *_ = layer.kv_cache
+        heads_per_group = layer.kv_cache[1].shape[1] // B_cache.shape[1]
+        expanded_candidates = _expanded_precompute_tactics(
+            timings, heads_per_group
+        )
+        local_expanded_timings = [float("inf")] * len(expanded_candidates)
+        expanded_count = len(expanded_candidates)
+        if expanded_count:
+            expanded_shift = batch % expanded_count
+            expanded_order = tuple(range(expanded_count))
+            expanded_order = (
+                expanded_order[expanded_shift:]
+                + expanded_order[:expanded_shift]
+            )
+            for candidate_index in expanded_order:
+                expanded_tactic = expanded_candidates[candidate_index]
+                try:
+                    local_expanded_timings[candidate_index] = benchmark.benchmark(
+                        expanded_tactic
+                    )
+                except Exception:
+                    logger.warning(
+                        "FlashInfer ReplaySSM tactic %s failed for batch %d.",
+                        expanded_tactic.name,
+                        batch,
+                        exc_info=True,
+                    )
+        expanded_timings = _aggregate_timings(local_expanded_timings)
+        all_candidates = (
+            FLASHINFER_REPLAYSSM_TUNING_CANDIDATES + expanded_candidates
+        )
+        all_timings = timings + expanded_timings
+        tactic = _select_fastest(all_timings, all_candidates)
         if tactic is None:
             logger.warning_once(
                 "Every FlashInfer ReplaySSM tactic failed for batch %d; "
@@ -600,8 +705,8 @@ def flashinfer_replayssm_autotune_warmup(worker: Worker) -> None:
             timing_log = ", ".join(
                 f"{candidate.name}={timing:.6f}ms"
                 for candidate, timing in zip(
-                    FLASHINFER_REPLAYSSM_TUNING_CANDIDATES,
-                    timings,
+                    all_candidates,
+                    all_timings,
                     strict=True,
                 )
             )
