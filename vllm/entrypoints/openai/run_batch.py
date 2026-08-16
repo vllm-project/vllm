@@ -863,9 +863,15 @@ def validate_run_batch_args(args):
         )
 
 
+def supported_urls(endpoint_registry: dict[str, EndpointConfig]) -> str:
+    """List the URLs the registry serves, for error messages."""
+    return ", ".join(config["supported_urls"] for config in endpoint_registry.values())
+
+
 async def run_one_request(
     request_json: str,
     endpoint_registry: dict[str, EndpointConfig],
+    supported: str,
 ) -> BatchRequestOutput:
     """Route a single line of the batch to its endpoint handler."""
     request = BatchRequestInput.model_validate_json(request_json)
@@ -885,9 +891,6 @@ async def run_one_request(
         )
 
     if result is None:
-        supported = ", ".join(
-            config["supported_urls"] for config in endpoint_registry.values()
-        )
         result = make_async_error_request_output(
             request,
             error_msg=f"URL {request.url} is not a supported endpoint. "
@@ -911,6 +914,7 @@ async def dispatch_batch(
     requests nor their responses accumulate for the whole batch.
     """
     pending: set[asyncio.Task[BatchRequestOutput]] = set()
+    supported = supported_urls(endpoint_registry)
 
     try:
         with open(input_path, encoding="utf-8") as f:
@@ -920,7 +924,7 @@ async def dispatch_batch(
                 for request_json in requests:
                     pending.add(
                         asyncio.create_task(
-                            run_one_request(request_json, endpoint_registry)
+                            run_one_request(request_json, endpoint_registry, supported)
                         )
                     )
                     if len(pending) >= max_inflight:

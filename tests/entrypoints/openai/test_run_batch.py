@@ -22,7 +22,6 @@ from vllm.entrypoints.openai.run_batch import (
     download_bytes_from_url,
     is_same_local_file,
     local_input_path,
-    run_one_request,
     validate_batch,
     validate_run_batch_args,
 )
@@ -1054,7 +1053,7 @@ async def test_dispatch_batch_respects_max_inflight(tmp_path, monkeypatch):
     live = 0
     peak = 0
 
-    async def fake_run_one_request(request_json, endpoint_registry):
+    async def fake_run_one_request(request_json, endpoint_registry, supported):
         nonlocal live, peak
         live += 1
         peak = max(peak, live)
@@ -1183,7 +1182,7 @@ async def test_dispatch_batch_cancels_inflight_on_failure(tmp_path, monkeypatch)
 
     started: list[asyncio.Task | None] = []
 
-    async def fake_run_one_request(request_json, endpoint_registry):
+    async def fake_run_one_request(request_json, endpoint_registry, supported):
         started.append(asyncio.current_task())
         if len(started) == 1:
             raise RuntimeError("request blew up")
@@ -1230,7 +1229,7 @@ async def test_local_input_path_stages_a_descriptor_alias(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_unsupported_url_error_lists_registry_endpoints():
+async def test_unsupported_url_error_lists_registry_endpoints(tmp_path):
     """The error names the endpoints the registry actually serves.
 
     Built from the registry rather than a literal, so the two cannot drift.
@@ -1245,8 +1244,17 @@ async def test_unsupported_url_error_lists_registry_endpoints():
     }
     request = json.loads(INPUT_BATCH.strip().split("\n")[0])
     request["url"] = "/v1/unsupported"
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text(json.dumps(request) + "\n")
+    output_path = tmp_path / "output.jsonl"
 
-    output = await run_one_request(json.dumps(request), registry)
+    with open(output_path, "w", encoding="utf-8") as output_file:
+        await dispatch_batch(
+            str(input_path), output_file, registry, BatchProgressTracker(), 4
+        )
 
-    assert "/v1/unsupported" in output.error
-    assert "/v1/widgets" in output.error
+    error = BatchRequestOutput.model_validate_json(
+        output_path.read_text().strip()
+    ).error
+    assert "/v1/unsupported" in error
+    assert "/v1/widgets" in error
