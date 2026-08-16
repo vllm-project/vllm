@@ -32,18 +32,6 @@ from .protocol import (
 logger = init_logger(__name__)
 
 
-class _UnsupportedCombinedTaskIOProcessor(PoolingIOProcessor):
-    name = "embed&token_classify"
-
-    def create_pooling_params(self, request):
-        raise ValueError(
-            "The 'embed&token_classify' pooling task is only available "
-            "through an IO processor plugin. Send a plugin request with "
-            "a 'data' field, "
-            "or select a concrete task with --pooler-config.task."
-        )
-
-
 class ServingPooling(PoolingBaseServing):
     request_id_prefix = "pooling"
 
@@ -63,12 +51,6 @@ class ServingPooling(PoolingBaseServing):
             renderer=self.renderer,
             chat_template_config=self.chat_template_config,
         )
-        if self.pooling_task == "embed&token_classify":
-            self.io_processors[self.pooling_task] = _UnsupportedCombinedTaskIOProcessor(
-                vllm_config=self.vllm_config,
-                renderer=self.renderer,
-                chat_template_config=self.chat_template_config,
-            )
         self.json_response_cls = get_json_response_cls()
 
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:

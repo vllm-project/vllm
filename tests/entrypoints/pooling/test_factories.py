@@ -9,6 +9,7 @@ from vllm.entrypoints.pooling import factories
 from vllm.entrypoints.pooling.factories import init_pooling_io_processors
 from vllm.entrypoints.pooling.pooling.io_processor import (
     PluginWithIOProcessorPlugins,
+    UnsupportedCombinedTaskIOProcessor,
 )
 
 
@@ -30,7 +31,7 @@ def _bge_m3_config(io_processor_plugin=None):
     return vllm_config, renderer, chat_template_config
 
 
-def test_combined_task_without_plugin_has_no_processor():
+def test_combined_task_without_plugin_uses_rejection_processor():
     vllm_config, renderer, chat_template_config = _bge_m3_config()
 
     processors = init_pooling_io_processors(
@@ -40,7 +41,10 @@ def test_combined_task_without_plugin_has_no_processor():
         chat_template_config=chat_template_config,
     )
 
-    assert processors == {}
+    assert processors.keys() == {"embed&token_classify"}
+    assert isinstance(
+        processors["embed&token_classify"], UnsupportedCombinedTaskIOProcessor
+    )
 
 
 def test_combined_task_with_plugin_uses_plugin_processor(monkeypatch):
@@ -58,7 +62,7 @@ def test_combined_task_with_plugin_uses_plugin_processor(monkeypatch):
         chat_template_config=chat_template_config,
     )
 
-    assert processors.keys() == {"plugin"}
+    assert processors.keys() == {"embed&token_classify", "plugin"}
     assert isinstance(processors["plugin"], PluginWithIOProcessorPlugins)
 
 
