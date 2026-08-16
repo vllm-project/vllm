@@ -243,7 +243,7 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
 - `enable_cross_layers_blocks` (bool): Enable cross-layer block packing for reduced store operations. Default: `false`.
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
 - `cache_prefix` (str): Namespace prepended to every store key. Lets separate deployments share one Mooncake master without polluting each other — instances configured with different prefixes never see each other's cached blocks, even for identical prompts. All instances that should share a prefix cache must use the same value. Default: `""` (no prefix; keys are byte-identical to the unprefixed format).
-- `save_decode_cache` (bool): Allow a `kv_consumer` to write newly completed decode KV blocks to the shared store. Default: `false`.
+- `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. For a `kv_consumer`, this enables decode-only offloading while continuing to skip prefill offloading. Default: `false`.
 
 Decode offloading uses the existing TP-rank key namespace. Cross-TP sharing is
 not yet supported.

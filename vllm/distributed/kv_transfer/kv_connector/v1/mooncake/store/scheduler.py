@@ -64,6 +64,10 @@ class MooncakeStoreScheduler:
         # Skips lookup CPU cost on instances that never load KV from the store.
         self.enable_lookup = kvc_extra_config.get("enable_lookup", True)
         self.save_decode_cache = kvc_extra_config.get("save_decode_cache", False)
+        kv_event_config = vllm_config.kv_events_config
+        self.enable_kv_events = bool(
+            kv_event_config and kv_event_config.enable_kv_cache_events
+        )
         self.client = LookupKeyClient(vllm_config)
 
         # Align with the engine's own scheduler_block_size and hash_block_size.
@@ -229,14 +233,14 @@ class MooncakeStoreScheduler:
                 token_len=num_tokens_to_compute,
                 allocated_block_ids=unfolded_block_ids,
                 num_saved_tokens=0,
-                token_ids=prefill_tokens[:num_tokens_to_compute],
+                token_ids=(
+                    prefill_tokens[:num_tokens_to_compute]
+                    if self.enable_kv_events
+                    else None
+                ),
                 prefill_end_tokens=len(prefill_tokens),
             )
             self._request_trackers[request.req_id] = request_tracker
-
-            last_chunk_tokens_num = (
-                len(prefill_tokens) // self._block_size * self._block_size
-            )
 
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
@@ -246,7 +250,6 @@ class MooncakeStoreScheduler:
                 # producer. Loads are still carried by the same metadata.
                 skip_save=is_consumer,
                 block_hashes=request_real.block_hashes,
-                is_last_chunk=(request_tracker.token_len >= last_chunk_tokens_num),
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -281,27 +284,33 @@ class MooncakeStoreScheduler:
                         token_len=num_tokens_to_compute,
                         allocated_block_ids=new_block_ids,
                         num_saved_tokens=0,
-                        token_ids=prefill_tokens[:num_tokens_to_compute].copy(),
+                        token_ids=(
+                            prefill_tokens[:num_tokens_to_compute].copy()
+                            if self.enable_kv_events
+                            else None
+                        ),
                         prefill_end_tokens=len(prefill_tokens),
                     )
                     self._request_trackers[req_id] = request_tracker
 
-                    last_chunk_tokens_num = (
-                        len(prefill_tokens) // self._block_size * self._block_size
-                    )
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
                         self._block_size,
                         load_spec=load_spec,
                         skip_save=is_consumer,
                         block_hashes=request_real.block_hashes,
-                        is_last_chunk=(
-                            request_tracker.token_len >= last_chunk_tokens_num
-                        ),
                     )
                 else:
                     # Decode/chunked request
                     request_tracker = self._request_trackers[req_id]
+                    num_computed_token = cached_reqs.num_computed_tokens[i]
+                    # Use the tracker's snapshot of the prefill range so resumed
+                    # requests keep saving past the original prompt boundary.
+                    prefill_end = request_tracker.prefill_end_tokens
+                    is_decode = num_computed_token >= prefill_end
+                    if is_decode and not self.save_decode_cache:
+                        continue
+
                     num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
                     req_tuple = self._unfinished_requests.get(req_id)
                     if req_tuple:
@@ -322,28 +331,15 @@ class MooncakeStoreScheduler:
                     # step has new block ids.
                     if new_block_ids:
                         request_tracker.update(new_block_ids)
-                    num_computed_token = cached_reqs.num_computed_tokens[i]
-                    # Use the tracker's snapshot of the prefill range so resumed
-                    # requests keep saving past the original prompt boundary.
-                    prefill_end = request_tracker.prefill_end_tokens
-                    is_decode = num_computed_token >= prefill_end
-                    if is_decode and not self.save_decode_cache:
-                        continue
                     if is_consumer and not is_decode:
                         continue
 
-                    last_chunk_tokens_num = (
-                        prefill_end // self._block_size * self._block_size
-                    )
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
                         self._block_size,
                         load_spec=None,
                         skip_save=False,
                         block_hashes=unfinished_req.block_hashes,
-                        is_last_chunk=(
-                            request_tracker.token_len >= last_chunk_tokens_num
-                        ),
                     )
 
                 if req_meta is not None:

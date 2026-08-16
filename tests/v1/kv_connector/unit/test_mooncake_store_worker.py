@@ -2208,6 +2208,99 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
     assert swa_event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[3]))]
 
 
+def test_store_sending_thread_kv_events_use_token_suffix():
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0]
+    store.batch_put_from_multi_buffers.return_value = [256]
+    thread = _make_store_sending_thread(store)
+    thread.enable_kv_event = True
+
+    thread.add_stored_request("r0")
+    thread._saved_offset["r0"] = 16
+    thread._handle_request(
+        ReqMeta(
+            req_id="r0",
+            token_len_chunk=32,
+            block_ids=([0, 1],),
+            block_hashes=[b"a0", b"a1"],
+            can_save=True,
+            token_ids=list(range(16, 32)),
+            token_ids_start=16,
+        )
+    )
+
+    [event] = thread.get_kv_events()
+    assert event.token_ids == list(range(16, 32))
+    assert thread._retry_token_ids == {}
+
+
+def test_store_sending_thread_kv_events_retry_without_covered_tokens():
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+    thread = _make_store_sending_thread(store)
+    thread.enable_kv_event = True
+
+    thread.add_stored_request("r0")
+    thread._handle_request(
+        ReqMeta(
+            req_id="r0",
+            token_len_chunk=32,
+            block_ids=([0, 1],),
+            block_hashes=[b"a0", b"a1"],
+            can_save=True,
+            token_ids=list(range(16, 32)),
+            token_ids_start=16,
+        )
+    )
+
+    retry_event, suffix_event = thread.get_kv_events()
+    assert retry_event.token_ids == []
+    assert suffix_event.token_ids == list(range(16, 32))
+
+
+def test_store_sending_thread_kv_events_recover_suffix_after_put_failure():
+    store = MagicMock()
+    store.batch_is_exist.side_effect = ([0], [0, 0])
+    store.batch_put_from_multi_buffers.side_effect = ([-1], [256, 256])
+    thread = _make_store_sending_thread(store)
+    thread.enable_kv_event = True
+
+    thread.add_stored_request("r0")
+    thread._handle_request(
+        ReqMeta(
+            req_id="r0",
+            token_len_chunk=16,
+            block_ids=([0],),
+            block_hashes=[b"a0"],
+            can_save=True,
+            token_ids=list(range(16)),
+        )
+    )
+
+    assert thread.get_kv_events() == []
+    assert thread._retry_token_ids["r0"] == (0, list(range(16)))
+
+    thread.add_stored_request("r0")
+    thread._handle_request(
+        ReqMeta(
+            req_id="r0",
+            token_len_chunk=32,
+            block_ids=([0, 1],),
+            block_hashes=[b"a0", b"a1"],
+            can_save=True,
+            token_ids=list(range(16, 32)),
+            token_ids_start=16,
+        )
+    )
+
+    retry_event, suffix_event = thread.get_kv_events()
+    assert retry_event.token_ids == list(range(16))
+    assert suffix_event.token_ids == list(range(16, 32))
+    assert thread._retry_token_ids == {}
+    assert thread._saved_offset["r0"] == 32
+
+
 def _auto_set_ready_event(*args, **kwargs):
     """Side effect for mocked thread constructors that auto-sets ready_event."""
     for arg in args:

@@ -25,6 +25,7 @@ def _make_bare_scheduler(
     scheduler = object.__new__(MooncakeStoreScheduler)
     scheduler.kv_role = kv_role
     scheduler.save_decode_cache = save_decode_cache
+    scheduler.enable_kv_events = False
     scheduler.lookup_async = False
     scheduler.enable_lookup = True
     scheduler._block_size = 16
@@ -78,6 +79,55 @@ def _make_decode_scheduler_output(
         num_scheduled_tokens={"req-0": num_scheduled_tokens},
         scheduled_spec_decode_tokens={},
     )
+
+
+def _make_new_scheduler_output() -> SimpleNamespace:
+    request = SimpleNamespace(
+        req_id="req-0",
+        num_computed_tokens=0,
+        prompt_token_ids=list(range(32)),
+        prefill_token_ids=None,
+        block_ids=([0, 1],),
+        block_hashes=[b"h0", b"h1"],
+    )
+    return SimpleNamespace(
+        request=request,
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[request],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={"req-0": 32},
+        scheduled_spec_decode_tokens={},
+    )
+
+
+def test_scheduler_only_tracks_token_ids_for_kv_events():
+    for enable_kv_events in (False, True):
+        scheduler = _make_bare_scheduler()
+        scheduler.enable_kv_events = enable_kv_events
+        scheduler._unfinished_requests["req-0"] = (
+            _make_new_scheduler_output().request,
+            ([0, 1],),
+        )
+
+        meta = scheduler.build_connector_meta(_make_new_scheduler_output())
+
+        tracker = scheduler._request_trackers["req-0"]
+        req_meta = meta.requests[0]
+        if enable_kv_events:
+            assert tracker.token_ids == list(range(32))
+            assert req_meta.token_ids == list(range(32))
+            assert req_meta.token_ids_start == 0
+            tracker.token_ids.append(99)
+            assert req_meta.token_ids == list(range(32))
+        else:
+            assert tracker.token_ids is None
+            assert req_meta.token_ids is None
 
 
 def _make_preemption_scheduler_output():
@@ -195,7 +245,7 @@ def test_consumer_does_not_save_decode_by_default():
     assert tracker.num_saved_tokens == 32
 
 
-def test_kv_both_does_not_save_decode_by_default():
+def test_kv_both_skips_decode_tracking_by_default():
     scheduler = _make_bare_scheduler(kv_role="kv_both")
     _add_unfinished_request(
         scheduler,
@@ -206,14 +256,17 @@ def test_kv_both_does_not_save_decode_by_default():
     tracker = scheduler._request_trackers["req-0"]
     tracker.token_len = 47
     tracker.allocated_block_ids = ([0, 1, 2],)
+    tracker.token_ids = list(range(47))
 
     meta = scheduler.build_connector_meta(
         _make_decode_scheduler_output(num_computed_tokens=47)
     )
 
     assert meta.requests == []
-    assert tracker.token_len == 48
+    assert tracker.token_len == 47
     assert tracker.num_saved_tokens == 32
+    assert tracker.allocated_block_ids == ([0, 1, 2],)
+    assert tracker.token_ids == list(range(47))
 
 
 def test_consumer_decode_offload_does_not_save_prefill():
@@ -263,10 +316,11 @@ def test_consumer_saves_full_decode_block_without_new_allocation():
     assert req_meta.can_save is True
     assert req_meta.token_len_chunk == 48
     assert req_meta.block_ids == ([0, 1, 2],)
-    assert req_meta.token_ids == list(range(48))
+    assert req_meta.token_ids == list(range(32, 48))
+    assert req_meta.token_ids_start == 32
     assert tracker.num_saved_tokens == 48
     tracker.token_ids.append(999)
-    assert req_meta.token_ids == list(range(48))
+    assert req_meta.token_ids == list(range(32, 48))
 
 
 def test_consumer_does_not_save_partial_decode_block():
