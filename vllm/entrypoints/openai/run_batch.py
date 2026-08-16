@@ -614,6 +614,9 @@ WrapperFn: TypeAlias = Callable[[Callable], Callable]
 class EndpointConfig(TypedDict):
     """How a batch request URL is matched to the handler that serves it."""
 
+    # What url_matcher accepts, for error messages. Kept beside the matcher so
+    # the two cannot drift.
+    supported_urls: str
     url_matcher: Callable[[str], bool]
     handler_getter: Callable[[], Callable | None]
     wrapper_fn: WrapperFn | None
@@ -764,6 +767,7 @@ async def build_endpoint_registry(
     # Registry of endpoint configurations
     endpoint_registry: dict[str, EndpointConfig] = {
         "completions": {
+            "supported_urls": "/v1/chat/completions",
             "url_matcher": lambda url: url == "/v1/chat/completions",
             "handler_getter": lambda: (
                 openai_serving_chat.create_chat_completion
@@ -773,6 +777,7 @@ async def build_endpoint_registry(
             "wrapper_fn": None,
         },
         "embeddings": {
+            "supported_urls": "/v1/embeddings",
             "url_matcher": lambda url: url == "/v1/embeddings",
             "handler_getter": lambda: (
                 serving_embedding if serving_embedding is not None else None
@@ -780,6 +785,7 @@ async def build_endpoint_registry(
             "wrapper_fn": None,
         },
         "score": {
+            "supported_urls": "*/score",
             "url_matcher": lambda url: url.endswith("/score"),
             "handler_getter": lambda: (
                 serving_scores if serving_scores is not None else None
@@ -787,6 +793,7 @@ async def build_endpoint_registry(
             "wrapper_fn": None,
         },
         "rerank": {
+            "supported_urls": "*/rerank",
             "url_matcher": lambda url: url.endswith("/rerank"),
             "handler_getter": lambda: (
                 serving_scores if serving_scores is not None else None
@@ -794,6 +801,7 @@ async def build_endpoint_registry(
             "wrapper_fn": None,
         },
         "transcriptions": {
+            "supported_urls": "/v1/audio/transcriptions",
             "url_matcher": lambda url: url == "/v1/audio/transcriptions",
             "handler_getter": lambda: (
                 openai_serving_transcription.create_transcription
@@ -806,6 +814,7 @@ async def build_endpoint_registry(
             ),
         },
         "translations": {
+            "supported_urls": "/v1/audio/translations",
             "url_matcher": lambda url: url == "/v1/audio/translations",
             "handler_getter": lambda: (
                 openai_serving_translation.create_translation
@@ -876,13 +885,13 @@ async def run_one_request(
         )
 
     if result is None:
+        supported = ", ".join(
+            config["supported_urls"] for config in endpoint_registry.values()
+        )
         result = make_async_error_request_output(
             request,
-            error_msg=f"URL {request.url} was used. "
-            "Supported endpoints: /v1/chat/completions, /v1/embeddings,"
-            " /v1/audio/transcriptions, /v1/audio/translations, /score, "
-            " /rerank. See vllm/entrypoints/openai/api_server.py "
-            "for supported score/rerank versions.",
+            error_msg=f"URL {request.url} is not a supported endpoint. "
+            f"Supported endpoints: {supported}.",
         )
 
     return await result

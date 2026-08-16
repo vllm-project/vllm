@@ -22,6 +22,7 @@ from vllm.entrypoints.openai.run_batch import (
     download_bytes_from_url,
     is_same_local_file,
     local_input_path,
+    run_one_request,
     validate_batch,
     validate_run_batch_args,
 )
@@ -1226,3 +1227,26 @@ async def test_local_input_path_stages_a_descriptor_alias(tmp_path):
             # Readable twice, which is what the two passes need.
             assert validate_batch(path) == expected
             assert validate_batch(path) == expected
+
+
+@pytest.mark.asyncio
+async def test_unsupported_url_error_lists_registry_endpoints():
+    """The error names the endpoints the registry actually serves.
+
+    Built from the registry rather than a literal, so the two cannot drift.
+    """
+    registry = {
+        "widgets": {
+            "supported_urls": "/v1/widgets",
+            "url_matcher": lambda url: url == "/v1/widgets",
+            "handler_getter": lambda: None,
+            "wrapper_fn": None,
+        }
+    }
+    request = json.loads(INPUT_BATCH.strip().split("\n")[0])
+    request["url"] = "/v1/unsupported"
+
+    output = await run_one_request(json.dumps(request), registry)
+
+    assert "/v1/unsupported" in output.error
+    assert "/v1/widgets" in output.error
