@@ -9,7 +9,6 @@ from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, MultiModalConfig, get_current_vllm_config_or_none
@@ -632,13 +631,9 @@ class FusedInputNorm(nn.Module):
             bias = -image_mean_tensor / image_std_tensor
             self.register_buffer("weight", weight)
             self.register_buffer("bias", bias)
-            self.register_buffer("running_mean", torch.zeros_like(image_mean_tensor))
-            self.register_buffer("running_var", torch.ones_like(image_mean_tensor))
         else:
             self.register_buffer("weight", None)
             self.register_buffer("bias", None)
-            self.register_buffer("running_mean", None)
-            self.register_buffer("running_var", None)
 
     @property
     def dtype(self) -> torch.dtype:
@@ -723,14 +718,16 @@ class FusedInputNorm(nn.Module):
         patches, size = grid_thw.shape
         patch_size = size // self.channel
 
-        grid_thw = grid_thw.view(patches, self.channel, patch_size)
-        grid_thw = F.batch_norm(
-            grid_thw.to(self.dtype),
-            running_mean=self.running_mean,
-            running_var=self.running_var,
-            weight=self.weight,
-            bias=self.bias,
-            training=False,
-            eps=0.0,
+        # Apply the per-channel affine transform directly instead of via
+        # F.batch_norm. batch_norm dispatches to cuDNN, whose batch-norm
+        # kernels cap the batch dimension near the CUDA grid limit (~65535);
+        # here that dimension is the number of patches, which grows unbounded
+        # with image resolution and batch size and overflows the cap on large
+        # image-heavy requests (CUDNN_STATUS_INTERNAL_ERROR). The plain
+        # broadcasted multiply-add is numerically identical and has no such
+        # limit.
+        x = grid_thw.to(self.dtype).view(patches, self.channel, patch_size)
+        x = x * self.weight.view(1, self.channel, 1) + self.bias.view(
+            1, self.channel, 1
         )
-        return grid_thw.view(patches, size).to(visual_dtype)
+        return x.view(patches, size).to(visual_dtype)
