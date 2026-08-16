@@ -153,7 +153,7 @@ class BatchRequestInput(OpenAIBaseModel):
     """
     The per-line object of the batch input file.
 
-    NOTE: Currently only the `/v1/chat/completions` endpoint is supported.
+    ``url`` selects the request type that ``body`` is parsed as.
     """
 
     # A developer-provided per-request id that will be used to match outputs to
