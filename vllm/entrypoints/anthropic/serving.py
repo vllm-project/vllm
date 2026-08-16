@@ -655,11 +655,33 @@ class AnthropicServingMessages(OpenAIServingChat):
             )
 
         for tool_call in choice.message.tool_calls:
+            try:
+                tool_input = json.loads(tool_call.function.arguments)
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "Ignoring malformed JSON arguments for Anthropic tool call "
+                    "%s (%s): %s",
+                    tool_call.id,
+                    tool_call.function.name,
+                    exc,
+                )
+                tool_input = {}
+
+            if not isinstance(tool_input, dict):
+                logger.warning(
+                    "Ignoring non-object arguments for Anthropic tool call %s "
+                    "(%s): got %s",
+                    tool_call.id,
+                    tool_call.function.name,
+                    type(tool_input).__name__,
+                )
+                tool_input = {}
+
             anthropic_tool_call = AnthropicContentBlock(
                 type="tool_use",
                 id=tool_call.id,
                 name=tool_call.function.name,
-                input=json.loads(tool_call.function.arguments),
+                input=tool_input,
             )
             content += [anthropic_tool_call]
 
