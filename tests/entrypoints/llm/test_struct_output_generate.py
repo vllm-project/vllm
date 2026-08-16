@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.config import StructuredOutputsConfig
+from vllm.exceptions import VLLMValidationError
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
@@ -326,7 +327,7 @@ def test_structured_output(
         )
         if backend.startswith("xgrammar"):
             with pytest.raises(
-                ValueError,
+                VLLMValidationError,
                 match="The provided JSON schema contains features "
                 "not supported by xgrammar.",
             ):
@@ -453,7 +454,9 @@ def test_structured_output(
                 max_tokens=1000,
                 structured_outputs=StructuredOutputsParams(grammar="not a grammar"),
             )
-            with pytest.raises(ValueError, match="Failed to convert the grammar "):
+            with pytest.raises(
+                VLLMValidationError, match="Failed to convert the grammar "
+            ):
                 runner.llm.generate(
                     (
                         "Generate a sql statement that selects col_1 from "
