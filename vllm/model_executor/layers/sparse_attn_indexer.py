@@ -23,6 +23,7 @@ from vllm.utils.deep_gemm import (
     fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
     has_deep_gemm,
+    is_deep_gemm_supported,
 )
 from vllm.utils.import_utils import has_cutedsl
 from vllm.utils.torch_utils import (
@@ -35,6 +36,10 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.attention.ops.mqa_logits_triton import (
+    fp8_mqa_logits_triton,
+    fp8_paged_mqa_logits_triton,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -125,6 +130,41 @@ def _merge_dcp_topk_global(
 
 
 @triton.jit
+def _encode_e4m3fn_byte(x):
+    # Software float32 -> E4M3FN byte encoding. SM80 Triton cannot compile
+    # the native fp8e4nv dtype, so we encode the bytes manually (round to
+    # nearest even, matching the hardware cast used on SM90+). `x` must be
+    # pre-clamped to the representable range.
+    sign_bit = (x < 0).to(tl.uint8) << 7
+    ax = tl.abs(x)
+    # E4M3FN: 1 sign, 4 exp (bias 7), 3 mantissa bits; min normal 2^-6,
+    # subnormal step 2^-9. The RNE boundary between max subnormal (7*2^-9)
+    # and min normal (2^-6) is 7.5*2^-9; the tie rounds to the normal value
+    # (even mantissa), so ">=" is correct here.
+    is_normal = ax >= 7.5 * 0.001953125
+    # Normal path: value = 2^e * (1 + m/8), e in [-6, 8].
+    e = tl.floor(tl.log2(ax))
+    e = tl.minimum(tl.maximum(e, -6.0), 8.0)
+    ms = ax * tl.exp2(3.0 - e)  # = 8 + m, in [7.5, 16]
+    mi = tl.floor(ms).to(tl.int32)
+    frac = ms - mi.to(tl.float32)
+    round_up = (frac > 0.5) | ((frac == 0.5) & ((mi & 1) == 1))
+    mi = mi + tl.where(round_up, 1, 0)
+    carry = mi >= 16
+    mant = tl.where(carry, 0, mi - 8)
+    eb = tl.where(carry, e + 1.0, e).to(tl.int32) + 7
+    norm_byte = ((eb << 3) | mant).to(tl.uint8)
+    # Subnormal path: value = m * 2^-9, m in [0, 7].
+    ss = ax * 512.0
+    si = tl.floor(ss).to(tl.int32)
+    sfrac = ss - si.to(tl.float32)
+    s_up = (sfrac > 0.5) | ((sfrac == 0.5) & ((si & 1) == 1))
+    si = tl.minimum(si + tl.where(s_up, 1, 0), 7)
+    sub_byte = si.to(tl.uint8)
+    return tl.where(is_normal, norm_byte, sub_byte) | sign_bit
+
+
+@triton.jit
 def _fused_indexer_q_rope_quant_kernel(
     positions,
     q,
@@ -180,24 +220,24 @@ def _fused_indexer_q_rope_quant_kernel(
     if is_neox:
         tl.store(
             out_base + offs32,
-            tl.clamp(r0 / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
+            _encode_e4m3fn_byte(tl.clamp(r0 / q_scale, fp8_min, fp8_max)),
         )
         tl.store(
             out_base + 32 + offs32,
-            tl.clamp(r1 / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
+            _encode_e4m3fn_byte(tl.clamp(r1 / q_scale, fp8_min, fp8_max)),
         )
     else:
         tl.store(
             out_base + offs32 * 2,
-            tl.clamp(r0 / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
+            _encode_e4m3fn_byte(tl.clamp(r0 / q_scale, fp8_min, fp8_max)),
         )
         tl.store(
             out_base + offs32 * 2 + 1,
-            tl.clamp(r1 / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
+            _encode_e4m3fn_byte(tl.clamp(r1 / q_scale, fp8_min, fp8_max)),
         )
     tl.store(
         out_base + 64 + offs64,
-        tl.clamp(q_nope / q_scale, fp8_min, fp8_max).to(q_fp8.dtype.element_ty),
+        _encode_e4m3fn_byte(tl.clamp(q_nope / q_scale, fp8_min, fp8_max)),
     )
 
     weight = tl.load(weights + token * weights_s0 + head * weights_s1).to(tl.float32)
@@ -232,7 +272,8 @@ def fused_indexer_q_rope_quant(
         q.stride(1),
         cos_sin_cache,
         cos_sin_cache.stride(0),
-        q_fp8,
+        # uint8 view: the kernel stores E4M3FN bytes manually (SM80-safe).
+        q_fp8.view(torch.uint8),
         q_fp8.stride(0),
         q_fp8.stride(1),
         weights,
@@ -497,14 +538,27 @@ def sparse_attn_indexer(
                         cu_seqlen_ke,
                     )
                 else:
-                    logits = fp8_fp4_mqa_logits(
-                        (q_slice_cast, q_scale_slice),
-                        (k_quant_cast, k_scale_cast),
-                        weights[chunk.token_start : chunk.token_end],
-                        cu_seqlen_ks,
-                        cu_seqlen_ke,
-                        clean_logits=False,
-                    )
+                    if is_deep_gemm_supported():
+                        logits = fp8_fp4_mqa_logits(
+                            (q_slice_cast, q_scale_slice),
+                            (k_quant_cast, k_scale_cast),
+                            weights[chunk.token_start : chunk.token_end],
+                            cu_seqlen_ks,
+                            cu_seqlen_ke,
+                            clean_logits=False,
+                        )
+                    else:
+                        assert not use_fp4_cache and q_scale_slice is None, (
+                            "Triton mqa_logits fallback only supports fp8 Q / "
+                            "non-FP4 cache"
+                        )
+                        logits = fp8_mqa_logits_triton(
+                            q_slice_cast,
+                            (k_quant_cast, k_scale_cast),
+                            weights[chunk.token_start : chunk.token_end],
+                            cu_seqlen_ks,
+                            cu_seqlen_ke,
+                        )
                 num_rows = logits.shape[0]
                 ops.top_k_per_row_prefill(
                     logits,
@@ -557,9 +611,14 @@ def sparse_attn_indexer(
                     q_scale[:num_decode_tokens], decode_lens, pad_value=0
                 )
             else:
+                # Pack the uint8 byte view: SM80 Triton cannot compile
+                # fp8e4nv pointers; pad byte 0 dequantizes to 0 and stale
+                # slots are masked by context_lens downstream.
                 padded_q_quant_decode_tokens = pack_seq_triton(
-                    q_quant[:num_decode_tokens], decode_lens
-                )
+                    q_quant[:num_decode_tokens].view(torch.uint8),
+                    decode_lens,
+                    pad_value=0,
+                ).view(q_quant.dtype)
                 padded_q_scale = None
         else:
             padded_q_quant_decode_tokens = q_quant[:num_decode_tokens].reshape(
@@ -600,16 +659,30 @@ def sparse_attn_indexer(
                 max_model_len,
             )
         else:
-            logits = fp8_fp4_paged_mqa_logits(
-                (padded_q_quant_cast, padded_q_scale),
-                kv_cache,
-                weights[:num_padded_tokens],
-                seq_lens,
-                decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
-                max_model_len=max_model_len,
-                clean_logits=False,
-            )
+            if is_deep_gemm_supported():
+                logits = fp8_fp4_paged_mqa_logits(
+                    (padded_q_quant_cast, padded_q_scale),
+                    kv_cache,
+                    weights[:num_padded_tokens],
+                    seq_lens,
+                    decode_metadata.block_table,
+                    decode_metadata.schedule_metadata,
+                    max_model_len=max_model_len,
+                    clean_logits=False,
+                )
+            else:
+                assert not use_fp4_cache and padded_q_scale is None, (
+                    "Triton paged mqa_logits fallback only supports fp8 Q / "
+                    "non-FP4 cache"
+                )
+                logits = fp8_paged_mqa_logits_triton(
+                    padded_q_quant_cast,
+                    kv_cache,
+                    weights[:num_padded_tokens],
+                    seq_lens[:, -1].to(torch.int32).contiguous(),
+                    decode_metadata.block_table,
+                    max_model_len,
+                )
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
@@ -770,10 +843,10 @@ class SparseAttnIndexer(CustomOp):
         self.dcp_rank = get_dcp_group().rank_in_group if self.dcp_world_size > 1 else 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
-        if current_platform.is_cuda() and not has_deep_gemm():
-            raise RuntimeError(
-                "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
-                "the current vLLM environment."
+        if current_platform.is_cuda() and not is_deep_gemm_supported():
+            logger.warning_once(
+                "Sparse Attention Indexer running without DeepGEMM; using the "
+                "Triton fp8 mqa logits fallback (SM80 path)."
             )
 
     def forward_native(

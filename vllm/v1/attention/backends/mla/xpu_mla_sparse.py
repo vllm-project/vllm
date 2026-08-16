@@ -96,6 +96,11 @@ class XPUMLASparseMetadata(AttentionMetadata):
 
     block_size: int = 1
     topk_tokens: int = 2048
+    num_decode_tokens: int = 0
+    num_decodes: int = 0
+    num_prefills: int = 0
+    prefill_max_seq_len: int = 0
+    prefill: object = None
 
 
 @dataclass
@@ -155,6 +160,7 @@ class XPUMLASparseMetadataBuilder(AttentionMetadataBuilder[XPUMLASparseMetadata]
 
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
 
+        num_decodes = int((seg_lengths == 1).sum())
         metadata = XPUMLASparseMetadata(
             num_reqs=common_attn_metadata.num_reqs,
             max_query_len=common_attn_metadata.max_query_len,
@@ -166,6 +172,10 @@ class XPUMLASparseMetadataBuilder(AttentionMetadataBuilder[XPUMLASparseMetadata]
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            num_decode_tokens=num_decodes,
+            num_decodes=num_decodes,
+            num_prefills=common_attn_metadata.num_reqs - num_decodes,
+            prefill_max_seq_len=common_attn_metadata.max_seq_len,
         )
         return metadata
 
