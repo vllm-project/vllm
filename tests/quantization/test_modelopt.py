@@ -19,6 +19,7 @@ from vllm.model_executor.kernels.linear import (
     HummingNvFp4LinearKernel,
     MarlinNvFp4LinearKernel,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
@@ -27,6 +28,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
     ModelOptNvFp4LinearMethod,
+    ModelOptNvFp4MegaMoE,
     ModelOptNvFp4W4A16LinearMethod,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -113,6 +115,43 @@ def test_modelopt_nvfp4_quantizes_parallel_lm_head():
         method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
 
     assert isinstance(method, ModelOptNvFp4LinearMethod)
+
+
+def test_modelopt_nvfp4_selects_deep_gemm_mega_moe():
+    config = ModelOptNvFp4Config(
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    layer = MagicMock(spec=RoutedExperts)
+    layer.moe_config.moe_backend = "deep_gemm_mega_moe"
+    expected = MagicMock(spec=ModelOptNvFp4MegaMoE)
+
+    with patch(
+        "vllm.model_executor.layers.quantization.modelopt.ModelOptNvFp4MegaMoE",
+        return_value=expected,
+    ) as mega_moe_cls:
+        method = config.get_quant_method(layer, prefix="model.layers.3.mlp.experts")
+
+    assert method is expected
+    mega_moe_cls.assert_called_once_with(
+        quant_config=config,
+        moe_config=layer.moe_config,
+    )
+
+
+def test_modelopt_w4a16_rejects_deep_gemm_mega_moe():
+    config = ModelOptNvFp4Config(
+        quant_method="W4A16_NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    layer = MagicMock(spec=RoutedExperts)
+    layer.moe_config.moe_backend = "deep_gemm_mega_moe"
+
+    with pytest.raises(ValueError, match="requires NVFP4 W4A4"):
+        config.get_quant_method(layer, prefix="model.layers.3.mlp.experts")
 
 
 def test_modelopt_fp8_updates_weight_dims_after_transpose():

@@ -281,6 +281,10 @@ class MoERunner(MoERunnerInterface):
                 mk_can_overlap_shared_experts=can_overlap,
             )
 
+        # Cooperative mega-kernels need the raw shared module during the
+        # post-load transform. Bind it before selecting the custom-op schema.
+        self._quant_method.bind_shared_experts(shared_experts)
+
         # Needed for string -> MoERunner layer lookup in custom ops.
         self.layer_name = layer_name
 
@@ -295,15 +299,21 @@ class MoERunner(MoERunnerInterface):
         return self.routed_experts.load_weights(weights)
 
     def _select_forward(self) -> Callable:
+        has_separate_shared_output = (
+            self._shared_experts is not None
+            and not self._quant_method.mk_fuses_shared_experts
+        )
         if current_platform.is_tpu() or current_platform.is_cpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
             # will switch to using the moe_forward custom op.
             # Note: CPU doesn't require wrapped _forward_impl.
-            return _moe_forward if self._shared_experts is None else _moe_forward_shared
+            return (
+                _moe_forward if not has_separate_shared_output else _moe_forward_shared
+            )
 
         return (
             torch.ops.vllm.moe_forward
-            if self._shared_experts is None
+            if not has_separate_shared_output
             else torch.ops.vllm.moe_forward_shared
         )
 
@@ -393,7 +403,10 @@ class MoERunner(MoERunnerInterface):
         avoid overflow by dividing shared_output by the scale instead
         (the decoder layer compensates with matching divisions).
         """
-        if self.routed_scaling_factor != 1.0:
+        if (
+            self.routed_scaling_factor != 1.0
+            and not self._quant_method.mk_fuses_shared_experts
+        ):
             if fused_output.dtype != torch.float16 or shared_output is None:
                 fused_output *= self.routed_scaling_factor
             elif shared_output is not None:
@@ -402,10 +415,7 @@ class MoERunner(MoERunnerInterface):
 
     @property
     def _fused_output_is_reduced(self) -> bool:
-        return (
-            self._quant_method.moe_kernel is not None
-            and self._quant_method.moe_kernel.output_is_reduced()
-        )
+        return self._quant_method.output_is_reduced
 
     def _maybe_reduce_shared_expert_output(
         self,
@@ -600,6 +610,16 @@ class MoERunner(MoERunnerInterface):
                 input_ids=input_ids,
             )
 
+            # A cooperative kernel returns routed + shared as one tensor, so
+            # the normal post-kernel routed-only scaling cannot distinguish
+            # the two contributions. Apply the factor to the routing weights
+            # before launching the kernel instead.
+            if (
+                self._quant_method.mk_fuses_shared_experts
+                and self.routed_scaling_factor != 1.0
+            ):
+                topk_weights = topk_weights * self.routed_scaling_factor
+
             fused_out = self.routed_experts.forward_modular(
                 x=hidden_states,
                 topk_weights=topk_weights,
@@ -613,6 +633,8 @@ class MoERunner(MoERunnerInterface):
             SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
         )
 
+        if self._quant_method.mk_fuses_shared_experts:
+            return None, fused_out
         return (
             self._shared_experts.output if self._shared_experts is not None else None,
             fused_out,
@@ -821,7 +843,10 @@ class MoERunner(MoERunnerInterface):
         ):
             hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
 
-        if self.shared_experts is not None:
+        if (
+            self.shared_experts is not None
+            and not self._quant_method.mk_fuses_shared_experts
+        ):
             assert shared_output is not None
             return shared_output, hidden_states
         else:

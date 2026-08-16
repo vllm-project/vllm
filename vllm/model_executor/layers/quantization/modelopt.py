@@ -1037,6 +1037,23 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half, torch.float8_e4m3fn]
 
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
+        # Pure-NVFP4 checkpoints use this config directly rather than
+        # ModelOptMixedPrecisionConfig.
+        if (
+            isinstance(layer, RoutedExperts)
+            and layer.moe_config.moe_backend == "deep_gemm_mega_moe"
+        ):
+            if self.quant_method != "NVFP4":
+                raise ValueError("deep_gemm_mega_moe requires NVFP4 W4A4, not W4A16.")
+            return ModelOptNvFp4MegaMoE(
+                quant_config=self,
+                moe_config=layer.moe_config,
+            )
+        return super().get_quant_method(layer, prefix)
+
     @classmethod
     def get_min_capability(cls) -> int:
         return 75
@@ -1647,6 +1664,319 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )
+
+
+class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
+    """ModelOpt NVFP4 adapter for DeepGEMM's cooperative MegaMoE kernel.
+
+    Unlike regular modular experts, MegaMoE owns EP dispatch, both expert
+    GEMMs, combine, and (optionally) the BF16 shared MLP.  Keeping this as a
+    quant method lets vLLM reuse RoutedExperts' existing ModelOpt checkpoint
+    loader while preventing the runner from dispatching the same tokens twice.
+    """
+
+    _symm_buffer_cache: dict[tuple[object, ...], object] = {}
+    _synchronized_ep_groups: set[tuple[int, int]] = set()
+
+    def __init__(
+        self,
+        quant_config: ModelOptNvFp4Config,
+        moe_config: FusedMoEConfig,
+    ) -> None:
+        # Deliberately bypass ModelOptNvFp4FusedMoE.__init__: the regular NVFP4
+        # oracle selects a GEMM-only Experts implementation, while MegaMoE is a
+        # cooperative communication + compute kernel.
+        FusedMoEMethodBase.__init__(self, moe_config)
+        self.quant_config = quant_config
+        self.use_a16 = False
+        self.use_global_sf = True
+        self._shared_experts_layer: torch.nn.Module | None = None
+        self._shared_l1_weights: torch.Tensor | None = None
+        self._shared_l2_weights: torch.Tensor | None = None
+        self._num_shared_experts = 0
+
+        parallel = moe_config.moe_parallel_config
+        if not parallel.use_ep or parallel.ep_size <= 1:
+            raise ValueError(
+                "deep_gemm_mega_moe requires expert parallelism across at "
+                "least two ranks."
+            )
+        if parallel.tp_size != 1:
+            raise ValueError("deep_gemm_mega_moe requires TP=1 inside each EP rank.")
+        if parallel.enable_eplb:
+            raise NotImplementedError(
+                "NVFP4 deep_gemm_mega_moe does not support EPLB yet."
+            )
+        if moe_config.activation.value != "silu":
+            raise ValueError("NVFP4 deep_gemm_mega_moe currently requires SiLU.")
+        if moe_config.num_experts % parallel.ep_size != 0:
+            raise ValueError(
+                f"num_experts={moe_config.num_experts} must be divisible by "
+                f"EP size {parallel.ep_size}."
+            )
+
+    @property
+    def supports_internal_mk(self) -> bool:
+        return True
+
+    @property
+    def mk_can_overlap_shared_experts(self) -> bool:
+        return self._shared_experts_layer is not None
+
+    @property
+    def mk_fuses_shared_experts(self) -> bool:
+        return self._shared_experts_layer is not None
+
+    @property
+    def output_is_reduced(self) -> bool:
+        # MegaMoE combine returns the completed output to each token's origin
+        # rank, so the generic runner must not apply another cross-rank reduce.
+        return True
+
+    @property
+    def topk_indices_dtype(self) -> torch.dtype | None:
+        return torch.int32
+
+    @property
+    def supports_eplb(self) -> bool:
+        return False
+
+    def bind_shared_experts(self, shared_experts: torch.nn.Module | None) -> None:
+        self._shared_experts_layer = shared_experts
+
+    @staticmethod
+    def _pack_e4m3_scales(scale: torch.Tensor) -> torch.Tensor:
+        if scale.dtype != torch.float8_e4m3fn:
+            raise TypeError(f"Expected E4M3 block scales, got {scale.dtype}.")
+        if scale.shape[-1] % 4:
+            raise ValueError(
+                "DeepGEMM packs four E4M3 scales per int32; got trailing "
+                f"dimension {scale.shape[-1]}."
+            )
+        packed = scale.contiguous().view(torch.uint8).view(torch.int32)
+        # Preserve the public [E, N, K/64] shape with the N-major TMA stride
+        # expected by the NVFP4 MegaMoE kernel.
+        return packed.transpose(-1, -2).contiguous().transpose(-1, -2)
+
+    def _transform_shared_weights(self, deep_gemm) -> None:
+        if self._shared_experts_layer is None:
+            return
+
+        gate_up = getattr(self._shared_experts_layer, "gate_up_proj", None)
+        down = getattr(self._shared_experts_layer, "down_proj", None)
+        if gate_up is None or down is None:
+            raise TypeError(
+                "DeepGEMM fused shared experts require gate_up_proj and down_proj."
+            )
+
+        shared_l1 = gate_up.weight.data
+        shared_l2 = down.weight.data
+        if shared_l1.dtype != torch.bfloat16 or shared_l2.dtype != torch.bfloat16:
+            raise TypeError(
+                "DeepGEMM fused shared experts require BF16 weights; got "
+                f"{shared_l1.dtype} and {shared_l2.dtype}."
+            )
+        hidden = self.moe.hidden_dim
+        if shared_l1.ndim != 2 or shared_l1.shape[0] % 2:
+            raise ValueError(f"Unexpected shared L1 shape {tuple(shared_l1.shape)}.")
+        shared_intermediate = shared_l1.shape[0] // 2
+        if tuple(shared_l1.shape) != (2 * shared_intermediate, hidden) or tuple(
+            shared_l2.shape
+        ) != (hidden, shared_intermediate):
+            raise ValueError(
+                "DeepGEMM fused shared expert needs unsharded BF16 weights; got "
+                f"L1={tuple(shared_l1.shape)}, L2={tuple(shared_l2.shape)}."
+            )
+        if shared_intermediate % self.moe.intermediate_size:
+            raise ValueError(
+                f"shared intermediate {shared_intermediate} must be a multiple "
+                f"of routed intermediate {self.moe.intermediate_size}."
+            )
+        self._num_shared_experts = shared_intermediate // self.moe.intermediate_size
+        self._shared_l1_weights, self._shared_l2_weights = (
+            deep_gemm.transform_weights_for_mega_moe(
+                shared_l1.contiguous(), shared_l2.contiguous()
+            )
+        )
+
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        if hasattr(layer, "_deep_gemm_mega_l1_weights"):
+            return
+
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        deep_gemm = _import_deep_gemm()
+        w13_scale = self._pack_e4m3_scales(layer.w13_weight_scale.data)
+        w2_scale = self._pack_e4m3_scales(layer.w2_weight_scale.data)
+        l1_weights, l2_weights = deep_gemm.transform_weights_for_mega_moe(
+            (layer.w13_weight.data.view(torch.int8).contiguous(), w13_scale),
+            (layer.w2_weight.data.view(torch.int8).contiguous(), w2_scale),
+        )
+        layer._deep_gemm_mega_l1_weights = l1_weights
+        layer._deep_gemm_mega_l2_weights = l2_weights
+
+        a1_scale = layer.w13_input_scale.data.max().float().reshape(())
+        layer._deep_gemm_mega_a1_scale = a1_scale
+        layer._deep_gemm_mega_l1_alphas = (
+            layer.w13_weight_scale_2.data.float().reshape(-1, 2).contiguous() * a1_scale
+        )
+        layer._deep_gemm_mega_l2_alphas = (
+            layer.w2_weight_scale_2.data.float().reshape(-1).contiguous()
+        )
+        a2_scale = layer.w2_input_scale.data.max().float().reshape(())
+        layer._deep_gemm_mega_a2_scales = (
+            torch.ones_like(layer._deep_gemm_mega_l2_alphas) * a2_scale
+        )
+
+        self._transform_shared_weights(deep_gemm)
+
+        # The transformed L2 weight aliases its loader Parameter. The other
+        # transformed tensors own fresh storage, so dropping the loader-side
+        # Parameters releases only redundant memory.
+        layer.w13_weight = None
+        layer.w13_weight_scale = None
+        layer.w13_weight_scale_2 = None
+        layer.w13_input_scale = None
+        layer.w2_weight = None
+        layer.w2_weight_scale = None
+        layer.w2_weight_scale_2 = None
+        layer.w2_input_scale = None
+
+        logger.info_once(
+            "Using DeepGEMM NVFP4 MegaMoE (fused_shared=%s).",
+            self._shared_experts_layer is not None,
+            scope="global",
+        )
+
+    def get_fused_moe_quant_config(
+        self, layer: RoutedExperts
+    ) -> FusedMoEQuantConfig | None:
+        return None
+
+    def _synchronize_first_launch(self) -> None:
+        from vllm.distributed import get_ep_group
+
+        ep_group = get_ep_group()
+        device = torch.accelerator.current_device_index()
+        key = (id(ep_group.cpu_group), device)
+        if key in self._synchronized_ep_groups:
+            return
+        torch.accelerator.synchronize()
+        # Use the device group with an explicit local device.  A NCCL-backed
+        # ``cpu_group`` may otherwise guess from the global rank, which is
+        # wrong on multi-node jobs (e.g. rank 4 owns local CUDA device 0).
+        torch.distributed.barrier(
+            group=ep_group.device_group,
+            device_ids=[device],
+        )
+        self._synchronized_ep_groups.add(key)
+
+    def _get_symm_buffer(self):
+        from vllm.distributed import get_ep_group
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        group = get_ep_group().device_group
+        device = torch.accelerator.current_device_index()
+        key = (
+            id(group),
+            device,
+            self.moe.num_experts,
+            self.moe.max_num_tokens,
+            self.moe.experts_per_token,
+            self.moe.hidden_dim,
+            self.moe.intermediate_size,
+            self._num_shared_experts,
+        )
+        symm_buffer = self._symm_buffer_cache.get(key)
+        if symm_buffer is None:
+            deep_gemm = _import_deep_gemm()
+            symm_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
+                group,
+                self.moe.num_experts,
+                self.moe.max_num_tokens,
+                self.moe.experts_per_token,
+                self.moe.hidden_dim,
+                self.moe.intermediate_size,
+                num_shared_experts=self._num_shared_experts,
+                mma_type="fp4xfp4",
+            )
+            self._symm_buffer_cache[key] = symm_buffer
+        return symm_buffer
+
+    def apply(
+        self,
+        layer: RoutedExperts,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if x.dtype != torch.bfloat16:
+            raise TypeError(f"NVFP4 MegaMoE expects BF16 input, got {x.dtype}.")
+        num_tokens = x.shape[0]
+        if num_tokens > self.moe.max_num_tokens:
+            raise ValueError(
+                f"NVFP4 MegaMoE got M={num_tokens}, capacity={self.moe.max_num_tokens}."
+            )
+        if self._shared_experts_layer is not None and shared_experts is None:
+            raise RuntimeError("Fused shared-expert module was not passed to MegaMoE.")
+
+        self._synchronize_first_launch()
+        symm_buffer = self._get_symm_buffer()
+
+        import vllm._custom_ops as ops
+        from vllm.forward_context import (
+            get_forward_context,
+            is_forward_context_available,
+        )
+        from vllm.utils.deep_gemm import _import_deep_gemm
+
+        x_fp4, x_scale = ops.scaled_fp4_quant(
+            x,
+            layer._deep_gemm_mega_a1_scale,
+            is_sf_swizzled_layout=False,
+        )
+        staged_topk_ids = topk_ids
+        if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+            is_padding = get_forward_context().is_padding
+            if is_padding is not None:
+                staged_topk_ids = torch.where(
+                    is_padding[:num_tokens].unsqueeze(1), -1, topk_ids
+                )
+
+        symm_buffer.x[:num_tokens].copy_(x_fp4)
+        symm_buffer.x_sf[:num_tokens].copy_(
+            x_scale.contiguous().view(torch.uint8).view(torch.int32)
+        )
+        symm_buffer.topk_idx[:num_tokens].copy_(staged_topk_ids)
+        symm_buffer.topk_weights[:num_tokens].copy_(topk_weights)
+
+        y = torch.empty_like(x, dtype=torch.bfloat16)
+        shared_kwargs = {}
+        if self._shared_experts_layer is not None:
+            if shared_experts_input is None:
+                raise RuntimeError("Fused shared experts require their BF16 input.")
+            shared_kwargs = {
+                "shared_l1_weights": self._shared_l1_weights,
+                "shared_l2_weights": self._shared_l2_weights,
+                "x_bf16": shared_experts_input,
+            }
+
+        deep_gemm = _import_deep_gemm()
+        deep_gemm.fp4_fp4_mega_moe(
+            y,
+            layer._deep_gemm_mega_l1_weights,
+            layer._deep_gemm_mega_l2_weights,
+            symm_buffer,
+            activation_clamp=getattr(layer, "swiglu_limit", None),
+            fast_math=True,
+            l1_alphas=layer._deep_gemm_mega_l1_alphas,
+            l2_alphas=layer._deep_gemm_mega_l2_alphas,
+            a2_scales=layer._deep_gemm_mega_a2_scales,
+            **shared_kwargs,
+        )
+        return y
 
 
 ModelOptNvFp4Config.LinearMethodCls = ModelOptNvFp4LinearMethod
@@ -2406,11 +2736,20 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                     moe_config=layer.moe_config,
                 )
             if quant_algo == "NVFP4":
+                if layer.moe_config.moe_backend == "deep_gemm_mega_moe":
+                    return ModelOptNvFp4MegaMoE(
+                        quant_config=self.nvfp4_config,
+                        moe_config=layer.moe_config,
+                    )
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.nvfp4_config,
                     moe_config=layer.moe_config,
                 )
             if quant_algo == "W4A16_NVFP4":
+                if layer.moe_config.moe_backend == "deep_gemm_mega_moe":
+                    raise ValueError(
+                        "deep_gemm_mega_moe requires NVFP4 W4A4, not W4A16."
+                    )
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.w4a16_nvfp4_config,
                     moe_config=layer.moe_config,
