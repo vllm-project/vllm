@@ -1241,7 +1241,6 @@ async def test_unsupported_url_error_lists_registry_endpoints(tmp_path):
     registry = {
         "widgets": {
             "url": "/v1/widgets",
-            "versioned": False,
             "handler_getter": lambda: None,
             "wrapper_fn": None,
         }
@@ -1319,26 +1318,17 @@ async def test_write_finished_keeps_responses_that_completed_with_a_failure(tmp_
 
 
 def test_url_matches_accepts_versioned_endpoints():
-    """Score and rerank are served under an optional version prefix.
+    """An endpoint with no version of its own is also served under one.
 
-    The previous suffix match also accepted unrelated paths ending in the same
-    segment, such as /foo/score.
+    Score and rerank are reachable as /score and /v1/score. The previous suffix
+    match also accepted unrelated paths ending in the same segment.
     """
-
-    def config(url, versioned):
-        return {
-            "url": url,
-            "versioned": versioned,
-            "handler_getter": lambda: None,
-            "wrapper_fn": None,
-        }
-
-    score = config("/score", versioned=True)
     for url in ("/score", "/v1/score", "/v2/score", "/v10/score"):
-        assert url_matches(score, url), url
+        assert url_matches("/score", url), url
     for url in ("/foo/score", "/a/b/score", "/scorecard", "/vX/score"):
-        assert not url_matches(score, url), url
+        assert not url_matches("/score", url), url
 
-    embeddings = config("/v1/embeddings", versioned=False)
-    assert url_matches(embeddings, "/v1/embeddings")
-    assert not url_matches(embeddings, "/v2/embeddings")
+    # An endpoint that already names its version matches only that version.
+    assert url_matches("/v1/embeddings", "/v1/embeddings")
+    for url in ("/v2/embeddings", "/v1/v1/embeddings"):
+        assert not url_matches("/v1/embeddings", url), url

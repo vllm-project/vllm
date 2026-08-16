@@ -631,19 +631,21 @@ class EndpointConfig(TypedDict):
     """How a batch request URL is matched to the handler that serves it."""
 
     url: str
-    # Score and rerank are also served under a version prefix, /v1/score.
-    versioned: bool
     handler_getter: Callable[[], Callable | None]
     wrapper_fn: WrapperFn | None
 
 
-def url_matches(config: EndpointConfig, url: str) -> bool:
-    """Whether a request URL is served by this endpoint."""
-    if url == config["url"]:
+def url_matches(endpoint_url: str, url: str) -> bool:
+    """Whether a request URL is served by an endpoint.
+
+    An endpoint that carries no version of its own, /score and /rerank, is also
+    served under one, /v1/score. The rest already name the version they serve.
+    """
+    if url == endpoint_url:
         return True
-    return config["versioned"] and bool(
-        re.fullmatch(rf"/v\d+{re.escape(config['url'])}", url)
-    )
+    if re.match(r"/v\d+/", endpoint_url):
+        return False
+    return bool(re.fullmatch(rf"/v\d+{re.escape(endpoint_url)}", url))
 
 
 def handle_endpoint_request(
@@ -661,7 +663,7 @@ def handle_endpoint_request(
         Awaitable[BatchRequestOutput] if the request was handled,
         None if URL didn't match
     """
-    if not url_matches(config, request.url):
+    if not url_matches(config["url"], request.url):
         return None
 
     handler_fn = config["handler_getter"]()
@@ -789,7 +791,6 @@ async def build_endpoint_registry(
     endpoint_registry: dict[str, EndpointConfig] = {
         "completions": {
             "url": "/v1/chat/completions",
-            "versioned": False,
             "handler_getter": lambda: (
                 openai_serving_chat.create_chat_completion
                 if openai_serving_chat is not None
@@ -799,7 +800,6 @@ async def build_endpoint_registry(
         },
         "embeddings": {
             "url": "/v1/embeddings",
-            "versioned": False,
             "handler_getter": lambda: (
                 serving_embedding if serving_embedding is not None else None
             ),
@@ -807,7 +807,6 @@ async def build_endpoint_registry(
         },
         "score": {
             "url": "/score",
-            "versioned": True,
             "handler_getter": lambda: (
                 serving_scores if serving_scores is not None else None
             ),
@@ -815,7 +814,6 @@ async def build_endpoint_registry(
         },
         "rerank": {
             "url": "/rerank",
-            "versioned": True,
             "handler_getter": lambda: (
                 serving_scores if serving_scores is not None else None
             ),
@@ -823,7 +821,6 @@ async def build_endpoint_registry(
         },
         "transcriptions": {
             "url": "/v1/audio/transcriptions",
-            "versioned": False,
             "handler_getter": lambda: (
                 openai_serving_transcription.create_transcription
                 if openai_serving_transcription is not None
@@ -836,7 +833,6 @@ async def build_endpoint_registry(
         },
         "translations": {
             "url": "/v1/audio/translations",
-            "versioned": False,
             "handler_getter": lambda: (
                 openai_serving_translation.create_translation
                 if openai_serving_translation is not None
