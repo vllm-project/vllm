@@ -37,39 +37,26 @@ logger = init_logger(__name__)
 @dataclass(frozen=True)
 class FlashInferReplaySSMTactic:
     algorithm: str
-    pipeline_stages: int | None = None
-    ctas_per_sm: int | None = None
+    d_split: int | None = None
     precompute_heads_per_cta: int = 0
 
     def __post_init__(self) -> None:
         if self.algorithm not in {"auto", "monolith", "two-kernel"}:
             raise ValueError(f"Unsupported ReplaySSM algorithm: {self.algorithm}")
-        has_launch_config = (
-            self.pipeline_stages is not None or self.ctas_per_sm is not None
-        )
-        if self.algorithm == "two-kernel":
-            if self.pipeline_stages not in {1, 2}:
-                raise ValueError("two-kernel requires pipeline_stages in {1, 2}")
-            if self.ctas_per_sm is None or self.ctas_per_sm <= 0:
-                raise ValueError("two-kernel requires a positive ctas_per_sm")
-            if self.precompute_heads_per_cta < 0:
-                raise ValueError(
-                    "two-kernel requires non-negative precompute_heads_per_cta"
-                )
-        elif has_launch_config:
-            raise ValueError(
-                f"{self.algorithm} does not accept pipeline or CTA settings"
-            )
-        elif self.precompute_heads_per_cta != 0:
+        if self.d_split is not None and self.d_split <= 0:
+            raise ValueError("d_split must be positive when specified")
+        if self.precompute_heads_per_cta < 0:
+            raise ValueError("precompute_heads_per_cta must be non-negative")
+        if self.algorithm == "monolith" and self.precompute_heads_per_cta != 0:
             raise ValueError(
                 f"{self.algorithm} does not accept precompute_heads_per_cta"
             )
 
     @property
     def name(self) -> str:
-        if self.algorithm != "two-kernel":
-            return self.algorithm
-        name = f"two_kernel_s{self.pipeline_stages}_c{self.ctas_per_sm}"
+        name = self.algorithm.replace("-", "_")
+        if self.d_split is not None:
+            name += f"_d{self.d_split}"
         if self.precompute_heads_per_cta:
             name += f"_h{self.precompute_heads_per_cta}"
         return name
@@ -504,20 +491,11 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
                 "Please install flashinfer with mamba.checkpointing_ssu support: "
                 "pip install flashinfer-python"
             ) from e
-        autotune_abi = getattr(
-            checkpointing_ssu_module,
-            "CHECKPOINTING_SSU_AUTOTUNE_ABI_VERSION",
-            0,
-        )
-        if (
-            not hasattr(checkpointing_ssu_module, "CheckpointingSSURunner")
-            or autotune_abi < 1
-        ):
+        if not hasattr(checkpointing_ssu_module, "CheckpointingSSURunner"):
             raise ImportError(
                 "FlashInfer ReplaySSM requires native checkpointing_ssu "
-                "autotuning ABI version 1 or newer. Install a compatible "
-                "FlashInfer revision exposing "
-                "CHECKPOINTING_SSU_AUTOTUNE_ABI_VERSION >= 1."
+                "autotuning support. Install a compatible FlashInfer revision "
+                "exposing CheckpointingSSURunner."
             )
         self._kernel = checkpointing_ssu_module.checkpointing_ssu
         self._tactic = FLASHINFER_REPLAYSSM_AUTO_TACTIC
@@ -598,13 +576,10 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
             cb_scaled=cb_scaled,
             cumAdt_vec=cumAdt_vec,
             cb_old=cb_old,
+            d_split=tactic.d_split if use_explicit_tactic else None,
             precompute_heads_per_cta=(
                 tactic.precompute_heads_per_cta if use_explicit_tactic else 0
             ),
-            main_pipeline_stages=(
-                tactic.pipeline_stages or 0 if use_explicit_tactic else 0
-            ),
-            main_ctas_per_sm=(tactic.ctas_per_sm or 0 if use_explicit_tactic else 0),
             algorithm=requested_algorithm,
         )
         if update_trackers and indices is not None:

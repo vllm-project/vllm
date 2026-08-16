@@ -26,9 +26,6 @@ from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     resolve_flashinfer_autotune_file,
     write_flashinfer_autotune_cache,
 )
-from vllm.model_executor.warmup.flashinfer_replayssm_warmup import (
-    trigger_flashinfer_replayssm_autotune,
-)
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     deepseek_v4_sparse_mla_attention_warmup,
     flashinfer_sparse_mla_decode_autotune_warmup,
@@ -237,6 +234,68 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
     return None
 
 
+def _flashinfer_replayssm_autotune_dummy_run(runner: "GPUModelRunner") -> None:
+    from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+        get_replayssm_backend,
+    )
+
+    try:
+        backend = get_replayssm_backend()
+    except RuntimeError:
+        return
+    if backend.name != "flashinfer":
+        return
+
+    query_len = runner.uniform_decode_query_len
+    max_num_reqs = min(
+        runner.scheduler_config.max_num_seqs,
+        runner.max_num_tokens // query_len,
+    )
+    if max_num_reqs == 0:
+        raise RuntimeError(
+            "FlashInfer ReplaySSM autotuning needs room for one decode request."
+        )
+
+    block_tables = runner.input_batch.block_table.block_tables
+    saved_block_ids = tuple(
+        block_table.block_table.np[:max_num_reqs, 0].copy()
+        for block_table in block_tables
+    )
+    dummy_block_ids = range(1, max_num_reqs + 1)
+    for block_table in block_tables:
+        block_table.block_table.np[:max_num_reqs, 0] = dummy_block_ids
+
+    try:
+        runner._dummy_run(
+            num_tokens=max_num_reqs * query_len,
+            uniform_decode=True,
+            allow_microbatching=False,
+            skip_eplb=True,
+            is_profile=True,
+            randomize_inputs=True,
+            force_attention=True,
+            profile_seq_lens=query_len + 1,
+        )
+    finally:
+        for block_table, block_ids in zip(block_tables, saved_block_ids):
+            block_table.block_table.np[:max_num_reqs, 0] = block_ids
+        runner.input_batch.block_table.commit_block_table(max_num_reqs)
+
+        from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+
+        reset_tensors: set[int] = set()
+        for module in runner.get_model().modules():
+            if not isinstance(module, MambaMixer2) or not module.use_replayssm:
+                continue
+            for tensor in module.kv_cache:
+                if not tensor.numel() or tensor.shape[0] <= max_num_reqs:
+                    continue
+                data_ptr = tensor.data_ptr()
+                if data_ptr not in reset_tensors:
+                    tensor[1 : max_num_reqs + 1].zero_()
+                    reset_tensors.add(data_ptr)
+
+
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     """
     Autotune FlashInfer operations.
@@ -307,11 +366,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             fi_utils.autotune(tune_mode=True, **autotune_kwargs),
         ):
             runner._dummy_run(**dummy_run_kwargs)
-            # The generic dummy run is predominantly prefill-shaped and may
-            # not execute ReplaySSM decode. One private maximum-batch decode
-            # call lets FlashInfer populate every native dynamic batch bucket
-            # before CUDA graph capture.
-            trigger_flashinfer_replayssm_autotune(runner)
+            _flashinfer_replayssm_autotune_dummy_run(runner)
     finally:
         set_autotune_process_group(None)
 
