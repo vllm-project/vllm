@@ -129,6 +129,18 @@ class GateLinear(ReplicatedLinear):
             and self.out_dtype == torch.float32
         )
 
+        # ROCm BF16x3 router GEMM eligibility.
+        self._rocm_bf16x3_no_bias = not bias
+        self.allow_rocm_bf16x3_router_gemm = (
+            self._rocm_bf16x3_no_bias
+            and self.weight.dtype == torch.float32
+            and current_platform.is_rocm()
+            and self.out_dtype == torch.float32
+        )
+        self._bf16x3_weight: torch.Tensor | None = None
+        # Rebuild the split after weight replacement or in-place updates.
+        self._bf16x3_weight_key: tuple[int, int] | None = None
+
         # cuteDSL ll_bf16_gemm eligibility. Any dims supported, but SM90+ required bc:
         # 1. PDL support. Both dot-product and split-K kernels.
         # 2. Thread Block Clusters. Split-K kernel for cross-CTA reduction.
@@ -165,6 +177,13 @@ class GateLinear(ReplicatedLinear):
             self.allow_cublas_router_gemm = self.weight.dtype == torch.bfloat16
 
         # out_dtype may start as None -> recompute eligibility here
+        self.allow_rocm_bf16x3_router_gemm = (
+            self._rocm_bf16x3_no_bias
+            and self.weight.dtype == torch.float32
+            and current_platform.is_rocm()
+            and out_dtype == torch.float32
+        )
+
         if self.allow_specialized_router_gemm:
             from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
                 is_available,
@@ -217,6 +236,33 @@ class GateLinear(ReplicatedLinear):
 
             output = bf16x3_router_gemm(x, self.weight)
             return output, None
+
+        # ROCm BF16x3 kernel for FP32 router weights.
+        if self.allow_rocm_bf16x3_router_gemm and x.dtype == torch.bfloat16:
+            from vllm.model_executor.layers.fused_moe.router import (
+                bf16x3_router_gemm_triton as rocm_bf16x3,
+            )
+            from vllm.triton_utils import triton
+
+            if rocm_bf16x3.is_supported(x, self.weight):
+                key = (self.weight.data_ptr(), self.weight._version)
+                if self._bf16x3_weight is None or self._bf16x3_weight_key != key:
+                    # Avoid allocating the split during graph capture.
+                    if torch.cuda.is_current_stream_capturing():
+                        self.allow_rocm_bf16x3_router_gemm = False
+                    else:
+                        self._bf16x3_weight = rocm_bf16x3.split_bf16x3(self.weight)
+                        self._bf16x3_weight_key = key
+                if self._bf16x3_weight is not None:
+                    try:
+                        return (
+                            rocm_bf16x3.bf16x3_router_gemm(x, self._bf16x3_weight),
+                            None,
+                        )
+                    except triton.runtime.errors.OutOfResources:
+                        # Fall back when the launch exceeds available LDS.
+                        self.allow_rocm_bf16x3_router_gemm = False
+                        self._bf16x3_weight = None
 
         # Tier 5: cuBLAS bf16→fp32
         if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
