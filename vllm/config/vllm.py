@@ -677,11 +677,7 @@ class VllmConfig:
             return False
 
         if model_config.runner_type == "pooling":
-            # Only encoder-only pooling is task-complete on V2. Which task a
-            # model resolves to is unknown until its pooler is built, so
-            # token-wise models (rerankers, reward models) would fail at engine
-            # start. Keep all decoder pooling on V1 until it is supported.
-            if model_config.attn_type != "encoder_only":
+            if model_config.is_multimodal_model:
                 return False
             # Fall through rather than return, so pooling models are still
             # subject to the MoE and hybrid checks below.
