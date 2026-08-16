@@ -16,7 +16,7 @@ ReplaySSM backends:
     (``selective_state_update_replayssm_flashinfer``)
 """
 
-import os
+import importlib
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -32,9 +32,6 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
 logger = init_logger(__name__)
-
-_FLASHINFER_SSU_PIPELINE_STAGES_ENV = "FLASHINFER_SSU_MAIN_PIPELINE_STAGES"
-_FLASHINFER_SSU_CTA_PER_SM_ENV = "FLASHINFER_SSU_MAIN_CTA_PER_SM"
 
 
 @dataclass(frozen=True)
@@ -498,16 +495,32 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
     def __init__(self, mamba_config: MambaConfig):
         super().__init__(mamba_config)
         try:
-            from flashinfer.mamba import checkpointing_ssu as _fi_checkpointing_ssu
-        except ImportError as e:
+            checkpointing_ssu_module = importlib.import_module(
+                "flashinfer.mamba.checkpointing_ssu"
+            )
+        except (ImportError, ModuleNotFoundError) as e:
             raise ImportError(
                 "FlashInfer is required for the flashinfer ReplaySSM backend. "
                 "Please install flashinfer with mamba.checkpointing_ssu support: "
                 "pip install flashinfer-python"
             ) from e
-        self._kernel = _fi_checkpointing_ssu
-        self._algorithm = FLASHINFER_REPLAYSSM_AUTO_TACTIC.algorithm
-        self._precompute_heads_per_cta = 0
+        autotune_abi = getattr(
+            checkpointing_ssu_module,
+            "CHECKPOINTING_SSU_AUTOTUNE_ABI_VERSION",
+            0,
+        )
+        if (
+            not hasattr(checkpointing_ssu_module, "CheckpointingSSURunner")
+            or autotune_abi < 1
+        ):
+            raise ImportError(
+                "FlashInfer ReplaySSM requires native checkpointing_ssu "
+                "autotuning ABI version 1 or newer. Install a compatible "
+                "FlashInfer revision exposing "
+                "CHECKPOINTING_SSU_AUTOTUNE_ABI_VERSION >= 1."
+            )
+        self._kernel = checkpointing_ssu_module.checkpointing_ssu
+        self._tactic = FLASHINFER_REPLAYSSM_AUTO_TACTIC
 
     @property
     def name(self) -> str:
@@ -558,6 +571,9 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
         if indices is not None and indices.dim() > 1:
             indices = indices[:, 0]
 
+        tactic = self._tactic
+        requested_algorithm = tactic.algorithm if algorithm is None else algorithm
+        use_explicit_tactic = algorithm is None
         result = self._kernel(
             state,
             x_cache,
@@ -582,8 +598,14 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
             cb_scaled=cb_scaled,
             cumAdt_vec=cumAdt_vec,
             cb_old=cb_old,
-            precompute_heads_per_cta=self._precompute_heads_per_cta,
-            algorithm=self._algorithm if algorithm is None else algorithm,
+            precompute_heads_per_cta=(
+                tactic.precompute_heads_per_cta if use_explicit_tactic else 0
+            ),
+            main_pipeline_stages=(
+                tactic.pipeline_stages or 0 if use_explicit_tactic else 0
+            ),
+            main_ctas_per_sm=(tactic.ctas_per_sm or 0 if use_explicit_tactic else 0),
+            algorithm=requested_algorithm,
         )
         if update_trackers and indices is not None:
             update_replayssm_ring_trackers(
@@ -600,41 +622,18 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
 def use_flashinfer_replayssm_tactic(
     tactic: FlashInferReplaySSMTactic,
 ) -> Iterator[None]:
-    """Apply a ReplaySSM launch tactic during serial warmup or graph capture."""
+    """Apply an explicit ReplaySSM tactic for tests or debugging."""
     backend = get_replayssm_backend()
     if not isinstance(backend, FlashInferReplaySSMBackend):
         yield
         return
 
-    old_algorithm = backend._algorithm
-    old_precompute_heads_per_cta = backend._precompute_heads_per_cta
-    old_stages = os.environ.get(_FLASHINFER_SSU_PIPELINE_STAGES_ENV)
-    old_ctas = os.environ.get(_FLASHINFER_SSU_CTA_PER_SM_ENV)
-    backend._algorithm = tactic.algorithm
-    backend._precompute_heads_per_cta = tactic.precompute_heads_per_cta
+    old_tactic = backend._tactic
+    backend._tactic = tactic
     try:
-        if tactic.algorithm == "two-kernel":
-            assert tactic.pipeline_stages is not None
-            assert tactic.ctas_per_sm is not None
-            os.environ[_FLASHINFER_SSU_PIPELINE_STAGES_ENV] = str(
-                tactic.pipeline_stages
-            )
-            os.environ[_FLASHINFER_SSU_CTA_PER_SM_ENV] = str(tactic.ctas_per_sm)
-        else:
-            os.environ.pop(_FLASHINFER_SSU_PIPELINE_STAGES_ENV, None)
-            os.environ.pop(_FLASHINFER_SSU_CTA_PER_SM_ENV, None)
         yield
     finally:
-        backend._algorithm = old_algorithm
-        backend._precompute_heads_per_cta = old_precompute_heads_per_cta
-        if old_stages is None:
-            os.environ.pop(_FLASHINFER_SSU_PIPELINE_STAGES_ENV, None)
-        else:
-            os.environ[_FLASHINFER_SSU_PIPELINE_STAGES_ENV] = old_stages
-        if old_ctas is None:
-            os.environ.pop(_FLASHINFER_SSU_CTA_PER_SM_ENV, None)
-        else:
-            os.environ[_FLASHINFER_SSU_CTA_PER_SM_ENV] = old_ctas
+        backend._tactic = old_tactic
 
 
 _REPLAYSSM_BACKEND_REGISTRY: dict[MambaBackendEnum, type[ReplaySSMBackend]] = {
