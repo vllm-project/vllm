@@ -12,6 +12,7 @@ from openai_harmony import Message, ToolDescription, ToolNamespaceConfig
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.mcp.tool_server import (
     MCPToolServer,
+    _build_request_headers,
     post_process_tools_description,
 )
 
@@ -134,6 +135,41 @@ class TestMCPToolServerUnit:
         post_process_tools_description(result)
 
         assert result.tools == [included]
+
+    def test_build_request_headers_sets_session_id_without_client_headers(self):
+        assert _build_request_headers("sess-1") == {"x-session-id": "sess-1"}
+        assert _build_request_headers("sess-1", None) == {"x-session-id": "sess-1"}
+
+    def test_build_request_headers_forwards_non_session_headers(self):
+        headers = {"Authorization": "Bearer token", "X-Custom": "ok"}
+        result = _build_request_headers("sess-1", headers)
+        assert result["Authorization"] == "Bearer token"
+        assert result["X-Custom"] == "ok"
+        assert result["x-session-id"] == "sess-1"
+        assert headers == {"Authorization": "Bearer token", "X-Custom": "ok"}
+
+    @pytest.mark.parametrize(
+        "client_key",
+        ["x-session-id", "X-Session-ID", "X-Session-Id", "X-SESSION-ID"],
+    )
+    def test_build_request_headers_keeps_vllm_session_id(self, client_key: str):
+        result = _build_request_headers(
+            "vllm-session",
+            {client_key: "attacker-session", "Authorization": "Bearer token"},
+        )
+        assert result["x-session-id"] == "vllm-session"
+        assert result["Authorization"] == "Bearer token"
+        assert client_key not in result or client_key == "x-session-id"
+
+    def test_build_request_headers_single_httpx_session_id(self):
+        httpx = pytest.importorskip("httpx")
+        built = _build_request_headers(
+            "vllm-session",
+            {"X-Session-ID": "attacker-session"},
+        )
+        encoded = httpx.Headers(built)
+        assert encoded.get("x-session-id") == "vllm-session"
+        assert encoded.multi_items() == [("x-session-id", "vllm-session")]
 
     def test_builtin_tools_consistency(self):
         """MCP_BUILTIN_TOOLS must match BUILTIN_TOOL_TO_MCP_SERVER_LABEL values."""

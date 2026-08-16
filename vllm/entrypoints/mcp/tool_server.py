@@ -53,6 +53,21 @@ def trim_schema(schema: dict) -> dict:
     return schema
 
 
+def _build_request_headers(
+    session_id: str, headers: dict[str, str] | None = None
+) -> dict[str, str]:
+    # Forward client MCP headers, then force vLLM's session id so a client
+    # cannot overwrite it (HTTP header names are case-insensitive).
+    request_headers: dict[str, str] = {}
+    if headers is not None:
+        request_headers.update(headers)
+        for key in list(request_headers):
+            if key.lower() == "x-session-id":
+                del request_headers[key]
+    request_headers["x-session-id"] = session_id
+    return request_headers
+
+
 def post_process_tools_description(
     list_tools_result: "ListToolsResult",
 ) -> "ListToolsResult":
@@ -181,9 +196,7 @@ class MCPToolServer(ToolServer):
         from mcp.client.sse import sse_client
 
         url = self.urls.get(tool_name)
-        request_headers = {"x-session-id": session_id}
-        if headers is not None:
-            request_headers.update(headers)
+        request_headers = _build_request_headers(session_id, headers)
         if not url:
             raise KeyError(f"Tool '{tool_name}' is not supported")
         async with (
