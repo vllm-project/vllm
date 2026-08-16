@@ -87,19 +87,19 @@ def test_discard_tags():
     with allocator.use_memory_pool("kv_cache"):
         kv = torch.ones(512, 512, device=DEVICE_TYPE)
 
-    free_bytes = current_platform.mem_get_info()[0]
+    free_bytes = torch.accelerator.get_memory_info()[0]
 
     # Discard kv_cache only — weights should remain valid
     allocator.discard("kv_cache")
 
-    free_bytes_after_discard = current_platform.mem_get_info()[0]
+    free_bytes_after_discard = torch.accelerator.get_memory_info()[0]
     assert free_bytes_after_discard > free_bytes
 
     # Weights are still usable
     assert torch.allclose(weights, torch.ones_like(weights))
 
     # Wake up and verify kv_cache is remapped (zeroed content)
-    allocator.wake_up(["kv_cache"])
+    allocator.wake_up()
     # After wake_up the VA is remapped; content is not preserved
     # but the allocation is valid
     assert kv.shape == (512, 512)
