@@ -425,9 +425,8 @@ class MooncakeStoreScheduler:
             if req_meta.partial_tail_offloads:
                 # A partial-tail CoW block is deliberately kept out of the
                 # request's block table, so it is absent from `block_ids` even
-                # though the worker DMAs out of it just as asynchronously. It
-                # leads the list as in `KVCacheManager.pop_blocks_for_free`,
-                # which the reversed free below relies on.
+                # though the worker DMAs out of it just as asynchronously.
+                # It leads the list, as in `pop_blocks_for_free`.
                 block_ids += [bid for _, bid, _ in req_meta.partial_tail_offloads]
             # Every allocated block is referenced, not just the ones covering
             # this job's token range: a rank resumes from its own last
@@ -460,8 +459,7 @@ class MooncakeStoreScheduler:
                 f"store job {store_job_id} reported by too many ranks"
             )
             del self._pinned_saves[store_job_id]
-            # Reversed, as the other batch frees of a request's blocks are, so
-            # that a block table's tail is evicted before its prefix.
+            # Tail-first, as elsewhere, so the shared prefix is evicted last.
             pool.free_blocks(pool.blocks[bid] for bid in reversed(block_ids))
 
     def has_pending_push_work(self) -> bool:
