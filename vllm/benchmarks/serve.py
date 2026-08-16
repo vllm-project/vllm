@@ -2064,7 +2064,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     if (
         args.dataset_name
-        in ["random", "random-mm", "random-rerank", "prefix_repetition"]
+        in ["random-mm", "random-rerank", "prefix_repetition"]
         and args.dataset_path is not None
     ):
         raise ValueError(
