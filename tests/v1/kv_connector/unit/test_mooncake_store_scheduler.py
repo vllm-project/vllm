@@ -814,7 +814,9 @@ def test_partial_tail_cow_block_is_referenced_for_the_job():
     meta = scheduler.build_connector_meta(out)
 
     store_job_id = meta.requests[0].store_job_id
-    assert scheduler._pinned_saves[store_job_id][0] == [0, 7]
+    # It leads the list, as in `pop_blocks_for_free`, so that the reversed free
+    # puts it last in eviction priority.
+    assert scheduler._pinned_saves[store_job_id][0] == [7, 0]
     assert pool.blocks[7].ref_cnt == 1
 
     scheduler.update_connector_output(_make_worker_output({store_job_id: 1}))
