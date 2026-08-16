@@ -53,6 +53,7 @@ from vllm.model_executor.layers.attention.attention import (
 from vllm.model_executor.layers.attention.mla_attention import (
     _get_kv_b_proj_input_dtype,
     accumulate_mla_context_chunk,
+    backend_supports_prefill_query_quantization,
     init_mla_context_partial,
     neutralize_empty_context_partials,
 )
@@ -106,6 +107,29 @@ logger = init_logger(__name__)
 # attention front-end (the GEMM is small and launch-bound, so the overlap
 # hides it); at or above it, run the gate on the main stream.
 _GATE_MULTI_STREAM_TOKEN_THRESHOLD = 512
+
+
+def _validate_plain_fp8_prefill_support(
+    cache_dtype: str, use_prefill_query_quantization: bool
+) -> None:
+    if cache_dtype not in ("fp8", "fp8_e4m3"):
+        return
+    if not use_prefill_query_quantization:
+        raise ValueError(
+            "Kimi-K3 plain FP8 KV cache requires FP8 prefill query "
+            "quantization. Enable --attention-config "
+            "'{\"use_prefill_query_quantization\": true}' on a supported "
+            "Blackwell device and MLA prefill backend, or use an unquantized "
+            "KV cache such as --kv-cache-dtype bfloat16."
+        )
+    if not backend_supports_prefill_query_quantization():
+        raise ValueError(
+            "Kimi-K3 plain FP8 KV cache requires FP8 prefill query "
+            "quantization, which is not supported on this device or with the "
+            "selected MLA prefill backend. Plain FP8 requires device "
+            "capability 100 and a compatible prefill backend; otherwise use "
+            "an unquantized KV cache such as --kv-cache-dtype bfloat16."
+        )
 
 
 @torch.compile(backend=current_platform.simple_compile_backend)
@@ -288,6 +312,11 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             self.kv_cache_dtype = cache_config.cache_dtype
         else:
             self.kv_cache_dtype = "auto"
+        vllm_config = get_current_vllm_config()
+        _validate_plain_fp8_prefill_support(
+            self.kv_cache_dtype,
+            vllm_config.attention_config.use_prefill_query_quantization,
+        )
 
         dtype = torch.get_default_dtype()
         self.attn_backend = get_attn_backend(
@@ -334,7 +363,6 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             self.impl.dcp_rank = 0
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
 
-        vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         assert parallel_config.prefill_context_parallel_size == 1, (
             "Kimi-K3 MultiHeadLatentAttention does not support prefill context "
