@@ -913,6 +913,20 @@ def test_store_sending_thread_reports_job_when_store_raises(failing_call):
     assert thread.take_completed_saves() == {req.store_job_id: 1}
 
 
+def test_store_sending_thread_reports_job_when_the_preamble_raises():
+    # The report has to survive a failure before the first store call too, so
+    # every dequeue leaves through the same exit.
+    thread = _make_store_sending_thread(MagicMock())
+    req = _make_store_req("req-a", [b"a0", b"a1"])
+    req.token_len_chunk = None  # type: ignore[assignment]
+
+    with contextlib.suppress(TypeError):
+        _run_store_req(thread, req)
+
+    assert thread.take_completed_saves() == {req.store_job_id: 1}
+    thread.request_queue.task_done.assert_called_once()
+
+
 def test_stale_store_job_cannot_touch_a_reused_request_id():
     # A preempted request resumes under its original id, so a job left over from
     # the retired generation carries a req_id that now belongs to a live one.
