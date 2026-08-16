@@ -74,6 +74,11 @@ def test_decode_sparse_reuses_prefill_kernel(
                 if compress_ratio == 128
                 else None
             ),
+            c128a_decode_topk_lens=(
+                torch.tensor([2, 2], dtype=torch.int32)
+                if compress_ratio == 128
+                else None
+            ),
         )
     )
     gathered = []
@@ -124,12 +129,9 @@ def test_decode_sparse_reuses_prefill_kernel(
     assert captured["sparse"]["q"] is q
     assert captured["sparse"]["out"] is output
     if compress_ratio == 128:
-        torch.testing.assert_close(
-            captured["local_topk"][0],
-            torch.arange(128, dtype=torch.int32),
-            rtol=0,
-            atol=0,
-        )
+        expected = torch.full((128,), -1, dtype=torch.int32)
+        expected[:2] = torch.arange(2, dtype=torch.int32)
+        torch.testing.assert_close(captured["local_topk"][0], expected, rtol=0, atol=0)
     elif compress_ratio == 4:
         torch.testing.assert_close(
             captured["local_topk"],

@@ -308,3 +308,109 @@ def test_deepgemm_fp8_fp4_paged_mqa_logits():
                 ref_logits = ref_logits.masked_fill(~mask, 0)
                 diff = calc_diff(logits, ref_logits)
                 assert diff < 1e-3, f"{diff=}"
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.skipif(not has_deep_gemm(), reason="DeepGEMM not available")
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
+)
+@pytest.mark.parametrize("context_len", [512, 513, 2052])
+def test_deepgemm_paged_and_contiguous_indexer_logits_exact(context_len: int):
+    """P/D gate: identical FP8 Q/K bytes must produce identical logits.
+
+    The 513 case is the first DS4 position where top-512 selection observes
+    logits instead of returning every candidate. 2052 covers the exact first
+    mismatch seen in the fixed DAPO 2K capsule.
+    """
+    torch.manual_seed(20260815)
+    # DeepGEMM consumes the cache's storage block size (64), not the
+    # uncompressed sparse-attention scheduling page size (256).
+    heads, head_dim, block_size = 64, 128, 64
+    max_model_len = 2304
+    num_blocks = cdiv(context_len, block_size)
+    q = torch.randn(
+        (1, 1, heads, head_dim), device="cuda", dtype=torch.bfloat16
+    ).to(torch.float8_e4m3fn)
+    kv = torch.randn(
+        (num_blocks, block_size, 1, head_dim),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    weights = torch.randn((1, heads), device="cuda", dtype=torch.float32)
+    packed = kv_cache_cast_to_fp8(kv)
+    packed_bytes = packed.view(num_blocks, -1)
+    contiguous_k = packed_bytes[:, : block_size * head_dim].reshape(
+        num_blocks * block_size, head_dim
+    ).view(torch.float8_e4m3fn)[:context_len]
+    contiguous_scale = packed_bytes[:, block_size * head_dim :].reshape(
+        num_blocks * block_size, 4
+    ).view(torch.float32).reshape(-1)[:context_len]
+
+    context_lens = torch.tensor([[context_len]], device="cuda", dtype=torch.int32)
+    block_table = torch.arange(
+        num_blocks, device="cuda", dtype=torch.int32
+    ).unsqueeze(0)
+    schedule = get_paged_mqa_logits_metadata(
+        context_lens, block_size, get_num_sms()
+    )
+    paged = fp8_fp4_paged_mqa_logits(
+        (q, None),
+        packed,
+        weights,
+        context_lens,
+        block_table,
+        schedule,
+        max_model_len,
+        clean_logits=False,
+    )[0, :context_len]
+    # The target request must also be invariant to a co-batched request and
+    # the resulting scheduler metadata/layout.
+    q_batched = torch.cat(
+        [
+            q,
+            torch.randn_like(q.to(torch.bfloat16)).to(torch.float8_e4m3fn),
+        ],
+        dim=0,
+    )
+    weights_batched = torch.cat(
+        [weights, torch.randn_like(weights)], dim=0
+    )
+    context_lens_batched = torch.tensor(
+        [[context_len], [max(1, context_len - 7)]],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    block_table_batched = block_table.expand(2, -1).contiguous()
+    schedule_batched = get_paged_mqa_logits_metadata(
+        context_lens_batched, block_size, get_num_sms()
+    )
+    paged_batched = fp8_fp4_paged_mqa_logits(
+        (q_batched, None),
+        packed,
+        weights_batched,
+        context_lens_batched,
+        block_table_batched,
+        schedule_batched,
+        max_model_len,
+        clean_logits=False,
+    )[0, :context_len]
+    assert torch.equal(paged, paged_batched), (
+        context_len,
+        "paged target changed under co-batching",
+        int((paged != paged_batched).sum().item()),
+        float((paged - paged_batched).abs().max().item()),
+    )
+    contiguous = fp8_fp4_mqa_logits(
+        (q.reshape(1, heads, head_dim), None),
+        (contiguous_k, contiguous_scale),
+        weights,
+        torch.tensor([0], device="cuda", dtype=torch.int32),
+        torch.tensor([context_len], device="cuda", dtype=torch.int32),
+        clean_logits=False,
+    )[0, :context_len]
+    assert torch.equal(paged, contiguous), (
+        context_len,
+        int((paged != contiguous).sum().item()),
+        float((paged - contiguous).abs().max().item()),
+    )

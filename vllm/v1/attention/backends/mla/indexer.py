@@ -950,7 +950,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if (
                 current_platform.is_cuda()
                 and has_deep_gemm()
-                and not envs.VLLM_BATCH_INVARIANT
             ):
                 self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
                     seq_lens,

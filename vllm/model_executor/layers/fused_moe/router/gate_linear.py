@@ -3,6 +3,7 @@
 import torch
 from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 import vllm._custom_ops as ops
 from vllm.config import get_current_vllm_config_or_none
 from vllm.logger import init_logger
@@ -179,6 +180,25 @@ class GateLinear(ReplicatedLinear):
     def forward(
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        # The low-latency router kernels select different K-reduction schemes
+        # as M changes.  That is desirable for normal decode latency, but it
+        # breaks the process-wide batch-invariant contract: the same token can
+        # get different FP32 router logits in decode (typically M=1) and
+        # prefill.  In BI mode use one GEMM family for every M.  Hopper and
+        # Blackwell configure cuBLAS for non-split-K execution in
+        # enable_batch_invariant_mode(); other platforms retain the stable
+        # ReplicatedLinear fallback.
+        if envs.VLLM_BATCH_INVARIANT:
+            if self.allow_cublas_router_gemm and x.dtype == torch.bfloat16:
+                output = torch.mm(x, self.weight.T, out_dtype=torch.float32)
+                return output, None
+            if self.out_dtype is not None and x.dtype != self.weight.dtype:
+                x = x.to(self.weight.dtype)
+            output, output_bias = super().forward(x)
+            if self.out_dtype is not None and output.dtype != self.out_dtype:
+                output = output.to(self.out_dtype)
+            return output, output_bias
+
         # Tier 1: cuteDSL ll_bf16_gemm (SM90+, any dims)
         if self.allow_ll_bf16_gemm and x.shape[0] <= 16 and x.dtype == torch.bfloat16:
             from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (

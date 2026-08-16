@@ -401,6 +401,18 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             )
             if num_decode_tokens > 1:
                 local_topk[1:].copy_(local_topk[0])
+            # ``top_k`` is the graph-stable padded C128 width, not the number
+            # of compressed rows currently visible to each token.  Leaving
+            # the padded tail as arange values makes BI canonicalization sort
+            # an invalid high index into the valid prefix at the first C128
+            # boundary (for example 127 instead of 0 when the true length is
+            # one).  Prefill metadata already represents this tail as -1.
+            assert attn_metadata.c128a_decode_topk_lens is not None
+            local_topk.masked_fill_(
+                local_topk
+                >= attn_metadata.c128a_decode_topk_lens[:num_decode_tokens, None],
+                -1,
+            )
         assert local_topk is not None
         combined_indices, combined_lens = combine_topk_swa_indices(
             local_topk,
