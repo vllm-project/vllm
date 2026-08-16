@@ -1326,7 +1326,8 @@ class Worker(WorkerBase):
 
         Args:
             update_info: Backend-specific update info, or a list indexed by
-                worker rank. A `None` entry skips that worker.
+                global worker rank across data parallel replicas. A `None`
+                entry skips that worker.
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -1338,11 +1339,16 @@ class Worker(WorkerBase):
 
         with set_current_vllm_config(self.vllm_config):
             try:
-                local_update_info = (
-                    update_info[self.rank]
-                    if isinstance(update_info, list)
-                    else update_info
-                )
+                if isinstance(update_info, list):
+                    parallel_config = self.vllm_config.parallel_config
+                    worker_rank = (
+                        parallel_config.data_parallel_rank
+                        * parallel_config.world_size
+                        + self.rank
+                    )
+                    local_update_info = update_info[worker_rank]
+                else:
+                    local_update_info = update_info
                 if local_update_info is None:
                     return
                 self.weight_transfer_engine.update_weights(local_update_info)
