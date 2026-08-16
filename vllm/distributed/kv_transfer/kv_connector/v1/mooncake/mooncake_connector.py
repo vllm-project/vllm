@@ -195,6 +195,62 @@ def _expand_transfer_regions(
     return regions
 
 
+def _spec_transfers_unique_kv_heads(spec: KVCacheSpec) -> bool:
+    return isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)) and not isinstance(
+        spec,
+        (MLAAttentionSpec, SlidingWindowMLASpec),
+    )
+
+
+def _spec_transfers_fully_replicated(spec: KVCacheSpec) -> bool:
+    return isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+
+
+def _infer_total_num_kv_heads(
+    local_tp_size: int,
+    remote_tp_size: int,
+    local_kv_block_len: int,
+    remote_kv_block_len: int,
+    total_num_kv_heads_hint: int | None,
+) -> int | None:
+    max_candidate = max(
+        256,
+        local_tp_size * remote_tp_size,
+        total_num_kv_heads_hint or 0,
+    )
+    candidates: list[int] = []
+    for total_num_kv_heads in range(1, max_candidate + 1):
+        if total_num_kv_heads >= local_tp_size:
+            if total_num_kv_heads % local_tp_size != 0:
+                continue
+            local_head_count = total_num_kv_heads // local_tp_size
+        else:
+            if local_tp_size % total_num_kv_heads != 0:
+                continue
+            local_head_count = 1
+
+        if total_num_kv_heads >= remote_tp_size:
+            if total_num_kv_heads % remote_tp_size != 0:
+                continue
+            remote_head_count = total_num_kv_heads // remote_tp_size
+        else:
+            if remote_tp_size % total_num_kv_heads != 0:
+                continue
+            remote_head_count = 1
+
+        if (
+            local_kv_block_len % local_head_count == 0
+            and remote_kv_block_len % remote_head_count == 0
+            and local_kv_block_len // local_head_count
+            == remote_kv_block_len // remote_head_count
+        ):
+            candidates.append(total_num_kv_heads)
+
+    if total_num_kv_heads_hint in candidates:
+        return total_num_kv_heads_hint
+    return min(candidates) if candidates else None
+
+
 def _compute_sender_transfer_plan(
     local_tp_rank: int,
     local_tp_size: int,
@@ -203,12 +259,84 @@ def _compute_sender_transfer_plan(
     local_kv_block_len: int,
     remote_kv_block_len: int,
     producer_cache_replicated: bool,
+    transfer_unique_kv_heads: bool = False,
+    total_num_kv_heads: int | None = None,
 ) -> tuple[bool, int, int, int]:
     """Plan one producer-rank to one consumer-rank copy for heterogeneous TP."""
     tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
 
     if tp_ratio == 1:
         return True, 0, 0, local_kv_block_len
+
+    if transfer_unique_kv_heads:
+        inferred_num_kv_heads = _infer_total_num_kv_heads(
+            local_tp_size=local_tp_size,
+            remote_tp_size=remote_tp_size,
+            local_kv_block_len=local_kv_block_len,
+            remote_kv_block_len=remote_kv_block_len,
+            total_num_kv_heads_hint=total_num_kv_heads,
+        )
+        if inferred_num_kv_heads is None:
+            transfer_unique_kv_heads = False
+
+        def get_head_partition(
+            tp_rank: int,
+            tp_size: int,
+        ) -> tuple[int, int, int, int]:
+            assert inferred_num_kv_heads is not None
+            if tp_size >= inferred_num_kv_heads:
+                assert tp_size % inferred_num_kv_heads == 0
+                replicas = tp_size // inferred_num_kv_heads
+                return tp_rank // replicas, 1, tp_rank % replicas, replicas
+            assert inferred_num_kv_heads % tp_size == 0
+            num_heads = inferred_num_kv_heads // tp_size
+            return tp_rank * num_heads, num_heads, 0, 1
+
+        if transfer_unique_kv_heads:
+            (
+                local_head_start,
+                local_head_count,
+                local_replica_index,
+                local_replicas,
+            ) = get_head_partition(local_tp_rank, local_tp_size)
+            (
+                remote_head_start,
+                remote_head_count,
+                remote_replica_index,
+                remote_replicas,
+            ) = get_head_partition(remote_tp_rank, remote_tp_size)
+
+            is_canonical_producer = True
+            if local_replicas >= remote_replicas:
+                assert local_replicas % remote_replicas == 0
+                is_canonical_producer = local_replica_index == (
+                    remote_replica_index * (local_replicas // remote_replicas)
+                )
+            elif remote_replicas > 1:
+                assert remote_replicas % local_replicas == 0
+                is_canonical_producer = (
+                    remote_replica_index // (remote_replicas // local_replicas)
+                    == local_replica_index
+                )
+
+            overlap_start = max(local_head_start, remote_head_start)
+            overlap_end = min(
+                local_head_start + local_head_count,
+                remote_head_start + remote_head_count,
+            )
+            if not is_canonical_producer or overlap_start >= overlap_end:
+                return False, 0, 0, 0
+
+            local_head_len = local_kv_block_len // local_head_count
+            remote_head_len = remote_kv_block_len // remote_head_count
+            assert local_head_len == remote_head_len
+            overlap_count = overlap_end - overlap_start
+            return (
+                True,
+                (overlap_start - local_head_start) * local_head_len,
+                (overlap_start - remote_head_start) * remote_head_len,
+                overlap_count * local_head_len,
+            )
 
     if tp_ratio > 0:
         if producer_cache_replicated:
@@ -254,6 +382,10 @@ def _validate_asymmetric_region_lengths(
     local_tp_size: int,
     remote_tp_size: int,
     producer_cache_replicated: bool,
+    unique_kv_head_layers: set[str] | None = None,
+    fully_replicated_layers: set[str] | None = None,
+    total_num_kv_heads_hint: int | None = None,
+    total_num_kv_heads_by_layer: dict[str, int] | None = None,
 ) -> str | None:
     """Validate transfer-region metadata for a fixed producer/consumer pair.
 
@@ -267,13 +399,51 @@ def _validate_asymmetric_region_lengths(
             "producer and consumer."
         )
 
-    if producer_cache_replicated:
-        return None
-
     tp_ratio = _get_tp_ratio(local_tp_size, remote_tp_size)
     for idx, (local_region, remote_region) in enumerate(
         zip(local_regions, remote_regions)
     ):
+        if (
+            fully_replicated_layers
+            and local_region.layer_name in fully_replicated_layers
+        ):
+            if local_region.kv_block_len != remote_region.kv_block_len:
+                return (
+                    "Mooncake fully replicated KV region length mismatch at "
+                    f"region {idx}: local={local_region.kv_block_len}, "
+                    f"remote={remote_region.kv_block_len}."
+                )
+            continue
+
+        if unique_kv_head_layers and local_region.layer_name in unique_kv_head_layers:
+            region_num_kv_heads = (
+                total_num_kv_heads_by_layer.get(
+                    local_region.layer_name,
+                    total_num_kv_heads_hint,
+                )
+                if total_num_kv_heads_by_layer
+                else total_num_kv_heads_hint
+            )
+            inferred_num_kv_heads = _infer_total_num_kv_heads(
+                local_tp_size=local_tp_size,
+                remote_tp_size=remote_tp_size,
+                local_kv_block_len=local_region.kv_block_len,
+                remote_kv_block_len=remote_region.kv_block_len,
+                total_num_kv_heads_hint=region_num_kv_heads,
+            )
+            if inferred_num_kv_heads is None:
+                return (
+                    "Mooncake cannot infer a consistent heterogeneous TP KV-head "
+                    f"mapping at region {idx}: "
+                    f"local={local_region.kv_block_len}, "
+                    f"remote={remote_region.kv_block_len}, "
+                    f"local_tp={local_tp_size}, remote_tp={remote_tp_size}."
+                )
+            continue
+
+        if producer_cache_replicated:
+            continue
+
         if tp_ratio == 1:
             if local_region.kv_block_len != remote_region.kv_block_len:
                 return (
@@ -1241,6 +1411,21 @@ class MooncakeConnectorWorker:
             local_tp_size=self.tp_size,
             remote_tp_size=meta.remote_tp_size,
             producer_cache_replicated=self._producer_cache_is_replicated(),
+            unique_kv_head_layers={
+                layer_name
+                for layer_name, spec in self._layer_specs.items()
+                if _spec_transfers_unique_kv_heads(spec)
+            },
+            fully_replicated_layers={
+                layer_name
+                for layer_name, spec in self._layer_specs.items()
+                if _spec_transfers_fully_replicated(spec)
+            },
+            total_num_kv_heads_hint=self.transfer_topo.total_num_kv_heads,
+            total_num_kv_heads_by_layer={
+                layer_name: self._get_layer_total_num_kv_heads(layer_name)
+                for layer_name in self._layer_specs
+            },
         )
         if validation_err is not None:
             response = MooncakeXferResponse(
@@ -1525,6 +1710,12 @@ class MooncakeConnectorWorker:
                     "Aligned Mooncake transfer regions must belong to the same "
                     "KV group."
                 )
+                layer_spec = getattr(self, "_layer_specs", {}).get(
+                    local_region.layer_name
+                )
+                region_fully_replicated = layer_spec is not None and (
+                    _spec_transfers_fully_replicated(layer_spec)
+                )
                 group_index = local_region.group_index
                 assert group_index < len(local_block_ids_by_group), (
                     "Transfer region references a missing KV group."
@@ -1548,6 +1739,16 @@ class MooncakeConnectorWorker:
                     remote_kv_block_len=remote_region.kv_block_len,
                     remote_tp_rank=agent_meta.remote_tp_rank,
                     remote_tp_size=agent_meta.remote_tp_size,
+                    transfer_unique_kv_heads=layer_spec is not None
+                    and _spec_transfers_unique_kv_heads(layer_spec),
+                    producer_cache_replicated=(
+                        True if region_fully_replicated else None
+                    ),
+                    total_num_kv_heads=(
+                        self._get_layer_total_num_kv_heads(local_region.layer_name)
+                        if layer_spec is not None
+                        else None
+                    ),
                 )
                 if not should_transfer:
                     # Replicated KV cache: only one producer rank in the TP group
@@ -2081,6 +2282,9 @@ class MooncakeConnectorWorker:
         remote_kv_block_len: int,
         remote_tp_rank: int,
         remote_tp_size: int,
+        transfer_unique_kv_heads: bool = False,
+        producer_cache_replicated: bool | None = None,
+        total_num_kv_heads: int | None = None,
     ) -> tuple[bool, int, int, int]:
         return _compute_sender_transfer_plan(
             local_tp_rank=self.tp_rank,
@@ -2089,7 +2293,28 @@ class MooncakeConnectorWorker:
             remote_tp_size=remote_tp_size,
             local_kv_block_len=local_kv_block_len,
             remote_kv_block_len=remote_kv_block_len,
-            producer_cache_replicated=self._producer_cache_is_replicated(),
+            producer_cache_replicated=(
+                self._producer_cache_is_replicated()
+                if producer_cache_replicated is None
+                else producer_cache_replicated
+            ),
+            transfer_unique_kv_heads=transfer_unique_kv_heads,
+            total_num_kv_heads=(
+                total_num_kv_heads
+                or getattr(self.transfer_topo, "total_num_kv_heads", None)
+            ),
+        )
+
+    def _get_layer_total_num_kv_heads(self, layer_name: str) -> int:
+        layer = self.vllm_config.compilation_config.static_forward_context.get(
+            layer_name
+        )
+        return int(
+            getattr(
+                layer,
+                "total_num_kv_heads",
+                self.transfer_topo.total_num_kv_heads,
+            )
         )
 
     def _log_debug_cache_registration(

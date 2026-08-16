@@ -25,6 +25,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     SendBlockMeta,
     TransferRegion,
     _align_transfer_regions,
+    _compute_sender_transfer_plan,
+    _validate_asymmetric_region_lengths,
     get_mooncake_bootstrap_addr,
     should_launch_bootstrap_server,
 )
@@ -41,6 +43,203 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import RequestStatus
 
 from .utils import create_request, create_scheduler, create_vllm_config
+
+
+@pytest.mark.parametrize(
+    ("local_tp_rank", "expected"),
+    [
+        (0, (True, 0, 0, 65536)),
+        (1, (False, 0, 0, 0)),
+        (2, (True, 0, 65536, 65536)),
+        (3, (False, 0, 0, 0)),
+        (4, (True, 0, 131072, 65536)),
+        (5, (False, 0, 0, 0)),
+        (6, (True, 0, 196608, 65536)),
+        (7, (False, 0, 0, 0)),
+    ],
+)
+def test_sender_plan_gqa_replicas_tp8_to_tp1(local_tp_rank, expected):
+    assert (
+        _compute_sender_transfer_plan(
+            local_tp_rank=local_tp_rank,
+            local_tp_size=8,
+            remote_tp_rank=0,
+            remote_tp_size=1,
+            local_kv_block_len=65536,
+            remote_kv_block_len=262144,
+            producer_cache_replicated=True,
+            transfer_unique_kv_heads=True,
+            total_num_kv_heads=4,
+        )
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("remote_tp_rank", "expected_src_offset"),
+    [
+        (0, 0),
+        (1, 0),
+        (2, 65536),
+        (3, 65536),
+        (4, 131072),
+        (5, 131072),
+        (6, 196608),
+        (7, 196608),
+    ],
+)
+def test_sender_plan_gqa_replicas_tp1_to_tp8(
+    remote_tp_rank,
+    expected_src_offset,
+):
+    assert _compute_sender_transfer_plan(
+        local_tp_rank=0,
+        local_tp_size=1,
+        remote_tp_rank=remote_tp_rank,
+        remote_tp_size=8,
+        local_kv_block_len=262144,
+        remote_kv_block_len=65536,
+        producer_cache_replicated=False,
+        transfer_unique_kv_heads=True,
+        total_num_kv_heads=4,
+    ) == (True, expected_src_offset, 0, 65536)
+
+
+@pytest.mark.parametrize(
+    ("local_tp_rank", "remote_tp_rank", "should_transfer"),
+    [(0, 0, True), (1, 0, False), (2, 1, True), (3, 1, False)],
+)
+def test_sender_plan_replicated_heads_tp4_to_tp2(
+    local_tp_rank,
+    remote_tp_rank,
+    should_transfer,
+):
+    plan = _compute_sender_transfer_plan(
+        local_tp_rank=local_tp_rank,
+        local_tp_size=4,
+        remote_tp_rank=remote_tp_rank,
+        remote_tp_size=2,
+        local_kv_block_len=32768,
+        remote_kv_block_len=32768,
+        producer_cache_replicated=True,
+        transfer_unique_kv_heads=True,
+        total_num_kv_heads=1,
+    )
+    assert plan == ((True, 0, 0, 32768) if should_transfer else (False, 0, 0, 0))
+
+
+def test_sender_plan_fully_replicated_region_is_unchanged():
+    assert _compute_sender_transfer_plan(
+        local_tp_rank=2,
+        local_tp_size=8,
+        remote_tp_rank=0,
+        remote_tp_size=1,
+        local_kv_block_len=4096,
+        remote_kv_block_len=4096,
+        producer_cache_replicated=True,
+    ) == (False, 0, 0, 4096)
+
+
+@pytest.mark.parametrize("remote_tp_rank", range(8))
+def test_sender_plan_fully_replicated_tp1_to_tp8(remote_tp_rank):
+    assert _compute_sender_transfer_plan(
+        local_tp_rank=0,
+        local_tp_size=1,
+        remote_tp_rank=remote_tp_rank,
+        remote_tp_size=8,
+        local_kv_block_len=4096,
+        remote_kv_block_len=4096,
+        producer_cache_replicated=True,
+    ) == (True, 0, 0, 4096)
+
+
+@pytest.mark.parametrize("local_tp_rank", range(8))
+def test_sender_plan_infers_per_region_head_count(local_tp_rank):
+    assert _compute_sender_transfer_plan(
+        local_tp_rank=local_tp_rank,
+        local_tp_size=8,
+        remote_tp_rank=0,
+        remote_tp_size=1,
+        local_kv_block_len=32768,
+        remote_kv_block_len=8 * 32768,
+        producer_cache_replicated=True,
+        transfer_unique_kv_heads=True,
+        # Simulate a model-level 4-head hint for an 8-head layer.
+        total_num_kv_heads=4,
+    ) == (True, 0, local_tp_rank * 32768, 32768)
+
+
+def test_sender_plan_virtual_split_preserves_head_offsets():
+    assert _compute_sender_transfer_plan(
+        local_tp_rank=4,
+        local_tp_size=8,
+        remote_tp_rank=0,
+        remote_tp_size=1,
+        local_kv_block_len=16384,
+        remote_kv_block_len=65536,
+        producer_cache_replicated=True,
+        transfer_unique_kv_heads=True,
+        total_num_kv_heads=4,
+    ) == (True, 0, 32768, 16384)
+
+
+def test_validate_asymmetric_regions_allows_replicated_consumer_heads():
+    layer_name = "model.layers.0.self_attn"
+    local_region = TransferRegion(
+        layer_name=layer_name,
+        layer_index=0,
+        base_addr=0x1000,
+        block_len=262144,
+        kv_block_len=262144,
+    )
+    remote_region = TransferRegion(
+        layer_name=layer_name,
+        layer_index=0,
+        base_addr=0x2000,
+        block_len=65536,
+        kv_block_len=65536,
+    )
+    assert (
+        _validate_asymmetric_region_lengths(
+            local_regions=[local_region],
+            remote_regions=[remote_region],
+            local_tp_size=1,
+            remote_tp_size=8,
+            producer_cache_replicated=False,
+            unique_kv_head_layers={layer_name},
+            total_num_kv_heads_hint=4,
+        )
+        is None
+    )
+
+
+def test_validate_asymmetric_regions_preserves_fully_replicated_cache():
+    layer_name = "model.layers.0.mla_attn"
+    local_region = TransferRegion(
+        layer_name=layer_name,
+        layer_index=0,
+        base_addr=0x1000,
+        block_len=4096,
+        kv_block_len=4096,
+    )
+    remote_region = TransferRegion(
+        layer_name=layer_name,
+        layer_index=0,
+        base_addr=0x2000,
+        block_len=4096,
+        kv_block_len=4096,
+    )
+    assert (
+        _validate_asymmetric_region_lengths(
+            local_regions=[local_region],
+            remote_regions=[remote_region],
+            local_tp_size=1,
+            remote_tp_size=8,
+            producer_cache_replicated=False,
+            fully_replicated_layers={layer_name},
+        )
+        is None
+    )
 
 
 def _make_test_kv_cache_config() -> KVCacheConfig:
