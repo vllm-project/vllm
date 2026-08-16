@@ -516,7 +516,6 @@ class Attention(nn.Module, AttentionLayerBase):
         output_dtype: torch.dtype | None = None,
         *,
         update_kv_cache: bool,
-        kv_cache_dummy_dep: torch.Tensor | None = None,
         encoded_layer_name: LayerNameType | None = None,
     ) -> torch.Tensor:
         """
@@ -564,6 +563,7 @@ class Attention(nn.Module, AttentionLayerBase):
             key = key.view(-1, self.num_kv_heads, self.head_size)
         if value is not None:
             value = value.view(-1, self.num_kv_heads, self.head_size_v)
+        kv_cache_dummy_dep = None
         if self.use_direct_call:
             # Skip this if sharing KV cache with an earlier attention layer.
             if (
@@ -611,8 +611,10 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         return output.view(-1, hidden_size)
 
-    def fused_rope_kvcache_supported(self, rotary_emb: "RotaryEmbedding") -> bool:
-        """Return whether this layer can use functional RoPE/cache fusion."""
+    def manual_rope_kvcache_fusion_supported(
+        self, rotary_emb: "RotaryEmbedding"
+    ) -> bool:
+        """Return whether this layer can use manual RoPE/cache fusion."""
         from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
         return (

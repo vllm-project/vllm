@@ -114,7 +114,7 @@ def test_q_out_rope_kvcache_stays_before_attention_with_graph_owned_output(
     with torch.device(device), vllm.config.set_current_vllm_config(vllm_config):
         torch.manual_seed(0)
         model = _FunctionalRoPEAttention(vllm_config, device)
-        assert model.attn.fused_rope_kvcache_supported(model.rotary_emb)
+        assert model.attn.manual_rope_kvcache_fusion_supported(model.rotary_emb)
         qkv = torch.randn(
             num_tokens,
             (model.num_heads + 2 * model.num_kv_heads) * model.head_size,

@@ -220,8 +220,8 @@ class LlamaAttention(nn.Module):
         )
         self._use_fused_rope_kvcache = False
         if isinstance(self.attn, Attention):
-            self._use_fused_rope_kvcache = self.attn.fused_rope_kvcache_supported(
-                self.rotary_emb
+            self._use_fused_rope_kvcache = (
+                self.attn.manual_rope_kvcache_fusion_supported(self.rotary_emb)
             )
 
     def forward(
