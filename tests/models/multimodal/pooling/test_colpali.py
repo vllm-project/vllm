@@ -223,7 +223,10 @@ def _run_multimodal_text_query_image_docs_test(
         max_model_len=4096,
         enforce_eager=True,
         gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+        attention_backend="FLASH_ATTN",
+        kernel_config={"enable_flashinfer_autotune": False},
     ) as vllm_model:
+        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
         scores = vllm_model.llm.score(query, image_docs)
 
         assert len(scores) == 2
@@ -297,9 +300,11 @@ def _run_multimodal_image_query_text_docs_test(
 @pytest.mark.parametrize("dtype", [DTYPE])
 def test_colpali_multimodal_text_query_image_docs(
     vllm_runner,
+    monkeypatch: pytest.MonkeyPatch,
     model: str,
     dtype: str,
 ) -> None:
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     _run_multimodal_text_query_image_docs_test(vllm_runner, model, dtype=dtype)
 
 
