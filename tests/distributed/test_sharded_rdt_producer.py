@@ -831,3 +831,118 @@ class TestExportRing:
         eng._pack_group_for_export([("a", torch.randn(8, 8).bfloat16())], 0)
         eng._pack_group_for_export([("b", torch.randn(8, 8).bfloat16())], 1)
         assert eng._export_ring[0].data_ptr() != eng._export_ring[1].data_ptr()
+
+
+class TestExportRingSlotSafety:
+    """The export ring packs a group's small storages into one reused buffer and
+    ships per-name views into it, so a slot may only be rewritten once the group
+    that last used it is freed everywhere. The credit gate does not establish
+    that on its own: it bounds how many groups are unfreed, not the order they
+    free in, and barriers complete out of order (a consumer pre-frees a group it
+    pulls nothing from; a light group can finish before an earlier heavy one).
+    """
+
+    @pytest.fixture
+    def gather_engine(self, monkeypatch):
+        monkeypatch.setattr(torch.Tensor, "cuda", lambda self: self)
+        monkeypatch.setattr(
+            trainer_mod,
+            "reduce_tensor",
+            lambda base: (
+                None,
+                (base.numel(), None, None, None, None, None, -1, None),
+            ),
+        )
+        return _loop_engine
+
+    @staticmethod
+    def _await_published(server, gi, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with server._cache_cond:
+                if gi in server._group_names:
+                    return True
+            time.sleep(0.002)
+        return False
+
+    def test_a_slot_is_never_rewritten_while_its_group_is_still_live(
+        self, server_factory, gather_engine
+    ):
+        """Free the later group of each pair first and hold the earlier one live
+        until the NEXT group is gathered -- the window a modular slot counter got
+        wrong (at lookahead=1 there are 2 slots, so group 2 took group 0's)."""
+        server = server_factory(gather_lookahead=1)
+        n_groups = 8
+        engine = gather_engine(server, n_groups, lookahead=1)
+
+        violations: list[tuple[int, int]] = []
+        last_holder: dict[int, int] = {}
+        pending: dict[str, int] = {}
+        orig_pack = engine._pack_group_for_export
+        orig_pub = engine._publish_async
+
+        def _pack(held, slot_idx):
+            prev = last_holder.get(slot_idx)
+            if prev is not None and prev in engine._inflight:
+                violations.append((slot_idx, prev))
+            pending["slot"] = slot_idx
+            return orig_pack(held, slot_idx)
+
+        def _pub(group_idx, entries):
+            if "slot" in pending:
+                last_holder[pending.pop("slot")] = group_idx
+            return orig_pub(group_idx, entries)
+
+        engine._pack_group_for_export = _pack
+        engine._publish_async = _pub
+
+        def _consumer():
+            for base in range(0, n_groups, 2):
+                if not self._await_published(server, base + 1):
+                    return
+                server.free_group(base + 1)
+                nxt = base + 2
+                if nxt < n_groups and not self._await_published(server, nxt):
+                    return
+                server.free_group(base)
+
+        consumer = threading.Thread(target=_consumer, daemon=True)
+        consumer.start()
+        engine._run_gather_loop(update_future=None, live_count=1)
+        consumer.join(timeout=15)
+
+        assert last_holder, "no group was ring-packed; the test proves nothing"
+        assert not violations, f"slot rewritten while its group was live: {violations}"
+        assert engine._inflight == {}
+
+    def test_distinct_live_groups_never_share_a_slot(
+        self, server_factory, gather_engine
+    ):
+        server = server_factory(gather_lookahead=1)
+        engine = gather_engine(server, 6, lookahead=1)
+        seen: list[dict] = []
+        orig_pack = engine._pack_group_for_export
+
+        def _pack(held, slot_idx):
+            live = {
+                g: s for g, s in engine._slot_of_group.items() if g in engine._inflight
+            }
+            seen.append({"slot": slot_idx, "live": live})
+            return orig_pack(held, slot_idx)
+
+        engine._pack_group_for_export = _pack
+
+        def _consumer():
+            for gi in range(6):
+                if not self._await_published(server, gi):
+                    return
+                server.free_group(gi)
+
+        consumer = threading.Thread(target=_consumer, daemon=True)
+        consumer.start()
+        engine._run_gather_loop(update_future=None, live_count=1)
+        consumer.join(timeout=15)
+
+        assert seen, "no group was ring-packed; the test proves nothing"
+        for rec in seen:
+            assert rec["slot"] not in rec["live"].values(), rec
