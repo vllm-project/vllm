@@ -1107,7 +1107,7 @@ sentry-sdk==2.63.0
     # via fastapi-cloud-cli
 setproctitle==1.3.7
     # via -r requirements/test/../common.txt
-setuptools==77.0.3
+setuptools==78.1.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt

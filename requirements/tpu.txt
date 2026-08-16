@@ -9,7 +9,7 @@ wheel
 jinja2>=3.1.6
 ray[default]
 ray[data]
-setuptools==78.1.0
+setuptools==78.1.1
 setuptools-rust>=1.9.0
 nixl==0.3.0
 tpu-inference==0.26.0
