@@ -24,6 +24,10 @@ class VitCudagraphTestConfig:
     max_model_len: int = 4096
     max_tokens: int = 64
     max_num_seqs: int = 2
+    # Encoder CUDA graphs are captured after the KV cache is sized, and MRV2's
+    # profile_cudagraph_memory() reserves nothing for them, so they have to fit
+    # in whatever the utilization fraction leaves unclaimed.
+    gpu_memory_utilization: float = 0.85
     num_video_frames: int = 16
     needs_video_metadata: bool = False
     vllm_runner_kwargs: dict = field(default_factory=dict)
@@ -331,6 +335,7 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
         max_model_len=config.max_model_len,
         max_num_seqs=config.max_num_seqs,
         limit_mm_per_prompt={"image": 1},
+        gpu_memory_utilization=config.gpu_memory_utilization,
         compilation_config=get_compilation_config(config),
         **config.vllm_runner_kwargs,
     ) as vllm_model:
@@ -386,6 +391,7 @@ def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
         max_model_len=config.max_model_len,
         max_num_seqs=config.max_num_seqs,
         limit_mm_per_prompt={"video": 1},
+        gpu_memory_utilization=config.gpu_memory_utilization,
         compilation_config=get_compilation_config(config),
         **config.vllm_runner_kwargs,
     ) as vllm_model:
