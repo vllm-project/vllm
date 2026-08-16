@@ -9,6 +9,7 @@ vLLM's parallel linear layers, MLA kernel, KDA kernel and fused MoE loader.
 """
 
 import copy
+import weakref
 from collections.abc import Callable, Iterable
 from math import lcm
 from typing import TypeGuard
@@ -20,6 +21,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from transformers.configuration_utils import PretrainedConfig
 
+from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -52,6 +54,9 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
+)
+from vllm.model_executor.layers.mamba.ops.kda_decode import (
+    is_fused_kda_decode_supported,
 )
 from vllm.model_executor.layers.mla import (
     MLAModules,
@@ -135,6 +140,45 @@ direct_register_custom_op(
 )
 
 
+def bailing_v3_fused_kda_attention(
+    mixed_qkv: torch.Tensor,
+    raw_g: torch.Tensor,
+    raw_beta: torch.Tensor,
+    output_gate: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+) -> None:
+    """Use fused KDA decode when possible, otherwise run the original path."""
+    forward_context: ForwardContext = get_forward_context()
+    layer = forward_context.no_compile_layers[layer_name]
+    layer._forward_fused_kda(
+        mixed_qkv=mixed_qkv,
+        raw_g=raw_g,
+        raw_beta=raw_beta,
+        output_gate=output_gate,
+        core_attn_out=core_attn_out,
+    )
+
+
+def bailing_v3_fused_kda_attention_fake(
+    mixed_qkv: torch.Tensor,
+    raw_g: torch.Tensor,
+    raw_beta: torch.Tensor,
+    output_gate: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="bailing_v3_fused_kda_attention",
+    op_func=bailing_v3_fused_kda_attention,
+    mutates_args=["core_attn_out"],
+    fake_impl=bailing_v3_fused_kda_attention_fake,
+)
+
+
 def _is_kda_layer(
     layer_idx: int, layer_group_size: int, num_hidden_layers: int
 ) -> bool:
@@ -202,6 +246,39 @@ def _load_a_log(param: torch.nn.Parameter, loaded_weight: torch.Tensor) -> None:
         param.data.copy_(shard.view_as(param.data))
     else:
         sharded_weight_loader(2)(param, loaded_weight)
+
+
+def _make_decode_conv1d_weight_loader(
+    layer_ref: weakref.ReferenceType,
+    shard_id: int,
+    base_loader: Callable[[torch.Tensor, torch.Tensor], None],
+) -> Callable[[torch.Tensor, torch.Tensor], None]:
+    def weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        base_loader(param, loaded_weight)
+        layer = layer_ref()
+        if layer is None or param.is_meta:
+            return
+        decode_conv1d_weight = layer.decode_conv1d_weight
+        if decode_conv1d_weight is not None and not decode_conv1d_weight.is_meta:
+            decode_conv1d_weight[shard_id].copy_(param.data.squeeze(1).transpose(0, 1))
+
+    return weight_loader
+
+
+def _make_decode_norm_weight_loader(
+    layer_ref: weakref.ReferenceType,
+    base_loader: Callable[[torch.Tensor, torch.Tensor], None],
+) -> Callable[[torch.Tensor, torch.Tensor], None]:
+    def weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        base_loader(param, loaded_weight)
+        layer = layer_ref()
+        if layer is None or param.is_meta:
+            return
+        decode_norm_weight = layer.decode_norm_weight
+        if decode_norm_weight is not None and not decode_norm_weight.is_meta:
+            decode_norm_weight.copy_(param.data.float())
+
+    return weight_loader
 
 
 def _is_block_fp8_config(
@@ -713,6 +790,53 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
         self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
         self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
 
+        self.use_fused_kda_decode = False
+        decode_conv1d_weight = None
+        if (
+            self.local_num_heads == 32
+            and self.model_config is not None
+            and self.cache_config is not None
+        ):
+            conv_state_dtype, _ = self.get_state_dtype()
+            self.use_fused_kda_decode = is_fused_kda_decode_supported(
+                self.local_num_heads,
+                self.head_dim,
+                self.conv_size,
+                self.num_speculative_tokens,
+                self.model_config.dtype,
+                conv_state_dtype,
+            )
+            if self.use_fused_kda_decode:
+                decode_conv1d_weight = torch.empty(
+                    3,
+                    self.conv_size,
+                    self.projection_size_per_partition,
+                    dtype=self.q_conv1d.weight.dtype,
+                    device=self.q_conv1d.weight.device,
+                )
+        self.decode_conv1d_weight: torch.Tensor | None
+        self.register_buffer(
+            "decode_conv1d_weight", decode_conv1d_weight, persistent=False
+        )
+        if decode_conv1d_weight is not None:
+            layer_ref = weakref.ref(self)
+            for shard_id, conv1d in enumerate(
+                (self.q_conv1d, self.k_conv1d, self.v_conv1d)
+            ):
+                base_loader = getattr(
+                    conv1d.weight, "weight_loader", default_weight_loader
+                )
+                if hasattr(conv1d.weight, "weight_loader"):
+                    delattr(conv1d.weight, "weight_loader")
+                set_weight_attrs(
+                    conv1d.weight,
+                    {
+                        "weight_loader": _make_decode_conv1d_weight_loader(
+                            layer_ref, shard_id, base_loader
+                        )
+                    },
+                )
+
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
         )
@@ -728,6 +852,30 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
         self.o_norm = FusedRMSNormGated(
             self.head_dim, eps=config.rms_norm_eps, activation="sigmoid"
         )
+        decode_norm_weight = None
+        if decode_conv1d_weight is not None:
+            decode_norm_weight = torch.empty(
+                self.head_dim,
+                dtype=torch.float32,
+                device=self.o_norm.weight.device,
+            )
+        self.decode_norm_weight: torch.Tensor | None
+        self.register_buffer("decode_norm_weight", decode_norm_weight, persistent=False)
+        if decode_norm_weight is not None:
+            layer_ref = weakref.ref(self)
+            base_loader = getattr(
+                self.o_norm.weight, "weight_loader", default_weight_loader
+            )
+            if hasattr(self.o_norm.weight, "weight_loader"):
+                delattr(self.o_norm.weight, "weight_loader")
+            set_weight_attrs(
+                self.o_norm.weight,
+                {
+                    "weight_loader": _make_decode_norm_weight_loader(
+                        layer_ref, base_loader
+                    )
+                },
+            )
         self.o_proj = RowParallelLinear(
             projection_size,
             self.hidden_size,
@@ -740,12 +888,60 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
-        splitting_op = "vllm::bailing_v3_kda_attention"
+        splitting_ops = ["vllm::bailing_v3_kda_attention"]
+        if self.use_fused_kda_decode:
+            splitting_ops.append("vllm::bailing_v3_fused_kda_attention")
+        if compilation_config.splitting_ops is not None:
+            for splitting_op in splitting_ops:
+                if splitting_op not in compilation_config.splitting_ops:
+                    compilation_config.splitting_ops.append(splitting_op)
+
+    @torch.no_grad()
+    def refresh_fused_kda_decode_weights(self) -> None:
+        """Refresh non-persistent fused-decode buffers from loaded weights."""
+        if not self.use_fused_kda_decode:
+            return
+
+        decode_conv1d_weight = self.decode_conv1d_weight
+        decode_norm_weight = self.decode_norm_weight
+        conv1d_weights = (
+            self.q_conv1d.weight,
+            self.k_conv1d.weight,
+            self.v_conv1d.weight,
+        )
         if (
-            compilation_config.splitting_ops is not None
-            and splitting_op not in compilation_config.splitting_ops
+            any(weight.is_meta for weight in conv1d_weights)
+            or self.o_norm.weight.is_meta
         ):
-            compilation_config.splitting_ops.append(splitting_op)
+            return
+
+        if decode_conv1d_weight is None or decode_conv1d_weight.is_meta:
+            decode_conv1d_weight = torch.empty(
+                3,
+                self.conv_size,
+                self.projection_size_per_partition,
+                dtype=conv1d_weights[0].dtype,
+                device=conv1d_weights[0].device,
+            )
+            self.decode_conv1d_weight = decode_conv1d_weight
+        if decode_norm_weight is None or decode_norm_weight.is_meta:
+            decode_norm_weight = torch.empty(
+                self.head_dim,
+                dtype=torch.float32,
+                device=self.o_norm.weight.device,
+            )
+            self.decode_norm_weight = decode_norm_weight
+
+        for shard_id, conv1d_weight in enumerate(conv1d_weights):
+            decode_conv1d_weight[shard_id].copy_(
+                conv1d_weight.data.squeeze(1).transpose(0, 1)
+            )
+        decode_norm_weight.copy_(self.o_norm.weight.data.float())
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        """Refresh fused-decode weights after initial or layerwise loading."""
+        del act_dtype
+        self.refresh_fused_kda_decode_weights()
 
     def forward(
         self,
@@ -755,6 +951,40 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
     ) -> None:
         del positions
         num_tokens = hidden_states.size(0)
+        if self.use_fused_kda_decode:
+            if self.separate_b_proj:
+                assert self.qkv_proj is not None and self.b_proj is not None
+                mixed_qkv = self.qkv_proj(hidden_states)[0]
+                beta_logits = self.b_proj(hidden_states)[0]
+            else:
+                assert self.qkvb_proj is not None
+                qkvb = self.qkvb_proj(hidden_states)[0]
+                mixed_qkv = qkvb[:, : 3 * self.projection_size_per_partition]
+                beta_logits = qkvb[:, 3 * self.projection_size_per_partition :]
+            raw_g = self.f_proj(hidden_states)[0]
+            output_gate = rearrange(
+                self.g_proj(hidden_states)[0],
+                "... (h d) -> ... h d",
+                d=self.head_dim,
+            )
+
+            core_attn_out = torch.zeros(
+                (1, num_tokens, self.local_num_heads, self.head_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            torch.ops.vllm.bailing_v3_fused_kda_attention(
+                mixed_qkv,
+                raw_g,
+                beta_logits.unsqueeze(0),
+                output_gate,
+                core_attn_out,
+                self.prefix,
+            )
+            core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
+            output[:] = self.o_proj(core_attn_out)[0]
+            return
+
         if self.separate_b_proj:
             assert self.qkv_proj is not None and self.b_proj is not None
             qkv = self.qkv_proj(hidden_states)[0]
@@ -797,6 +1027,81 @@ class BailingMoeV3KimiDeltaAttention(PluggableLayer, MambaBase):
         core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
+
+    def _forward_fused_kda(
+        self,
+        mixed_qkv: torch.Tensor,
+        raw_g: torch.Tensor,
+        raw_beta: torch.Tensor,
+        output_gate: torch.Tensor,
+        core_attn_out: torch.Tensor,
+    ) -> None:
+        forward_context = get_forward_context()
+        attn_metadata_map = forward_context.attn_metadata
+        if attn_metadata_map is None:
+            return
+
+        assert isinstance(attn_metadata_map, dict)
+        attn_metadata = attn_metadata_map[self.prefix]
+        assert isinstance(attn_metadata, GDNAttentionMetadata)
+        state_indices = attn_metadata.non_spec_state_indices_tensor
+        spec_sequence_masks = attn_metadata.spec_sequence_masks
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        conv_state, recurrent_state = self.kv_cache
+        recurrent_state_active = recurrent_state[..., : self.head_dim]
+        if not is_conv_state_dim_first():
+            conv_state = conv_state.transpose(-1, -2)
+
+        if (
+            spec_sequence_masks is None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes > 0
+        ):
+            assert self.decode_conv1d_weight is not None
+            assert self.decode_norm_weight is not None
+            assert state_indices is not None
+            ops.fused_kda_decode(
+                x=mixed_qkv[:num_actual_tokens],
+                weight=self.decode_conv1d_weight,
+                bias=None,
+                conv_state=conv_state,
+                raw_g=raw_g[:num_actual_tokens].view(
+                    1, num_actual_tokens, self.local_num_heads, self.head_dim
+                ),
+                raw_beta=raw_beta[:, :num_actual_tokens],
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                state_indices=state_indices[:num_actual_tokens].contiguous(),
+                state=recurrent_state_active,
+                out=core_attn_out[:, :num_actual_tokens],
+                lower_bound=self.lower_bound if self.safe_gate else None,
+                output_gate=output_gate[:num_actual_tokens],
+                norm_weight=self.decode_norm_weight,
+                norm_eps=self.o_norm.eps,
+            )
+            return
+
+        q_proj_states, k_proj_states, v_proj_states = mixed_qkv.split(
+            self.projection_size_per_partition, dim=-1
+        )
+        g1 = fused_kda_gate(
+            raw_g,
+            self.A_log,
+            self.head_dim,
+            g_bias=self.dt_bias,
+            lower_bound=self.lower_bound if self.safe_gate else None,
+        ).unsqueeze(0)
+        beta = raw_beta.float().sigmoid()
+
+        self._forward(
+            q_proj_states=q_proj_states,
+            k_proj_states=k_proj_states,
+            v_proj_states=v_proj_states,
+            g1=g1,
+            beta=beta,
+            core_attn_out=core_attn_out,
+        )
+        core_attn_out.copy_(self.o_norm(core_attn_out, output_gate))
 
     def _forward(
         self,

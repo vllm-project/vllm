@@ -6,6 +6,8 @@ Compares chunk_kda against a naive recurrent reference (float32).
 Uses torch.rand for q/k/v to match FLA's test pattern.
 """
 
+from dataclasses import dataclass
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -535,6 +537,7 @@ def test_kda_spec_decode_correctness(
         (12, 1, -5.0, True),
         (12, 4, None, False),
         (24, 4, None, False),
+        (32, 4, -5.0, True),
         (48, 1, -5.0, True),
         (96, 1, -5.0, True),
     ],
@@ -683,6 +686,235 @@ def test_fused_kda_decode_correctness(
     torch.testing.assert_close(actual, expected, atol=3e-2, rtol=3e-2)
     torch.testing.assert_close(conv_actual, conv_ref, atol=0, rtol=0)
     torch.testing.assert_close(state_actual, state_ref, atol=3e-2, rtol=3e-2)
+
+
+@dataclass(frozen=True)
+class _FusedKdaDecodeCase:
+    x: torch.Tensor
+    conv_weight: torch.Tensor
+    fused_weight: torch.Tensor
+    raw_g: torch.Tensor
+    raw_beta: torch.Tensor
+    output_gate: torch.Tensor
+    a_log: torch.Tensor
+    dt_bias: torch.Tensor
+    norm_weight: torch.Tensor
+    state_indices: torch.Tensor
+    conv_seed: torch.Tensor
+    state_seed: torch.Tensor
+    norm_eps: float = 1e-5
+    lower_bound: float = -5.0
+
+
+def _make_fused_kda_decode_case(
+    *,
+    num_steps: int,
+    slots: int,
+    state_indices: list[int],
+    seed: int,
+) -> _FusedKdaDecodeCase:
+    num_heads, head_dim, conv_width = 32, 128, 4
+    if not is_fused_kda_decode_supported(
+        num_heads,
+        head_dim,
+        conv_width,
+        num_spec=0,
+        input_dtype=torch.bfloat16,
+        conv_state_dtype=torch.bfloat16,
+    ):
+        pytest.skip("Fused KDA decode is not supported on this platform")
+
+    torch.manual_seed(seed)
+    dim = num_heads * head_dim
+    num_rows = len(state_indices)
+
+    def randn(*shape: int, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
+        return torch.randn(*shape, dtype=dtype, device=DEVICE)
+
+    conv_weight = 0.1 * randn(3 * dim, conv_width, dtype=torch.float32)
+    a_log = (0.5 * randn(num_heads, dtype=torch.float32)).contiguous()
+    dt_bias = (0.1 * randn(dim, dtype=torch.float32)).contiguous()
+    conv_seed = (0.1 * randn(slots, conv_width - 1, 3 * dim)).transpose(1, 2)
+    return _FusedKdaDecodeCase(
+        x=randn(num_steps, num_rows, 3 * dim),
+        conv_weight=conv_weight,
+        fused_weight=conv_weight.reshape(3, dim, conv_width)
+        .transpose(1, 2)
+        .contiguous(),
+        raw_g=randn(num_steps, 1, num_rows, num_heads, head_dim),
+        raw_beta=randn(num_steps, 1, num_rows, num_heads),
+        output_gate=randn(num_steps, num_rows, num_heads, head_dim),
+        a_log=a_log,
+        dt_bias=dt_bias,
+        norm_weight=randn(head_dim, dtype=torch.float32),
+        state_indices=torch.tensor(state_indices, dtype=torch.int32, device=DEVICE),
+        conv_seed=conv_seed,
+        state_seed=0.01
+        * randn(slots, num_heads, head_dim, head_dim, dtype=torch.float32),
+    )
+
+
+def _run_fused_kda_decode_reference(
+    case: _FusedKdaDecodeCase,
+    active_rows: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if active_rows is None:
+        active_rows = torch.arange(
+            case.state_indices.numel(), dtype=torch.long, device=DEVICE
+        )
+    state_indices = case.state_indices.index_select(0, active_rows)
+    conv_state = case.conv_seed.clone()
+    state = case.state_seed.clone()
+    outputs = torch.zeros_like(case.raw_g)
+
+    for step in range(case.x.shape[0]):
+        x = case.x[step].index_select(0, active_rows)
+        mixed_qkv = causal_conv1d_update(
+            x,
+            conv_state,
+            case.conv_weight,
+            activation="silu",
+            conv_state_indices=state_indices,
+            validate_data=True,
+            out=torch.empty_like(x),
+        )
+        output, _ = fused_recurrent_kda_packed_decode(
+            mixed_qkv=mixed_qkv,
+            raw_g=case.raw_g[step].index_select(1, active_rows),
+            raw_beta=case.raw_beta[step].index_select(1, active_rows),
+            A_log=case.a_log,
+            dt_bias=case.dt_bias,
+            lower_bound=case.lower_bound,
+            initial_state=state,
+            state_indices=state_indices,
+        )
+        output_float = output.float()
+        output = (
+            output_float
+            * torch.rsqrt(
+                output_float.square().mean(dim=-1, keepdim=True) + case.norm_eps
+            )
+            * case.norm_weight
+            * case.output_gate[step]
+            .index_select(0, active_rows)
+            .float()
+            .sigmoid()
+            .unsqueeze(0)
+        ).to(output.dtype)
+        outputs[step].index_copy_(1, active_rows, output)
+    return outputs, conv_state, state
+
+
+def _run_fused_kda_decode_steps(
+    case: _FusedKdaDecodeCase,
+    conv_state: torch.Tensor,
+    state: torch.Tensor,
+    outputs: torch.Tensor,
+) -> None:
+    for step in range(case.x.shape[0]):
+        ops.fused_kda_decode(
+            x=case.x[step],
+            weight=case.fused_weight,
+            bias=None,
+            conv_state=conv_state,
+            raw_g=case.raw_g[step],
+            raw_beta=case.raw_beta[step],
+            A_log=case.a_log,
+            dt_bias=case.dt_bias,
+            state_indices=case.state_indices,
+            state=state,
+            out=outputs[step],
+            lower_bound=case.lower_bound,
+            output_gate=case.output_gate[step],
+            norm_weight=case.norm_weight,
+            norm_eps=case.norm_eps,
+        )
+
+
+@torch.inference_mode()
+def test_fused_kda_decode_h32_skips_padded_rows():
+    case = _make_fused_kda_decode_case(
+        num_steps=1,
+        slots=4,
+        state_indices=[2, 0, 1, 0],
+        seed=3200,
+    )
+    valid_rows = torch.tensor([0, 2], dtype=torch.long, device=DEVICE)
+    padded_rows = torch.tensor([1, 3], dtype=torch.long, device=DEVICE)
+    expected, conv_ref, state_ref = _run_fused_kda_decode_reference(case, valid_rows)
+
+    conv_actual = case.conv_seed.clone()
+    state_actual = case.state_seed.clone()
+    actual = torch.full_like(case.raw_g, torch.nan)
+    _run_fused_kda_decode_steps(case, conv_actual, state_actual, actual)
+
+    torch.testing.assert_close(
+        actual[0].index_select(1, valid_rows),
+        expected[0].index_select(1, valid_rows),
+        atol=3e-2,
+        rtol=3e-2,
+    )
+    torch.testing.assert_close(
+        actual[0].index_select(1, padded_rows),
+        torch.zeros_like(actual[0].index_select(1, padded_rows)),
+        atol=0,
+        rtol=0,
+    )
+    torch.testing.assert_close(conv_actual, conv_ref, atol=0, rtol=0)
+    torch.testing.assert_close(state_actual, state_ref, atol=3e-2, rtol=3e-2)
+    torch.testing.assert_close(conv_actual[0], case.conv_seed[0], atol=0, rtol=0)
+    torch.testing.assert_close(state_actual[0], case.state_seed[0], atol=0, rtol=0)
+
+
+@torch.inference_mode()
+def test_fused_kda_decode_h32_multistep_cudagraph_replay():
+    """Exercise Ling's H=32 decode shape across repeated updates to one slot."""
+    case = _make_fused_kda_decode_case(
+        num_steps=4,
+        slots=3,
+        state_indices=[1],
+        seed=3204,
+    )
+    expected, conv_ref, state_ref = _run_fused_kda_decode_reference(case)
+    conv_eager = case.conv_seed.clone()
+    state_eager = case.state_seed.clone()
+    eager_outputs = torch.empty_like(case.raw_g)
+    _run_fused_kda_decode_steps(case, conv_eager, state_eager, eager_outputs)
+
+    torch.testing.assert_close(eager_outputs, expected, atol=3e-2, rtol=3e-2)
+    torch.testing.assert_close(conv_eager, conv_ref, atol=0, rtol=0)
+    torch.testing.assert_close(state_eager, state_ref, atol=4e-2, rtol=4e-2)
+
+    conv_graph = case.conv_seed.clone()
+    state_graph = case.state_seed.clone()
+    graph_outputs = torch.empty_like(eager_outputs)
+    graph = torch.cuda.CUDAGraph()
+    torch.accelerator.synchronize()
+    with torch.cuda.graph(graph):
+        _run_fused_kda_decode_steps(case, conv_graph, state_graph, graph_outputs)
+
+    conv_graph.copy_(case.conv_seed)
+    state_graph.copy_(case.state_seed)
+    graph_outputs.fill_(torch.nan)
+    graph.replay()
+    torch.accelerator.synchronize()
+    first_outputs = graph_outputs.clone()
+    first_conv_state = conv_graph.clone()
+    first_kda_state = state_graph.clone()
+
+    torch.testing.assert_close(first_outputs, eager_outputs, atol=0, rtol=0)
+    torch.testing.assert_close(first_conv_state, conv_eager, atol=0, rtol=0)
+    torch.testing.assert_close(first_kda_state, state_eager, atol=0, rtol=0)
+
+    conv_graph.copy_(case.conv_seed)
+    state_graph.copy_(case.state_seed)
+    graph_outputs.fill_(torch.nan)
+    graph.replay()
+    torch.accelerator.synchronize()
+
+    torch.testing.assert_close(graph_outputs, first_outputs, atol=0, rtol=0)
+    torch.testing.assert_close(conv_graph, first_conv_state, atol=0, rtol=0)
+    torch.testing.assert_close(state_graph, first_kda_state, atol=0, rtol=0)
 
 
 def test_fused_kda_decode_rejects_speculative_conv_state():
