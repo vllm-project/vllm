@@ -29,6 +29,9 @@ class _TestReplaySSMMixer(MambaMixer2):
         self.cache_config = SimpleNamespace(mamba_cache_mode="none")
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
+        self._updates_replayssm_trackers = True
+        self._replayssm_ring_starts_to_update = None
+        self._replayssm_prev_num_accepted_to_update = None
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         return self._state_shapes
@@ -82,6 +85,34 @@ def test_bind_kv_cache_recreates_replayssm_tracker_sidecars():
         mixer._replayssm_prev_num_accepted.data_ptr()
         != old_prev_num_accepted.data_ptr()
     )
+
+
+def test_bind_kv_cache_batches_replayssm_tracker_updates():
+    mixers = [_TestReplaySSMMixer() for _ in range(3)]
+    layer_names = [f"layers.{i}.mixer" for i in range(3)]
+    ctx = dict(zip(layer_names, mixers))
+    kv_cache = {
+        layer_name: _packed_replayssm_cache(4) for layer_name in layer_names
+    }
+
+    bind_kv_cache(kv_cache, ctx, [])
+
+    assert len({m._replayssm_ring_start.data_ptr() for m in mixers}) == 3
+    assert len({m._replayssm_prev_num_accepted.data_ptr() for m in mixers}) == 3
+    ring_starts = mixers[-1]._replayssm_ring_starts_to_update
+    prev_num_accepted = mixers[-1]._replayssm_prev_num_accepted_to_update
+    assert ring_starts is not None
+    assert prev_num_accepted is not None
+    assert ring_starts.shape == (3, 4)
+    assert prev_num_accepted.shape == (3, 4)
+    for layer_index, mixer in enumerate(mixers):
+        assert mixer._replayssm_ring_start.data_ptr() == ring_starts[
+            layer_index
+        ].data_ptr()
+        assert mixer._replayssm_prev_num_accepted.data_ptr() == prev_num_accepted[
+            layer_index
+        ].data_ptr()
+    assert [m._updates_replayssm_trackers for m in mixers] == [False, False, True]
 
 
 def test_bind_kv_cache(default_vllm_config):
