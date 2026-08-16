@@ -784,13 +784,38 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
             raise RuntimeError(
                 "Compressed sparse MLA decode requires compressed sparse indices."
             )
+        # flashinfer's dsv4 decode API expects query as
+        # [batch, q_len_per_request, heads, 512]. With speculative decoding
+        # (next_n = k+1 tokens per request) a flattened [tokens, heads, 512]
+        # is ambiguous: flashinfer's normalizer misroutes it to the varlen
+        # prefill kernel, whose SM120 build asserts num_tokens > 64
+        # ("Decode ... must go through sparse_mla_sm120_decode_dsv4").
+        out_arg = output
+        if num_decodes > 0 and num_decode_tokens > num_decodes:
+            assert num_decode_tokens % num_decodes == 0, (
+                f"ragged spec decode batch: {num_decode_tokens} tokens over "
+                f"{num_decodes} requests"
+            )
+            next_n = num_decode_tokens // num_decodes
+            q = q.view(num_decodes, next_n, *q.shape[1:])
+            out_arg = output.view(num_decodes, next_n, *output.shape[1:])
+            # Companion tensors must match the [batch, next_n, ...] layout the
+            # 4-D query implies (flashinfer validates indices against it).
+            swa_indices = swa_indices.reshape(num_decodes, next_n, -1)
+            swa_lens = swa_lens.reshape(num_decodes, next_n)
+            if extra_sparse_indices is not None:
+                extra_sparse_indices = extra_sparse_indices.reshape(
+                    num_decodes, next_n, -1
+                )
+            if extra_sparse_lengths is not None:
+                extra_sparse_lengths = extra_sparse_lengths.reshape(num_decodes, next_n)
         flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
             query=q,
             swa_kv_cache=swa_cache,
             workspace_buffer=self._get_workspace(q.device),
             sparse_indices=swa_indices,
             compressed_kv_cache=extra_cache,
-            out=output,
+            out=out_arg,
             bmm1_scale=self.scale,
             sinks=self.attn_sink,
             kv_layout="NHD",
@@ -898,12 +923,59 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
             )
 
             q_chunk = q[query_start:query_end]
+            if q_chunk.shape[0] == 0:
+                # Empty chunk (zero-token span in query_start_loc): the
+                # flashinfer sparse kernel crashes reshaping 0 elements.
+                continue
             swa_indices_chunk = swa_metadata.prefill_swa_indices[query_start:query_end]
             swa_lens_chunk = swa_metadata.prefill_swa_lens[query_start:query_end]
             if extra_kv_paged is not None and extra_sparse_indices_chunk is None:
                 raise RuntimeError(
                     "Compressed sparse MLA prefill requires compressed sparse indices."
                 )
+            if q_chunk.shape[0] <= 64:
+                # SM120's sparse prefill kernel asserts num_tokens > 64.
+                # Small segments (the DSpark draft's k-token pass, short
+                # chunked-prefill tails) must use the uniform decode-form
+                # [1, q_len, ...] call, which flashinfer routes to its
+                # sparse_mla_sm120_decode_dsv4 kernels (q_len <= 64 legal).
+                for ri in range(chunk_start, chunk_end):
+                    rs = int(query_start_loc_cpu[num_decodes + ri] - prefill_token_base)
+                    re_ = int(
+                        query_start_loc_cpu[num_decodes + ri + 1] - prefill_token_base
+                    )
+                    if re_ <= rs:
+                        continue
+                    ql = re_ - rs
+                    esi = (
+                        extra_sparse_indices[rs:re_].reshape(1, ql, -1)
+                        if extra_sparse_indices is not None
+                        else None
+                    )
+                    esl = (
+                        extra_sparse_lengths[rs:re_].reshape(1, ql)
+                        if extra_sparse_lengths is not None
+                        else None
+                    )
+                    flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
+                        query=q[rs:re_].reshape(1, ql, *q.shape[1:]),
+                        swa_kv_cache=swa_kv_paged,
+                        workspace_buffer=self._get_workspace(q.device),
+                        sparse_indices=swa_metadata.prefill_swa_indices[rs:re_].reshape(
+                            1, ql, -1
+                        ),
+                        compressed_kv_cache=extra_kv_paged,
+                        out=output[rs:re_].reshape(1, ql, *output.shape[1:]),
+                        bmm1_scale=self.scale,
+                        sinks=self.attn_sink,
+                        kv_layout="NHD",
+                        swa_topk_lens=swa_metadata.prefill_swa_lens[rs:re_].reshape(
+                            1, ql
+                        ),
+                        extra_sparse_indices=esi,
+                        extra_sparse_topk_lens=esl,
+                    )
+                continue
             flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
                 query=q_chunk,
                 swa_kv_cache=swa_kv_paged,
