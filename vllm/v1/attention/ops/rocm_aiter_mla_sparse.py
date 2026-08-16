@@ -563,21 +563,14 @@ def rocm_fp8_mqa_logits(
         Logits tensor of shape [M, N], dtype `torch.float32`.
     """
 
-    # TODO(ganyi): Temporarily workaround, will remove the module check and reference
-    # path after aiter merge this kernel into main
     from vllm._aiter_ops import rocm_aiter_ops
 
     k_fp8, scale = kv
 
-    # Temporarily route gfx942 to the vendored ROCm/aiter#3257 workaround.
-    # Remove this branch once vLLM bumps AITER to a version that includes
-    # ROCm/aiter#3257.
     if _ON_GFX942 and rocm_aiter_ops.is_enabled():
-        from vllm.v1.attention.ops.triton_fp8_mqa_logits import (
-            fp8_mqa_logits_gfx942,
-        )
+        from aiter.ops.flydsl import flydsl_fp8_mqa_logits
 
-        return fp8_mqa_logits_gfx942(
+        return flydsl_fp8_mqa_logits(
             q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke
         )
 
