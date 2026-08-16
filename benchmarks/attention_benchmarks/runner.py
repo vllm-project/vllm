@@ -45,7 +45,7 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
-    layer_kv_cache_strides,
+    compute_layout_strides,
     reshape_kv_cache,
 )
 
@@ -364,7 +364,7 @@ def _create_kv_cache(
         * config.num_layers
     )
     buf = torch.zeros(total_bytes, device=device, dtype=torch.int8)
-    layer_stride, block_stride = layer_kv_cache_strides(
+    layer_stride, block_stride, _, _, _ = compute_layout_strides(
         spec, max_num_blocks, config.num_layers, layout
     )
     return reshape_kv_cache(

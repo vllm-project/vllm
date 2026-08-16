@@ -1001,6 +1001,21 @@ class NixlBaseConnectorWorker:
         seen_storage_addresses: set[int] = set()
         seen_base_addresses: list[int] = []
 
+        # DSv4-style packed allocation: every layer is a distinct strided view
+        # into one block-major storage, so a block's bytes are a single
+        # contiguous row spanning all layers. Registering that row as one
+        # region keeps transfers at one descriptor per block instead of one per
+        # (layer, block). Models whose layers sit in separate allocations
+        # already get one region per layer, and Mamba layers register their own
+        # conv/ssm sub-regions, so both keep the per-layer path.
+        storage_ptrs = {
+            cache.untyped_storage().data_ptr() for cache in xfer_buffers.values()
+        }
+        data_ptrs = {cache.data_ptr() for cache in xfer_buffers.values()}
+        packed_storage = (
+            not self._has_mamba and len(storage_ptrs) == 1 and len(data_ptrs) > 1
+        )
+
         # K and V are packed into the content dim, so each attention layer is a
         # single NIXL region whose block transfers as one unit. Mamba layers
         # instead register separate conv/ssm sub-regions.
@@ -1070,12 +1085,16 @@ class NixlBaseConnectorWorker:
                 else:
                     block_stride = cache.stride(0) * cache.element_size()
                 storage_is_block_major = num_blocks * block_stride == storage.nbytes()
+                # A layer whose [H, N, C] interior is dense addresses its own
+                # page as one chunk, so it can own a region. When it does not,
+                # or when every layer is packed into this one storage, the
+                # block's whole row is the only contiguous unit.
                 hnc_contiguous = (
                     cache.ndim == 4
                     and cache.stride(2) == cache.shape[3]
                     and cache.stride(1) == cache.shape[2] * cache.shape[3]
                 )
-                if storage_is_block_major and not hnc_contiguous:
+                if storage_is_block_major and (packed_storage or not hnc_contiguous):
                     storage_block_len = storage.nbytes() // num_blocks
                     region_specs = [
                         (storage_addr, storage_block_len, storage_block_len)
