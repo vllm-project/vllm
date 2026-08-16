@@ -478,3 +478,26 @@ def test_kv_cache_dtype_skip_layers(vllm_runner, monkeypatch):
                 assert layer.self_attn.attn.kv_cache_dtype == expected
 
         llm.apply_model(check_layers)
+
+
+def test_validate_fp8_block_shape():
+    """Test validate_fp8_block_shape validation rules for tensor parallel shapes."""
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        validate_fp8_block_shape,
+    )
+
+    layer = torch.nn.Module()
+    layer.tp_size = 2
+
+    # Should raise ValueError when input_size_per_partition is not divisible by block_k
+    with pytest.raises(
+        ValueError, match="is not divisible by weight quantization block_k"
+    ):
+        validate_fp8_block_shape(
+            layer=layer,
+            input_size=200,
+            output_size=512,
+            input_size_per_partition=100,
+            output_partition_sizes=[256],
+            block_size=[128, 64],  # 100 % 64 != 0 -> raises ValueError
+        )

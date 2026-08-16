@@ -1209,7 +1209,9 @@ def validate_fp8_block_shape(
         )
         return
 
-    tp_size = getattr(layer, "tp_size", get_tensor_model_parallel_world_size())
+    tp_size = getattr(layer, "tp_size", None)
+    if tp_size is None:
+        tp_size = get_tensor_model_parallel_world_size()
     block_n, block_k = block_size[0], block_size[1]
 
     # Required by row parallel
