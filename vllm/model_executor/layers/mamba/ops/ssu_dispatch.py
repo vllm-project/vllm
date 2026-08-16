@@ -75,17 +75,20 @@ def _update_replayssm_ring_trackers_kernel(
     prev_num_accepted,
     state_batch_indices,
     n_slots,
+    tracker_stride,
     logical_window: tl.constexpr,
     ring_buffer_len: tl.constexpr,
     pad_slot_id: tl.constexpr,
     BLOCK: tl.constexpr,
 ) -> None:
     offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    tracker_offset = tl.program_id(1) * tracker_stride
     mask = offsets < n_slots
     slots = tl.load(state_batch_indices + offsets, mask=mask, other=pad_slot_id)
     valid = mask & (slots != pad_slot_id)
-    prev = tl.load(prev_num_accepted + slots, mask=valid, other=0)
-    start = tl.load(ring_start + slots, mask=valid, other=0)
+    tracker_slots = tracker_offset + slots
+    prev = tl.load(prev_num_accepted + tracker_slots, mask=valid, other=0)
+    start = tl.load(ring_start + tracker_slots, mask=valid, other=0)
     must_checkpoint = prev + 1 > logical_window
     next_start = tl.where(
         must_checkpoint,
@@ -93,8 +96,8 @@ def _update_replayssm_ring_trackers_kernel(
         start,
     )
     next_prev = tl.where(must_checkpoint, 1, prev + 1)
-    tl.store(ring_start + slots, next_start, mask=valid)
-    tl.store(prev_num_accepted + slots, next_prev, mask=valid)
+    tl.store(ring_start + tracker_slots, next_start, mask=valid)
+    tl.store(prev_num_accepted + tracker_slots, next_prev, mask=valid)
 
 
 @triton.jit
@@ -121,16 +124,27 @@ def update_replayssm_ring_trackers(
     logical_window: int,
     pad_slot_id: int = NULL_BLOCK_ID,
 ) -> None:
+    if ring_start.shape != prev_num_accepted.shape:
+        raise ValueError("ReplaySSM tracker tensors must have matching shapes")
+    if ring_start.dim() not in (1, 2):
+        raise ValueError("ReplaySSM tracker tensors must be one- or two-dimensional")
+    if not ring_start.is_contiguous() or not prev_num_accepted.is_contiguous():
+        raise ValueError("ReplaySSM tracker tensors must be contiguous")
     state_batch_indices = state_batch_indices.reshape(-1)
     n_slots = state_batch_indices.numel()
     if n_slots == 0:
         return
+    num_trackers = 1 if ring_start.dim() == 1 else ring_start.shape[0]
+    tracker_stride = ring_start.shape[-1]
     block = 128
-    _update_replayssm_ring_trackers_kernel[(triton.cdiv(n_slots, block),)](
+    _update_replayssm_ring_trackers_kernel[
+        (triton.cdiv(n_slots, block), num_trackers)
+    ](
         ring_start,
         prev_num_accepted,
         state_batch_indices,
         n_slots,
+        tracker_stride,
         logical_window,
         logical_window + 1,
         pad_slot_id,
@@ -518,6 +532,9 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
         cumAdt_vec: torch.Tensor | None = None,
         cb_old: torch.Tensor | None = None,
         algorithm: str | None = None,
+        update_trackers: bool = True,
+        ring_starts_to_update: torch.Tensor | None = None,
+        prev_num_accepted_to_update: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # AR decode currently passes (batch, nheads, dim); checkpointing_ssu
         # expects a predicted-token axis T. Unsqueeze T=1 here.
@@ -564,10 +581,18 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
             cb_old=cb_old,
             algorithm=self._algorithm if algorithm is None else algorithm,
         )
-        if indices is not None:
+        if update_trackers and indices is not None:
+            if (ring_starts_to_update is None) != (
+                prev_num_accepted_to_update is None
+            ):
+                raise ValueError("ReplaySSM tracker update tensors must be paired")
             update_replayssm_ring_trackers(
-                ring_start,
-                prev_num_accepted_tokens,
+                ring_start
+                if ring_starts_to_update is None
+                else ring_starts_to_update,
+                prev_num_accepted_tokens
+                if prev_num_accepted_to_update is None
+                else prev_num_accepted_to_update,
                 indices,
                 logical_window=x_cache.size(2) - 1,
                 pad_slot_id=null_block_id,
@@ -734,6 +759,9 @@ def selective_state_update_replayssm_flashinfer(
     cumAdt_vec: torch.Tensor | None = None,
     cb_old: torch.Tensor | None = None,
     algorithm: str | None = None,
+    update_trackers: bool = True,
+    ring_starts_to_update: torch.Tensor | None = None,
+    prev_num_accepted_to_update: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """FlashInfer ReplaySSM decode (``checkpointing_ssu``)."""
     backend = get_replayssm_backend()
@@ -765,6 +793,9 @@ def selective_state_update_replayssm_flashinfer(
         cumAdt_vec=cumAdt_vec,
         cb_old=cb_old,
         algorithm=algorithm,
+        update_trackers=update_trackers,
+        ring_starts_to_update=ring_starts_to_update,
+        prev_num_accepted_to_update=prev_num_accepted_to_update,
     )
 
 
