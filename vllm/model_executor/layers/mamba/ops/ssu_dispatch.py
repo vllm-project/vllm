@@ -42,6 +42,7 @@ class FlashInferReplaySSMTactic:
     algorithm: str
     pipeline_stages: int | None = None
     ctas_per_sm: int | None = None
+    precompute_heads_per_cta: int = 0
 
     def __post_init__(self) -> None:
         if self.algorithm not in {"auto", "monolith", "two-kernel"}:
@@ -54,16 +55,27 @@ class FlashInferReplaySSMTactic:
                 raise ValueError("two-kernel requires pipeline_stages in {1, 2}")
             if self.ctas_per_sm is None or self.ctas_per_sm <= 0:
                 raise ValueError("two-kernel requires a positive ctas_per_sm")
+            if self.precompute_heads_per_cta < 0:
+                raise ValueError(
+                    "two-kernel requires non-negative precompute_heads_per_cta"
+                )
         elif has_launch_config:
             raise ValueError(
                 f"{self.algorithm} does not accept pipeline or CTA settings"
+            )
+        elif self.precompute_heads_per_cta != 0:
+            raise ValueError(
+                f"{self.algorithm} does not accept precompute_heads_per_cta"
             )
 
     @property
     def name(self) -> str:
         if self.algorithm != "two-kernel":
             return self.algorithm
-        return f"two_kernel_s{self.pipeline_stages}_c{self.ctas_per_sm}"
+        name = f"two_kernel_s{self.pipeline_stages}_c{self.ctas_per_sm}"
+        if self.precompute_heads_per_cta:
+            name += f"_h{self.precompute_heads_per_cta}"
+        return name
 
 
 FLASHINFER_REPLAYSSM_AUTO_TACTIC = FlashInferReplaySSMTactic("auto")
@@ -503,6 +515,7 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
             ) from e
         self._kernel = _fi_checkpointing_ssu
         self._algorithm = FLASHINFER_REPLAYSSM_AUTO_TACTIC.algorithm
+        self._precompute_heads_per_cta = 0
 
     @property
     def name(self) -> str:
@@ -579,6 +592,7 @@ class FlashInferReplaySSMBackend(ReplaySSMBackend):
             cb_scaled=cb_scaled,
             cumAdt_vec=cumAdt_vec,
             cb_old=cb_old,
+            precompute_heads_per_cta=self._precompute_heads_per_cta,
             algorithm=self._algorithm if algorithm is None else algorithm,
         )
         if update_trackers and indices is not None:
@@ -611,9 +625,11 @@ def use_flashinfer_replayssm_tactic(
         return
 
     old_algorithm = backend._algorithm
+    old_precompute_heads_per_cta = backend._precompute_heads_per_cta
     old_stages = os.environ.get(_FLASHINFER_SSU_PIPELINE_STAGES_ENV)
     old_ctas = os.environ.get(_FLASHINFER_SSU_CTA_PER_SM_ENV)
     backend._algorithm = tactic.algorithm
+    backend._precompute_heads_per_cta = tactic.precompute_heads_per_cta
     try:
         if tactic.algorithm == "two-kernel":
             assert tactic.pipeline_stages is not None
@@ -628,6 +644,7 @@ def use_flashinfer_replayssm_tactic(
         yield
     finally:
         backend._algorithm = old_algorithm
+        backend._precompute_heads_per_cta = old_precompute_heads_per_cta
         if old_stages is None:
             os.environ.pop(_FLASHINFER_SSU_PIPELINE_STAGES_ENV, None)
         else:

@@ -19,8 +19,10 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 from vllm.model_executor.warmup.flashinfer_replayssm_warmup import (
     FLASHINFER_REPLAYSSM_TUNING_CANDIDATES,
     FlashInferReplaySSMAutotuneResult,
+    _expanded_precompute_tactics,
     _load_cache,
     _make_cache_key,
+    _precompute_heads_per_cta_candidates,
     _ReplaySSMBenchmark,
     _save_cache,
     _select_fastest,
@@ -36,6 +38,7 @@ def _fake_backend() -> FlashInferReplaySSMBackend:
     backend._mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
     backend._kernel = Mock(return_value=torch.empty(1))
     backend._algorithm = "auto"
+    backend._precompute_heads_per_cta = 0
     return backend
 
 
@@ -57,6 +60,39 @@ def test_replayssm_tuning_candidates_and_deterministic_selection():
     timings = [3.0, 2.0, 2.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
     assert _select_fastest(timings).name == "monolith"
     assert _select_fastest([float("inf")] * len(timings)) is None
+    near_tie = [1.0, 0.9995] + [float("inf")] * (len(timings) - 2)
+    assert _select_fastest(near_tie).name == "auto"
+
+
+def test_replayssm_precompute_candidates_expand_top_main_tactics():
+    assert _precompute_heads_per_cta_candidates(16) == (1, 2, 4, 8, 16)
+    timings = [float("inf")] * len(FLASHINFER_REPLAYSSM_TUNING_CANDIDATES)
+    timings[4] = 1.0
+    timings[10] = 2.0
+    timings[2] = 3.0
+
+    assert [
+        tactic.name for tactic in _expanded_precompute_tactics(timings, 16)
+    ] == [
+        "two_kernel_s1_c4_h1",
+        "two_kernel_s1_c4_h2",
+        "two_kernel_s1_c4_h4",
+        "two_kernel_s1_c4_h8",
+        "two_kernel_s1_c4_h16",
+        "two_kernel_s2_c8_h1",
+        "two_kernel_s2_c8_h2",
+        "two_kernel_s2_c8_h4",
+        "two_kernel_s2_c8_h8",
+        "two_kernel_s2_c8_h16",
+    ]
+
+
+def test_replayssm_tactic_validates_precompute_geometry():
+    assert FlashInferReplaySSMTactic(
+        "two-kernel", 1, 4, precompute_heads_per_cta=8
+    ).name == "two_kernel_s1_c4_h8"
+    with pytest.raises(ValueError, match="does not accept precompute"):
+        FlashInferReplaySSMTactic("monolith", precompute_heads_per_cta=8)
 
 
 def test_replayssm_tuning_key_distinguishes_batch_and_T():
@@ -67,8 +103,8 @@ def test_replayssm_tuning_key_distinguishes_batch_and_T():
 
 def test_replayssm_autotune_cache_round_trip(tmp_path):
     path = tmp_path / "replayssm.json"
-    _save_cache(path, {"key": "two_kernel_s2_c16", "bad": "unknown"})
-    assert _load_cache(path) == {"key": "two_kernel_s2_c16"}
+    _save_cache(path, {"key": "two_kernel_s2_c16_h8", "bad": "unknown"})
+    assert _load_cache(path) == {"key": "two_kernel_s2_c16_h8"}
 
 
 @pytest.mark.parametrize("payload", ["null", "[]", "1"])
@@ -139,17 +175,21 @@ def test_replayssm_tactic_scope_restores_algorithm_and_environment(
     monkeypatch.setenv(_STAGES_ENV, "7")
     monkeypatch.setenv(_CTAS_ENV, "11")
 
-    tactic = FlashInferReplaySSMTactic("two-kernel", 2, 16)
+    tactic = FlashInferReplaySSMTactic(
+        "two-kernel", 2, 16, precompute_heads_per_cta=8
+    )
     with (
         pytest.raises(RuntimeError, match="sentinel"),
         use_flashinfer_replayssm_tactic(tactic),
     ):
         assert backend._algorithm == "two-kernel"
+        assert backend._precompute_heads_per_cta == 8
         assert ssu_dispatch.os.environ[_STAGES_ENV] == "2"
         assert ssu_dispatch.os.environ[_CTAS_ENV] == "16"
         raise RuntimeError("sentinel")
 
     assert backend._algorithm == "auto"
+    assert backend._precompute_heads_per_cta == 0
     assert ssu_dispatch.os.environ[_STAGES_ENV] == "7"
     assert ssu_dispatch.os.environ[_CTAS_ENV] == "11"
 
@@ -163,7 +203,11 @@ def test_replayssm_backend_uses_scoped_algorithm(monkeypatch):
     monkeypatch.setattr(ssu_dispatch, "_replayssm_backend", backend)
     tensor = torch.empty(1)
 
-    with use_flashinfer_replayssm_tactic(FlashInferReplaySSMTactic("monolith")):
+    with use_flashinfer_replayssm_tactic(
+        FlashInferReplaySSMTactic(
+            "two-kernel", 1, 4, precompute_heads_per_cta=8
+        )
+    ):
         backend(
             tensor,
             tensor,
@@ -179,7 +223,8 @@ def test_replayssm_backend_uses_scoped_algorithm(monkeypatch):
             tensor,
         )
 
-    assert backend._kernel.call_args.kwargs["algorithm"] == "monolith"
+    assert backend._kernel.call_args.kwargs["algorithm"] == "two-kernel"
+    assert backend._kernel.call_args.kwargs["precompute_heads_per_cta"] == 8
 
 
 def test_replayssm_capture_tactic_uses_request_batch_not_tokens():
