@@ -750,9 +750,6 @@ class NemotronHForCausalLM(
             return MambaStateDtypeCalculator.append_replayssm_ring(
                 base_dtype,
                 vllm_config.model_config.dtype,
-                include_trackers=(
-                    vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
-                ),
             )
         return base_dtype
 
@@ -798,9 +795,6 @@ class NemotronHForCausalLM(
                 hf_config.n_groups,
                 parallel_config.tensor_parallel_size,
                 ring_buffer_len,
-                include_trackers=(
-                    vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER
-                ),
             )
         return base_shape
 

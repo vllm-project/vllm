@@ -11,15 +11,13 @@ from vllm.v1.worker.utils import bind_kv_cache
 
 
 class _TestReplaySSMMixer(MambaMixer2):
-    _state_shapes = ((2,), (3,), (4,), (5,), (6,), (), ())
+    _state_shapes = ((2,), (3,), (4,), (5,), (6,))
     _state_dtypes = (
         torch.float32,
         torch.float32,
         torch.float32,
         torch.float32,
         torch.float32,
-        torch.int32,
-        torch.int32,
     )
 
     def __init__(self):
@@ -40,50 +38,7 @@ class _TestReplaySSMMixer(MambaMixer2):
 
 
 def _packed_replayssm_cache(num_blocks: int, fill_value: int = 0) -> torch.Tensor:
-    return torch.full((num_blocks, 1, 1, 88), fill_value, dtype=torch.int8)
-
-
-def test_bind_kv_cache_uses_contiguous_replayssm_tracker_sidecars():
-    mixer = _TestReplaySSMMixer()
-    mixer.bind_kv_cache(_packed_replayssm_cache(3, fill_value=1))
-
-    packed_ring_start, packed_prev_num_accepted = mixer.kv_cache[5:]
-    assert not packed_ring_start.is_contiguous()
-    assert not packed_prev_num_accepted.is_contiguous()
-
-    for tracker in (
-        mixer._replayssm_ring_start,
-        mixer._replayssm_prev_num_accepted,
-    ):
-        assert tracker.shape == (3,)
-        assert tracker.dtype == torch.int32
-        assert tracker.is_contiguous()
-        assert torch.count_nonzero(tracker) == 0
-
-    assert torch.count_nonzero(packed_ring_start) == 3
-    assert torch.count_nonzero(packed_prev_num_accepted) == 3
-    assert not dict(mixer.named_buffers())
-
-
-def test_bind_kv_cache_recreates_replayssm_tracker_sidecars():
-    mixer = _TestReplaySSMMixer()
-    mixer.bind_kv_cache(_packed_replayssm_cache(2))
-    old_ring_start = mixer._replayssm_ring_start
-    old_prev_num_accepted = mixer._replayssm_prev_num_accepted
-    old_ring_start.fill_(7)
-    old_prev_num_accepted.fill_(9)
-
-    mixer.bind_kv_cache(_packed_replayssm_cache(4))
-
-    assert mixer._replayssm_ring_start.shape == (4,)
-    assert mixer._replayssm_prev_num_accepted.shape == (4,)
-    assert torch.count_nonzero(mixer._replayssm_ring_start) == 0
-    assert torch.count_nonzero(mixer._replayssm_prev_num_accepted) == 0
-    assert mixer._replayssm_ring_start.data_ptr() != old_ring_start.data_ptr()
-    assert (
-        mixer._replayssm_prev_num_accepted.data_ptr()
-        != old_prev_num_accepted.data_ptr()
-    )
+    return torch.full((num_blocks, 1, 1, 80), fill_value, dtype=torch.int8)
 
 
 def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
@@ -120,6 +75,10 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
     )
     assert mixers[0]._replayssm_ring_start.shape == (4,)
     assert mixers[0]._replayssm_prev_num_accepted.shape == (4,)
+    assert mixers[0]._replayssm_ring_start.dtype == torch.int32
+    assert mixers[0]._replayssm_ring_start.is_contiguous()
+    assert torch.count_nonzero(mixers[0]._replayssm_ring_start) == 0
+    assert torch.count_nonzero(mixers[0]._replayssm_prev_num_accepted) == 0
     assert [m._updates_replayssm_trackers for m in mixers] == [False, True, True]
 
 

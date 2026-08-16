@@ -83,10 +83,7 @@ class BaseMambaAttentionMetadata:
     is_flush_d: torch.Tensor | None = None
     bc_pre_scratch: torch.Tensor | None = None
     # ReplaySSM — FlashInfer checkpointing_ssu two-kernel scratch.
-    # The per-layer ring trackers live in the Mamba KV cache.
-    cb_scaled: torch.Tensor | None = None
-    cumAdt_vec: torch.Tensor | None = None
-    cb_old: torch.Tensor | None = None
+    replayssm_scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None
 
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
@@ -179,9 +176,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
         # ReplaySSM CUDA-graph buffers.
         # Triton: write_pos / is_flush / bc_pre.
-        # FlashInfer: ring_start / prev_num_accepted + two-kernel scratch
-        # (cb_scaled / cumAdt_vec / cb_old) so algorithm="auto" can pick
-        # monolith or two-kernel.
+        # FlashInfer: two-kernel scratch, so algorithm="auto" can pick the
+        # monolith or two-kernel implementation.
         if self.use_replayssm and not self.use_flashinfer_replayssm:
             self.decode_write_pos_d: torch.Tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,),
@@ -208,47 +204,25 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.float32,
                 device=device,
             )
-            self.decode_cb_scaled = None
-            self.decode_cumAdt_vec = None
-            self.decode_cb_old = None
+            self.decode_replayssm_scratch = None
         elif self.use_flashinfer_replayssm:
+            from flashinfer.mamba.checkpointing_ssu import (
+                allocate_checkpointing_ssu_scratch,
+            )
+
             self.decode_bc_pre_scratch = None
-            scratch_bs = max(
-                self.decode_cudagraph_max_bs, scheduler_config.max_num_seqs
-            )
-            # x_cache page: (nheads, L, head_dim); AR decode uses T=1.
-            # Scratch shapes follow flashinfer's bench_checkpointing_ssu.py
-            # (WARP_SIZE / MMA_FRAG_SIZE are not exported from Python).
             nheads = kv_cache_spec.shapes[2][0]
-            npredicted = 1  # AR decode
-            max_window = self.replayssm_buffer_len
-            k_old = (max_window + 7) // 8 * 8
-            # cumAdt_vec: next_multiple_of_16(T)
-            t_pad = ((npredicted + 15) // 16) * 16
-            warp_size = 32
-            # cb_scaled: (..., 32, 8) = fragA for m16n8k16
-            mma_frag_size = t_pad // 2
-            act_dtype = vllm_config.model_config.dtype
-            self.decode_cb_scaled = torch.empty(
-                (scratch_bs, nheads, warp_size, mma_frag_size),
-                dtype=act_dtype,
-                device=device,
-            )
-            self.decode_cumAdt_vec = torch.empty(
-                (scratch_bs, nheads, t_pad),
-                dtype=torch.float32,
-                device=device,
-            )
-            self.decode_cb_old = torch.empty(
-                (scratch_bs, nheads, warp_size, k_old // 2),
-                dtype=act_dtype,
+            self.decode_replayssm_scratch = allocate_checkpointing_ssu_scratch(
+                batch_size=scheduler_config.max_num_seqs,
+                num_heads=nheads,
+                num_predicted_tokens=1,
+                max_window=self.replayssm_buffer_len,
+                dtype=vllm_config.model_config.dtype,
                 device=device,
             )
         else:
             self.decode_bc_pre_scratch = None
-            self.decode_cb_scaled = None
-            self.decode_cumAdt_vec = None
-            self.decode_cb_old = None
+            self.decode_replayssm_scratch = None
 
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
         if self.use_spec_decode:
@@ -553,9 +527,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
         write_pos_d = None
         is_flush_d = None
-        cb_scaled = None
-        cumAdt_vec = None
-        cb_old = None
+        replayssm_scratch = None
 
         if self.vllm_config.cache_config.mamba_cache_mode == "all":
             num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
@@ -642,11 +614,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     num_reqs - num_prefills : num_reqs
                 ]
 
-        if (
-            self.use_replayssm
-            and not self.use_flashinfer_replayssm
-            and num_decodes > 0
-        ):
+        if self.use_replayssm and not self.use_flashinfer_replayssm and num_decodes > 0:
             decode_base_cpu = common_attn_metadata.replayssm_decode_base_cpu
             num_computed_tokens_cpu = common_attn_metadata._num_computed_tokens_cpu
             if decode_base_cpu is None or num_computed_tokens_cpu is None:
@@ -712,12 +680,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
 
         if self.use_flashinfer_replayssm and num_decodes > 0:
-            assert self.decode_cb_scaled is not None
-            assert self.decode_cumAdt_vec is not None
-            assert self.decode_cb_old is not None
-            cb_scaled = self.decode_cb_scaled[:num_decodes]
-            cumAdt_vec = self.decode_cumAdt_vec[:num_decodes]
-            cb_old = self.decode_cb_old[:num_decodes]
+            assert self.decode_replayssm_scratch is not None
+            cb_scaled, cumAdt_vec, cb_old = self.decode_replayssm_scratch
+            replayssm_scratch = (
+                cb_scaled[:num_decodes],
+                cumAdt_vec[:num_decodes],
+                cb_old[:num_decodes],
+            )
 
         bc_pre_scratch = None
         if (
@@ -739,9 +708,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             write_pos_d=write_pos_d,
             is_flush_d=is_flush_d,
             bc_pre_scratch=bc_pre_scratch,
-            cb_scaled=cb_scaled,
-            cumAdt_vec=cumAdt_vec,
-            cb_old=cb_old,
+            replayssm_scratch=replayssm_scratch,
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc_d=query_start_loc_d,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
@@ -779,9 +746,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         write_pos_d = metadata.write_pos_d
         is_flush_d = metadata.is_flush_d
         bc_pre_scratch = metadata.bc_pre_scratch
-        cb_scaled = metadata.cb_scaled
-        cumAdt_vec = metadata.cumAdt_vec
-        cb_old = metadata.cb_old
+        replayssm_scratch = metadata.replayssm_scratch
         if (
             metadata.num_prefills == 0
             and metadata.num_decodes <= self.decode_cudagraph_max_bs
@@ -863,12 +828,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 if self.decode_bc_pre_scratch is not None:
                     bc_pre_scratch = self.decode_bc_pre_scratch[:padded_bs]
             elif self.use_flashinfer_replayssm:
-                assert self.decode_cb_scaled is not None
-                assert self.decode_cumAdt_vec is not None
-                assert self.decode_cb_old is not None
-                cb_scaled = self.decode_cb_scaled[:padded_bs]
-                cumAdt_vec = self.decode_cumAdt_vec[:padded_bs]
-                cb_old = self.decode_cb_old[:padded_bs]
+                assert self.decode_replayssm_scratch is not None
+                cb_scaled, cumAdt_vec, cb_old = self.decode_replayssm_scratch
+                replayssm_scratch = (
+                    cb_scaled[:padded_bs],
+                    cumAdt_vec[:padded_bs],
+                    cb_old[:padded_bs],
+                )
 
         return replace(
             metadata,
@@ -878,9 +844,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             write_pos_d=write_pos_d,
             is_flush_d=is_flush_d,
             bc_pre_scratch=bc_pre_scratch,
-            cb_scaled=cb_scaled,
-            cumAdt_vec=cumAdt_vec,
-            cb_old=cb_old,
+            replayssm_scratch=replayssm_scratch,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
             block_idx_last_computed_token=block_idx_last_computed_token,
             block_idx_last_scheduled_token_prev_step=(
