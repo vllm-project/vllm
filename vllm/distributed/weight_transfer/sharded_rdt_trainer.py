@@ -18,6 +18,7 @@ free_group -> release lifecycle and the ownership model.
 """
 
 import contextlib
+import os
 import threading
 import time
 import uuid
@@ -28,7 +29,11 @@ from typing import Any, ClassVar
 
 import ray
 import torch
-from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
+from torch.multiprocessing.reductions import (
+    StorageWeakRef,
+    rebuild_cuda_tensor,
+    reduce_tensor,
+)
 from typing_extensions import Self
 
 from vllm.distributed.weight_transfer.base import (
@@ -177,6 +182,11 @@ class _RDTProducerServer:
         # a ring regrow invalidates rather than writing into a freed buffer. See
         # the serve path for why the layout, not the spec names, is the key.
         self._pack_dsts: dict[tuple, tuple[int, list[torch.Tensor]]] = {}
+        # [RDT-EXPORT-RING] handle -> rebuilt base. The trainer reuses buffers
+        # across groups, so the same handle arrives on many publishes; without
+        # this we reopen it every group. Cleared per sync so no IPC mapping into
+        # trainer memory outlives the sync that made it.
+        self._base_cache: dict[tuple, torch.Tensor] = {}
 
         # Freeze the static post-init object graph so gen-2 GC never stops the
         # world mid-serve, which shows up as serve stragglers.
@@ -263,6 +273,7 @@ class _RDTProducerServer:
             self._freed_pending.clear()
             self._free_counts.clear()
             self._group_names.clear()
+            self._base_cache.clear()
             self._note_progress_locked()
 
     def _release_group_locked(self, group_idx: int) -> None:
@@ -299,11 +310,15 @@ class _RDTProducerServer:
         storages, views = entries
         bases: dict[int, torch.Tensor] = {}
         for sid, reduce_args in storages.items():
+            cached = self._base_cache.get(reduce_args)
+            if cached is not None:
+                bases[sid] = cached
+                continue
             list_args = list(reduce_args)
             # Index 6 of reduce_tensor's args is the exporter's device index;
             # rebuild on this server's device (same physical GPU as the rank).
             list_args[6] = self._device_index
-            bases[sid] = rebuild_cuda_tensor(*list_args)
+            bases[sid] = self._base_cache[reduce_args] = rebuild_cuda_tensor(*list_args)
         rebuilt: dict[str, torch.Tensor] = {}
         for name, (sid, dtype_name, shape, stride, storage_offset) in views.items():
             typed = bases[sid].view(getattr(torch, dtype_name))
@@ -350,6 +365,7 @@ class _RDTProducerServer:
             )
             freed = self._freed_pending
             self._freed_pending = []
+            self._base_cache.clear()
             return freed
 
     def set_gather_error(self, message: str) -> None:
@@ -542,6 +558,12 @@ class ShardedRDTTrainerWeightTransferEngine(
         # group index. CUDA-IPC exports must outlive the importer, so we hold
         # them until the server reports the group freed. See send_weights.
         self._inflight: dict[int, dict[str, torch.Tensor]] = {}
+        # [RDT-EXPORT-RING] Reusable packed slots, one per resident group. See
+        # _pack_group_for_export. Persistent across syncs: freeing and
+        # reallocating them each sync fragmented the caching allocator badly
+        # enough to grow reserved memory ~1.5 GB per sync.
+        self._export_ring: list[torch.Tensor | None] = []
+        self._export_ring_args: list[tuple | None] = []
         # Set by trainer_init from the server-name all-gather; retained so a
         # restarted consumer can be re-initialized without another collective.
         self._server_names: list[str] | None = None
@@ -553,6 +575,66 @@ class ShardedRDTTrainerWeightTransferEngine(
         import ray
 
         return ray.get(getattr(self._server, method).remote(*args))
+
+    @staticmethod
+    def _contig_stride(shape) -> tuple:
+        stride: list[int] = []
+        acc = 1
+        for s in reversed(list(shape)):
+            stride.append(acc)
+            acc *= int(s)
+        return tuple(reversed(stride))
+
+    def _pack_group_for_export(self, held: list, slot_idx: int) -> tuple:
+        """Copy ``held`` into ring slot ``slot_idx``; return ``(storages, views,
+        refs)`` in the same shape the per-storage path returns, but with ONE
+        storage. Views are built exactly as ``publish_group`` rebuilds them, so
+        the two sides cannot disagree about layout.
+
+        Slot safety is the existing credit invariant: the gather loop blocks
+        while ``len(_inflight) > gather_lookahead``, so group N's slot is reused
+        only by N+lookahead+1, which cannot start until N is freed everywhere.
+        """
+        offsets: list[int] = []
+        cur = 0
+        for _name, t in held:
+            cur = (cur + 15) & ~15  # 16B keeps every element size we ship aligned
+            offsets.append(cur)
+            cur += t.numel() * t.element_size()
+        need = max(16, (cur + 15) & ~15)
+
+        slot = self._export_ring[slot_idx]
+        device = held[0][1].device
+        if slot is None or slot.numel() < need or slot.device != device:
+            self._export_ring[slot_idx] = self._export_ring_args[slot_idx] = None
+            slot = torch.empty(need, dtype=torch.uint8, device=device)
+            self._export_ring[slot_idx] = slot
+
+        ust = slot.untyped_storage()
+        sid = ust.data_ptr()
+        reduce_args = self._export_ring_args[slot_idx]
+        if reduce_args is None:
+            base = torch.empty(0, dtype=torch.uint8, device=device)
+            base.set_(ust, 0, (ust.nbytes(),))
+            _rebuild, reduce_args = reduce_tensor(base)
+            self._export_ring_args[slot_idx] = reduce_args
+
+        views: dict[str, tuple] = {}
+        refs: dict[str, torch.Tensor] = {}
+        for (name, t), off in zip(held, offsets):
+            shape, esz = tuple(t.shape), t.element_size()
+            stride = self._contig_stride(shape)
+            dst = torch.as_strided(slot.view(t.dtype), shape, stride, off // esz)
+            dst.copy_(t)
+            refs[name] = dst
+            views[name] = (
+                sid,
+                str(t.dtype).split(".")[-1],
+                list(shape),
+                list(stride),
+                off // esz,
+            )
+        return {sid: reduce_args}, views, refs
 
     def _publish_async(self, group_idx: int, entries):
         """Fire publish_group WITHOUT waiting on the RPC (the gather loop
@@ -964,6 +1046,29 @@ class ShardedRDTTrainerWeightTransferEngine(
         # drains first, so every resident group is pullable while we wait.
         bound = max(1, self._init_info.gather_lookahead)
 
+        # [RDT-EXPORT-RING] `bound + 1` slots is exactly the residency the credit
+        # gate enforces. Small storages are packed into a slot and exported once
+        # per slot instead of once per storage (518 -> 7 cudaIpcGetMemHandle
+        # calls per rank per sync at 235B, each 0.5-1.5ms).
+        use_ring = os.environ.get("VLLM_RDT_EXPORT_RING", "1") not in (
+            "0",
+            "false",
+            "False",
+        )
+        ring_max_bytes = int(
+            float(os.environ.get("VLLM_RDT_EXPORT_RING_MAX_MB", "64")) * (1 << 20)
+        )
+        nslots, ring_pos = bound + 1, 0
+        # data_ptr -> (storage weakref, reduce_args), this sync only. `storages`
+        # is per-group, so a source that reuses a buffer across groups would
+        # otherwise re-export it every group. The weakref is load-bearing: a
+        # freed allocation can be reissued at the same address, and serving that
+        # from a stale handle is silently wrong bytes.
+        handle_cache: dict[int, tuple] = {}
+        if use_ring and len(getattr(self, "_export_ring", [])) != nslots:
+            self._export_ring = [None] * nslots
+            self._export_ring_args = [None] * nslots
+
         try:
             for gi in self._owned_idx:
                 group = self._groups[gi]
@@ -987,20 +1092,35 @@ class ShardedRDTTrainerWeightTransferEngine(
                 storages: dict[int, tuple] = {}
                 views: dict[str, tuple] = {}
                 refs: dict[str, torch.Tensor] = {}
+                small: list = []
                 for name, tensor in zip(names, tensors):
                     if tensor is None:
                         continue
                     tensor = tensor.detach()
                     if not tensor.is_cuda:
                         tensor = tensor.cuda()
+                    # Threshold on the STORAGE, not the tensor: a source may hand
+                    # out many small views of one large stacked buffer, and a
+                    # per-tensor test would pack the whole thing, costing +1
+                    # group of peak memory for a storage already coalesced.
+                    if use_ring and tensor.untyped_storage().nbytes() <= ring_max_bytes:
+                        small.append((name, tensor))
+                        continue
                     tensor = tensor.contiguous()
                     refs[name] = tensor  # keep the export alive
                     ust = tensor.untyped_storage()
                     sid = ust.data_ptr()
                     if sid not in storages:
-                        base = torch.empty(0, dtype=torch.uint8, device=tensor.device)
-                        base.set_(ust, 0, (ust.nbytes(),))
-                        _rebuild, reduce_args = reduce_tensor(base)
+                        cached = handle_cache.get(sid)
+                        if cached is not None and not cached[0].expired():
+                            reduce_args = cached[1]
+                        else:
+                            base = torch.empty(
+                                0, dtype=torch.uint8, device=tensor.device
+                            )
+                            base.set_(ust, 0, (ust.nbytes(),))
+                            _rebuild, reduce_args = reduce_tensor(base)
+                            handle_cache[sid] = (StorageWeakRef(ust), reduce_args)
                         storages[sid] = reduce_args
                     views[name] = (
                         sid,
@@ -1009,6 +1129,13 @@ class ShardedRDTTrainerWeightTransferEngine(
                         list(tensor.stride()),
                         tensor.storage_offset(),
                     )
+                if small:
+                    st, vw, rf = self._pack_group_for_export(small, ring_pos % nslots)
+                    storages.update(st)
+                    views.update(vw)
+                    refs.update(rf)
+                    ring_pos += 1
+                del small
                 del tensors
                 if not refs:
                     # A group with nothing held here cannot occur (every group
@@ -1034,6 +1161,10 @@ class ShardedRDTTrainerWeightTransferEngine(
                 self._rpc("set_gather_error", repr(e))
             self._inflight.clear()
             raise
+        finally:
+            # Keep the slots, drop the handles: the sidecar's base cache is
+            # cleared per sync, so a handle must not outlive the sync either.
+            self._export_ring_args = [None] * len(getattr(self, "_export_ring", []))
 
     def _drop_inflight(self, freed_keys: list) -> None:
         for k in freed_keys:

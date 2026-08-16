@@ -772,3 +772,62 @@ class TestFakeServerAgreesWithTheRealOne:
             assert server._inflight_groups == []
             assert server.wait_freed() == [GI_A]
             assert server.end_sync() == []
+
+
+class TestExportRing:
+    """The packed export path. Its one hard invariant is that the trainer packs
+    a group exactly the way ``publish_group`` rebuilds it — a layout
+    disagreement would serve the wrong bytes with nothing downstream to catch
+    it."""
+
+    @staticmethod
+    def _engine():
+        eng = ShardedRDTTrainerWeightTransferEngine.__new__(
+            ShardedRDTTrainerWeightTransferEngine
+        )
+        eng._export_ring = [None, None]
+        eng._export_ring_args = [None, None]
+        return eng
+
+    def _roundtrip(self, held, slot=0):
+        eng = self._engine()
+        storages, views, _refs = eng._pack_group_for_export(held, slot)
+        assert len(storages) == 1, "a packed group must export exactly one storage"
+        slot_t = eng._export_ring[slot]
+        return {
+            name: torch.as_strided(slot_t.view(getattr(torch, dt)), shape, stride, off)
+            for name, (_sid, dt, shape, stride, off) in views.items()
+        }
+
+    def test_packed_group_rebuilds_bit_identically(self):
+        held = [
+            ("bf16.2d", torch.randn(12, 7).bfloat16()),
+            ("fp32.1d", torch.randn(9)),
+            ("bf16.3d", torch.randn(4, 5, 6).bfloat16()),
+            ("bf16.transposed", torch.randn(6, 11).bfloat16().t()),
+            ("bf16.sliced", torch.randn(8, 32).bfloat16()[:, 3:19]),
+        ]
+        got = self._roundtrip(held)
+        for name, t in held:
+            assert got[name].dtype is t.dtype
+            assert tuple(got[name].shape) == tuple(t.shape)
+            assert torch.equal(got[name], t), name
+
+    def test_a_reused_slot_reallocates_and_still_rebuilds(self):
+        eng = self._engine()
+        eng._pack_group_for_export([("a", torch.randn(4, 4).bfloat16())], 0)
+        small = eng._export_ring[0].numel()
+        big = [("b", torch.randn(256, 128).bfloat16())]
+        _st, views, _rf = eng._pack_group_for_export(big, 0)
+        assert eng._export_ring[0].numel() > small
+        _name, (_sid, dt, shape, stride, off) = next(iter(views.items()))
+        rebuilt = torch.as_strided(
+            eng._export_ring[0].view(getattr(torch, dt)), shape, stride, off
+        )
+        assert torch.equal(rebuilt, big[0][1])
+
+    def test_slots_are_distinct_so_adjacent_groups_cannot_alias(self):
+        eng = self._engine()
+        eng._pack_group_for_export([("a", torch.randn(8, 8).bfloat16())], 0)
+        eng._pack_group_for_export([("b", torch.randn(8, 8).bfloat16())], 1)
+        assert eng._export_ring[0].data_ptr() != eng._export_ring[1].data_ptr()
