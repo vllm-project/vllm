@@ -191,7 +191,7 @@ pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -
     }
     flush_tool_run(&mut out, &mut pending_tool_run, &tool_call_id_index)?;
 
-    match &request.tool_choice {
+    match request.tool_choice() {
         ChatToolChoice::Required => {
             write_internal_system(
                 &mut out,
@@ -202,7 +202,7 @@ pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -
         }
         // Emit only when tools are present: Rust defaults tool_choice to None
         // for tool-free requests, which must not inject a tool-choice message.
-        ChatToolChoice::None if !request.tools.is_empty() => {
+        ChatToolChoice::None if !request.tools().is_empty() => {
             write_internal_system(
                 &mut out,
                 "tool-choice",
@@ -226,7 +226,7 @@ pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -
 fn request_tools(request: &ChatRequest) -> &[ChatTool] {
     // Declare tools whenever the request carries them. K3 tool-declare is
     // independent of tool_choice; tool_choice only injects control messages.
-    request.tools.as_slice()
+    request.initial_tools()
 }
 
 fn thinking_enabled(request: &ChatRequest) -> Result<bool> {

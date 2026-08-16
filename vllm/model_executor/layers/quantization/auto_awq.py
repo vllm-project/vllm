@@ -292,7 +292,7 @@ class AutoAWQConfig(QuantizationConfig):
                 prefix,
                 self.modules_to_not_convert,
                 self.packed_modules_mapping,
-                skip_with_substr=True,
+                match_mode="substring",
             ):
                 return UnquantizedLinearMethod()
 
@@ -335,7 +335,7 @@ class AutoAWQConfig(QuantizationConfig):
             if is_layer_skipped(
                 prefix,
                 getattr(self, "modules_to_not_convert", []),
-                skip_with_substr=True,
+                match_mode="substring",
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
 
