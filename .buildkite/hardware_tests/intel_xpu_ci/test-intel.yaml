@@ -57,7 +57,6 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'bash .buildkite/scripts/hardware_ci/run-intel-ci-test.sh v1'
-    parallelism: 2
   - label: "XPU server test"
     depends_on:
       - image-build-xpu

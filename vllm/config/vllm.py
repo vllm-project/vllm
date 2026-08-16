@@ -66,10 +66,6 @@ else:
 
 logger = init_logger(__name__)
 
-MRV1_UNSUPPORTED_PIECEWISE_CUDAGRAPH_ARCHITECTURES = frozenset(
-    {"DeepseekV4ForCausalLM"}
-)
-
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
         "DeepseekV2ForCausalLM",
@@ -87,6 +83,13 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
 @lru_cache
 def default_v2_model_runner_architectures() -> frozenset[str]:
     """Architectures defaulting to the V2 model runner on this platform."""
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        # TODO(rocm): DeepSeek V4 is still faster on MRV1 on ROCm. The
+        # attention layer picks the eager cudagraph region MRV1 needs, so
+        # this is a perf default only; drop it once MRV2 catches up.
+        return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES - {"DeepseekV4ForCausalLM"}
     return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
 
 
@@ -690,25 +693,6 @@ class VllmConfig:
         if getattr(model_config, "is_attention_free", False):
             return False
         return is_default_v2_architecture or not model_config.is_moe
-
-    def _validate_mrv1_piecewise_cudagraph(self) -> None:
-        if self.use_v2_model_runner:
-            return
-        model_config = self.model_config
-        if model_config is None:
-            return
-        if not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs():
-            return
-        architectures = getattr(model_config, "architectures", [])
-        if any(
-            arch in MRV1_UNSUPPORTED_PIECEWISE_CUDAGRAPH_ARCHITECTURES
-            for arch in architectures
-        ):
-            raise ValueError(
-                "DeepSeek V4 does not support PIECEWISE CUDA graphs with "
-                "Model Runner V1. Use Model Runner V2 or disable PIECEWISE "
-                "CUDA graphs."
-            )
 
     @property
     def needs_dp_coordinator(self) -> bool:
@@ -1643,8 +1627,6 @@ class VllmConfig:
                         "this will likely lead to an error.",
                         "pipeline parallelism",
                     )
-
-        self._validate_mrv1_piecewise_cudagraph()
 
         # final check of cudagraph mode after all possible updates
         if current_platform.is_cuda_alike():
