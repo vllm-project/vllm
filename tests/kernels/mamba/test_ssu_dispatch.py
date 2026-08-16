@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -37,9 +39,18 @@ except ImportError:
     HAS_FLASHINFER = False
 
 try:
-    from flashinfer.mamba import checkpointing_ssu  # noqa: F401
-
-    HAS_FLASHINFER_CHECKPOINTING_SSU = True
+    checkpointing_ssu_module = importlib.import_module(
+        "flashinfer.mamba.checkpointing_ssu"
+    )
+    HAS_FLASHINFER_CHECKPOINTING_SSU = (
+        hasattr(checkpointing_ssu_module, "CheckpointingSSURunner")
+        and getattr(
+            checkpointing_ssu_module,
+            "CHECKPOINTING_SSU_AUTOTUNE_ABI_VERSION",
+            0,
+        )
+        >= 1
+    )
 except ImportError:
     HAS_FLASHINFER_CHECKPOINTING_SSU = False
 
@@ -306,10 +317,15 @@ def test_replayssm_triton_entry_rejects_flashinfer_backend():
     reason="flashinfer.mamba.checkpointing_ssu not available",
 )
 def test_replayssm_flashinfer_call(monkeypatch):
-    import flashinfer.mamba
-
     kernel = Mock(return_value=torch.empty(1, 1, 2, 4))
-    monkeypatch.setattr(flashinfer.mamba, "checkpointing_ssu", kernel)
+    checkpointing_ssu_module = importlib.import_module(
+        "flashinfer.mamba.checkpointing_ssu"
+    )
+    monkeypatch.setattr(checkpointing_ssu_module, "checkpointing_ssu", kernel)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.mamba.ops.ssu_dispatch._replayssm_backend",
+        None,
+    )
     initialize_replayssm_backend(
         MambaConfig(backend=MambaBackendEnum.FLASHINFER), use_replayssm=True
     )
@@ -354,6 +370,21 @@ def test_replayssm_flashinfer_call(monkeypatch):
     args = kernel.call_args.args
     assert args[4] is ring_start
     assert args[5] is prev_num_accepted
+    assert kwargs["algorithm"] == "auto"
+    assert kwargs["precompute_heads_per_cta"] == 0
+    assert kwargs["main_pipeline_stages"] == 0
+    assert kwargs["main_ctas_per_sm"] == 0
+
+
+def test_replayssm_requires_native_flashinfer_autotuning(monkeypatch):
+    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
+
+    old_module = SimpleNamespace(
+        checkpointing_ssu=Mock(), CheckpointingSSURunner=object
+    )
+    monkeypatch.setattr(mod.importlib, "import_module", lambda _: old_module)
+    with pytest.raises(ImportError, match="native checkpointing_ssu autotuning"):
+        FlashInferReplaySSMBackend(MambaConfig(backend=MambaBackendEnum.FLASHINFER))
 
 
 @pytest.mark.skipif(
@@ -361,7 +392,10 @@ def test_replayssm_flashinfer_call(monkeypatch):
     reason="flashinfer checkpointing_ssu is installed",
 )
 def test_replayssm_flashinfer_import_error():
-    with pytest.raises(ImportError, match="FlashInfer is required"):
+    with pytest.raises(
+        ImportError,
+        match="FlashInfer is required|native checkpointing_ssu autotuning",
+    ):
         FlashInferReplaySSMBackend(MambaConfig(backend=MambaBackendEnum.FLASHINFER))
 
 

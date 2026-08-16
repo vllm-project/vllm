@@ -27,7 +27,7 @@ from vllm.model_executor.warmup.flashinfer_autotune_cache import (
     write_flashinfer_autotune_cache,
 )
 from vllm.model_executor.warmup.flashinfer_replayssm_warmup import (
-    flashinfer_replayssm_autotune_warmup,
+    trigger_flashinfer_replayssm_autotune,
 )
 from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     deepseek_v4_sparse_mla_attention_warmup,
@@ -184,7 +184,6 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         logger.info_once("Skipping FlashInfer autotune because it is disabled.")
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
-        flashinfer_replayssm_autotune_warmup(worker)
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
@@ -308,6 +307,11 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             fi_utils.autotune(tune_mode=True, **autotune_kwargs),
         ):
             runner._dummy_run(**dummy_run_kwargs)
+            # The generic dummy run is predominantly prefill-shaped and may
+            # not execute ReplaySSM decode. One private maximum-batch decode
+            # call lets FlashInfer populate every native dynamic batch bucket
+            # before CUDA graph capture.
+            trigger_flashinfer_replayssm_autotune(runner)
     finally:
         set_autotune_process_group(None)
 

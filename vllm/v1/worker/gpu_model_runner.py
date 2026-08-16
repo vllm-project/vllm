@@ -915,7 +915,6 @@ class GPUModelRunner(
 
         # Cudagraph dispatcher for runtime cudagraph dispatching.
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
-        self.flashinfer_replayssm_autotune_result: Any | None = None
 
         self.mm_budget = (
             MultiModalBudget(self.vllm_config, self.mm_registry)
@@ -7120,10 +7119,6 @@ class GPUModelRunner(
         if not batch_descriptors:
             return
 
-        from vllm.model_executor.warmup.flashinfer_replayssm_warmup import (
-            use_flashinfer_replayssm_tactic_for_capture,
-        )
-
         uniform_decode = batch_descriptors[0].uniform
 
         # Only rank 0 should print progress bar during capture
@@ -7153,13 +7148,12 @@ class GPUModelRunner(
                     uniform_decode=uniform_decode,
                 )
             )
-            with use_flashinfer_replayssm_tactic_for_capture(self, batch_desc):
-                self._warmup_and_capture(
-                    batch_desc,
-                    cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    allow_microbatching=allow_microbatching,
-                    profiler=profiler,
-                )
+            self._warmup_and_capture(
+                batch_desc,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                allow_microbatching=allow_microbatching,
+                profiler=profiler,
+            )
             torch.accelerator.synchronize()
         self.maybe_remove_all_loras(self.lora_config)
 
