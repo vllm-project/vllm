@@ -580,7 +580,7 @@ def combine_topk_swa_indices(
     return combined_indices, combined_lens
 
 
-_COMBINE_TOPK_SWA_NUM_WORKERS = 128
+_COMBINE_TOPK_SWA_NUM_WORKERS = 256
 
 
 # Representative pointer alignment variants for Triton pointer specialization.
