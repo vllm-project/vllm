@@ -3,9 +3,12 @@
 """
 Test MoonEP dispatch / prefetch / combine logic (BF16 PoC).
 
-Runs MoonEPPrepareAndFinalize plus a reference segment-loop expert runner
-over MoonEP's expert-grouped ``[NvS, H]`` layout and compares against the
-pure-PyTorch reference MoE. Requires NVSwitch multicast capable GPUs.
+Two paths, both compared against the pure-PyTorch reference MoE:
+- MoonEPPrepareAndFinalize + a reference segment-loop expert runner over
+  MoonEP's expert-grouped ``[NvS, H]`` layout;
+- the full modular kernel, MoonEPPrepareAndFinalize + MoonEPExperts through
+  FusedMoEKernel.
+Requires NVSwitch multicast capable GPUs.
 """
 
 import dataclasses
@@ -18,6 +21,7 @@ from torch.distributed import ProcessGroup
 from tests.kernels.moe.utils import make_test_weights
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -200,14 +204,75 @@ def _no_quant_config():
     return FusedMoEQuantConfig.make(quant_dtype=None)
 
 
+def moonep_modular_kernel_impl(
+    pg: ProcessGroup,
+    pgi: ProcessGroupInfo,
+    test_tensors: TestTensors,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    num_prefetch_slots: int,
+) -> torch.Tensor:
+    """Full modular-kernel path: MoonEPPrepareAndFinalize + MoonEPExperts."""
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.experts.moonep_experts import (
+        MoonEPExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
+
+    config = test_tensors.config
+    hidden_size = test_tensors.rank_tokens.shape[1]
+    max_tokens_per_rank = 128 * ((config.m + 127) // 128)
+
+    weight_layout = make_moonep_weight_layout(w1, w2, num_prefetch_slots)
+    buffer, pf = make_moonep_prepare_finalize(
+        pg,
+        pgi,
+        hidden_size,
+        config.num_experts,
+        config.topk,
+        max_tokens_per_rank,
+        weight_layout,
+    )
+    try:
+        moe_config = make_dummy_moe_config(
+            num_experts=config.num_experts,
+            experts_per_token=config.topk,
+            hidden_dim=hidden_size,
+            intermediate_size=config.n,
+            max_num_tokens=max_tokens_per_rank,
+        )
+        experts = MoonEPExperts(moe_config=moe_config, quant_config=_no_quant_config())
+        experts.set_up_weight(weight_layout.full_up_weight)
+        kernel = FusedMoEKernel(prepare_finalize=pf, fused_experts=experts)
+        out = kernel.apply(
+            hidden_states=test_tensors.rank_tokens,
+            w1=weight_layout.full_gate_weight,
+            w2=weight_layout.full_down_weight,
+            topk_weights=test_tensors.topk_weights,
+            topk_ids=test_tensors.topk,
+            activation=MoEActivation.SILU,
+            global_num_experts=config.num_experts,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+        torch.accelerator.synchronize()
+        return out
+    finally:
+        buffer.destroy()
+
+
 def _moonep_moe(
     pgi: ProcessGroupInfo,
     config: TestConfig,
     w1: torch.Tensor,
     w2: torch.Tensor,
     num_prefetch_slots: int,
+    use_modular_kernel: bool,
 ):
+    from vllm.v1.worker.workspace import init_workspace_manager
+
     device_idx = torch.accelerator.current_device_index()
+    init_workspace_manager(torch.device("cuda", device_idx))
     w1 = w1.to(device=device_idx)
     w2 = w2.to(device=device_idx)
 
@@ -223,9 +288,8 @@ def _moonep_moe(
             test_tensors.topk_weights,
             test_tensors.topk,
         )
-        moonep_combined = moonep_moe_impl(
-            pg, pgi, test_tensors, w1, w2, num_prefetch_slots
-        )
+        impl = moonep_modular_kernel_impl if use_modular_kernel else moonep_moe_impl
+        moonep_combined = impl(pg, pgi, test_tensors, w1, w2, num_prefetch_slots)
 
     torch.testing.assert_close(
         torch_combined,
@@ -249,6 +313,7 @@ MNKs = [
 @pytest.mark.parametrize("router_skew", [1.0, 8.0])
 @pytest.mark.parametrize("num_prefetch_slots", [4])
 @pytest.mark.parametrize("world_size", [2])
+@pytest.mark.parametrize("use_modular_kernel", [False, True])
 @multi_gpu_test(num_gpus=2)
 @requires_moonep
 def test_moonep_bf16_moe(
@@ -260,6 +325,7 @@ def test_moonep_bf16_moe(
     router_skew: float,
     num_prefetch_slots: int,
     world_size: int,
+    use_modular_kernel: bool,
 ):
     set_random_seed(7)
     config = TestConfig(
@@ -273,7 +339,15 @@ def test_moonep_bf16_moe(
     (_, w1, _, _), (_, w2, _, _) = make_test_weights(num_experts, n, k)
 
     try:
-        parallel_launch(world_size, _moonep_moe, config, w1, w2, num_prefetch_slots)
+        parallel_launch(
+            world_size,
+            _moonep_moe,
+            config,
+            w1,
+            w2,
+            num_prefetch_slots,
+            use_modular_kernel,
+        )
     except Exception as exc:
         if "MulticastNotAvailableError" in str(exc):
             pytest.skip("NVSwitch multicast not available")
