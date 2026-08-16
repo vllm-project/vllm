@@ -958,6 +958,11 @@ class OffloadingConnectorScheduler:
         req_status = self._req_status[request.request_id]
         for group_state in req_status.group_states:
             group_state.block_ids.clear()
+            # block_ids is rebuilt from scratch below, so the store cursor must
+            # rewind with it. The BLOCK_LEVEL branch further down overwrites this
+            # with num_chunks; REQUEST_LEVEL relies on it being 0, which is only
+            # true on a request's first pass unless it is reset here.
+            group_state.next_stored_chunk_idx = 0
 
         if req_status.transfer_jobs:
             logger.debug(
@@ -1117,6 +1122,12 @@ class OffloadingConnectorScheduler:
             if preempted:
                 for group_state in req_status.group_states:
                     group_state.block_ids.clear()
+                    # Resumed requests arrive on the cached path, which supplies
+                    # only newly-allocated block ids, so block_ids is rebuilt from
+                    # index 0 while offload_keys/num_chunks still describe the whole
+                    # sequence. Without rewinding, the strided slice in
+                    # _build_store_jobs comes up short of offload_keys.
+                    group_state.next_stored_chunk_idx = 0
 
             if new_block_id_groups:
                 if self._sliding_window_groups:
