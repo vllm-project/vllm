@@ -613,6 +613,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         activation: MoEActivation,
         output: torch.Tensor,
         input: torch.Tensor,
+        valid_rows: torch.Tensor | None = None,
     ) -> None:
         activation_config = self.activation_config
         if (
@@ -629,6 +630,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
                 activation=activation,
                 input=input,
                 output=output,
+                valid_rows=valid_rows,
             )
 
     def fused_situ_quant_enabled(self, activation: MoEActivation) -> bool:
@@ -669,6 +671,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         self,
         gate_up_output: torch.Tensor,
         quanted_down_input: torch.Tensor,
+        valid_rows: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the fused SITU activation + FP8 quant for the w2 input.
 
@@ -700,6 +703,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             beta=cfg.activation_situ_beta,
             linear_beta=cfg.activation_situ_linear_beta,
             group_size=group_size,
+            valid_rows=valid_rows,
         )
         return quanted_down_input, input_scale
 
@@ -826,18 +830,29 @@ class HummingIndexedExperts(HummingExpertsBase):
             **moe_kwargs1,
         )
 
+        valid_rows = None
+        if (
+            expert_tokens_meta is not None
+            and expert_tokens_meta.psum_recv_per_rank is not None
+        ):
+            psum = expert_tokens_meta.psum_recv_per_rank
+            topk = topk_ids.size(1)
+            valid_rows = psum[-1:].to(torch.int64) * topk
+
         if self.fused_situ_quant_enabled(activation):
             # Fused SITU + FP8 quant (per-token or block-FP8 group-128) straight
             # into the w2 input, skipping the bf16 activation_output round-trip.
             inputs, input_scale = self.fused_situ_quant(
                 gate_up_output=buffers["gate_up_output"],
                 quanted_down_input=buffers["quanted_down_input"],
+                valid_rows=valid_rows,
             )
         else:
             self.apply_activation(
                 activation=activation,
                 input=buffers["gate_up_output"],
                 output=buffers["activation_output"],
+                valid_rows=valid_rows,
             )
 
             inputs, input_scale = self.quantize_input(

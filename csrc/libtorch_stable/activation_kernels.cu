@@ -516,8 +516,10 @@ template <typename scalar_t>
 __global__ void situ_and_mul_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., 2, d]
-    const int d, const float beta, const float linear_beta) {
+    const int d, const float beta, const float linear_beta,
+    const int64_t* __restrict__ valid_rows_ptr) {
   const int64_t row = blockIdx.x;
+  if (valid_rows_ptr != nullptr && row >= *valid_rows_ptr) return;
   const scalar_t* gate_ptr = input + row * 2 * d;
   const scalar_t* up_ptr = gate_ptr + d;
   scalar_t* out_ptr = out + row * d;
@@ -577,19 +579,38 @@ __device__ __forceinline__ float warp_reduce_max(float v) {
 }
 
 // Fused SITU + block-FP8 (per-128-group) quant, one warp per group. Persistent
-// grid: each block strides over the rows. cp.async stages gate+up into smem.
+// grid: each block strides over valid rows only, so padding rows past
+// *valid_rows are never touched. cp.async stages gate+up into smem per group.
 template <typename scalar_t, typename fp8_type, int THREADS, int NUM_STAGES,
           int GROUP_SIZE, int GRID_DIM, int D>
 __global__ void situ_and_mul_quant_group_pipelined_kernel(
     fp8_type* __restrict__ out,          // [num_tokens, D]
     float* __restrict__ scale_out,       // [num_tokens, NUM_GROUPS]
     const scalar_t* __restrict__ input,  // [num_tokens, 2, D]
-    const int64_t num_rows) {
+    const int64_t num_rows, const int64_t* __restrict__ valid_rows_ptr) {
   const int tid = threadIdx.x;
   const int warp_id = tid / WARP_SIZE;
   const int lane_id = tid % WARP_SIZE;
   static constexpr int NUM_WARPS = THREADS / WARP_SIZE;
   static constexpr int NUM_GROUPS = D / GROUP_SIZE;
+  const int64_t row_bound =
+      valid_rows_ptr != nullptr ? *valid_rows_ptr : num_rows;
+
+  // Padding rows past *valid_rows are never streamed below; fill their scales
+  // with 1.0 so masked-out rows don't feed NaN/Inf into the w2 GEMM. NUM_GROUPS
+  // is a multiple of 4, so the run is float4-aligned and exact (scale_out is a
+  // tensor base, >=16B aligned).
+  static_assert(NUM_GROUPS % 4 == 0,
+                "float4 scale fill needs NUM_GROUPS % 4 == 0");
+  static constexpr int NG4 = NUM_GROUPS / 4;
+  const int64_t pad_start4 = row_bound * NG4;
+  const int64_t pad_end4 = num_rows * NG4;
+  float4* scale4 = reinterpret_cast<float4*>(scale_out);
+  constexpr float4 ones{1.0f, 1.0f, 1.0f, 1.0f};
+  for (int64_t i = pad_start4 + (int64_t)blockIdx.x * THREADS + tid;
+       i < pad_end4; i += (int64_t)GRID_DIM * THREADS) {
+    scale4[i] = ones;
+  }
 
   // Vectorized loads/stores assume a 2-byte scalar_t; the fp32 dispatch branch
   // is compiled out here and served by the scalar group kernel instead.
@@ -655,7 +676,7 @@ __global__ void situ_and_mul_quant_group_pipelined_kernel(
     // Persistent outer loop kept sequential (nounroll): it wraps the whole
     // pipeline, and GRID_DIM is compile-time so the stride folds to a constant.
 #pragma unroll 1
-    for (int64_t row = blockIdx.x; row < num_rows; row += GRID_DIM,
+    for (int64_t row = blockIdx.x; row < row_bound; row += GRID_DIM,
                  row_src += src_row_stride, row_out += out_row_stride,
                  row_scale += scale_row_stride) {
       // Per-lane source for this row; issue_load bumps `src` by warp_stride.
@@ -746,7 +767,7 @@ __global__ void situ_and_mul_quant_group_pipelined_kernel(
 }
 
 // Scalar fallback for the group path (odd d or the otherwise-unreachable fp32
-// dispatch branch). Persistent grid; each block strides over the rows, and
+// dispatch branch). Persistent grid; each block strides over valid rows, and
 // within a row warp `w` owns groups w, w+num_warps, ... (GROUP_SIZE % 32 == 0).
 template <typename scalar_t, typename fp8_type, int GROUP_SIZE>
 __global__ void situ_and_mul_quant_group_scalar_kernel(
@@ -754,12 +775,15 @@ __global__ void situ_and_mul_quant_group_scalar_kernel(
     float* __restrict__ scale_out,       // [num_tokens, num_groups]
     const scalar_t* __restrict__ input,  // [num_tokens, 2, d]
     const int d, const int num_groups, const float beta,
-    const float linear_beta, const int64_t num_rows) {
+    const float linear_beta, const int64_t num_rows,
+    const int64_t* __restrict__ valid_rows_ptr) {
   static constexpr int ELTS_PER_LANE = GROUP_SIZE / WARP_SIZE;
   const int tid = threadIdx.x;
   const int warp_id = tid / WARP_SIZE;
   const int lane_id = tid % WARP_SIZE;
   const int num_warps = blockDim.x / WARP_SIZE;
+  const int64_t row_bound =
+      valid_rows_ptr != nullptr ? *valid_rows_ptr : num_rows;
 
   const bool clamp_up = linear_beta > 0.0f;
   // __fdividef reciprocal: single MUFU.RCP, no IEEE-div FCHK/CALL slow path
@@ -771,7 +795,7 @@ __global__ void situ_and_mul_quant_group_scalar_kernel(
       std::is_same_v<fp8_type, c10::Float8_e4m3fn> ? 448.0f : 224.0f;
   static constexpr float inv_fp8_max = 1.0f / FP8_MAX;
 
-  for (int64_t row = blockIdx.x; row < num_rows; row += gridDim.x) {
+  for (int64_t row = blockIdx.x; row < row_bound; row += gridDim.x) {
     const scalar_t* gate_ptr = input + row * 2 * (int64_t)d;
     const scalar_t* up_ptr = gate_ptr + d;
     fp8_type* out_ptr = out + row * (int64_t)d;
@@ -800,6 +824,15 @@ __global__ void situ_and_mul_quant_group_scalar_kernel(
         out_ptr[idx] = quant_to_fp8<fp8_type>(acts[e], inv_scale, FP8_MAX);
       }
     }
+  }
+
+  // Padding rows past *valid_rows are never streamed above; fill their scales
+  // with a finite value so masked-out rows don't feed NaN/Inf into the w2 GEMM.
+  const int64_t pad_start = row_bound * (int64_t)num_groups;
+  const int64_t pad_end = num_rows * (int64_t)num_groups;
+  for (int64_t i = pad_start + (int64_t)blockIdx.x * blockDim.x + tid;
+       i < pad_end; i += (int64_t)gridDim.x * blockDim.x) {
+    scale_out[i] = 1.0f;
   }
 }
 
@@ -925,7 +958,8 @@ void swigluoai_and_mul(torch::stable::Tensor& out,    // [..., d]
 // through), matching SituAndMul(linear_beta=None) on the Python side.
 void situ_and_mul(torch::stable::Tensor& out,    // [..., d]
                   torch::stable::Tensor& input,  // [..., 2 * d]
-                  double beta, double linear_beta) {
+                  double beta, double linear_beta,
+                  std::optional<torch::stable::Tensor> valid_rows) {
   int d = input.size(-1) / 2;
   int64_t num_tokens = input.numel() / input.size(-1);
   if (num_tokens == 0) {
@@ -933,6 +967,10 @@ void situ_and_mul(torch::stable::Tensor& out,    // [..., d]
   }
   dim3 grid(num_tokens);
   dim3 block(std::min(d, 1024));
+  const int64_t* valid_rows_ptr = nullptr;
+  if (valid_rows.has_value()) {
+    valid_rows_ptr = valid_rows->const_data_ptr<int64_t>();
+  }
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
@@ -940,7 +978,7 @@ void situ_and_mul(torch::stable::Tensor& out,    // [..., d]
       input.scalar_type(), "situ_and_mul_kernel", [&] {
         vllm::situ_and_mul_kernel<scalar_t><<<grid, block, 0, stream>>>(
             out.mutable_data_ptr<scalar_t>(), input.const_data_ptr<scalar_t>(),
-            d, (float)beta, (float)linear_beta);
+            d, (float)beta, (float)linear_beta, valid_rows_ptr);
       });
 }
 
@@ -975,11 +1013,14 @@ void masked_situ_and_mul(torch::stable::Tensor& out,    // [E, T, d]
 // Humming w2 path. `group_size == 128` selects k-major block-FP8 group scales
 // (scale [.., d / 128], matching humming quant_input(group_size=128, float32)).
 // `linear_beta <= 0` means "unset" (up passed through), matching
-// SituAndMul(linear_beta=None).
+// SituAndMul(linear_beta=None). `valid_rows` (int64 scalar tensor) is the
+// DeepEP v2 contiguous-layout valid row count; padding rows are skipped and
+// receive a benign scale.
 void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
                         torch::stable::Tensor& scale,  // [..., 1 or d/128]
                         torch::stable::Tensor& input,  // [..., 2 * d]
-                        double beta, double linear_beta, int64_t group_size) {
+                        double beta, double linear_beta, int64_t group_size,
+                        std::optional<torch::stable::Tensor> valid_rows) {
   STD_TORCH_CHECK(
       out.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fn ||
           out.scalar_type() == torch::headeronly::ScalarType::Float8_e4m3fnuz,
@@ -994,6 +1035,10 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
   int64_t num_tokens = input.numel() / input.size(-1);
   if (num_tokens == 0) {
     return;
+  }
+  const int64_t* valid_rows_ptr = nullptr;
+  if (valid_rows.has_value()) {
+    valid_rows_ptr = valid_rows->const_data_ptr<int64_t>();
   }
   // fp8_max (448 e4m3fn / 224 fnuz) is derived from fp8_type inside the kernel.
   const torch::stable::accelerator::DeviceGuard device_guard(
@@ -1048,7 +1093,8 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
                     kernel<<<grid, block, smem_bytes, stream>>>(
                         out.mutable_data_ptr<fp8_t>(),
                         scale.mutable_data_ptr<float>(),
-                        input.const_data_ptr<scalar_t>(), num_tokens);
+                        input.const_data_ptr<scalar_t>(), num_tokens,
+                        valid_rows_ptr);
                     return;
                   }
                 }
@@ -1060,7 +1106,8 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
                         out.mutable_data_ptr<fp8_t>(),
                         scale.mutable_data_ptr<float>(),
                         input.const_data_ptr<scalar_t>(), d, num_groups,
-                        (float)beta, (float)linear_beta, num_tokens);
+                        (float)beta, (float)linear_beta, num_tokens,
+                        valid_rows_ptr);
               });
         });
   }

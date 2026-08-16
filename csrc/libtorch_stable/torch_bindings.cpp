@@ -600,14 +600,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // SituGLU implementation used in Kimi models.
   ops.def(
       "situ_and_mul(Tensor! out, Tensor input, float beta=1.0, float "
-      "linear_beta=-1.0) -> ()");
+      "linear_beta=-1.0, Tensor? valid_rows=None) -> ()");
   // Fused SituGLU activation + dynamic FP8 quantization for the Humming w2 path
   // (writes the fp8 down input and its float32 scale). group_size=0 ->
   // per-token scale [.., 1]; group_size=128 -> k-major block-FP8 scale [..,
   // d/128].
   ops.def(
       "situ_and_mul_quant(Tensor! out, Tensor! scale, Tensor input, "
-      "float beta=1.0, float linear_beta=-1.0, int group_size=0) -> ()");
+      "float beta=1.0, float linear_beta=-1.0, int group_size=0, "
+      "Tensor? valid_rows=None) -> ()");
   ops.def(
       "masked_situ_and_mul(Tensor! out, Tensor input, Tensor "
       "expert_num_tokens, float beta=1.0, float linear_beta=-1.0) -> ()");
