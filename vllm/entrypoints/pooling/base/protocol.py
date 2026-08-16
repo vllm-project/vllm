@@ -10,6 +10,7 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    normalize_reasoning_content,
 )
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
@@ -269,6 +270,11 @@ class ChatRequestMixin(ChatRequestOptionsMixin):
     # --8<-- [start:chat-params]
     messages: list[ChatCompletionMessageParam]
     # --8<-- [end:chat-params]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_reasoning_before(cls, data: Any) -> Any:
+        return normalize_reasoning_content(data)
 
 
 class EncodingRequestMixin(OpenAIBaseModel):

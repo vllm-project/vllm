@@ -4,7 +4,17 @@
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.pooling.classify.protocol import ClassificationChatRequest
+from vllm.entrypoints.serve.tokenize.protocol import TokenizeChatRequest
 from vllm.exceptions import VLLMValidationError
+
+# Renderers read only `reasoning`, so every request type carrying chat
+# messages must normalize the deprecated name or drop thinking silently.
+CHAT_MESSAGE_REQUESTS = [
+    ChatCompletionRequest,
+    TokenizeChatRequest,
+    ClassificationChatRequest,
+]
 
 
 def test_chat_completion_request_with_no_tools():
@@ -64,8 +74,9 @@ def test_chat_completion_request_with_tool_choice_but_no_tools(tool_choice):
         )
 
 
-def test_reasoning_content_normalized_to_reasoning():
-    request = ChatCompletionRequest.model_validate(
+@pytest.mark.parametrize("request_cls", CHAT_MESSAGE_REQUESTS)
+def test_reasoning_content_normalized_to_reasoning(request_cls):
+    request = request_cls.model_validate(
         {
             "messages": [
                 {"role": "user", "content": "What is 2+2?"},
@@ -84,8 +95,9 @@ def test_reasoning_content_normalized_to_reasoning():
     assert "reasoning_content" not in assistant_msg
 
 
-def test_reasoning_takes_precedence_over_reasoning_content():
-    request = ChatCompletionRequest.model_validate(
+@pytest.mark.parametrize("request_cls", CHAT_MESSAGE_REQUESTS)
+def test_reasoning_takes_precedence_over_reasoning_content(request_cls):
+    request = request_cls.model_validate(
         {
             "messages": [
                 {"role": "user", "content": "What is 2+2?"},
@@ -104,8 +116,9 @@ def test_reasoning_takes_precedence_over_reasoning_content():
     assert "reasoning_content" not in assistant_msg
 
 
-def test_no_reasoning_fields_unchanged():
-    request = ChatCompletionRequest.model_validate(
+@pytest.mark.parametrize("request_cls", CHAT_MESSAGE_REQUESTS)
+def test_no_reasoning_fields_unchanged(request_cls):
+    request = request_cls.model_validate(
         {
             "messages": [
                 {"role": "user", "content": "Hello"},
