@@ -126,6 +126,8 @@ def _refit_kernel(
     NUM_SPECULATIVE_STEPS: tl.constexpr,
     L2: tl.constexpr,
     MIN_ROUND: tl.constexpr,
+    MIN_INTERCEPT: tl.constexpr,
+    POOL_SLOPE: tl.constexpr,
     INV_TP: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -146,14 +148,48 @@ def _refit_kernel(
 
     # Closed-form 2x2 inverse: A^-1 = 1/det * [[c, -b], [-b, a]].
     det = a * c - b * b
-    step_w = (c * g0 - b * g1) / det
-    step_b = (a * g1 - b * g0) / det
+    step_w_k = (c * g0 - b * g1) / det
+    step_b_k = (a * g1 - b * g0) / det
 
-    ok = (tl.abs(det) > 1e-12) & (n >= MIN_ROUND)
-    # Mask out NaNs and steps that would drive the weight negative.
-    ok &= (step_w == step_w) & (step_b == step_b) & (w + step_w >= 0.0)
-    new_w = tl.where(ok, w + step_w, w)
-    new_b = tl.where(ok, bias + step_b, bias)
+    if POOL_SLOPE:
+        # One slope shared by every position, intercepts still per position:
+        # design row x = [margin, e_k]. The Newton system goes block-diagonal ->
+        # arrowhead, and eliminating the intercept rows leaves
+        #     step_w = sum(omega_k * step_w_k) / sum(omega_k),
+        # with omega_k = det_k / c_k the Schur complement of the intercept block,
+        # i.e. the slope's Fisher information once the intercept is profiled out.
+        # So the pooled slope is an inverse-variance weighted average and a
+        # data-poor position contributes almost nothing while still receiving the
+        # consensus. This is what lets the deep positions have a usable slope:
+        # they see too few observations per round to fit two parameters, but an
+        # intercept alone is well determined.
+        omega = det / c
+        usable = mask & (tl.abs(det) > 1e-12) & (c > 1e-12)
+        usable &= (step_w_k == step_w_k) & (omega == omega) & (omega > 0.0)
+        omega = tl.where(usable, omega, 0.0)
+        den = tl.sum(omega, axis=0)
+        step_w = tl.sum(omega * tl.where(usable, step_w_k, 0.0), axis=0) / den
+        # The slope now learns from every position, so it is gated on the round's
+        # total sample count rather than any single position's.
+        total_n = tl.sum(tl.where(mask, n, 0.0), axis=0)
+        w_ok = (den > 1e-12) & (step_w == step_w) & (total_n >= MIN_ROUND)
+        w_now = tl.sum(tl.where(k == 0, w, 0.0), axis=0)  # shared: read once
+        w_ok &= w_now + step_w >= 0.0
+        step_w = tl.where(w_ok, step_w, 0.0)
+        new_w = tl.where(mask, w_now + step_w, 0.0)
+        # Intercept conditioned on the pooled slope. Algebraically identical to
+        # the unpooled form when step_w == step_w_k, so only the slope it is
+        # conditioned on changes. One parameter needs far less data than two,
+        # hence the lower gate.
+        step_b = (g1 - b * step_w) / c
+        b_ok = mask & (c > 1e-12) & (step_b == step_b) & (n >= MIN_INTERCEPT)
+        new_b = tl.where(b_ok, bias + step_b, bias)
+    else:
+        ok = (tl.abs(det) > 1e-12) & (n >= MIN_ROUND)
+        # Mask out NaNs and steps that would drive the weight negative.
+        ok &= (step_w_k == step_w_k) & (step_b_k == step_b_k) & (w + step_w_k >= 0.0)
+        new_w = tl.where(ok, w + step_w_k, w)
+        new_b = tl.where(ok, bias + step_b_k, bias)
 
     tl.store(coef_ptr + k, new_w * INV_TP, mask=mask)
     tl.store(coef_ptr + coef_stride + k, new_b * INV_TP, mask=mask)
@@ -181,6 +217,7 @@ def _predict_kernel(
     logits_ptr,
     logits_stride,
     idx_mapping_ptr,
+    idx_mapping_stride,
     step_ptr,
     num_tokens,
     vocab_size,
@@ -194,7 +231,9 @@ def _predict_kernel(
     if token_idx >= num_tokens:
         return
 
-    req_state_idx = tl.load(idx_mapping_ptr + token_idx).to(tl.int64)
+    req_state_idx = tl.load(idx_mapping_ptr + token_idx * idx_mapping_stride).to(
+        tl.int64
+    )
     if req_state_idx < 0:
         # Cudagraph-padded requests carry -1. Skip them so that they don't
         # scatter garbage over a live request's margins.
@@ -268,10 +307,21 @@ class OnlineAcceptanceEstimator:
     # After warmup, refit every this many steps, accumulating samples in between.
     REFIT_INTERVAL = 100
     # A draft position with fewer collected samples than this skips fitting to avoid
-    # fitting to noise.
+    # fitting to noise. With a pooled slope this gates the shared slope on the
+    # round's total across positions.
     MIN_ROUND_OBSERVATIONS = 50
+    # Per-position gate for the intercept when the slope is pooled. One free
+    # parameter needs far less data than two, and the deep positions that matter
+    # most here see only a few dozen observations per round.
+    MIN_INTERCEPT_OBSERVATIONS = 10
+    # Share one slope across positions, fitting only per-position intercepts.
+    # Set to 0 to restore an independent 2-parameter fit per position.
+    POOL_SLOPE = bool(int(os.getenv("VLLM_ACCEPTANCE_ESTIMATOR_POOL_SLOPE", "1")))
     # Ridge on the 2x2 solve.
     L2 = 1e-3
+    # Log per-position sample counts and calibration gap at every refit. Costs a
+    # device sync per refit, so it is off unless explicitly asked for.
+    DEBUG_CALIBRATION = bool(int(os.getenv("VLLM_ACCEPTANCE_ESTIMATOR_DEBUG", "0")))
 
     def __init__(
         self,
@@ -359,6 +409,26 @@ class OnlineAcceptanceEstimator:
             return
         self._steps_since_refit = 0
 
+        if self.DEBUG_CALIBRATION:
+            # grad[:, 1] accumulates sum(label - pred) over the round and counts
+            # accumulates the number of observations, so their ratio is the
+            # signed calibration gap: positive means the round under-predicted
+            # acceptance, negative means it over-predicted. Both are already on
+            # hand, so the diagnostic needs no extra accumulator.
+            n = self.counts.tolist()
+            gap = (self.grad[:, 1] / self.counts.clamp(min=1.0)).tolist()
+            w = self.coefficients[0].tolist()
+            b = self.coefficients[1].tolist()
+            logger.info(
+                "acceptance calib refit=%d | %s",
+                self._refits,
+                " | ".join(
+                    f"k{k}: n={n[k]:.0f} gap={gap[k]:+.3f} w={w[k]:.3f} b={b[k]:.2f}"
+                    + ("" if n[k] >= self.MIN_ROUND_OBSERVATIONS else " STARVED")
+                    for k in range(self.num_speculative_steps)
+                ),
+            )
+
         # Fit the coefficients to the accumulated statistics gathered over the
         # course of the last REFIT_INTERVAL steps.
         _refit_kernel[(1,)](
@@ -372,6 +442,8 @@ class OnlineAcceptanceEstimator:
             NUM_SPECULATIVE_STEPS=self.num_speculative_steps,
             L2=self.L2,
             MIN_ROUND=self.MIN_ROUND_OBSERVATIONS,
+            MIN_INTERCEPT=self.MIN_INTERCEPT_OBSERVATIONS,
+            POOL_SLOPE=self.POOL_SLOPE,
             INV_TP=1.0 / self._tp_size,
             BLOCK=triton.next_power_of_2(self.num_speculative_steps),
         )
@@ -408,6 +480,9 @@ class OnlineAcceptanceEstimator:
             logits,
             logits.stride(0),
             idx_mapping,
+            # DSpark scores one draft position at a time, so its mapping arrives
+            # as a strided column of the (req, step) sample mapping.
+            idx_mapping.stride(0),
             draft_step,
             num_tokens,
             vocab_size,

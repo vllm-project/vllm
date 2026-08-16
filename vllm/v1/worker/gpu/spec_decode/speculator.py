@@ -430,7 +430,7 @@ class DraftModelSpeculator(BaseSpeculator):
             )
 
         # _propose fills draft_token_confidence_probs on the way through, via
-        # _score_acceptance.
+        # _maybe_score_confidence.
         return self._propose(
             input_batch,
             attn_metadata,
