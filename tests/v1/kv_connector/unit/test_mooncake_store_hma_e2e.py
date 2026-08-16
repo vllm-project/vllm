@@ -228,12 +228,11 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
         block_ids=([0, 1, 2, 3], [0, 1, 2, 3]),
         block_hashes=hs,
         can_save=True,
+        store_job_id=1,
     )
-    send_thread.add_stored_request("r0")
-    # Put the request in the queue so task_done() doesn't underflow.
-    send_thread.request_queue.put(save_req)
-    req = send_thread.request_queue.get()
-    send_thread._handle_request(req)
+    # add_request also queues the job, so task_done() doesn't underflow.
+    send_thread.add_request(save_req)
+    send_thread._handle_request(send_thread.request_queue.get())
 
     # Point worker.store at the dict store (the worker constructor captured
     # the MagicMock; replace with the real dict store for lookup).
@@ -499,15 +498,15 @@ def test_offload_syncs_event_before_put():
         can_save=True,
         num_prompt_tokens=12,
         partial_tail_offloads=[(1, 7, 12)],
+        store_job_id=1,
     )
     req.current_event = event
-    send.add_stored_request("r1")
 
-    send.request_queue.put(req)
+    send.add_request(req)
     send._handle_request(send.request_queue.get())
     assert send.request_queue.qsize() == 0
     assert store._data
-    assert send.stored_requests["r1"] == 0
+    assert send.stored_requests["r1"] == set()
     event.synchronize.assert_called_once()
 
 
