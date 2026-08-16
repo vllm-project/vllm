@@ -28,12 +28,12 @@ def main():
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
     CMD_MODULES = [
-        vllm.entrypoints.cli.openai,
-        vllm.entrypoints.cli.serve,
-        vllm.entrypoints.cli.launch,
-        vllm.entrypoints.cli.benchmark.main,
-        vllm.entrypoints.cli.collect_env,
-        vllm.entrypoints.cli.run_batch,
+        vllm.entrypoints.cli.openai,        # vllm chat / vllm complete
+        vllm.entrypoints.cli.serve,         # vllm serve
+        vllm.entrypoints.cli.launch,        # vllm launch
+        vllm.entrypoints.cli.benchmark.main, # vllm bench 
+        vllm.entrypoints.cli.collect_env,   # vllm collect-env
+        vllm.entrypoints.cli.run_batch,     # vllm run-batch
     ]
 
     cli_env_setup()
@@ -84,17 +84,20 @@ def main():
         )
         subparsers = parser.add_subparsers(required=False, dest="subparser")
         cmds = {}
+        # 给各个模块的子命令都注册到 subparsers
         for cmd_module in CMD_MODULES:
-            new_cmds = cmd_module.cmd_init()
+            new_cmds = cmd_module.cmd_init()  # 全部初始化
             for cmd in new_cmds:
+                # 添加 参数， 设置dispatch_function 属性为 对应Command类的cmd方法
                 cmd.subparser_init(subparsers).set_defaults(dispatch_function=cmd.cmd)
                 cmds[cmd.name] = cmd
         args = parser.parse_args()
-        if args.subparser in cmds:
-            cmds[args.subparser].validate(args)
+
+        if args.subparser in cmds: # args.subparser 为实际用户调用的第二个参数
+            cmds[args.subparser].validate(args) # 验证传入的参数
 
         if hasattr(args, "dispatch_function"):
-            args.dispatch_function(args)
+            args.dispatch_function(args) # 对应Command类的cmd方法
         else:
             parser.print_help()
 

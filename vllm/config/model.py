@@ -503,7 +503,7 @@ class ModelConfig:
                 # It's a dict-valued parameter - set it directly
                 setattr(config, key, value)
 
-    def __post_init__(
+    def __post_init__( # __init__ 在末尾自动调用 __post_init__
         self,
         # Multimodal config init vars
         language_model_only: bool,
@@ -1479,7 +1479,7 @@ class ModelConfig:
             # When using MLA during decode it becomes MQA
             return 1
 
-        total_num_kv_heads = self.get_total_num_kv_heads()
+        total_num_kv_heads = self.get_total_num_kv_heads() # kv heads分发到GPU
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
         # case where the number of KV heads is smaller than the tensor

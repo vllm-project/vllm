@@ -1463,7 +1463,7 @@ ModelRegistry = _ModelRegistry(
             class_name=cls_name,
         )
         for model_arch, (mod_relname, cls_name) in _VLLM_MODELS.items()
-    }
+    }  # 初始化时 传入字典 {str，_LazyRegisteredModel }
 )
 
 _T = TypeVar("_T")

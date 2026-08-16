@@ -637,7 +637,7 @@ class SamplingParams(
                 f"Got bad_words={self.bad_words}"
             )
 
-    def _verify_greedy_sampling(self) -> None:
+    def _verify_greedy_sampling(self) -> None: # 贪婪
         if self.n > 1:
             raise VLLMValidationError(
                 f"n must be 1 when using greedy sampling, got {self.n}."

@@ -2123,7 +2123,7 @@ class VllmConfig:
             return
         self.model_config.config_updated = True
 
-        architecture = self.model_config.architecture
+        architecture = self.model_config.architecture  # 拿到架构名
         if architecture is None:
             return
 
@@ -2133,7 +2133,7 @@ class VllmConfig:
             HybridAttentionMambaModelConfig,
         )
 
-        cls = MODELS_CONFIG_MAP.get(architecture, None)
+        cls = MODELS_CONFIG_MAP.get(architecture, None) # 查找该架构是否有专属的配置类
         if cls is None:
             # `architecture` may be an HF base-model name (e.g. "Mamba2Model"
             # when `architectures` is omitted); normalize to the resolved arch

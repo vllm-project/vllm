@@ -1715,7 +1715,7 @@ class EngineArgs:
             )
 
         return ModelConfig(
-            model=self.model,
+            model=self.model, # /vllm/entrypoints/openai/cli_args.py model_tag 字段
             model_weights=self.model_weights,
             hf_config_path=self.hf_config_path,
             runner=self.runner,
