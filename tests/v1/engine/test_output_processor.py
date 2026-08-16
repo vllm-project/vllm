@@ -23,6 +23,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
@@ -32,7 +33,33 @@ from vllm.v1.engine.output_processor import (
     RequestOutputCollector,
     RequestState,
 )
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import IterationStats, RequestStateStats, SchedulerStats
+
+
+def test_remote_kv_wait_time_is_added_to_request_stats():
+    output_processor = object.__new__(OutputProcessor)
+    request_stats = RequestStateStats()
+    request_state = MagicMock(
+        stats=request_stats,
+        routed_experts_chunks=[],
+        is_prefilling=False,
+    )
+    request_state.make_request_output.return_value = None
+    output_processor.request_states = {"request": request_state}
+    output_processor._update_stats_from_output = MagicMock()
+
+    output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id="request",
+                new_token_ids=[],
+                pooling_output=MagicMock(),
+                remote_kv_wait_time=0.75,
+            )
+        ]
+    )
+
+    assert request_stats.remote_kv_wait_time == 0.75
 
 
 @pytest.mark.parametrize("flat_logprobs", [False, True])

@@ -100,6 +100,7 @@ class EngineCoreOutput(
     num_nans_in_logits: int = 0
     mm_cache_miss_hashes: list[str] | None = None
     new_sampling_mask: object | None = None
+    remote_kv_wait_time: float | None = None
 
 
 class EngineCoreOutputs(

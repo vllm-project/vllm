@@ -11,7 +11,7 @@ from pydantic import (
 )
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.generate.base.protocol import StreamOptions
+from vllm.entrypoints.generate.base.protocol import PerRequestMetrics, StreamOptions
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProbs,
     ChatCompletionRequest,
@@ -268,6 +268,10 @@ class GenerateResponse(BaseModel):
         description=(
             "ECTransfer parameters used for encoder-cache disaggregated serving."
         ),
+    )
+    request_metrics: PerRequestMetrics | None = Field(
+        default=None,
+        description="Per-request generation and remote KV wait timings.",
     )
 
 

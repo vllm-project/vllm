@@ -228,6 +228,7 @@ class EngineCoreOutput(
     mm_cache_miss_hashes: list[str] | None = None
 
     new_sampling_mask: SamplingMaskLists | None = None
+    remote_kv_wait_time: float | None = None
 
     # Per-request spec-decode acceptance; attached only on the final output.
     # Appended last so `array_like` positional serialization stays compatible.

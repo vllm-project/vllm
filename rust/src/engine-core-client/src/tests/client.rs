@@ -2744,6 +2744,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         mm_cache_miss_hashes: None,
                         new_sampling_mask: None,
                         spec_decode_metrics: None,
+                        remote_kv_wait_time: None,
                     },
                 ],
                 scheduler_stats: None,
