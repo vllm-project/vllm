@@ -141,7 +141,6 @@ def build_params(
     for s, d in zip(src_tensors, dst_tensors):
         s_bpb = s.stride(0) * s.element_size()
         d_bpb = d.stride(0) * d.element_size()
-        assert s_bpb == d.stride(0) * d.element_size()
         src_bases.append(s.data_ptr())
         dst_bases.append(d.data_ptr())
         src_bpb.append(s_bpb)

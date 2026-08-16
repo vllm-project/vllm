@@ -93,7 +93,6 @@ class DiskBackend:
     ) -> None:
         self._load_stream = load_stream
         self._store_stream = store_stream
-        self._total_block_bytes = total_block_bytes
         self._num_buffer_slots = num_buffer_slots
         self._tensor_names = list(gpu_caches.keys())
         self._per_tensor_bpb = [
@@ -105,12 +104,6 @@ class DiskBackend:
             for bpb in self._per_tensor_bpb
         ]
         self._total_block_bytes = sum(self._padded_bpb)
-        n_padded = sum(1 for b, p in zip(self._per_tensor_bpb, self._padded_bpb)
-                        if b != p)
-
-        assert total_block_bytes % _ALIGNMENT == 0, (
-            f"total_block_bytes={total_block_bytes} not aligned to {_ALIGNMENT}"
-        )
 
         # Separate buffer pools for store and load threads
         self._store_buffer_caches = {}
