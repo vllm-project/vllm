@@ -63,6 +63,31 @@ def test_encoder_cudagraph_uses_model_video_frame_limit():
     assert Glm4vForConditionalGeneration.get_max_frames_per_video(model) == 600
 
 
+@pytest.mark.parametrize(
+    ("temporal_patch_size", "expected_grid_t"),
+    [(2, 9), (4, 5), (8, 3)],
+)
+def test_vision_info_rounds_up_temporal_frames(
+    temporal_patch_size: int,
+    expected_grid_t: int,
+):
+    info = Mock(spec=Glm4vProcessingInfo)
+    vision_config = info.get_hf_config.return_value.vision_config
+    vision_config.patch_size = 14
+    vision_config.spatial_merge_size = 2
+    vision_config.temporal_patch_size = temporal_patch_size
+
+    _, num_vision_tokens = Glm4vProcessingInfo._get_vision_info(
+        info,
+        image_width=28,
+        image_height=28,
+        num_frames=17,
+        do_resize=False,
+    )
+
+    assert num_vision_tokens == expected_grid_t
+
+
 @pytest.mark.parametrize("model_id", ["zai-org/GLM-4.1V-9B-Thinking"])
 @pytest.mark.parametrize("expected_toks_per_frame", [299])
 @pytest.mark.parametrize(
@@ -93,7 +118,6 @@ def test_processor_override(
         limit_mm_per_prompt={"video": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
-    tokenizer = processor.info.get_tokenizer()
     hf_processor_mm_kwargs = {"fps": fps}
 
     # Build the image str / prompt based on the number of images we pass
@@ -112,8 +136,8 @@ def test_processor_override(
 
     # Ensure we have the right number of placeholders per num_crops size
     hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
-    video_token_id = tokenizer.convert_tokens_to_ids(hf_processor.video_token)
-    video_tok_count = processed_inputs["prompt_token_ids"].count(video_token_id)
+    image_token_id = hf_processor.image_token_id
+    video_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
     grid_t, _, _ = processed_inputs["mm_kwargs"].get_data()["video_grid_thw"][0]
 
     assert grid_t == expected_grid_t

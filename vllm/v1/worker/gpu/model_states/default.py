@@ -5,7 +5,6 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.core.sched.output import NewRequestData
@@ -71,14 +70,7 @@ class DefaultModelState(ModelState):
         input_batch: InputBatch,
         req_states: RequestState,
     ) -> torch.Tensor:
-        mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
-            scheduled_encoder_inputs
-        )
-        if mm_kwargs:
-            # Execute the multimodal encoder.
-            encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
-            # Cache the encoder outputs by mm_hash
-            self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
+        self.execute_mm_encoder(scheduled_encoder_inputs)
 
         mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
         if self.mm_pruner is not None and mm_embeds:
@@ -140,10 +132,7 @@ class DefaultModelState(ModelState):
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
     ) -> dict[str, Any]:
-        if cudagraph_mode == CUDAGraphMode.FULL or (
-            cudagraph_mode == CUDAGraphMode.PIECEWISE
-            and is_breakable_cudagraph_enabled()
-        ):
+        if cudagraph_mode == CUDAGraphMode.FULL:
             # Use padded sizes - padding is handled by model_runner.prepare_attn.
             num_reqs = input_batch.num_reqs_after_padding
             num_tokens = input_batch.num_tokens_after_padding
@@ -155,7 +144,9 @@ class DefaultModelState(ModelState):
             input_batch.query_start_loc_np[: num_reqs + 1]
         )
         query_start_loc_gpu = input_batch.query_start_loc[: num_reqs + 1]
-        max_query_len = input_batch.num_scheduled_tokens.max().item()
+        max_query_len = input_batch.max_query_len
+        if max_query_len is None:
+            max_query_len = input_batch.num_scheduled_tokens.max().item()
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
         if for_capture:
             # Capture with worst-case max_seq_len so the graph is valid at any replay.

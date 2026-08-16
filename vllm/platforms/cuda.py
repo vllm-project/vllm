@@ -229,6 +229,10 @@ class CudaPlatformBase(Platform):
         with contextlib.suppress(ImportError):
             import vllm._qutlass_C  # noqa: F401
 
+    @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
+
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
         if self.has_device_capability(80):
@@ -290,7 +294,8 @@ class CudaPlatformBase(Platform):
             # kernel with limited pinned memory support for CUDA.
             version = _get_wsl_kernel_version()
             if version is None or version < (4, 19, 121):
-                logger.warning_once(
+                # warning_once() causes a circular import on WSL, see #48397.
+                logger.warning(
                     "Using 'pin_memory=False' as WSL is detected and the "
                     "WSL2 kernel version is below 4.19.121. This may slow "
                     "down performance. Please run `wsl --update`."
@@ -740,12 +745,16 @@ class NvmlCudaPlatform(CudaPlatformBase):
             return None
 
     @classmethod
-    @with_nvml_context
     def has_device_capability(
         cls,
         capability: tuple[int, int] | int,
         device_id: int = 0,
     ) -> bool:
+        # No @with_nvml_context here: the base implementation only reads
+        # get_device_capability(), which is cached and brings its own NVML
+        # context. Wrapping this method as well cost an nvmlInit()/
+        # nvmlShutdown() pair on every call, including calls made per attention
+        # layer per step from the Triton reshape-and-cache path.
         try:
             return super().has_device_capability(capability, device_id)
         except RuntimeError:

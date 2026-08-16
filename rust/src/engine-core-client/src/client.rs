@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::{join_all, try_join_all};
 use itertools::Itertools;
 use serde::Serialize;
+use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
@@ -394,6 +396,17 @@ impl EngineCoreClient {
         self.engines.iter().map(|engine| &engine.ready_response).collect()
     }
 
+    /// Return the first engine's ready response.
+    ///
+    /// Per-engine fields such as `data_parallel_rank` should be read through
+    /// [`ready_responses`](Self::ready_responses).
+    pub fn ready_response(&self) -> &EngineCoreReadyResponse {
+        &self
+            .engines
+            .first()
+            .expect("engine core client requires at least one engine")
+            .ready_response
+    }
     /// Return the engine-reported effective model dtype.
     pub fn model_dtype(&self) -> ModelDtype {
         self.engines
@@ -440,15 +453,6 @@ impl EngineCoreClient {
             .world_size
     }
 
-    /// Return the data parallel size from the parallel config, if available.
-    pub fn data_parallel_size(&self) -> u64 {
-        self.engines
-            .first()
-            .expect("engine core client requires at least one engine")
-            .ready_response
-            .data_parallel_size
-    }
-
     /// Get the model name associated with this client used for metrics
     /// labeling.
     pub fn model_name(&self) -> &str {
@@ -458,6 +462,12 @@ impl EngineCoreClient {
     /// Return whether the client still considers the engine healthy.
     pub fn is_healthy(&self) -> bool {
         self.inner.is_healthy()
+    }
+
+    /// Subscribe to engine health changes. The current value is `true` while
+    /// the client is healthy and changes permanently to `false` on failure.
+    pub fn subscribe_health(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.inner.subscribe_health()
     }
 
     /// Return the first persistent health error observed by the client, if any.
@@ -502,7 +512,7 @@ impl EngineCoreClient {
                 "registered request to engine"
             );
 
-            self.inner.send_to_engine(&engine_id, EngineCoreRequestType::Add, &req).await?;
+            self.inner.send_request_to_engine(&engine_id, req).await?;
             Ok(())
         }
         .await;
@@ -664,6 +674,77 @@ impl EngineCoreClient {
                 other => vec![other],
             })
             .collect())
+    }
+
+    /// Initialize the configured RL weight-transfer backend.
+    pub async fn init_weight_transfer_engine(&self, init_info: JsonValue) -> Result<()> {
+        self.collective_rpc(
+            "init_weight_transfer_engine",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::from([("init_info".to_string(), init_info)]),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Start a weight update for the base model.
+    pub async fn start_weight_update(&self) -> Result<()> {
+        self.collective_rpc(
+            "start_weight_update",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::<String, JsonValue>::new(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Start a weight update for the speculative draft model.
+    pub async fn start_draft_weight_update(&self) -> Result<()> {
+        self.collective_rpc(
+            "start_draft_weight_update",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::<String, JsonValue>::new(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Apply one backend-specific weight metadata chunk.
+    pub async fn update_weights(&self, update_info: JsonValue) -> Result<()> {
+        self.collective_rpc(
+            "update_weights",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::from([("update_info".to_string(), update_info)]),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Finish the current weight update.
+    pub async fn finish_weight_update(&self) -> Result<()> {
+        self.collective_rpc(
+            "finish_weight_update",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::<String, JsonValue>::new(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Set the committed weight version on every connected engine.
+    pub async fn set_weight_version(&self, weight_version: &str) -> Result<()> {
+        self.call_utility::<(), _>("set_weight_version", (weight_version,)).await?;
+        Ok(())
+    }
+
+    /// Return the committed weight version agreed on by every connected engine.
+    pub async fn get_weight_version(&self) -> Result<String> {
+        self.call_utility_consensus("get_weight_version", ()).await
     }
 
     /// Return whether the engine is currently sleeping at any level.
