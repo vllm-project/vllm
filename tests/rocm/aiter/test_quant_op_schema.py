@@ -105,11 +105,34 @@ def test_per_tensor_quant_matches_native(dynamic):
         torch.testing.assert_close(deq, ref_deq, rtol=2e-2, atol=2e-2)
 
 
-# A test_per_tensor_quant_torch_compile test previously lived here to validate
-# the per-tensor aliasing contract. It existed because opcheck's test_schema
-# could not check this op directly: test_schema compares the op's outputs with
-# torch.allclose, but on fp8 outputs that comparison runs arithmetic fp8 does not
-# support and raises "mul_cuda" is unimplemented for fp8. The fp8-safe opcheck
-# helper fixes that by casting to double before the comparison, so the per-tensor
-# schema tests above can now run test_schema directly. That makes this test
-# redundant, so it has been removed.
+def test_per_token_quant_matches_native():
+    """Per-token quant output dequantizes back to the input within FP8 error."""
+    torch.manual_seed(0)
+    x = _x()
+
+    out, scale = rocm_aiter_ops.per_token_quant(x, FP8_DTYPE)
+
+    assert out.shape == x.shape
+    assert out.dtype == FP8_DTYPE
+    assert scale.shape[0] == x.shape[0]
+
+    # Dequantize and compare to original
+    deq = out.to(torch.float32) * scale.view(-1, 1)
+    torch.testing.assert_close(deq, x.to(torch.float32), rtol=0.07, atol=5e-2)
+
+
+def test_rms_norm_determinism():
+    """AITER RMSNorm produces bitwise-identical results across repeated calls."""
+    # Import to ensure ops are registered
+    import vllm.kernels.aiter_ops  # noqa: F401
+
+    torch.manual_seed(0)
+    M, N = 32, 512
+    x = torch.randn(M, N, dtype=torch.bfloat16, device="cuda")
+    weight = torch.ones(N, dtype=torch.bfloat16, device="cuda")
+    eps = 1e-5
+
+    reference = torch.ops.vllm_aiter.rms_norm(x, weight, eps)
+    for i in range(3):
+        result = torch.ops.vllm_aiter.rms_norm(x, weight, eps)
+        assert torch.equal(reference, result), f"Run {i + 1} differs from reference"

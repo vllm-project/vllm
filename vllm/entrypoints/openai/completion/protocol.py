@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     OpenAIBaseModel,
     PerRequestTimingMetrics,
+    StopParam,
     StreamOptions,
     UsageInfo,
     structured_outputs_from_response_format,
@@ -61,7 +62,7 @@ class CompletionRequest(OpenAIBaseModel):
     n: int = 1
     presence_penalty: float | None = 0.0
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
-    stop: str | list[str] | None = []
+    stop: StopParam = []
     stream: bool | None = False
     stream_options: StreamOptions | None = None
     suffix: str | None = None
@@ -147,6 +148,14 @@ class CompletionRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
+    session_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable session identity shared by related requests. Unlike "
+            "request_id, this value is expected to remain stable across "
+            "multiple requests in the same conversation or agent session."
+        ),
+    )
 
     return_tokens_as_token_ids: bool | None = Field(
         default=None,
@@ -165,6 +174,11 @@ class CompletionRequest(OpenAIBaseModel):
             "for each chunk. This is useful for debugging or when you "
             "need to map generated text back to input tokens."
         ),
+    )
+    routed_experts_prompt_start: int = Field(
+        default=0,
+        ge=0,
+        description="Skip the first N prompt tokens from returned routed-expert data.",
     )
     return_token_offsets: bool | None = Field(
         default=False,
@@ -385,6 +399,7 @@ class CompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
             thinking_token_budget=self.thinking_token_budget,
+            routed_experts_prompt_start=self.routed_experts_prompt_start,
         )
 
     @model_validator(mode="before")
@@ -602,7 +617,7 @@ class CompletionResponseChoice(OpenAIBaseModel):
     prompt_token_ids: list[int] | None = None  # For prompt
     # Per-token expert routing decisions, base64-encoded ``.npy`` bytes
     # (numpy serialization). Shape after decode:
-    #   (num_tokens - 1, num_layers, num_experts_per_tok)  dtype uint8/uint16
+    #   (num_tokens - 1, num_layers, num_experts_per_tok) dtype uint8/uint16/int32
     # ``num_tokens - 1`` because the last sampled token has not been
     # forwarded yet and therefore has no routing data.
     # Decode:

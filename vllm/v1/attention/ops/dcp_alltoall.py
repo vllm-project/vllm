@@ -26,6 +26,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.ops.common import mask_dcp_empty_shards_
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
@@ -87,7 +88,9 @@ def _lse_weighted_combine(
     weights = weights / weight_sum.clamp(min=1e-10)  # [N, B, H]
 
     # Weighted combination: sum over N dimension
-    result = (outputs * weights.unsqueeze(-1)).sum(dim=0)  # [B, H, D]
+    weights = weights.unsqueeze(-1)
+    outputs = torch.where(weights == 0, torch.zeros_like(outputs), outputs)
+    result = (outputs * weights).sum(dim=0)  # [B, H, D]
 
     if return_lse:
         if is_lse_base_on_e:
@@ -172,7 +175,7 @@ def _dcp_a2a_pack_send_kernel(
 
         lse_val = tl.load(
             lse_ptr + batch_idx * lse_stride_B + src_head_idx * lse_stride_H
-        )
+        ).to(tl.float32)
         if LSE_PACK_DIM == 1:
             tl.store(
                 send_ptr + send_base + HEAD_DIM * send_stride_D,
@@ -301,10 +304,11 @@ def _dcp_a2a_unpack_combine_kernel(
         else:
             weight = tl.exp2(lse_val - global_lse)
         weight = tl.where(weight != weight, 0.0, weight)
-        acc += (
-            tl.load(recv_ptr + recv_base + d_offsets * recv_stride_D).to(tl.float32)
-            * weight
+        partial = tl.load(recv_ptr + recv_base + d_offsets * recv_stride_D).to(
+            tl.float32
         )
+        partial = tl.where(weight == 0.0, 0.0, partial)
+        acc += partial * weight
 
     final_offsets = (
         batch_idx * out_stride_B + head_idx * out_stride_H + d_offsets * out_stride_D
@@ -324,7 +328,10 @@ def _dcp_a2a_pack_send(
     h_per_rank: int,
     head_dim: int,
     lse_pack_dim: int,
+    seq_lens: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
 ) -> None:
+    mask_dcp_empty_shards_(cp_attn_lse, seq_lens, query_start_loc)
     grid = (cp_attn_out.shape[0], h_per_rank, 1)
     _dcp_a2a_pack_send_kernel[grid](
         cp_attn_out,
@@ -396,20 +403,24 @@ def dcp_a2a_lse_reduce(
     ctx: CPTritonContext | None = None,
     return_lse: bool = False,
     is_lse_base_on_e: bool = True,
+    seq_lens: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     Combine partial attention outputs across DCP ranks using All-to-All.
 
-    The output and fp32 LSE are packed into a single output-dtype buffer, sent
+    The output and LSE are packed into a single output-dtype buffer, sent
     with one All-to-All, then unpacked and combined with exact LSE weighting.
 
     Args:
         cp_attn_out: [B, H, D] where B=num_tokens, H=total_heads, D=head_dim
-        cp_attn_lse: [B, H] log-sum-exp values (fp32)
+        cp_attn_lse: [B, H] floating-point log-sum-exp values
         cp_group: GroupCoordinator for DCP communication
         ctx: CPTritonContext (unused, for signature compatibility)
         return_lse: If True, also return the combined global LSE
         is_lse_base_on_e: If True, LSE is base e; if False, base 2
+        seq_lens: Local KV lengths. Empty shards contribute zero weight.
+        query_start_loc: Cumulative query-token offsets for each request.
 
     Returns:
         Combined output [B, H/N, D] (head-scattered)
@@ -426,10 +437,6 @@ def dcp_a2a_lse_reduce(
     if H % world_size != 0:
         raise ValueError(f"H={H} must be divisible by DCP world size {world_size}.")
     H_per_rank = H // world_size
-    # The pack kernel bit-casts the LSE as fp32; some MLA backends return it in
-    # the activation dtype (bf16/fp16), so enforce the documented fp32 contract.
-    if cp_attn_lse.dtype != torch.float32:
-        cp_attn_lse = cp_attn_lse.to(torch.float32)
     lse_pack_dim = _dcp_a2a_lse_pack_dim(cp_attn_out.dtype)
 
     send_buffer, recv_buffer = _dcp_a2a_send_recv_buffers(
@@ -446,6 +453,8 @@ def dcp_a2a_lse_reduce(
         H_per_rank,
         D,
         lse_pack_dim,
+        seq_lens=seq_lens,
+        query_start_loc=query_start_loc,
     )
 
     work = dist.all_to_all_single(

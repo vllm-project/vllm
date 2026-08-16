@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import gc
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -34,6 +35,10 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerBackend
+from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
+    ROCMAiterMLASparseBackend,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
@@ -124,6 +129,34 @@ def get_vllm_config():
         parallel_config=parallel_config,
     )
     return vllm_config
+
+
+@pytest.mark.parametrize("gc_initially_enabled", [True, False])
+def test_freeze_gc_disables_and_restores_automatic_gc(
+    monkeypatch: pytest.MonkeyPatch,
+    gc_initially_enabled: bool,
+):
+    monkeypatch.setenv("VLLM_ENABLE_CUDAGRAPH_GC", "0")
+    original_gc_state = gc.isenabled()
+    try:
+        if gc_initially_enabled:
+            gc.enable()
+        else:
+            gc.disable()
+
+        with (
+            pytest.raises(RuntimeError, match="capture failed"),
+            GPUModelRunner._freeze_gc(),
+        ):
+            assert not gc.isenabled()
+            raise RuntimeError("capture failed")
+
+        assert gc.isenabled() is gc_initially_enabled
+    finally:
+        if original_gc_state:
+            gc.enable()
+        else:
+            gc.disable()
 
 
 @pytest.fixture
@@ -262,6 +295,16 @@ def test_select_common_block_size_uses_largest_shared_int():
     assert selected_size == 64
 
 
+def test_select_common_block_size_accepts_rocm_sparse_block_size_16(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+
+    selected_size = select_common_block_size(
+        16,
+        [DeepseekV32IndexerBackend, ROCMAiterMLASparseBackend],
+    )
+    assert selected_size == 16
+
+
 def test_reasoning_config_without_custom_logitsprocs_does_not_need_output_token_ids(
     dist_init,
 ):
@@ -351,9 +394,13 @@ def test_select_common_block_size_no_valid_option():
 
 def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     model = Mock()
-    model.get_num_mm_encoder_tokens.side_effect = lambda num_embeds: num_embeds + 1
+    model.get_mm_lora_token_counts.side_effect = (
+        lambda *, modality, mm_kwargs, num_mm_embeds: (
+            num_mm_embeds + 1,
+            num_mm_embeds + 11,
+        )
+    )
     model.get_mm_mapping.return_value = SimpleNamespace(connector=True)
-    model.get_num_mm_connector_tokens.side_effect = lambda num_tokens: num_tokens + 10
 
     lora_manager = Mock()
     lora_manager.supports_tower_connector_lora.return_value = True
@@ -524,7 +571,8 @@ def test_update_states_request_resumed(model_runner, dist_init):
     assert _is_req_state_block_table_match(model_runner, req_id)
 
 
-def test_get_nans_in_logits(model_runner, dist_init):
+def test_get_nans_in_logits(model_runner, dist_init, monkeypatch):
+    monkeypatch.setattr(gpu_model_runner_module.envs, "VLLM_RAISE_ON_LOGIT_NANS", False)
     req_ids = ("req_0", "req_1")
 
     scheduler_output = _schedule_new_request(*req_ids)
@@ -893,6 +941,37 @@ def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
         dim=0,
     )
     assert torch.equal(passed_draft_probs, expected_draft_probs)
+
+
+def test_dummy_sampler_run_warms_all_greedy_rejection_sampler(monkeypatch):
+    runner = object.__new__(GPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(multimodal_config=None)
+    )
+    runner.model = SimpleNamespace(compute_logits=Mock(return_value=torch.randn(3, 8)))
+    runner.sampler = Mock(return_value="sampler_output")
+    runner.sampler.logprobs_mode = "processed_logprobs"
+    runner.speculative_config = SimpleNamespace(
+        rejection_sample_method="standard",
+        draft_sample_method="greedy",
+    )
+    runner.rejection_sampler = Mock()
+    synchronize = Mock()
+    monkeypatch.setattr(torch.accelerator, "synchronize", synchronize)
+
+    output = GPUModelRunner._dummy_sampler_run(runner, torch.randn(3, 4))
+
+    assert output == "sampler_output"
+    assert runner.rejection_sampler.call_count == 2
+    mixed_metadata = runner.rejection_sampler.call_args_list[0].args[3]
+    all_greedy_metadata = runner.rejection_sampler.call_args_list[1].args[3]
+    assert not mixed_metadata.all_greedy
+    assert mixed_metadata.temperature is not None
+    assert all_greedy_metadata.all_greedy
+    assert not all_greedy_metadata.all_random
+    assert all_greedy_metadata.temperature is None
+    synchronize.assert_called_once_with()
 
 
 def test_invalid_draft_suffixes_remain_rejected_in_metadata():

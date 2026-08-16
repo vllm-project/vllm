@@ -20,6 +20,18 @@ NUM_EXPERTS_PER_TOK = 2
 NUM_HIDDEN_LAYERS = 2
 
 
+def assert_valid_routed_experts(encoded: str | None) -> None:
+    assert encoded is not None
+    routed_experts = np.load(io.BytesIO(base64.b64decode(encoded)))
+    assert routed_experts.ndim == 3
+    num_tokens, num_layers, topk = routed_experts.shape
+    assert num_tokens > 0
+    assert num_layers == NUM_HIDDEN_LAYERS
+    assert topk == NUM_EXPERTS_PER_TOK
+    assert (routed_experts >= 0).all()
+    assert (routed_experts < NUM_LOCAL_EXPERTS).all()
+
+
 @pytest.fixture(scope="module")
 def server():
     args = [
@@ -50,15 +62,5 @@ async def test_routed_experts(server):
 
         choice = result.model_dump()["choices"][0]
 
-        assert choice["routed_experts"] is not None
         assert choice["token_ids"] is not None
-
-        # routed_experts is base64-encoded .npy bytes; decode to ndarray.
-        routed_experts = np.load(io.BytesIO(base64.b64decode(choice["routed_experts"])))
-        assert routed_experts.ndim == 3
-        num_tokens, num_layers, topk = routed_experts.shape
-        assert num_tokens > 0
-        assert num_layers == NUM_HIDDEN_LAYERS
-        assert topk == NUM_EXPERTS_PER_TOK
-        assert (routed_experts >= 0).all()
-        assert (routed_experts < NUM_LOCAL_EXPERTS).all()
+        assert_valid_routed_experts(choice["routed_experts"])

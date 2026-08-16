@@ -33,6 +33,7 @@ CacheDType = Literal[
     "int8_per_token_head",
     "fp8_per_token_head",
     "nvfp4",
+    "nvfp4_4over6",
 ]
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["all", "align", "none"]
@@ -80,6 +81,8 @@ class CacheConfig:
     Some models (namely DeepSeekV3.2) default to fp8, set to bfloat16 to use
     bfloat16 instead, this is an invalid option for models that do not default
     to fp8.
+    "nvfp4_4over6" uses the NVFP4 layout and selects between max/6 and max/4
+    scales per 16 values by minimizing squared reconstruction error.
     """
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
@@ -135,10 +138,10 @@ class CacheConfig:
     """The cache strategy for Mamba layers:
 
     - "none": set when prefix caching is disabled.
-    - "all": cache the mamba state of all tokens at position i * block_size. This is
-      the default behavior (for models that support it) when prefix caching is enabled.
+    - "all": cache the mamba state of all tokens at position i * block_size.
     - "align": only cache the mamba state of the last token of each scheduler step and
-      when the token is at position i * block_size.
+      when the token is at position i * block_size. This is the default when prefix
+      caching is enabled.
     """
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM history buffer length B: with use_replayssm, standard decode
