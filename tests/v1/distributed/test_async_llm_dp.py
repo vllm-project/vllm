@@ -12,13 +12,14 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.config import VllmConfig
+from vllm.config.parallel import DataParallelBackend
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.core_client import DPAsyncMPClient
+from vllm.v1.engine.core_client import DPLBAsyncMPClient
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, MultiModalCacheStats, SchedulerStats
 
@@ -82,7 +83,7 @@ async def generate(
 async def test_load(
     model: str,
     output_kind: RequestOutputKind,
-    data_parallel_backend: str,
+    data_parallel_backend: DataParallelBackend,
     async_scheduling: bool,
 ):
     if async_scheduling and data_parallel_backend == "ray":
@@ -162,7 +163,8 @@ async def test_load(
         assert not engine.output_processor.has_unfinished_requests()
 
         # testing internals here which may break
-        core_client: DPAsyncMPClient = engine.engine_core
+        core_client = engine.engine_core
+        assert isinstance(core_client, DPLBAsyncMPClient)
         # the engines only synchronize stopping every N steps so
         # allow a small amount of time here.
         for _ in range(10):
@@ -184,6 +186,67 @@ async def test_load(
             assert slogger.finished_req_count > NUM_REQUESTS // (DP_SIZE + 1), (
                 f"requests are imbalanced: {stats_loggers}"
             )
+
+
+@pytest.mark.parametrize("prefill_schedule_interval", [1, 4])
+@pytest.mark.asyncio
+async def test_dp_prefill_schedule_interval(prefill_schedule_interval: int):
+    """Throttling new prefills to every Nth step (DP balancing) must not break
+    generation: a stream of staggered requests should still all complete with
+    the expected number of tokens.
+
+    The throttle only engages in the DP MoE/EP engine-core path
+    (`DPEngineCoreProc`), so this uses an MoE model with expert parallel.
+    """
+    with ExitStack() as after:
+        prompt = "This is a test of data parallel"
+
+        engine_args = AsyncEngineArgs(
+            model="ibm-research/PowerMoE-3b",
+            enforce_eager=True,
+            tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
+            data_parallel_size=DP_SIZE,
+            data_parallel_backend="mp",
+            enable_expert_parallel=True,
+            prefill_schedule_interval=prefill_schedule_interval,
+        )
+        engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        NUM_REQUESTS = 50
+        NUM_EXPECTED_TOKENS = 10
+
+        request_ids = [f"request-{i}" for i in range(NUM_REQUESTS)]
+
+        # Create requests with a small stagger so they arrive across many
+        # steps and (with interval > 1) accumulate in the waiting queue
+        # before being admitted together on cadence-aligned steps.
+        tasks = []
+        for request_id in request_ids:
+            tasks.append(
+                asyncio.create_task(
+                    generate(
+                        engine,
+                        request_id,
+                        prompt,
+                        RequestOutputKind.DELTA,
+                        NUM_EXPECTED_TOKENS,
+                    )
+                )
+            )
+            await asyncio.sleep(0.01)
+
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for task in pending:
+            task.cancel()
+        for task in done:
+            num_generated_tokens, request_id = await task
+            assert num_generated_tokens == NUM_EXPECTED_TOKENS, (
+                f"{request_id} generated {num_generated_tokens} but "
+                f"expected {NUM_EXPECTED_TOKENS}"
+            )
+
+        assert not engine.output_processor.has_unfinished_requests()
 
 
 # =============================================================================

@@ -4,15 +4,88 @@
 
 set -e
 
-merge_base_commit=$(git merge-base HEAD origin/main)
+# ROCm CI runs this script inside `run-amd-test.sh` where /vllm-workspace often has no .git
+# (wheel artifact layout). The wrapper passes CI_STANDALONE_MERGE_BASE from the agent checkout.
+merge_base_commit=""
+if [[ -n "${CI_STANDALONE_MERGE_BASE:-}" ]]; then
+    merge_base_commit="${CI_STANDALONE_MERGE_BASE}"
+elif merge_base_commit="$(git -C /vllm-workspace merge-base HEAD origin/main 2>/dev/null)"; then
+    :
+elif merge_base_commit="$(git merge-base HEAD origin/main 2>/dev/null)"; then
+    :
+else
+    echo "ERROR: need a git checkout or CI_STANDALONE_MERGE_BASE to resolve wheels.vllm.ai commit." >&2
+    exit 1
+fi
+
 echo "INFO: current merge base commit with main: $merge_base_commit"
-git show --oneline -s "$merge_base_commit"
+if git show --oneline -s "$merge_base_commit" 2>/dev/null; then
+    :
+else
+    echo "INFO: git show unavailable in this environment; using SHA above for precompiled metadata."
+fi
 
 # test whether the metadata.json url is valid, retry each 3 minutes up to 5 times
 # this avoids cumbersome error messages & manual retries in case the precompiled wheel
 # for the given commit is still being built in the release pipeline
-meta_json_url="https://wheels.vllm.ai/$merge_base_commit/vllm/metadata.json"
-echo "INFO: will use metadata.json from $meta_json_url"
+_vllm_target_lower="$(printf '%s' "${VLLM_TARGET_DEVICE:-}" | tr '[:upper:]' '[:lower:]')"
+if [[ "${_vllm_target_lower}" == "rocm" ]] || [[ -d /opt/rocm ]] || command -v rocminfo >/dev/null 2>&1; then
+    _rocm_env_variant="$(python3 - <<'PY'
+import ctypes
+import os
+from pathlib import Path
+
+def get_rocm_version() -> str | None:
+    rocm_home = os.environ.get("ROCM_HOME") or os.environ.get("ROCM_PATH") or "/opt/rocm"
+    try:
+        librocm_core = Path(rocm_home) / "lib" / "librocm-core.so"
+        if not librocm_core.is_file():
+            return None
+        librocm = ctypes.CDLL(str(librocm_core))
+        get_rocm_core_version = librocm.getROCmVersion
+        major = ctypes.c_uint32()
+        minor = ctypes.c_uint32()
+        patch = ctypes.c_uint32()
+        if get_rocm_core_version(
+            ctypes.byref(major), ctypes.byref(minor), ctypes.byref(patch)
+        ) == 0:
+            return f"{major.value}.{minor.value}.{patch.value}"
+    except Exception:
+        return None
+    return None
+
+version = get_rocm_version()
+if version:
+    print(f"rocm{version.replace('.', '')}", end="")
+PY
+)"
+    _available_variants="$(curl -sf "https://wheels.vllm.ai/rocm/${merge_base_commit}/" \
+        | grep -oP 'rocm\d+' | sort -u | tr '\n' ' ' || true)"
+    if [[ -n "${VLLM_PRECOMPILED_WHEEL_VARIANT:-}" ]]; then
+        _rocm_variant="${VLLM_PRECOMPILED_WHEEL_VARIANT}"
+        if [[ -n "${_rocm_env_variant}" && "${_rocm_variant}" != "${_rocm_env_variant}" ]]; then
+            echo "ERROR: VLLM_PRECOMPILED_WHEEL_VARIANT=${_rocm_variant} does not match detected environment ROCm variant ${_rocm_env_variant}" >&2
+            exit 1
+        fi
+    else
+        _rocm_variant="${_rocm_env_variant}"
+    fi
+    if [[ -z "${_rocm_variant}" ]]; then
+        echo "ERROR: Could not detect ROCm variant from the environment for commit ${merge_base_commit}" >&2
+        exit 1
+    fi
+    if [[ -z "${_available_variants}" ]] \
+            || [[ " ${_available_variants} " != *" ${_rocm_variant} "* ]]; then
+        echo "ERROR: Environment ROCm variant '${_rocm_variant}' is not published for commit ${merge_base_commit} (available:${_available_variants:-none})" >&2
+        exit 1
+    fi
+    meta_json_url="https://wheels.vllm.ai/rocm/${merge_base_commit}/${_rocm_variant}/vllm/metadata.json"
+    unset -v _rocm_env_variant _available_variants _rocm_variant
+else
+    meta_json_url="https://wheels.vllm.ai/${merge_base_commit}/vllm/metadata.json"
+fi
+unset -v _vllm_target_lower
+echo "INFO: will use metadata.json from ${meta_json_url}"
 
 for i in {1..5}; do
     echo "Checking metadata.json URL (attempt $i)..."
@@ -59,7 +132,12 @@ cd /vllm-workspace/
 # uninstall vllm
 pip3 uninstall -y vllm
 # restore the original files
-mv src/vllm ./vllm
+if [[ -d src/vllm ]]; then
+    mv src/vllm ./vllm
+elif [[ ! -d vllm ]]; then
+    echo "ERROR: expected vllm package at /vllm-workspace/src/vllm or /vllm-workspace/vllm" >&2
+    exit 1
+fi
 
 # remove all compilers
 apt remove --purge build-essential -y
@@ -67,7 +145,14 @@ apt autoremove -y
 
 echo 'import os; os.system("touch /tmp/changed.file")' >> vllm/__init__.py
 
-VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e .
+# ROCm CI uses setuptools develop for editable installs (see Dockerfile.rocm and run-amd-test.sh).
+_vllm_target_lower="$(printf '%s' "${VLLM_TARGET_DEVICE:-}" | tr '[:upper:]' '[:lower:]')"
+if [[ "${_vllm_target_lower}" == "rocm" ]]; then
+  VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 python3 setup.py develop
+else
+  VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e .
+fi
+unset -v _vllm_target_lower
 # Run the script
 python3 -c 'import vllm'
 

@@ -8,11 +8,9 @@ import uuid
 from argparse import Namespace
 from collections.abc import Awaitable
 from contextlib import asynccontextmanager
-from http import HTTPStatus
 
 import pydantic
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.exceptions import RequestValidationError
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import iterate_in_threadpool
 from starlette.datastructures import Headers, MutableHeaders
@@ -20,25 +18,13 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.launcher import terminate_if_errored
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorInfo,
-    ErrorResponse,
-    GenerationError,
-)
-from vllm.entrypoints.serve.utils.error_response import (
-    create_error_response,
-    sanitize_message,
-)
-from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.utils.gc_utils import freeze_gc_heap
-from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 
 logger = init_logger("vllm.entrypoints.openai.server_utils")
 
 
-GUARDED_PREFIX = ("/v1", "/v2", "/inference")
+GUARDED_PREFIX = ("/v1", "/v2", "/inference", "/cohere")
 
 
 class AuthenticationMiddleware:
@@ -324,128 +310,6 @@ async def log_response(request: Request, call_next):
     return response
 
 
-async def engine_error_handler(
-    req: Request, exc: EngineDeadError | EngineGenerateError
-):
-    """
-    VLLM V1 AsyncLLM catches exceptions and returns
-    only two types: EngineGenerateError and EngineDeadError.
-
-    EngineGenerateError is raised by the per request generate()
-    method. This error could be request specific (and therefore
-    recoverable - e.g. if there is an error in input processing).
-
-    EngineDeadError is raised by the background output_handler
-    method. This error is global and therefore not recoverable.
-
-    We register these @app.exception_handlers to return nice
-    responses to the end user if they occur and shut down if needed.
-    See https://fastapi.tiangolo.com/tutorial/handling-errors/
-    for more details on how exception handlers work.
-
-    If an exception is encountered in a StreamingResponse
-    generator, the exception is not raised, since we already sent
-    a 200 status. Rather, we send an error message as the next chunk.
-    Since the exception is not raised, this means that the server
-    will not automatically shut down. Instead, we use the watchdog
-    background task for check for errored state.
-    """
-
-    if req.app.state.args.log_error_stack:
-        logger.exception(
-            "Engine Exception caught. Request id: %s",
-            req.state.request_metadata.request_id
-            if hasattr(req.state, "request_metadata")
-            else None,
-        )
-
-    terminate_if_errored(
-        server=req.app.state.server,
-        engine=req.app.state.engine_client,
-    )
-    err = create_error_response(exc)
-    return JSONResponse(err.model_dump(), status_code=err.error.code)
-
-
-async def generation_error_handler(req: Request, exc: GenerationError):
-    """Handle GenerationError without logging stack traces.
-
-    GenerationError is a known, expected error (e.g. KV cache load failure)
-    that should be returned to the client as a 500 response without polluting
-    server logs with stack traces.
-    """
-    err = create_error_response(exc)
-    return JSONResponse(err.model_dump(), status_code=err.error.code)
-
-
-async def exception_handler(req: Request, exc: Exception):
-    if req.app.state.args.log_error_stack:
-        logger.error(
-            "Exception caught. Request id: %s",
-            req.state.request_metadata.request_id
-            if hasattr(req.state, "request_metadata")
-            else None,
-        )
-
-    err = create_error_response(exc)
-    return JSONResponse(err.model_dump(), status_code=err.error.code)
-
-
-async def http_exception_handler(req: Request, exc: HTTPException):
-    if req.app.state.args.log_error_stack:
-        logger.exception(
-            "HTTPException caught. Request id: %s",
-            req.state.request_metadata.request_id
-            if hasattr(req.state, "request_metadata")
-            else None,
-        )
-    err = ErrorResponse(
-        error=ErrorInfo(
-            message=sanitize_message(exc.detail),
-            type=HTTPStatus(exc.status_code).phrase,
-            code=exc.status_code,
-        )
-    )
-    return JSONResponse(err.model_dump(), status_code=exc.status_code)
-
-
-async def validation_exception_handler(req: Request, exc: RequestValidationError):
-    if req.app.state.args.log_error_stack:
-        logger.exception(
-            "RequestValidationError caught. Request id: %s",
-            req.state.request_metadata.request_id
-            if hasattr(req.state, "request_metadata")
-            else None,
-        )
-
-    param = None
-    errors = exc.errors()
-    for error in errors:
-        if "ctx" in error and "error" in error["ctx"]:
-            ctx_error = error["ctx"]["error"]
-            if isinstance(ctx_error, VLLMValidationError):
-                param = ctx_error.parameter
-                break
-
-    exc_str = str(exc)
-    errors_str = str(errors)
-
-    if errors and errors_str and errors_str != exc_str:
-        message = f"{exc_str} {errors_str}"
-    else:
-        message = exc_str
-
-    err = ErrorResponse(
-        error=ErrorInfo(
-            message=sanitize_message(message),
-            type=HTTPStatus.BAD_REQUEST.phrase,
-            code=HTTPStatus.BAD_REQUEST,
-            param=param,
-        )
-    )
-    return JSONResponse(err.model_dump(), status_code=HTTPStatus.BAD_REQUEST)
-
-
 _running_tasks: set[asyncio.Task] = set()
 
 
@@ -474,6 +338,13 @@ async def lifespan(app: FastAPI):
         finally:
             if task is not None:
                 task.cancel()
+            for attr_name in (
+                "openai_serving_transcription",
+                "openai_serving_translation",
+            ):
+                serving = getattr(app.state, attr_name, None)
+                if serving is not None and hasattr(serving, "shutdown"):
+                    serving.shutdown()
     finally:
         # Ensure app state including engine ref is gc'd
         del app.state
