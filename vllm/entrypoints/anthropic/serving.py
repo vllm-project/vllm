@@ -431,7 +431,10 @@ class AnthropicServingMessages(OpenAIServingChat):
                     ref_name = item.get("tool_name") or item.get("name")
                     if ref_name:
                         tool_reference.append(
-                            {"type": "tool_reference", "name": ref_name}
+                            {
+                                "type": "text",
+                                "text": f"[tool reference: {ref_name}]",
+                            }
                         )
             tool_text = "\n".join(text_parts)
 

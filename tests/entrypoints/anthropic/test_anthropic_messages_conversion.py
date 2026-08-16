@@ -48,6 +48,8 @@ from vllm.entrypoints.serve.exception_handling.handlers.validation import (
     validation_exception_handler,
 )
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 _convert = AnthropicServingMessages._convert_anthropic_to_openai_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
 
@@ -237,6 +239,20 @@ class TestToolResultContent:
         tool_msg = [m for m in result.messages if m["role"] == "tool"]
         assert len(tool_msg) == 1
         assert tool_msg[0]["content"] == "line 1\nline 2"
+
+    def test_tool_result_with_tool_reference(self):
+        request = self._make_tool_result_request(
+            [
+                {"type": "tool_reference", "tool_name": "list_files"},
+            ]
+        )
+        result = _convert(request)
+
+        tool_msg = [m for m in result.messages if m["role"] == "tool"]
+        assert len(tool_msg) == 2
+        assert tool_msg[1]["content"] == [
+            {"type": "text", "text": "[tool reference: list_files]"}
+        ]
 
     def test_tool_result_with_image(self):
         """Image in tool_result should produce a follow-up user message."""
