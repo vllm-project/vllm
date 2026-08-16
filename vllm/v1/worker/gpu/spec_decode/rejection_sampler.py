@@ -5,6 +5,7 @@ from collections.abc import Iterable, Iterator
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.config import SpeculativeConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.triton_utils import tl, triton
@@ -82,6 +83,9 @@ class RejectionSampler:
         self.sampler = sampler
         self.num_speculative_steps = spec_config.num_speculative_tokens
         rejection_sample_method = spec_config.rejection_sample_method
+        self.use_batch_invariant_rng = (
+            envs.VLLM_BATCH_INVARIANT and spec_config.supports_batch_invariance()
+        )
         self.use_block_verification: bool = False
         self.synthetic_conditional_rates: torch.Tensor | None = None
         if rejection_sample_method == "synthetic":
@@ -167,6 +171,7 @@ class RejectionSampler:
             self.synthetic_conditional_rates,
             use_fp64=self.sampler.use_fp64_gumbel,
             use_block_verification=self.use_block_verification,
+            use_batch_invariant_rng=self.use_batch_invariant_rng,
         )
         return processed_logits, sampled, num_sampled
 

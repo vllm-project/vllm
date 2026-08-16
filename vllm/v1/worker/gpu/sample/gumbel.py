@@ -13,6 +13,10 @@ from vllm.triton_utils import HAS_TRITON, tl, tldevice, triton
 # attribute is `None`, and `tl.constexpr(...)` would crash at import time.
 _TL_RAND_MIN = tl.constexpr(4.6566127342e-10) if HAS_TRITON else 4.6566127342e-10
 
+RNG_DOMAIN_DRAFT_PROPOSAL = 1
+RNG_DOMAIN_ACCEPTANCE = 2
+RNG_DOMAIN_RESIDUAL = 3
+
 
 @triton.jit
 def _temperature_kernel(
@@ -82,6 +86,13 @@ def tl_rand32(seed, offset, includes_zero: tl.constexpr):
 
 
 @triton.jit
+def tl_rng_seed(seed, domain: tl.constexpr):
+    if domain == 0:
+        return seed
+    return tl.randint(seed, seed * 0 + domain).to(tl.int64)
+
+
+@triton.jit
 def gumbel_block_argmax(
     logits,
     block,
@@ -95,6 +106,8 @@ def gumbel_block_argmax(
     logits_cache_stride,
     logits_cache_col_ptr,
     vocab_size,
+    rng_domain: tl.constexpr,
+    use_target_stream,
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr = False,
@@ -136,7 +149,9 @@ def gumbel_block_argmax(
         # Calculate the seed for gumbel noise.
         seed = tl.load(seeds_ptr + req_state_idx, mask=is_valid_req, other=0)
         pos = tl.load(pos_ptr + token_idx)
-        gumbel_seed = tl.randint(seed, pos)
+        rng_seed = tl_rng_seed(seed, rng_domain)
+        rng_seed = tl.where(use_target_stream, seed, rng_seed)
+        gumbel_seed = tl.randint(rng_seed, pos)
 
         if USE_FP64:
             u = tl_rand64(gumbel_seed, block, includes_zero=False)
@@ -178,6 +193,7 @@ def _gumbel_sample_kernel(
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr,
+    RNG_DOMAIN: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
     block_idx = tl.program_id(1)
@@ -203,6 +219,8 @@ def _gumbel_sample_kernel(
         logits_cache_stride,
         logits_cache_col_ptr,
         vocab_size,
+        RNG_DOMAIN,
+        False,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
         USE_FP64=USE_FP64,
         PER_TOKEN_COL=PER_TOKEN_COL,
@@ -222,6 +240,7 @@ def gumbel_sample(
     logits_cache: torch.Tensor | None = None,  # [max_num_reqs, num_cols, vocab_size]
     logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
     use_fp64: bool = False,
+    rng_domain: int = 0,
 ) -> torch.Tensor:
     # Enforce contiguity on non-strided input tensors
     expanded_idx_mapping = expanded_idx_mapping.contiguous()
@@ -254,6 +273,7 @@ def gumbel_sample(
         APPLY_TEMPERATURE=apply_temperature,
         USE_FP64=use_fp64,
         PER_TOKEN_COL=per_token_col,
+        RNG_DOMAIN=rng_domain,
     )
     # NOTE(woosuk): Use int64 for later indexing.
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)

@@ -1043,6 +1043,22 @@ class VllmConfig:
 
         self.try_verify_and_update_config()
 
+        speculative_config = self.speculative_config
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and speculative_config is not None
+            and (
+                not self.use_v2_model_runner
+                or not speculative_config.supports_batch_invariance()
+            )
+        ):
+            raise ValueError(
+                "VLLM_BATCH_INVARIANT only supports speculative decoding with "
+                "Model Runner V2, EAGLE3/DFlash/DSpark, probabilistic drafting, "
+                "standard rejection sampling, fixed speculative lengths, and "
+                "adaptive verification disabled."
+            )
+
         if self.model_config is not None:
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)

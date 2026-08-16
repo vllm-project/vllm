@@ -6,6 +6,12 @@ import math
 import pytest
 import torch
 
+from vllm.v1.worker.gpu.sample.gumbel import (
+    RNG_DOMAIN_ACCEPTANCE,
+    RNG_DOMAIN_DRAFT_PROPOSAL,
+    RNG_DOMAIN_RESIDUAL,
+    gumbel_sample,
+)
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
@@ -651,3 +657,75 @@ def test_chunked_requests_match_full_batch(has_draft_logits: bool):
     steps = torch.arange(num_speculative_steps + 1, device=device)
     valid = steps.unsqueeze(0) < num_sampled.unsqueeze(1)
     assert torch.equal(chunked_sampled[valid], sampled[valid])
+
+
+def test_spec_rng_streams_are_batch_invariant():
+    torch.manual_seed(17)
+    device = "cuda"
+    num_reqs = 32
+    num_speculative_steps = 3
+    vocab_size = 257
+    logits = torch.randn(num_reqs, vocab_size, device=device)
+    idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
+    temperature = torch.full((num_reqs,), 0.7, device=device)
+    seeds = torch.arange(num_reqs, dtype=torch.int64, device=device) * 7919
+    positions = torch.arange(1000, 1000 + num_reqs, device=device)
+    rows = torch.arange(num_reqs, device=device)
+
+    def sample(domain: int, selected: torch.Tensor) -> torch.Tensor:
+        return gumbel_sample(
+            logits[selected],
+            idx_mapping[selected],
+            temperature,
+            seeds,
+            positions[selected],
+            apply_temperature=True,
+            rng_domain=domain,
+        )
+
+    streams = []
+    for domain in (
+        RNG_DOMAIN_DRAFT_PROPOSAL,
+        RNG_DOMAIN_ACCEPTANCE,
+        RNG_DOMAIN_RESIDUAL,
+    ):
+        full = sample(domain, rows)
+        split = torch.cat((sample(domain, rows[:11]), sample(domain, rows[11:])))
+        assert torch.equal(split, full)
+        streams.append(full)
+
+    assert all(
+        not torch.equal(streams[i], streams[j])
+        for i in range(len(streams))
+        for j in range(i)
+    )
+
+    target_logits = torch.randn(vocab_size, device=device)
+    inputs = _build_rejection_sample_inputs(
+        target_logits,
+        target_logits,
+        num_speculative_steps,
+        temperature=1.0,
+        num_trials=num_reqs,
+    )
+    sampled, num_sampled = rejection_sample(
+        **inputs,
+        num_speculative_steps=num_speculative_steps,
+        use_batch_invariant_rng=True,
+    )
+    bonus_rows = torch.arange(
+        num_speculative_steps,
+        num_reqs * (num_speculative_steps + 1),
+        num_speculative_steps + 1,
+        device=device,
+    )
+    target_sampled = gumbel_sample(
+        inputs["target_logits"][bonus_rows],
+        inputs["expanded_idx_mapping"][bonus_rows],
+        inputs["temperature"],
+        inputs["seed"],
+        inputs["pos"][bonus_rows],
+        apply_temperature=False,
+    )
+    assert torch.all(num_sampled == num_speculative_steps + 1)
+    assert torch.equal(sampled[:, -1], target_sampled)
