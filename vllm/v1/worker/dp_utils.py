@@ -37,11 +37,9 @@ class DPProfilerSync:
     """
 
     def __init__(self) -> None:
-        # This rank has received start_profile but capture has not begun yet.
+        # start_profile received, capture not yet begun.
         self._pending = False
-        # Consensus reached: every rank should start capture. Latched until the
-        # worker consumes it, so a second reduce in the same step (PP+SP) can't
-        # clear it before the worker reads it.
+        # Latched consensus, cleared when the worker consumes it.
         self.start_now = False
 
     def request_start(self) -> None:
@@ -90,20 +88,21 @@ def _run_ar(
     padded_num_tokens_per_ubatch: int,
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
-    profile_start_pending: bool = False,
+    profiler_sync: "DPProfilerSync | None" = None,
 ) -> torch.Tensor:
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
     device, group = _get_device_and_group(parallel_config)
-    # Populate this rank's contribution on CPU to reduce GPU syncs. Row 4 carries
-    # the profiler start request so it is OR-reduced together with the batch
-    # coordination, avoiding a separate collective (see DPProfilerSync).
-    tensor_cpu = torch.zeros(5, dp_size, dtype=torch.int32)
+    multinode_profiling = profiler_sync is not None
+    # Populate this rank's contribution on CPU to reduce GPU syncs.
+    # Row 4 (profiler start request) is only added under VLLM_ENABLE_MULTINODE_PROFILING.
+    tensor_cpu = torch.zeros(5 if multinode_profiling else 4, dp_size, dtype=torch.int32)
     tensor_cpu[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor_cpu[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor_cpu[2][dp_rank] = 1 if should_ubatch else 0
     tensor_cpu[3][dp_rank] = cudagraph_mode
-    tensor_cpu[4][dp_rank] = 1 if profile_start_pending else 0
+    if multinode_profiling:
+        tensor_cpu[4][dp_rank] = 1 if profiler_sync._pending else 0
     tensor = tensor_cpu.to(device, non_blocking=True)
     dist.all_reduce(tensor, group=group)
     return tensor
@@ -190,7 +189,7 @@ def _synchronize_dp_ranks(
         padded_num_tokens_per_ubatch=num_tokens_padded,
         cudagraph_mode=cudagraph_mode,
         parallel_config=parallel_config,
-        profile_start_pending=profiler_sync is not None and profiler_sync._pending,
+        profiler_sync=profiler_sync,
     )
 
     # Only the NCCL path leaves `tensor` on device. With Gloo -- the default
@@ -201,16 +200,11 @@ def _synchronize_dp_ranks(
         if parallel_config.disable_nccl_for_dp_synchronization
         else gpu_sync_allowed()
     ):
-        # OR-reduced profiler start request: latch it so the worker starts
-        # capture on the same step across all DP ranks.
-        if profiler_sync is not None:
+        # Latch the OR-reduced profiler start request across ranks.
+        multinode_profiling = profiler_sync is not None
+        if multinode_profiling:
             consensus = bool(tensor[4].any().item())
-            # DEBUG (multinode profiler propagation): fires only during a
-            # profiling window (this rank pending, or the OR-reduce carried a
-            # start bit), so it cannot spam steady-state serving. Shows the
-            # actual reduce group size -- if reduce_group_size == 1 the DP
-            # all-reduce is per-engine and the start bit cannot cross engines
-            # under external-LB.
+            # Only logs during a profiling window, so it can't spam serving.
             if profiler_sync._pending or consensus:
                 _, dbg_group = _get_device_and_group(parallel_config)
                 logger.info(

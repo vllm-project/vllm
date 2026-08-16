@@ -33,11 +33,9 @@ class DPProfilerSync:
     """
 
     def __init__(self) -> None:
-        # This rank has received start_profile but capture has not begun yet.
+        # start_profile received, capture not yet begun.
         self._pending = False
-        # Consensus reached: every rank should start capture. Latched until the
-        # worker consumes it, so a second reduce in the same step can't clear it
-        # before the worker reads it.
+        # Latched consensus, cleared when the worker consumes it.
         self.start_now = False
 
     def request_start(self) -> None:
@@ -81,21 +79,21 @@ def sync_cudagraph_and_dp_padding(
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
-    # Row 4 carries the profiler start request so it is OR-reduced together with
-    # the batch coordination, avoiding a separate collective (see DPProfilerSync).
-    tensor = torch.zeros(5, dp_size, dtype=torch.int32, device="cpu")
+    multinode_profiling = profiler_sync is not None
+    # Row 4 (profiler start request) only added under VLLM_ENABLE_MULTINODE_PROFILING.
+    tensor = torch.zeros(
+        5 if multinode_profiling else 4, dp_size, dtype=torch.int32, device="cpu"
+    )
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
-    tensor[4][dp_rank] = (
-        1 if (profiler_sync is not None and profiler_sync._pending) else 0
-    )
+    if multinode_profiling:
+        tensor[4][dp_rank] = 1 if profiler_sync._pending else 0
     dist.all_reduce(tensor, group=group)
 
-    # OR-reduced profiler start request: latch it so the worker starts capture
-    # on the same step across all DP ranks.
-    if profiler_sync is not None:
+    # Latch the OR-reduced profiler start request across ranks.
+    if multinode_profiling:
         profiler_sync.observe(bool(tensor[4].any().item()))
 
     num_tokens_across_dp = tensor[0]
