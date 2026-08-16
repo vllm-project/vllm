@@ -37,7 +37,7 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import KVCacheBlock, max_servable_num_tokens
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -211,6 +211,10 @@ class Scheduler(SchedulerInterface):
         # update_from_output.
         self.grammar_compile_error_reqs: set[str] = set()
 
+        # Requests longer than `max_servable_num_tokens` (below), finished as
+        # per-request length errors in update_from_output.
+        self.unservable_reqs: set[str] = set()
+
         # Encoder-related.
         # Calculate encoder cache size if applicable
         supports_mm_inputs = mm_registry.supports_multimodal_inputs(
@@ -294,6 +298,34 @@ class Scheduler(SchedulerInterface):
         # kv_cache_manager is constructed so block_pool is available.
         if self.connector is not None:
             self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
+
+        # Longest sequence this pool can hold for one request, from the same
+        # per-spec bounds the startup check uses. Normally >= max_model_len,
+        # because that check refuses to size a pool that cannot serve one
+        # max_model_len request. When it is smaller, a request beyond it can
+        # never be scheduled at any future time, however much drains, so it is
+        # failed at admission (see `add_request`) rather than retried forever
+        # (#52520). Falsy means there is no per-block bound to enforce -- `None`
+        # for layouts the startup check cannot price either, `0` for a pool with
+        # no usable blocks -- and the frontend's `max_model_len` check stands
+        # alone, exactly as before.
+        self.max_servable_num_tokens: int = (
+            max_servable_num_tokens(
+                vllm_config, kv_cache_config.kv_cache_groups, kv_cache_config.num_blocks
+            )
+            or self.max_model_len
+        )
+        if self.max_servable_num_tokens < self.max_model_len:
+            logger.error(
+                "The KV cache pool (%d blocks) can hold at most %d tokens for a "
+                "single request, which is less than max_model_len (%d). Requests "
+                "longer than %d tokens will be rejected. Increase "
+                "`gpu_memory_utilization` or decrease `max_model_len`.",
+                kv_cache_config.num_blocks,
+                self.max_servable_num_tokens,
+                self.max_model_len,
+                self.max_servable_num_tokens,
+            )
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
@@ -2055,6 +2087,25 @@ class Scheduler(SchedulerInterface):
                     )
                 )
 
+        if self.unservable_reqs:
+            # Requests the pool can never hold. FINISHED_IGNORED is upstream's
+            # status for "prompt longer than the model's length cap"; the
+            # actionable maximum servable length is logged in `add_request`.
+            ignored_reqs = self.finish_requests(
+                self.unservable_reqs, RequestStatus.FINISHED_IGNORED
+            )
+            self.unservable_reqs.clear()
+            for request in ignored_reqs:
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=request.request_id,
+                        new_token_ids=[],
+                        finish_reason=request.get_finished_reason(),
+                        events=request.take_events(),
+                        trace_headers=request.trace_headers,
+                    )
+                )
+
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
@@ -2298,6 +2349,22 @@ class Scheduler(SchedulerInterface):
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return self.kv_cache_manager.usage
 
+    def _is_unservable(self, request: Request) -> bool:
+        """Whether no future pool state can ever hold this request.
+
+        Mirrors the frontend's `max_model_len` validation: a generate request
+        also needs a slot for the token it will produce, so a prompt exactly at
+        the bound is already too long.
+        """
+        if self.max_servable_num_tokens >= self.max_model_len:
+            # The common case: the pool covers the whole window, so the
+            # frontend's `max_model_len` check is the only bound that bites.
+            return False
+        num_tokens = request.num_tokens
+        if request.pooling_params is None:
+            num_tokens += 1
+        return num_tokens > self.max_servable_num_tokens
+
     def add_request(self, request: Request) -> None:
         existing = self.requests.get(request.request_id)
         if existing is not None:
@@ -2313,6 +2380,19 @@ class Scheduler(SchedulerInterface):
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         else:
+            if self._is_unservable(request):
+                logger.error(
+                    "Request %s (%d tokens) needs more KV cache blocks than the "
+                    "whole pool holds; no future pool state can schedule it. The "
+                    "maximum servable length is %d tokens. Failing the request "
+                    "instead of retrying it.",
+                    request.request_id,
+                    request.num_tokens,
+                    self.max_servable_num_tokens,
+                )
+                self.requests[request.request_id] = request
+                self.unservable_reqs.add(request.request_id)
+                return
             if request.resumable:
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
@@ -2477,7 +2557,9 @@ class Scheduler(SchedulerInterface):
             + len(self.skipped_waiting)
             - self.num_waiting_for_streaming_input
         )
-        return num_waiting + len(self.running)
+        # `unservable_reqs` are in no queue: they are finished by the next
+        # `update_from_output`, which must still be reached.
+        return num_waiting + len(self.running) + len(self.unservable_reqs)
 
     def has_finished_requests(self) -> bool:
         if self.finished_req_ids:

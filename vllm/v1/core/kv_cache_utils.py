@@ -1973,6 +1973,44 @@ def _estimate_max_model_len_from_groups(
         vllm_config.model_config.max_model_len = original_max
 
 
+def max_servable_num_tokens(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    num_blocks: int,
+) -> int | None:
+    """
+    The longest sequence a pool of `num_blocks` blocks can hold for one request.
+
+    `BlockPool` permanently reserves one block as the null block, so only
+    `num_blocks - 1` blocks are ever available to a request.
+
+    This is the same bound `_check_enough_kv_cache_memory` reports as "the
+    estimated maximum model length", evaluated against the block count the pool
+    was actually built with. Sharing one function between the startup pool sizer
+    and the runtime admission gate is what keeps them from drifting; when they
+    drift, the engine admits requests that no future pool state can hold
+    (#52520). #40946 did the same for SWA / chunked-local attention.
+
+    Returns `None` when the groups cannot be priced per block, i.e. exactly when
+    the pool itself was not sized per block, so this never invents a bound the
+    startup check did not apply.
+    """
+    if not kv_cache_groups:
+        return None
+    if (
+        len(kv_cache_groups) > 1
+        and len({g.kv_cache_spec.page_size_bytes for g in kv_cache_groups}) > 1
+        and not _use_packed_kv_cache_config(vllm_config, kv_cache_groups)
+    ):
+        return None
+    usable_blocks = max(num_blocks - 1, 0)
+    return _estimate_max_model_len_from_groups(
+        vllm_config,
+        kv_cache_groups,
+        usable_blocks * _pool_bytes_per_block(vllm_config, kv_cache_groups),
+    )
+
+
 def _auto_fit_max_model_len(
     vllm_config: VllmConfig,
     projected_groups_per_worker: list[list[KVCacheGroupSpec]],
