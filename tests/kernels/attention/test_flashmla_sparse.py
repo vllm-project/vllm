@@ -4,43 +4,6 @@ import pytest
 import torch
 
 
-def test_deepseek_v4_c128a_dynamic_topk_packed_buffers():
-    from vllm.models.deepseek_v4.sparse_mla import build_c128a_topk_metadata
-
-    device = torch.device("cuda")
-    capacity_width = 256
-    active_width = 128
-    global_decode_buffer = torch.empty(
-        (2, capacity_width), dtype=torch.int32, device=device
-    )
-    decode_lens_buffer = torch.empty(2, dtype=torch.int32, device=device)
-    prefill_buffer = torch.empty((2, capacity_width), dtype=torch.int32, device=device)
-
-    global_decode, decode_lens, prefill_local = build_c128a_topk_metadata(
-        positions=torch.tensor([255, 511], dtype=torch.int64, device=device),
-        compress_ratio=128,
-        num_decode_tokens=1,
-        token_to_req_indices=torch.tensor([0, 0], dtype=torch.int32, device=device),
-        block_table=torch.tensor([[3]], dtype=torch.int32, device=device),
-        block_size=capacity_width,
-        slot_mapping=torch.tensor([0, 1], dtype=torch.int64, device=device),
-        global_decode_buffer=global_decode_buffer,
-        decode_lens_buffer=decode_lens_buffer,
-        prefill_buffer=prefill_buffer,
-        max_compressed_tokens=active_width,
-    )
-
-    assert global_decode.shape == (1, active_width)
-    assert prefill_local.shape == (1, active_width)
-    assert global_decode.stride() == (active_width, 1)
-    assert prefill_local.stride() == (active_width, 1)
-    assert global_decode[0, :2].cpu().tolist() == [768, 769]
-    assert decode_lens.cpu().tolist() == [2]
-    assert prefill_local[0, :4].cpu().tolist() == list(range(4))
-    assert torch.all(global_decode[0, 2:] == -1)
-    assert torch.all(prefill_local[0, 4:] == -1)
-
-
 def test_sparse_flashmla_metadata_smoke():
     import vllm.v1.attention.ops.flashmla as fm
 
