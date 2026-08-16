@@ -328,3 +328,12 @@ def test_lora_target_modules_default_none(serve_parser):
     """Test that lora-target-modules defaults to None"""
     args = serve_parser.parse_args(args=[])
     assert args.lora_target_modules is None
+
+
+def test_auto_tool_choice_validation(serve_parser):
+    """Test that enable-auto-tool-choice requires tool-call-parser during validation"""
+    args = serve_parser.parse_args(args=["--enable-auto-tool-choice"])
+    with pytest.raises(
+        TypeError, match="--enable-auto-tool-choice requires --tool-call-parser"
+    ):
+        validate_parsed_serve_args(args)
