@@ -21,13 +21,20 @@ from vllm.model_executor.kernels.linear import (
 )
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
+    LINEAR_ALGOS,
     ModelOptFp8Config,
-    ModelOptFp8LinearMethod,
+    ModelOptLinearMethod,
     ModelOptMixedPrecisionConfig,
     ModelOptMxFp8Config,
     ModelOptNvFp4Config,
-    ModelOptNvFp4LinearMethod,
-    ModelOptNvFp4W4A16LinearMethod,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Static128BlockSym,
+    kFp8StaticTensorSym,
+    kMxfp8Dynamic,
+    kMxfp8Static,
+    kNvfp4Dynamic,
+    kNvfp4Static,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -107,15 +114,25 @@ def test_modelopt_nvfp4_quantizes_parallel_lm_head():
         exclude_modules=[],
     )
 
-    with patch(
-        "vllm.model_executor.layers.quantization.modelopt.init_nvfp4_linear_kernel"
-    ):
-        method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
+    method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
 
-    assert isinstance(method, ModelOptNvFp4LinearMethod)
+    assert isinstance(method, ModelOptLinearMethod)
+    assert method.spec.weight is kNvfp4Static
+    assert method.spec.activation is kNvfp4Dynamic
 
 
 def test_modelopt_fp8_updates_weight_dims_after_transpose():
+    """Humming reads weight.input_dim/output_dim. Swapping the
+    ModelWeightParameter for a plain Parameter drops them, so the per-tensor
+    FP8 scheme must restore them for the transposed [in, out] layout.
+    """
+    from vllm.config.quantization import QuantSpec
+    from vllm.model_executor.layers.quantization.modelopt import (
+        SCHEME_FOR,
+        CkptCtx,
+        FormatScheme,
+    )
+
     layer = torch.nn.Module()
     layer.register_parameter(
         "weight", torch.nn.Parameter(torch.empty(3, 2), requires_grad=False)
@@ -126,15 +143,81 @@ def test_modelopt_fp8_updates_weight_dims_after_transpose():
     layer.register_parameter(
         "input_scale", torch.nn.Parameter(torch.ones(1), requires_grad=False)
     )
+    layer.logical_widths = [3]
 
-    method = ModelOptFp8LinearMethod.__new__(ModelOptFp8LinearMethod)
-    method.fp8_linear = Mock()
+    method = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
+    method.spec = QuantSpec(weight=kFp8StaticTensorSym, activation=kFp8StaticTensorSym)
+    method.ctx = CkptCtx()
+    method.fmt = FormatScheme()
+    method.wkey = SCHEME_FOR[kFp8StaticTensorSym]
+    method.akey = SCHEME_FOR[kFp8StaticTensorSym]
+    method.kernel = Mock()
     method.process_weights_after_loading(layer)
 
     assert layer.weight.shape == (2, 3)
     assert layer.weight.input_dim == 0
     assert layer.weight.output_dim == 1
-    method.fp8_linear.process_weights_after_loading.assert_called_once_with(layer)
+    method.kernel.process_weights_after_loading.assert_called_once_with(layer)
+
+
+def test_modelopt_linear_algos_table_matches_resolve():
+    """LINEAR_ALGOS is the single source of truth for supported linear algos.
+
+    Every entry must be dispatchable by resolve(), and every config's
+    validation list must be derived from it -- so adding a format is one row
+    here plus one row in resolve(), with nothing else to keep in sync.
+    """
+    from vllm.model_executor.layers.quantization.modelopt import (
+        QUANT_ALGOS,
+        algos_owned_by,
+        resolve,
+    )
+
+    class _Cfg:
+        group_size = 16
+
+    for algo in LINEAR_ALGOS:
+        spec, _, _ = resolve(algo, _Cfg(), "layer")
+        assert spec.weight is not None, algo
+
+    assert list(QUANT_ALGOS) == [*LINEAR_ALGOS, "MIXED_PRECISION"]
+    assert algos_owned_by("modelopt") == (
+        "FP8",
+        "FP8_PER_CHANNEL_PER_TOKEN",
+        "FP8_PB_WO",
+        "FP8_PB",
+    )
+    assert algos_owned_by("modelopt_fp4") == ("NVFP4", "W4A16_NVFP4")
+    assert algos_owned_by("modelopt_mxfp8") == ("MXFP8",)
+
+
+@pytest.mark.parametrize("algo", list(LINEAR_ALGOS))
+def test_modelopt_mixed_precision_dispatches_every_linear_algo(algo):
+    """Mixed precision must route every algo in LINEAR_ALGOS through the
+    generic method. FP8_PER_CHANNEL_PER_TOKEN and FP8_PB_WO used to fall
+    through to UnquantizedLinearMethod, which loses the checkpoint's scales.
+    """
+    from vllm.model_executor.layers.linear import LinearBase
+    from vllm.model_executor.layers.quantization import modelopt as m
+
+    config = m.ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "kv_cache_quant_algo": None,
+                "exclude_modules": [],
+                "group_size": 16,
+                "quantized_layers": {
+                    "model.layers.0.mlp.down_proj": {"quant_algo": algo}
+                },
+            }
+        }
+    )
+    method = config.get_quant_method(
+        MagicMock(spec=LinearBase), "model.layers.0.mlp.down_proj"
+    )
+
+    assert isinstance(method, ModelOptLinearMethod), (algo, type(method).__name__)
 
 
 def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
@@ -154,12 +237,11 @@ def test_modelopt_mixed_precision_quantizes_parallel_lm_head():
         {"lm_head": {"quant_algo": "NVFP4", "group_size": 16}}
     )
 
-    with patch(
-        "vllm.model_executor.layers.quantization.modelopt.init_nvfp4_linear_kernel"
-    ):
-        method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
+    method = config.get_quant_method(_mock_lm_head(), prefix="lm_head")
 
-    assert isinstance(method, ModelOptNvFp4LinearMethod)
+    assert isinstance(method, ModelOptLinearMethod)
+    assert method.spec.weight is kNvfp4Static
+    assert method.spec.activation is kNvfp4Dynamic
 
 
 def test_modelopt_mixed_precision_resolves_declared_packed_projection():
@@ -237,12 +319,11 @@ def test_modelopt_mixed_precision_infers_fused_gate_up_projection():
     )
 
     fake_layer = MagicMock(spec=LinearBase)
-    with patch(
-        "vllm.model_executor.layers.quantization.modelopt.init_nvfp4_linear_kernel"
-    ):
-        method = config.get_quant_method(fake_layer, "model.layers.0.mlp.gate_up_proj")
+    method = config.get_quant_method(fake_layer, "model.layers.0.mlp.gate_up_proj")
 
-    assert isinstance(method, ModelOptNvFp4LinearMethod)
+    assert isinstance(method, ModelOptLinearMethod)
+    assert method.spec.weight is kNvfp4Static
+    assert method.spec.activation is kNvfp4Dynamic
 
 
 @pytest.mark.parametrize(
@@ -298,7 +379,7 @@ def test_modelopt_fp8_checkpoint_setup(default_vllm_config, vllm_runner):
             "This test requires a local ModelOpt FP8 checkpoint."
         )
 
-    # Set model config as model_config.dtype is required in ModelOptFp8LinearMethod.
+    # Set model config as model_config.dtype is required in ModelOptLinearMethod.
     default_vllm_config.model_config = ModelConfig()
     with vllm_runner(model_path, quantization="modelopt", enforce_eager=True) as llm:
 
@@ -311,14 +392,10 @@ def test_modelopt_fp8_checkpoint_setup(default_vllm_config, vllm_runner):
             down_proj = layer.mlp.down_proj
 
             # Check that ModelOpt quantization method is properly applied
-            from vllm.model_executor.layers.quantization.modelopt import (
-                ModelOptFp8LinearMethod,
-            )
-
-            assert isinstance(qkv_proj.quant_method, ModelOptFp8LinearMethod)
-            assert isinstance(o_proj.quant_method, ModelOptFp8LinearMethod)
-            assert isinstance(gate_up_proj.quant_method, ModelOptFp8LinearMethod)
-            assert isinstance(down_proj.quant_method, ModelOptFp8LinearMethod)
+            assert isinstance(qkv_proj.quant_method, ModelOptLinearMethod)
+            assert isinstance(o_proj.quant_method, ModelOptLinearMethod)
+            assert isinstance(gate_up_proj.quant_method, ModelOptLinearMethod)
+            assert isinstance(down_proj.quant_method, ModelOptLinearMethod)
 
             # Check weight dtype is FP8
             assert qkv_proj.weight.dtype == torch.float8_e4m3fn
@@ -364,7 +441,7 @@ def test_modelopt_fp8_pc_pt_checkpoint_setup(default_vllm_config, vllm_runner):
     model_id = "CedricHwang/qwen2.5-0.5b-modelopt-fp8-pc-pt"
     model_path = _snapshot_download_or_skip(model_id)
 
-    # Set model config as model_config.dtype is required in ModelOptFp8LinearMethod.
+    # Set model config as model_config.dtype is required in ModelOptLinearMethod.
     default_vllm_config.model_config = ModelConfig()
     with vllm_runner(model_path, quantization="modelopt", enforce_eager=True) as llm:
 
@@ -376,14 +453,10 @@ def test_modelopt_fp8_pc_pt_checkpoint_setup(default_vllm_config, vllm_runner):
             gate_up_proj = layer.mlp.gate_up_proj
             down_proj = layer.mlp.down_proj
 
-            from vllm.model_executor.layers.quantization.modelopt import (
-                ModelOptFp8PcPtLinearMethod,
-            )
-
-            assert isinstance(qkv_proj.quant_method, ModelOptFp8PcPtLinearMethod)
-            assert isinstance(o_proj.quant_method, ModelOptFp8PcPtLinearMethod)
-            assert isinstance(gate_up_proj.quant_method, ModelOptFp8PcPtLinearMethod)
-            assert isinstance(down_proj.quant_method, ModelOptFp8PcPtLinearMethod)
+            assert isinstance(qkv_proj.quant_method, ModelOptLinearMethod)
+            assert isinstance(o_proj.quant_method, ModelOptLinearMethod)
+            assert isinstance(gate_up_proj.quant_method, ModelOptLinearMethod)
+            assert isinstance(down_proj.quant_method, ModelOptLinearMethod)
 
             fp8_dtype = current_platform.fp8_dtype()
             assert qkv_proj.weight.dtype == fp8_dtype
@@ -428,7 +501,7 @@ def test_modelopt_fp8_pb_wo_checkpoint_setup(default_vllm_config, vllm_runner):
     model_id = "CedricHwang/qwen2.5-0.5b-modelopt-fp8-pb-wo"
     model_path = _snapshot_download_or_skip(model_id)
 
-    # Set model config as model_config.dtype is required in ModelOptFp8LinearMethod.
+    # Set model config as model_config.dtype is required in ModelOptLinearMethod.
     default_vllm_config.model_config = ModelConfig()
     with vllm_runner(model_path, quantization="modelopt", enforce_eager=True) as llm:
 
@@ -440,36 +513,25 @@ def test_modelopt_fp8_pb_wo_checkpoint_setup(default_vllm_config, vllm_runner):
             gate_up_proj = layer.mlp.gate_up_proj
             down_proj = layer.mlp.down_proj
 
-            from vllm.model_executor.layers.quantization.modelopt import (
-                ModelOptFp8PbWoLinearMethod,
-            )
-
-            assert isinstance(qkv_proj.quant_method, ModelOptFp8PbWoLinearMethod)
-            assert isinstance(o_proj.quant_method, ModelOptFp8PbWoLinearMethod)
-            assert isinstance(gate_up_proj.quant_method, ModelOptFp8PbWoLinearMethod)
-            assert isinstance(down_proj.quant_method, ModelOptFp8PbWoLinearMethod)
+            assert isinstance(qkv_proj.quant_method, ModelOptLinearMethod)
+            assert isinstance(o_proj.quant_method, ModelOptLinearMethod)
+            assert isinstance(gate_up_proj.quant_method, ModelOptLinearMethod)
+            assert isinstance(down_proj.quant_method, ModelOptLinearMethod)
 
             assert qkv_proj.weight.dtype == torch.float8_e4m3fn
             assert o_proj.weight.dtype == torch.float8_e4m3fn
             assert gate_up_proj.weight.dtype == torch.float8_e4m3fn
             assert down_proj.weight.dtype == torch.float8_e4m3fn
 
-            # Block scales; should be materialized as a 2D [out_blk, in_blk] tensor.
-            assert hasattr(qkv_proj, "weight_scale")
-            assert qkv_proj.weight_scale.dtype == torch.float32
-            assert qkv_proj.weight_scale.dim() == 2
-
-            assert hasattr(o_proj, "weight_scale")
-            assert o_proj.weight_scale.dtype == torch.float32
-            assert o_proj.weight_scale.dim() == 2
-
-            assert hasattr(gate_up_proj, "weight_scale")
-            assert gate_up_proj.weight_scale.dtype == torch.float32
-            assert gate_up_proj.weight_scale.dim() == 2
-
-            assert hasattr(down_proj, "weight_scale")
-            assert down_proj.weight_scale.dtype == torch.float32
-            assert down_proj.weight_scale.dim() == 2
+            # Block scales; materialized as a 2D [out_blk, in_blk] tensor.
+            # On a DeepGEMM-backed kernel the warmup pre-packs them from fp32
+            # into UE8M0 int32 (4 exponents per word), which is what the
+            # Blackwell GEMM consumes, so accept either representation. The
+            # DeepSeek block-FP8 path via Fp8LinearMethod has always done this.
+            for mod in (qkv_proj, o_proj, gate_up_proj, down_proj):
+                assert hasattr(mod, "weight_scale")
+                assert mod.weight_scale.dim() == 2
+                assert mod.weight_scale.dtype in (torch.float32, torch.int32)
 
         llm.apply_model(check_model)
 
@@ -479,12 +541,10 @@ def test_modelopt_fp8_pb_wo_checkpoint_setup(default_vllm_config, vllm_runner):
 
 
 def test_modelopt_nvfp4_config_dispatches_w4a4_method():
-    """``quant_method="NVFP4"`` (W4A4 default) routes to the existing
-    ``ModelOptNvFp4LinearMethod``."""
-    from vllm.model_executor.layers.quantization.modelopt import (
-        ModelOptNvFp4Config,
-        ModelOptNvFp4LinearMethod,
-    )
+    """``quant_method="NVFP4"`` (W4A4) resolves to a
+    ``(kNvfp4Static, kNvfp4Dynamic)`` QuantSpec under the generic
+    ``ModelOptLinearMethod``."""
+    from vllm.model_executor.layers.linear import LinearBase
 
     config = ModelOptNvFp4Config(
         quant_method="NVFP4",
@@ -492,24 +552,25 @@ def test_modelopt_nvfp4_config_dispatches_w4a4_method():
         kv_cache_quant_algo=None,
         exclude_modules=[],
     )
-    assert config.LinearMethodCls is ModelOptNvFp4LinearMethod
     assert config.quant_method == "NVFP4"
+
+    method = config.get_quant_method(
+        MagicMock(spec=LinearBase), "model.layers.0.fake_proj"
+    )
+    assert isinstance(method, ModelOptLinearMethod)
+    assert method.spec.weight is kNvfp4Static
+    assert method.spec.activation is kNvfp4Dynamic
 
 
 def test_modelopt_nvfp4_config_dispatches_w4a16_method():
-    """``quant_method="W4A16_NVFP4"`` routes to
-    ``ModelOptNvFp4W4A16LinearMethod`` instead of the W4A4 sibling.
+    """``quant_method="W4A16_NVFP4"`` resolves to a weight-only QuantSpec
+    (``activation=None``) — distinct from the W4A4 sibling.
 
-    Mirrors the FP8 dispatch precedent (``ModelOptFp8Config`` selects
-    one of three FP8 LinearMethods on ``quant_method``); a regression
-    here would mean a W4A16 NVFP4 checkpoint silently loaded under the
-    W4A4 activation-quantization path.
+    A regression here would mean a W4A16 NVFP4 checkpoint silently loaded
+    with a dynamic fp4 activation key, registering an ``input_scale`` and
+    routing to the cutlass W4A4 NVFP4 GEMM instead of FP4 Marlin.
     """
-    from vllm.model_executor.layers.quantization.modelopt import (
-        ModelOptNvFp4Config,
-        ModelOptNvFp4LinearMethod,
-        ModelOptNvFp4W4A16LinearMethod,
-    )
+    from vllm.model_executor.layers.linear import LinearBase
 
     config = ModelOptNvFp4Config(
         quant_method="W4A16_NVFP4",
@@ -517,9 +578,37 @@ def test_modelopt_nvfp4_config_dispatches_w4a16_method():
         kv_cache_quant_algo=None,
         exclude_modules=[],
     )
-    assert config.LinearMethodCls is ModelOptNvFp4W4A16LinearMethod
-    assert config.LinearMethodCls is not ModelOptNvFp4LinearMethod
     assert config.quant_method == "W4A16_NVFP4"
+
+    method = config.get_quant_method(
+        MagicMock(spec=LinearBase), "model.layers.0.fake_proj"
+    )
+    assert isinstance(method, ModelOptLinearMethod)
+    assert method.spec.weight is kNvfp4Static
+    assert method.spec.activation is None
+
+
+def test_modelopt_linear_method_builder_registry_override(monkeypatch):
+    """The bespoke-method escape hatch: a format registered in
+    ``LINEAR_METHOD_BUILDERS`` routes that algo to its own method instead of the
+    generic ``ModelOptLinearMethod``. This is how a format that cannot be a
+    ``(weight, activation)`` key pair plugs into dispatch."""
+    from vllm.model_executor.layers.linear import LinearBase
+    from vllm.model_executor.layers.quantization import modelopt as m
+
+    sentinel = object()
+    monkeypatch.setitem(m.LINEAR_METHOD_BUILDERS, "NVFP4", lambda cfg, prefix: sentinel)
+
+    config = ModelOptNvFp4Config(
+        quant_method="NVFP4",
+        is_checkpoint_nvfp4_serialized=True,
+        kv_cache_quant_algo=None,
+        exclude_modules=[],
+    )
+    method = config.get_quant_method(
+        MagicMock(spec=LinearBase), "model.layers.0.fake_proj"
+    )
+    assert method is sentinel  # bespoke builder wins over the generic path
 
 
 @pytest.mark.parametrize(
@@ -528,13 +617,63 @@ def test_modelopt_nvfp4_config_dispatches_w4a16_method():
 )
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
 def test_modelopt_w4a16_respects_linear_backend(linear_backend, kernel_cls):
+    """W4A16 (`activation=None`) kernel selection honors ``--linear-backend``:
+    ``use_a16=True`` defaults to Marlin, but an explicit backend wins. The
+    generic method routes this through ``select_linear_kernel``."""
+    from vllm.config.quantization import QuantSpec
+    from vllm.model_executor.layers.quantization.modelopt import (
+        RuntimeDtypes,
+        select_linear_kernel,
+    )
+
     vllm_config = VllmConfig()
     vllm_config.kernel_config.linear_backend = linear_backend
+    spec = QuantSpec(weight=kNvfp4Static, activation=None)
+    rt = RuntimeDtypes(torch.bfloat16, torch.bfloat16)
     with set_current_vllm_config(vllm_config):
-        method = ModelOptNvFp4W4A16LinearMethod(
-            ModelOptNvFp4Config(quant_method="W4A16_NVFP4")
+        kernel = select_linear_kernel(spec, MagicMock(), rt)
+    assert isinstance(kernel, kernel_cls)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_modelopt_linear_exposes_humming_layer_attrs(dist_init, monkeypatch):
+    """``prepare_humming_linear_layer_config`` reads ``output_partition_sizes``
+    and ``has_bias`` straight off the layer, so ``--linear-backend=humming``
+    needs create_weights to leave both there. Nothing else sets
+    ``output_partition_sizes``; ``LinearBase`` sets ``has_bias`` but
+    ``ParallelLMHead`` does not.
+    """
+    from vllm.config.quantization import QuantSpec
+    from vllm.model_executor.layers.quantization import modelopt as mo
+
+    monkeypatch.setattr(mo, "select_linear_kernel", lambda spec, layer, rt: Mock())
+    monkeypatch.setattr(mo, "expose_input_quant_key", lambda layer, kernel: None)
+
+    def build(layer):
+        method = ModelOptLinearMethod.__new__(ModelOptLinearMethod)
+        method.spec = QuantSpec(weight=kNvfp4Static, activation=None)
+        method.ctx = mo.CkptCtx(group_size=16)
+        method.fmt = mo.FormatScheme()
+        method.wkey = mo.SCHEME_FOR[kNvfp4Static]
+        method.akey = None
+        method.input_dtype = method.out_dtype = torch.bfloat16
+        method.marlin_input_dtype = None
+        method.create_weights(
+            layer, 64, [32, 32], 64, 64, torch.bfloat16, weight_loader=Mock()
         )
-    assert isinstance(method.kernel, kernel_cls)
+
+    # ParallelLMHead-style: a bias slot but no has_bias attribute.
+    lm_head = torch.nn.Module()
+    lm_head.register_parameter("bias", None)
+    build(lm_head)
+    assert lm_head.output_partition_sizes == [32, 32]
+    assert lm_head.has_bias is False
+
+    # LinearBase already decided has_bias; we must not overwrite it.
+    linear = torch.nn.Module()
+    linear.has_bias = True
+    build(linear)
+    assert linear.has_bias is True
 
 
 @pytest.mark.parametrize(
@@ -596,39 +735,27 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
 
 
 @pytest.mark.parametrize(
-    "per_layer_algo, expected_linear_cls_name",
+    "per_layer_algo, expected_weight, expected_activation",
     [
-        ("NVFP4", "ModelOptNvFp4LinearMethod"),
-        ("W4A16_NVFP4", "ModelOptNvFp4W4A16LinearMethod"),
+        ("NVFP4", kNvfp4Static, kNvfp4Dynamic),
+        ("W4A16_NVFP4", kNvfp4Static, None),
+        ("FP8", kFp8StaticTensorSym, kFp8StaticTensorSym),
+        ("MXFP8", kMxfp8Static, kMxfp8Dynamic),
     ],
 )
-def test_modelopt_mixed_precision_dispatches_w4a16_layer(
-    per_layer_algo, expected_linear_cls_name
+def test_modelopt_mixed_precision_dispatches_linear_layer(
+    per_layer_algo, expected_weight, expected_activation
 ):
-    """``ModelOptMixedPrecisionConfig.get_quant_method`` must route a Linear
-    layer to the right LinearMethod based on its per-layer ``quant_algo``
-    entry in ``quantized_layers``. Verifies the new ``W4A16_NVFP4`` branch
-    coexists with the existing ``NVFP4`` branch without regression. A
-    regression here would mean a W4A16 layer in a mixed-precision ckpt
-    silently fell through to ``UnquantizedLinearMethod``.
-
-    NOTE: FP8 dispatch (the third branch of get_quant_method) is not
-    covered here because ``ModelOptFp8LinearMethod.__init__`` reads
-    ``get_current_vllm_config().model_config.dtype``, which requires a
-    fully constructed ``ModelConfig`` (real model path). FP8 routing in
-    mixed-precision is exercised by the existing integration tests
-    above that use the ``vllm_runner`` fixture (e.g.
-    ``test_modelopt_fp8_checkpoint_setup``). Our PR doesn't change the
-    FP8 branch, so this isn't a coverage gap.
+    """``ModelOptMixedPrecisionConfig.get_quant_method`` routes a Linear layer
+    to the generic ``ModelOptLinearMethod`` with the ``QuantSpec`` resolved
+    from its per-layer ``quant_algo`` entry in ``quantized_layers``. A
+    regression here would mean a layer got the wrong ``(weight, activation)``
+    key pair or fell through to ``UnquantizedLinearMethod`` — e.g. a W4A16
+    layer picking up a dynamic fp4 activation key (cutlass W4A4 path) instead
+    of the weight-only Marlin path.
     """
     from vllm.model_executor.layers.linear import LinearBase
     from vllm.model_executor.layers.quantization import modelopt as m
-
-    if (
-        expected_linear_cls_name == "ModelOptNvFp4W4A16LinearMethod"
-        and current_platform.is_rocm()
-    ):
-        pytest.skip("ModelOptNvFp4W4A16LinearMethod is not supported with rocm")
 
     hf_quant_config: dict[str, Any] = {
         "quantization": {
@@ -646,10 +773,9 @@ def test_modelopt_mixed_precision_dispatches_w4a16_layer(
     fake_layer = MagicMock(spec=LinearBase)
     method = config.get_quant_method(fake_layer, "model.layers.0.fake_proj")
 
-    expected_cls = getattr(m, expected_linear_cls_name)
-    assert isinstance(method, expected_cls), (
-        f"Expected {expected_linear_cls_name}, got {type(method).__name__}"
-    )
+    assert isinstance(method, m.ModelOptLinearMethod)
+    assert method.spec.weight is expected_weight
+    assert method.spec.activation is expected_activation
 
 
 def test_modelopt_mixed_precision_builds_w4a16_sibling_config():
@@ -676,6 +802,134 @@ def test_modelopt_mixed_precision_builds_w4a16_sibling_config():
     config = m.ModelOptMixedPrecisionConfig.from_config(hf_quant_config)
 
     assert config.nvfp4_config.quant_method == "NVFP4"
-    assert config.nvfp4_config.LinearMethodCls is m.ModelOptNvFp4LinearMethod
     assert config.w4a16_nvfp4_config.quant_method == "W4A16_NVFP4"
-    assert config.w4a16_nvfp4_config.LinearMethodCls is m.ModelOptNvFp4W4A16LinearMethod
+
+
+def _block_fp8_layer(
+    out_features: int, *, block_scale_deepseek: bool, in_features: int = 256
+):
+    """Run the per-block FP8 weight scheme over one layer's geometry."""
+    from vllm.model_executor.layers.quantization import modelopt as m
+
+    layer = torch.nn.Module()
+    m.SCHEME_FOR[kFp8Static128BlockSym].create_weights(
+        layer,
+        m.WEIGHT,
+        m.CkptCtx(block_scale_deepseek=block_scale_deepseek),
+        m.Shapes([out_features], in_features, torch.bfloat16),
+        Mock(),
+    )
+    return layer
+
+
+def test_modelopt_fp8_pb_scale_allows_partial_block(dist_init):
+    """FP8_PB sizes ``weight_scale_inv`` by ceiling division, so a partition
+    that ends in a partial block is representable. 2624 is GLM-5.2's
+    fused_qkv_a_proj (q_a 2048 + kv_a 576): not a multiple of 128, and the
+    layer is replicated, so no TP degree makes it block-aligned.
+    """
+    layer = _block_fp8_layer(2624, block_scale_deepseek=True)
+
+    assert not hasattr(layer, "weight_scale")
+    assert layer.weight_scale_inv.shape == (21, 2)
+
+
+def test_modelopt_fp8_pb_wo_scale_requires_exact_block(dist_init):
+    """FP8_PB_WO's 4-D layout cannot express a partial block, so it keeps
+    rejecting partitions that are not block-aligned."""
+    layer = _block_fp8_layer(2560, block_scale_deepseek=False)
+
+    assert not hasattr(layer, "weight_scale_inv")
+    assert layer.weight_scale.shape == (20, 1, 2, 1)
+
+    with pytest.raises(ValueError, match="divisible by 128"):
+        _block_fp8_layer(2624, block_scale_deepseek=False)
+
+
+@pytest.mark.parametrize(
+    "block_scale_deepseek, scale_name, expected_shape",
+    [(True, "weight_scale_inv", (21, 2)), (False, "weight_scale", (20, 2))],
+)
+def test_modelopt_block_fp8_process_normalises_scale(
+    dist_init, block_scale_deepseek, scale_name, expected_shape
+):
+    """``process`` hands the kernel a 2-D scale either way: it squeezes
+    ModelOpt's 4-D ``weight_scale`` and leaves DeepSeek's 2-D
+    ``weight_scale_inv`` alone.
+    """
+    from vllm.model_executor.layers.quantization import modelopt as m
+
+    out_features = 2624 if block_scale_deepseek else 2560
+    layer = _block_fp8_layer(out_features, block_scale_deepseek=block_scale_deepseek)
+
+    m.SCHEME_FOR[kFp8Static128BlockSym].process(layer, m.WEIGHT)
+
+    assert getattr(layer, scale_name).shape == expected_shape
+    assert layer.weight.shape == (out_features, 256)
+
+
+@pytest.mark.parametrize(
+    "algo, expected",
+    [("FP8_PB", True), ("FP8_PB_WO", True), ("FP8", False), ("MXFP8", False)],
+)
+def test_modelopt_mixed_precision_has_blocked_weights(algo, expected):
+    """``has_blocked_weights()`` gates "+quant_fp8" in ``VllmConfig``.
+
+    It must be True as soon as one layer is per-block: without the op QuantFP8
+    falls back to forward_native, which emits unpacked fp32 group scales where
+    Blackwell DeepGEMM wants them UE8M0-packed, and the model serves NaN logits.
+    It must stay False otherwise — enabling the op changes compilation for
+    checkpoints that never needed it.
+    """
+    config = _mixed_precision_config({"model.layers.0.a": {"quant_algo": algo}})
+
+    assert config.has_blocked_weights() is expected
+
+
+def test_modelopt_mixed_precision_rejects_non_128_block_size():
+    """``kFp8Static128BlockSym`` and the kernel behind it are 128x128. A
+    checkpoint declaring another group_size would load and silently mis-scale,
+    so the config rejects it instead."""
+    from vllm.model_executor.layers.quantization import modelopt as m
+
+    hf_quant_config: dict[str, Any] = {
+        "quantization": {
+            "quant_algo": "MIXED_PRECISION",
+            "kv_cache_quant_algo": None,
+            "exclude_modules": [],
+            "quantized_layers": {
+                "model.layers.0.a": {"quant_algo": "FP8_PB", "group_size": 64},
+            },
+        }
+    }
+
+    with pytest.raises(ValueError, match="group_size=64"):
+        m.ModelOptMixedPrecisionConfig.from_config(hf_quant_config)
+
+
+@pytest.mark.parametrize("algo", ["FP8_PB", "FP8_PB_WO"])
+def test_modelopt_fp8_rejects_non_128_block_size(algo):
+    """The same guard has to cover homogeneous checkpoints, not just mixed ones.
+    ModelOptFp8Config carries no group_size of its own, so without this the
+    value is silently dropped and the layer mis-scales against a 128x128 key.
+    """
+    from vllm.model_executor.layers.quantization import modelopt as m
+
+    def build(group_size):
+        return m.ModelOptFp8Config.from_config(
+            {
+                "quantization": {
+                    "quant_algo": algo,
+                    "kv_cache_quant_algo": None,
+                    "exclude_modules": [],
+                    "group_size": group_size,
+                }
+            }
+        )
+
+    with pytest.raises(ValueError, match="group_size=64"):
+        build(64)
+
+    # 128 and an absent group_size are both fine.
+    assert build(128).quant_method == algo
+    assert build(None).quant_method == algo
