@@ -777,7 +777,11 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             attn_metadata.reduce_indptr = self._mla_reduce_indptr
             attn_metadata.reduce_final_map = self._mla_reduce_final_map
             attn_metadata.reduce_partial_map = self._mla_reduce_partial_map
-        if self._fp8_prefill_enabled and attn_metadata.prefill is not None:
+        if (
+            self._fp8_prefill_enabled
+            and attn_metadata.prefill is not None
+            and attn_metadata.prefill.chunked_context is None
+        ):
             self._build_fp8_prefill_ps_metadata(attn_metadata, common_attn_metadata)
         return attn_metadata
 
