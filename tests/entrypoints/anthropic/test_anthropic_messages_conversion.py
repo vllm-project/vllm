@@ -36,6 +36,8 @@ from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
+    FunctionCall,
+    ToolCall,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
@@ -1448,6 +1450,103 @@ class TestMessagesFullConverter:
         assert len(result.content) == 1
         assert result.content[0].type == "text"
         assert result.content[0].text == ""
+
+    def test_malformed_tool_arguments_do_not_raise(self):
+        """Truncated tool JSON must not turn a completed generation into 500."""
+        generator = ChatCompletionResponse(
+            id="chatcmpl-tools",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(
+                        role="assistant",
+                        content=None,
+                        tool_calls=[
+                            ToolCall(
+                                id="call_weather",
+                                function=FunctionCall(
+                                    name="get_weather",
+                                    arguments='{"city":',
+                                ),
+                            )
+                        ],
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=8, completion_tokens=4, total_tokens=12),
+        )
+
+        result = _make_full_converter().messages_full_converter(generator)
+
+        tool_blocks = [block for block in result.content if block.type == "tool_use"]
+        assert len(tool_blocks) == 1
+        assert tool_blocks[0].name == "get_weather"
+        assert tool_blocks[0].input == {}
+        assert result.stop_reason == "tool_use"
+
+    def test_non_object_tool_arguments_are_wrapped(self):
+        generator = ChatCompletionResponse(
+            id="chatcmpl-tools-list",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(
+                        role="assistant",
+                        content=None,
+                        tool_calls=[
+                            ToolCall(
+                                id="call_list",
+                                function=FunctionCall(
+                                    name="tag",
+                                    arguments='["a","b"]',
+                                ),
+                            )
+                        ],
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=4, completion_tokens=2, total_tokens=6),
+        )
+
+        result = _make_full_converter().messages_full_converter(generator)
+
+        tool_blocks = [block for block in result.content if block.type == "tool_use"]
+        assert tool_blocks[0].input == {"value": ["a", "b"]}
+
+    def test_valid_object_tool_arguments_are_preserved(self):
+        generator = ChatCompletionResponse(
+            id="chatcmpl-tools-obj",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(
+                        role="assistant",
+                        content=None,
+                        tool_calls=[
+                            ToolCall(
+                                id="call_weather",
+                                function=FunctionCall(
+                                    name="get_weather",
+                                    arguments='{"city":"paris"}',
+                                ),
+                            )
+                        ],
+                    ),
+                    finish_reason="tool_calls",
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=4, completion_tokens=2, total_tokens=6),
+        )
+
+        result = _make_full_converter().messages_full_converter(generator)
+
+        tool_blocks = [block for block in result.content if block.type == "tool_use"]
+        assert tool_blocks[0].input == {"city": "paris"}
 
 
 # ======================================================================
