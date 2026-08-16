@@ -504,9 +504,12 @@ __device__ __forceinline__ float situ_activation(float g, float u, float beta,
                                                  float linear_beta,
                                                  bool clamp_up, float inv_beta,
                                                  float inv_linear_beta) {
-  // __fdividef: fast MUFU.RCP + FMUL, no FCHK range-check / slow-path branch.
-  const float gate_out =
-      __fdividef(beta * tanh_approx(g * inv_beta), 1.0f + __expf(-g));
+  // sigmoid(g) == (1 + tanh(g/2)) / 2, an exact identity, so the whole gate runs
+  // on two tanh.approx (2 MUFU) instead of tanh + __expf + reciprocal (3 MUFU).
+  // The two tanh are independent (better ILP) and there is no divide; error
+  // stays the tanh.approx class, negligible under the FP8 quant that follows.
+  const float gate_out = (0.5f * beta) * tanh_approx(g * inv_beta) *
+                         (1.0f + tanh_approx(g * 0.5f));
   const float up_out =
       clamp_up ? linear_beta * tanh_approx(u * inv_linear_beta) : u;
   return gate_out * up_out;
