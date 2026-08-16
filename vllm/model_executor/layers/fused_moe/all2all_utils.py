@@ -299,8 +299,9 @@ def maybe_make_prepare_finalize(
         )
         handle = all2all_manager.get_handle(all_to_all_args)
 
-        # PoC: the [E+B] replicated weight layout is attached later by the
-        # MoE layer (after weight loading); engine use is not supported yet.
+        # The [E+B] weight layout is attached via set_weight_layout() once the
+        # layer has loaded and converted its weights (see
+        # UnquantizedFusedMoEMethod._setup_kernel).
         prepare_finalize = MoonEPPrepareAndFinalize(
             buffer=handle,
             max_tokens_per_rank=moe.max_num_tokens,

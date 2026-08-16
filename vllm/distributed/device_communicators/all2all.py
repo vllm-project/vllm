@@ -1144,6 +1144,7 @@ class MoonEPAll2AllManager(All2AllManagerBase):
             group=self._device_group
             if self._device_group is not None
             else self.cpu_group,
+            explicitly_destroy=True,
         )
 
     def get_handle(self, kwargs):

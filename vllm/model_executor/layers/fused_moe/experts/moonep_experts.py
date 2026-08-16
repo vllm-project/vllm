@@ -162,7 +162,8 @@ class MoonEPExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ) -> None:
-        assert expert_map is None, "MoonEP uses global expert rows"
+        # expert_map is ignored: MoonEP dispatches on global expert ids and
+        # the weights are addressed by global [E+B] row, on every rank.
         assert not apply_router_weight_on_input
         assert activation == MoEActivation.SILU
         assert self._up_weight is not None, "set_up_weight() not called"
