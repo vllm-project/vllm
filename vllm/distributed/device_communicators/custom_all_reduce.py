@@ -13,6 +13,7 @@ from vllm import _custom_ops as ops
 from vllm.distributed.device_communicators.all_reduce_utils import (
     CUSTOM_ALL_REDUCE_MAX_SIZES,
     gpu_p2p_access_check,
+    resolve_custom_allreduce_max_size,
 )
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
@@ -161,6 +162,22 @@ class CustomAllreduce:
                     CUSTOM_ALL_REDUCE_MAX_SIZES[device_capability_str][world_size],
                     max_size,
                 )
+        override_mb = envs.VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB
+        max_size, applied_override = resolve_custom_allreduce_max_size(
+            max_size, world_size, same_node, override_mb
+        )
+        if override_mb is not None and not applied_override:
+            logger.warning_once(
+                "VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB=%s is ignored "
+                "(only same-node TP=2 is supported).",
+                override_mb,
+            )
+        elif applied_override:
+            logger.info_once(
+                "Custom allreduce max size set to %d MiB via "
+                "VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB (same-node TP=2).",
+                max_size // (1024 * 1024),
+            )
         # device.index is a visible ordinal, not a logical local ID.
         fully_connected = False
         if same_node:
