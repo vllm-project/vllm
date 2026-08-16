@@ -75,32 +75,62 @@ __device__ __forceinline__ auto convert_to_uint32_v2(float x) -> uint32_t {
 }
 
 template <uint32_t BlockSize, uint32_t VecSize, typename Visit>
-__device__ __forceinline__ void scan_scores_vectorized(
+__device__ __forceinline__ void for_each_score(
     const float* __restrict__ scores, uint32_t length, Visit visit) {
-  static_assert(VecSize == 2 || VecSize == 4);
+  static_assert(VecSize == 1 || VecSize == 2 || VecSize == 4);
   const uint32_t tx = threadIdx.x;
-  const uint32_t aligned_length = length - length % VecSize;
 
-  for (uint32_t base = tx * VecSize; base < aligned_length;
-       base += BlockSize * VecSize) {
-    if constexpr (VecSize == 4) {
-      const float4 values =
-          *reinterpret_cast<const float4*>(scores + base);
-      visit(base, values.x);
-      visit(base + 1, values.y);
-      visit(base + 2, values.z);
-      visit(base + 3, values.w);
-    } else {
-      const float2 values =
-          *reinterpret_cast<const float2*>(scores + base);
-      visit(base, values.x);
-      visit(base + 1, values.y);
+  if constexpr (VecSize == 1) {
+    for (uint32_t idx = tx; idx < length; idx += BlockSize) {
+      visit(idx, scores[idx]);
+    }
+  } else {
+    const uint32_t aligned_length = length - length % VecSize;
+
+    for (uint32_t base = tx * VecSize; base < aligned_length;
+         base += BlockSize * VecSize) {
+      if constexpr (VecSize == 4) {
+        const float4 values =
+            *reinterpret_cast<const float4*>(scores + base);
+        visit(base, values.x);
+        visit(base + 1, values.y);
+        visit(base + 2, values.z);
+        visit(base + 3, values.w);
+      } else {
+        const float2 values =
+            *reinterpret_cast<const float2*>(scores + base);
+        visit(base, values.x);
+        visit(base + 1, values.y);
+      }
+    }
+
+    for (uint32_t idx = aligned_length + tx; idx < length; idx += BlockSize) {
+      visit(idx, scores[idx]);
     }
   }
+}
 
-  for (uint32_t idx = aligned_length + tx; idx < length; idx += BlockSize) {
-    visit(idx, scores[idx]);
-  }
+enum class PivotRelation : uint8_t { kGreater, kEqual };
+
+template <PivotRelation Relation, uint32_t TopK, uint32_t BlockSize,
+          uint32_t VecSize>
+__device__ __forceinline__ void collect_pivot_matches(
+    const float* __restrict__ scores, int32_t* __restrict__ output,
+    uint32_t length, uint32_t pivot, uint32_t* output_counter) {
+  for_each_score<BlockSize, VecSize>(
+      scores, length, [&](uint32_t idx, float score) {
+        const uint32_t ordered = convert_to_uint32_v2(score);
+        bool matches;
+        if constexpr (Relation == PivotRelation::kGreater) {
+          matches = ordered > pivot;
+        } else {
+          matches = ordered == pivot;
+        }
+        if (matches) {
+          const uint32_t pos = atomicAdd(output_counter, 1);
+          if (pos < TopK) output[pos] = static_cast<int32_t>(idx);
+        }
+      });
 }
 
 // Exact, bounded-memory fallback for candidate-buffer overflow. Each radix
@@ -157,22 +187,13 @@ __device__ void exact_topk_rescan(const float* __restrict__ scores,
     }
     const uint32_t prefix = smem->prefix;
 
-    if constexpr (VecSize == 1) {
-      for (uint32_t idx = tx; idx < length; idx += BlockSize) {
-        const uint32_t ordered = convert_to_uint32_v2(scores[idx]);
-        if ((ordered & prefix_mask) == prefix) {
-          atomicAdd(&smem->histogram[(ordered >> shift) & digit_mask], 1);
-        }
-      }
-    } else {
-      scan_scores_vectorized<BlockSize, VecSize>(
-          scores, length, [&](uint32_t, float score) {
-            const uint32_t ordered = convert_to_uint32_v2(score);
-            if ((ordered & prefix_mask) == prefix) {
-              atomicAdd(&smem->histogram[(ordered >> shift) & digit_mask], 1);
-            }
-          });
-    }
+    for_each_score<BlockSize, VecSize>(
+        scores, length, [&](uint32_t, float score) {
+          const uint32_t ordered = convert_to_uint32_v2(score);
+          if ((ordered & prefix_mask) == prefix) {
+            atomicAdd(&smem->histogram[(ordered >> shift) & digit_mask], 1);
+          }
+        });
     __syncthreads();
 
     if constexpr (UseWideRadix) {
@@ -226,57 +247,30 @@ __device__ void exact_topk_rescan(const float* __restrict__ scores,
 
     const uint32_t equal_count = smem->remaining;
     const uint32_t equal_base = TopK - equal_count;
-    for (uint32_t idx = tx; idx < length; idx += BlockSize) {
-      const uint32_t ordered = convert_to_uint32_v2(scores[idx]);
-      if (ordered > pivot) {
-        const uint32_t pos = atomicAdd(&smem->output_counter, 1);
-        output[pos] = static_cast<int32_t>(idx);
-      } else if (ordered == pivot) {
-        const uint32_t pos = atomicAdd(&smem->histogram[0], 1);
-        if (pos < equal_count) {
-          output[equal_base + pos] = static_cast<int32_t>(idx);
-        }
-      }
-    }
+    for_each_score<BlockSize, VecSize>(
+        scores, length, [&](uint32_t idx, float score) {
+          const uint32_t ordered = convert_to_uint32_v2(score);
+          if (ordered > pivot) {
+            const uint32_t pos = atomicAdd(&smem->output_counter, 1);
+            output[pos] = static_cast<int32_t>(idx);
+          } else if (ordered == pivot) {
+            const uint32_t pos = atomicAdd(&smem->histogram[0], 1);
+            if (pos < equal_count) {
+              output[equal_base + pos] = static_cast<int32_t>(idx);
+            }
+          }
+        });
     __syncthreads();
   } else {
     if (tx == 0) smem->output_counter = 0;
     __syncthreads();
 
-    if constexpr (VecSize == 1) {
-      for (uint32_t idx = tx; idx < length; idx += BlockSize) {
-        if (convert_to_uint32_v2(scores[idx]) > pivot) {
-          const uint32_t pos = atomicAdd(&smem->output_counter, 1);
-          if (pos < TopK) output[pos] = static_cast<int32_t>(idx);
-        }
-      }
-    } else {
-      scan_scores_vectorized<BlockSize, VecSize>(
-          scores, length, [&](uint32_t idx, float score) {
-            if (convert_to_uint32_v2(score) > pivot) {
-              const uint32_t pos = atomicAdd(&smem->output_counter, 1);
-              if (pos < TopK) output[pos] = static_cast<int32_t>(idx);
-            }
-          });
-    }
+    collect_pivot_matches<PivotRelation::kGreater, TopK, BlockSize, VecSize>(
+        scores, output, length, pivot, &smem->output_counter);
     __syncthreads();
 
-    if constexpr (VecSize == 1) {
-      for (uint32_t idx = tx; idx < length; idx += BlockSize) {
-        if (convert_to_uint32_v2(scores[idx]) == pivot) {
-          const uint32_t pos = atomicAdd(&smem->output_counter, 1);
-          if (pos < TopK) output[pos] = static_cast<int32_t>(idx);
-        }
-      }
-    } else {
-      scan_scores_vectorized<BlockSize, VecSize>(
-          scores, length, [&](uint32_t idx, float score) {
-            if (convert_to_uint32_v2(score) == pivot) {
-              const uint32_t pos = atomicAdd(&smem->output_counter, 1);
-              if (pos < TopK) output[pos] = static_cast<int32_t>(idx);
-            }
-          });
-    }
+    collect_pivot_matches<PivotRelation::kEqual, TopK, BlockSize, VecSize>(
+        scores, output, length, pivot, &smem->output_counter);
     __syncthreads();
   }
 }
