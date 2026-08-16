@@ -455,6 +455,46 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         # Block scale for the preshuffled weight; None = not preshuffled.
         self._wqa_wkv_scale: torch.Tensor | None = None
         self._wo_b_scale: torch.Tensor | None = None
+        # Pre-allocated split-K partition buffers for decode attention.
+        # Lazily initialized on first decode call to avoid device issues.
+        self._split_k_buffers: (
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
+        ) = None
+
+    def _get_split_k_buffers(
+        self, device: torch.device
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Lazily allocate and return reusable split-K partition buffers.
+
+        These buffers are sized to the maximum possible decode dimensions:
+        [max_num_batched_tokens, MAX_SPLITS=16, n_local_heads] for part_m/l
+        and [max_num_batched_tokens, MAX_SPLITS=16, n_local_heads, comb_dim]
+        for part_acc. Each decode call slices into these buffers, avoiding
+        per-step memory allocation overhead.
+        """
+        if self._split_k_buffers is not None:
+            return self._split_k_buffers
+        max_queries = self.max_num_batched_tokens
+        max_splits = 16  # Upper bound from _decode_num_splits search range.
+        num_heads = self.n_local_heads
+        comb_dim = self.nope_head_dim + self.rope_head_dim
+        part_m = torch.empty(
+            (max_queries, max_splits, num_heads),
+            dtype=torch.float32,
+            device=device,
+        )
+        part_l = torch.empty(
+            (max_queries, max_splits, num_heads),
+            dtype=torch.float32,
+            device=device,
+        )
+        part_acc = torch.empty(
+            (max_queries, max_splits, num_heads, comb_dim),
+            dtype=torch.float32,
+            device=device,
+        )
+        self._split_k_buffers = (part_m, part_l, part_acc)
+        return self._split_k_buffers
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
@@ -666,6 +706,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             nope_head_dim=self.nope_head_dim,
             rope_head_dim=self.rope_head_dim,
             output=output,
+            split_k_buffers=self._get_split_k_buffers(q.device),
         )
 
     def _forward_prefill(
