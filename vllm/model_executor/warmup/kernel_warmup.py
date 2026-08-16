@@ -162,6 +162,15 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     minimax_m3_msa_warmup(worker)
 
+    # Grow FlashInfer's shared GEMM workspace to its high-water mark now,
+    # while no CUDA graph has been captured: growing it later moves the
+    # buffer and leaves captured graphs replaying against freed memory
+    # (see presize_flashinfer_gemm_workspaces).
+    if has_flashinfer() and current_platform.has_device_capability(90):
+        from vllm.utils.flashinfer import presize_flashinfer_gemm_workspaces
+
+        presize_flashinfer_gemm_workspaces(worker.device)
+
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune
     )

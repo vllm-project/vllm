@@ -79,6 +79,11 @@ class SM100Workspace:
         self._workspace_buf = torch.empty(
             initial_workspace_size, device="cuda", dtype=torch.uint8
         )
+        # Retired workspace generations. CUDA graphs capture the raw device
+        # pointer of whichever buffer was current at capture time, so a
+        # buffer may never be freed once a graph could have captured it;
+        # growing the workspace must keep every older generation alive.
+        self._retired_bufs: list[torch.Tensor] = []
 
         self._block_size = 128  # Forced to 128
 
@@ -101,7 +106,18 @@ class SM100Workspace:
         )
 
         if self._workspace_buf.shape[0] < workspace_size:
-            self._workspace_buf.resize_(workspace_size)
+            # Do NOT resize_() in place: resize_() frees the old storage,
+            # while launches already enqueued and CUDA graphs captured
+            # against the old device address keep dereferencing it. Replays
+            # would then read/write memory the allocator has reused for
+            # unrelated tensors. Allocate a new buffer and retire the old
+            # one instead; graphs captured against a retired buffer stay
+            # correct because its capture-time size was sufficient for the
+            # shapes baked into those graphs.
+            self._retired_bufs.append(self._workspace_buf)
+            self._workspace_buf = torch.empty(
+                workspace_size, device="cuda", dtype=torch.uint8
+            )
 
 
 g_sm100_workspace = SM100Workspace(128 * 1024 * 1024)  # 128MB

@@ -884,6 +884,41 @@ def flashinfer_scaled_fp4_mm_out(
     return out
 
 
+def presize_flashinfer_gemm_workspaces(
+    device: torch.device, size: int = 64 * 1024 * 1024
+) -> None:
+    """Grow FlashInfer's shared GEMM workspace before any CUDA graph capture.
+
+    FlashInfer's cuDNN GEMM execute paths grow their shared cache workspace
+    with ``tensor.resize_()`` whenever an execution plan asks for more than
+    the current buffer (32 MiB by default). ``resize_()`` frees the old
+    storage and moves the buffer to a new device address, but launches
+    already captured into CUDA graphs keep the old raw pointer, so a
+    post-capture grow turns every subsequent replay into a use-after-free:
+    cuDNN kernels read scratch from, and write scratch over, whatever
+    tensors the allocator hands the freed block to. Observed as illegal
+    memory access / misaligned address faults and GPU wedges minutes into
+    serving (see issue #52540; a 256-byte overflow past the 32 MiB default
+    during capture was enough).
+
+    Pre-growing the shared buffer past any plan's realistic demand keeps
+    the address stable for the lifetime of the process. This guard is
+    needed until a FlashInfer release ships the allocation fix
+    (flashinfer-ai/flashinfer#4553); it is cheap (one buffer per device)
+    and a no-op when FlashInfer is absent.
+    """
+    if not has_flashinfer():
+        return
+    try:
+        from flashinfer.utils import _get_cache_buf
+    except ImportError:
+        return
+    # Workspace names used by the GEMM lanes vLLM routes through
+    # FlashInfer's autotuner (which may select the cuDNN runner).
+    for name in ("bmm_fp8_workspace",):
+        _get_cache_buf(name, size, device)
+
+
 def flashinfer_scaled_fp8_mm(
     a: torch.Tensor,
     b: torch.Tensor,
