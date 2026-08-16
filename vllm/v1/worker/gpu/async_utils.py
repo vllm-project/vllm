@@ -165,6 +165,15 @@ class AsyncOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
+        if self._has_fault is not None and self._has_fault.item():
+            if self.pending_artifact_output is not None:
+                self.pending_artifact_output.discard()
+            mask = get_ep_all2all_manager().query_active_mask()
+            raise RuntimeError(
+                "Fault detected in EP all2all communication: "
+                "one or more ranks timed out during dispatch/combine. "
+                f"Mask: {mask.cpu().tolist()}"
+            )
         if self.pending_artifact_output is not None:
             self.model_runner_output.artifact_connector_output = (
                 self.pending_artifact_output.finish()
@@ -195,14 +204,6 @@ class AsyncOutput(AsyncModelRunnerOutput):
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
-        if self._has_fault is not None and self._has_fault.item():
-            mask = get_ep_all2all_manager().query_active_mask()
-            raise RuntimeError(
-                "Fault detected in EP all2all communication: "
-                "one or more ranks timed out during dispatch/combine. "
-                f"Mask: {mask.cpu().tolist()}"
-            )
-
         return self.model_runner_output
 
 

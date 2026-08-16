@@ -151,6 +151,25 @@ def test_public_binding_only_visits_target_model(monkeypatch):
     assert calls == [(7, topk_ids)]
 
 
+def test_public_binding_supports_direct_capture_source():
+    class DirectCaptureSource(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layer_id = 3
+            self.capture_fn = None
+
+    source = DirectCaptureSource()
+    calls = []
+    capturer = types.SimpleNamespace(capture=lambda *args: calls.append(args))
+
+    bind_routed_experts_capturer(source, capturer)
+
+    assert source.capture_fn is not None
+    topk_ids = torch.tensor([[1, 2]])
+    source.capture_fn(topk_ids)
+    assert calls == [(3, topk_ids)]
+
+
 def test_public_binding_rejects_monolithic_without_replay_support(monkeypatch):
     class DummyFusedMoE:
         def __init__(self):
@@ -248,6 +267,47 @@ def test_routed_experts_capturer_dp_modular_local_tokens():
     assert torch.equal(capturer.device_buffer[:3, 0, :], topk)
 
 
+def test_routed_experts_capturer_dp_ep_gathered_shards():
+    capturer = _capturer_with_buffer(dp_rank=1, tp_size=2)
+    num_tokens_dp = torch.tensor([3, 2], dtype=torch.int32)
+    ctx = SimpleNamespace(
+        dp_metadata=SimpleNamespace(
+            num_tokens_across_dp_cpu=num_tokens_dp,
+            local_sizes=[2, 2, 1, 1],
+        )
+    )
+    topk = torch.tensor(
+        [[0, 1], [2, 3], [4, 5], [-1, -1], [10, 11], [12, 13]],
+        dtype=torch.int32,
+    )
+
+    with patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx):
+        capturer.capture(layer_id=0, topk_ids=topk)
+
+    assert torch.equal(capturer.device_buffer[:2, 0], topk[4:])
+
+
+def test_routed_experts_capturer_sp_modular_gathers_tp_shards():
+    capturer = _capturer_with_buffer(dp_rank=1, tp_size=2)
+    num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
+    ctx = SimpleNamespace(
+        dp_metadata=SimpleNamespace(num_tokens_across_dp_cpu=num_tokens_dp)
+    )
+    local_shard = torch.tensor([[10, 11], [12, 13]], dtype=torch.int32)
+    gathered = torch.tensor([[10, 11], [12, 13], [14, 15], [-1, -1]], dtype=torch.int32)
+    tp_group = Mock()
+    tp_group.all_gather.return_value = gathered
+
+    with (
+        patch(f"{_REC_MODULE}.get_forward_context", return_value=ctx),
+        patch(f"{_REC_MODULE}.get_tp_group", return_value=tp_group),
+    ):
+        capturer.capture(layer_id=0, topk_ids=local_shard)
+
+    tp_group.all_gather.assert_called_once_with(local_shard, dim=0)
+    assert torch.equal(capturer.device_buffer[:3, 0], gathered[:3])
+
+
 def test_routed_experts_capturer_dp_unexpected_batch_raises():
     """Mismatch between topk batch dim and DP layout: fail fast."""
     capturer = _capturer_with_buffer(dp_rank=0)
@@ -267,6 +327,7 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_mrv2_async_output_finishes_pending_artifact_output():
+    pytest.importorskip("vllm.vllm_flash_attn", exc_type=ImportError)
     from vllm.distributed.artifact_connector.connector import ArtifactConnectorOutput
     from vllm.v1.outputs import ModelRunnerOutput
     from vllm.v1.worker.gpu.async_utils import AsyncOutput
@@ -295,6 +356,32 @@ def test_mrv2_async_output_finishes_pending_artifact_output():
     pending.to_cpu_nonblocking.assert_called_once_with()
     pending.finish.assert_called_once_with()
     assert output.artifact_connector_output is artifact_output
+
+
+def test_mrv2_async_output_discards_artifact_output_on_ep_fault():
+    pytest.importorskip("vllm.vllm_flash_attn", exc_type=ImportError)
+    from vllm.v1.worker.gpu.async_utils import AsyncOutput
+
+    pending = Mock()
+    output = AsyncOutput.__new__(AsyncOutput)
+    output.copy_event = Mock()
+    output.pending_artifact_output = pending
+    output._has_fault = torch.tensor(True)
+
+    manager = Mock()
+    manager.query_active_mask.return_value = torch.tensor([True, False])
+    with (
+        patch(
+            "vllm.v1.worker.gpu.async_utils.get_ep_all2all_manager",
+            return_value=manager,
+        ),
+        pytest.raises(RuntimeError, match="Fault detected in EP all2all communication"),
+    ):
+        output.get_output()
+
+    output.copy_event.synchronize.assert_called_once_with()
+    pending.discard.assert_called_once_with()
+    pending.finish.assert_not_called()
 
 
 def test_model_runner_shutdown_cleans_gpu_before_artifact_error(monkeypatch):

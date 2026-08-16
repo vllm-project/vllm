@@ -93,6 +93,9 @@ class PendingArtifactOutput:
         finally:
             self._connector.output_finished(self._metadata)
 
+    def discard(self) -> None:
+        self._connector.output_finished(self._metadata)
+
 
 class ArtifactWorkerConnector:
     """Own capture, request tails, and backend resources on the output worker."""
