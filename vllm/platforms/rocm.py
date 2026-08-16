@@ -1129,6 +1129,21 @@ class RocmPlatform(Platform):
         )
 
     @classmethod
+    def set_additional_forward_context(cls, *args, **kwargs) -> dict[str, Any]:
+        """Cache the current HIP stream once per forward pass.
+
+        Called once per ``set_forward_context()`` invocation (i.e. once per
+        forward) while the ambient current stream is that forward's logical
+        "main" stream: the worker compute stream at runtime, and the capture
+        stream inside ``graph_capture()``. ``launch_multi_stream`` reads
+        this cached handle so every fork/join edge binds to the same stream
+        object, keeping the stream DAG statically reason-able and avoiding
+        per-call ``torch.cuda.current_stream()`` queries that widen the HIP
+        stream handle pool.
+        """
+        return {"main_stream": torch.cuda.current_stream()}
+
+    @classmethod
     def launch_multi_stream(
         cls,
         default_fn: Callable[[], Any],
@@ -1141,10 +1156,19 @@ class RocmPlatform(Platform):
         """Launch default and auxiliary work on separate HIP streams.
 
         Uses ``Stream.wait_stream()`` fork-join instead of CUDA events.
-        On HIP, ``Event.wait()`` cross-stream ordering is not reliably
-        enforced under multistream overlap, especially during CUDA graph
-        capture/replay.  Stream-level waits express dependencies directly
-        and are the supported synchronization path on ROCm.
+        On HIP, ``Event.wait()`` / ``Event.wait_event()`` cross-stream
+        ordering is not reliably enforced and can deadlock or hang under
+        multistream overlap, especially during HIP graph capture/replay.
+        Stream-level waits express dependencies directly and are the
+        supported synchronization path on ROCm.
+
+        The main stream is fetched from the forward context cache
+        (``additional_kwargs["main_stream"]``, populated once per forward
+        by ``set_additional_forward_context``) so all fork/join edges bind
+        to a single stream handle. During HIP graph capture the cached
+        stream equals the capture stream, so the fork/join edges are
+        recorded into the graph correctly. Falls back to
+        ``torch.cuda.current_stream()`` when no forward context is set.
 
         ``start_event`` and ``done_events`` are kept for API compatibility
         with CUDA but are unused here.
@@ -1164,8 +1188,19 @@ class RocmPlatform(Platform):
             Tuple of (default_result, aux_results).
         """
         assert aux_streams is not None
-        aux_results: list[Any] = [None] * len(aux_fns)
-        current_stream = torch.cuda.current_stream()
+        aux_results = [None] * len(aux_fns)
+
+        from vllm.forward_context import (
+            get_forward_context,
+            is_forward_context_available,
+        )
+
+        current_stream = None
+        if is_forward_context_available():
+            current_stream = get_forward_context().additional_kwargs.get("main_stream")
+        if current_stream is None:
+            current_stream = torch.cuda.current_stream()
+
         pending: list[torch.cuda.Stream] = []
 
         def _launch_aux() -> None:
