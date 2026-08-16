@@ -124,7 +124,6 @@ class ECCPUScheduler:
                 cache=self._cache,
                 compat_hash=self._compat_hash,
             )
-            self._producer_session.start()
         if self._is_consumer:
             self._transport = ZmqClientTransport()
 
@@ -347,6 +346,8 @@ class ECCPUScheduler:
     ) -> ECCPUConnectorMetadata:
         meta = ECCPUConnectorMetadata()
         if self._is_producer:
+            if self._nixl_enabled and self._producer_session is not None:
+                self._producer_session.poll_step()
             meta.saves = self._pending_saves
             self._pending_saves = {}
         if self._is_consumer:
@@ -386,12 +387,15 @@ class ECCPUScheduler:
                 logger.debug("EC consumer: mm_hash=%s unpinned after load", mm_hash)
 
     def has_pending_push_work(self) -> bool:
-        """True while any dispatched save or load has not been confirmed done.
+        """Keep the engine stepping so this connector's polls keep running.
 
-        Keeps the engine stepping so the worker's completion reports are polled
-        even when no requests are otherwise runnable.
+        With NIXL enabled the engine tick is the only driver of
+        ``ProducerSession.poll_step()``, and a producer's work arrives from a
+        remote consumer, so nothing local would otherwise wake it. Without NIXL
+        this only has to outlive dispatched saves and loads, so the engine can
+        quiesce once the worker has confirmed them.
         """
-        return self._cache.has_held_entries()
+        return self._nixl_enabled or self._cache.has_held_entries()
 
     def request_finished(
         self, request: "Request"
@@ -433,7 +437,7 @@ class ECCPUScheduler:
 
         if self._nixl_enabled:
             if self._producer_session is not None:
-                self._producer_session.stop()
+                self._producer_session.close()
             self._shutdown_nixl_consumer()
             if self._data is not None:
                 try:

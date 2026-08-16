@@ -4,7 +4,7 @@
 
 ZmqClientConnection  — one DEALER socket to a single producer peer.
 ZmqClientTransport   — pool of ZmqClientConnection objects (consumer side).
-ZmqServerTransport   — ROUTER socket + background thread (producer side).
+ZmqServerTransport   — ROUTER socket (producer side).
 """
 
 import contextlib
@@ -166,13 +166,12 @@ class ZmqClientTransport:
 
 
 class ZmqServerTransport:
-    """ROUTER socket for the producer side. Byte-level only — no decoding,
-    no callbacks, no thread. ProducerSession owns the background thread and
-    drives this transport from it.
+    """ROUTER socket for the producer side. Byte-level only, driven by
+    ProducerSession.
 
-    poll(timeout_ms) blocks for up to timeout_ms waiting for messages, then
-    drains all that are available. send() routes a reply back to a specific
-    peer by ZMQ identity.
+    poll(timeout_ms) waits up to timeout_ms for messages, then drains all that
+    are available; timeout_ms=0 drains whatever has already arrived. send()
+    routes a reply back to a specific peer by ZMQ identity.
     """
 
     def __init__(self, host: str, port: int) -> None:
