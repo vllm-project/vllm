@@ -53,7 +53,6 @@ class INCConfig(QuantizationConfig):
     MXFP8_GROUP_SIZE = 32
     MXFP8_DATA_TYPE = "mx_fp"
     MXFP8_PACKING_FORMAT = "auto_round:llm_compressor"
-    MXFP8_SUPPORTED_ACT_DTYPES = {"mx_fp", "mx_fp_rceil"}
 
     def __init__(
         self,
