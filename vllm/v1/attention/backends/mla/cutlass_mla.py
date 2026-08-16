@@ -115,7 +115,10 @@ class SM100Workspace:
             # correct because its capture-time size was sufficient for the
             # shapes baked into those graphs.
             self._retired_bufs.append(self._workspace_buf)
-            self._workspace_buf = torch.empty(
+            # zeros, not empty: split-KV workspaces carry semaphore/accum
+            # regions that kernels expect to start zeroed; a recycled dirty
+            # block from the caching allocator can hang or corrupt them.
+            self._workspace_buf = torch.zeros(
                 workspace_size, device="cuda", dtype=torch.uint8
             )
 
