@@ -7738,6 +7738,7 @@ class GPUModelRunner(
             self.compilation_config.static_forward_context,
             self.kv_caches,
             num_attn_module,
+            kv_cache_groups=kv_cache_config.kv_cache_groups,
         )
         return kv_caches
 

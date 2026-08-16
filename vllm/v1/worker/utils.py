@@ -504,6 +504,7 @@ def bind_kv_cache(
     forward_context: dict[str, Attention],
     runner_kv_caches: list[torch.Tensor],
     num_attn_module: int = 1,
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so
@@ -554,17 +555,31 @@ def bind_kv_cache(
 
     from vllm.model_executor.layers.mamba.mamba_mixer2 import (
         MambaMixer2,
-        batch_replayssm_ring_tracker_updates,
+        share_replayssm_ring_trackers,
     )
 
-    replayssm_mixers = [
-        layer
-        for layer_name in ordered_layer_names
-        if isinstance((layer := forward_context[layer_name]), MambaMixer2)
-        and layer.use_replayssm
-        and layer.mamba_config.backend == MambaBackendEnum.FLASHINFER
-    ]
-    batch_replayssm_ring_tracker_updates(replayssm_mixers)
+    layer_to_cache_group = {
+        layer_name: group_index
+        for group_index, group in enumerate(kv_cache_groups or ())
+        for layer_name in group.layer_names
+    }
+    replayssm_mixer_groups = defaultdict(list)
+    for layer_name in ordered_layer_names:
+        layer = forward_context[layer_name]
+        if not (
+            isinstance(layer, MambaMixer2)
+            and layer.use_replayssm
+            and layer.mamba_config.backend == MambaBackendEnum.FLASHINFER
+        ):
+            continue
+        group_index = layer_to_cache_group.get(layer_name)
+        if group_index is None:
+            # Callers without a KV-cache configuration cannot prove that two
+            # layers use the same block-index namespace, so keep them separate.
+            group_index = layer_name
+        replayssm_mixer_groups[group_index].append(layer)
+
+    share_replayssm_ring_trackers(list(replayssm_mixer_groups.values()))
 
 
 def copy_kv_cache_blocks_inplace(
