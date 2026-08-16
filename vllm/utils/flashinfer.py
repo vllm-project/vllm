@@ -915,8 +915,15 @@ def presize_flashinfer_gemm_workspaces(
         return
     # Workspace names used by the GEMM lanes vLLM routes through
     # FlashInfer's autotuner (which may select the cuDNN runner).
+    # zero_init matters: cuDNN split-K plans keep completion semaphores in
+    # the workspace and spin forever on garbage values; a fresh cudaMalloc
+    # happens to hand back zeroed pages, but that is luck, not a contract.
     for name in ("bmm_fp8_workspace",):
-        _get_cache_buf(name, size, device)
+        try:
+            _get_cache_buf(name, size, device, zero_init=True)
+        except TypeError:
+            # older FlashInfer without the zero_init parameter
+            _get_cache_buf(name, size, device)
 
 
 def flashinfer_scaled_fp8_mm(
