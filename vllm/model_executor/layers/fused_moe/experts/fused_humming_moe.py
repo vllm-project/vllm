@@ -830,13 +830,6 @@ class HummingIndexedExperts(HummingExpertsBase):
         )
 
         valid_rows = None
-        if (
-            expert_tokens_meta is not None
-            and expert_tokens_meta.psum_recv_per_rank is not None
-        ):
-            psum = expert_tokens_meta.psum_recv_per_rank
-            topk = topk_ids.size(1)
-            valid_rows = psum[-1:].to(torch.int64) * topk
 
         if self.fused_situ_quant_enabled(activation):
             # Fused SITU + FP8 quant (per-token or block-FP8 group-128) straight
@@ -869,7 +862,6 @@ class HummingIndexedExperts(HummingExpertsBase):
             **moe_kwargs2,
         )
 
-        # moe_fused_mul_sum skips worst-case padding rows via expert_map.
         moe_fused_mul_sum(
             inputs=buffers["down_output"].view(*topk_ids.shape, -1),
             topk_weights=topk_weights,
