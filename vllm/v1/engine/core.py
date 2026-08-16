@@ -920,25 +920,26 @@ class EngineCore:
         if not self.model_executor.is_sleeping:
             self.resume_scheduler()
 
-    def release_kv_cache(self, mode: PauseMode = "abort") -> bool | Future:
-        """Release KV cache memory while keeping model weights resident."""
+    def release_kv_cache_memory(self, mode: PauseMode = "abort") -> None | Future:
+        """Discard KV cache physical memory and pause until its explicit wake."""
         pause_future = self.pause_scheduler(mode=mode, clear_cache=True)
-        model_executor = self.model_executor
+
         if pause_future is None:
-            return model_executor.release_kv_cache()
+            self.model_executor.discard(("kv_cache",))
+            return None
 
-        future = Future[Any]()
+        future: Future[None] = Future()
 
-        def pause_complete(f: Future):
+        def pause_complete(f: Future) -> None:
             try:
                 f.result()
-                future.set_result(model_executor.release_kv_cache())
+                self.model_executor.discard(("kv_cache",))
             except Exception as e:
                 future.set_exception(e)
+            else:
+                future.set_result(None)
 
-        logger.info(
-            "Waiting for in-flight requests to complete before releasing KV cache..."
-        )
+        logger.info("Waiting for in-flight requests to complete before release...")
         pause_future.add_done_callback(pause_complete)
         return future
 

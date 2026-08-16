@@ -976,17 +976,19 @@ class AsyncLLM(EngineClient):
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
 
-    async def release_kv_cache(self, mode: PauseMode = "abort") -> bool:
-        released = await self.engine_core.release_kv_cache_async(mode)
+    async def release_kv_cache_memory(self, mode: PauseMode = "abort") -> None:
+        await self.engine_core.release_kv_cache_memory_async(mode)
 
-        if released and self.logger_manager is not None:
-            self.logger_manager.record_kv_cache_released_state()
-        return released
+        if self.logger_manager is not None:
+            self.logger_manager.record_sleep_state(1, 0)
 
     async def wake_up(self, tags: list[str] | None = None) -> None:
         await self.engine_core.wake_up_async(tags)
 
-        if self.logger_manager is not None:
+        if (
+            self.logger_manager is not None
+            and not await self.engine_core.is_sleeping_async()
+        ):
             self.logger_manager.record_sleep_state(0, 0)
 
     async def checkpoint_prepare(self) -> None:

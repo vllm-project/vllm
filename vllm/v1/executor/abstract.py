@@ -327,12 +327,9 @@ class Executor(ABC):
         self.collective_rpc("reset_encoder_cache")
 
     def sleep(self, level: int = 1):
-        if self.is_sleeping:
-            if self.sleeping_tags == {"kv_cache"}:
-                logger.info("Executor is releasing weights after KV cache release.")
-            else:
-                logger.warning("Executor is already sleeping.")
-                return
+        if self.is_sleeping and self.sleeping_tags != {"kv_cache"}:
+            logger.warning("Executor is already sleeping.")
+            return
         time_before_sleep = time.perf_counter()
         self.collective_rpc("sleep", kwargs=dict(level=level))
         time_after_sleep = time.perf_counter()
@@ -353,14 +350,13 @@ class Executor(ABC):
                         "Tag %s is not in sleeping tags %s", tag, self.sleeping_tags
                     )
                     return
-        tags_to_wake = tags if tags is not None else list(self.sleeping_tags)
         time_before_wakeup = time.perf_counter()
-        self.collective_rpc("wake_up", kwargs=dict(tags=tags_to_wake))
+        self.collective_rpc("wake_up", kwargs=dict(tags=tags))
         time_after_wakeup = time.perf_counter()
         logger.info(
             "It took %.6f seconds to wake up tags %s.",
             time_after_wakeup - time_before_wakeup,
-            tags_to_wake,
+            tags if tags is not None else self.sleeping_tags,
         )
         if tags:
             for tag in tags:
@@ -370,20 +366,22 @@ class Executor(ABC):
         if not self.sleeping_tags:
             self.is_sleeping = False
 
-    def release_kv_cache(self) -> bool:
-        if self.is_sleeping:
-            logger.warning("Executor is already sleeping.")
-            return False
-        time_before_release = time.perf_counter()
-        self.collective_rpc("release_kv_cache")
-        time_after_release = time.perf_counter()
-        self.sleeping_tags = {"kv_cache"}
-        self.is_sleeping = True
+    def discard(self, tags: tuple[str, ...]) -> None:
+        if set(tags).issubset(self.sleeping_tags):
+            logger.warning("Tags %s are already sleeping.", tags)
+            return
+        time_before_discard = time.perf_counter()
+        try:
+            self.collective_rpc("discard", args=(tags,))
+        finally:
+            self.sleeping_tags.update(tags)
+            self.is_sleeping = True
+        time_after_discard = time.perf_counter()
         logger.info(
-            "It took %.6f seconds to release KV cache.",
-            time_after_release - time_before_release,
+            "It took %.6f seconds to discard tags %s.",
+            time_after_discard - time_before_discard,
+            tags,
         )
-        return True
 
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest

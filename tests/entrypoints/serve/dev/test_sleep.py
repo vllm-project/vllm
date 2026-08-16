@@ -35,11 +35,8 @@ def test_sleep_mode():
         # check sleep metrics
         response = requests.get(remote_server.url_for("metrics"))
         assert response.status_code == 200
-        awake, kv_cache_released, weights_offloaded, discard_all = (
-            _get_sleep_metrics_from_api(response)
-        )
+        awake, weights_offloaded, discard_all = _get_sleep_metrics_from_api(response)
         assert awake == 0
-        assert kv_cache_released == 0
         assert weights_offloaded == 1
         assert discard_all == 0
 
@@ -52,29 +49,24 @@ def test_sleep_mode():
         # check sleep metrics
         response = requests.get(remote_server.url_for("metrics"))
         assert response.status_code == 200
-        awake, kv_cache_released, weights_offloaded, discard_all = (
-            _get_sleep_metrics_from_api(response)
-        )
+        awake, weights_offloaded, discard_all = _get_sleep_metrics_from_api(response)
         assert awake == 1
-        assert kv_cache_released == 0
         assert weights_offloaded == 0
         assert discard_all == 0
 
-        response = requests.post(remote_server.url_for("release_kv_cache"))
+        response = requests.post(remote_server.url_for("release_kv_cache_memory"))
         assert response.status_code == 200
 
-        # check KV cache release metrics
         response = requests.get(remote_server.url_for("metrics"))
         assert response.status_code == 200
-        awake, kv_cache_released, weights_offloaded, discard_all = (
-            _get_sleep_metrics_from_api(response)
-        )
+        awake, weights_offloaded, discard_all = _get_sleep_metrics_from_api(response)
         assert awake == 0
-        assert kv_cache_released == 1
         assert weights_offloaded == 0
         assert discard_all == 0
 
-        response = requests.post(remote_server.url_for("wake_up"))
+        response = requests.post(
+            remote_server.url_for("wake_up"), params={"tags": ["kv_cache"]}
+        )
         assert response.status_code == 200
 
         # test wake up with tags
@@ -86,10 +78,15 @@ def test_sleep_mode():
         )
         assert response.status_code == 200
 
-        # is sleeping should be false after waking up any part of the engine
+        # Partial wake keeps the engine sleeping.
         response = requests.get(remote_server.url_for("is_sleeping"))
         assert response.status_code == 200
         assert response.json().get("is_sleeping") is True
+
+        response = requests.get(remote_server.url_for("metrics"))
+        assert response.status_code == 200
+        awake, _, _ = _get_sleep_metrics_from_api(response)
+        assert awake == 0
 
         response = requests.post(
             remote_server.url_for("wake_up"), params={"tags": ["kv_cache"]}
@@ -103,19 +100,16 @@ def test_sleep_mode():
         # check sleep metrics
         response = requests.get(remote_server.url_for("metrics"))
         assert response.status_code == 200
-        awake, kv_cache_released, weights_offloaded, discard_all = (
-            _get_sleep_metrics_from_api(response)
-        )
+        awake, weights_offloaded, discard_all = _get_sleep_metrics_from_api(response)
         assert awake == 1
-        assert kv_cache_released == 0
         assert weights_offloaded == 0
         assert discard_all == 0
 
 
 def _get_sleep_metrics_from_api(response: requests.Response):
-    """Return (awake, kv_cache_released, weights_offloaded, discard_all)"""
+    """Return (awake, weights_offloaded, discard_all)"""
 
-    awake, kv_cache_released, weights_offloaded, discard_all = None, None, None, None
+    awake, weights_offloaded, discard_all = None, None, None
 
     for family in text_string_to_metric_families(response.text):
         if family.name == "vllm:engine_sleep_state":
@@ -124,16 +118,13 @@ def _get_sleep_metrics_from_api(response: requests.Response):
                     for label_name, label_value in sample.labels.items():
                         if label_value == "awake":
                             awake = sample.value
-                        elif label_value == "kv_cache_released":
-                            kv_cache_released = sample.value
                         elif label_value == "weights_offloaded":
                             weights_offloaded = sample.value
                         elif label_value == "discard_all":
                             discard_all = sample.value
 
     assert awake is not None
-    assert kv_cache_released is not None
     assert weights_offloaded is not None
     assert discard_all is not None
 
-    return awake, kv_cache_released, weights_offloaded, discard_all
+    return awake, weights_offloaded, discard_all
