@@ -134,6 +134,28 @@ def test_rank_local_update_selects_worker_payload(rank, expected):
     assert worker._weight_update_active is True
 
 
+def test_rank_local_update_includes_data_parallel_rank():
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    worker.rank = 0
+    worker.vllm_config.parallel_config.data_parallel_size = 4
+    worker.vllm_config.parallel_config.data_parallel_rank = 2
+    Worker.start_weight_update(worker)
+
+    Worker.update_weights(
+        worker,
+        [
+            {"names": ["dp-0"]},
+            {"names": ["dp-1"]},
+            {"names": ["dp-2"]},
+            {"names": ["dp-3"]},
+        ],
+    )
+
+    assert engine.update_calls == [{"names": ["dp-2"]}]
+    assert worker._weight_update_active is True
+
+
 def test_finish_draft_session_keeps_lora_state():
     engine = _RecordingEngine()
     engine.supports_draft_weight_update = True
