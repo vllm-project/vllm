@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 BLOCK_SIZE = 16
 DEVICE = torch.device("cpu")
 
+
 @dataclass
 class ReplaySSMBuildCase:
     """A decode batch and its expected per-row write_pos / is_flush.
@@ -191,8 +192,6 @@ def _make_mamba_spec(
     buffer_len: int,
     mamba_backend: MambaBackendEnum,
 ) -> MambaSpec:
-    # The builder only reads the x/B ring shapes; include FlashInfer's trackers
-    # so the mock page matches the production cache layout.
     ring_buffer_len = buffer_len + (
         1 if mamba_backend == MambaBackendEnum.FLASHINFER else 0
     )
@@ -203,8 +202,6 @@ def _make_mamba_spec(
         (1, ring_buffer_len),
         (1, ring_buffer_len, 1),
     )
-    if mamba_backend == MambaBackendEnum.FLASHINFER:
-        shapes = (*shapes, (), ())
     return MambaSpec(
         block_size=BLOCK_SIZE,
         shapes=shapes,
@@ -274,19 +271,20 @@ def test_resumed_request_differs_from_fresh():
 
 
 def test_flashinfer_replayssm_scratch_metadata_fresh_decode():
-    """FlashInfer receives per-row scratch; ring state is layer-local."""
-    builder = _create_replayssm_builder(
-        16, mamba_backend=MambaBackendEnum.FLASHINFER
-    )
+    checkpointing_ssu = pytest.importorskip("flashinfer.mamba.checkpointing_ssu")
+    if not hasattr(checkpointing_ssu, "allocate_checkpointing_ssu_scratch"):
+        pytest.skip("FlashInfer does not expose ReplaySSM scratch allocation")
+
+    builder = _create_replayssm_builder(16, mamba_backend=MambaBackendEnum.FLASHINFER)
     case = REPLAYSSM_BUILD_CASES["fresh_decode"]
     meta = _build(builder, case)
 
     assert meta.write_pos_d is None
     assert meta.is_flush_d is None
     assert meta.bc_pre_scratch is None
-    assert meta.cb_scaled is not None
-    assert meta.cb_scaled.shape == (1, 1, 32, 8)
-    assert meta.cumAdt_vec is not None
-    assert meta.cumAdt_vec.shape == (1, 1, 16)
-    assert meta.cb_old is not None
-    assert meta.cb_old.shape == (1, 1, 32, 8)
+    assert meta.replayssm_scratch is not None
+    assert [tensor.shape for tensor in meta.replayssm_scratch] == [
+        (1, 1, 32, 8),
+        (1, 1, 16),
+        (1, 1, 32, 8),
+    ]

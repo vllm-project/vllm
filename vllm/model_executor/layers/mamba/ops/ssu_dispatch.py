@@ -3,24 +3,15 @@
 """
 Dispatch module for Mamba selective state update (SSU) backends.
 
-Provides unified ``selective_state_update`` (baseline decode) and ReplaySSM
-decode entry points that dispatch to Triton / FlashInfer / CPU based on
-``MambaBackendEnum``. On CPU-only platforms (PowerPC, x86 without CUDA) the
-baseline SSU backend defaults to ``cpu``.
-
-ReplaySSM backends:
-  - Triton: ``write_pos`` / ``is_flush`` / ``bc_pre``
-    (``selective_state_update_replayssm_triton``)
-  - FlashInfer: ``ring_start`` / ``prev_num_accepted_tokens`` (+ optional
-    two-kernel scratch), matching ``flashinfer.mamba.checkpointing_ssu``
-    (``selective_state_update_replayssm_flashinfer``)
+Provides a unified ``selective_state_update`` function that dispatches to
+Triton, FlashInfer, or CPU based on ``MambaBackendEnum``. It also contains the
+FlashInfer ReplaySSM adapter and shared ring-tracker kernels. On CPU-only
+platforms the baseline SSU backend defaults to CPU.
 """
 
 import importlib
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
-from contextlib import contextmanager
-from dataclasses import dataclass
+from collections.abc import Callable
 
 import torch
 
@@ -32,37 +23,6 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
 logger = init_logger(__name__)
-
-
-@dataclass(frozen=True)
-class FlashInferReplaySSMTactic:
-    algorithm: str
-    d_split: int | None = None
-    precompute_heads_per_cta: int = 0
-
-    def __post_init__(self) -> None:
-        if self.algorithm not in {"auto", "monolith", "two-kernel"}:
-            raise ValueError(f"Unsupported ReplaySSM algorithm: {self.algorithm}")
-        if self.d_split is not None and self.d_split <= 0:
-            raise ValueError("d_split must be positive when specified")
-        if self.precompute_heads_per_cta < 0:
-            raise ValueError("precompute_heads_per_cta must be non-negative")
-        if self.algorithm == "monolith" and self.precompute_heads_per_cta != 0:
-            raise ValueError(
-                f"{self.algorithm} does not accept precompute_heads_per_cta"
-            )
-
-    @property
-    def name(self) -> str:
-        name = self.algorithm.replace("-", "_")
-        if self.d_split is not None:
-            name += f"_d{self.d_split}"
-        if self.precompute_heads_per_cta:
-            name += f"_h{self.precompute_heads_per_cta}"
-        return name
-
-
-FLASHINFER_REPLAYSSM_AUTO_TACTIC = FlashInferReplaySSMTactic("auto")
 
 
 @triton.jit
@@ -401,312 +361,35 @@ _BACKEND_REGISTRY: dict[MambaBackendEnum, type[MambaSSUBackend]] = {
 _mamba_ssu_backend: MambaSSUBackend | None = None
 
 
-class ReplaySSMBackend(ABC):
-    """Marker base for ReplaySSM decode backends."""
-
-    def __init__(self, mamba_config: MambaConfig):
-        self._mamba_config = mamba_config
-
-    @property
-    @abstractmethod
-    def name(self) -> str: ...
+_flashinfer_replayssm_kernel: Callable[..., torch.Tensor] | None = None
 
 
-class TritonReplaySSMBackend(ReplaySSMBackend):
-    """vLLM Triton ReplaySSM (``write_pos`` / ``is_flush`` / ``bc_pre``)."""
-
-    def __init__(self, mamba_config: MambaConfig):
-        super().__init__(mamba_config)
-        from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
-            selective_state_update_replayssm_output_only as _triton_replayssm,
-        )
-
-        self._kernel = _triton_replayssm
-
-    @property
-    def name(self) -> str:
-        return "triton"
-
-    def __call__(
-        self,
-        state: torch.Tensor,
-        x: torch.Tensor,
-        dt: torch.Tensor,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        C: torch.Tensor,
-        D: torch.Tensor | None = None,
-        dt_bias: torch.Tensor | None = None,
-        z: torch.Tensor | None = None,
-        dt_softplus: bool = False,
-        x_cache: torch.Tensor | None = None,
-        dt_cache: torch.Tensor | None = None,
-        B_cache: torch.Tensor | None = None,
-        bc_pre: torch.Tensor | None = None,
-        write_pos: torch.Tensor | None = None,
-        is_flush: torch.Tensor | None = None,
-        max_cache_len: int = 16,
-        state_batch_indices: torch.Tensor | None = None,
-        null_block_id: int = NULL_BLOCK_ID,
-        out: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        return self._kernel(
-            state,
-            x,
-            dt,
-            A,
-            B,
-            C,
-            D=D,
-            dt_bias=dt_bias,
-            z=z,
-            dt_softplus=dt_softplus,
-            x_cache=x_cache,
-            dt_cache=dt_cache,
-            B_cache=B_cache,
-            bc_pre=bc_pre,
-            write_pos=write_pos,
-            is_flush=is_flush,
-            max_cache_len=max_cache_len,
-            state_batch_indices=state_batch_indices,
-            null_block_id=null_block_id,
-            out=out,
-            enable_stochastic_rounding=self._mamba_config.enable_stochastic_rounding,
-            cache_philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds,
-        )
-
-
-class FlashInferReplaySSMBackend(ReplaySSMBackend):
-    """FlashInfer ``checkpointing_ssu`` ReplaySSM backend."""
-
-    def __init__(self, mamba_config: MambaConfig):
-        super().__init__(mamba_config)
-        try:
-            checkpointing_ssu_module = importlib.import_module(
-                "flashinfer.mamba.checkpointing_ssu"
-            )
-        except (ImportError, ModuleNotFoundError) as e:
-            raise ImportError(
-                "FlashInfer is required for the flashinfer ReplaySSM backend. "
-                "Please install flashinfer with mamba.checkpointing_ssu support: "
-                "pip install flashinfer-python"
-            ) from e
-        if not hasattr(checkpointing_ssu_module, "CheckpointingSSURunner"):
-            raise ImportError(
-                "FlashInfer ReplaySSM requires native checkpointing_ssu "
-                "autotuning support. Install a compatible FlashInfer revision "
-                "exposing CheckpointingSSURunner."
-            )
-        self._kernel = checkpointing_ssu_module.checkpointing_ssu
-        self._tactic = FLASHINFER_REPLAYSSM_AUTO_TACTIC
-
-    @property
-    def name(self) -> str:
-        return "flashinfer"
-
-    def __call__(
-        self,
-        state: torch.Tensor,
-        x: torch.Tensor,
-        dt: torch.Tensor,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        C: torch.Tensor,
-        out: torch.Tensor,
-        x_cache: torch.Tensor,
-        B_cache: torch.Tensor,
-        dt_cache: torch.Tensor,
-        ring_start: torch.Tensor,
-        prev_num_accepted_tokens: torch.Tensor,
-        D: torch.Tensor | None = None,
-        dt_bias: torch.Tensor | None = None,
-        z: torch.Tensor | None = None,
-        dt_softplus: bool = False,
-        state_batch_indices: torch.Tensor | None = None,
-        null_block_id: int = NULL_BLOCK_ID,
-        cb_scaled: torch.Tensor | None = None,
-        cumAdt_vec: torch.Tensor | None = None,
-        cb_old: torch.Tensor | None = None,
-        algorithm: str | None = None,
-        update_trackers: bool = True,
-    ) -> torch.Tensor:
-        # AR decode currently passes (batch, nheads, dim); checkpointing_ssu
-        # expects a predicted-token axis T. Unsqueeze T=1 here.
-        if x.dim() == 3:
-            x = x.unsqueeze(1)
-            dt = dt.unsqueeze(1)
-            B = B.unsqueeze(1)
-            C = C.unsqueeze(1)
-            out = out.unsqueeze(1)
-            z = z.unsqueeze(1) if z is not None else None
-
-        rand_seed = (
-            torch.randint(0, 2**32, (1,), device=state.device, dtype=torch.int64)
-            if self._mamba_config.enable_stochastic_rounding
-            else None
-        )
-        indices = state_batch_indices
-        if indices is not None and indices.dim() > 1:
-            indices = indices[:, 0]
-
-        tactic = self._tactic
-        requested_algorithm = tactic.algorithm if algorithm is None else algorithm
-        use_explicit_tactic = algorithm is None
-        result = self._kernel(
-            state,
-            x_cache,
-            B_cache,
-            dt_cache,
-            ring_start,
-            prev_num_accepted_tokens,
-            x,
-            dt,
-            A,
-            B,
-            C,
-            out,
-            D=D,
-            z=z,
-            dt_bias=dt_bias,
-            dt_softplus=dt_softplus,
-            state_batch_indices=indices,
-            pad_slot_id=null_block_id,
-            rand_seed=rand_seed,
-            philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds or 10,
-            cb_scaled=cb_scaled,
-            cumAdt_vec=cumAdt_vec,
-            cb_old=cb_old,
-            d_split=tactic.d_split if use_explicit_tactic else None,
-            precompute_heads_per_cta=(
-                tactic.precompute_heads_per_cta if use_explicit_tactic else 0
-            ),
-            algorithm=requested_algorithm,
-        )
-        if update_trackers and indices is not None:
-            update_replayssm_ring_trackers(
-                ring_start,
-                prev_num_accepted_tokens,
-                indices,
-                logical_window=x_cache.size(2) - 1,
-                pad_slot_id=null_block_id,
-            )
-        return result
-
-
-@contextmanager
-def use_flashinfer_replayssm_tactic(
-    tactic: FlashInferReplaySSMTactic,
-) -> Iterator[None]:
-    """Apply an explicit ReplaySSM tactic for tests or debugging."""
-    backend = get_replayssm_backend()
-    if not isinstance(backend, FlashInferReplaySSMBackend):
-        yield
+def _initialize_flashinfer_replayssm(enabled: bool) -> None:
+    global _flashinfer_replayssm_kernel
+    _flashinfer_replayssm_kernel = None
+    if not enabled:
         return
 
-    old_tactic = backend._tactic
-    backend._tactic = tactic
     try:
-        yield
-    finally:
-        backend._tactic = old_tactic
+        module = importlib.import_module("flashinfer.mamba.checkpointing_ssu")
+    except (ImportError, ModuleNotFoundError) as e:
+        raise ImportError(
+            "FlashInfer is required for the flashinfer ReplaySSM backend. "
+            "Install a compatible flashinfer-python package."
+        ) from e
 
-
-_REPLAYSSM_BACKEND_REGISTRY: dict[MambaBackendEnum, type[ReplaySSMBackend]] = {
-    MambaBackendEnum.TRITON: TritonReplaySSMBackend,
-    MambaBackendEnum.FLASHINFER: FlashInferReplaySSMBackend,
-}
-
-_replayssm_backend: ReplaySSMBackend | None = None
-
-
-def initialize_replayssm_backend(
-    mamba_config: MambaConfig,
-    *,
-    use_replayssm: bool,
-) -> None:
-    """Initialize the global ReplaySSM backend when ``--use-replayssm`` is set."""
-    global _replayssm_backend
-    if not use_replayssm:
-        _replayssm_backend = None
-        return
-
-    backend = mamba_config.backend
-    if backend not in _REPLAYSSM_BACKEND_REGISTRY:
-        raise ValueError(
-            f"--use-replayssm does not support mamba backend {backend.value!r}. "
-            f"Valid options: {[b.value for b in _REPLAYSSM_BACKEND_REGISTRY]}"
-        )
-
-    backend_cls = _REPLAYSSM_BACKEND_REGISTRY[backend]
-    if isinstance(_replayssm_backend, backend_cls):
-        return
-
-    _replayssm_backend = backend_cls(mamba_config)
-    logger.info("Using %s ReplaySSM backend.", _replayssm_backend.name)
-
-
-def get_replayssm_backend() -> ReplaySSMBackend:
-    """Get the current ReplaySSM backend. Raises if not initialized."""
-    if _replayssm_backend is None:
-        raise RuntimeError(
-            "ReplaySSM backend has not been initialized. "
-            "Call initialize_mamba_ssu_backend() with use_replayssm=True first."
-        )
-    return _replayssm_backend
-
-
-def selective_state_update_replayssm_triton(
-    state: torch.Tensor,
-    x: torch.Tensor,
-    dt: torch.Tensor,
-    A: torch.Tensor,
-    B: torch.Tensor,
-    C: torch.Tensor,
-    D: torch.Tensor | None = None,
-    dt_bias: torch.Tensor | None = None,
-    z: torch.Tensor | None = None,
-    dt_softplus: bool = False,
-    x_cache: torch.Tensor | None = None,
-    dt_cache: torch.Tensor | None = None,
-    B_cache: torch.Tensor | None = None,
-    bc_pre: torch.Tensor | None = None,
-    write_pos: torch.Tensor | None = None,
-    is_flush: torch.Tensor | None = None,
-    max_cache_len: int = 16,
-    state_batch_indices: torch.Tensor | None = None,
-    null_block_id: int = NULL_BLOCK_ID,
-    out: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Triton ReplaySSM decode (``write_pos`` / ``is_flush`` / ``bc_pre``)."""
-    backend = get_replayssm_backend()
-    if not isinstance(backend, TritonReplaySSMBackend):
-        raise RuntimeError(
-            "selective_state_update_replayssm_triton is the Triton ReplaySSM "
-            f"entry point; current backend is {backend.name!r}. Use "
-            "selective_state_update_replayssm_flashinfer for FlashInfer."
-        )
-    return backend(
-        state,
-        x,
-        dt,
-        A,
-        B,
-        C,
-        D=D,
-        dt_bias=dt_bias,
-        z=z,
-        dt_softplus=dt_softplus,
-        x_cache=x_cache,
-        dt_cache=dt_cache,
-        B_cache=B_cache,
-        bc_pre=bc_pre,
-        write_pos=write_pos,
-        is_flush=is_flush,
-        max_cache_len=max_cache_len,
-        state_batch_indices=state_batch_indices,
-        null_block_id=null_block_id,
-        out=out,
+    required = (
+        "checkpointing_ssu",
+        "CheckpointingSSURunner",
+        "allocate_checkpointing_ssu_scratch",
     )
+    missing = [name for name in required if not hasattr(module, name)]
+    if missing:
+        raise ImportError(
+            "FlashInfer ReplaySSM requires native autotuning and scratch "
+            f"allocation support; missing {missing}."
+        )
+    _flashinfer_replayssm_kernel = module.checkpointing_ssu
 
 
 def selective_state_update_replayssm_flashinfer(
@@ -728,44 +411,79 @@ def selective_state_update_replayssm_flashinfer(
     dt_softplus: bool = False,
     state_batch_indices: torch.Tensor | None = None,
     null_block_id: int = NULL_BLOCK_ID,
-    cb_scaled: torch.Tensor | None = None,
-    cumAdt_vec: torch.Tensor | None = None,
-    cb_old: torch.Tensor | None = None,
-    algorithm: str | None = None,
+    scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    algorithm: str = "auto",
+    d_split: int | None = None,
+    precompute_heads_per_cta: int = 0,
     update_trackers: bool = True,
+    enable_stochastic_rounding: bool = False,
+    stochastic_rounding_philox_rounds: int | None = None,
 ) -> torch.Tensor:
-    """FlashInfer ReplaySSM decode (``checkpointing_ssu``)."""
-    backend = get_replayssm_backend()
-    if not isinstance(backend, FlashInferReplaySSMBackend):
+    """Run FlashInfer checkpointing SSU and optionally advance shared trackers."""
+    if _flashinfer_replayssm_kernel is None:
         raise RuntimeError(
-            "selective_state_update_replayssm_flashinfer requires the "
-            f"flashinfer ReplaySSM backend; current backend is {backend.name!r}."
+            "FlashInfer ReplaySSM has not been initialized. "
+            "Call initialize_mamba_ssu_backend() with use_replayssm=True."
         )
-    return backend(
+
+    if x.dim() == 3:
+        x = x.unsqueeze(1)
+        dt = dt.unsqueeze(1)
+        B = B.unsqueeze(1)
+        C = C.unsqueeze(1)
+        out = out.unsqueeze(1)
+        z = z.unsqueeze(1) if z is not None else None
+
+    indices = state_batch_indices
+    if indices is not None and indices.dim() > 1:
+        indices = indices[:, 0]
+
+    cb_scaled = cumAdt_vec = cb_old = None
+    if scratch is not None:
+        cb_scaled, cumAdt_vec, cb_old = scratch
+
+    rand_seed = (
+        torch.randint(0, 2**32, (1,), device=state.device, dtype=torch.int64)
+        if enable_stochastic_rounding
+        else None
+    )
+    result = _flashinfer_replayssm_kernel(
         state,
+        x_cache,
+        B_cache,
+        dt_cache,
+        ring_start,
+        prev_num_accepted_tokens,
         x,
         dt,
         A,
         B,
         C,
         out,
-        x_cache,
-        B_cache,
-        dt_cache,
-        ring_start,
-        prev_num_accepted_tokens,
         D=D,
-        dt_bias=dt_bias,
         z=z,
+        dt_bias=dt_bias,
         dt_softplus=dt_softplus,
-        state_batch_indices=state_batch_indices,
-        null_block_id=null_block_id,
+        state_batch_indices=indices,
+        pad_slot_id=null_block_id,
+        rand_seed=rand_seed,
+        philox_rounds=stochastic_rounding_philox_rounds or 10,
         cb_scaled=cb_scaled,
         cumAdt_vec=cumAdt_vec,
         cb_old=cb_old,
+        d_split=d_split,
+        precompute_heads_per_cta=precompute_heads_per_cta,
         algorithm=algorithm,
-        update_trackers=update_trackers,
     )
+    if update_trackers and indices is not None:
+        update_replayssm_ring_trackers(
+            ring_start,
+            prev_num_accepted_tokens,
+            indices,
+            logical_window=x_cache.size(2) - x.size(1),
+            pad_slot_id=null_block_id,
+        )
+    return result
 
 
 def initialize_mamba_ssu_backend(
@@ -774,47 +492,49 @@ def initialize_mamba_ssu_backend(
     *,
     use_replayssm: bool = False,
 ) -> None:
-    """Initialize the global Mamba SSU backend (and ReplaySSM when enabled).
-
-    No-op for baseline SSU if `kv_cache_config` contains no specs that call
-    selective_state_update. Always (re)considers ReplaySSM when
-    ``use_replayssm`` is set.
-    """
-    if any(
+    """Initialize the Mamba SSU backend and optional FlashInfer ReplaySSM."""
+    if not any(
         isinstance(g.kv_cache_spec, MambaSpec)
         and g.kv_cache_spec.mamba_type
         in (MambaAttentionBackendEnum.MAMBA1, MambaAttentionBackendEnum.MAMBA2)
         for g in kv_cache_config.kv_cache_groups
     ):
-        global _mamba_ssu_backend
+        return
 
-        backend = mamba_config.backend
+    global _mamba_ssu_backend
+    backend = mamba_config.backend
 
-        # On CPU-only platforms (PowerPC, x86 without CUDA) Triton JIT is
-        # unstable or unavailable.  Silently fall back to the CPU
-        # backend unless the user explicitly chose something other than "triton".
-        if backend == MambaBackendEnum.TRITON:
-            from vllm.platforms import current_platform
+    if backend == MambaBackendEnum.TRITON:
+        from vllm.platforms import current_platform
 
-            if current_platform.is_cpu():
-                logger.info(
-                    "CPU platform detected: overriding Mamba SSU backend "
-                    "from 'triton' to 'cpu'."
-                )
-                backend = MambaBackendEnum.CPU
-
-        if backend not in _BACKEND_REGISTRY:
-            raise ValueError(
-                f"Unknown Mamba SSU backend: {backend}. "
-                f"Valid options: {list(_BACKEND_REGISTRY.keys())}"
+        if current_platform.is_cpu():
+            logger.info(
+                "CPU platform detected: overriding Mamba SSU backend "
+                "from 'triton' to 'cpu'."
             )
+            backend = MambaBackendEnum.CPU
 
-        backend_cls = _BACKEND_REGISTRY[backend]
-        if not isinstance(_mamba_ssu_backend, backend_cls):
-            _mamba_ssu_backend = backend_cls(mamba_config)
-            logger.info("Using %s Mamba SSU backend.", _mamba_ssu_backend.name)
+    if backend not in _BACKEND_REGISTRY:
+        raise ValueError(
+            f"Unknown Mamba SSU backend: {backend}. "
+            f"Valid options: {list(_BACKEND_REGISTRY.keys())}"
+        )
+    if use_replayssm and backend not in (
+        MambaBackendEnum.TRITON,
+        MambaBackendEnum.FLASHINFER,
+    ):
+        raise ValueError(f"ReplaySSM does not support mamba backend {backend.value!r}")
 
-    initialize_replayssm_backend(mamba_config, use_replayssm=use_replayssm)
+    backend_cls = _BACKEND_REGISTRY[backend]
+    if not isinstance(_mamba_ssu_backend, backend_cls):
+        _mamba_ssu_backend = backend_cls(mamba_config)
+        logger.info("Using %s Mamba SSU backend.", _mamba_ssu_backend.name)
+
+    _initialize_flashinfer_replayssm(
+        use_replayssm and backend == MambaBackendEnum.FLASHINFER
+    )
+    if use_replayssm:
+        logger.info("Using %s ReplaySSM backend.", backend.value)
 
 
 def get_mamba_ssu_backend() -> MambaSSUBackend:

@@ -10,29 +10,17 @@ import torch
 
 from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-    FLASHINFER_REPLAYSSM_AUTO_TACTIC,
-    FlashInferReplaySSMBackend,
-    FlashInferReplaySSMTactic,
     FlashInferSSUBackend,
-    TritonReplaySSMBackend,
     TritonSSUBackend,
     get_mamba_ssu_backend,
-    get_replayssm_backend,
     initialize_mamba_ssu_backend,
-    initialize_replayssm_backend,
     selective_state_update,
     selective_state_update_replayssm_flashinfer,
-    selective_state_update_replayssm_triton,
     update_replayssm_ring_trackers,
-    use_flashinfer_replayssm_tactic,
 )
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
-from vllm.v1.kv_cache_interface import (
-    KVCacheConfig,
-    KVCacheGroupSpec,
-    MambaSpec,
-)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, MambaSpec
 
 try:
     import flashinfer.mamba  # noqa: F401
@@ -45,67 +33,15 @@ try:
     checkpointing_ssu_module = importlib.import_module(
         "flashinfer.mamba.checkpointing_ssu"
     )
-    HAS_FLASHINFER_CHECKPOINTING_SSU = hasattr(
-        checkpointing_ssu_module, "CheckpointingSSURunner"
+    HAS_FLASHINFER_CHECKPOINTING_SSU = all(
+        hasattr(checkpointing_ssu_module, name)
+        for name in (
+            "CheckpointingSSURunner",
+            "allocate_checkpointing_ssu_scratch",
+        )
     )
 except ImportError:
     HAS_FLASHINFER_CHECKPOINTING_SSU = False
-
-
-def _fake_flashinfer_replayssm_backend() -> FlashInferReplaySSMBackend:
-    backend = FlashInferReplaySSMBackend.__new__(FlashInferReplaySSMBackend)
-    backend._mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
-    backend._kernel = Mock(return_value=torch.empty(1))
-    backend._tactic = FLASHINFER_REPLAYSSM_AUTO_TACTIC
-    return backend
-
-
-def test_replayssm_explicit_tactic_validation():
-    tactic = FlashInferReplaySSMTactic(
-        "two-kernel", d_split=2, precompute_heads_per_cta=8
-    )
-    assert tactic.name == "two_kernel_d2_h8"
-    with pytest.raises(ValueError, match="does not accept precompute"):
-        FlashInferReplaySSMTactic("monolith", precompute_heads_per_cta=8)
-
-
-def test_replayssm_tactic_scope_restores_direct_launch_controls(monkeypatch):
-    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
-
-    backend = _fake_flashinfer_replayssm_backend()
-    monkeypatch.setattr(mod, "_replayssm_backend", backend)
-    tactic = FlashInferReplaySSMTactic(
-        "two-kernel", d_split=2, precompute_heads_per_cta=8
-    )
-
-    with (
-        pytest.raises(RuntimeError, match="sentinel"),
-        use_flashinfer_replayssm_tactic(tactic),
-    ):
-        assert backend._tactic is tactic
-        raise RuntimeError("sentinel")
-
-    assert backend._tactic is FLASHINFER_REPLAYSSM_AUTO_TACTIC
-
-
-def test_replayssm_backend_forwards_explicit_tactic(monkeypatch):
-    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
-
-    backend = _fake_flashinfer_replayssm_backend()
-    monkeypatch.setattr(mod, "_replayssm_backend", backend)
-    tensor = torch.empty(1)
-
-    with use_flashinfer_replayssm_tactic(
-        FlashInferReplaySSMTactic("two-kernel", d_split=2, precompute_heads_per_cta=8)
-    ):
-        backend(*(tensor,) * 12)
-
-    kwargs = backend._kernel.call_args.kwargs
-    assert kwargs["algorithm"] == "two-kernel"
-    assert kwargs["d_split"] == 2
-    assert kwargs["precompute_heads_per_cta"] == 8
-    assert "main_pipeline_stages" not in kwargs
-    assert "main_ctas_per_sm" not in kwargs
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -158,8 +94,7 @@ def test_explicit_triton_backend():
     initialize_mamba_ssu_backend(
         MambaConfig(backend=MambaBackendEnum.TRITON), _kv_cache_config_with_ssu()
     )
-    backend = get_mamba_ssu_backend()
-    assert isinstance(backend, TritonSSUBackend)
+    assert isinstance(get_mamba_ssu_backend(), TritonSSUBackend)
 
 
 @pytest.mark.skipif(not HAS_FLASHINFER, reason="flashinfer not installed")
@@ -198,18 +133,9 @@ def test_flashinfer_forwards_ssu_algorithm(
             ssu_algorithm=algorithm,
         )
     )
-
     tensor = torch.empty(1)
-    backend(
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-        tensor,
-    )
+
+    backend(*(tensor,) * 8)
 
     assert kernel.call_args.kwargs["algorithm"] == expected
 
@@ -219,9 +145,11 @@ def test_uninitialized_backend_raises():
 
     old = mod._mamba_ssu_backend
     mod._mamba_ssu_backend = None
-    with pytest.raises(RuntimeError, match="not been initialized"):
-        get_mamba_ssu_backend()
-    mod._mamba_ssu_backend = old
+    try:
+        with pytest.raises(RuntimeError, match="not been initialized"):
+            get_mamba_ssu_backend()
+    finally:
+        mod._mamba_ssu_backend = old
 
 
 @pytest.mark.parametrize(
@@ -242,8 +170,6 @@ def test_init_is_noop_for_non_ssu_mamba_type(mamba_type):
             MambaConfig(), _kv_cache_config_with_ssu(mamba_type)
         )
         assert mod._mamba_ssu_backend is None
-        with pytest.raises(RuntimeError, match="not been initialized"):
-            get_mamba_ssu_backend()
     finally:
         mod._mamba_ssu_backend = old
 
@@ -254,25 +180,24 @@ def test_flashinfer_import_error():
         FlashInferSSUBackend(MambaConfig())
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_triton_basic_call():
     set_random_seed(0)
     initialize_mamba_ssu_backend(
         MambaConfig(backend=MambaBackendEnum.TRITON), _kv_cache_config_with_ssu()
     )
-    device = "cuda"
     batch_size = 2
     dim = 64
     dstate = 16
-
-    state = torch.randn(batch_size, dim, dstate, device=device)
-    x = torch.randn(batch_size, dim, device=device)
+    state = torch.randn(batch_size, dim, dstate, device="cuda")
+    x = torch.randn(batch_size, dim, device="cuda")
     out = torch.empty_like(x)
-    dt = torch.randn(batch_size, dim, device=device)
-    dt_bias = torch.rand(dim, device=device) - 4.0
-    A = -torch.rand(dim, dstate, device=device)
-    B = torch.randn(batch_size, dstate, device=device)
-    C = torch.randn(batch_size, dstate, device=device)
-    D = torch.randn(dim, device=device)
+    dt = torch.randn(batch_size, dim, device="cuda")
+    dt_bias = torch.rand(dim, device="cuda") - 4.0
+    A = -torch.rand(dim, dstate, device="cuda")
+    B = torch.randn(batch_size, dstate, device="cuda")
+    C = torch.randn(batch_size, dstate, device="cuda")
+    D = torch.randn(dim, device="cuda")
 
     selective_state_update(
         state,
@@ -289,115 +214,26 @@ def test_triton_basic_call():
     assert not torch.isnan(out).any()
 
 
-def test_replayssm_default_backend_is_triton():
-    initialize_replayssm_backend(MambaConfig(), use_replayssm=True)
-    backend = get_replayssm_backend()
-    assert isinstance(backend, TritonReplaySSMBackend)
-    assert backend.name == "triton"
-
-
-def test_replayssm_explicit_triton_backend():
-    initialize_replayssm_backend(
-        MambaConfig(backend=MambaBackendEnum.TRITON), use_replayssm=True
-    )
-    backend = get_replayssm_backend()
-    assert isinstance(backend, TritonReplaySSMBackend)
-
-
-@pytest.mark.skipif(
-    not HAS_FLASHINFER_CHECKPOINTING_SSU,
-    reason="flashinfer.mamba.checkpointing_ssu not available",
-)
-def test_replayssm_flashinfer_backend_init():
-    initialize_replayssm_backend(
-        MambaConfig(backend=MambaBackendEnum.FLASHINFER), use_replayssm=True
-    )
-    backend = get_replayssm_backend()
-    assert isinstance(backend, FlashInferReplaySSMBackend)
-    assert backend.name == "flashinfer"
-
-
-def test_replayssm_disabled_clears_backend():
-    initialize_replayssm_backend(MambaConfig(), use_replayssm=True)
-    assert get_replayssm_backend() is not None
-    initialize_replayssm_backend(MambaConfig(), use_replayssm=False)
-    with pytest.raises(RuntimeError, match="not been initialized"):
-        get_replayssm_backend()
-
-
-def test_replayssm_cpu_backend_rejected():
-    with pytest.raises(ValueError, match="does not support mamba backend"):
-        initialize_replayssm_backend(
-            MambaConfig(backend=MambaBackendEnum.CPU), use_replayssm=True
-        )
-
-
-def test_replayssm_uninitialized_backend_raises():
+def test_replayssm_flashinfer_call_forwards_explicit_controls(monkeypatch):
     import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
 
-    old = mod._replayssm_backend
-    mod._replayssm_backend = None
-    try:
-        with pytest.raises(RuntimeError, match="not been initialized"):
-            get_replayssm_backend()
-    finally:
-        mod._replayssm_backend = old
-
-
-@pytest.mark.skipif(
-    not HAS_FLASHINFER_CHECKPOINTING_SSU,
-    reason="flashinfer.mamba.checkpointing_ssu not available",
-)
-def test_replayssm_triton_entry_rejects_flashinfer_backend():
-    initialize_replayssm_backend(
-        MambaConfig(backend=MambaBackendEnum.FLASHINFER), use_replayssm=True
-    )
-    tensor = torch.empty(1)
-    with pytest.raises(RuntimeError, match="Triton ReplaySSM"):
-        selective_state_update_replayssm_triton(
-            tensor,
-            tensor,
-            tensor,
-            tensor,
-            tensor,
-            tensor,
-            out=tensor,
-        )
-
-
-@pytest.mark.skipif(
-    not HAS_FLASHINFER_CHECKPOINTING_SSU,
-    reason="flashinfer.mamba.checkpointing_ssu not available",
-)
-def test_replayssm_flashinfer_call(monkeypatch):
     kernel = Mock(return_value=torch.empty(1, 1, 2, 4))
-    checkpointing_ssu_module = importlib.import_module(
-        "flashinfer.mamba.checkpointing_ssu"
-    )
-    monkeypatch.setattr(checkpointing_ssu_module, "checkpointing_ssu", kernel)
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.mamba.ops.ssu_dispatch._replayssm_backend",
-        None,
-    )
-    initialize_replayssm_backend(
-        MambaConfig(backend=MambaBackendEnum.FLASHINFER), use_replayssm=True
-    )
+    monkeypatch.setattr(mod, "_flashinfer_replayssm_kernel", kernel)
 
-    batch, nheads, dim, dstate, ngroups, L = 1, 2, 4, 8, 1, 16
+    batch, nheads, dim, dstate, ngroups, window = 1, 2, 4, 8, 1, 16
     state = torch.empty(1, nheads, dim, dstate)
     x = torch.empty(batch, nheads, dim)
     dt = torch.empty(batch, nheads, dim)
     A = torch.empty(nheads, dim, dstate)
     B = torch.empty(batch, ngroups, dstate)
     C = torch.empty(batch, ngroups, dstate)
-    D = torch.empty(nheads, dim)
-    dt_bias = torch.empty(nheads, dim)
     out = torch.empty_like(x)
-    x_cache = torch.empty(1, nheads, L, dim)
-    dt_cache = torch.empty(1, nheads, L)
-    B_cache = torch.empty(1, ngroups, L, dstate)
+    x_cache = torch.empty(1, nheads, window, dim)
+    dt_cache = torch.empty(1, nheads, window)
+    B_cache = torch.empty(1, ngroups, window, dstate)
     ring_start = torch.zeros(1, dtype=torch.int32)
     prev_num_accepted = torch.zeros(1, dtype=torch.int32)
+    scratch = (torch.empty(1), torch.empty(1), torch.empty(1))
 
     selective_state_update_replayssm_flashinfer(
         state,
@@ -412,63 +248,54 @@ def test_replayssm_flashinfer_call(monkeypatch):
         dt_cache,
         ring_start,
         prev_num_accepted,
-        D=D,
-        dt_bias=dt_bias,
-        dt_softplus=True,
+        scratch=scratch,
+        algorithm="two-kernel",
+        d_split=2,
+        precompute_heads_per_cta=8,
+        update_trackers=False,
     )
-    assert kernel.call_count == 1
-    kwargs = kernel.call_args.kwargs
-    assert kwargs["dt_softplus"] is True
-    # ring_start / prev_num_accepted are positional after the caches.
+
     args = kernel.call_args.args
+    kwargs = kernel.call_args.kwargs
     assert args[4] is ring_start
     assert args[5] is prev_num_accepted
-    assert kwargs["algorithm"] == "auto"
-    assert kwargs["d_split"] is None
-    assert kwargs["precompute_heads_per_cta"] == 0
-    assert "main_pipeline_stages" not in kwargs
-    assert "main_ctas_per_sm" not in kwargs
+    assert kwargs["algorithm"] == "two-kernel"
+    assert kwargs["d_split"] == 2
+    assert kwargs["precompute_heads_per_cta"] == 8
+    assert kwargs["cb_scaled"] is scratch[0]
+    assert kwargs["cumAdt_vec"] is scratch[1]
+    assert kwargs["cb_old"] is scratch[2]
 
 
-def test_replayssm_requires_native_flashinfer_autotuning(monkeypatch):
+def test_replayssm_requires_native_flashinfer_support(monkeypatch):
     import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
 
-    old_module = SimpleNamespace(checkpointing_ssu=Mock())
+    old_module = SimpleNamespace(
+        checkpointing_ssu=Mock(), CheckpointingSSURunner=object
+    )
     monkeypatch.setattr(mod.importlib, "import_module", lambda _: old_module)
-    with pytest.raises(ImportError, match="native checkpointing_ssu autotuning"):
-        FlashInferReplaySSMBackend(MambaConfig(backend=MambaBackendEnum.FLASHINFER))
+    with pytest.raises(ImportError, match="scratch allocation support"):
+        mod._initialize_flashinfer_replayssm(True)
+
+
+def test_replayssm_flashinfer_import_error(monkeypatch):
+    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
+
+    def raise_import_error(_):
+        raise ImportError
+
+    monkeypatch.setattr(mod.importlib, "import_module", raise_import_error)
+    with pytest.raises(ImportError, match="FlashInfer is required"):
+        mod._initialize_flashinfer_replayssm(True)
 
 
 @pytest.mark.skipif(
-    HAS_FLASHINFER_CHECKPOINTING_SSU,
-    reason="flashinfer checkpointing_ssu is installed",
+    not HAS_FLASHINFER_CHECKPOINTING_SSU,
+    reason="compatible flashinfer checkpointing_ssu not available",
 )
-def test_replayssm_flashinfer_import_error():
-    with pytest.raises(
-        ImportError,
-        match="FlashInfer is required|native checkpointing_ssu autotuning",
-    ):
-        FlashInferReplaySSMBackend(MambaConfig(backend=MambaBackendEnum.FLASHINFER))
-
-
-def test_replayssm_dispatch_fn_uses_initialized_backend():
-    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
-
-    called = Mock(return_value=torch.empty(1))
-    old = mod._replayssm_backend
-    mod._replayssm_backend = TritonReplaySSMBackend(MambaConfig())
-    mod._replayssm_backend._kernel = called
-    try:
-        tensor = torch.empty(1)
-        selective_state_update_replayssm_triton(
-            tensor,
-            tensor,
-            tensor,
-            tensor,
-            tensor,
-            tensor,
-            out=tensor,
-        )
-        assert called.call_count == 1
-    finally:
-        mod._replayssm_backend = old
+def test_replayssm_flashinfer_backend_init():
+    initialize_mamba_ssu_backend(
+        MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+        _kv_cache_config_with_ssu(),
+        use_replayssm=True,
+    )
