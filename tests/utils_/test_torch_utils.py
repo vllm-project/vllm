@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from io import StringIO
+
 import pytest
 import torch
 
 from vllm.utils.torch_utils import (
     OMP_NUM_THREADS_SET_BY_VLLM,
+    _cgroup_cpu_limit,
     available_cpu_count,
     common_broadcastable_dtype,
     current_stream,
@@ -151,6 +154,37 @@ def test_startup_omp_num_threads_divides_between_local_workers():
     assert startup_omp_num_threads(2) == available // 2
     # Never zero, however many workers share the node.
     assert startup_omp_num_threads(available * 4) == 1
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_cgroup_cpu_limit_includes_mount_root(
+    monkeypatch: pytest.MonkeyPatch, version: int
+):
+    if version == 2:
+        files = {
+            "/proc/self/cgroup": "0::/team/job\n",
+            "/sys/fs/cgroup/team/job/cpu.max": "max 100000\n",
+            "/sys/fs/cgroup/team/cpu.max": "max 100000\n",
+            "/sys/fs/cgroup/cpu.max": "200000 100000\n",
+        }
+    else:
+        files = {
+            "/proc/self/cgroup": "2:cpu,cpuacct:/team/job\n",
+            "/sys/fs/cgroup/cpu/team/job/cpu.cfs_quota_us": "-1\n",
+            "/sys/fs/cgroup/cpu/team/cpu.cfs_quota_us": "-1\n",
+            "/sys/fs/cgroup/cpu/cpu.cfs_quota_us": "200000\n",
+            "/sys/fs/cgroup/cpu/cpu.cfs_period_us": "100000\n",
+        }
+
+    def fake_open(path, *args, **kwargs):
+        try:
+            return StringIO(files[path])
+        except KeyError:
+            raise FileNotFoundError(path) from None
+
+    monkeypatch.setattr("builtins.open", fake_open)
+
+    assert _cgroup_cpu_limit() == 2.0
 
 
 def test_set_torch_threads_for_runtime(restore_torch_threads):
