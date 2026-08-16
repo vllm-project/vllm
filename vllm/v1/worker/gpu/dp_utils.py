@@ -42,7 +42,9 @@ class DPProfilerSync:
     """Synchronize profiler start requests through the per-step DP all-reduce."""
 
     def __init__(self) -> None:
+        # start_profile received, capture not yet begun.
         self._pending = False
+        # Latched consensus, cleared when the worker consumes it.
         self.start_now = False
 
     def request_start(self) -> None:
@@ -83,18 +85,20 @@ def sync_cudagraph_and_dp_padding(
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
-    tensor = torch.zeros(6, dp_size, dtype=torch.int32, device="cpu")
+    multinode_profiling = profiler_sync is not None
+    tensor = torch.zeros(
+        6 if multinode_profiling else 5, dp_size, dtype=torch.int32, device="cpu"
+    )
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
     tensor[4][dp_rank] = num_reqs
-    tensor[5][dp_rank] = int(
-        profiler_sync is not None and profiler_sync._pending
-    )
+    if multinode_profiling:
+        tensor[5][dp_rank] = int(profiler_sync._pending)
     dist.all_reduce(tensor, group=group)
 
-    if profiler_sync is not None:
+    if multinode_profiling:
         profiler_sync.observe(bool(tensor[5].any().item()))
 
     num_tokens_across_dp = tensor[0]
