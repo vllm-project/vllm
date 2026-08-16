@@ -492,6 +492,29 @@ def has_moonep() -> bool:
     return _has_module("moonep")
 
 
+def check_moonep_system_support() -> None:
+    """Raise if the current device cannot run MoonEP.
+
+    MoonEP's symmetric-memory buffers require CUDA VMM plus NVSwitch multicast
+    (SHARP) on every EP rank; NVLink-only topologies without NVSwitch (e.g.
+    4x H100 NV6) fail deep inside ``moonep.Buffer`` otherwise.
+    """
+    if not has_moonep():
+        raise RuntimeError(
+            "MoonEP not available. Install it from "
+            "https://github.com/MoonshotAI/MoonEP."
+        )
+    from moonep._C import (  # type: ignore[import-not-found]
+        nvl_multicast_supported,
+    )
+
+    if not nvl_multicast_supported():
+        raise RuntimeError(
+            "MoonEP requires NVSwitch multicast (SHARP) support on the "
+            "current device; it is not supported on this GPU/topology."
+        )
+
+
 def is_numba_available() -> bool:
     """Whether the optional `numba` package is available."""
     return _has_module("numba")
