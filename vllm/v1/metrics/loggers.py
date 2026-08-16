@@ -601,6 +601,19 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_prefix_cache_hits, per_engine_labelvalues
         )
 
+        counter_prefix_cache_sparse_retention_misses = self._counter_cls(
+            name="vllm:prefix_cache_sparse_retention_misses",
+            documentation=(
+                "Shared-prefix tokens that were matched by some KV cache group "
+                "but not reused, because a sparse-retention group (Mamba / "
+                "sliding window) held no checkpoint at that position."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_prefix_cache_sparse_retention_misses = create_metric_per_engine(
+            counter_prefix_cache_sparse_retention_misses, per_engine_labelvalues
+        )
+
         #
         # External - KV connector prefix cache
         #
@@ -1127,6 +1140,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
             self.counter_prefix_cache_hits[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.hits
+            )
+            self.counter_prefix_cache_sparse_retention_misses[engine_idx].inc(
+                scheduler_stats.prefix_cache_stats.sparse_retention_misses
             )
 
             if scheduler_stats.connector_prefix_cache_stats is not None:
