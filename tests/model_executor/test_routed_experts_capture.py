@@ -325,7 +325,14 @@ def test_routed_experts_attention_group_is_shared_and_fail_closed(monkeypatch):
     class FullAttentionSpec:
         pass
 
+    class UniformTypeKVCacheSpecs:
+        def __init__(self, specs):
+            self.kv_cache_specs = specs
+
     monkeypatch.setattr(f"{_REC_MODULE}.FullAttentionSpec", FullAttentionSpec)
+    monkeypatch.setattr(
+        f"{_REC_MODULE}.UniformTypeKVCacheSpecs", UniformTypeKVCacheSpecs
+    )
     config = SimpleNamespace(
         kv_cache_groups=[
             SimpleNamespace(kv_cache_spec=object()),
@@ -336,6 +343,37 @@ def test_routed_experts_attention_group_is_shared_and_fail_closed(monkeypatch):
 
     with pytest.raises(ValueError, match="requires a full-attention KV cache group"):
         get_routed_experts_attn_gid(SimpleNamespace(kv_cache_groups=[]))
+
+    wrapped = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    {"layer.0": FullAttentionSpec(), "layer.1": FullAttentionSpec()}
+                )
+            )
+        ]
+    )
+    assert get_routed_experts_attn_gid(wrapped) == 0
+
+    mixed = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    {"layer.0": FullAttentionSpec(), "layer.1": object()}
+                )
+            )
+        ]
+    )
+    with pytest.raises(ValueError, match="requires a full-attention KV cache group"):
+        get_routed_experts_attn_gid(mixed)
+
+    empty = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(kv_cache_spec=UniformTypeKVCacheSpecs({}))
+        ]
+    )
+    with pytest.raises(ValueError, match="requires a full-attention KV cache group"):
+        get_routed_experts_attn_gid(empty)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

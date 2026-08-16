@@ -17,7 +17,11 @@ from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.outputs import RoutedExpertsTensors
 
 logger = logging.getLogger(__name__)
@@ -289,7 +293,21 @@ def bind_routed_experts_capturer(
 def get_routed_experts_attn_gid(kv_cache_config: KVCacheConfig) -> int:
     """Return the full-attention KV cache group used for routed experts."""
     for gid, group in enumerate(kv_cache_config.kv_cache_groups):
-        if isinstance(group.kv_cache_spec, FullAttentionSpec):
+        group_spec = group.kv_cache_spec
+        if isinstance(group_spec, FullAttentionSpec):
+            return gid
+        # DeepSeek-V4 packs its per-layer MLA specs into a uniform group.
+        # The wrapper owns the block table/slot mapping while every inner
+        # MLAAttentionSpec is a FullAttentionSpec, so this is the same stable
+        # physical-slot identity used by the unwrapped full-attention path.
+        inner_specs = (
+            tuple(group_spec.kv_cache_specs.values())
+            if isinstance(group_spec, UniformTypeKVCacheSpecs)
+            else ()
+        )
+        if inner_specs and all(
+            isinstance(spec, FullAttentionSpec) for spec in inner_specs
+        ):
             return gid
     raise ValueError("Routed-experts capture requires a full-attention KV cache group.")
 
