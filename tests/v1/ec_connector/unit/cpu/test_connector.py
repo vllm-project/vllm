@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from unittest.mock import MagicMock
 
+import pytest
+
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
 from vllm.distributed.ec_transfer.ec_connector.cpu.connector import ECCPUConnector
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
@@ -32,6 +34,20 @@ def test_worker_role_builds_only_worker(monkeypatch):
     c = ECCPUConnector(_cfg(), ECConnectorRole.WORKER)
     assert c.connector_worker is fake_worker
     assert c.connector_scheduler is None
+
+
+@pytest.mark.parametrize("role", [ECConnectorRole.SCHEDULER, ECConnectorRole.WORKER])
+def test_v1_model_runner_is_rejected(monkeypatch, role):
+    """The V1 runner never reports save completions, so refuse to start."""
+    monkeypatch.setattr(
+        ECCPUConnector, "_make_scheduler", lambda self, cfg: MagicMock()
+    )
+    monkeypatch.setattr(ECCPUConnector, "_make_worker", lambda self, cfg: MagicMock())
+    cfg = _cfg()
+    cfg.use_v2_model_runner = False
+
+    with pytest.raises(ValueError, match="V2 model runner"):
+        ECCPUConnector(cfg, role)
 
 
 def test_factory_registered():

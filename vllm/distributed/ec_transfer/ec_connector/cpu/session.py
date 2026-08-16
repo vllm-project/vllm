@@ -6,10 +6,10 @@ Layer hierarchy:  connector → session → transport (connection)
 
 Two long-lived sessions:
 
-  ProducerSession — owns ZmqServerTransport and a background thread.
-      The thread polls the transport for raw bytes, then calls poll() with
-      those messages. poll() decodes XferReqs, grants or NACKs them, pins
-      source blocks, sends XferAck replies, drains NIXL completion
+  ProducerSession — owns ZmqServerTransport. The connector calls poll_step()
+      once per engine step, which drains the transport without blocking and
+      feeds the raw bytes to poll(). poll() decodes XferReqs, grants or NACKs
+      them, pins source blocks, sends XferAck replies, drains NIXL completion
       notifications, and sweeps expired xfers.
 
   ConsumerSession — owns one ZmqClientConnection and the NIXL agent
@@ -25,7 +25,6 @@ Internal data classes:
 """
 
 import enum
-import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -228,11 +227,11 @@ class ConsumerXfer:
 
 
 class ProducerSession:
-    """Long-lived producer session. Owns ZmqServerTransport and its thread.
+    """Long-lived producer session. Owns ZmqServerTransport.
 
-    The thread polls the transport for raw bytes and calls poll() with them.
-    poll() decodes XferReqs, grants or NACKs each one, drains NIXL completion
-    notifications, and sweeps expired xfers. No callbacks anywhere.
+    poll_step() runs once per engine step: drains the transport without
+    blocking, decodes XferReqs, grants or NACKs each one, drains NIXL completion
+    notifications, and sweeps expired xfers.
     """
 
     def __init__(
@@ -247,37 +246,22 @@ class ProducerSession:
         self._cache = cache  # EmbeddingCache — single block owner
         self._compat_hash = compat_hash
 
-        # Router-thread-only state.
         # Key: "{consumer_session_id}:{mm_hash}" — matches the NIXL notif_msg exactly,
         # so completion notification lookup is a direct dict pop with no parsing.
         self._active_xfers: dict[str, ProducerXfer] = {}
 
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
         self._req_decoder = msgspec.msgpack.Decoder(XferReq)
-        self._encoder = msgspec.msgpack.Encoder()
+        self._req_encoder = msgspec.msgpack.Encoder()
 
-    def start(self) -> None:
-        self._thread = threading.Thread(
-            target=self._run, name="ec-nixl-router", daemon=True
-        )
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
+    def close(self) -> None:
         for xfer in self._active_xfers.values():
             self._cache.unpin(xfer.mm_hash)  # release any still-held pins
         self._active_xfers.clear()
         self._transport.close()
 
-    def _run(self) -> None:
-        """Background thread: polls transport bytes, then drives poll()."""
-        while not self._stop.is_set():
-            timeout_ms = 5 if self._active_xfers else 1000
-            messages = self._transport.poll(timeout_ms=timeout_ms)
-            self.poll(messages)
+    def poll_step(self) -> None:
+        """Drain the transport without blocking and process what arrived."""
+        self.poll(self._transport.poll(timeout_ms=0))
 
     def poll(self, messages: list[tuple[bytes, bytes]]) -> None:
         """Decode and process inbound XferReqs, drain NIXL notifs, sweep timeouts.
@@ -291,7 +275,7 @@ class ProducerSession:
                 logger.warning("ec: dropped malformed XferReq")
                 continue
             ack = self._grant_or_nack(req)
-            self._transport.send(identity, self._encoder.encode(ack))
+            self._transport.send(identity, self._req_encoder.encode(ack))
 
         self._drain_notifs()
         self._sweep_timeouts()
