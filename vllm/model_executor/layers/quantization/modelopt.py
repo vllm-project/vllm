@@ -1195,6 +1195,20 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
                 " scale for parallel layers."
             )
 
+        # Sanity-check: weight_scale must be non-zero after loading.
+        # All-zeros means the FP4 weights were never actually loaded
+        # (e.g. the checkpoint stores this layer as BF16 and the weight
+        # loader silently skipped it).
+        if layer.weight_scale.count_nonzero() == 0:
+            raise RuntimeError(
+                f"NVFP4 weight_scale for layer "
+                f"{getattr(layer, 'name', repr(layer))!r} is all-zeros after "
+                "weight loading — the FP4 weights were never loaded. "
+                "The checkpoint likely stores this layer as BF16 (not FP4). "
+                "Fix: pass quant_config=None when constructing this layer, or add it "
+                "to the quantization ignore list."
+            )
+
         # Rename ModelOpt checkpoint names to standardized names
         input_global_scale = layer.input_scale.max().to(torch.float32)
         layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
