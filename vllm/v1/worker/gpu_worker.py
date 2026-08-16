@@ -261,7 +261,7 @@ class Worker(WorkerBase):
     def release_kv_cache(self) -> None:
         free_bytes_before_release = torch.cuda.mem_get_info()[0]
         allocator = get_mem_allocator_instance()
-        allocator.release_tags(("kv_cache",))
+        allocator.discard(("kv_cache",))
         free_bytes_after_release, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_release - free_bytes_before_release
         used_bytes = total - free_bytes_after_release

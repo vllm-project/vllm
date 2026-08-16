@@ -227,10 +227,11 @@ class CuMemAllocator:
         return data.handle
 
     def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
-        """
-        Put the allocator in sleep mode.
-        All data in the memory allocation with the specified tag will be
-        offloaded to CPU memory, and others will be discarded.
+        """Put mapped allocations in sleep mode.
+
+        Previously sleeping allocations keep their existing offload or discard
+        policy. Mapped allocations with the specified tags are offloaded to CPU
+        memory, and the others are discarded.
 
         Args:
             offload_tags: The tags of the memory allocation that will be
@@ -247,11 +248,16 @@ class CuMemAllocator:
 
         total_bytes = 0
         backup_bytes = 0
+        has_policy_conflict = False
 
         for ptr, data in self.pointer_to_data.items():
-            handle = data.handle
             if data.is_asleep:
+                requests_offload = data.tag in offload_tags
+                was_offloaded = data.cpu_backup_tensor is not None
+                if requests_offload != was_offloaded:
+                    has_policy_conflict = True
                 continue
+            handle = data.handle
             total_bytes += handle[1]
             if data.tag in offload_tags:
                 backup_bytes += handle[1]
@@ -279,32 +285,48 @@ class CuMemAllocator:
             (total_bytes - backup_bytes) / 1024**3,
         )
 
+        if has_policy_conflict:
+            logger.warning(
+                "CuMemAllocator: sleep cannot change the policy of "
+                "already-asleep allocations; the existing policy was kept."
+            )
+
         gc.collect()
         torch.cuda.empty_cache()
 
-    def release_tags(self, tags: tuple[str, ...] | str) -> None:
+    def discard(self, tags: tuple[str, ...] | str) -> None:
+        """Discard mapped allocations with the given tags without CPU backup.
+
+        Previously sleeping allocations keep their existing policy.
+        """
         if isinstance(tags, str):
             tags = (tags,)
 
-        released_bytes = 0
+        discarded_bytes = 0
+        has_policy_conflict = False
         for data in self.pointer_to_data.values():
-            if data.tag not in tags or data.is_asleep:
+            if data.tag not in tags:
                 continue
-            released_bytes += data.handle[1]
-            data.cpu_backup_tensor = None
-            try:
-                unmap_and_release(data.handle)
-            finally:
-                data.is_asleep = True
+            if data.is_asleep:
+                if data.cpu_backup_tensor is not None:
+                    has_policy_conflict = True
+                continue
+            torch.accelerator.synchronize(data.handle[0])
+            unmap_and_release(data.handle)
+            data.is_asleep = True
+            discarded_bytes += data.handle[1]
 
         logger.info(
-            "CuMemAllocator: released %.2f GiB memory for tags %s.",
-            released_bytes / 1024**3,
+            "CuMemAllocator: discarded %.2f GiB for tags %s.",
+            discarded_bytes / 1024**3,
             tags,
         )
 
-        gc.collect()
-        torch.cuda.empty_cache()
+        if has_policy_conflict:
+            logger.warning(
+                "CuMemAllocator: discard cannot change the policy of "
+                "already-asleep allocations; the existing policy was kept."
+            )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         """
@@ -321,9 +343,9 @@ class CuMemAllocator:
         torch.accelerator.empty_cache()
 
         for ptr, data in self.pointer_to_data.items():
+            if not data.is_asleep:
+                continue
             if tags is None or data.tag in tags:
-                if not data.is_asleep:
-                    continue
                 handle = data.handle
                 create_and_map(handle)
                 data.is_asleep = False
