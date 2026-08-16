@@ -10,7 +10,9 @@ import torch
 
 from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+    FLASHINFER_REPLAYSSM_AUTO_TACTIC,
     FlashInferReplaySSMBackend,
+    FlashInferReplaySSMTactic,
     FlashInferSSUBackend,
     TritonReplaySSMBackend,
     TritonSSUBackend,
@@ -22,6 +24,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     selective_state_update_replayssm_flashinfer,
     selective_state_update_replayssm_triton,
     update_replayssm_ring_trackers,
+    use_flashinfer_replayssm_tactic,
 )
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -42,17 +45,67 @@ try:
     checkpointing_ssu_module = importlib.import_module(
         "flashinfer.mamba.checkpointing_ssu"
     )
-    HAS_FLASHINFER_CHECKPOINTING_SSU = (
-        hasattr(checkpointing_ssu_module, "CheckpointingSSURunner")
-        and getattr(
-            checkpointing_ssu_module,
-            "CHECKPOINTING_SSU_AUTOTUNE_ABI_VERSION",
-            0,
-        )
-        >= 1
+    HAS_FLASHINFER_CHECKPOINTING_SSU = hasattr(
+        checkpointing_ssu_module, "CheckpointingSSURunner"
     )
 except ImportError:
     HAS_FLASHINFER_CHECKPOINTING_SSU = False
+
+
+def _fake_flashinfer_replayssm_backend() -> FlashInferReplaySSMBackend:
+    backend = FlashInferReplaySSMBackend.__new__(FlashInferReplaySSMBackend)
+    backend._mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
+    backend._kernel = Mock(return_value=torch.empty(1))
+    backend._tactic = FLASHINFER_REPLAYSSM_AUTO_TACTIC
+    return backend
+
+
+def test_replayssm_explicit_tactic_validation():
+    tactic = FlashInferReplaySSMTactic(
+        "two-kernel", d_split=2, precompute_heads_per_cta=8
+    )
+    assert tactic.name == "two_kernel_d2_h8"
+    with pytest.raises(ValueError, match="does not accept precompute"):
+        FlashInferReplaySSMTactic("monolith", precompute_heads_per_cta=8)
+
+
+def test_replayssm_tactic_scope_restores_direct_launch_controls(monkeypatch):
+    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
+
+    backend = _fake_flashinfer_replayssm_backend()
+    monkeypatch.setattr(mod, "_replayssm_backend", backend)
+    tactic = FlashInferReplaySSMTactic(
+        "two-kernel", d_split=2, precompute_heads_per_cta=8
+    )
+
+    with (
+        pytest.raises(RuntimeError, match="sentinel"),
+        use_flashinfer_replayssm_tactic(tactic),
+    ):
+        assert backend._tactic is tactic
+        raise RuntimeError("sentinel")
+
+    assert backend._tactic is FLASHINFER_REPLAYSSM_AUTO_TACTIC
+
+
+def test_replayssm_backend_forwards_explicit_tactic(monkeypatch):
+    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
+
+    backend = _fake_flashinfer_replayssm_backend()
+    monkeypatch.setattr(mod, "_replayssm_backend", backend)
+    tensor = torch.empty(1)
+
+    with use_flashinfer_replayssm_tactic(
+        FlashInferReplaySSMTactic("two-kernel", d_split=2, precompute_heads_per_cta=8)
+    ):
+        backend(*(tensor,) * 12)
+
+    kwargs = backend._kernel.call_args.kwargs
+    assert kwargs["algorithm"] == "two-kernel"
+    assert kwargs["d_split"] == 2
+    assert kwargs["precompute_heads_per_cta"] == 8
+    assert "main_pipeline_stages" not in kwargs
+    assert "main_ctas_per_sm" not in kwargs
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -371,17 +424,16 @@ def test_replayssm_flashinfer_call(monkeypatch):
     assert args[4] is ring_start
     assert args[5] is prev_num_accepted
     assert kwargs["algorithm"] == "auto"
+    assert kwargs["d_split"] is None
     assert kwargs["precompute_heads_per_cta"] == 0
-    assert kwargs["main_pipeline_stages"] == 0
-    assert kwargs["main_ctas_per_sm"] == 0
+    assert "main_pipeline_stages" not in kwargs
+    assert "main_ctas_per_sm" not in kwargs
 
 
 def test_replayssm_requires_native_flashinfer_autotuning(monkeypatch):
     import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
 
-    old_module = SimpleNamespace(
-        checkpointing_ssu=Mock(), CheckpointingSSURunner=object
-    )
+    old_module = SimpleNamespace(checkpointing_ssu=Mock())
     monkeypatch.setattr(mod.importlib, "import_module", lambda _: old_module)
     with pytest.raises(ImportError, match="native checkpointing_ssu autotuning"):
         FlashInferReplaySSMBackend(MambaConfig(backend=MambaBackendEnum.FLASHINFER))
