@@ -18,7 +18,12 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_two_sided,
 )
 from vllm.utils.func_utils import supports_kw
-from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2, has_moonep, has_mori
+from vllm.utils.import_utils import (
+    check_moonep_system_support,
+    has_deep_ep,
+    has_deep_ep_v2,
+    has_mori,
+)
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -1108,10 +1113,7 @@ class MoonEPAll2AllManager(All2AllManagerBase):
     """
 
     def __init__(self, cpu_group, tcp_store_group=None, device_group=None):
-        assert has_moonep(), (
-            "MoonEP not available. Install it from "
-            "https://github.com/MoonshotAI/MoonEP."
-        )
+        check_moonep_system_support()
         super().__init__(cpu_group, tcp_store_group)
         self._device_group = device_group
         self.handle_cache = Cache()
