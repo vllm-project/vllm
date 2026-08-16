@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from vllm.model_executor.models.qwen3_vl import Qwen3VLMultiModalProcessor
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ...utils import build_model_context
@@ -92,6 +93,46 @@ def test_processor_num_frames_timestamp(
     assert len(video_phs) == 1, (
         f"Expected exactly 1 video placeholder, got {len(video_phs)}"
     )
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+def test_processor_video_preserves_outer_vision_wrapper(model_id: str) -> None:
+    """Regression test for vllm-project/vllm#46817.
+
+    Transformers >= 5.10 expands only the inner ``<|video_pad|>`` token,
+    keeping the chat template's outer ``<|vision_start|>`` /
+    ``<|vision_end|>`` markers. vLLM must match that behavior instead of
+    replacing the whole ``<|vision_start|><|video_pad|><|vision_end|>``
+    triplet.
+    """
+    num_frames = 8
+    hf_processor_mm_kwargs: dict[str, Any] = {"num_frames": num_frames}
+
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
+
+    if not Qwen3VLMultiModalProcessor._expands_only_video_token(hf_processor):
+        pytest.skip("Transformers < 5.10 expands the full video placeholder")
+
+    hf_config = processor.info.get_hf_config()
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>"
+    mm_data = _build_video_mm_data(num_frames=num_frames)
+
+    processed = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+    )
+
+    token_ids = processed["prompt_token_ids"]
+    assert token_ids[0] == hf_config.vision_start_token_id
+    assert token_ids[-1] == hf_config.vision_end_token_id
+    assert token_ids.count(hf_config.vision_start_token_id) == num_frames + 1
+    assert token_ids.count(hf_config.vision_end_token_id) == num_frames + 1
 
 
 @pytest.mark.parametrize("model_id", [MODEL_ID])
