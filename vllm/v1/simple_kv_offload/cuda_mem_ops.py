@@ -110,7 +110,8 @@ def _resolve_batch_memcpy():
 class BatchMemcpyParams(NamedTuple):
     src_bases: np.ndarray  # [num_layers] uint64 — data_ptr per layer
     dst_bases: np.ndarray  # [num_layers] uint64
-    bpb: np.ndarray  # [num_layers] uint64 — bytes per block
+    src_bpb: np.ndarray # [num_layers] uint64 - src bytes per block
+    dst_bpb: np.ndarray # [num_layers] uint64 - dst bytes per block
     num_layers: int
     # CUDA only: one attributes entry carrying srcAccessOrder. Unused on ROCm
     # (7.2.1 or 7.2.2) because the current runtime rejects numAttrs > 0.
@@ -136,20 +137,23 @@ def build_params(
     src_tensors = list(src_caches.values())
     dst_tensors = list(dst_caches.values())
 
-    src_bases, dst_bases, bpb = [], [], []
+    src_bases, dst_bases, src_bpb, dst_bpb = [], [], [], []
     for s, d in zip(src_tensors, dst_tensors):
         s_bpb = s.stride(0) * s.element_size()
+        d_bpb = d.stride(0) * d.element_size()
         assert s_bpb == d.stride(0) * d.element_size()
         src_bases.append(s.data_ptr())
         dst_bases.append(d.data_ptr())
-        bpb.append(s_bpb)
+        src_bpb.append(s_bpb)
+        dst_bpb.append(d_bpb)
 
     attrs = _CUmemcpyAttributes(srcAccessOrder=src_access_order)
 
     return BatchMemcpyParams(
         src_bases=np.array(src_bases, dtype=np.uint64),
         dst_bases=np.array(dst_bases, dtype=np.uint64),
-        bpb=np.array(bpb, dtype=np.uint64),
+        src_bpb=np.array(src_bpb, dtype=np.uint64),
+        dst_bpb=np.array(dst_bpb, dtype=np.uint64),
         num_layers=len(src_tensors),
         attrs=attrs,
         attrs_idx=ctypes.c_size_t(0),
@@ -172,12 +176,12 @@ def copy_blocks(
     dst_ids = np.array(dst_block_ids, dtype=np.uint64)
 
     src_all = (
-        params.src_bases[:, None] + src_ids[None, :] * params.bpb[:, None]
+        params.src_bases[:, None] + src_ids[None, :] * params.src_bpb[:, None]
     ).ravel()
     dst_all = (
-        params.dst_bases[:, None] + dst_ids[None, :] * params.bpb[:, None]
+        params.dst_bases[:, None] + dst_ids[None, :] * params.dst_bpb[:, None]
     ).ravel()
-    sz_all = np.repeat(params.bpb, n)
+    sz_all = np.repeat(np.minimum(params.src_bpb, params.dst_bpb), n)
     total = n * params.num_layers
 
     # ROCm 7.2.1/7.2.2 rejects any call with numAttrs>0 (hipMemcpyBatchAsync

@@ -76,6 +76,7 @@ class DiskBackend:
         self._store_slot_views: list[list[memoryview]] = []
         self._load_slot_views: list[list[memoryview]] = []
         self._per_tensor_bpb: list[int] = []
+        self._padded_bpb: list[int] = []
         self._tensor_names: list[str] = []
 
     def init(
@@ -99,6 +100,14 @@ class DiskBackend:
             t.stride(0) * t.element_size() for t in gpu_caches.values()
         ]
 
+        self._padded_bpb = [
+            (bpb + _ALIGNMENT - 1) & ~(_ALIGNMENT - 1)
+            for bpb in self._per_tensor_bpb
+        ]
+        self._total_block_bytes = sum(self._padded_bpb)
+        n_padded = sum(1 for b, p in zip(self._per_tensor_bpb, self._padded_bpb)
+                        if b != p)
+
         assert total_block_bytes % _ALIGNMENT == 0, (
             f"total_block_bytes={total_block_bytes} not aligned to {_ALIGNMENT}"
         )
@@ -107,11 +116,12 @@ class DiskBackend:
         self._store_buffer_caches = {}
         self._load_buffer_caches = {}
         for name, gpu_t in gpu_caches.items():
-            bpb = gpu_t.stride(0) * gpu_t.element_size()
-            store_buf = _alloc_aligned(num_buffer_slots, bpb)
+            idx = len(self._store_buffer_caches)
+            padded = self._padded_bpb[idx]
+            store_buf = _alloc_aligned(num_buffer_slots, padded)
             pin_tensor(store_buf)
             self._store_buffer_caches[name] = store_buf
-            load_buf = _alloc_aligned(num_buffer_slots, bpb)
+            load_buf = _alloc_aligned(num_buffer_slots, padded)
             pin_tensor(load_buf)
             self._load_buffer_caches[name] = load_buf
 
@@ -157,16 +167,16 @@ class DiskBackend:
             flags |= O_DIRECT
         self._fd = os.open(disk_path, flags, 0o600)
         self._disk_path = disk_path
-        os.ftruncate(self._fd, num_disk_slots * total_block_bytes)
+        os.ftruncate(self._fd, num_disk_slots * self._total_block_bytes)
 
         logger.info(
             "DiskBackend: path=%s, slots=%d, total=%.2f GB, buf=%dx%d bytes"
             " (page_cache=%s)",
             disk_path,
             num_disk_slots,
-            (num_disk_slots * total_block_bytes) / (1024**3),
+            (num_disk_slots * self._total_block_bytes) / (1024**3),
             num_buffer_slots,
-            total_block_bytes,
+            self._total_block_bytes,
             use_page_cache,
         )
 
