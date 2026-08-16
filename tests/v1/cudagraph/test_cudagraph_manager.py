@@ -83,9 +83,11 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
     def create_forward_fn(desc, warmup):
         return lambda _mode: None
 
+    capture_stream = MagicMock(name="graph_capture_stream")
+
     @contextmanager
     def fake_graph_capture(*args, **kwargs):
-        yield SimpleNamespace(stream=MagicMock())
+        yield SimpleNamespace(stream=capture_stream)
 
     fake_offloader = MagicMock()
 
@@ -109,3 +111,5 @@ def test_full_capture_sets_graph_pool_id_before_cuda_graph(monkeypatch):
         manager.capture(create_forward_fn)
 
     mock_cuda_graph.assert_called_once()
+    _args, kwargs = mock_cuda_graph.call_args
+    assert kwargs["stream"] is capture_stream
