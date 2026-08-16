@@ -151,7 +151,7 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
 )
-from vllm.v1.conf_compute_utils import AsyncD2HCopyWorker, StagedH2DCopier
+from vllm.v1.conf_compute_utils import StagedH2DCopier, confidential_compute_enabled
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
@@ -269,7 +269,6 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         vocab_size: int,
         routed_experts: RoutedExpertsTensors | None = None,
         check_ep_fault: bool = False,
-        async_d2h_copy_worker: AsyncD2HCopyWorker | None = None,
     ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
@@ -285,53 +284,37 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._logprobs_tensors = logprobs_tensors
         self._routed_experts = routed_experts
         self._has_fault: torch.Tensor | None = None
+        self._check_ep_fault = check_ep_fault
+        self._copy_stream = async_output_copy_stream
 
-        # Set only under Confidential Computing: the copy worker signals it
-        # once the deferred readback has completed.
-        self._copy_done: threading.Event | None = None
-        if async_d2h_copy_worker is not None:
-            # Under Confidential Computing a D2H copy is host-synchronous and,
-            # ordered after this step's forward+sample, would stall this
-            # thread for ~one forward and delay the next step's graph launch.
-            # Hand it to the dedicated copy worker (see
-            # vllm.v1.conf_compute_utils); otherwise the copy is truly async,
-            # so issue inline below.
-            self._check_ep_fault = check_ep_fault
+        # Under Confidential Computing the D2H copies are host-synchronous:
+        # issued here they would stall this thread on the in-flight
+        # forward+sample and delay the next step's launch. Defer them to
+        # get_output(), which runs on the executor's async-output thread and
+        # blocks until the copy completes anyway (see
+        # vllm.v1.conf_compute_utils).
+        self._defer_copy = confidential_compute_enabled()
+        if self._defer_copy:
+            # No CPU output tensor exists until get_output() issues the
+            # deferred copies, so set_async_sampled_token_ids receives None
+            # and the async output-token-ids repair is skipped under
+            # Confidential Computing.
             self.sampled_token_ids_cpu: torch.Tensor | None = None
-            self._logprobs_tensors_cpu = None
-            self._routed_experts_cpu = None
-            self._copy_done = async_d2h_copy_worker.submit(self._issue_copies)
+            self._src_ready_event = torch.cuda.Event(blocking=True)
+            self._src_ready_event.record()
             return
 
         # Initiate the copy on a separate stream, but do not synchronize it.
         default_stream = torch.cuda.current_stream()
         with torch.cuda.stream(async_output_copy_stream):
             async_output_copy_stream.wait_stream(default_stream)
-            self.sampled_token_ids_cpu = self._sampled_token_ids.to(
-                "cpu", non_blocking=True
-            )
-            self._logprobs_tensors_cpu = (
-                self._logprobs_tensors.to_cpu_nonblocking()
-                if self._logprobs_tensors
-                else None
-            )
-            self._routed_experts_cpu = (
-                self._routed_experts.to_cpu_nonblocking()
-                if self._routed_experts is not None
-                else None
-            )
-            if check_ep_fault:
-                has_fault = get_ep_all2all_manager().query_fault()
-                self._has_fault = has_fault.to("cpu", non_blocking=True)
-            self.async_copy_ready_event.record()
+            self._issue_copies()
 
     def _issue_copies(self) -> None:
-        """Confidential Computing only: issue the D2H copies and record the
-        ready event.
-
-        Runs on the AsyncD2HCopyWorker's thread and stream, already ordered
-        after the producing forward+sample work.
-        """
+        """Issue the D2H copies on the current stream and record the ready
+        event. The producing forward+sample work must already be ordered
+        before the copies (stream-wait in __init__, or event-sync in
+        get_output for the deferred Confidential Computing path)."""
         self.sampled_token_ids_cpu = self._sampled_token_ids.to(
             "cpu", non_blocking=True
         )
@@ -355,11 +338,14 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         This function blocks until the copy is finished.
         """
-        if self._copy_done is not None:
-            # Confidential Computing: wait for the copy worker's deferred
-            # readback (see vllm.v1.conf_compute_utils); worker-done =>
-            # copy-done.
-            self._copy_done.wait()
+        if self._defer_copy:
+            # Confidential Computing: sleep until the forward+sample has
+            # materialized the source tensors (event-sync, not stream-wait,
+            # so the host-synchronous copies below only pay their own
+            # transfer time), then issue the copies here on the copy stream.
+            self._src_ready_event.synchronize()
+            with torch.cuda.stream(self._copy_stream):
+                self._issue_copies()
         max_gen_len = self.sampled_token_ids_cpu.shape[-1]
         self.async_copy_ready_event.synchronize()
 
@@ -826,11 +812,14 @@ class GPUModelRunner(
         self.num_computed_tokens = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
-        # Staged-copy helpers for direct (non-CpuGpuBuffer) H2D input copies
-        # under Confidential Computing; keyed by call site. See
-        # _staged_h2d_copy_ and vllm.v1.conf_compute_utils.
-        self._h2d_stage_cache: dict[str, StagedH2DCopier] = {}
-        self._async_d2h_copy_worker: AsyncD2HCopyWorker | None = None
+        # Staged-copy helper for the direct (non-CpuGpuBuffer)
+        # num_computed_tokens H2D under Confidential Computing; see
+        # vllm.v1.conf_compute_utils.
+        self._num_computed_tokens_copier = (
+            StagedH2DCopier(self.num_computed_tokens)
+            if confidential_compute_enabled()
+            else None
+        )
         self.prev_num_draft_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
         )
@@ -1226,20 +1215,6 @@ class GPUModelRunner(
             stream = torch.cuda.Stream()
             self.async_output_copy_stream = stream
         return stream
-
-    def _get_or_create_async_d2h_copy_worker(self) -> AsyncD2HCopyWorker | None:
-        """Lazily create the dedicated D2H copy worker (Confidential Computing
-        only). Otherwise returns None so the output copy is issued inline as
-        before."""
-        if not current_platform.is_confidential_compute():
-            return None
-        if self._async_d2h_copy_worker is None:
-            self._async_d2h_copy_worker = AsyncD2HCopyWorker(
-                device_module=torch.cuda,
-                copy_stream=torch.cuda.Stream(),
-                device=self.device,
-            )
-        return self._async_d2h_copy_worker
 
     def _on_request_state_removed(
         self,
@@ -2025,35 +2000,6 @@ class GPUModelRunner(
 
         return encoder_seq_lens, encoder_seq_lens_cpu
 
-    def _staged_h2d_copy_(
-        self,
-        gpu_base: torch.Tensor,
-        cpu_base: torch.Tensor,
-        n: int | None = None,
-        *,
-        key: str,
-    ) -> torch.Tensor:
-        """Confidential Computing only: copy ``cpu_base[:n] -> gpu_base[:n]``
-        via the staged path.
-
-        Mirrors CpuGpuBuffer.copy_to_gpu for direct (non-CpuGpuBuffer)
-        tensors: the H2D runs on a dedicated prep stream (immune to the
-        forward queued on the compute stream) and a D2D moves it onto
-        ``gpu_base`` on the current stream (asynchronous under Confidential
-        Computing). Staging is double-buffered per ``key``. Callers must
-        check ``is_confidential_compute()``.
-        """
-        # NOTE: this buffer (e.g. num_computed_tokens) is consumed by compute-stream
-        # kernels DURING _prepare_inputs (positions -> slot mapping / block table),
-        # so it must use the staged path: its D2D is ordered on the compute stream
-        # ahead of the consumer kernel, which any defer-to-forward scheme would
-        # violate (prep would read stale counts -> out-of-range slots -> IMA).
-        copier = self._h2d_stage_cache.get(key)
-        if copier is None:
-            copier = StagedH2DCopier(gpu_base)
-            self._h2d_stage_cache[key] = copier
-        return copier.copy_(cpu_base, n)
-
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -2268,12 +2214,14 @@ class GPUModelRunner(
                 self.prev_num_draft_tokens.gpu,
                 cpu_values,
             )
-        elif current_platform.is_confidential_compute():
-            self._staged_h2d_copy_(
-                self.num_computed_tokens,
-                self.input_batch.num_computed_tokens_cpu_tensor,
-                num_reqs,
-                key="num_computed_tokens",
+        elif self._num_computed_tokens_copier is not None:
+            # Confidential Computing: num_computed_tokens is consumed by
+            # compute-stream kernels during _prepare_inputs, so the staged
+            # copy's D2D must be ordered on the compute stream ahead of the
+            # consumer kernel; a plain H2D here would block the host on the
+            # in-flight forward.
+            self._num_computed_tokens_copier.copy_(
+                self.input_batch.num_computed_tokens_cpu_tensor, num_reqs
             )
         else:
             self.num_computed_tokens[:num_reqs].copy_(
@@ -4920,7 +4868,6 @@ class GPUModelRunner(
                 vocab_size=self.input_batch.vocab_size,
                 routed_experts=routed_experts_snapshot,
                 check_ep_fault=self.check_ep_fault,
-                async_d2h_copy_worker=self._get_or_create_async_d2h_copy_worker(),
             )
         with record_function_or_nullcontext(
             "gpu_model_runner: set_async_sampled_token_ids"
