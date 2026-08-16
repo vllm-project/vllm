@@ -178,7 +178,9 @@ class WeightTransferInitRequest:
 class WeightTransferUpdateRequest:
     """API-level weight update request."""
 
-    update_info: dict[str, Any] = field(default_factory=dict)
+    update_info: dict[str, Any] | list[dict[str, Any] | None] = field(
+        default_factory=dict
+    )
 
 
 class WeightTransferEngine(ABC, Generic[TInitInfo, TUpdateInfo]):
@@ -374,7 +376,9 @@ class VLLMWeightSyncClient(Protocol):
 
     def start_weight_update(self) -> None: ...
 
-    def update_weights(self, update_info: dict[str, Any]) -> None: ...
+    def update_weights(
+        self, update_info: dict[str, Any] | list[dict[str, Any] | None]
+    ) -> None: ...
 
     def finish_weight_update(self, weight_version: str | None = None) -> None: ...
 

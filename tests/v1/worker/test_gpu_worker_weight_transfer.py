@@ -118,6 +118,22 @@ def test_start_update_finish_delegates_to_engine():
     assert worker.model_runner.reset_lora_calls == 1
 
 
+@pytest.mark.parametrize(
+    ("rank", "expected"),
+    [(1, {"names": ["rank-1"]}), (2, None)],
+)
+def test_rank_local_update_selects_worker_payload(rank, expected):
+    engine = _RecordingEngine()
+    worker = _make_worker(engine)
+    worker.rank = rank
+    Worker.start_weight_update(worker)
+
+    Worker.update_weights(worker, [{"names": ["rank-0"]}, {"names": ["rank-1"]}, None])
+
+    assert engine.update_calls == ([] if expected is None else [expected])
+    assert worker._weight_update_active is True
+
+
 def test_finish_draft_session_keeps_lora_state():
     engine = _RecordingEngine()
     engine.supports_draft_weight_update = True
