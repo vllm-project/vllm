@@ -93,6 +93,18 @@ class LogitsProcessor(ABC):
         """
         raise NotImplementedError
 
+    def needs_output_token_ids(self) -> bool:
+        """True if this processor currently reads request output token ids.
+
+        Under async scheduling, the per-request ``output_tok_ids`` lists are
+        only kept up to date (the placeholder for the in-flight token is
+        backfilled with the real sampled token before logits processors run)
+        when something in the batch needs them. A processor that inspects
+        generation history must return True while it is tracking at least
+        one request, or it will see history that is one token stale.
+        """
+        return False
+
     @abstractmethod
     def update_state(
         self,
