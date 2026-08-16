@@ -1053,7 +1053,7 @@ async def test_dispatch_batch_respects_max_inflight(tmp_path, monkeypatch):
     live = 0
     peak = 0
 
-    async def fake_run_one_request(request_json, endpoint_registry, supported):
+    async def fake_run_one_request(request_json, endpoint_registry):
         nonlocal live, peak
         live += 1
         peak = max(peak, live)
@@ -1182,7 +1182,7 @@ async def test_dispatch_batch_cancels_inflight_on_failure(tmp_path, monkeypatch)
 
     started: list[asyncio.Task | None] = []
 
-    async def fake_run_one_request(request_json, endpoint_registry, supported):
+    async def fake_run_one_request(request_json, endpoint_registry):
         started.append(asyncio.current_task())
         if len(started) == 1:
             raise RuntimeError("request blew up")
@@ -1236,8 +1236,7 @@ async def test_unsupported_url_error_lists_registry_endpoints(tmp_path):
     """
     registry = {
         "widgets": {
-            "supported_urls": "/v1/widgets",
-            "url_matcher": lambda url: url == "/v1/widgets",
+            "url_pattern": "/v1/widgets",
             "handler_getter": lambda: None,
             "wrapper_fn": None,
         }
