@@ -328,10 +328,13 @@ def warmup_kernels(
             vocab_size = model_runner.model_config.get_vocab_size()
             bitmask_width = (vocab_size + 31) // 32
             grammar_bitmask = np.full(
-                (len(req_ids), bitmask_width), fill_value=-1, dtype=np.int32
+                (len(req_ids) * model_runner.decode_query_len, bitmask_width),
+                fill_value=-1,
+                dtype=np.int32,
             )
             grammar_output = GrammarOutput(
-                structured_output_request_ids=req_ids, grammar_bitmask=grammar_bitmask
+                structured_output_request_ids=req_ids,
+                grammar_bitmask=grammar_bitmask,
             )
 
         worker_sample_tokens(grammar_output)

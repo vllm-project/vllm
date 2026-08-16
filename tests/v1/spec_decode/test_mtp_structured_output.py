@@ -68,7 +68,7 @@ def test_bitmask_with_padded_invalid_drafts(backend):
     )
 
     assert bitmask is not None
-    assert bitmask.shape[0] == len(padded) + 1
+    assert bitmask.shape[0] == NUM_SPEC_TOKENS + 1
     assert not grammar.is_terminated()
 
 
@@ -139,7 +139,7 @@ def test_bonus_position_constrained_after_invalid_drafts(backend):
         scheduled_spec_decode_tokens={request.request_id: drafts},
     )
     assert bitmask is not None
-    assert bitmask.shape[0] == len(drafts) + 1
+    assert bitmask.shape[0] == NUM_SPEC_TOKENS + 1
 
     assert not (bitmask[-1] == -1).all()
     assert not grammar.is_terminated()
@@ -180,11 +180,11 @@ def test_bitmask_constrained_when_reasoning_ends_midwindow(backend):
     )
 
     assert bitmask is not None
-    assert bitmask.shape[0] == len(drafts) + 1
+    assert bitmask.shape[0] == NUM_SPEC_TOKENS + 1
     assert (bitmask[0] == -1).all()
     assert (bitmask[1] == -1).all()
     assert not (bitmask[2] == -1).all()
-    assert not (bitmask[-1] == -1).all()
+    assert not (bitmask[len(drafts)] == -1).all()
     assert not grammar.is_terminated()
 
 
@@ -230,7 +230,7 @@ def test_bitmask_post_reasoning_end_drafts_skip_grammar_advance(backend):
     )
 
     assert bitmask is not None
-    assert bitmask.shape[0] == len(drafts) + 1
+    assert bitmask.shape[0] == NUM_SPEC_TOKENS + 1
     # Post-marker position is still bitmask-constrained.
     assert not (bitmask[2] == -1).all()
     # Grammar must not have advanced through the unvalidated draft.
@@ -258,7 +258,7 @@ def test_validate_tokens_then_bitmask_round_trip(backend):
         scheduled_spec_decode_tokens={request.request_id: padded},
     )
     assert bitmask is not None
-    assert bitmask.shape[0] == len(padded) + 1
+    assert bitmask.shape[0] == NUM_SPEC_TOKENS + 1
     assert not grammar.is_terminated()
 
 
