@@ -15,6 +15,7 @@ def moe_align_block_size(
     expert_map: torch.Tensor | None = None,
     pad_sorted_ids: bool = False,
     ignore_invalid_experts: bool = False,
+    num_local_experts: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
@@ -43,6 +44,13 @@ def moe_align_block_size(
         as -1. When True, all invalid expert_ids in topk_ids will be ignored
         and will not participate in counting or ranking, and there will be no
         -1 in expert_ids.
+    - num_local_experts: The number of experts local to this rank. When set
+        together with ignore_invalid_experts=True and a non-None expert_map,
+        the output buffers are sized by the local expert count instead of the
+        global num_experts. Only local experts can receive tokens after
+        dispatch, so padding is bounded by num_local_experts, and the smaller
+        buffers cut the sorted_token_ids initialization cost (dominant in EP
+        decode, where global num_experts greatly exceeds the local count).
 
     Returns:
     - sorted_token_ids: A tensor containing the sorted token indices according
@@ -71,10 +79,18 @@ def moe_align_block_size(
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.
     """
-    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+    sizing_num_experts = num_experts
+    if (
+        ignore_invalid_experts
+        and expert_map is not None
+        and num_local_experts is not None
+    ):
+        sizing_num_experts = num_local_experts
+
+    max_num_tokens_padded = topk_ids.numel() + sizing_num_experts * (block_size - 1)
     if pad_sorted_ids:
         max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
-    if topk_ids.numel() < num_experts:
+    if topk_ids.numel() < sizing_num_experts:
         max_num_tokens_padded = min(
             topk_ids.numel() * block_size, max_num_tokens_padded
         )
