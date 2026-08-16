@@ -129,6 +129,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
     VLLM_GDN_DECODE_KERNEL: Literal["cuda", "triton"] = "cuda"
     VLLM_DISABLE_PYNCCL: bool = False
+    VLLM_DISABLE_CUTEDSL: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
@@ -1222,6 +1223,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable pynccl (using torch.distributed instead)
     "VLLM_DISABLE_PYNCCL": lambda: (
         os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")
+    ),
+    # Treat CuTeDSL as unavailable even if the `cutlass` package is
+    # installed, falling back to non-CuTeDSL kernels. Escape hatch for
+    # platforms where CuTeDSL kernels fail to compile (e.g. internal
+    # compiler errors on GB10 / SM12.1).
+    "VLLM_DISABLE_CUTEDSL": lambda: (
+        os.getenv("VLLM_DISABLE_CUTEDSL", "False").lower() in ("true", "1")
     ),
     # Optional: enable external Oink custom ops (e.g., Blackwell RMSNorm).
     # Disabled by default.

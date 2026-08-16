@@ -41,7 +41,14 @@ if TYPE_CHECKING:
 
 def _prefer_two_stage_compressor() -> bool:
     # Platforms that favor the triton variant of two-stage compressor split.
-    # Currently only tested on ROCm
+    # Currently only tested on ROCm. Also used on CUDA when CuTeDSL is
+    # unavailable/disabled (VLLM_DISABLE_CUTEDSL=1): the cutedsl compressor
+    # ICEs on SM12.1/GB10, and the head=512 triton two-stage is the only
+    # non-cutedsl compressor for that head dim.
+    from vllm.utils.import_utils import has_cutedsl
+
+    if current_platform.is_cuda() and not has_cutedsl():
+        return True
     return current_platform.is_rocm()
 
 
@@ -419,7 +426,9 @@ class DeepseekCompressor(nn.Module):
         # cutedsl (head=512) accepts the full-cache flags; triton (indexer/AMD)
         # does not, so the two callables have different signatures.
         compress_norm_rope_store_fn: Any
-        if current_platform.is_cuda() and self.head_dim == 512:
+        from vllm.utils.import_utils import has_cutedsl
+
+        if current_platform.is_cuda() and self.head_dim == 512 and has_cutedsl():
             from .nvidia.ops.sparse_attn_compress_cutedsl import (
                 compress_norm_rope_store_cutedsl,
             )
