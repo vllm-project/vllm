@@ -21,6 +21,10 @@ from .utils import request_memory
 logger = init_logger(__name__)
 
 
+def _should_warm_up_xccl(world_size: int) -> bool:
+    return world_size > 1 and torch.distributed.is_xccl_available()
+
+
 class XPUWorker(Worker):
     """A XPU worker class."""
 
@@ -101,7 +105,7 @@ class XPUWorker(Worker):
         )
 
         # global all_reduce needed for overall oneccl warm up
-        if torch.distributed.is_xccl_available():
+        if _should_warm_up_xccl(self.parallel_config.world_size):
             torch.distributed.all_reduce(torch.zeros(1).xpu())
 
         if self.use_v2_model_runner:
