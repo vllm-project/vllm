@@ -47,14 +47,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @property
     def mk_fuses_shared_experts(self) -> bool:
-        """Whether the method returns routed + shared output in one kernel.
-
-        Most MoE methods either run shared experts on a separate stream or ask
-        the modular kernel to schedule them while dispatch/combine is in flight.
-        Cooperative mega-kernels are different: they consume the shared expert
-        weights and input directly, so the runner must not launch or add the
-        shared MLP a second time.
-        """
+        """Whether one kernel returns the combined routed and shared output."""
         return False
 
     @property
@@ -62,13 +55,17 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         """Whether the method returns the final cross-rank expert result."""
         return self.moe_kernel is not None and self.moe_kernel.output_is_reduced()
 
-    def bind_shared_experts(self, shared_experts: torch.nn.Module | None) -> None:
-        """Bind the model's shared-expert module before post-load processing.
+    def bind_shared_experts(
+        self,
+        shared_experts: torch.nn.Module | None,
+        *,
+        routed_output_transform: torch.nn.Module | None = None,
+    ) -> None:
+        """Bind shared experts for methods that transform them after loading."""
+        return
 
-        This is a no-op for regular kernels. Cooperative mega-kernels override
-        it so shared weights can be transformed after checkpoint loading, at
-        the same lifecycle point as routed weights.
-        """
+    def bind_routed_scaling_factor(self, routed_scaling_factor: float) -> None:
+        """Bind the routed-output scale for methods that add shared output."""
         return
 
     @abstractmethod

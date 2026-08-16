@@ -72,6 +72,13 @@ def _mock_lm_head() -> Mock:
     return lm_head
 
 
+def _mock_routed_experts() -> RoutedExperts:
+    layer = object.__new__(RoutedExperts)
+    torch.nn.Module.__init__(layer)
+    layer.moe_config = MagicMock()
+    return layer
+
+
 def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionConfig:
     return ModelOptMixedPrecisionConfig(
         kv_cache_quant_method=None,
@@ -123,7 +130,7 @@ def test_modelopt_nvfp4_selects_deep_gemm_mega_moe():
         kv_cache_quant_algo=None,
         exclude_modules=[],
     )
-    layer = MagicMock(spec=RoutedExperts)
+    layer = _mock_routed_experts()
     layer.moe_config.moe_backend = "deep_gemm_mega_moe"
     expected = MagicMock(spec=ModelOptNvFp4MegaMoE)
 
@@ -140,6 +147,20 @@ def test_modelopt_nvfp4_selects_deep_gemm_mega_moe():
     )
 
 
+def test_modelopt_nvfp4_mega_moe_does_not_fuse_shared_before_output_transform():
+    method = object.__new__(ModelOptNvFp4MegaMoE)
+    shared_experts = MagicMock()
+
+    method.bind_shared_experts(shared_experts)
+    assert method._shared_experts_layer is shared_experts
+
+    method.bind_shared_experts(
+        shared_experts,
+        routed_output_transform=MagicMock(),
+    )
+    assert method._shared_experts_layer is None
+
+
 def test_modelopt_w4a16_rejects_deep_gemm_mega_moe():
     config = ModelOptNvFp4Config(
         quant_method="W4A16_NVFP4",
@@ -147,7 +168,7 @@ def test_modelopt_w4a16_rejects_deep_gemm_mega_moe():
         kv_cache_quant_algo=None,
         exclude_modules=[],
     )
-    layer = MagicMock(spec=RoutedExperts)
+    layer = _mock_routed_experts()
     layer.moe_config.moe_backend = "deep_gemm_mega_moe"
 
     with pytest.raises(ValueError, match="requires NVFP4 W4A4"):

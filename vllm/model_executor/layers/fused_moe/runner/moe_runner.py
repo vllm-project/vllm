@@ -283,7 +283,11 @@ class MoERunner(MoERunnerInterface):
 
         # Cooperative mega-kernels need the raw shared module during the
         # post-load transform. Bind it before selecting the custom-op schema.
-        self._quant_method.bind_shared_experts(shared_experts)
+        self._quant_method.bind_shared_experts(
+            shared_experts,
+            routed_output_transform=routed_output_transform,
+        )
+        self._quant_method.bind_routed_scaling_factor(routed_scaling_factor)
 
         # Needed for string -> MoERunner layer lookup in custom ops.
         self.layer_name = layer_name
@@ -609,16 +613,6 @@ class MoERunner(MoERunnerInterface):
                 topk_indices_dtype=self._quant_method.topk_indices_dtype,
                 input_ids=input_ids,
             )
-
-            # A cooperative kernel returns routed + shared as one tensor, so
-            # the normal post-kernel routed-only scaling cannot distinguish
-            # the two contributions. Apply the factor to the routing weights
-            # before launching the kernel instead.
-            if (
-                self._quant_method.mk_fuses_shared_experts
-                and self.routed_scaling_factor != 1.0
-            ):
-                topk_weights = topk_weights * self.routed_scaling_factor
 
             fused_out = self.routed_experts.forward_modular(
                 x=hidden_states,

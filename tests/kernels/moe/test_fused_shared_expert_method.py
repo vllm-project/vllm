@@ -18,6 +18,7 @@ def _runner_with_fused_shared_method() -> tuple[MoERunner, MagicMock]:
     quant_method.mk_fuses_shared_experts = True
 
     raw_shared = MagicMock()
+    raw_shared.shard_sequence_parallel = False
     moe_config = MagicMock()
     moe_config.dp_size = 1
     moe_config.pcp_size = 1
@@ -58,7 +59,7 @@ def test_fused_shared_method_does_not_launch_shared_module_separately():
     passed_weights = runner.routed_experts.forward_modular.call_args.kwargs[
         "topk_weights"
     ]
-    torch.testing.assert_close(passed_weights, topk_weights * 2.5)
+    torch.testing.assert_close(passed_weights, topk_weights)
     assert shared_output is None
     assert output is fused_output
 

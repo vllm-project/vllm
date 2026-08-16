@@ -1587,6 +1587,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
         # Setup modular kernel.
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        assert self.moe_quant_config is not None
         assert self.experts_cls is not None
         self.moe_kernel = make_nvfp4_moe_kernel(
             moe_quant_config=self.moe_quant_config,
@@ -1597,7 +1598,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
-    def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
+    def get_fused_moe_quant_config(
+        self, layer: RoutedExperts
+    ) -> FusedMoEQuantConfig | None:
         return make_nvfp4_moe_quant_config(
             backend=self.nvfp4_backend,
             w13_scale=layer.w13_weight_scale,
@@ -1694,6 +1697,7 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
         self._shared_l1_weights: torch.Tensor | None = None
         self._shared_l2_weights: torch.Tensor | None = None
         self._num_shared_experts = 0
+        self._routed_scaling_factor = 1.0
 
         parallel = moe_config.moe_parallel_config
         if not parallel.use_ep or parallel.ep_size <= 1:
@@ -1741,8 +1745,22 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
     def supports_eplb(self) -> bool:
         return False
 
-    def bind_shared_experts(self, shared_experts: torch.nn.Module | None) -> None:
-        self._shared_experts_layer = shared_experts
+    def bind_shared_experts(
+        self,
+        shared_experts: torch.nn.Module | None,
+        *,
+        routed_output_transform: torch.nn.Module | None = None,
+    ) -> None:
+        # The generic runner applies this transform to routed output before
+        # adding shared output. Folding shared output into MegaMoE earlier
+        # would incorrectly transform both branches, so retain the regular
+        # shared-expert path for this model shape.
+        self._shared_experts_layer = (
+            shared_experts if routed_output_transform is None else None
+        )
+
+    def bind_routed_scaling_factor(self, routed_scaling_factor: float) -> None:
+        self._routed_scaling_factor = routed_scaling_factor
 
     @staticmethod
     def _pack_e4m3_scales(scale: torch.Tensor) -> torch.Tensor:
@@ -1974,6 +1992,11 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
             l1_alphas=layer._deep_gemm_mega_l1_alphas,
             l2_alphas=layer._deep_gemm_mega_l2_alphas,
             a2_scales=layer._deep_gemm_mega_a2_scales,
+            routed_scaling_factor=(
+                self._routed_scaling_factor
+                if self._shared_experts_layer is not None
+                else 1.0
+            ),
             **shared_kwargs,
         )
         return y
