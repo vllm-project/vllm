@@ -201,7 +201,6 @@ def apply_moe_activation(
     activation_config: ApplyMoEActivationConfig | None = None,
     topk_ids: torch.Tensor | None = None,
     expert_map: torch.Tensor | None = None,
-    valid_rows: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Apply MoE activation function.
 
@@ -257,7 +256,6 @@ def apply_moe_activation(
             -1.0
             if config.activation_situ_linear_beta is None
             else config.activation_situ_linear_beta,
-            valid_rows,
         )
     elif activation == MoEActivation.SWIGLUOAI:
         torch.ops._C.swigluoai_and_mul(output, input)
@@ -298,7 +296,6 @@ def situ_and_mul_quant(
     beta: float,
     linear_beta: float | None,
     group_size: int = 0,
-    valid_rows: torch.Tensor | None = None,
 ) -> None:
     """Fused Kimi SITU activation + dynamic FP8 quantization.
 
@@ -313,9 +310,7 @@ def situ_and_mul_quant(
     [M, d // 128], matching humming ``quant_input(group_size=128, float32)``.
 
     ``linear_beta`` <= 0 (or None) means "unset" (up passed through), matching
-    ``SituAndMul(linear_beta=None)``. ``valid_rows`` (int64 scalar tensor) is the
-    DeepEP v2 contiguous-layout valid row count; padding rows are skipped and
-    receive a benign scale of 1.0. Kept in this module so that every
+    ``SituAndMul(linear_beta=None)``. Kept in this module so that every
     ``torch.ops._C.situ*`` call lives in one file.
     """
     torch.ops._C.situ_and_mul_quant(
@@ -325,5 +320,4 @@ def situ_and_mul_quant(
         beta,
         -1.0 if linear_beta is None else linear_beta,
         group_size,
-        valid_rows,
     )

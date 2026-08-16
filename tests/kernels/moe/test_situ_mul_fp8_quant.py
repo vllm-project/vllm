@@ -4,8 +4,8 @@
 quant kernel (``situ_and_mul_quant``).
 
 Mirrors ``test_silu_mul_fp8_quant_deep_gemm.py`` in structure: build a reference
-activation + block-FP8 quant, drive random per-row scale magnitudes, exercise
-the masked (``valid_rows``) contiguous layout, and compare per valid row.
+activation + block-FP8 quant, drive random per-row scale magnitudes, and compare
+per row.
 
 The kernel uses approximate device math (``tanh.approx.f32`` + ``__expf``), which
 cannot be reproduced bit-exactly in torch. It is therefore validated against the
@@ -40,19 +40,9 @@ SITU_LINEAR_BETA = 25.0
 SITU_D = 3072
 GROUP_SIZE = 128
 
-# (num_tokens, valid_rows). valid_rows=None => all rows valid. 2048/4096 rows
-# span multiple grid-stride waves of the persistent grid (GRID_DIM = 132*8).
-CASES = [
-    (1, None),
-    (17, None),
-    (128, None),
-    (2048, None),
-    (4096, None),
-    (2048, 1500),  # DeepEP v2 contiguous padding
-    (2048, 1),
-    (4096, 4095),
-    (512, 0),  # whole tensor is padding
-]
+# num_tokens. 2048/4096 rows span multiple grid-stride waves of the persistent
+# grid (GRID_DIM = 132*8).
+CASES = [1, 17, 128, 2048, 4096]
 
 
 def token_random(num_tokens: int, twod: int, dtype: torch.dtype) -> torch.Tensor:
@@ -95,25 +85,16 @@ def fp8_code_dist(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return (ordered(a) - ordered(b)).abs()
 
 
-@pytest.mark.parametrize("num_tokens,valid", CASES)
+@pytest.mark.parametrize("num_tokens", CASES)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.half])
 @torch.inference_mode()
-def test_situ_and_mul_quant_pipelined(
-    num_tokens: int, valid: int | None, dtype: torch.dtype
-) -> None:
+def test_situ_and_mul_quant_pipelined(num_tokens: int, dtype: torch.dtype) -> None:
     set_random_seed(42)
     d = SITU_D
     inp = token_random(num_tokens, 2 * d, dtype)
 
-    # Sentinels: padding rows must keep their bytes (out) and get scale 1.0.
-    out = torch.full((num_tokens, d), 17.0, device=DEVICE).to(fp8_dtype)
-    scale = torch.full(
-        (num_tokens, d // GROUP_SIZE), -1.0, dtype=torch.float32, device=DEVICE
-    )
-    out_sentinel = out.clone()
-    valid_rows = (
-        None if valid is None else torch.tensor(valid, dtype=torch.int64, device=DEVICE)
-    )
+    out = torch.empty(num_tokens, d, dtype=fp8_dtype, device=DEVICE)
+    scale = torch.empty(num_tokens, d // GROUP_SIZE, dtype=torch.float32, device=DEVICE)
 
     situ_and_mul_quant(
         out,
@@ -122,19 +103,9 @@ def test_situ_and_mul_quant_pipelined(
         beta=SITU_BETA,
         linear_beta=SITU_LINEAR_BETA,
         group_size=GROUP_SIZE,
-        valid_rows=valid_rows,
     )
 
-    # Padding contract: skipped rows keep their bytes; their scale becomes 1.0.
-    if valid is not None and valid < num_tokens:
-        assert torch.equal(scale[valid:], torch.ones_like(scale[valid:]))
-        assert torch.equal(
-            out[valid:].view(torch.uint8), out_sentinel[valid:].view(torch.uint8)
-        )
-
-    rows = num_tokens if valid is None else valid
-    if rows == 0:
-        return
+    rows = num_tokens
 
     ref_q, ref_s = ref_situ_block_fp8_quant(
         inp[:rows], SITU_BETA, SITU_LINEAR_BETA, GROUP_SIZE
