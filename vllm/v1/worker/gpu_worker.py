@@ -692,6 +692,11 @@ class Worker(WorkerBase):
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        from vllm.model_executor.layers.attention.kimi_k3_fp8_scales import (
+            prepare_kimi_k3_fp8_scales,
+        )
+
+        prepare_kimi_k3_fp8_scales(self.vllm_config)
         warmup_sizes: list[int] = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
@@ -726,6 +731,7 @@ class Worker(WorkerBase):
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
         kernel_warmup(self)
+        prepare_kimi_k3_fp8_scales(self.vllm_config, arm_calibration=True)
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
@@ -1376,6 +1382,16 @@ class Worker(WorkerBase):
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
 
+        from vllm.model_executor.layers.attention.kimi_k3_fp8_scales import (
+            save_kimi_k3_fp8_calibration,
+        )
+
+        calibration_save_error: Exception | None = None
+        try:
+            save_kimi_k3_fp8_calibration(self.vllm_config)
+        except Exception as error:
+            calibration_save_error = error
+
         # Release GPU resources held by the model runner so that memory
         # can be reclaimed when running in-process
         if model_runner := getattr(self, "model_runner", None):
@@ -1389,6 +1405,9 @@ class Worker(WorkerBase):
 
             if CuMemAllocator.instance is not None:
                 CuMemAllocator.instance.release_pools()
+
+        if calibration_save_error is not None:
+            raise calibration_save_error
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)

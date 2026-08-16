@@ -167,6 +167,11 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
         k: torch.Tensor,
         v: torch.Tensor,
         out: torch.Tensor | None = None,
+        *,
+        layer_name: str = "",
+        calibration_amax: torch.Tensor | None = None,
+        static_descale: torch.Tensor | None = None,
+        calibration_armed: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from tokenspeed_mla import tokenspeed_mla_prefill
 
