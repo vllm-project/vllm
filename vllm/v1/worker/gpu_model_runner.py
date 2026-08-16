@@ -67,6 +67,10 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
+from vllm.model_executor.model_loader.reload.layerwise import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+)
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
     MultiModalEmbeddings,
@@ -5252,6 +5256,30 @@ class GPUModelRunner(
 
         return None
 
+    def _reload_draft_weights_from_disk(self) -> None:
+        get_draft_model = getattr(self, "get_draft_model", None)
+        if not callable(get_draft_model):
+            return
+        draft_model = get_draft_model()
+        speculative_config = getattr(self, "speculative_config", None)
+        if draft_model is None or speculative_config is None:
+            return
+
+        draft_model_config = speculative_config.draft_model_config
+        assert draft_model_config is not None
+        load_config = speculative_config.draft_load_config or self.load_config
+        model_loader = get_model_loader(load_config)
+        if not hasattr(model_loader, "get_all_weights"):
+            raise NotImplementedError(
+                f"Draft model reloading with `{load_config.load_format}` format"
+            )
+
+        initialize_layerwise_reload(draft_model)
+        draft_model.load_weights(
+            model_loader.get_all_weights(draft_model_config, draft_model)
+        )
+        finalize_layerwise_reload(draft_model, draft_model_config)
+
     def reload_weights(
         self,
         weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
@@ -5260,6 +5288,14 @@ class GPUModelRunner(
     ) -> None:
         """Reload weights in place; see `reload_weights` in
         `vllm.model_executor.model_loader.reload.inplace` for details."""
+        # Speculative drafts are a separate module. Level 2 sleep discards
+        # their parameters with the target's; wake_up only restores draft
+        # buffers. Reload the configured draft checkpoint first (disk path
+        # only) so the target remains authoritative for any shared storage.
+        # Call unbound: Model Runner V2 delegates this method with a V2
+        # `self` and does not inherit the helper.
+        if weights_iterator is None:
+            GPUModelRunner._reload_draft_weights_from_disk(self)
         reload_weights(
             self.vllm_config,
             self.get_model(),
