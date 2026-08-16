@@ -108,3 +108,45 @@ def test_mtp_speculative_config_max_model_len(spec_max_model_len: int):
         max_model_len=spec_max_model_len,
     )
     assert spec_config.draft_model_config.max_model_len == spec_max_model_len
+
+
+def test_speculative_max_model_len_warns_that_it_has_no_effect(caplog_vllm):
+    """Setting `max_model_len` must say it does nothing, not fail silently.
+
+    Regression test for #52258. V0 used this to skip speculation for long
+    sequences; V1 has no runtime consumer. For ngram the draft config aliases
+    the target config so the override never runs, and for draft-model methods
+    the value is assigned but never read.
+    """
+    target_len, spec_len = 200, 80
+    model_config = ModelConfig(
+        model="facebook/opt-125m",
+        runner="generate",
+        max_model_len=target_len,
+    )
+    spec_config = SpeculativeConfig(
+        target_model_config=model_config,
+        target_parallel_config=ParallelConfig(),
+        method="ngram",
+        prompt_lookup_max=5,
+        prompt_lookup_min=3,
+        num_speculative_tokens=3,
+        max_model_len=spec_len,
+    )
+
+    assert "has no effect" in caplog_vllm.text
+    # The setting is retained for reporting, and the aliased target window is
+    # left alone.
+    assert spec_config.max_model_len == spec_len
+    assert model_config.max_model_len == target_len
+
+    caplog_vllm.clear()
+    SpeculativeConfig(
+        target_model_config=model_config,
+        target_parallel_config=ParallelConfig(),
+        method="ngram",
+        prompt_lookup_max=5,
+        prompt_lookup_min=3,
+        num_speculative_tokens=3,
+    )
+    assert "has no effect" not in caplog_vllm.text
