@@ -1369,14 +1369,13 @@ def get_kv_cache_config_from_groups(
     layout = _resolve_layout_for_groups(kv_cache_groups, vllm_config.cache_config)
     kv_cache_tensors = []
     for byte_offset, layer_names, spec in runs:
-        strides = compute_layout_strides(
+        layer_stride, block_stride, _, _, _ = compute_layout_strides(  # L, B, H, N, C
             spec,
             num_blocks,
             len(layer_names),
             layout,
             packed_block_stride=packed_block_stride,
         )
-        layer_stride, block_stride, _, _, _ = strides  # L, B, H, N, C
         offset = (
             byte_offset
             * max(layer_stride, spec.page_size_bytes)

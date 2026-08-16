@@ -344,6 +344,7 @@ def _create_input_tensors(
 def _create_kv_cache(
     config: BenchmarkConfig,
     max_num_blocks: int,
+    backend_class,
     device: torch.device,
     dtype: torch.dtype,
 ) -> list:
@@ -358,6 +359,9 @@ def _create_kv_cache(
         head_size=config.head_dim,
         dtype=cache_dtype,
     )
+    # Backends that repack the page (e.g. ROCM_ATTN's separate K/V head groups)
+    # publish it here, exactly as the worker does when building the real spec.
+    spec = backend_class.customize_spec(spec)
     layout = get_kv_cache_layout()
     total_bytes = (
         prod(compute_layer_kv_cache_shape_bytes(spec, max_num_blocks))
@@ -531,7 +535,9 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
                 config, total_q, device, dtype, quantize_query=quantize_query
             )
 
-            cache_list = _create_kv_cache(config, max_num_blocks, device, dtype)
+            cache_list = _create_kv_cache(
+                config, max_num_blocks, backend_class, device, dtype
+            )
 
             timing_stats, mem_stats = _run_single_benchmark(
                 config,
