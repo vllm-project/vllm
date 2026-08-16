@@ -558,28 +558,38 @@ def bind_kv_cache(
         share_replayssm_ring_trackers,
     )
 
-    layer_to_cache_group = {
-        layer_name: group_index
-        for group_index, group in enumerate(kv_cache_groups or ())
-        for layer_name in group.layer_names
-    }
-    replayssm_mixer_groups = defaultdict(list)
+    replayssm_mixers: dict[str, MambaMixer2] = {}
     for layer_name in ordered_layer_names:
         layer = forward_context[layer_name]
-        if not (
+        if (
             isinstance(layer, MambaMixer2)
             and layer.use_replayssm
             and layer.mamba_config.backend == MambaBackendEnum.FLASHINFER
         ):
-            continue
-        group_index = layer_to_cache_group.get(layer_name)
-        if group_index is None:
-            # Callers without a KV-cache configuration cannot prove that two
-            # layers use the same block-index namespace, so keep them separate.
-            group_index = layer_name
-        replayssm_mixer_groups[group_index].append(layer)
-
-    share_replayssm_ring_trackers(list(replayssm_mixer_groups.values()))
+            replayssm_mixers[layer_name] = layer
+    if kv_cache_groups:
+        mixer_groups = []
+        grouped_names = {
+            layer_name for group in kv_cache_groups for layer_name in group.layer_names
+        }
+        for group in kv_cache_groups:
+            group_names = set(group.layer_names)
+            mixer_groups.append(
+                [
+                    replayssm_mixers[layer_name]
+                    for layer_name in ordered_layer_names
+                    if layer_name in group_names and layer_name in replayssm_mixers
+                ]
+            )
+        mixer_groups.extend(
+            [mixer]
+            for layer_name, mixer in replayssm_mixers.items()
+            if layer_name not in grouped_names
+        )
+    else:
+        # Without cache groups, block-index namespaces cannot be proven equal.
+        mixer_groups = [[mixer] for mixer in replayssm_mixers.values()]
+    share_replayssm_ring_trackers(mixer_groups)
 
 
 def copy_kv_cache_blocks_inplace(

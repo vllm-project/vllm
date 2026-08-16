@@ -7,11 +7,14 @@ happen during model execution.
 """
 
 import time
-from typing import TYPE_CHECKING
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any
 
 import torch
 
 import vllm.envs as envs
+from vllm.config.mamba import MambaBackendEnum
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
@@ -234,18 +237,15 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
     return None
 
 
-def _flashinfer_replayssm_autotune_dummy_run(runner: "GPUModelRunner") -> None:
-    from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-        get_replayssm_backend,
-    )
-
-    try:
-        backend = get_replayssm_backend()
-    except RuntimeError:
-        return
-    if backend.name != "flashinfer":
-        return
-
+def _flashinfer_replayssm_autotune_kwargs(
+    runner: "GPUModelRunner", max_token_prefill_kwargs: dict[str, Any]
+) -> tuple[int, dict[str, Any]] | None:
+    config = runner.vllm_config
+    if not (
+        config.cache_config.use_replayssm
+        and config.mamba_config.backend == MambaBackendEnum.FLASHINFER
+    ):
+        return None
     query_len = runner.uniform_decode_query_len
     max_num_reqs = min(
         runner.scheduler_config.max_num_seqs,
@@ -255,6 +255,45 @@ def _flashinfer_replayssm_autotune_dummy_run(runner: "GPUModelRunner") -> None:
         raise RuntimeError(
             "FlashInfer ReplaySSM autotuning needs room for one decode request."
         )
+
+    return max_num_reqs, {
+        **max_token_prefill_kwargs,
+        "num_tokens": max_num_reqs * query_len,
+        "uniform_decode": True,
+        "allow_microbatching": False,
+        "force_attention": True,
+        "profile_seq_lens": query_len + 1,
+    }
+
+
+@contextmanager
+def _temporary_replayssm_autotune_slots(
+    runner: "GPUModelRunner", max_num_reqs: int
+) -> Iterator[None]:
+    from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+
+    reset_tensors: list[torch.Tensor] = []
+    seen: set[int] = set()
+    for module in runner.get_model().modules():
+        if not isinstance(module, MambaMixer2) or not module.use_replayssm:
+            continue
+        tensors = (
+            *module.kv_cache,
+            module._replayssm_ring_start,
+            module._replayssm_prev_num_accepted,
+        )
+        for tensor in tensors:
+            if not tensor.numel():
+                continue
+            if tensor.shape[0] <= max_num_reqs:
+                raise RuntimeError(
+                    "FlashInfer ReplaySSM autotuning needs max_num_reqs + 1 "
+                    "state slots."
+                )
+            data_ptr = tensor.data_ptr()
+            if data_ptr not in seen:
+                reset_tensors.append(tensor)
+                seen.add(data_ptr)
 
     block_tables = runner.input_batch.block_table.block_tables
     saved_block_ids = tuple(
@@ -266,34 +305,13 @@ def _flashinfer_replayssm_autotune_dummy_run(runner: "GPUModelRunner") -> None:
         block_table.block_table.np[:max_num_reqs, 0] = dummy_block_ids
 
     try:
-        runner._dummy_run(
-            num_tokens=max_num_reqs * query_len,
-            uniform_decode=True,
-            allow_microbatching=False,
-            skip_eplb=True,
-            is_profile=True,
-            randomize_inputs=True,
-            force_attention=True,
-            profile_seq_lens=query_len + 1,
-        )
+        yield
     finally:
         for block_table, block_ids in zip(block_tables, saved_block_ids):
             block_table.block_table.np[:max_num_reqs, 0] = block_ids
         runner.input_batch.block_table.commit_block_table(max_num_reqs)
-
-        from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
-
-        reset_tensors: set[int] = set()
-        for module in runner.get_model().modules():
-            if not isinstance(module, MambaMixer2) or not module.use_replayssm:
-                continue
-            for tensor in module.kv_cache:
-                if not tensor.numel() or tensor.shape[0] <= max_num_reqs:
-                    continue
-                data_ptr = tensor.data_ptr()
-                if data_ptr not in reset_tensors:
-                    tensor[1 : max_num_reqs + 1].zero_()
-                    reset_tensors.add(data_ptr)
+        for tensor in reset_tensors:
+            tensor[1 : max_num_reqs + 1].zero_()
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
@@ -340,11 +358,14 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     # which lead to some EP ranks receiving no tokens and skipping their
     # MoE kernel entirely, and cause hang due to all-reduce collective
     # during synchronized autotuning.
-    dummy_run_kwargs = dict(
+    max_token_prefill_kwargs = dict(
         num_tokens=runner.scheduler_config.max_num_batched_tokens,
         skip_eplb=True,
         is_profile=True,
         randomize_inputs=True,
+    )
+    replayssm_autotune = _flashinfer_replayssm_autotune_kwargs(
+        runner, max_token_prefill_kwargs
     )
 
     # Read cached autotune results and broadcast to all ranks.
@@ -365,8 +386,11 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             torch.inference_mode(),
             fi_utils.autotune(tune_mode=True, **autotune_kwargs),
         ):
-            runner._dummy_run(**dummy_run_kwargs)
-            _flashinfer_replayssm_autotune_dummy_run(runner)
+            runner._dummy_run(**max_token_prefill_kwargs)
+            if replayssm_autotune is not None:
+                max_num_reqs, max_batch_decode_kwargs = replayssm_autotune
+                with _temporary_replayssm_autotune_slots(runner, max_num_reqs):
+                    runner._dummy_run(**max_batch_decode_kwargs)
     finally:
         set_autotune_process_group(None)
 
