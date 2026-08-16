@@ -20,10 +20,13 @@ from vllm.entrypoints.openai.run_batch import (
     batch_output_writer,
     dispatch_batch,
     download_bytes_from_url,
+    is_descriptor_alias,
     is_same_local_file,
     local_input_path,
+    needs_staging,
     validate_batch,
     validate_run_batch_args,
+    write_finished,
 )
 
 CHAT_MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
@@ -1258,3 +1261,57 @@ async def test_unsupported_url_error_lists_registry_endpoints(tmp_path):
     ).error
     assert "/v1/unsupported" in error
     assert "/v1/widgets" in error
+
+
+def test_only_descriptor_aliases_need_staging(tmp_path):
+    """An ordinary file is read in place; only descriptor aliases are copied.
+
+    Staging every path under /dev would copy a batch held on tmpfs, which is
+    re-readable and may be large.
+    """
+    ordinary = tmp_path / "batch.jsonl"
+    ordinary.write_text("{}\n")
+
+    assert not needs_staging(str(ordinary))
+    assert not is_descriptor_alias("/dev/shm/batch.jsonl")
+    assert not is_descriptor_alias("/dev/null")
+
+    assert is_descriptor_alias("/dev/stdin")
+    assert is_descriptor_alias("/dev/fd/3")
+    assert is_descriptor_alias("/proc/self/fd/12")
+    assert is_descriptor_alias("/proc/451/fd/7")
+
+
+@pytest.mark.asyncio
+async def test_write_finished_keeps_responses_that_completed_with_a_failure(tmp_path):
+    """A failure must not discard responses that finished alongside it.
+
+    Requests complete in groups, so raising on the first failure would throw
+    away work that had already succeeded.
+    """
+
+    async def succeed(custom_id):
+        return BatchRequestOutput(
+            id="vllm-test", custom_id=custom_id, response=None, error=None
+        )
+
+    async def fail():
+        raise RuntimeError("request blew up")
+
+    # The failure is first, so an implementation that raises immediately would
+    # write nothing.
+    tasks = [asyncio.create_task(fail())] + [
+        asyncio.create_task(succeed(f"request-{i}")) for i in range(3)
+    ]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    output_path = tmp_path / "output.jsonl"
+    with open(output_path, "w", encoding="utf-8") as output_file:
+        failure = write_finished(tasks, output_file, BatchProgressTracker())
+
+    assert isinstance(failure, RuntimeError)
+    written = [
+        BatchRequestOutput.model_validate_json(line).custom_id
+        for line in output_path.read_text().strip().split("\n")
+    ]
+    assert written == ["request-0", "request-1", "request-2"]

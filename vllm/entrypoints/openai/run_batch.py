@@ -10,7 +10,7 @@ import stat
 import sys
 import tempfile
 from argparse import Namespace
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from http import HTTPStatus
 from io import BytesIO
 from typing import IO, Any, TypeAlias, TypedDict
@@ -339,14 +339,29 @@ class BatchProgressTracker:
         return self._pbar
 
 
+def is_descriptor_alias(path: str) -> bool:
+    """Whether a path names an open descriptor rather than a file of its own.
+
+    Reopening one of these shares the descriptor's offset on some platforms, so
+    a second pass over it would start at EOF even though it stats as a regular
+    file. Ordinary files under /dev, a batch on tmpfs for instance, are not
+    affected.
+    """
+    if path in ("/dev/stdin", "/dev/stdout", "/dev/stderr"):
+        return True
+    directory, _, number = path.rpartition("/")
+    if not number.isdigit():
+        return False
+    return directory == "/dev/fd" or (
+        directory.startswith("/proc/") and directory.endswith("/fd")
+    )
+
+
 def needs_staging(path_or_url: str) -> bool:
     """Whether the input has to be copied before it can be read twice."""
     if path_or_url.startswith(("http://", "https://")):
         return True
-    # A descriptor alias such as /dev/stdin or /dev/fd/3 can report itself as a
-    # regular file while still sharing the descriptor's offset when reopened,
-    # which would leave the second pass at EOF.
-    if path_or_url.startswith(("/dev/", "/proc/")):
+    if is_descriptor_alias(path_or_url):
         return True
     return not stat.S_ISREG(os.stat(path_or_url).st_mode)
 
@@ -894,6 +909,29 @@ async def run_one_request(
     return await result
 
 
+def write_finished(
+    finished: Iterable[asyncio.Task[BatchRequestOutput]],
+    output_file: IO[str],
+    tracker: BatchProgressTracker,
+) -> BaseException | None:
+    """
+    Write each response that completed, returning the first failure if any.
+
+    Requests finish in groups, so a failure must not discard the responses that
+    succeeded alongside it.
+    """
+    failure: BaseException | None = None
+    for task in finished:
+        error = task.exception()
+        if error is not None:
+            failure = failure or error
+            continue
+        print(task.result().model_dump_json(), file=output_file)
+        tracker.completed()
+    output_file.flush()
+    return failure
+
+
 async def dispatch_batch(
     input_path: str,
     output_file: IO[str],
@@ -929,15 +967,16 @@ async def dispatch_batch(
                 finished, pending = await asyncio.wait(
                     pending, return_when=asyncio.FIRST_COMPLETED
                 )
-                for task in finished:
-                    print(task.result().model_dump_json(), file=output_file)
-                    tracker.completed()
-                output_file.flush()
+                failure = write_finished(finished, output_file, tracker)
+                if failure is not None:
+                    raise failure
     finally:
-        # An error leaves the rest of the batch in flight; drop it rather than
-        # let the requests outlive the run.
+        # An error leaves the rest of the batch in flight. Drop it, and wait for
+        # the cancellations so the requests do not outlive the run.
         for task in pending:
             task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
 
 
 async def run_batch(
