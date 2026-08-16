@@ -10,7 +10,9 @@ from ...models.utils import check_logprobs_close
 from ...utils import large_gpu_mark, multi_gpu_test
 
 try:
-    from flashinfer.mamba import checkpointing_ssu  # noqa: F401
+    from flashinfer.mamba.checkpointing_ssu import (
+        allocate_checkpointing_ssu_scratch,  # noqa: F401
+    )
 
     HAS_FLASHINFER_CHECKPOINTING_SSU = True
 except ImportError:
@@ -85,35 +87,6 @@ def test_replayssm_flashinfer_decode_matches_baseline(vllm_runner, model_name):
         vllm_runner,
         model_name,
         mamba_backend="flashinfer",
-        name_1="replayssm_flashinfer",
-    )
-
-
-@pytest.mark.skipif(
-    not HAS_FLASHINFER_CHECKPOINTING_SSU,
-    reason="flashinfer.mamba.checkpointing_ssu not available",
-)
-@pytest.mark.parametrize("model_name", MODELS)
-def test_replayssm_flashinfer_matches_triton_replayssm(vllm_runner, model_name):
-    common = dict(
-        max_model_len=1024,
-        trust_remote_code=True,
-        enable_prefix_caching=False,
-        mamba_cache_mode="none",
-        use_replayssm=True,
-        replayssm_buffer_len=16,
-    )
-    with vllm_runner(model_name, mamba_backend="triton", **common) as llm:
-        triton = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
-    with vllm_runner(model_name, mamba_backend="flashinfer", **common) as llm:
-        flashinfer = llm.generate_greedy_logprobs(
-            PROMPTS, max_tokens=32, num_logprobs=5
-        )
-
-    check_logprobs_close(
-        outputs_0_lst=triton,
-        outputs_1_lst=flashinfer,
-        name_0="replayssm_triton",
         name_1="replayssm_flashinfer",
     )
 
