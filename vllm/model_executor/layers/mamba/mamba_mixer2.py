@@ -532,8 +532,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
         self._updates_replayssm_trackers = True
-        self._replayssm_ring_starts_to_update: torch.Tensor | None = None
-        self._replayssm_prev_num_accepted_to_update: torch.Tensor | None = None
 
         self.num_spec = vllm_config.num_speculative_tokens
         if self.num_spec > 0:
@@ -1140,10 +1138,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         cumAdt_vec=attn_metadata.cumAdt_vec,
                         cb_old=attn_metadata.cb_old,
                         update_trackers=self._updates_replayssm_trackers,
-                        ring_starts_to_update=self._replayssm_ring_starts_to_update,
-                        prev_num_accepted_to_update=(
-                            self._replayssm_prev_num_accepted_to_update
-                        ),
                     )
                 else:
                     selective_state_update_replayssm_triton(
@@ -1236,49 +1230,52 @@ class MambaMixer2(MambaBase, PluggableLayer):
         return MambaAttentionBackendEnum.MAMBA2
 
 
-def batch_replayssm_ring_tracker_updates(mixers: list[MambaMixer2]) -> None:
-    """Keep per-layer cursors and update them together after the final layer."""
-    if not mixers:
-        return
+def share_replayssm_ring_trackers(
+    mixer_groups: list[list[MambaMixer2]],
+) -> None:
+    """Share ring cursors within each cache-slot index namespace.
 
-    first_ring_start = mixers[0]._replayssm_ring_start
-    first_prev_num_accepted = mixers[0]._replayssm_prev_num_accepted
-    expected = (
-        first_ring_start.shape,
-        first_ring_start.device,
-        first_ring_start.dtype,
-        first_prev_num_accepted.shape,
-        first_prev_num_accepted.device,
-        first_prev_num_accepted.dtype,
-    )
-    for mixer in mixers:
-        actual = (
-            mixer._replayssm_ring_start.shape,
-            mixer._replayssm_ring_start.device,
-            mixer._replayssm_ring_start.dtype,
-            mixer._replayssm_prev_num_accepted.shape,
-            mixer._replayssm_prev_num_accepted.device,
-            mixer._replayssm_prev_num_accepted.dtype,
+    Layers backed by one KV-cache group use the same physical block indices and
+    can therefore share cursors. Different KV-cache groups may assign different
+    block indices to the same request and must keep separate cursor tensors.
+    The final local layer in each group advances its cursors after every layer
+    in that group has consumed the previous values.
+    """
+    for mixers in mixer_groups:
+        if not mixers:
+            continue
+
+        first_ring_start = mixers[0]._replayssm_ring_start
+        first_prev_num_accepted = mixers[0]._replayssm_prev_num_accepted
+        expected = (
+            first_ring_start.shape,
+            first_ring_start.device,
+            first_ring_start.dtype,
+            first_prev_num_accepted.shape,
+            first_prev_num_accepted.device,
+            first_prev_num_accepted.dtype,
+            mixers[0].replayssm_buffer_len,
         )
-        if actual != expected:
-            raise ValueError("ReplaySSM tracker sidecars must have matching layouts")
+        for mixer in mixers:
+            actual = (
+                mixer._replayssm_ring_start.shape,
+                mixer._replayssm_ring_start.device,
+                mixer._replayssm_ring_start.dtype,
+                mixer._replayssm_prev_num_accepted.shape,
+                mixer._replayssm_prev_num_accepted.device,
+                mixer._replayssm_prev_num_accepted.dtype,
+                mixer.replayssm_buffer_len,
+            )
+            if actual != expected:
+                raise ValueError(
+                    "ReplaySSM tracker sidecars must have matching layouts"
+                )
 
-    ring_starts = torch.zeros(
-        (len(mixers), *first_ring_start.shape),
-        dtype=first_ring_start.dtype,
-        device=first_ring_start.device,
-    )
-    prev_num_accepted = torch.zeros_like(ring_starts)
-    for layer_index, mixer in enumerate(mixers):
-        mixer._replayssm_ring_start = ring_starts[layer_index]
-        mixer._replayssm_prev_num_accepted = prev_num_accepted[layer_index]
-        mixer._updates_replayssm_trackers = False
-        mixer._replayssm_ring_starts_to_update = None
-        mixer._replayssm_prev_num_accepted_to_update = None
+            mixer._replayssm_ring_start = first_ring_start
+            mixer._replayssm_prev_num_accepted = first_prev_num_accepted
+            mixer._updates_replayssm_trackers = False
 
-    mixers[-1]._updates_replayssm_trackers = True
-    mixers[-1]._replayssm_ring_starts_to_update = ring_starts
-    mixers[-1]._replayssm_prev_num_accepted_to_update = prev_num_accepted
+        mixers[-1]._updates_replayssm_trackers = True
 
 
 def mamba_mixer2(
