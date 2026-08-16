@@ -302,13 +302,16 @@ class Scheduler(SchedulerInterface):
         # Longest sequence this pool can hold for one request, from the same
         # per-spec bounds the startup check uses. Normally >= max_model_len,
         # because that check refuses to size a pool that cannot serve one
-        # max_model_len request. When it is smaller, a request beyond it can
-        # never be scheduled at any future time, however much drains, so it is
-        # failed at admission (see `add_request`) rather than retried forever
-        # (#52520). Falsy means there is no per-block bound to enforce -- `None`
-        # for layouts the startup check cannot price either, `0` for a pool with
-        # no usable blocks -- and the frontend's `max_model_len` check stands
-        # alone, exactly as before.
+        # max_model_len request. When it is smaller, a sequence beyond it can
+        # never be scheduled at any future time, however much drains, so it
+        # bounds a request from both ends rather than being retried forever
+        # (#52520): a prompt already past it is failed at admission (see
+        # `add_request`), and a generate request that would grow past it stops
+        # there as a length cap (see `_update_request_with_output`). Falsy
+        # means there is no per-block bound to enforce -- `None` for layouts
+        # the startup check cannot price either, `0` for a pool with no usable
+        # blocks -- and the frontend's `max_model_len` check stands alone,
+        # exactly as before.
         self.max_servable_num_tokens: int = (
             max_servable_num_tokens(
                 vllm_config, kv_cache_config.kv_cache_groups, kv_cache_config.num_blocks
@@ -319,11 +322,13 @@ class Scheduler(SchedulerInterface):
             logger.error(
                 "The KV cache pool (%d blocks) can hold at most %d tokens for a "
                 "single request, which is less than max_model_len (%d). Requests "
-                "longer than %d tokens will be rejected. Increase "
-                "`gpu_memory_utilization` or decrease `max_model_len`.",
+                "longer than %d tokens will be rejected, and generation stops at "
+                "%d tokens. Increase `gpu_memory_utilization` or decrease "
+                "`max_model_len`.",
                 kv_cache_config.num_blocks,
                 self.max_servable_num_tokens,
                 self.max_model_len,
+                self.max_servable_num_tokens,
                 self.max_servable_num_tokens,
             )
 
@@ -2243,7 +2248,16 @@ class Scheduler(SchedulerInterface):
 
             # Check for stop and update request state.
             # This must be called before we make the EngineCoreOutput.
-            stopped = check_stop(request, self.max_model_len)
+            # The length cap is `max_servable_num_tokens`, not `max_model_len`:
+            # they are equal unless the pool cannot cover the whole window, and
+            # when they differ, growing past the pool's ceiling costs the
+            # request a block that no future pool state has. It would be
+            # preempted at that token and then be too long to re-prefill --
+            # #52520 again, reached through decode instead of prefill. Stopping
+            # here returns the tokens already streamed with `finish_reason:
+            # length`, exactly as if `max_model_len` had been set to what the
+            # pool can serve.
+            stopped = check_stop(request, self.max_servable_num_tokens)
             if stopped:
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break

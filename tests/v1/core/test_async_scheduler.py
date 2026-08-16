@@ -297,6 +297,8 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.defer_block_free = False
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
+    # Equal to max_model_len whenever the pool covers the whole window.
+    scheduler.max_servable_num_tokens = scheduler.max_model_len
 
     def free_request(req, delay_free_blocks=False):
         scheduler.finished_req_ids.add(req.request_id)

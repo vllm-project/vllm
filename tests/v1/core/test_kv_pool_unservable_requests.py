@@ -11,8 +11,10 @@ descheduled with that work discarded, and was never scheduled again -- a stall
 whose only signal is a `waiting` gauge.
 
 `Scheduler.max_servable_num_tokens` now derives that limit from the same
-`kv_cache_utils` helper the startup check uses, and fails an over-long request at
-admission instead of retrying it.
+`kv_cache_utils` helper the startup check uses. It bounds a request from both
+ends: a prompt already past it is failed at admission instead of being retried,
+and a generate request that would grow past it stops there as a length cap
+instead of being preempted at that token into a queue it can no longer leave.
 """
 
 import pytest
@@ -255,3 +257,71 @@ def test_pool_with_headroom_serves_the_whole_window():
     assert request.num_preemptions == 0
     assert request.num_output_tokens == 1
     assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+
+
+# The decode case. A prompt this long clears the frontend's
+# `prompt + max_tokens <= max_model_len` check and admission's
+# `prompt + 1 <= max_servable_num_tokens` check, and then generation walks the
+# sequence past the ceiling: there are only `SERVABLE_LEN - DECODE_PROMPT_LEN`
+# output slots under it, out of `DECODE_MAX_TOKENS` asked for.
+DECODE_PROMPT_LEN = SERVABLE_LEN - 8  # 1000
+DECODE_MAX_TOKENS = MAX_MODEL_LEN - DECODE_PROMPT_LEN  # 24
+
+
+def test_generation_stops_at_the_bound_instead_of_stalling_mid_decode():
+    """A generate request must not be preempted into a queue it cannot leave.
+
+    Both length checks pass, so the request runs. At output token 9 the
+    sequence would need a block the pool does not have. Unfixed, it is
+    preempted there -- and is then longer than the pool can re-prefill, so it
+    is never scheduled again: output frozen mid-answer, one preemption, and
+    `waiting` non-empty forever. The pool's ceiling is a length cap, so the
+    request must stop on it with the tokens it produced.
+    """
+    scheduler = _make_scheduler(STARTUP_MIN_BLOCKS)
+    [request] = create_requests(
+        num_requests=1,
+        num_tokens=DECODE_PROMPT_LEN,
+        max_tokens=DECODE_MAX_TOKENS,
+        ignore_eos=True,
+        block_size=BLOCK_SIZE,
+    )
+    # Precisely the case the admission gate lets through.
+    assert request.num_tokens + 1 <= scheduler.max_servable_num_tokens
+    assert request.num_tokens + DECODE_MAX_TOKENS > scheduler.max_servable_num_tokens
+    scheduler.add_request(request)
+
+    peak = _run(scheduler, request)
+
+    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert request.num_tokens == SERVABLE_LEN
+    assert request.num_output_tokens == SERVABLE_LEN - DECODE_PROMPT_LEN
+    assert request.num_preemptions == 0
+    assert peak <= SERVABLE_LEN
+    assert not scheduler.has_unfinished_requests()
+
+
+def test_generation_is_not_capped_when_the_pool_covers_the_window():
+    """The cap must not shorten an answer the pool can actually hold.
+
+    Same request, one block of headroom: it must produce every token it asked
+    for, so the bound cannot be silently truncating generation in the normal
+    case.
+    """
+    scheduler = _make_scheduler(STARTUP_MIN_BLOCKS + 1)
+    assert scheduler.max_servable_num_tokens >= MAX_MODEL_LEN
+    [request] = create_requests(
+        num_requests=1,
+        num_tokens=DECODE_PROMPT_LEN,
+        max_tokens=DECODE_MAX_TOKENS,
+        ignore_eos=True,
+        block_size=BLOCK_SIZE,
+    )
+    scheduler.add_request(request)
+
+    _run(scheduler, request)
+
+    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    assert request.num_output_tokens == DECODE_MAX_TOKENS
+    assert request.num_tokens == MAX_MODEL_LEN
+    assert request.num_preemptions == 0
