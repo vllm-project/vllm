@@ -94,7 +94,8 @@ def get_model_type_cases(
             test_info.needs_video_metadata
         )
 
-    # No sizes passed for custom inputs, since inputs are directly provided
+    # Keep all size batches in one test case so they share the same model
+    # instances. No sizes are passed for preprocessed audio or custom inputs.
     if test_type not in (
         VLMTestType.CUSTOM_INPUTS,
         VLMTestType.AUDIO,
@@ -102,7 +103,9 @@ def get_model_type_cases(
         wrapped_sizes = get_wrapped_test_sizes(test_info, test_type)
         if wrapped_sizes is None:
             raise ValueError(f"Sizes must be set for test type {test_type}")
-        iter_kwargs["size_wrapper"] = wrapped_sizes
+        if not wrapped_sizes:
+            return []
+        iter_kwargs["size_wrappers"] = (wrapped_sizes,)
 
     # Otherwise expand the custom test options instead
     elif test_type == VLMTestType.CUSTOM_INPUTS:
@@ -127,9 +130,8 @@ def get_parametrized_options(
     create_new_process_for_each_test: bool,
 ):
     """Converts all of our VLMTestInfo into an expanded list of parameters.
-    This is similar to nesting pytest parametrize calls, but done directly
-    through an itertools product so that each test can set things like
-    size factors etc, while still running in isolated test cases.
+    Runner configuration values are expanded through an itertools product.
+    Input size batches stay grouped so they can share model instances.
     """
     matching_tests = get_filtered_test_settings(
         test_settings, test_type, create_new_process_for_each_test
@@ -149,8 +151,7 @@ def get_wrapped_test_sizes(
     test_info: VLMTestInfo, test_type: VLMTestType
 ) -> tuple[ImageSizeWrapper, ...]:
     """Given a test info which may have size factors or fixed sizes, wrap them
-    and combine them into an iterable, each of which will be used in parameter
-    expansion.
+    and combine them into an iterable of request batches.
 
     Args:
         test_info: Test configuration to be expanded.
