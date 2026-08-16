@@ -267,6 +267,9 @@ def _launch_gfx950_partial(
     extra_indices: torch.Tensor,
     extra_indptr: torch.Tensor,
     num_splits: int,
+    adaptive_splits: bool = False,
+    poison_scratch: bool = False,
+    one_wave_splits: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
 
@@ -287,6 +290,11 @@ def _launch_gfx950_partial(
         dtype=torch.float32,
         device=q.device,
     )
+    if poison_scratch:
+        part_m.fill_(float("nan"))
+        part_l.fill_(float("nan"))
+        part_acc.fill_(float("nan"))
+        part_acc[:, 1::2].fill_(float("inf"))
     assert part_m.is_contiguous()
     assert part_l.is_contiguous()
     assert part_acc.is_contiguous()
@@ -320,6 +328,8 @@ def _launch_gfx950_partial(
         IS_FNUZ_MAIN=current_platform.is_fp8_fnuz(),
         IS_FNUZ_EXTRA=False,
         TRUST_EXTRA_CACHE_NAN_FREE=True,
+        ADAPTIVE_SPLITS=adaptive_splits,
+        ONE_WAVE_SPLITS=one_wave_splits or num_splits,
         BLOCK_H=16,
         BLOCK_K=32,
         NUM_SPLITS=num_splits,
@@ -328,6 +338,46 @@ def _launch_gfx950_partial(
         waves_per_eu=0,
     )
     return part_m, part_l, part_acc
+
+
+def _launch_sparse_decode_reduce(
+    part_m: torch.Tensor,
+    part_l: torch.Tensor,
+    part_acc: torch.Tensor,
+    adaptive_splits: bool,
+) -> torch.Tensor:
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    num_queries, num_splits, num_heads = part_m.shape
+    out = torch.empty(
+        (num_queries, num_heads, HEAD_DIM),
+        dtype=torch.bfloat16,
+        device=part_m.device,
+    )
+    attn_sink = torch.empty(1, dtype=torch.float32, device=part_m.device)
+    mod._sparse_attn_decode_reduce_kernel[(num_queries, num_heads)](
+        part_m,
+        part_l,
+        part_acc,
+        attn_sink,
+        out,
+        out.stride(0),
+        out.stride(1),
+        part_m.stride(0),
+        part_m.stride(1),
+        part_acc.stride(0),
+        part_acc.stride(1),
+        part_acc.stride(2),
+        num_heads,
+        HAS_ATTN_SINK=False,
+        ADAPTIVE_SPLITS=adaptive_splits,
+        COMB_DIM=HEAD_DIM,
+        BLOCK_H=1,
+        NUM_SPLITS=num_splits,
+        SPLITS_PAD=1 << (num_splits - 1).bit_length(),
+        num_warps=4,
+    )
+    return out
 
 
 @torch.inference_mode()
@@ -621,6 +671,73 @@ def test_sparse_attn_decode_trusted_extra_matches_legacy_scrub() -> None:
     assert torch.equal(trusted, torch.zeros_like(trusted))
 
 
+@pytest.mark.parametrize("on_gfx950", [False, True])
+@torch.inference_mode()
+def test_rocm_ragged_graph_buffer_view_tracks_source_width(
+    monkeypatch, on_gfx950: bool
+) -> None:
+    from vllm.models.deepseek_v4.amd import rocm as rocm_mod
+
+    monkeypatch.setattr(rocm_mod, "_ON_GFX950", on_gfx950)
+
+    indices_buffer = torch.full((16,), -1, dtype=torch.int32)
+    indptr_buffer = torch.full((3,), -1, dtype=torch.int32)
+    first_indices = torch.tensor([3, 5, 7], dtype=torch.int32)
+    first_indptr = torch.tensor([0, 1, 3], dtype=torch.int32)
+    first_view, first_indptr_view = rocm_mod._copy_ragged_to_graph_buffers(
+        first_indices,
+        first_indptr,
+        indices_buffer,
+        indptr_buffer,
+        num_rows=2,
+        max_entries_per_row=8,
+    )
+
+    second_indices = torch.tensor([1, 2, 3, 4, 5, 6], dtype=torch.int32)
+    second_indptr = torch.tensor([0, 2, 6], dtype=torch.int32)
+    second_view, second_indptr_view = rocm_mod._copy_ragged_to_graph_buffers(
+        second_indices,
+        second_indptr,
+        indices_buffer,
+        indptr_buffer,
+        num_rows=2,
+        max_entries_per_row=8,
+    )
+
+    expected_first_entries = (
+        first_indices.numel() if on_gfx950 else indices_buffer.numel()
+    )
+    expected_second_entries = (
+        second_indices.numel() if on_gfx950 else indices_buffer.numel()
+    )
+    assert first_view.numel() == expected_first_entries
+    assert second_view.numel() == expected_second_entries
+    assert first_view.data_ptr() == second_view.data_ptr() == indices_buffer.data_ptr()
+    assert first_indptr_view.data_ptr() == second_indptr_view.data_ptr()
+    assert torch.equal(second_view[: second_indices.numel()], second_indices)
+    assert torch.equal(second_indptr_view, second_indptr)
+
+
+def test_rocm_capture_metadata_sets_adaptive_marker(monkeypatch) -> None:
+    from vllm.models.deepseek_v4.amd import rocm as rocm_mod
+    from vllm.models.deepseek_v4.sparse_mla import (
+        DeepseekV4SparseMLAMetadataBuilder,
+    )
+
+    metadata = SimpleNamespace(for_cudagraph_capture=False)
+    monkeypatch.setattr(
+        DeepseekV4SparseMLAMetadataBuilder,
+        "build_for_cudagraph_capture",
+        lambda *_: metadata,
+    )
+    builder = object.__new__(rocm_mod.DeepseekV4ROCMAiterMLASparseMetadataBuilder)
+
+    actual = builder.build_for_cudagraph_capture(SimpleNamespace())
+
+    assert actual is metadata
+    assert actual.for_cudagraph_capture is _on_gfx950()
+
+
 @requires_split_decode_arch
 @torch.inference_mode()
 def test_decode_num_splits_heuristic(monkeypatch) -> None:
@@ -635,18 +752,18 @@ def test_decode_num_splits_heuristic(monkeypatch) -> None:
     # A tiny batch on a large device should split to add parallelism.
     assert mod._decode_num_splits(2, 1, avg_main_len=256.0, avg_extra_len=0.0) > 1
 
-    # Long C128A rows need 32 splits to fill a 256-CU device at low batch.
-    assert mod._decode_num_splits(1, 1, 128.0, 8192.0) == 32
-    assert mod._decode_num_splits(8, 1, 128.0, 8192.0) == 32
+    # The shared gfx942 selector retains its original 16-split ceiling.
+    assert mod._decode_num_splits(1, 1, 128.0, 8192.0) == 16
+    assert mod._decode_num_splits(8, 1, 128.0, 8192.0) == 16
     assert mod._decode_num_splits(64, 1, 128.0, 8192.0) == 4
 
-    # The chosen count always stays within the searched [1, 32] range, and a
+    # The chosen count always stays within the searched [1, 16] range, and a
     # zero-length workload never splits (no work to parallelize).
     for num_queries in (1, 4, 24, 224, 1024):
         splits = mod._decode_num_splits(
             num_queries, 1, avg_main_len=512.0, avg_extra_len=128.0
         )
-        assert 1 <= splits <= 32
+        assert 1 <= splits <= 16
     assert mod._decode_num_splits(2, 1, avg_main_len=0.0, avg_extra_len=0.0) >= 1
 
 
@@ -671,7 +788,7 @@ def test_decode_num_splits_gfx950(monkeypatch) -> None:
 
 
 @requires_split_decode_arch
-@pytest.mark.parametrize("num_splits", [1, 2, 3, 4, 8, 32])
+@pytest.mark.parametrize("num_splits", [1, 2, 3, 4, 8])
 @pytest.mark.parametrize("with_extra", [True, False])
 @pytest.mark.parametrize("with_sink", [True, False])
 @torch.inference_mode()
@@ -849,6 +966,79 @@ def test_sparse_attn_decode_gfx950_partial_buffer_layout(num_splits: int) -> Non
 
 
 @requires_gfx950
+@torch.inference_mode()
+def test_sparse_attn_decode_gfx950_adaptive_reduce_ignores_stale_scratch() -> None:
+    device = torch.device("cuda")
+    torch.manual_seed(19)
+    block_size = 64
+    num_heads = 16
+    num_splits = 32
+    main_use_fnuz = current_platform.is_fp8_fnuz()
+    q = torch.randn(3, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    q *= 0.125
+    main_kv = torch.randn(3, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size, main_use_fnuz)
+    main_rows = [[0], [1], [2]]
+    main_indices, main_indptr = _ragged_from_rows(main_rows, device)
+    extra_kv = torch.randn(2112, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size, use_fnuz=False)
+    extra_rows = [
+        list(range(64)),
+        list(range(64, 576)),
+        list(range(576, 2112)),
+    ]
+    extra_indices, extra_indptr = _ragged_from_rows(extra_rows, device)
+
+    part_m, part_l, part_acc = _launch_gfx950_partial(
+        q,
+        main_cache,
+        main_indices,
+        main_indptr,
+        extra_cache,
+        extra_indices,
+        extra_indptr,
+        num_splits,
+        adaptive_splits=True,
+        poison_scratch=True,
+        one_wave_splits=16,
+    )
+
+    neg_large = torch.finfo(torch.float32).min
+    assert torch.equal(part_m[0, 4:], torch.full_like(part_m[0, 4:], neg_large))
+    assert torch.equal(part_l[0, 4:], torch.zeros_like(part_l[0, 4:]))
+    assert torch.isnan(part_acc[0, 4::2]).all()
+    assert torch.isinf(part_acc[0, 5::2]).all()
+    assert (part_l[1, :16] > 0).all()
+    assert torch.equal(part_m[1, 16:], torch.full_like(part_m[1, 16:], neg_large))
+    assert torch.equal(part_l[1, 16:], torch.zeros_like(part_l[1, 16:]))
+    assert torch.isnan(part_acc[1, 16::2]).all()
+    assert torch.isinf(part_acc[1, 17::2]).all()
+    assert (part_l[2] > 0).all()
+    assert torch.isfinite(part_acc[2]).all()
+
+    actual = _launch_sparse_decode_reduce(
+        part_m,
+        part_l,
+        part_acc,
+        adaptive_splits=True,
+    )
+    expected = _ref_sparse_decode_ragged(
+        q=q,
+        main_cache=main_cache,
+        main_rows=main_rows,
+        scale=HEAD_DIM**-0.5,
+        attn_sink=None,
+        block_size=block_size,
+        extra_cache=extra_cache,
+        extra_rows=extra_rows,
+        main_use_fnuz=main_use_fnuz,
+    )
+
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
+
+
+@requires_gfx950
 @pytest.mark.parametrize("extra_len", [0, 1, 31, 32, 33, 63, 64, 65])
 @torch.inference_mode()
 def test_sparse_attn_decode_gfx950_outer64_boundaries(
@@ -922,10 +1112,11 @@ def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch) -> None:
     device = torch.device("cuda")
     torch.manual_seed(17)
     block_size = 64
-    num_queries = 8
+    num_queries = 16
     num_heads = 16
     num_splits = 8
     extra_per_query = 65 * num_splits
+    max_extra_per_query = 8192
     q = (
         torch.randn(
             num_queries,
@@ -958,7 +1149,18 @@ def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch) -> None:
         for query_idx in range(num_queries)
     ]
     main_indices, main_indptr = _ragged_from_rows(main_rows, device)
-    extra_indices, extra_indptr = _ragged_from_rows(extra_rows, device)
+    short_extra_rows = [row[:64] for row in extra_rows]
+    long_indices, long_indptr = _ragged_from_rows(extra_rows, device)
+    short_indices, short_indptr = _ragged_from_rows(short_extra_rows, device)
+    extra_indices = torch.full(
+        (num_queries * max_extra_per_query,),
+        -1,
+        dtype=torch.int32,
+        device=device,
+    )
+    extra_indices[: long_indices.numel()].copy_(long_indices)
+    extra_indptr = long_indptr.clone()
+    extra_indices_ptr = extra_indices.data_ptr()
     attn_sink = torch.linspace(-0.1, 0.1, num_heads, dtype=torch.float32, device=device)
     out = torch.empty_like(q)
 
@@ -979,6 +1181,7 @@ def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch) -> None:
             extra_indptr=extra_indptr,
             out=out,
             extra_cache_nan_free=True,
+            adaptive_splits=True,
         )
 
     run_decode()
@@ -986,18 +1189,9 @@ def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch) -> None:
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         captured_out = run_decode()
-    captured = out.clone()
-
-    q.add_(0.03125)
-    replacement = extra_rows[0][-1]
-    extra_indices[0] = replacement
-    extra_rows[0][0] = replacement
-    graph.replay()
     torch.accelerator.synchronize()
-
-    assert captured_out.data_ptr() == out.data_ptr()
-    assert not torch.equal(out, captured)
-    expected = _ref_sparse_decode_ragged(
+    captured_long = out.clone()
+    expected_long = _ref_sparse_decode_ragged(
         q=q,
         main_cache=main_cache,
         main_rows=main_rows,
@@ -1007,7 +1201,35 @@ def test_sparse_attn_decode_gfx950_graph_replay(monkeypatch) -> None:
         extra_cache=extra_cache,
         extra_rows=extra_rows,
     )
-    torch.testing.assert_close(out, expected, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(captured_long, expected_long, atol=2e-2, rtol=2e-2)
+
+    extra_indices[: short_indices.numel()].copy_(short_indices)
+    extra_indptr.copy_(short_indptr)
+    graph.replay()
+    torch.accelerator.synchronize()
+    short_out = out.clone()
+    expected_short = _ref_sparse_decode_ragged(
+        q=q,
+        main_cache=main_cache,
+        main_rows=main_rows,
+        scale=HEAD_DIM**-0.5,
+        attn_sink=attn_sink,
+        block_size=block_size,
+        extra_cache=extra_cache,
+        extra_rows=short_extra_rows,
+    )
+
+    assert captured_out.data_ptr() == out.data_ptr()
+    assert extra_indices.data_ptr() == extra_indices_ptr
+    assert extra_indices.numel() == num_queries * max_extra_per_query
+    assert not torch.equal(short_out, captured_long)
+    torch.testing.assert_close(short_out, expected_short, atol=2e-2, rtol=2e-2)
+
+    extra_indices[: long_indices.numel()].copy_(long_indices)
+    extra_indptr.copy_(long_indptr)
+    graph.replay()
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(out, expected_long, atol=2e-2, rtol=2e-2)
 
 
 @requires_split_decode_arch
@@ -1039,7 +1261,8 @@ def test_sparse_attn_decode_long_context(monkeypatch) -> None:
     scale = HEAD_DIM**-0.5
 
     split_fn = "_decode_gfx950_num_splits" if _on_gfx950() else "_decode_num_splits"
-    monkeypatch.setattr(mod, split_fn, lambda *args, **kwargs: 32)
+    num_splits = 32 if _on_gfx950() else 16
+    monkeypatch.setattr(mod, split_fn, lambda *args, **kwargs: num_splits)
     actual = mod._rocm_sparse_attn_decode_ragged_triton(
         q=q,
         main_cache=main_cache,

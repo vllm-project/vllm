@@ -35,6 +35,10 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.compressor_utils import (
     get_dspark_swa_index_width,
 )
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    cp_gather_indexer_k_quant_cache_triton,
+    indexer_k_quant_and_cache_triton,
+)
 
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
 
@@ -48,6 +52,55 @@ def _on_gfx950() -> bool:
         return _ON_GFX950
     except Exception:
         return False
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only dispatch")
+def test_cp_gather_despecialized_kernel_is_gfx950_only(monkeypatch):
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    class FakeKernel:
+        def __init__(self):
+            self.calls = []
+
+        def __getitem__(self, grid):
+            def launch(*args):
+                self.calls.append((grid, args))
+
+            return launch
+
+    legacy_kernel = FakeKernel()
+    gfx950_kernel = FakeKernel()
+    monkeypatch.setattr(mod, "_cp_gather_indexer_quant_cache_kernel", legacy_kernel)
+    monkeypatch.setattr(
+        mod,
+        "_cp_gather_indexer_quant_cache_gfx950_kernel",
+        gfx950_kernel,
+    )
+
+    k_cache = torch.zeros((4, 1, 132), dtype=torch.uint8)
+    k_fp8 = torch.empty((5, 128), dtype=current_platform.fp8_dtype())
+    k_scale = torch.empty((5, 4), dtype=torch.uint8)
+    block_table = torch.zeros((2, 7), dtype=torch.int32)
+    cu_seqlen = torch.tensor([0, 2, 5], dtype=torch.int32)
+    token_to_seq = torch.tensor([0, 0, 1, 1, 1], dtype=torch.int32)
+    args = (k_cache, k_fp8, k_scale, block_table, cu_seqlen, token_to_seq)
+
+    monkeypatch.setattr(mod, "_ON_GFX950", True)
+    mod.cp_gather_indexer_k_quant_cache_triton(*args)
+    assert len(gfx950_kernel.calls) == 1
+    assert not legacy_kernel.calls
+    gfx950_grid, gfx950_args = gfx950_kernel.calls[0]
+    assert gfx950_grid == (5,)
+    assert len(gfx950_args) == 18
+    assert gfx950_args[-3:] == (2, 7, 4)
+
+    monkeypatch.setattr(mod, "_ON_GFX950", False)
+    mod.cp_gather_indexer_k_quant_cache_triton(*args)
+    assert len(legacy_kernel.calls) == 1
+    legacy_grid, legacy_args = legacy_kernel.calls[0]
+    assert legacy_grid == (5,)
+    assert len(legacy_args) == 19
+    assert legacy_args[-4:] == (5, 2, 7, 4)
 
 
 @pytest.mark.parametrize(
@@ -537,7 +590,8 @@ def test_indexer_gather_accepts_upper_bound_output():
     valid_tokens = 9
     upper_bound_tokens = 13
     block_size = 16
-    num_blocks = 2
+    num_seqs = 3
+    num_blocks = num_seqs
     sentinel = 123
     device = "cuda"
 
@@ -545,13 +599,15 @@ def test_indexer_gather_accepts_upper_bound_output():
     kv_cache = torch.zeros(
         num_blocks, block_size, cache_stride, dtype=torch.uint8, device=device
     )
-    slot_mapping = torch.arange(valid_tokens, dtype=torch.int64, device=device)
+    slot_mapping = torch.tensor(
+        [0, 1, 2, 16, 17, 18, 32, 33, 34], dtype=torch.int64, device=device
+    )
     ops.indexer_k_quant_and_cache(k, kv_cache, slot_mapping, quant_block_size, "ue8m0")
 
     block_table = torch.arange(num_blocks, dtype=torch.int32, device=device).unsqueeze(
-        0
+        1
     )
-    cu_seq_lens = torch.tensor([0, valid_tokens], dtype=torch.int32, device=device)
+    cu_seq_lens = torch.tensor([0, 3, 6, 9], dtype=torch.int32, device=device)
     dst_k = torch.full(
         (upper_bound_tokens, head_dim), sentinel, dtype=torch.uint8, device=device
     )
@@ -566,8 +622,52 @@ def test_indexer_gather_accepts_upper_bound_output():
     ops.cp_gather_indexer_k_quant_cache(
         kv_cache, dst_k, dst_scale, block_table, cu_seq_lens
     )
+
+    if current_platform.is_rocm():
+        triton_kv_cache = torch.zeros_like(kv_cache)
+        indexer_k_quant_and_cache_triton(
+            k,
+            triton_kv_cache,
+            slot_mapping,
+            quant_block_size,
+            "ue8m0",
+        )
+        triton_dst_k = torch.full_like(dst_k, sentinel)
+        triton_dst_scale = torch.full_like(dst_scale, sentinel)
+        token_to_seq = torch.cat(
+            (
+                torch.repeat_interleave(
+                    torch.arange(num_seqs, dtype=torch.int32, device=device), 3
+                ),
+                torch.full(
+                    (upper_bound_tokens - valid_tokens,),
+                    -1,
+                    dtype=torch.int32,
+                    device=device,
+                ),
+            )
+        )
+        cp_gather_indexer_k_quant_cache_triton(
+            triton_kv_cache,
+            triton_dst_k.view(current_platform.fp8_dtype()),
+            triton_dst_scale,
+            block_table,
+            cu_seq_lens,
+            token_to_seq,
+        )
     torch.accelerator.synchronize()
 
+    if current_platform.is_rocm():
+        triton_recovered = triton_dst_k[:valid_tokens].view(
+            current_platform.fp8_dtype()
+        ).float() * triton_dst_scale[:valid_tokens].view(torch.float32)
+        triton_error = (triton_recovered - k.float()).abs().amax(dim=1)
+        max_triton_error = (
+            16.0 * triton_dst_scale[:valid_tokens].view(torch.float32).flatten()
+        )
+        assert torch.all(triton_error <= max_triton_error)
+        assert torch.all(triton_dst_k[valid_tokens:] == sentinel)
+        assert torch.all(triton_dst_scale[valid_tokens:] == sentinel)
     k_recovered = dst_k[:valid_tokens].view(torch.float8_e4m3fn).float() * dst_scale[
         :valid_tokens
     ].view(torch.float32)

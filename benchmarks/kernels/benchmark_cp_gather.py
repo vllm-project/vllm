@@ -7,8 +7,12 @@ from collections.abc import Callable
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    cp_gather_indexer_k_quant_cache_triton,
+)
 
 SCENARIOS = {
     "single-60k": [60_000],
@@ -31,6 +35,15 @@ DTYPES = {
     "bfloat16": torch.bfloat16,
     "float32": torch.float32,
 }
+INDEXER_TOKEN_COUNTS = (1638, 1737, 1738, 1739, 2029, 2031, 3217, 4078)
+
+
+def _on_gfx950() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import _ON_GFX950
+
+    return _ON_GFX950
 
 
 def make_page_table(
@@ -172,6 +185,65 @@ def make_maybe_dequant_gather(
     return run, bytes_moved
 
 
+def make_indexer_quant_gather(
+    seq_lens: list[int],
+    block_size: int,
+) -> tuple[Callable[[], None], int]:
+    head_dim = 128
+    cache_entry_bytes = head_dim + 4
+    max_blocks_per_seq = 4096
+    num_cache_blocks = 8192
+    block_table = torch.full(
+        (len(seq_lens), max_blocks_per_seq),
+        -1,
+        dtype=torch.int32,
+        device="cuda",
+    )
+    next_block = 0
+    for req_id, seq_len in enumerate(seq_lens):
+        req_blocks = math.ceil(seq_len / block_size)
+        block_table[req_id, :req_blocks] = torch.arange(
+            next_block,
+            next_block + req_blocks,
+            dtype=torch.int32,
+            device="cuda",
+        )
+        next_block += req_blocks
+    assert next_block <= num_cache_blocks
+
+    cu_seq_lens = torch.zeros(len(seq_lens) + 1, dtype=torch.int32, device="cuda")
+    cu_seq_lens[1:] = torch.tensor(seq_lens, dtype=torch.int32, device="cuda").cumsum(
+        dim=0
+    )
+    token_to_seq = torch.repeat_interleave(
+        torch.arange(len(seq_lens), dtype=torch.int32, device="cuda"),
+        torch.tensor(seq_lens, dtype=torch.int32, device="cuda"),
+    )
+    kv_cache = torch.zeros(
+        (num_cache_blocks, block_size, cache_entry_bytes),
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    num_tokens = sum(seq_lens)
+    dst_k = torch.empty(
+        (num_tokens, head_dim), dtype=current_platform.fp8_dtype(), device="cuda"
+    )
+    dst_scale = torch.empty((num_tokens, 4), dtype=torch.uint8, device="cuda")
+
+    def run() -> None:
+        cp_gather_indexer_k_quant_cache_triton(
+            kv_cache,
+            dst_k,
+            dst_scale,
+            block_table,
+            cu_seq_lens,
+            token_to_seq,
+        )
+
+    bytes_moved = 2 * num_tokens * cache_entry_bytes
+    return run, bytes_moved
+
+
 @torch.inference_mode()
 def run_scenario(
     variant: str,
@@ -187,17 +259,21 @@ def run_scenario(
         run, bytes_moved = make_cache_gather(seq_lens, block_size, entry_size, dtype)
     elif variant == "fp8-upconvert":
         run, bytes_moved = make_fp8_upconvert(seq_lens, block_size)
+    elif variant == "indexer-quant":
+        run, bytes_moved = make_indexer_quant_gather(seq_lens, block_size)
     else:
         run, bytes_moved = make_maybe_dequant_gather(seq_lens, block_size, entry_size)
 
-    latency_ms = triton.testing.do_bench(
-        run, warmup=warmup_ms, rep=rep_ms, return_mode="median"
+    latency_ms, p99_ms, p999_ms = triton.testing.do_bench(
+        run, warmup=warmup_ms, rep=rep_ms, quantiles=[0.5, 0.99, 0.999]
     )
     bandwidth_gbps = bytes_moved / latency_ms / 1e6
     lengths = ",".join(str(seq_len) for seq_len in seq_lens)
     print(
         f"{variant:15s} {name:10s} batch={len(seq_lens):2d} "
         f"total={sum(seq_lens):7d} latency={latency_ms * 1e3:9.2f} us "
+        f"p99={p99_ms * 1e3:9.2f} us "
+        f"p99.9={p999_ms * 1e3:9.2f} us "
         f"bandwidth={bandwidth_gbps:8.1f} GB/s lengths=[{lengths}]"
     )
 
@@ -206,10 +282,12 @@ def main() -> None:
     parser = FlexibleArgumentParser(description="Benchmark cp_gather variants")
     parser.add_argument(
         "--variant",
-        choices=["all", "cache", "fp8-upconvert", "maybe-dequant"],
+        choices=["all", "cache", "fp8-upconvert", "maybe-dequant", "indexer-quant"],
         default="all",
     )
-    parser.add_argument("--scenario", choices=["all", *SCENARIOS], default="all")
+    parser.add_argument(
+        "--scenario", choices=["all", *SCENARIOS, "indexer-8k1k"], default="all"
+    )
     parser.add_argument("--dtype", choices=DTYPES, default="fp8")
     parser.add_argument("--block-size", type=int, default=64)
     parser.add_argument("--entry-size", type=int, default=576)
@@ -217,19 +295,37 @@ def main() -> None:
     parser.add_argument("--rep-ms", type=int, default=100)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
+    if (
+        args.variant == "indexer-quant" or args.scenario == "indexer-8k1k"
+    ) and not _on_gfx950():
+        parser.error("indexer-quant is only available on gfx950")
 
     torch.manual_seed(args.seed)
-    variants = (
-        ("cache", "fp8-upconvert", "maybe-dequant")
-        if args.variant == "all"
-        else (args.variant,)
-    )
-    scenarios = (
-        SCENARIOS
-        if args.scenario == "all"
-        else {args.scenario: SCENARIOS[args.scenario]}
-    )
+    if args.variant == "all":
+        variants = ["cache", "fp8-upconvert", "maybe-dequant"]
+        if _on_gfx950():
+            variants.append("indexer-quant")
+    else:
+        variants = [args.variant]
     for variant in variants:
+        if variant == "indexer-quant":
+            if args.scenario not in ("all", "indexer-8k1k"):
+                continue
+            scenarios = {}
+            for num_batches in (1, 2, 3):
+                for num_tokens in INDEXER_TOKEN_COUNTS:
+                    base, remainder = divmod(num_tokens, num_batches)
+                    scenarios[f"b{num_batches}-{num_tokens}"] = [
+                        base + (req_id < remainder) for req_id in range(num_batches)
+                    ]
+        else:
+            if args.scenario == "indexer-8k1k":
+                continue
+            scenarios = (
+                SCENARIOS
+                if args.scenario == "all"
+                else {args.scenario: SCENARIOS[args.scenario]}
+            )
         for name, seq_lens in scenarios.items():
             run_scenario(
                 variant,

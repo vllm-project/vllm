@@ -308,9 +308,13 @@ def _copy_ragged_to_graph_buffers(
 
     max_entries = max(num_rows * max_entries_per_row, 1)
     ragged_out = ragged_indices_buffer[:max_entries]
-    nnz = ragged_indices.numel()
-    if nnz > 0:
-        ragged_out[:nnz].copy_(ragged_indices, non_blocking=True)
+    source_entries = ragged_indices.numel()
+    if source_entries > 0:
+        ragged_out[:source_entries].copy_(ragged_indices, non_blocking=True)
+    if _ON_GFX950:
+        # Preserve the graph-stable base pointer while exposing source capacity
+        # to the sync-free split selector; indptr still carries the true NNZ.
+        ragged_out = ragged_out[: max(source_entries, 1)]
     return ragged_out, indptr_out
 
 
@@ -320,6 +324,7 @@ class DeepseekV4ROCMAiterMLASparseMetadata(DeepseekV4FlashMLAMetadata):
 
     c128a_decode_topk_ragged_indices: torch.Tensor | None = None
     c128a_decode_topk_ragged_indptr: torch.Tensor | None = None
+    for_cudagraph_capture: bool = False
 
 
 @dataclass
@@ -383,6 +388,16 @@ class DeepseekV4ROCMAiterMLASparseMetadataBuilder(DeepseekV4SparseMLAMetadataBui
             c128a_decode_topk_ragged_indices=ragged_indices,
             c128a_decode_topk_ragged_indptr=ragged_indptr,
         )
+
+    def build_for_cudagraph_capture(
+        self, common_attn_metadata: CommonAttentionMetadata
+    ) -> DeepseekV4ROCMAiterMLASparseMetadata:
+        metadata = cast(
+            DeepseekV4ROCMAiterMLASparseMetadata,
+            super().build_for_cudagraph_capture(common_attn_metadata),
+        )
+        metadata.for_cudagraph_capture = _ON_GFX950
+        return metadata
 
 
 class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
@@ -621,6 +636,13 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 attn_metadata=rocm_metadata,
                 swa_only=swa_only,
                 output=output[:num_decode_tokens],
+                adaptive_splits=(
+                    _ON_GFX950
+                    and not swa_only
+                    and self.compress_ratio == 128
+                    and rocm_metadata is not None
+                    and rocm_metadata.for_cudagraph_capture
+                ),
             )
 
     def _forward_decode(
@@ -631,6 +653,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         attn_metadata: DeepseekV4ROCMAiterMLASparseMetadata | None,
         swa_only: bool,
         output: torch.Tensor,
+        adaptive_splits: bool,
     ) -> None:
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
@@ -682,6 +705,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             nope_head_dim=self.nope_head_dim,
             rope_head_dim=self.rope_head_dim,
             output=output,
+            adaptive_splits=adaptive_splits,
             extra_cache_nan_free=_trust_dsv4_extra_cache_nan_free(
                 self.kv_cache_dtype,
                 self._has_kv_transfer,
