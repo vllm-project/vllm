@@ -801,7 +801,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                     MultiModalFieldConfig.flat_from_sizes("video", vfc)
                 ),
                 video_frame_counts=MultiModalFieldConfig.batched(
-                    "video",
+                    "video", keep_on_cpu=True
                 ),
                 video_num_soft_tokens=MultiModalFieldConfig.batched(
                     "video", keep_on_cpu=True

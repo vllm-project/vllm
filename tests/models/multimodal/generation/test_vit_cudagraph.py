@@ -286,6 +286,12 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "<bos><start_of_turn>user\n<|video|>\nDescribe this video in one sentence."
             "<end_of_turn>\n<start_of_turn>model\n"
         ),
+        # The 16-frame test video produces 1056 vision tokens. Capture only
+        # the smallest supported bucket that covers it instead of all default
+        # buckets through max_model_len, which adds unrelated memory pressure.
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [1120],
+        },
         needs_video_metadata=True,
         marks=[pytest.mark.core_model],
     ),
