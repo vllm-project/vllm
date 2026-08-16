@@ -174,7 +174,7 @@ class CustomAllreduce:
             )
         elif applied_override:
             logger.info_once(
-                "Custom allreduce max size set to %d MiB via "
+                "Custom allreduce max size overridden to %d MiB via "
                 "VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB (same-node TP=2).",
                 max_size // (1024 * 1024),
             )

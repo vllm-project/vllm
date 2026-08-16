@@ -1860,8 +1860,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "0"))
     ),
-    # Opt-in custom all-reduce byte ceiling in MiB. Unset keeps the 8 MiB
-    # constructor default. Applied only for same-node TP=2.
+    # Opt-in custom all-reduce size ceiling in MiB (integer 1..256).
+    # Unset keeps the 8 MiB constructor default. Applied only for same-node
+    # TP=2; other topologies ignore the env. This *sets* the ceiling (it can
+    # lower as well as raise). CUSTOM is used when inp_size < max_size
+    # (strictly less). Raising max_size grows *two* same-node buffers
+    # (sync metadata scratch + eager IPC copy buffer), so 128 MiB is about
+    # +232 MiB/GPU and 256 MiB about +488 MiB/GPU vs the 8 MiB default.
     "VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB": lambda: (
         int(v) if (v := os.getenv("VLLM_CUSTOM_ALLREDUCE_MAX_SIZE_MB")) else None
     ),
