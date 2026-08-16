@@ -905,7 +905,10 @@ class DeepseekV4Indexer(nn.Module):
         attn_metadata = get_forward_context().attn_metadata
         if isinstance(attn_metadata, dict):
             indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
-            if indexer_metadata.max_seq_len // self.compress_ratio <= self.topk_tokens:
+            if (
+                indexer_metadata.max_seq_len // self.compress_ratio <= self.topk_tokens
+                and not torch.cuda.is_current_stream_capturing()
+            ):
                 # candidates num smaller than topk, every candidate is selected
                 # but we still need to build k cache
                 compressor(compressed_kv_score, positions, rotary_emb)
