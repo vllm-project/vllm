@@ -2373,13 +2373,6 @@ class VllmConfig:
         model_config = self.model_config
         speculative_config = self.speculative_config
 
-        if (
-            model_config is not None
-            and getattr(model_config, "is_hybrid", False)
-            and self.cache_config.mamba_cache_mode == "all"
-        ):
-            unsupported.append("Mamba cache 'all' mode")
-
         if self.parallel_config.prefill_context_parallel_size > 1 and not (
             model_config is not None and model_config.use_mla
         ):
