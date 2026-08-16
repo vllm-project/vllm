@@ -749,7 +749,6 @@ class HummingIndexedExperts(HummingExpertsBase):
             num_experts=self.global_num_experts,
             expert_map=expert_map,
             ignore_invalid_experts=True,
-            num_local_experts=self.num_experts,
         )
 
         moe_common_kwargs = {
