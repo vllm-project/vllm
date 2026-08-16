@@ -334,6 +334,225 @@ def test_multi_step_decode_replays_captured_graph_as_expected(
     assert run_fullgraph.call_count == expected_graph_replays
 
 
+def test_init_cudagraph_manager_creates_selected_fused_depths(monkeypatch):
+    created_managers = []
+
+    class FakeCudaGraphManager:
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+            self.use_breakable_cg = False
+            self.capture_fn = None
+            created_managers.append(self)
+
+        def capture(self, fn, *args, **kwargs):
+            self.capture_fn = fn
+
+    monkeypatch.setattr(spec_module, "SpeculatorCudaGraphManager", FakeCudaGraphManager)
+
+    speculator = object.__new__(_TestSpeculator)
+    speculator.vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(
+            num_speculative_tokens_per_batch_size=[
+                (1, 1, 4),
+                (2, 2, 2),
+                (3, 3, 1),
+                (4, 4, 0),
+            ]
+        )
+    )
+    speculator.device = torch.device("cpu")
+    speculator.num_speculative_steps = 4
+    speculator.use_fused_multi_step_decode = True
+    speculator.last_token_indices = torch.zeros(2, dtype=torch.int64)
+    speculator.idx_mapping = torch.zeros(2, dtype=torch.int64)
+    speculator.max_num_reqs = 2
+    speculator.model_state = object()
+    speculator.target_input_buffers = object()
+    speculator.block_tables = object()
+    speculator.target_attn_groups = []
+    speculator.kv_cache_config = object()
+    speculator.input_buffers = object()
+    speculator.attn_groups = []
+    speculator.on_prefill_begin = Mock()
+    speculator.on_prefill_end = Mock()
+    speculator.on_multi_step_decode_begin = Mock()
+    speculator.on_multi_step_decode_end = Mock()
+    speculator._prefill = Mock()
+    speculator._generate_fused_drafts = Mock()
+
+    speculator.init_cudagraph_manager(CUDAGraphMode.FULL_AND_PIECEWISE)
+    speculator.capture()
+
+    assert len(created_managers) == 3  # Prefill, K2 decode, K4 decode.
+    assert set(speculator.decode_cudagraph_managers) == {2, 4}
+    assert (
+        speculator.decode_cudagraph_manager is speculator.decode_cudagraph_managers[4]
+    )
+    assert all(
+        manager.kwargs["use_dynamic_decode_query_len"] is False
+        for manager in speculator.decode_cudagraph_managers.values()
+    )
+    for depth, manager in speculator.decode_cudagraph_managers.items():
+        assert manager.capture_fn is not None
+        manager.capture_fn()
+        assert speculator._generate_fused_drafts.call_args.kwargs == {
+            "num_speculative_tokens": depth
+        }
+
+
+@pytest.mark.parametrize(
+    ("selected_depth", "expected_depth", "manager_key"),
+    [(1, 1, None), (2, 2, 2), (4, 4, 4), (None, 4, 4)],
+)
+def test_propose_honors_positive_selected_depth(
+    monkeypatch, selected_depth, expected_depth, manager_key
+):
+    speculator = object.__new__(_TestSpeculator)
+    speculator.num_speculative_steps = 4
+    speculator.max_model_len = 32
+    speculator.max_num_reqs = 2
+    speculator.dp_size = 1
+    speculator.dp_rank = 0
+    speculator.supports_mm_inputs = False
+    speculator.hidden_states = torch.zeros(2, 3)
+    speculator.draft_tokens = torch.arange(8).reshape(2, 4)
+    speculator.last_token_indices = torch.zeros(2, dtype=torch.int64)
+    speculator.current_draft_step = torch.tensor(0)
+    speculator.input_buffers = SimpleNamespace()
+    speculator.prefill_cudagraph_manager = object()
+    reduced_manager = object()
+    max_manager = object()
+    speculator.decode_cudagraph_managers = {2: reduced_manager, 4: max_manager}
+    speculator.decode_cudagraph_manager = max_manager
+    speculator.use_fused_multi_step_decode = True
+    speculator._copy_request_inputs = Mock()
+    speculator._prepare_eplb_forward = Mock()
+    speculator.on_prefill_begin = Mock()
+    speculator.on_prefill_end = Mock()
+    speculator.on_multi_step_decode_begin = Mock()
+    speculator.on_multi_step_decode_end = Mock()
+    speculator._prefill = Mock()
+    speculator._multi_step_decode = Mock()
+    speculator._fused_multi_step_decode = Mock()
+
+    monkeypatch.setattr(spec_module, "prepare_prefill_inputs", Mock())
+    prepare_decode = Mock()
+    monkeypatch.setattr(spec_module, "prepare_decode_inputs", prepare_decode)
+    monkeypatch.setattr(spec_module, "get_uniform_decode_token_count", Mock())
+    dispatched_managers = []
+
+    def dispatch(manager, num_reqs, num_tokens, *args, **kwargs):
+        dispatched_managers.append(manager)
+        return (
+            BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.NONE,
+                num_tokens=num_tokens,
+                num_reqs=num_reqs,
+            ),
+            None,
+        )
+
+    monkeypatch.setattr(spec_module, "dispatch_cg_and_sync_dp", dispatch)
+
+    input_batch = SimpleNamespace(
+        num_tokens=2,
+        num_tokens_after_padding=2,
+        num_reqs=2,
+        num_scheduled_tokens=torch.ones(2, dtype=torch.int32),
+        seq_lens=torch.ones(2, dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.ones(2, dtype=torch.int32),
+        idx_mapping=torch.arange(2),
+        has_prefill=False,
+    )
+    output = speculator.propose(
+        input_batch,
+        attn_metadata={},
+        slot_mappings={},
+        last_hidden_states=torch.ones(2, 3),
+        aux_hidden_states=None,
+        num_sampled=torch.ones(2, dtype=torch.int32),
+        num_rejected=torch.zeros(2, dtype=torch.int32),
+        last_sampled=torch.zeros(2, dtype=torch.int64),
+        next_prefill_tokens=torch.zeros(2, dtype=torch.int64),
+        temperature=torch.zeros(2),
+        seeds=torch.zeros(2, dtype=torch.int64),
+        num_speculative_tokens=selected_depth,
+    )
+
+    assert output.shape == (2, expected_depth)
+    if manager_key is None:
+        assert dispatched_managers == [speculator.prefill_cudagraph_manager]
+        prepare_decode.assert_not_called()
+        speculator._fused_multi_step_decode.assert_not_called()
+    else:
+        expected_manager = speculator.decode_cudagraph_managers[manager_key]
+        assert dispatched_managers == [
+            speculator.prefill_cudagraph_manager,
+            expected_manager,
+        ]
+        prepare_decode.assert_called_once()
+        assert speculator._fused_multi_step_decode.call_args.args[-2:] == (
+            expected_depth,
+            expected_manager,
+        )
+
+
+@pytest.mark.parametrize("selected_depth", [2, 4])
+@pytest.mark.parametrize(
+    ("method_name", "cg_mode"),
+    [
+        ("_multi_step_decode", CUDAGraphMode.NONE),
+        ("_multi_step_decode", CUDAGraphMode.FULL),
+        ("_fused_multi_step_decode", CUDAGraphMode.NONE),
+        ("_fused_multi_step_decode", CUDAGraphMode.FULL),
+    ],
+)
+def test_selected_depth_controls_physical_draft_work(
+    selected_depth, method_name, cg_mode
+):
+    speculator = object.__new__(_TestSpeculator)
+    speculator.num_speculative_steps = 4
+    speculator.current_draft_step = torch.tensor(0)
+    speculator.input_buffers = SimpleNamespace(
+        positions=torch.arange(2),
+        query_start_loc=torch.arange(3),
+    )
+    speculator.idx_mapping = torch.arange(2)
+    speculator.attn_groups = []
+    speculator._generate_draft = Mock()
+    default_manager = SimpleNamespace(run_fullgraph=Mock())
+    selected_manager = SimpleNamespace(run_fullgraph=Mock())
+    speculator.decode_cudagraph_manager = default_manager
+    batch_desc = BatchExecutionDescriptor(
+        cg_mode=cg_mode,
+        num_tokens=2,
+        num_reqs=2,
+    )
+    kwargs = {"num_speculative_tokens": selected_depth}
+    if method_name == "_fused_multi_step_decode":
+        kwargs["decode_cudagraph_manager"] = selected_manager
+
+    getattr(speculator, method_name)(
+        num_reqs=2,
+        skip_attn=True,
+        batch_desc=batch_desc,
+        seq_lens_cpu_upper_bound=torch.ones(2, dtype=torch.int32),
+        num_tokens_across_dp=None,
+        **kwargs,
+    )
+
+    if cg_mode == CUDAGraphMode.NONE:
+        assert speculator._generate_draft.call_count == selected_depth - 1
+        selected_manager.run_fullgraph.assert_not_called()
+    elif method_name == "_multi_step_decode":
+        assert default_manager.run_fullgraph.call_count == selected_depth - 1
+        speculator._generate_draft.assert_not_called()
+    else:
+        selected_manager.run_fullgraph.assert_called_once_with(batch_desc)
+        default_manager.run_fullgraph.assert_not_called()
+        speculator._generate_draft.assert_not_called()
+
+
 def test_propose_k0_runs_prefill_without_draft_decode(monkeypatch):
     speculator = object.__new__(_TestSpeculator)
     speculator.num_speculative_steps = 2
