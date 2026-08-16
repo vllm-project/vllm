@@ -96,6 +96,21 @@ def wrap_data_with_event(data: str, event: str):
     return f"event: {event}\ndata: {data}\n\n"
 
 
+def _parse_tool_use_input(arguments: str) -> dict[str, Any]:
+    """Parse tool-call arguments into an Anthropic tool_use input object.
+
+    Model output is often truncated or a non-object JSON value. Those must
+    not fail a completed generation.
+    """
+    try:
+        parsed = json.loads(arguments) if arguments else {}
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(parsed, dict):
+        return parsed
+    return {"value": parsed}
+
+
 class AnthropicServingMessages(OpenAIServingChat):
     """Handler for Anthropic Messages API requests"""
 
@@ -659,7 +674,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                 type="tool_use",
                 id=tool_call.id,
                 name=tool_call.function.name,
-                input=json.loads(tool_call.function.arguments),
+                input=_parse_tool_use_input(tool_call.function.arguments),
             )
             content += [anthropic_tool_call]
 
