@@ -433,7 +433,8 @@ class Attention(nn.Module, AttentionLayerBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
-        compilation_config.static_all_kv_layers.append(prefix)
+        if kv_sharing_target_layer_name is None:
+            compilation_config.static_all_kv_layers.append(prefix)
         self.attn_type = attn_type
 
         if kv_sharing_target_layer_name is not None:
