@@ -227,11 +227,10 @@ class CuMemAllocator:
         return data.handle
 
     def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
-        """Put mapped allocations in sleep mode.
-
-        Previously sleeping allocations keep their existing offload or discard
-        policy. Mapped allocations with the specified tags are offloaded to CPU
-        memory, and the others are discarded.
+        """
+        Put the allocator in sleep mode.
+        All data in the memory allocation with the specified tag will be
+        offloaded to CPU memory, and others will be discarded.
 
         Args:
             offload_tags: The tags of the memory allocation that will be
@@ -295,10 +294,7 @@ class CuMemAllocator:
         torch.cuda.empty_cache()
 
     def discard(self, tags: tuple[str, ...] | str) -> None:
-        """Discard mapped allocations with the given tags without CPU backup.
-
-        Previously sleeping allocations keep their existing policy.
-        """
+        """Discard mapped allocations with the given tags without CPU backup."""
         if isinstance(tags, str):
             tags = (tags,)
 

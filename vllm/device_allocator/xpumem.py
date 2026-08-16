@@ -165,12 +165,6 @@ class XpuMemAllocator:
         return data.handle
 
     def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None:
-        """Put mapped allocations in sleep mode.
-
-        Previously sleeping allocations keep their existing offload or discard
-        policy. Mapped allocations with the specified tags are offloaded to CPU
-        memory, and the others are discarded.
-        """
         if offload_tags is None:
             offload_tags = (XpuMemAllocator.default_tag,)
         elif isinstance(offload_tags, str):
@@ -238,10 +232,7 @@ class XpuMemAllocator:
             xpu_empty_cache()
 
     def discard(self, tags: tuple[str, ...] | str) -> None:
-        """Discard mapped allocations with the given tags without CPU backup.
-
-        Previously sleeping allocations keep their existing policy.
-        """
+        """Discard mapped allocations with the given tags without CPU backup."""
         if isinstance(tags, str):
             tags = (tags,)
 
