@@ -17,6 +17,12 @@ import pytest
 import torch
 from packaging import version
 
+from tests.evals.gsm8k.gsm8k_eval import (
+    GSM8KEvalSpec,
+    assert_gsm8k_result,
+    evaluate_gsm8k_lm_eval,
+    load_gsm8k_eval_specs,
+)
 from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkConfig,
@@ -364,13 +370,7 @@ class AccuracyTestConfig:
         return model_args
 
 
-GSM8K_ACCURACY_CONFIGS = [
-    # Private model.
-    AccuracyTestConfig(
-        model_name="amd/DeepSeek-R1-WMXFP4-AMXFP4-Scale-UINT8-MoE-Quant",
-        excepted_value=0.96,
-    ),
-]
+GSM8K_ACCURACY_CONFIGS = load_gsm8k_eval_specs("quark")
 
 WIKITEXT_ACCURACY_CONFIGS = [
     AccuracyTestConfig(
@@ -480,28 +480,25 @@ def test_nvfp4_wikitext_correctness(tp_size: int):
     not HF_HUB_AMD_ORG_ACCESS,
     reason="Read access to huggingface.co/amd is required for this test.",
 )
-def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
+def test_mxfp4_gsm8k_correctness(config: GSM8KEvalSpec):
     device_count = torch.accelerator.device_count()
     if device_count < 8:
         pytest.skip(f"This test requires >=8 gpus, got only {device_count}")
 
-    task = "gsm8k"
-    rtol = 0.03
-
-    results = lm_eval.simple_evaluate(
-        model="vllm",
-        model_args=config.get_model_args(tp_size=8, model_max_len=38768),
-        tasks=task,
-        batch_size=64,
-        num_fewshot=8,
+    assert config.model is not None
+    model_config = AccuracyTestConfig(
+        model_name=config.model,
+        excepted_value=config.accuracy_threshold,
     )
 
-    EXPECTED_VALUE = config.excepted_value
-    measured_value = results["results"][task]["exact_match,strict-match"]
-    assert (
-        measured_value - rtol < EXPECTED_VALUE
-        and measured_value + rtol > EXPECTED_VALUE
-    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+    result = evaluate_gsm8k_lm_eval(
+        model="vllm",
+        model_args=model_config.get_model_args(tp_size=8, model_max_len=38768),
+        batch_size=64,
+        **config.lm_eval_kwargs(),
+    )
+
+    assert_gsm8k_result(result, config, context=config.model)
 
 
 @pytest.mark.skipif(

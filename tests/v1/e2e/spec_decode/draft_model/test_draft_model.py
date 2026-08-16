@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from tests.evals.gsm8k.gsm8k_eval import GSM8KEvalSpec, get_gsm8k_eval_spec
 from tests.utils import multi_gpu_only, single_gpu_only
 from vllm import SamplingParams
 from vllm.config import CompilationConfig, VllmConfig, replace
@@ -32,7 +33,7 @@ class ArgsTest:
     num_speculative_tokens: int
     expected_acceptance_rate: float
     expected_acceptance_len: float
-    expected_gsm8k_accuracy: float = 0.0  # skip by default
+    gsm8k_spec: GSM8KEvalSpec | None = None
     # Defaults
     enforce_eager: bool = True
     parallel_drafting: bool = False
@@ -71,7 +72,7 @@ cases = [
         num_speculative_tokens=3,  # K
         expected_acceptance_len=0.98 * (3 + 1),  # epsilon discount of K + 1
         expected_acceptance_rate=0.98,  # slight epsilon
-        expected_gsm8k_accuracy=0.25,  # ref: 35-40%
+        gsm8k_spec=get_gsm8k_eval_spec("draft_model", "qwen3-0.6b-self-draft"),
     ),
     # Smaller draft model, stochastic sampling.
     ArgsTest(
@@ -81,7 +82,7 @@ cases = [
         num_speculative_tokens=3,
         expected_acceptance_len=3.4,  # ref: 3.7
         expected_acceptance_rate=0.80,  # ref: 0.90
-        expected_gsm8k_accuracy=0.5,  # ref: 60%. Note gsm8k always runs greedy sampling
+        gsm8k_spec=get_gsm8k_eval_spec("draft_model", "qwen3-1.7b-draft-0.6b"),
     ),
 ]
 
@@ -159,7 +160,7 @@ def test_draft_model_tensor_parallelism(vllm_runner):
         draft_tensor_parallel_size=2,
         **some_high_acceptance_metrics(),
         enforce_eager=False,
-        expected_gsm8k_accuracy=0.5,
+        gsm8k_spec=get_gsm8k_eval_spec("draft_model", "qwen3-1.7b-tp2"),
     )
     assert_draft_model_correctness(sd_case, vllm_runner)
 
@@ -346,9 +347,9 @@ def assert_draft_model_correctness(args: ArgsTest, vllm_runner):
         acceptance_len: float = compute_acceptance_len(metrics)
 
         # Need to evaluate after getting metrics to avoid polluting the AR
-        evaluate_llm_for_gsm8k(
-            spec_llm, expected_accuracy_threshold=args.expected_gsm8k_accuracy
-        )
+        if args.gsm8k_spec is not None:
+            assert args.gsm8k_spec.model == args.target_model
+            evaluate_llm_for_gsm8k(spec_llm, args.gsm8k_spec)
 
         print(
             f"spec-decode: target={args.target_model}, draft={args.draft_model}, "

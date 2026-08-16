@@ -11,7 +11,11 @@ correctly with the DeepSeek-V2-Lite model using GSM8K evaluation.
 import pytest
 import torch
 
-from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k
+from tests.evals.gsm8k.gsm8k_eval import (
+    assert_gsm8k_result,
+    evaluate_gsm8k,
+    get_gsm8k_eval_spec,
+)
 from tests.utils import RemoteOpenAIServer
 from vllm.utils.import_utils import has_deep_ep
 
@@ -26,13 +30,10 @@ except Exception:
     # Be conservative: if we can't detect, don't xfail by default
     IS_BLACKWELL = False
 
-MODEL_NAME = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+GSM8K_SPEC = get_gsm8k_eval_spec("dbo", "deepseek-v2-lite-chat")
+assert GSM8K_SPEC.model is not None
+MODEL_NAME = GSM8K_SPEC.model
 DP_SIZE = 2
-
-# GSM8K eval configuration
-NUM_QUESTIONS = 256  # Fast eval for CI; but must be large enough to hit dbo thresholds
-NUM_SHOTS = 5  # Few-shot examples
-MIN_ACCURACY = 0.62  # Expected 0.64 with 2% buffer (based on vLLM test data)
 
 # Increase max_num_seqs to trigger DBO for decode batches
 # With 64 seqs, decode batches should exceed the 32 token threshold
@@ -51,7 +52,7 @@ DEEPEP_BACKENDS = [
     IS_BLACKWELL,
     reason=(
         "Temporary: DBO accuracy unstable on Blackwell "
-        "(doesn't meet expectation of MIN_ACCURACY = 0.62)"
+        f"(doesn't meet expectation of {GSM8K_SPEC.accuracy_threshold})"
     ),
 )
 def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
@@ -95,15 +96,14 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
 
         # Run GSM8K evaluation
         results = evaluate_gsm8k(
-            num_questions=NUM_QUESTIONS,
-            num_shots=NUM_SHOTS,
+            **GSM8K_SPEC.isolated_kwargs(),
             host=host,
             port=port,
         )
 
         # Validate accuracy is reasonable
-        accuracy = results["accuracy"]
-        assert accuracy >= MIN_ACCURACY, (
-            f"DBO+DP+EP accuracy too low ({all2all_backend}): "
-            f"{accuracy:.3f} < {MIN_ACCURACY:.3f} "
+        assert_gsm8k_result(
+            results,
+            GSM8K_SPEC,
+            context=f"DBO+DP+EP ({all2all_backend})",
         )

@@ -38,13 +38,17 @@ import requests
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
 
-from .gsm8k_eval import evaluate_gsm8k
+from .gsm8k_eval import (
+    GSM8KEvalSpec,
+    assert_gsm8k_result,
+    evaluate_gsm8k,
+    load_gsm8k_eval_specs,
+)
 
 if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
 
-NUM_QUESTIONS = 200
-NUM_FEWSHOT = 5
+GSM8K_SPECS = {spec.id: spec for spec in load_gsm8k_eval_specs("kv_offloading")}
 
 _OFFLOAD_SYNC_TIMEOUT = 60
 
@@ -113,39 +117,37 @@ def _reset_gpu_prefix_cache(base_url: str) -> None:
 
 @dataclass
 class OffloadingModelConfig:
-    id: str
-    model: str
+    gsm8k_spec: GSM8KEvalSpec
     connector: str
-    accuracy_threshold: float
-    tolerance: float = 0.05
     extra_server_args: list[str] = field(default_factory=list)
     env_dict: dict[str, str] = field(default_factory=dict)
     cpu_offload_gib: int = 4
     startup_timeout: int = 600
     spec_name: str = "CPUOffloadingSpec"
 
+    @property
+    def id(self) -> str:
+        return self.gsm8k_spec.id
+
+    @property
+    def model(self) -> str:
+        assert self.gsm8k_spec.model is not None
+        return self.gsm8k_spec.model
+
 
 MODELS = [
     # ── OffloadingConnector ──────────────────────────────────────────
     OffloadingModelConfig(
-        id="offloading-nemotron-h-8b",
-        model="nvidia/Nemotron-H-8B-Base-8K",
+        gsm8k_spec=GSM8K_SPECS["offloading-nemotron-h-8b"],
         connector="OffloadingConnector",
-        # Baseline ~0.49 on 200 questions (measured on GB200).
-        accuracy_threshold=0.39,
     ),
     OffloadingModelConfig(
-        id="offloading-gemma-4-e4b-it",
-        model="google/gemma-4-E4B-it",
+        gsm8k_spec=GSM8K_SPECS["offloading-gemma-4-e4b-it"],
         connector="OffloadingConnector",
-        # Baseline ~0.64 on 200 questions (measured on GB200).
-        accuracy_threshold=0.55,
     ),
     OffloadingModelConfig(
-        id="offloading-qwen3.5-35b",
-        model="Qwen/Qwen3.5-35B-A3B",
+        gsm8k_spec=GSM8K_SPECS["offloading-qwen3.5-35b"],
         connector="OffloadingConnector",
-        accuracy_threshold=0.75,
         extra_server_args=[
             "--tensor-parallel-size",
             "2",
@@ -154,11 +156,8 @@ MODELS = [
         startup_timeout=1200,
     ),
     OffloadingModelConfig(
-        id="offloading-deepseek-v4-flash",
-        model="deepseek-ai/DeepSeek-V4-Flash",
+        gsm8k_spec=GSM8K_SPECS["offloading-deepseek-v4-flash"],
         connector="OffloadingConnector",
-        # Baseline ~0.97 on 200 questions (measured on GB200).
-        accuracy_threshold=0.90,
         extra_server_args=[
             "--tensor-parallel-size",
             "4",
@@ -172,11 +171,8 @@ MODELS = [
         startup_timeout=1200,
     ),
     OffloadingModelConfig(
-        id="offloading-deepseek-v2-lite-tiering-tp2",
-        model="deepseek-ai/DeepSeek-V2-Lite",
+        gsm8k_spec=GSM8K_SPECS["offloading-deepseek-v2-lite-tiering-tp2"],
         connector="OffloadingConnector",
-        # Baseline 0.360/0.345 over two runs (measured on 2xA100).
-        accuracy_threshold=0.35,
         extra_server_args=[
             "--tensor-parallel-size",
             "2",
@@ -187,22 +183,16 @@ MODELS = [
     ),
     # ── SimpleCPUOffloadConnector ────────────────────────────────────
     OffloadingModelConfig(
-        id="simple-nemotron-h-8b",
-        model="nvidia/Nemotron-H-8B-Base-8K",
+        gsm8k_spec=GSM8K_SPECS["simple-nemotron-h-8b"],
         connector="SimpleCPUOffloadConnector",
-        accuracy_threshold=0.45,
     ),
     OffloadingModelConfig(
-        id="simple-gemma-4-e4b-it",
-        model="google/gemma-4-E4B-it",
+        gsm8k_spec=GSM8K_SPECS["simple-gemma-4-e4b-it"],
         connector="SimpleCPUOffloadConnector",
-        accuracy_threshold=0.55,
     ),
     OffloadingModelConfig(
-        id="simple-qwen3.5-35b",
-        model="Qwen/Qwen3.5-35B-A3B",
+        gsm8k_spec=GSM8K_SPECS["simple-qwen3.5-35b"],
         connector="SimpleCPUOffloadConnector",
-        accuracy_threshold=0.75,
         extra_server_args=[
             "--tensor-parallel-size",
             "2",
@@ -211,10 +201,8 @@ MODELS = [
         startup_timeout=1200,
     ),
     OffloadingModelConfig(
-        id="simple-deepseek-v4-flash",
-        model="deepseek-ai/DeepSeek-V4-Flash",
+        gsm8k_spec=GSM8K_SPECS["simple-deepseek-v4-flash"],
         connector="SimpleCPUOffloadConnector",
-        accuracy_threshold=0.90,
         extra_server_args=[
             "--tensor-parallel-size",
             "4",
@@ -266,23 +254,22 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
 
         for run_idx in range(1, 3):
             results = evaluate_gsm8k(
-                num_questions=NUM_QUESTIONS,
-                num_shots=NUM_FEWSHOT,
+                **cfg.gsm8k_spec.isolated_kwargs(),
                 host=f"http://{server.host}",
                 port=server.port,
             )
 
             print(
                 f"GSM8K run {run_idx}/2 + {cfg.connector} ({cfg.id}): "
-                f"accuracy={results['accuracy']:.4f}, "
-                f"invalid_rate={results['invalid_rate']:.3f}, "
-                f"latency={results['latency']:.1f}s"
+                f"accuracy={results.accuracy:.4f}, "
+                f"invalid_rate={results.invalid_rate:.3f}, "
+                f"latency={results.latency:.1f}s"
             )
 
-            assert results["accuracy"] >= (cfg.accuracy_threshold - cfg.tolerance), (
-                f"GSM8K run {run_idx}/2 accuracy "
-                f"{results['accuracy']:.4f} below "
-                f"{cfg.accuracy_threshold - cfg.tolerance:.4f}"
+            assert_gsm8k_result(
+                results,
+                cfg.gsm8k_spec,
+                context=f"GSM8K run {run_idx}/2 {cfg.id}",
             )
 
             if run_idx == 1:

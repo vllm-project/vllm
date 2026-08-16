@@ -5,7 +5,12 @@ import dataclasses
 import pytest
 import torch
 
-from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
+from tests.evals.gsm8k.gsm8k_eval import (
+    GSM8KEvalSpec,
+    assert_gsm8k_result,
+    evaluate_gsm8k_offline,
+    get_gsm8k_eval_spec,
+)
 from tests.utils import large_gpu_mark
 from vllm import LLM
 from vllm.config import SpeculativeConfig
@@ -14,11 +19,9 @@ from vllm.distributed import cleanup_dist_env_and_memory
 
 @dataclasses.dataclass
 class SpeculatorTestConfig:
-    model_path: str
+    gsm8k_spec: GSM8KEvalSpec
     method: str
     display_name: str
-    expected_gsm8k_accuracy: float
-    accuracy_rtol: float
     expected_acceptance_len: float
     acceptance_len_rtol: float
     expected_per_pos_acceptance_rates: tuple[float, ...]
@@ -26,13 +29,16 @@ class SpeculatorTestConfig:
     quantization: str | None = None
     parallel_drafting: bool | None = None
 
+    @property
+    def model_path(self) -> str:
+        assert self.gsm8k_spec.model is not None
+        return self.gsm8k_spec.model
+
 
 DFLASH_CONFIG = SpeculatorTestConfig(
-    model_path="nm-testing/dflash-qwen3-8b-speculators",
+    gsm8k_spec=get_gsm8k_eval_spec("speculators", "dflash"),
     method="dflash",
     display_name="DFlash",
-    expected_gsm8k_accuracy=0.885,
-    accuracy_rtol=0.03,
     expected_acceptance_len=3.45,
     acceptance_len_rtol=0.15,
     expected_per_pos_acceptance_rates=(0.795, 0.611, 0.429, 0.282),
@@ -41,11 +47,9 @@ DFLASH_CONFIG = SpeculatorTestConfig(
 )
 
 PEAGLE_CONFIG = SpeculatorTestConfig(
-    model_path="nm-testing/qwen3-8b-peagle-speculators",
+    gsm8k_spec=get_gsm8k_eval_spec("speculators", "peagle"),
     method="eagle3",
     display_name="PEagle",
-    expected_gsm8k_accuracy=0.88,
-    accuracy_rtol=0.05,
     expected_acceptance_len=2.27,
     acceptance_len_rtol=0.20,
     expected_per_pos_acceptance_rates=(0.66, 0.36, 0.18, 0.09),
@@ -54,14 +58,9 @@ PEAGLE_CONFIG = SpeculatorTestConfig(
 )
 
 QWEN3_EAGLE3_CONFIG = SpeculatorTestConfig(
-    model_path=(
-        "inference-optimization/"
-        "Qwen3-8B-from-Qwen3-8B_regen-speculators.eagle3-qwen3arch-ckpt1"
-    ),
+    gsm8k_spec=get_gsm8k_eval_spec("speculators", "qwen3arch-eagle3"),
     method="eagle3",
     display_name="Qwen3 Eagle3",
-    expected_gsm8k_accuracy=0.88,
-    accuracy_rtol=0.05,
     expected_acceptance_len=2.67,
     acceptance_len_rtol=0.10,
     expected_per_pos_acceptance_rates=(0.76, 0.55, 0.36),
@@ -69,11 +68,9 @@ QWEN3_EAGLE3_CONFIG = SpeculatorTestConfig(
 )
 
 QWEN3_PEAGLE_CONFIG = SpeculatorTestConfig(
-    model_path="inference-optimization/Qwen3-8B-speculators.peagle-qwen3arch-ckpt4",
+    gsm8k_spec=get_gsm8k_eval_spec("speculators", "qwen3arch-peagle"),
     method="eagle3",
     display_name="Qwen3 PEagle",
-    expected_gsm8k_accuracy=0.88,
-    accuracy_rtol=0.05,
     expected_acceptance_len=3.42,
     acceptance_len_rtol=0.15,
     expected_per_pos_acceptance_rates=(0.78, 0.59, 0.43, 0.29, 0.18, 0.10, 0.05),
@@ -204,12 +201,13 @@ def test_speculators_correctness(monkeypatch, config):
         disable_log_stats=False,
     )
 
-    results = evaluate_gsm8k_offline(spec_llm)
-    accuracy = results["accuracy"]
+    results = evaluate_gsm8k_offline(spec_llm, **config.gsm8k_spec.isolated_kwargs())
+    accuracy = results.accuracy
     print(f"GSM8K Accuracy: {accuracy:.4f}")
-    accuracy_threshold = config.expected_gsm8k_accuracy * (1 - config.accuracy_rtol)
-    assert accuracy >= accuracy_threshold, (
-        f"Expected GSM8K accuracy >= {accuracy_threshold:.3f}, got {accuracy:.3f}"
+    assert_gsm8k_result(
+        results,
+        config.gsm8k_spec,
+        context=config.display_name,
     )
 
     current_metrics = spec_llm.get_metrics()

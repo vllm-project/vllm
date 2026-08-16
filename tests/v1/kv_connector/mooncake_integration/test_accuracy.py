@@ -2,23 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 
-import lm_eval
 import openai
+
+from tests.evals.gsm8k.gsm8k_eval import (
+    assert_gsm8k_result,
+    evaluate_gsm8k_lm_eval,
+    load_gsm8k_eval_specs,
+)
 
 BASE_URL = "http://localhost:8192/v1"
 NUM_CONCURRENT = 100
-TASK = "gsm8k"
-FILTER = "exact_match,strict-match"
-RTOL = 0.05
-
-# Model-specific expected values
-EXPECTED_VALUES = {
-    "Qwen/Qwen3-0.6B": 0.41,
+GSM8K_SPECS = {
+    spec.model: spec
+    for spec in load_gsm8k_eval_specs("mooncake")
+    if spec.model is not None
 }
 
 SIMPLE_PROMPT = (
-    "The best part about working on vLLM is that I got to meet so many people across "
-    "various different organizations like UCB, Google, and Meta which means",
+    (
+        "The best part about working on vLLM is that I got to meet so many people "
+        "across various different organizations like UCB, Google, and Meta which means"
+    ),
 )
 
 # Get model name from environment variable
@@ -38,30 +42,28 @@ def run_simple_prompt():
 def test_accuracy():
     """Run the end to end accuracy test."""
     run_simple_prompt()
+    gsm8k_spec = GSM8K_SPECS.get(MODEL_NAME)
+    eval_kwargs = gsm8k_spec.lm_eval_kwargs() if gsm8k_spec else {}
 
     model_args = (
         f"model={MODEL_NAME},"
         f"base_url={BASE_URL}/completions,"
         f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False"
     )
-    results = lm_eval.simple_evaluate(
+    result = evaluate_gsm8k_lm_eval(
         model="local-completions",
         model_args=model_args,
-        tasks=TASK,
+        **eval_kwargs,
     )
 
-    measured_value = results["results"][TASK][FILTER]
-    expected_value = EXPECTED_VALUES.get(MODEL_NAME)
+    measured_value = result.accuracy
 
     print(f"Measured accuracy value: {measured_value}\n")
-    if expected_value is None:
+    if gsm8k_spec is None:
         print(
             f"Warning: No expected value found for {MODEL_NAME}. "
             "Skipping accuracy check."
         )
         return
 
-    assert (
-        measured_value - RTOL < expected_value
-        and measured_value + RTOL > expected_value
-    ), f"Expected: {expected_value} | Measured: {measured_value}"
+    assert_gsm8k_result(result, gsm8k_spec, context=MODEL_NAME)

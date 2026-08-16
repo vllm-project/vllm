@@ -2,53 +2,29 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 
-import lm_eval
 import openai
+
+from tests.evals.gsm8k.gsm8k_eval import (
+    assert_gsm8k_result,
+    evaluate_gsm8k_lm_eval,
+    load_gsm8k_eval_specs,
+)
 
 BASE_URL = "http://localhost:8192/v1"
 NUM_CONCURRENT = int(os.getenv("NUM_CONCURRENT", "100"))
-TASK = "gsm8k"
-FILTER = "exact_match,strict-match"
-# TODO(#43186): Widened from 0.03 to absorb chunk_scan/SSU numeric jitter
-# on granite-4.0-h-tiny under NIXL PD; tighten when the kernel divergence
-# is fixed.
-RTOL = 0.05
-
-# Model-specific expected values
-EXPECTED_VALUES = {
-    "Qwen/Qwen3-0.6B": 0.41,
-    "deepseek-ai/deepseek-vl2-small": 0.59,
-    "deepseek-ai/deepseek-vl2-tiny": 0.19,
-    "deepseek-ai/DeepSeek-V2-Lite-Chat": 0.65,
-    "google/gemma-3-4b-it": 0.74,
-    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8": 0.84,
-    "ibm-granite/granite-4.0-h-tiny": 0.77,
-    "Qwen/Qwen3.5-0.8B": 0.33,
-    "google/gemma-4-E2B-it": 0.485,
-    "ai21labs/AI21-Jamba2-3B": 0.74,
-    "deepseek-ai/DeepSeek-V4-Flash": 0.95,
+GSM8K_SPECS = {
+    spec.model: spec for spec in load_gsm8k_eval_specs("nixl") if spec.model is not None
 }
 
 SIMPLE_PROMPT = (
-    "The best part about working on vLLM is that I got to meet so many people across "
-    "various different organizations like UCB, Google, and Meta which means",
+    (
+        "The best part about working on vLLM is that I got to meet so many people "
+        "across various different organizations like UCB, Google, and Meta which means"
+    ),
 )
 
 # Get model name from environment variable
 MODEL_NAME = os.environ.get("TEST_MODEL", "Qwen/Qwen3-0.6B")
-
-
-def _meets_accuracy_threshold(measured_value: float, expected_value: float) -> bool:
-    return measured_value >= expected_value - RTOL
-
-
-def test_accuracy_threshold_is_one_sided():
-    expected_value = 0.77
-    minimum_value = expected_value - RTOL
-
-    assert _meets_accuracy_threshold(minimum_value, expected_value)
-    assert _meets_accuracy_threshold(expected_value + RTOL + 0.01, expected_value)
-    assert not _meets_accuracy_threshold(minimum_value - 0.01, expected_value)
 
 
 def run_simple_prompt():
@@ -64,6 +40,8 @@ def run_simple_prompt():
 def test_accuracy():
     """Run the end to end accuracy test."""
     run_simple_prompt()
+    gsm8k_spec = GSM8K_SPECS.get(MODEL_NAME)
+    eval_kwargs = gsm8k_spec.lm_eval_kwargs() if gsm8k_spec else {}
 
     if "gemma-4" in MODEL_NAME:
         # Gemma4 is quite sensible to having a chat template applied, so we evaluate
@@ -75,12 +53,11 @@ def test_accuracy():
             "tokenizer_backend=huggingface,"
             "trust_remote_code=True"
         )
-        results = lm_eval.simple_evaluate(
+        result = evaluate_gsm8k_lm_eval(
             model="local-chat-completions",
             model_args=model_args,
-            tasks=TASK,
-            num_fewshot=5,
             apply_chat_template=True,
+            **eval_kwargs,
         )
     else:
         model_args = (
@@ -89,24 +66,20 @@ def test_accuracy():
             f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False,"
             "trust_remote_code=True"
         )
-        results = lm_eval.simple_evaluate(
+        result = evaluate_gsm8k_lm_eval(
             model="local-completions",
             model_args=model_args,
-            tasks=TASK,
+            **eval_kwargs,
         )
 
-    measured_value = results["results"][TASK][FILTER]
-    expected_value = EXPECTED_VALUES.get(MODEL_NAME)
+    measured_value = result.accuracy
 
     print(f"Measured accuracy value: {measured_value}\n")
-    if expected_value is None:
+    if gsm8k_spec is None:
         print(
             f"Warning: No expected value found for {MODEL_NAME}. "
             "Skipping accuracy check."
         )
         return
 
-    minimum_value = expected_value - RTOL
-    assert _meets_accuracy_threshold(measured_value, expected_value), (
-        f"Expected at least: {minimum_value} | Measured: {measured_value}"
-    )
+    assert_gsm8k_result(result, gsm8k_spec, context=MODEL_NAME)

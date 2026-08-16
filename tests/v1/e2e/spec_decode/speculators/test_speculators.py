@@ -3,6 +3,7 @@
 
 import pytest
 
+from tests.evals.gsm8k.gsm8k_eval import GSM8KEvalSpec, get_gsm8k_eval_spec
 from tests.utils import single_gpu_only
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
@@ -15,12 +16,12 @@ from ..utils import (
 
 
 @pytest.mark.parametrize(
-    ["model_path", "expected_accuracy_threshold"],
+    "gsm8k_spec",
     [
         # Measured reference: 75%-80%.
-        ("RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3", 0.72),
+        get_gsm8k_eval_spec("spec_decode_speculators", "llama3-eagle3"),
         # Measured reference: 87%-92%.
-        ("RedHatAI/Qwen3-8B-speculator.eagle3", 0.84),
+        get_gsm8k_eval_spec("spec_decode_speculators", "qwen3-eagle3"),
     ],
     ids=["llama3_eagle3_speculator", "qwen3_eagle3_speculator"],
 )
@@ -28,8 +29,7 @@ from ..utils import (
 def test_speculators_model_integration(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
-    model_path: str,
-    expected_accuracy_threshold: float,
+    gsm8k_spec: GSM8KEvalSpec,
     vllm_runner,
 ):
     """
@@ -48,6 +48,8 @@ def test_speculators_model_integration(
     6. Output matches reference (non-speculative) generation
     """
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    assert gsm8k_spec.model is not None
+    model_path = gsm8k_spec.model
 
     # Generate test prompts
     test_prompts = get_test_prompts(mm_enabled=False)
@@ -62,9 +64,7 @@ def test_speculators_model_integration(
         max_model_len=4096,
         gpu_memory_utilization=0.92,
     ) as spec_runner:
-        evaluate_llm_for_gsm8k(
-            spec_runner.llm, expected_accuracy_threshold=expected_accuracy_threshold
-        )
+        evaluate_llm_for_gsm8k(spec_runner.llm, gsm8k_spec)
         spec_outputs = spec_runner.llm.chat(test_prompts, sampling_config)
 
         # Verify speculative config was auto-detected

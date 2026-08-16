@@ -8,13 +8,21 @@ from typing import Any
 import pytest
 import torch
 
-from tests.evals.gsm8k.gsm8k_eval import _build_gsm8k_prompts, evaluate_gsm8k_offline
+from tests.evals.gsm8k.gsm8k_eval import (
+    GSM8KEvalSpec,
+    _build_gsm8k_prompts,
+    assert_gsm8k_result,
+    evaluate_gsm8k_offline,
+    get_gsm8k_eval_spec,
+)
 from vllm import LLM, SamplingParams
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.assets.image import VLM_IMAGES_DIR
 from vllm.outputs import RequestOutput
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.metrics.reader import Metric
+
+DEFAULT_GSM8K_SPEC = get_gsm8k_eval_spec("spec_decode", "default-sanity")
 
 
 def _skip_if_insufficient_gpus_for_tp(tp_size: int):
@@ -103,7 +111,10 @@ def stochastic_sampling() -> SamplingParams:
     return SamplingParams(temperature=1.0, max_tokens=10, ignore_eos=False)
 
 
-def evaluate_llm_for_gsm8k(llm: LLM, expected_accuracy_threshold: float = 0.70) -> None:
+def evaluate_llm_for_gsm8k(
+    llm: LLM,
+    gsm8k_spec: GSM8KEvalSpec = DEFAULT_GSM8K_SPEC,
+) -> None:
     """Evaluate the LLM on GSM8K and check that accuracy is above a sanity threshold.
 
     The default threshold assumes the LLM uses the same target model as the "model_name"
@@ -111,15 +122,13 @@ def evaluate_llm_for_gsm8k(llm: LLM, expected_accuracy_threshold: float = 0.70) 
     on GSM8K with greedy decoding, so we check that it's above a sanity threshold of 70%
     to verify that the model is correct.
     """
-    if expected_accuracy_threshold <= 0.0:
+    if gsm8k_spec.accuracy_threshold <= 0.0:
         print("Skipping GSM8K evaluation")
         return
-    results = evaluate_gsm8k_offline(llm)
-    accuracy = results["accuracy"]
+    results = evaluate_gsm8k_offline(llm, **gsm8k_spec.isolated_kwargs())
+    accuracy = results.accuracy
     print(f"GSM8K accuracy: {accuracy:.3f}")
-    assert accuracy >= expected_accuracy_threshold, (
-        f"Expected GSM8K accuracy >= {expected_accuracy_threshold}, got {accuracy:.3f}"
-    )
+    assert_gsm8k_result(results, gsm8k_spec)
 
 
 def assert_request_outputs_match(

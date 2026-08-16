@@ -10,7 +10,11 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 import requests
 
-from ..evals.gsm8k.gsm8k_eval import evaluate_gsm8k
+from ..evals.gsm8k.gsm8k_eval import (
+    assert_gsm8k_result,
+    evaluate_gsm8k,
+    get_gsm8k_eval_spec,
+)
 from ..utils import RemoteOpenAIServer, multi_gpu_test
 
 
@@ -22,10 +26,9 @@ def cleanup_ray_between_tests():
     yield
 
 
-MODEL_NAME = "deepseek-ai/DeepSeek-V2-Lite-Chat"
-
-NUM_GSM8K_QUESTIONS = 256
-EXPECTED_ACCURACY = 0.58
+GSM8K_SPEC = get_gsm8k_eval_spec("elastic_ep", "deepseek-v2-lite-chat")
+assert GSM8K_SPEC.model is not None
+MODEL_NAME = GSM8K_SPEC.model
 ACCURACY_TOL = 0.08
 MAX_NUM_SEQS = 32
 
@@ -145,19 +148,15 @@ def _scale_with_traffic(
 def _run_gsm8k_eval(server: RemoteOpenAIServer, stage: str) -> float:
     assert server.port is not None
     result = evaluate_gsm8k(
-        num_questions=NUM_GSM8K_QUESTIONS,
+        **GSM8K_SPEC.isolated_kwargs(),
         host=f"http://{server.host}",
         port=server.port,
     )
-    accuracy = result["accuracy"]
+    accuracy = result.accuracy
     print(
-        f"[{stage}] GSM8K accuracy: {accuracy:.3f} "
-        f"({result['num_questions']} questions)"
+        f"[{stage}] GSM8K accuracy: {accuracy:.3f} ({result.num_questions} questions)"
     )
-    assert accuracy >= EXPECTED_ACCURACY, (
-        f"[{stage}] GSM8K accuracy {accuracy:.3f} is below "
-        f"expected threshold {EXPECTED_ACCURACY}"
-    )
+    assert_gsm8k_result(result, GSM8K_SPEC, context=stage)
     return accuracy
 
 

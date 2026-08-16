@@ -13,10 +13,14 @@ import os
 from dataclasses import dataclass
 from typing import Literal, NamedTuple
 
-import lm_eval
 import pytest
 import torch
 
+from tests.evals.gsm8k.gsm8k_eval import (
+    assert_gsm8k_result,
+    evaluate_gsm8k_lm_eval,
+    load_gsm8k_eval_specs,
+)
 from tests.utils import RemoteOpenAIServer, create_new_process_for_each_test
 from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
@@ -28,27 +32,15 @@ logger = init_logger("test_context_parallel")
 
 VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 
-CP_TEST_MODELS = [
-    # TODO support other models
-    # [LANGUAGE GENERATION]
-    "deepseek-ai/DeepSeek-V2-Lite-Chat",
-    "Qwen/Qwen2.5-1.5B-Instruct",
-    "Qwen/Qwen3.5-0.8B",  # hybrid attention model
-]
+GSM8K_SPECS = {
+    spec.model: spec
+    for spec in load_gsm8k_eval_specs("context_parallel")
+    if spec.model is not None
+}
+CP_TEST_MODELS = list(GSM8K_SPECS)
 
 # GSM8K eval configuration
-NUM_SHOTS = 5  # Few-shot examples
-TASK = "gsm8k"
-FILTER = "exact_match,strict-match"
 NUM_CONCURRENT = 128
-# tp accuracy with 2% buffer
-MIN_ACCURACY = {
-    # .buildkite/lm-eval-harness/configs/DeepSeek-V2-Lite-Chat.yaml
-    "deepseek-ai/DeepSeek-V2-Lite-Chat": 0.64,
-    # .buildkite/lm-eval-harness/configs/Qwen2.5-1.5B-Instruct.yaml
-    "Qwen/Qwen2.5-1.5B-Instruct": 0.52,
-    "Qwen/Qwen3.5-0.8B": 0.33,
-}
 
 
 class ParallelSetup(NamedTuple):
@@ -173,6 +165,7 @@ def _test_cp_gsm8k(
     method: Literal["generate"],
     is_multimodal: bool,
 ):
+    gsm8k_spec = GSM8K_SPECS[model_id]
     (
         tp_size,
         pp_size,
@@ -256,19 +249,13 @@ def _test_cp_gsm8k(
             f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False"
         )
 
-        results = lm_eval.simple_evaluate(
+        result = evaluate_gsm8k_lm_eval(
             model="local-completions",
             model_args=model_args,
-            tasks=TASK,
-            num_fewshot=NUM_SHOTS,
+            **gsm8k_spec.lm_eval_kwargs(),
         )
 
-        # Validate accuracy is reasonable
-        accuracy = results["results"][TASK][FILTER]
-        min_accuracy = MIN_ACCURACY[model_id]
-        assert accuracy >= min_accuracy, (
-            f"TP+DCP accuracy too low: {accuracy:.3f} < {min_accuracy:.3f}"
-        )
+        assert_gsm8k_result(result, gsm8k_spec, context="TP+DCP")
 
 
 @pytest.mark.parametrize(

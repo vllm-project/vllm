@@ -1,6 +1,35 @@
 # GSM8K Accuracy Evaluation
 
-This directory contains a replacement for the lm-eval-harness GSM8K evaluation, using an isolated GSM8K script and vLLM server for better performance and control.
+This directory owns the shared result and assertion contract for GSM8K tests.
+It supports two explicit benchmark profiles:
+
+- `isolated-v1` uses the in-repo prompt builder and last-number scorer. It can
+  run against a vLLM server or an offline `LLM` and remains the fast path for
+  most model and feature correctness tests.
+- `lm-eval-v3` delegates prompting and scoring to lm-eval's version 3 `gsm8k`
+  task. It supports offline vLLM and OpenAI-compatible server adapters.
+
+The profiles are not score-equivalent. Tests must keep their existing profile
+and baseline unless they are deliberately rebaselined with model evaluation
+results.
+
+## Evaluation inventory
+
+GSM8K benchmark definitions live in this directory even when the test launcher
+belongs to a topology-specific suite:
+
+- `configs/evals.yaml` is the searchable inventory for distributed,
+  entrypoint, connector, quantization, offloading, and speculative-decoding
+  tests. Each case records its source test, model, profile, metric, sample
+  count, few-shot count, token cap, accuracy floor, and tolerance.
+- The other `configs/*.yaml` files describe models run by
+  `test_gsm8k_correctness.py`; the adjacent `models-*.txt` files select which
+  configs each CI job runs.
+
+Topology-specific process setup stays with its owning test so hardware marks,
+fixtures, and feature assertions remain discoverable in that area. Those tests
+load their GSM8K settings through `get_gsm8k_eval_spec` instead of defining
+benchmark constants inline.
 
 ## Usage
 
@@ -38,3 +67,29 @@ env:                      # Environment variables (optional)
 The `server_args` field accepts any arguments that can be passed to `vllm serve`.
 
 The `env` field accepts a dictionary of environment variables to set for the server process.
+
+## Shared test API
+
+Both profiles return `GSM8KResult`. Accuracy gates should use
+`assert_gsm8k_result`, which verifies the YAML-selected profile and metric and
+treats accuracy improvements as passing:
+
+```python
+from tests.evals.gsm8k.gsm8k_eval import (
+    assert_gsm8k_result,
+    evaluate_gsm8k_lm_eval,
+    get_gsm8k_eval_spec,
+)
+
+spec = get_gsm8k_eval_spec("llm_entrypoint", "qwen3-1.7b")
+result = evaluate_gsm8k_lm_eval(
+    model="vllm",
+    model_args="pretrained=Qwen/Qwen3-1.7B,max_model_len=4096",
+    **spec.lm_eval_kwargs(),
+)
+assert_gsm8k_result(result, spec)
+```
+
+`gsm8k_platinum`, generic multi-task `.buildkite/lm-eval-harness` jobs, and uses
+of GSM8K questions as benchmark traffic are separate contracts. They are not
+dedicated GSM8K correctness evals and intentionally do not use this API.

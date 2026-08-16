@@ -1,28 +1,225 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Isolated GSM8K evaluation script for vLLM serve endpoint.
-"""
+"""Shared GSM8K evaluation helpers and vLLM server CLI."""
 
 import argparse
 import ast
 import asyncio
 import json
+import math
 import os
 import tempfile
 import time
 from collections.abc import Generator
+from dataclasses import asdict, dataclass
+from functools import cache
+from pathlib import Path
+from typing import Any, Literal, TypedDict, cast
 
 import aiohttp
 import numpy as np
 import regex as re
 import requests
+import yaml
 from tqdm.asyncio import tqdm
 
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 
 INVALID = -9999999
+GSM8K_TASK = "gsm8k"
+STRICT_MATCH = "exact_match,strict-match"
+FLEXIBLE_EXTRACT = "exact_match,flexible-extract"
+GSM8K_EVALS_PATH = Path(__file__).with_name("configs") / "evals.yaml"
+
+
+class IsolatedEvalKwargs(TypedDict):
+    num_questions: int
+    num_shots: int
+    max_tokens: int
+
+
+@dataclass(frozen=True)
+class GSM8KEvalSpec:
+    """YAML-owned definition of a GSM8K evaluation."""
+
+    suite: str
+    id: str
+    source: str
+    profile: Literal["isolated-v1", "lm-eval-v3"]
+    metric: str
+    accuracy_threshold: float
+    tolerance: float
+    num_questions: int
+    num_fewshot: int
+    max_tokens: int
+    model: str | None = None
+
+    @property
+    def name(self) -> str:
+        return f"{self.suite}.{self.id}"
+
+    def isolated_kwargs(self) -> IsolatedEvalKwargs:
+        return {
+            "num_questions": self.num_questions,
+            "num_shots": self.num_fewshot,
+            "max_tokens": self.max_tokens,
+        }
+
+    def lm_eval_kwargs(self) -> dict[str, int]:
+        return {"num_fewshot": self.num_fewshot}
+
+
+@cache
+def load_gsm8k_eval_specs(suite: str) -> tuple[GSM8KEvalSpec, ...]:
+    """Load one suite's evaluation definitions from the common manifest."""
+    with open(GSM8K_EVALS_PATH) as config_file:
+        manifest = yaml.safe_load(config_file)
+
+    try:
+        suite_data = manifest["suites"][suite]
+    except (KeyError, TypeError) as exc:
+        raise KeyError(f"Unknown GSM8K eval suite {suite!r}") from exc
+
+    profile_name = suite_data["profile"]
+    try:
+        profile_defaults = manifest["profiles"][profile_name]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(
+            f"GSM8K eval suite {suite!r} has unknown profile {profile_name!r}"
+        ) from exc
+
+    specs = []
+    for case_id, case_data in suite_data["cases"].items():
+        values = profile_defaults | suite_data.get("defaults", {}) | case_data
+        tolerance = float(values["tolerance"])
+        accuracy_threshold = float(values["accuracy_threshold"])
+        if tolerance < 0:
+            raise ValueError(f"{suite}.{case_id} has a negative tolerance")
+        if not 0 <= accuracy_threshold <= 1:
+            raise ValueError(f"{suite}.{case_id} has an invalid accuracy threshold")
+
+        specs.append(
+            GSM8KEvalSpec(
+                suite=suite,
+                id=case_id,
+                source=suite_data["source"],
+                profile=cast(Literal["isolated-v1", "lm-eval-v3"], profile_name),
+                metric=values["metric"],
+                accuracy_threshold=accuracy_threshold,
+                tolerance=tolerance,
+                num_questions=int(values["num_questions"]),
+                num_fewshot=int(values["num_fewshot"]),
+                max_tokens=int(values["max_tokens"]),
+                model=values.get("model"),
+            )
+        )
+    return tuple(specs)
+
+
+def get_gsm8k_eval_spec(suite: str, case_id: str) -> GSM8KEvalSpec:
+    """Return one named evaluation from the common manifest."""
+    try:
+        return next(spec for spec in load_gsm8k_eval_specs(suite) if spec.id == case_id)
+    except StopIteration as exc:
+        raise KeyError(f"Unknown GSM8K eval {suite}.{case_id}") from exc
+
+
+@dataclass(frozen=True)
+class GSM8KResult:
+    """Normalized result returned by every GSM8K evaluation path."""
+
+    accuracy: float
+    profile: Literal["isolated-v1", "lm-eval-v3"]
+    metric: str
+    num_questions: int = 0
+    num_shots: int = 0
+    max_tokens: int = 0
+    invalid_rate: float = 0.0
+    latency: float = 0.0
+    questions_per_second: float = 0.0
+    total_output_tokens: int = 0
+    tokens_per_second: float = 0.0
+    timestamp: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable representation."""
+        return asdict(self)
+
+
+def assert_min_accuracy(
+    result: GSM8KResult,
+    expected: float,
+    *,
+    tolerance: float = 0.0,
+    context: str = "GSM8K",
+) -> None:
+    """Assert a one-sided accuracy floor with an optional absolute tolerance."""
+    minimum = expected - tolerance
+    if result.accuracy < minimum and not math.isclose(
+        result.accuracy, minimum, abs_tol=1e-12
+    ):
+        raise AssertionError(
+            f"{context}: {result.profile}/{result.metric} accuracy "
+            f"{result.accuracy:.4f} < {minimum:.4f} "
+            f"(expected {expected:.4f}, tolerance {tolerance:.4f})"
+        )
+
+
+def assert_gsm8k_result(
+    result: GSM8KResult,
+    spec: GSM8KEvalSpec,
+    *,
+    context: str | None = None,
+) -> None:
+    """Validate a result against its YAML-owned profile and accuracy floor."""
+    if (result.profile, result.metric) != (spec.profile, spec.metric):
+        raise AssertionError(
+            f"{spec.name}: expected {spec.profile}/{spec.metric}, got "
+            f"{result.profile}/{result.metric}"
+        )
+    assert_min_accuracy(
+        result,
+        spec.accuracy_threshold,
+        tolerance=spec.tolerance,
+        context=context or spec.name,
+    )
+
+
+def result_from_lm_eval(
+    results: dict[str, Any], metric: str = STRICT_MATCH
+) -> GSM8KResult:
+    """Normalize the output of lm-eval's version 3 GSM8K task."""
+    try:
+        accuracy = float(results["results"][GSM8K_TASK][metric])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"lm-eval did not return GSM8K metric {metric!r}") from exc
+    return GSM8KResult(
+        accuracy=accuracy,
+        profile="lm-eval-v3",
+        metric=metric,
+    )
+
+
+def evaluate_gsm8k_lm_eval(
+    *,
+    model: str,
+    model_args: str | dict[str, Any],
+    metric: str = STRICT_MATCH,
+    **kwargs: Any,
+) -> GSM8KResult:
+    """Run the canonical lm-eval GSM8K task and normalize its result."""
+    import lm_eval
+
+    results = lm_eval.simple_evaluate(
+        model=model,
+        model_args=model_args,
+        tasks=GSM8K_TASK,
+        **kwargs,
+    )
+    if results is None:
+        raise RuntimeError("lm-eval returned no GSM8K results")
+    return result_from_lm_eval(results, metric)
 
 
 def download_and_cache_file(url: str, filename: str | None = None) -> str:
@@ -101,16 +298,12 @@ async def call_vllm_api(
     if seed is not None:
         data["seed"] = seed
 
-    try:
-        async with session.post(f"{url}/v1/completions", json=data) as response:
-            response.raise_for_status()
-            result = await response.json()
-            text = result["choices"][0]["text"]
-            completion_tokens = result.get("usage", {}).get("completion_tokens", 0)
-            return text, completion_tokens
-    except Exception as e:
-        print(f"Error calling vLLM API ({type(e).__name__}): {e}")
-        return "", 0
+    async with session.post(f"{url}/v1/completions", json=data) as response:
+        response.raise_for_status()
+        result = await response.json()
+        text = result["choices"][0]["text"]
+        completion_tokens = result.get("usage", {}).get("completion_tokens", 0)
+        return text, completion_tokens
 
 
 async def call_vllm_chat_api(
@@ -134,16 +327,12 @@ async def call_vllm_chat_api(
     if seed is not None:
         data["seed"] = seed
 
-    try:
-        async with session.post(f"{url}/v1/chat/completions", json=data) as response:
-            response.raise_for_status()
-            result = await response.json()
-            text = result["choices"][0]["message"]["content"] or ""
-            completion_tokens = result.get("usage", {}).get("completion_tokens", 0)
-            return text, completion_tokens
-    except Exception as e:
-        print(f"Error calling vLLM chat API ({type(e).__name__}): {e}")
-        return "", 0
+    async with session.post(f"{url}/v1/chat/completions", json=data) as response:
+        response.raise_for_status()
+        result = await response.json()
+        text = result["choices"][0]["message"]["content"] or ""
+        completion_tokens = result.get("usage", {}).get("completion_tokens", 0)
+        return text, completion_tokens
 
 
 def _build_gsm8k_prompts(
@@ -184,8 +373,8 @@ def _score_gsm8k(
     num_shots: int,
     max_tokens: int,
     latency: float,
-) -> dict[str, float | int]:
-    """Score GSM8K responses and return a results dict."""
+) -> GSM8KResult:
+    """Score GSM8K responses using the isolated-v1 profile."""
     num_questions = len(labels)
     preds = [get_answer_value(state) for state in states]
     accuracy = np.mean(np.array(preds) == np.array(labels))
@@ -193,18 +382,20 @@ def _score_gsm8k(
     total_output_tokens = sum(output_tokens)
     tokens_per_second = total_output_tokens / latency if latency > 0 else 0.0
 
-    return {
-        "accuracy": accuracy,
-        "invalid_rate": invalid_rate,
-        "latency": latency,
-        "questions_per_second": num_questions / latency if latency > 0 else 0.0,
-        "total_output_tokens": total_output_tokens,
-        "tokens_per_second": tokens_per_second,
-        "num_questions": num_questions,
-        "num_shots": num_shots,
-        "max_tokens": max_tokens,
-        "timestamp": time.time(),
-    }
+    return GSM8KResult(
+        accuracy=float(accuracy),
+        profile="isolated-v1",
+        metric="last-number-exact-match",
+        invalid_rate=float(invalid_rate),
+        latency=latency,
+        questions_per_second=(num_questions / latency if latency > 0 else 0.0),
+        total_output_tokens=total_output_tokens,
+        tokens_per_second=tokens_per_second,
+        num_questions=num_questions,
+        num_shots=num_shots,
+        max_tokens=max_tokens,
+        timestamp=time.time(),
+    )
 
 
 def evaluate_gsm8k(
@@ -220,7 +411,7 @@ def evaluate_gsm8k(
     request_timeout_seconds: float = 600,
     gen_prefix: str = "",
     max_concurrency: int | None = None,
-) -> dict[str, float | int]:
+) -> GSM8KResult:
     """
     Evaluate GSM8K accuracy using vLLM serve endpoint.
 
@@ -295,7 +486,7 @@ def evaluate_gsm8k_offline(
     gen_prefix: str = "",
     use_chat_completions: bool = False,
     chat_template_kwargs: dict[str, object] | None = None,
-) -> dict[str, float | int]:
+) -> GSM8KResult:
     """Evaluate GSM8K accuracy using an offline vllm.LLM object.
 
     Same prompts and scoring as evaluate_gsm8k(), but runs generation
@@ -364,14 +555,30 @@ def main() -> None:
         type=int,
         help="Maximum number of concurrent requests",
     )
+    parser.add_argument(
+        "--eval-spec",
+        help="Evaluation ID from configs/evals.yaml, formatted as suite.case",
+    )
     parser.add_argument("--save-results", type=str, help="Save results to JSON file")
 
     args = parser.parse_args()
+    gsm8k_spec = None
+    eval_kwargs: IsolatedEvalKwargs = {
+        "num_questions": args.num_questions,
+        "num_shots": args.num_shots,
+        "max_tokens": args.max_tokens,
+    }
+    if args.eval_spec:
+        suite, separator, case_id = args.eval_spec.partition(".")
+        if not separator:
+            parser.error("--eval-spec must be formatted as suite.case")
+        gsm8k_spec = get_gsm8k_eval_spec(suite, case_id)
+        if gsm8k_spec.profile != "isolated-v1":
+            parser.error("the server CLI only supports isolated-v1 eval specs")
+        eval_kwargs = gsm8k_spec.isolated_kwargs()
 
     result = evaluate_gsm8k(
-        num_questions=args.num_questions,
-        num_shots=args.num_shots,
-        max_tokens=args.max_tokens,
+        **eval_kwargs,
         host=args.host,
         port=args.port,
         temperature=args.temperature,
@@ -381,18 +588,21 @@ def main() -> None:
 
     # Print results to terminal
     print("\nResults:")
-    print(f"Accuracy: {result['accuracy']:.3f}")
-    print(f"Invalid responses: {result['invalid_rate']:.3f}")
-    print(f"Total latency: {result['latency']:.3f} s")
-    print(f"Questions per second: {result['questions_per_second']:.3f}")
-    print(f"Total output tokens: {result['total_output_tokens']}")
-    print(f"Output tokens per second: {result['tokens_per_second']:.3f}")
+    print(f"Accuracy: {result.accuracy:.3f}")
+    print(f"Invalid responses: {result.invalid_rate:.3f}")
+    print(f"Total latency: {result.latency:.3f} s")
+    print(f"Questions per second: {result.questions_per_second:.3f}")
+    print(f"Total output tokens: {result.total_output_tokens}")
+    print(f"Output tokens per second: {result.tokens_per_second:.3f}")
 
     # Optional file saving
     if args.save_results:
         with open(args.save_results, "w") as f:
-            json.dump(result, f, indent=2)
+            json.dump(result.to_dict(), f, indent=2)
         print(f"Results saved to {args.save_results}")
+
+    if gsm8k_spec is not None:
+        assert_gsm8k_result(result, gsm8k_spec)
 
 
 if __name__ == "__main__":

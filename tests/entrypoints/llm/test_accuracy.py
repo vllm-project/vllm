@@ -9,60 +9,47 @@ sure that the zmq frontend mp RPC message passing and
 AsyncLLMEngine are working correctly.
 """
 
-import lm_eval
 import pytest
 
+from tests.evals.gsm8k.gsm8k_eval import (
+    GSM8KEvalSpec,
+    assert_gsm8k_result,
+    evaluate_gsm8k_lm_eval,
+    load_gsm8k_eval_specs,
+)
 from vllm.platforms import current_platform
 
-MODEL_NAMES = [
-    "Qwen/Qwen3-1.7B",
-    "google/gemma-3-1b-it",
-]
-FP8_KV_MODEL_NAMES = [
-    "Qwen/Qwen3-1.7B",
-]
-NUM_CONCURRENT = 500
-TASK = "gsm8k"
-FILTER = "exact_match,strict-match"
-RTOL = 0.03
-EXPECTED_VALUES = {
-    "Qwen/Qwen3-1.7B": 0.68,
-    "google/gemma-3-1b-it": 0.25,
-}
+GSM8K_SPECS = {spec.id: spec for spec in load_gsm8k_eval_specs("llm_entrypoint")}
+MODEL_SPECS = [GSM8K_SPECS["qwen3-1.7b"], GSM8K_SPECS["gemma3-1b-it"]]
+FP8_KV_MODEL_SPECS = [GSM8K_SPECS["qwen3-1.7b-fp8-kv"]]
 
 
-def run_test(model_name, more_args=None):
+def run_test(gsm8k_spec: GSM8KEvalSpec, more_args=None):
     """Run the end to end accuracy test."""
+    assert gsm8k_spec.model is not None
+    model_name = gsm8k_spec.model
 
     model_args = f"pretrained={model_name},max_model_len=4096"
 
     if more_args is not None:
         model_args = "{},{}".format(model_args, more_args)
 
-    results = lm_eval.simple_evaluate(
+    result = evaluate_gsm8k_lm_eval(
         model="vllm",
         model_args=model_args,
-        tasks="gsm8k",
         batch_size="auto",
+        **gsm8k_spec.lm_eval_kwargs(),
     )
 
-    measured_value = results["results"][TASK][FILTER]
-    assert model_name in EXPECTED_VALUES, (
-        f"Cannot find the expected value for the model {model_name=}"
-    )
-    expected_value = EXPECTED_VALUES[model_name]
-    assert (
-        measured_value - RTOL < expected_value
-        and measured_value + RTOL > expected_value
-    ), f"Expected: {expected_value} |  Measured: {measured_value}"
+    assert_gsm8k_result(result, gsm8k_spec, context=model_name)
 
 
 # TODO: [AlexM] Fix it with new CI/CD tests
 TPU_TP_TEST_STR = ""  # "tensor_parallel_size=4"
 
 
-@pytest.mark.parametrize("model", MODEL_NAMES)
-def test_lm_eval_accuracy_v1_engine(model):
+@pytest.mark.parametrize("gsm8k_spec", MODEL_SPECS, ids=lambda spec: spec.id)
+def test_lm_eval_accuracy_v1_engine(gsm8k_spec: GSM8KEvalSpec):
     """Run with the V1 Engine."""
 
     more_args = None
@@ -75,11 +62,11 @@ def test_lm_eval_accuracy_v1_engine(model):
         if TPU_TP_TEST_STR:
             more_args += ",{}".format(TPU_TP_TEST_STR)
 
-    run_test(model, more_args)
+    run_test(gsm8k_spec, more_args)
 
 
-@pytest.mark.parametrize("model", FP8_KV_MODEL_NAMES)
-def test_lm_eval_accuracy_v1_engine_fp8_kv_cache(model):
+@pytest.mark.parametrize("gsm8k_spec", FP8_KV_MODEL_SPECS, ids=lambda spec: spec.id)
+def test_lm_eval_accuracy_v1_engine_fp8_kv_cache(gsm8k_spec: GSM8KEvalSpec):
     """Run with the V1 Engine."""
 
     more_args = None
@@ -91,4 +78,4 @@ def test_lm_eval_accuracy_v1_engine_fp8_kv_cache(model):
         if TPU_TP_TEST_STR:
             more_args += ",{}".format(TPU_TP_TEST_STR)
 
-    run_test(model, more_args)
+    run_test(gsm8k_spec, more_args)

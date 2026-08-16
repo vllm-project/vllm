@@ -5,7 +5,12 @@ from dataclasses import dataclass
 
 import pytest
 
-from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
+from tests.evals.gsm8k.gsm8k_eval import (
+    GSM8KEvalSpec,
+    assert_gsm8k_result,
+    evaluate_gsm8k_offline,
+    get_gsm8k_eval_spec,
+)
 from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
 
@@ -18,14 +23,11 @@ REGRESSION_TOLERANCE = 0.95
 class DSparkCorrectnessConfig:
     model: str
     draft_model: str
-    reference_accuracy: float
     reference_acceptance_rate: float
     reference_acceptance_len: float
     num_speculative_tokens: int = 7
     max_model_len: int = 4096
     max_num_seqs: int | None = None
-    num_questions: int = 1319
-    max_tokens: int = 256
     use_chat_completions: bool = False
     chat_template_kwargs: dict[str, object] | None = None
     attention_backend: str | None = None
@@ -40,7 +42,6 @@ class DSparkCorrectnessConfig:
 QWEN3_DSPARK_DEEPSPEC = DSparkCorrectnessConfig(
     model="Qwen/Qwen3-4B-FP8",
     draft_model="deepseek-ai/dspark_qwen3_4b_block7",
-    reference_accuracy=0.801,
     reference_acceptance_rate=0.428,
     reference_acceptance_len=3.994,
     attention_backend="FLASH_ATTN",
@@ -51,11 +52,9 @@ QWEN3_DSPARK_DEEPSPEC = DSparkCorrectnessConfig(
 GEMMA4_DSPARK_DEEPSPEC = DSparkCorrectnessConfig(
     model="RedHatAI/gemma-4-12B-it-NVFP4",
     draft_model="deepseek-ai/dspark_gemma4_12b_block7",
-    reference_accuracy=0.92,
     reference_acceptance_rate=0.58,
     reference_acceptance_len=5.0,
     max_num_seqs=32,
-    num_questions=200,
     use_chat_completions=True,
     gpu_memory_utilization=0.85,
     enforce_eager=True,
@@ -67,12 +66,10 @@ GEMMA4_DSPARK_DEEPSPEC = DSparkCorrectnessConfig(
 QWEN3_6_DSPARK_SPECULATORS = DSparkCorrectnessConfig(
     model="RedHatAI/Qwen3.6-35B-A3B-NVFP4",
     draft_model="RedHatAI/Qwen3.6-35B-A3B-speculator.dspark",
-    reference_accuracy=0.85,
     reference_acceptance_rate=0.41,
     reference_acceptance_len=4.25,
     num_speculative_tokens=8,
     max_num_seqs=32,
-    num_questions=200,
     use_chat_completions=True,
     chat_template_kwargs={"enable_thinking": False},
     gpu_memory_utilization=0.85,
@@ -81,19 +78,33 @@ QWEN3_6_DSPARK_SPECULATORS = DSparkCorrectnessConfig(
 
 
 @pytest.mark.parametrize(
-    "config",
+    ("config", "gsm8k_spec"),
     [
-        pytest.param(QWEN3_DSPARK_DEEPSPEC, id="qwen3-deepspec"),
-        pytest.param(GEMMA4_DSPARK_DEEPSPEC, id="gemma4-deepspec"),
-        pytest.param(QWEN3_6_DSPARK_SPECULATORS, id="qwen3.6-speculators"),
+        pytest.param(
+            QWEN3_DSPARK_DEEPSPEC,
+            get_gsm8k_eval_spec("dspark", "qwen3-deepspec"),
+            id="qwen3-deepspec",
+        ),
+        pytest.param(
+            GEMMA4_DSPARK_DEEPSPEC,
+            get_gsm8k_eval_spec("dspark", "gemma4-deepspec"),
+            id="gemma4-deepspec",
+        ),
+        pytest.param(
+            QWEN3_6_DSPARK_SPECULATORS,
+            get_gsm8k_eval_spec("dspark", "qwen3.6-speculators"),
+            id="qwen3.6-speculators",
+        ),
     ],
 )
 def test_dspark_correctness_and_acceptance_rate(
     monkeypatch: pytest.MonkeyPatch,
     config: DSparkCorrectnessConfig,
+    gsm8k_spec: GSM8KEvalSpec,
     vllm_runner,
 ):
     """Guard GSM8K accuracy and acceptance metrics for DSpark models."""
+    assert gsm8k_spec.model == config.model
     if config.disable_flashinfer_sampler:
         monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
@@ -127,13 +138,12 @@ def test_dspark_correctness_and_acceptance_rate(
         spec_llm = spec_runner.llm
         results = evaluate_gsm8k_offline(
             spec_llm,
-            num_questions=config.num_questions,
-            max_tokens=config.max_tokens,
             temperature=1.0,
             use_chat_completions=config.use_chat_completions,
             chat_template_kwargs=config.chat_template_kwargs,
+            **gsm8k_spec.isolated_kwargs(),
         )
-        accuracy = results["accuracy"]
+        accuracy = results.accuracy
         metrics = spec_llm.get_metrics()
         acceptance_rate = compute_acceptance_rate(metrics)
         acceptance_len = compute_acceptance_len(metrics)
@@ -145,9 +155,7 @@ def test_dspark_correctness_and_acceptance_rate(
         )
         print(f"{context}: {metrics_summary}")
 
-        assert accuracy >= config.reference_accuracy * REGRESSION_TOLERANCE, (
-            f"{context}: {metrics_summary}"
-        )
+        assert_gsm8k_result(results, gsm8k_spec, context=context)
         assert (
             acceptance_rate >= config.reference_acceptance_rate * REGRESSION_TOLERANCE
         ), f"{context}: {metrics_summary}"

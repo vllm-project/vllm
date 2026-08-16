@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from tests.evals.gsm8k.gsm8k_eval import GSM8KEvalSpec
 from vllm import SamplingParams
 from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
@@ -22,7 +23,7 @@ def _run_eagle_correctness(
     sampling_config: SamplingParams,
     model_setup: tuple[str, str, str, int],
     mm_enabled: bool,
-    expected_accuracy_threshold: float,
+    gsm8k_spec: GSM8KEvalSpec,
     enable_chunked_prefill: bool,
     model_impl: str,
     attn_backend: str,
@@ -33,6 +34,7 @@ def _run_eagle_correctness(
     which should be the same when using eagle speculative decoding.
     """
     method, model_name, spec_model_name, tp_size = model_setup
+    assert gsm8k_spec.model == model_name
     _skip_if_insufficient_gpus_for_tp(tp_size)
 
     test_prompts = get_test_prompts(mm_enabled)
@@ -86,10 +88,7 @@ def _run_eagle_correctness(
             compilation_config=CompilationConfig(),
             **extra_kwargs,
         ) as ref_runner:
-            evaluate_llm_for_gsm8k(
-                ref_runner.llm,
-                expected_accuracy_threshold=expected_accuracy_threshold,
-            )
+            evaluate_llm_for_gsm8k(ref_runner.llm, gsm8k_spec)
             ref_outputs = ref_runner.llm.chat(test_prompts, sampling_config)
 
         with vllm_runner(
@@ -119,10 +118,7 @@ def _run_eagle_correctness(
                 f"Expected async scheduling for {method}: target={model_name}, "
                 f"draft={spec_model_name}, backend={attn_backend}; got {has_async}"
             )
-            evaluate_llm_for_gsm8k(
-                spec_runner.llm,
-                expected_accuracy_threshold=expected_accuracy_threshold,
-            )
+            evaluate_llm_for_gsm8k(spec_runner.llm, gsm8k_spec)
             spec_outputs = spec_runner.llm.chat(test_prompts, sampling_config)
 
         assert_request_outputs_match(
