@@ -362,11 +362,13 @@ class CudaGraphManager:
                             set_graph_pool_id(self.pool)
                         else:
                             set_graph_pool_id(current_platform.graph_pool_handle())
-                        # Capture on graph_capture()'s stream. Omitting stream=
-                        # makes torch.cuda.graph() switch to a private side
-                        # stream, so TP allreduce is recorded off the
-                        # communicator capture context.
-                        with torch.cuda.graph(graph, self.pool, stream=cap_ctx.stream):
+                        # ROCm: record on graph_capture()'s stream so TP
+                        # allreduce is captured in the communicator context.
+                        # CUDA keeps PyTorch's default capture stream.
+                        capture_stream = (
+                            cap_ctx.stream if current_platform.is_rocm() else None
+                        )
+                        with torch.cuda.graph(graph, self.pool, stream=capture_stream):
                             forward_fn(CUDAGraphMode.NONE)
                             # Join offloader's copy stream after forward to avoid
                             # unjoined stream error. The last layer's start_prefetch
