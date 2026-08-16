@@ -149,6 +149,15 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self._cu_seqlens: torch.Tensor | None = None
         self._num_tokens: int = 0
 
+    def set_weight_layout(self, weight_layout: MoonEPExpertWeightLayout) -> None:
+        """Attach the ``[E+B, ...]`` weights once the layer has loaded them."""
+        self.weight_layout = weight_layout
+
+    @property
+    def num_dispatched_slots(self) -> int:
+        """``NvS``: static number of dispatched token slots per rank."""
+        return int(self.buffer._ctx["NvS"])
+
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
 
@@ -246,13 +255,18 @@ class MoonEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self._plan = plan
         self._cu_seqlens = cu_seqlens
 
-        if self.weight_layout is not None:
-            self.buffer.prefetch_weight(
-                plan=plan,
-                full_gate_weight=self.weight_layout.full_gate_weight,
-                full_up_weight=self.weight_layout.full_up_weight,
-                full_down_weight=self.weight_layout.full_down_weight,
-            )
+        # Redundant experts' weights must be in rows [E, E+B) before the
+        # expert compute reads them; skipping this silently corrupts output.
+        assert self.weight_layout is not None, (
+            "MoonEPPrepareAndFinalize: weight layout not set "
+            "(call set_weight_layout() after weight loading)"
+        )
+        self.buffer.prefetch_weight(
+            plan=plan,
+            full_gate_weight=self.weight_layout.full_gate_weight,
+            full_up_weight=self.weight_layout.full_up_weight,
+            full_down_weight=self.weight_layout.full_down_weight,
+        )
 
         # Segment sizes per [E+B] weight row. NOTE: this is per *row*, not
         # per local expert, and NvS rows are expert-grouped rather than
