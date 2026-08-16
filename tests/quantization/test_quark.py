@@ -35,6 +35,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 from vllm.transformers_utils.repo_utils import hf_api
 
@@ -96,6 +97,24 @@ def test_quark_config_preserves_existing_packed_modules_mapping():
     config = CustomQuarkConfig({})
 
     assert config.packed_modules_mapping["custom_proj"] == ["a", "b"]
+
+
+def test_quark_mapper_preserves_structured_lists():
+    structured = [{"weight": {"dtype": "int4"}}]
+    config = QuarkConfig(
+        {
+            "exclude": ["model.layers.0.self_attn.q_proj"],
+            "weight_quant": structured,
+        }
+    )
+    mapper = WeightsMapper(orig_to_new_prefix={"model.": "language_model."})
+
+    config.apply_vllm_mapper(mapper)
+
+    assert config.quant_config["exclude"] == [
+        "language_model.layers.0.self_attn.q_proj"
+    ]
+    assert config.quant_config["weight_quant"] == structured
 
 
 def test_quark_fp8_w8a8_detects_per_block_config():
