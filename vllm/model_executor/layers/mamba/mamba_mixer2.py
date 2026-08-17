@@ -40,9 +40,9 @@ from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+    reset_replayssm_ring_trackers,
     selective_state_update,
     selective_state_update_replayssm_flashinfer,
-    update_replayssm_ring_trackers,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import (
@@ -994,7 +994,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 ssm_state[state_indices_tensor_p] = varlen_states
                 if ring_start is not None and self._updates_replayssm_trackers:
                     assert prev_num_accepted is not None
-                    update_replayssm_ring_trackers(
+                    reset_replayssm_ring_trackers(
                         ring_start,
                         prev_num_accepted,
                         state_indices_tensor_p,

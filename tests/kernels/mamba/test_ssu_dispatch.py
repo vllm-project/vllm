@@ -13,6 +13,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     TritonSSUBackend,
     get_mamba_ssu_backend,
     initialize_mamba_ssu_backend,
+    reset_replayssm_ring_trackers,
     selective_state_update,
     selective_state_update_replayssm_flashinfer,
     update_replayssm_ring_trackers,
@@ -79,7 +80,7 @@ def test_flashinfer_replayssm_ring_tracker_lifecycle():
     assert observed[31] == (16, 16)
     assert observed[32] == (15, 1)
 
-    update_replayssm_ring_trackers(
+    reset_replayssm_ring_trackers(
         ring_start,
         prev_num_accepted,
         state_batch_indices,

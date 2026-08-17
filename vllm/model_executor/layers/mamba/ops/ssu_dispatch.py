@@ -102,6 +102,21 @@ def update_replayssm_ring_trackers(
     )
 
 
+def reset_replayssm_ring_trackers(
+    ring_start: torch.Tensor,
+    prev_num_accepted: torch.Tensor,
+    state_batch_indices: torch.Tensor,
+    pad_slot_id: int = NULL_BLOCK_ID,
+) -> None:
+    """Reset selected ReplaySSM ring trackers."""
+    update_replayssm_ring_trackers(
+        ring_start,
+        prev_num_accepted,
+        state_batch_indices,
+        pad_slot_id=pad_slot_id,
+    )
+
+
 class MambaSSUBackend(ABC):
     """Abstract base class for Mamba SSU backends."""
 
