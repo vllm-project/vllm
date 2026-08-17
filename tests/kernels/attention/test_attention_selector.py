@@ -528,6 +528,7 @@ def test_non_causal_autoselect_backend():
         "fp8_ds_mla",
         "fp8_inc",
         "nvfp4",
+        "nvfp4_4over6",
         "fp8_per_token_head",
         "int8_per_token_head",
     ],

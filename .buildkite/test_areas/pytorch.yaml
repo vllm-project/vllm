@@ -13,6 +13,7 @@ steps:
     - vllm/compilation/
     - vllm/config/
     - vllm/distributed/
+    - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
     - vllm/env_override.py
     - vllm/envs.py
@@ -53,6 +54,7 @@ steps:
     - vllm/compilation/
     - vllm/config/
     - vllm/distributed/
+    - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
     - vllm/env_override.py
     - vllm/envs.py
@@ -85,6 +87,7 @@ steps:
     - vllm/compilation/
     - vllm/config/
     - vllm/distributed/
+    - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
     - vllm/env_override.py
     - vllm/envs.py
@@ -118,6 +121,7 @@ steps:
   - vllm/compilation/
   - vllm/config/
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/env_override.py
   - vllm/envs.py
@@ -157,6 +161,7 @@ steps:
   - vllm/compilation/
   - vllm/config/
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/env_override.py
   - vllm/envs.py
