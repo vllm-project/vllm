@@ -236,11 +236,15 @@ def test_build_attn_metadata_reuses_compatible_group_metadata():
     class Builder:
         supports_update_block_table = True
 
+        def get_metadata_reuse_key(self):
+            return ()
+
         def __init__(self):
             self.build_calls = []
             self.capture_calls = []
             self.update_calls = []
             self.shared_from = []
+            self.allow_update = True
 
         def build(self, **kwargs):
             self.build_calls.append(kwargs)
@@ -256,6 +260,9 @@ def test_build_attn_metadata_reuses_compatible_group_metadata():
 
         def share_reusable_metadata_buffers(self, source):
             self.shared_from.append(source)
+
+        def can_reuse_metadata(self, metadata):
+            return self.allow_update
 
     builders = [Builder(), Builder()]
     attn_groups = [
@@ -321,3 +328,12 @@ def test_build_attn_metadata_reuses_compatible_group_metadata():
     assert cached is result["layer.0"]
     assert block_table is block_tables[1]
     assert slot_mapping is slot_mappings[1]
+
+    builders[1].allow_update = False
+    builders[1].build_calls.clear()
+    builders[1].update_calls.clear()
+    result = attn_utils.build_attn_metadata(**common_args)
+    assert result["layer.0"].source == "build"
+    assert result["layer.1"].source == "build"
+    assert len(builders[1].build_calls) == 1
+    assert builders[1].update_calls == []

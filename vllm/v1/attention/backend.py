@@ -597,6 +597,13 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     # Whether all step-dependent draft decode metadata can be updated in place,
     # allowing one metadata build to be reused across autoregressive draft steps.
     supports_draft_decode_metadata_update: bool = False
+    # Narrower than supports_update_block_table: the reuse site falls back to
+    # a full build whenever can_reuse_metadata() rejects the cached metadata.
+    supports_metadata_reuse: bool = False
+    # Graph-stable buffer attributes this builder may adopt from a compatible
+    # builder for another KV-cache group. Consumed by the default
+    # share_reusable_metadata_buffers().
+    reusable_metadata_buffers: ClassVar[tuple[str, ...]] = ()
 
     @abstractmethod
     def __init__(
@@ -686,6 +693,33 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         Only needs to be implemented if supports_update_block_table is True.
         """
         raise NotImplementedError
+
+    def get_metadata_reuse_key(self) -> tuple[object, ...]:
+        """Extra identity of this builder for cross-group metadata reuse.
+
+        Two builders may share a metadata build only when their keys compare
+        equal, on top of matching type and KV-cache spec.
+        """
+        return ()
+
+    def share_reusable_metadata_buffers(
+        self, source: "AttentionMetadataBuilder"
+    ) -> None:
+        """Adopt `source`'s graph-stable buffers before reusing its metadata.
+
+        Runs before the build, so a captured graph sees the shared storage.
+        """
+        for name in self.reusable_metadata_buffers:
+            destination = getattr(self, name)
+            shared = getattr(source, name)
+            assert destination.shape == shared.shape
+            assert destination.dtype == shared.dtype
+            assert destination.device == shared.device
+            setattr(self, name, shared)
+
+    def can_reuse_metadata(self, metadata: M) -> bool:
+        """Whether `metadata` from a compatible builder may be block-table swapped."""
+        return self.supports_update_block_table or self.supports_metadata_reuse
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata

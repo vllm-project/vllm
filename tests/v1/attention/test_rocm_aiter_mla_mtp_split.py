@@ -378,7 +378,10 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
     assert expand_kernel.kernel_block_size == kernel_block_size
 
 
-def test_update_block_table_reuses_schedule_and_rebuilds_page_indices(monkeypatch):
+@pytest.mark.parametrize("full_cudagraphs", [False, True])
+def test_update_block_table_reuses_schedule_and_rebuilds_page_indices(
+    monkeypatch, full_cudagraphs
+):
     expand_kernel = _ExpandPageIndicesKernel()
     monkeypatch.setattr(rocm_aiter_mla, "_expand_page_indices_kernel", expand_kernel)
 
@@ -407,6 +410,12 @@ def test_update_block_table_reuses_schedule_and_rebuilds_page_indices(monkeypatc
     builder = SimpleNamespace(
         paged_kv_indices=torch.empty(5, dtype=torch.int32),
         kernel_block_size=2,
+        # Exercise both the plain path and the full-graph path, where the
+        # group-local ones-buffer is resliced from the builder.
+        paged_kv_last_page_len=torch.ones(4, dtype=torch.int32),
+        compilation_config=SimpleNamespace(
+            cudagraph_mode=SimpleNamespace(has_full_cudagraphs=lambda: full_cudagraphs)
+        ),
     )
     new_block_table = torch.tensor([[10, 11, 12]], dtype=torch.int32)
     new_slot_mapping = torch.tensor([4, 5, 6], dtype=torch.int64)
