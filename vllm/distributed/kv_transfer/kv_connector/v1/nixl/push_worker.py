@@ -144,19 +144,25 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             self._push_writer_thread.start()
             logger.info("nixl-push-writer thread started (rank=%d)", self.tp_rank)
 
-    def shutdown(self):
-        self._push_writer_stop.set()
-        # Unblock the writer if it's waiting in the no-active-state branch.
-        self._push_writer_wake.set()
-        if self._push_writer_thread is not None:
-            self._push_writer_thread.join(timeout=2)
+    def _poll_shutdown_work(self, cancel: bool) -> bool:
+        base_done = super()._poll_shutdown_work(cancel)
+        writer = getattr(self, "_push_writer_thread", None)
+        if writer is not None:
+            writer.join(timeout=0)
+            if writer.is_alive():
+                return False
             self._push_writer_thread = None
+        if not hasattr(self, "_sending_transfers_lock"):
+            return base_done
         with self._sending_transfers_lock:
-            for handles in self._sending_transfers.values():
-                for handle in handles:
-                    self.nixl_wrapper.release_xfer_handle(handle)
-            self._sending_transfers.clear()
-        super().shutdown()
+            sends_done = self._poll_shutdown_transfers(self._sending_transfers, cancel)
+        return base_done and sends_done
+
+    def shutdown(self, drain_timeout: float | None = None) -> None:
+        if hasattr(self, "_push_writer_stop"):
+            self._push_writer_stop.set()
+            self._push_writer_wake.set()
+        super().shutdown(drain_timeout)
 
     # --- Engine-main-thread entry point -------------------------------- #
 

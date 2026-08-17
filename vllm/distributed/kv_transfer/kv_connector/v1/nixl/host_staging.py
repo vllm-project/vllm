@@ -27,9 +27,7 @@ copied, so no caller observes partially populated host blocks.
 
 from __future__ import annotations
 
-import contextlib
 import ctypes
-import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -369,14 +367,31 @@ class HostReadStager:
                 try:
                     xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 except Exception:
-                    xfer_state = "ERR"
+                    state.failed = True
+                    state.queued.clear()
+                    try:
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                    except Exception:
+                        still_reading.append(
+                            (handle, slot, dst_addrs, copy_kinds, mirror_addrs)
+                        )
+                    else:
+                        slot.pool.free_slots.append(slot)
+                    continue
                 if xfer_state == "PROC":
                     still_reading.append(
                         (handle, slot, dst_addrs, copy_kinds, mirror_addrs)
                     )
                     continue
-                with contextlib.suppress(Exception):
+                try:
                     self.nixl_wrapper.release_xfer_handle(handle)
+                except Exception:
+                    state.failed = True
+                    state.queued.clear()
+                    still_reading.append(
+                        (handle, slot, dst_addrs, copy_kinds, mirror_addrs)
+                    )
+                    continue
                 if xfer_state != "DONE":
                     state.failed = True
                     state.queued.clear()
@@ -425,18 +440,35 @@ class HostReadStager:
         state.aborted = True
         state.queued.clear()
 
-    def shutdown(self) -> None:
-        """Drain active operations before releasing registered staging memory."""
+    def begin_shutdown(self) -> None:
+        """Stop issuing reads and mark all staged requests aborted."""
         if self._closed:
             return
         for req_id in tuple(self._reqs):
             self.abort(req_id)
-        while self._reqs:
-            self.advance()
-            if self._reqs:
-                time.sleep(0.001)
+
+    def poll_shutdown(self, cancel: bool = False) -> bool:
+        """Advance shutdown without blocking and return whether it completed."""
+        if self._closed:
+            return True
+        if cancel:
+            for state in self._reqs.values():
+                still_reading = []
+                for read in state.reading:
+                    handle, slot, *_ = read
+                    try:
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                    except Exception:
+                        still_reading.append(read)
+                    else:
+                        slot.pool.free_slots.append(slot)
+                state.reading = still_reading
+        self.advance()
+        if self._reqs:
+            return False
         self._copy_stream.synchronize()
         for pool in self._pools.values():
             self.nixl_wrapper.release_dlist_handle(pool.handle)
             self.nixl_wrapper.deregister_memory(pool.reg_descs)
         self._closed = True
+        return True

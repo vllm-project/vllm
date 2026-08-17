@@ -102,6 +102,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_SHUTDOWN_DRAIN_TIMEOUT_S = 2.0
+_SHUTDOWN_POLL_INTERVAL_S = 0.001
+
 
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
@@ -310,6 +313,9 @@ class NixlBaseConnectorWorker:
 
         # Config.
         self.vllm_config = vllm_config
+        self._shutdown_started = False
+        self._shutdown_complete = False
+        self._shutdown_reaper_thread: threading.Thread | None = None
         # mypy will complain on re-assignment otherwise.
         self.block_size: int = cast(int, vllm_config.cache_config.block_size)
 
@@ -3194,39 +3200,48 @@ class NixlBaseConnectorWorker:
             )
 
     def __del__(self):
-        self.shutdown()
+        with contextlib.suppress(Exception):
+            self.shutdown(drain_timeout=0)
 
-    def shutdown(self):
-        """Shutdown the connector worker."""
-        if not hasattr(self, "_handshake_initiation_executor"):
-            # error happens during init, no need to shutdown
+    def _poll_shutdown_transfers(
+        self,
+        transfers: dict[ReqId, list[TransferHandle]],
+        cancel: bool,
+    ) -> bool:
+        for req_id, handles in tuple(transfers.items()):
+            remaining = []
+            for handle in handles:
+                try:
+                    state = self.nixl_wrapper.check_xfer_state(handle)
+                except Exception:
+                    state = "PROC"
+                if state == "PROC" and not cancel:
+                    remaining.append(handle)
+                    continue
+                try:
+                    self.nixl_wrapper.release_xfer_handle(handle)
+                except Exception:
+                    remaining.append(handle)
+            if remaining:
+                transfers[req_id] = remaining
+            else:
+                del transfers[req_id]
+        return not transfers
+
+    def _poll_shutdown_work(self, cancel: bool) -> bool:
+        transfers_done = self._poll_shutdown_transfers(self._recving_transfers, cancel)
+        stagers_done = True
+        for stager in (self._host_stager, self._hisparse_host_stager):
+            if stager is not None:
+                stagers_done &= stager.poll_shutdown(cancel)
+        with self._handshake_lock:
+            handshakes_done = not self._handshake_futures
+        return transfers_done and stagers_done and handshakes_done
+
+    def _finish_shutdown(self) -> None:
+        if self._shutdown_complete:
             return
-        self._handshake_initiation_executor.shutdown(wait=True, cancel_futures=True)
-        # Posted reads cannot be cancelled. Keep their memory registered until
-        # every handle is terminal, then release it before tearing down MRs.
-        while self._recving_transfers:
-            for req_id, handles in tuple(self._recving_transfers.items()):
-                in_progress = []
-                for handle in handles:
-                    try:
-                        if self.nixl_wrapper.check_xfer_state(handle) == "PROC":
-                            in_progress.append(handle)
-                            continue
-                    except Exception:
-                        logger.exception("NIXL transfer polling failed at shutdown.")
-                    with contextlib.suppress(Exception):
-                        self.nixl_wrapper.release_xfer_handle(handle)
-                if in_progress:
-                    self._recving_transfers[req_id] = in_progress
-                else:
-                    del self._recving_transfers[req_id]
-            if self._recving_transfers:
-                time.sleep(0.001)
         self._recving_transfers.clear()
-        if self._host_stager is not None:
-            self._host_stager.shutdown()
-        if self._hisparse_host_stager is not None:
-            self._hisparse_host_stager.shutdown()
         try:
             for handle in self.src_xfer_handles_by_block_size.values():
                 self.nixl_wrapper.release_dlist_handle(handle)
@@ -3257,3 +3272,48 @@ class NixlBaseConnectorWorker:
             # model_runner.shutdown()).
             self.device_kv_caches = {}
             self.host_xfer_buffers = {}
+        self._shutdown_complete = True
+        self._shutdown_reaper_thread = None
+
+    def _reap_shutdown_work(self) -> None:
+        while not self._poll_shutdown_work(cancel=True):
+            time.sleep(_SHUTDOWN_POLL_INTERVAL_S)
+        self._finish_shutdown()
+        logger.info("Deferred NIXL shutdown cleanup completed.")
+
+    def shutdown(self, drain_timeout: float | None = None) -> None:
+        """Stop new work and bound the wait for active NIXL operations."""
+        if not hasattr(self, "_handshake_initiation_executor"):
+            return
+        if self._shutdown_started:
+            return
+        self._shutdown_started = True
+        if drain_timeout is None:
+            drain_timeout = _SHUTDOWN_DRAIN_TIMEOUT_S
+        self._handshake_initiation_executor.shutdown(wait=False, cancel_futures=True)
+        for stager in (self._host_stager, self._hisparse_host_stager):
+            if stager is not None:
+                stager.begin_shutdown()
+
+        deadline = time.monotonic() + drain_timeout
+        drained = self._poll_shutdown_work(cancel=False)
+        while not drained and time.monotonic() < deadline:
+            time.sleep(_SHUTDOWN_POLL_INTERVAL_S)
+            drained = self._poll_shutdown_work(cancel=False)
+        if not drained:
+            drained = self._poll_shutdown_work(cancel=True)
+        if drained:
+            self._finish_shutdown()
+            return
+
+        logger.warning(
+            "NIXL shutdown drain timed out after %.1fs; retaining registered "
+            "memory until active operations become terminal.",
+            drain_timeout,
+        )
+        self._shutdown_reaper_thread = threading.Thread(
+            target=self._reap_shutdown_work,
+            daemon=True,
+            name="nixl-shutdown-reaper",
+        )
+        self._shutdown_reaper_thread.start()
