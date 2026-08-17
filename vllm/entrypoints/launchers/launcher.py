@@ -22,7 +22,7 @@ from vllm.entrypoints.serve.utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
-from vllm.entrypoints.serve.utils.ssl import SSLCertRefresher
+from vllm.entrypoints.launchers.ssl import SSLCertRefresher
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tool_parsers import ToolParserManager
