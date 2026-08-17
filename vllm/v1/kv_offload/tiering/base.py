@@ -66,11 +66,6 @@ class TransferJob:
     is_promotion: bool
     req_context: ReqContext
 
-    @property
-    def block_ids(self) -> np.ndarray:
-        """Backward-compat alias for chunk_slot_ids."""
-        return self.chunk_slot_ids
-
 
 @dataclass
 class JobResult:

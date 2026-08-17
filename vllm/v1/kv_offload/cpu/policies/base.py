@@ -93,7 +93,3 @@ class CachePolicy(ABC):
     def mark_non_evictable(self, key: OffloadKey) -> None:
         """Called when a chunk's ref_cnt transitions from 0."""
         return
-
-
-# Backward-compat alias for out-of-tree CachePolicy implementations.
-BlockStatus = ChunkSlotStatus
