@@ -5,12 +5,16 @@ Trace replay forces the engine to emit a predetermined token sequence during dec
 - **Inference config diff**: compare logprobs between different quantization schemes, tensor parallelism layouts, or attention backends for the same model.
 - **Train vs inference diff**: replay a training-time token sequence through the inference engine to detect logprob divergence caused by numerical differences between training and serving frameworks.
 
+## Requirements
+
+Trace replay reserves a per-request trace buffer, so it is off by default. Enable it with `--enable-trace-replay` (or `LLM(..., enable_trace_replay=True)`). It is only supported by model runner V2; requests are rejected when either condition is not met.
+
 ## Usage
 
 ```python
 from vllm import LLM, SamplingParams
 
-llm = LLM(model="Qwen/Qwen3-0.6B")
+llm = LLM(model="Qwen/Qwen3-0.6B", enable_trace_replay=True)
 
 # Token sequence captured from a previous run or training log
 trace_tokens = [15, 284, 1026, 374]
@@ -37,6 +41,7 @@ To compare configurations, run the same trace against two engine setups and diff
 When `trace_decode_token_ids` is set:
 
 - `max_tokens` is automatically set to the trace length.
+- The trace is truncated if it does not fit within `max_model_len` given the prompt length.
 - All stop conditions (EOS, stop strings, stop token IDs) are disabled.
 - Generation produces exactly the trace tokens, then stops.
 

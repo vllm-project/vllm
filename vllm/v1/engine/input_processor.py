@@ -128,15 +128,18 @@ class InputProcessor:
                     "not configured. Please set --reasoning-parser "
                     "and/or --reasoning-config to use thinking_token_budget."
                 )
-            if (
-                params.trace_decode_token_ids
-                and not self.model_config.enable_trace_replay
-            ):
-                raise VLLMValidationError(
-                    "trace_decode_token_ids is set but trace replay is not "
-                    "enabled. Start the engine with --enable-trace-replay to "
-                    "use it."
-                )
+            if params.trace_decode_token_ids:
+                if not self.model_config.enable_trace_replay:
+                    raise VLLMValidationError(
+                        "trace_decode_token_ids is set but trace replay is not "
+                        "enabled. Start the engine with --enable-trace-replay "
+                        "to use it."
+                    )
+                if not self.use_v2_model_runner:
+                    raise VLLMValidationError(
+                        "trace_decode_token_ids is only supported by model "
+                        "runner V2, but this engine is running model runner V1."
+                    )
         elif isinstance(params, PoolingParams):
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS

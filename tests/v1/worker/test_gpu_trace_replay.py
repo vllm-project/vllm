@@ -37,16 +37,12 @@ def _i64(x) -> torch.Tensor:
     return torch.tensor(x, dtype=torch.int64, device=DEVICE)
 
 
-<<<<<<< HEAD
 def _trace_state(max_num_reqs: int) -> TraceReplayState:
-=======
-def _trace_state(max_num_reqs: int, enabled: bool = True) -> TraceReplayState:
     """Build a state whose req_states exposes the buffers apply_trace reads.
 
     total_len/prompt_len are written by the caller to position each request at
     the desired replay step.
     """
->>>>>>> 129632efa0 (Read replay step buffers from the stored request state)
     req_states = cast(
         RequestState,
         SimpleNamespace(
@@ -227,22 +223,3 @@ def test_slot_reuse_clears_trace():
     _set_lens(state, [3, 0], [3, 0])
     state.apply_trace(sampled, idx_mapping)
     assert sampled.tolist() == [888]
-<<<<<<< HEAD
-=======
-
-
-def test_disabled_state_allocates_nothing_and_is_inert():
-    """Without --enable-trace-replay, no buffer is reserved and replay is a no-op."""
-    state = _trace_state(4, enabled=False)
-    assert not hasattr(state, "trace_token_ids")
-
-    # Requests are accepted (and ignored) rather than crashing the worker.
-    state.add_request(0, SamplingParams(trace_decode_token_ids=[11, 22]))
-    state.apply_staged_writes()
-
-    idx_mapping = _i32([0])
-    sampled = _i64([999])
-    state.apply_trace(sampled, idx_mapping)
-    assert sampled.tolist() == [999]
-
->>>>>>> 129632efa0 (Read replay step buffers from the stored request state)

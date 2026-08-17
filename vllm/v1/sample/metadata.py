@@ -50,7 +50,6 @@ class SamplingMetadata:
 
     # Speculative token ids
     spec_token_ids: list[list[int]] | None = None
-    trace_decode_token_ids: list[list[int]] | None = None
     # When non-None, use ``holder.has_tracked_requests()`` to see if this batch applies
     # thinking-token-budget logits (holder may exist with an empty tracking set).
     thinking_budget_state_holder: ThinkingBudgetStateHolder | None = None
