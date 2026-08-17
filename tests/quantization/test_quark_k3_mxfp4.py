@@ -12,7 +12,8 @@ import torch
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
-    convert_k3_situ_weight_to_kernel_format,
+    convert_weight_to_mxfp4_moe_kernel_format,
+    mxfp4_round_up_hidden_size_and_intermediate_size,
 )
 from vllm.model_executor.layers.quantization.quark import quark_moe
 
@@ -36,41 +37,31 @@ def test_use_k3_situ_aiter_a8w4(monkeypatch, scheme, aiter_enabled, expected):
     assert quark_moe._use_k3_situ_aiter_a8w4(MagicMock(), scheme) is expected
 
 
-def test_k3_situ_a8w4_keeps_tp8_intermediate_size():
-    method = object.__new__(quark_moe.QuarkOCP_MX_MoEMethod)
-    method.is_k3_situ_aiter_a8w4 = True
-    method.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
-    method.moe = MagicMock(activation=MoEActivation.SITU)
-
-    with patch.object(
-        quark_moe.QuarkMoEMethod,
-        "maybe_roundup_sizes",
-        return_value=(3584, 384),
-    ):
-        hidden_size, intermediate_size = method.maybe_roundup_sizes(
-            hidden_size=3584,
-            intermediate_size_per_partition=384,
-            act_dtype=MagicMock(),
-            moe_parallel_config=MagicMock(),
-        )
+def test_situ_aiter_keeps_tp8_intermediate_size():
+    hidden_size, intermediate_size = mxfp4_round_up_hidden_size_and_intermediate_size(
+        Mxfp4MoeBackend.AITER_MXFP4_BF16,
+        3584,
+        384,
+        activation=MoEActivation.SITU,
+    )
 
     assert hidden_size == 3584
     assert intermediate_size == 384
 
 
 @pytest.mark.parametrize("guinterleave", [False, True])
-def test_convert_k3_situ_weight_to_kernel_format(monkeypatch, guinterleave):
+def test_convert_situ_weight_to_mxfp4_kernel_format(monkeypatch, guinterleave):
     layer = MagicMock()
-    layer.w13_weight = torch.nn.Parameter(
+    w13_weight = torch.nn.Parameter(
         torch.zeros((2, 4, 4), dtype=torch.uint8), requires_grad=False
     )
-    layer.w2_weight = torch.nn.Parameter(
+    w2_weight = torch.nn.Parameter(
         torch.zeros((2, 4, 4), dtype=torch.uint8), requires_grad=False
     )
-    layer.w13_weight_scale = torch.nn.Parameter(
+    w13_weight_scale = torch.nn.Parameter(
         torch.zeros((2, 4, 2), dtype=torch.uint8), requires_grad=False
     )
-    layer.w2_weight_scale = torch.nn.Parameter(
+    w2_weight_scale = torch.nn.Parameter(
         torch.zeros((2, 4, 2), dtype=torch.uint8), requires_grad=False
     )
 
@@ -82,7 +73,7 @@ def test_convert_k3_situ_weight_to_kernel_format(monkeypatch, guinterleave):
     aiter_module = ModuleType("aiter")
     aiter_utility_module = ModuleType("aiter.utility")
     fp4_utils_module = ModuleType("aiter.utility.fp4_utils")
-    setattr(fp4_utils_module, "e8m0_shuffle", e8m0_shuffle)
+    fp4_utils_module.e8m0_shuffle = e8m0_shuffle
 
     with (
         patch.dict(
@@ -107,19 +98,21 @@ def test_convert_k3_situ_weight_to_kernel_format(monkeypatch, guinterleave):
         ) as shuffle_scale,
     ):
         monkeypatch.delenv("AITER_BF16_FP8_MOE_BOUND", raising=False)
-        converted = convert_k3_situ_weight_to_kernel_format(layer)
-
-    assert all(
-        actual is expected
-        for actual, expected in zip(
-            converted,
-            (
-                shuffled_w13,
-                shuffled_w2,
-                shuffled_w13_scale,
-                shuffled_w2_scale,
-            ),
+        converted = convert_weight_to_mxfp4_moe_kernel_format(
+            mxfp4_backend=Mxfp4MoeBackend.AITER_MXFP4_BF16,
+            layer=layer,
+            w13_weight=w13_weight,
+            w2_weight=w2_weight,
+            w13_weight_scale=w13_weight_scale,
+            w2_weight_scale=w2_weight_scale,
+            activation=MoEActivation.SITU,
         )
+
+    assert converted[:4] == (
+        shuffled_w13,
+        shuffled_w2,
+        shuffled_w13_scale,
+        shuffled_w2_scale,
     )
     assert shuffled_w13.is_shuffled
     assert shuffled_w2.is_shuffled
@@ -127,4 +120,4 @@ def test_convert_k3_situ_weight_to_kernel_format(monkeypatch, guinterleave):
     assert shuffle_weight.call_args_list[1].args[2] is False
     assert shuffle_scale.call_args.args[2] is guinterleave
     e8m0_shuffle.assert_called_once()
-    assert ("AITER_BF16_FP8_MOE_BOUND" in os.environ) is guinterleave
+    assert os.environ["AITER_BF16_FP8_MOE_BOUND"] == "0"

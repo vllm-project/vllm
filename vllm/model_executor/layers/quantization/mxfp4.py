@@ -20,9 +20,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
-    backend_to_kernel_cls,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
-    convert_k3_situ_weight_to_kernel_format,
     convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
@@ -471,43 +469,14 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         )
 
 
-def _use_k3_situ_aiter(moe: FusedMoEConfig) -> bool:
-    """Whether Kimi-K3's SiTU MXFP4 MoE should use the AITER A16W4 kernel.
-
-    K3 is weight-only MXFP4 (W4A16) with SiTU activation, which the generic
-    MXFP4 backend selector does not cover; route it to AITER on gfx950.
-    """
-    if not current_platform.is_rocm():
-        return False
-    from vllm._aiter_ops import rocm_aiter_ops
-    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-    from vllm.platforms.rocm import on_gfx950
-
-    return (
-        rocm_aiter_ops.is_fused_moe_enabled()
-        and on_gfx950()
-        and moe.activation == MoEActivation.SITU
-        and moe.activation_situ_linear_beta is not None
-        and rocm_aiter_ops.get_aiter_activation_type("situ") is not None
-    )
-
-
 class Mxfp4MoEMethod(FusedMoEMethodBase):
     """MXFP4 MoE quantization method."""
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
+
         self.weight_dtype = "mxfp4"
-        self.is_k3_situ_aiter = _use_k3_situ_aiter(moe)
-        self.experts_cls: type[mk.FusedMoEExperts] | None
-        if self.is_k3_situ_aiter:
-            self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
-            self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
-            logger.info_once("Using AITER_MXFP4_BF16 for Kimi-K3 SiTU MXFP4 MoE.")
-        else:
-            self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(
-                moe
-            )
+        self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(moe)
 
         self.max_capture_size = moe.max_capture_size
 
@@ -747,25 +716,20 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 )
 
         # Convert weights to kernel format
-        if self.is_k3_situ_aiter:
-            w13, w2, w13_scale, w2_scale = convert_k3_situ_weight_to_kernel_format(
-                layer
+        w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
+            convert_weight_to_mxfp4_moe_kernel_format(
+                mxfp4_backend=self.mxfp4_backend,
+                layer=layer,
+                w13_weight=w13,
+                w2_weight=w2,
+                w13_weight_scale=w13_scale,
+                w2_weight_scale=w2_scale,
+                w13_bias=w13_bias,
+                w2_bias=w2_bias,
+                _cache_permute_indices=self._cache_permute_indices,
+                activation=self.moe.activation,
             )
-        else:
-            w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
-                convert_weight_to_mxfp4_moe_kernel_format(
-                    mxfp4_backend=self.mxfp4_backend,
-                    layer=layer,
-                    w13_weight=w13,
-                    w2_weight=w2,
-                    w13_weight_scale=w13_scale,
-                    w2_weight_scale=w2_scale,
-                    w13_bias=w13_bias,
-                    w2_bias=w2_bias,
-                    _cache_permute_indices=self._cache_permute_indices,
-                    activation=self.moe.activation,
-                )
-            )
+        )
 
         # For TRITON backends, weights are wrapped tensors from triton_kernels
         # that don't support .detach(). Manually assign parameters.

@@ -683,48 +683,6 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     return hidden_size, intermediate_size
 
 
-def convert_k3_situ_weight_to_kernel_format(
-    layer: RoutedExperts,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Preshuffle K3 SiTU MXFP4 weights for AITER SiTUv2 kernels."""
-    import os
-
-    from aiter.utility.fp4_utils import e8m0_shuffle
-
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    fp4_dtype = torch.float4_e2m1fn_x2
-    e8m0_dtype = torch.float8_e8m0fnu
-    num_experts = layer.w13_weight.shape[0]
-    guinterleave = rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
-
-    if guinterleave:
-        # AITER otherwise keeps BF16 activations for small token buckets,
-        # which is incompatible with the FP8 A8W4 interleaved layout.
-        # TODO: Remove once AITER takes this as a kernel argument.
-        os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
-
-    w13 = rocm_aiter_ops.shuffle_weight_a16w4(
-        layer.w13_weight.data.view(fp4_dtype), 16, guinterleave
-    )
-    w2 = rocm_aiter_ops.shuffle_weight_a16w4(
-        layer.w2_weight.data.view(fp4_dtype), 16, False
-    )
-    w13_scale_raw = layer.w13_weight_scale.data.view(e8m0_dtype)
-    w2_scale_raw = layer.w2_weight_scale.data.view(e8m0_dtype)
-    w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
-        w13_scale_raw.view(-1, w13_scale_raw.shape[-1]),
-        num_experts,
-        guinterleave,
-    )
-    w2_scale = e8m0_shuffle(w2_scale_raw.view(-1, w2_scale_raw.shape[-1]))
-
-    w13.is_shuffled = True
-    w2.is_shuffled = True
-
-    return w13, w2, w13_scale, w2_scale
-
-
 def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     mxfp4_backend: Mxfp4MoeBackend,
     layer: torch.nn.Module,
