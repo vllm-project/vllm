@@ -49,6 +49,7 @@ from vllm.multimodal.processing.processor import (
     ResolvedPromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .idefics2_vision_model import Idefics2VisionTransformer
@@ -396,12 +397,23 @@ class Phi4MMImageEncoder(nn.Module):
                         w * base_feat_width // base_feat_height_reduction,
                     )
                 )
-                useful_height = int(reshaped_image_attention_mask[0, :, 0].sum().item())
-                useful_width = int(reshaped_image_attention_mask[0, 0, :].sum().item())
+                # The mask stays on device for the encoder above, so these
+                # per-image counts have to come back to the host to drive the
+                # slicing and the Python-level length arithmetic.
+                with gpu_sync_allowed():
+                    useful_height = int(
+                        reshaped_image_attention_mask[0, :, 0].sum().item()
+                    )
+                    useful_width = int(
+                        reshaped_image_attention_mask[0, 0, :].sum().item()
+                    )
+                    mask_token_count = int(
+                        image_attention_mask[_bs, : B_ + 1, 0::2, 0::2].sum().item()
+                    )
                 sub_img = sub_img[:, :useful_height, :useful_width]
                 temp_sub_GN = self.sub_GN.repeat(1, useful_height, 1, 1)
                 temp_len = (
-                    int(image_attention_mask[_bs, : B_ + 1, 0::2, 0::2].sum().item())
+                    mask_token_count
                     + (useful_height + 1)
                     + base_feat_height // base_feat_height_reduction
                 )
@@ -905,7 +917,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         return dict(
             input_image_embeds=MultiModalFieldConfig.batched("image"),
             image_attention_mask=MultiModalFieldConfig.batched("image"),
-            image_sizes=MultiModalFieldConfig.batched("image"),
+            image_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             num_img_tokens=MultiModalFieldConfig.batched("image"),
             input_audio_embeds=MultiModalFieldConfig.batched("audio"),
         )

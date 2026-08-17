@@ -66,10 +66,6 @@ else:
 
 logger = init_logger(__name__)
 
-MRV1_UNSUPPORTED_PIECEWISE_CUDAGRAPH_ARCHITECTURES = frozenset(
-    {"DeepseekV4ForCausalLM"}
-)
-
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
         "DeepseekV2ForCausalLM",
@@ -83,15 +79,6 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     }
 )
 
-# Architectures that default to V1 on ROCm: the V2 runner faults during the
-# profile run. VLLM_USE_V2_MODEL_RUNNER=1 still forces V2.
-# TODO: fix V2 enablement
-ROCM_EXCLUDED_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
-    {
-        "KimiK3ForConditionalGeneration",
-    }
-)
-
 
 @lru_cache
 def default_v2_model_runner_architectures() -> frozenset[str]:
@@ -99,10 +86,10 @@ def default_v2_model_runner_architectures() -> frozenset[str]:
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
-        return (
-            DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
-            - ROCM_EXCLUDED_V2_MODEL_RUNNER_ARCHITECTURES
-        )
+        # TODO(rocm): DeepSeek V4 is still faster on MRV1 on ROCm. The
+        # attention layer picks the eager cudagraph region MRV1 needs, so
+        # this is a perf default only; drop it once MRV2 catches up.
+        return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES - {"DeepseekV4ForCausalLM"}
     return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
 
 
@@ -707,25 +694,6 @@ class VllmConfig:
             return False
         return is_default_v2_architecture or not model_config.is_moe
 
-    def _validate_mrv1_piecewise_cudagraph(self) -> None:
-        if self.use_v2_model_runner:
-            return
-        model_config = self.model_config
-        if model_config is None:
-            return
-        if not self.compilation_config.cudagraph_mode.has_piecewise_cudagraphs():
-            return
-        architectures = getattr(model_config, "architectures", [])
-        if any(
-            arch in MRV1_UNSUPPORTED_PIECEWISE_CUDAGRAPH_ARCHITECTURES
-            for arch in architectures
-        ):
-            raise ValueError(
-                "DeepSeek V4 does not support PIECEWISE CUDA graphs with "
-                "Model Runner V1. Use Model Runner V2 or disable PIECEWISE "
-                "CUDA graphs."
-            )
-
     @property
     def needs_dp_coordinator(self) -> bool:
         """
@@ -1089,6 +1057,14 @@ class VllmConfig:
                 raise ValueError(
                     "--enable-return-routed-experts is incompatible with "
                     "pipeline parallelism (PP > 1)."
+                )
+            if (
+                self.parallel_config.decode_context_parallel_size > 1
+                or self.parallel_config.prefill_context_parallel_size > 1
+            ):
+                raise ValueError(
+                    "--enable-return-routed-experts is incompatible with context "
+                    "parallelism (DCP > 1 or PCP > 1)."
                 )
 
             # Incompatible with any KV connector — covers both PD disaggregation
@@ -1651,8 +1627,6 @@ class VllmConfig:
                         "this will likely lead to an error.",
                         "pipeline parallelism",
                     )
-
-        self._validate_mrv1_piecewise_cudagraph()
 
         # final check of cudagraph mode after all possible updates
         if current_platform.is_cuda_alike():
