@@ -76,3 +76,42 @@ def test_qwen3_5_mtp_lm_head_receives_quant_config():
         MockLMHead.assert_called_once()
         call_kwargs = MockLMHead.call_args.kwargs
         assert call_kwargs["quant_config"] is mock_quant_config
+
+
+def test_should_bypass_mtp_quant_when_quark_exclude_omits_mtp():
+    from vllm.model_executor.models.qwen3_5_mtp import _should_bypass_mtp_quant
+
+    quant_config = Mock()
+    quant_config.get_name.return_value = "quark"
+    hf_qc = {"exclude": ["self_attn.q_proj"], "layer_quant_config": {}}
+
+    assert _should_bypass_mtp_quant(quant_config, hf_qc) is True
+
+
+def test_should_not_bypass_mtp_quant_when_quark_declares_mtp():
+    from vllm.model_executor.models.qwen3_5_mtp import _should_bypass_mtp_quant
+
+    quant_config = Mock()
+    quant_config.get_name.return_value = "quark"
+    hf_qc = {
+        "exclude": [],
+        "layer_quant_config": {"model.mtp.fc": {"weight": {"dtype": "float16"}}},
+    }
+
+    assert _should_bypass_mtp_quant(quant_config, hf_qc) is False
+
+
+def test_should_bypass_mtp_quant_for_gptq_dynamic_marker():
+    from vllm.model_executor.models.qwen3_5_mtp import _should_bypass_mtp_quant
+
+    quant_config = Mock()
+    quant_config.get_name.return_value = "gptq"
+    hf_qc = {"dynamic": {"-:.*mtp.*": False}}
+
+    assert _should_bypass_mtp_quant(quant_config, hf_qc) is True
+
+
+def test_should_not_bypass_mtp_quant_with_no_quant_config():
+    from vllm.model_executor.models.qwen3_5_mtp import _should_bypass_mtp_quant
+
+    assert _should_bypass_mtp_quant(None, {"exclude": []}) is False

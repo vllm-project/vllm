@@ -50,6 +50,34 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _should_bypass_mtp_quant(
+    quant_config: "QuantizationConfig | None",
+    hf_qc: object,
+) -> bool:
+    """Whether MTP decoder weights (mtp.fc, mtp.layers.*) should be built
+    unquantized despite the base model using a quantization config."""
+    if not quant_config:
+        return False
+    if quant_config.get_name() == "modelopt_fp4":
+        return True
+    if not isinstance(hf_qc, dict):
+        return False
+
+    dynamic = hf_qc.get("dynamic", {})
+    if any(k.startswith("-:") and "mtp" in k for k in dynamic):
+        return True
+
+    if quant_config.get_name() == "quark":
+        exclude = hf_qc.get("exclude") or []
+        layer_quant_config = hf_qc.get("layer_quant_config") or {}
+        mtp_declared = any("mtp" in str(e).lower() for e in exclude) or any(
+            "mtp" in str(k).lower() for k in layer_quant_config
+        )
+        return not mtp_declared
+
+    return False
+
+
 @support_torch_compile(
     dynamic_arg_dims={
         "input_ids": 0,
@@ -84,15 +112,10 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             config.hidden_size,
         )
 
-        # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
-        # missing from hf_quant_config.json exclude_modules. Force unquantized.
-        # Ref: https://github.com/vllm-project/vllm/pull/38650
-        # Ref: https://github.com/NVIDIA/Model-Optimizer/pull/1124
-        fc_quant = (
-            None
-            if (quant_config and quant_config.get_name() == "modelopt_fp4")
-            else quant_config
-        )
+        hf_qc = getattr(model_config.hf_config, "quantization_config", None)
+        bypass_mtp_quant = _should_bypass_mtp_quant(quant_config, hf_qc)
+
+        fc_quant = None if bypass_mtp_quant else quant_config
         self.fc = ColumnParallelLinear(
             self.config.hidden_size * 2,
             self.config.hidden_size,
@@ -103,16 +126,9 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             prefix=f"{prefix}.fc",
         )
 
-        # GPTQ: quantized checkpoints may exclude MTP from quantization via
-        # quantization_config.dynamic with "-:pattern" entries. When detected,
-        # disable quantization for MTP layers so they use unquantized params.
         original_quant = vllm_config.quant_config
-        if quant_config and quant_config.get_name() not in ("modelopt_fp4",):
-            hf_qc = getattr(model_config.hf_config, "quantization_config", None)
-            if isinstance(hf_qc, dict):
-                dynamic = hf_qc.get("dynamic", {})
-                if any(k.startswith("-:") and "mtp" in k for k in dynamic):
-                    vllm_config.quant_config = None
+        if bypass_mtp_quant:
+            vllm_config.quant_config = None
         self.layers = torch.nn.ModuleList(
             Qwen3_5DecoderLayer(
                 vllm_config,
