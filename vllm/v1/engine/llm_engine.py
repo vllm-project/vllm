@@ -281,6 +281,7 @@ class LLMEngine:
             # Make a new RequestState and queue.
             self.output_processor.add_request(request, prompt_text, None, 0)
             # Add the request to EngineCore.
+            debug_spend_time("before engine_core.add_request")
             self.engine_core.add_request(request)
             debug_spend_time("after engine_core.add_request")
             return req_id

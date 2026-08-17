@@ -87,8 +87,8 @@ class PagedShmTensorIPC:
 
         start = time.perf_counter()
         try:
-            alloc = self.client_sync.open_write(items)
-        except MemoryError:
+            alloc = self.client_sync.open_write(items, timeout=5.0)
+        except RuntimeError:
             return None
 
         for elem, item in zip(elements, alloc):
@@ -135,7 +135,11 @@ class PagedShmTensorIPC:
             if pshm_tensor is not None:
                 torch_dtype = getattr(torch, pshm_tensor.dtype)
                 tensor_gpu = self.client_sync.read(
-                    pshm_tensor.uuid, pshm_tensor.size, pshm_tensor.blocks, device
+                    pshm_tensor.uuid,
+                    pshm_tensor.size,
+                    pshm_tensor.blocks,
+                    device,
+                    timeout=-1,
                 )
                 tensor_gpu = tensor_gpu.view(torch_dtype).view(pshm_tensor.shape)
                 pixel_values.data = tensor_gpu

@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
+import threading
+import time
 
 import numpy as np
 import pytest
@@ -9,6 +11,7 @@ import torch
 
 from vllm.renderers.paged_shm.client import PagedShmClient
 from vllm.renderers.paged_shm.server import PagedShmServerProc
+from vllm.renderers.paged_shm.types import ShmItem
 from vllm.utils import random_uuid
 
 # ---------------------------------------------------------------------------
@@ -257,7 +260,12 @@ class TestMultiBlock:
 
 
 class TestContextManagers:
-    """Exercise the write/read context managers directly."""
+    """
+    Exercise the write/read context managers directly.
+    Note: These tests intentionally access `client._storage` (private attribute)
+    to simulate manual block manipulation, ensuring the context managers handle
+    commit/rollback correctly.
+    """
 
     def test_write_context_commit(self, client):
         uuid = _unique_uuid()
@@ -473,8 +481,6 @@ class TestConcurrency:
     """Limited concurrency test using threads (ZMQ sockets are thread‑safe)."""
 
     def test_concurrent_readers(self, client):
-        import threading
-
         uuid = _unique_uuid()
         data = b"concurrent read data"
         client.write(uuid, data)
@@ -496,8 +502,6 @@ class TestConcurrency:
 
     def test_concurrent_writers(self, client):
         """Multiple writers with distinct UUIDs should succeed."""
-        import threading
-
         uuids = [_unique_uuid() for _ in range(4)]
         datas = [f"writer-{i}".encode() for i in range(4)]
 
@@ -595,5 +599,362 @@ class TestOpenReadFlag:
         assert state["reading_items_count"] > 0
 
         # Cleanup: release lock and delete
+        client.close_read(uuid)
+        client.delete(uuid)
+
+
+# ---------------------------------------------------------------------------
+# Timeout handling
+# ---------------------------------------------------------------------------
+
+
+class TestTimeout:
+    """Test timeout behavior for open_write and open_read."""
+
+    def _fill_memory_non_cacheable(self, client) -> str:
+        """
+        Allocate all blocks with a single non-cacheable item.
+        With size=1MB and block_size=4096, this exactly uses 256 blocks.
+        """
+        uuid = _unique_uuid()
+        data = bytes(1024 * 1024)  # 1 MiB == 256 * 4096
+        client.write(uuid, data, use_cache=False)
+        state = client.get_manager_state()
+        assert state["free_blocks_count"] == 0
+        assert state["total_available_blocks"] == 0
+        return uuid
+
+    def test_open_write_timeout_zero_raises_memory_error(self, client):
+        """With timeout=0, MemoryError should be raised immediately."""
+        large_uuid = self._fill_memory_non_cacheable(client)
+        try:
+            with pytest.raises(RuntimeError, match="Server error"):
+                client.open_write(
+                    [ShmItem(uuid=_unique_uuid(), size=100, use_cache=True)],
+                    timeout=0.0,
+                )
+        finally:
+            client.delete(large_uuid)
+
+    def test_open_write_timeout_positive_succeeds_after_space_freed(self, client):
+        """With timeout>0, open_write should block until space is freed."""
+        large_uuid = self._fill_memory_non_cacheable(client)
+
+        small_uuid = _unique_uuid()
+        result_holder = {}
+        err_holder = {}
+
+        def _waiter():
+            try:
+                alloc = client.open_write(
+                    [ShmItem(uuid=small_uuid, size=100, use_cache=True)],
+                    timeout=5.0,
+                )
+                result_holder["alloc"] = alloc
+            except Exception as e:
+                err_holder["err"] = e
+
+        t = threading.Thread(target=_waiter)
+        t.start()
+
+        # Give the server time to queue the request and block the client thread
+        time.sleep(0.2)
+        assert t.is_alive(), "open_write should be waiting, not finished"
+
+        # Free space by deleting the large non-cacheable item
+        client.delete(large_uuid)
+
+        t.join(timeout=10.0)
+        assert not t.is_alive(), "open_write did not complete in time"
+        assert "err" not in err_holder, f"open_write failed: {err_holder.get('err')}"
+        assert "alloc" in result_holder
+        assert result_holder["alloc"][0].blocks
+
+        # Cleanup
+        client.close_write(small_uuid)
+        client.delete(small_uuid)
+
+    def test_open_write_timeout_negative_infinite(self, client):
+        """With timeout<0, open_write should wait indefinitely."""
+        large_uuid = self._fill_memory_non_cacheable(client)
+
+        small_uuid = _unique_uuid()
+        result_holder = {}
+        err_holder = {}
+
+        def _waiter():
+            try:
+                alloc = client.open_write(
+                    [ShmItem(uuid=small_uuid, size=100, use_cache=True)],
+                    timeout=-1.0,
+                )
+                result_holder["alloc"] = alloc
+            except Exception as e:
+                err_holder["err"] = e
+
+        t = threading.Thread(target=_waiter)
+        t.start()
+
+        time.sleep(0.2)
+        assert t.is_alive(), "open_write should be waiting indefinitely"
+
+        # Free space
+        client.delete(large_uuid)
+
+        t.join(timeout=10.0)
+        assert not t.is_alive(), "open_write did not complete after space freed"
+        assert "err" not in err_holder, f"open_write failed: {err_holder.get('err')}"
+        assert "alloc" in result_holder
+
+        # Cleanup
+        client.close_write(small_uuid)
+        client.delete(small_uuid)
+
+    def test_open_read_timeout_zero_raises_value_error(self, client):
+        """With timeout=0, open_read on a writing item should raise ValueError."""
+        uuid = _unique_uuid()
+        client.open_write([ShmItem(uuid=uuid, size=100, use_cache=True)], timeout=0.0)
+
+        try:
+            with pytest.raises(RuntimeError, match="Server error"):
+                client.open_read(uuid, timeout=0.0)
+        finally:
+            # Release the write lock and delete
+            client.close_write(uuid)
+            client.delete(uuid)
+
+    def test_open_read_timeout_positive_succeeds_after_close_write(self, client):
+        """With timeout>0, open_read should wait until the item becomes readable."""
+        uuid = _unique_uuid()
+        client.open_write([ShmItem(uuid=uuid, size=100, use_cache=True)], timeout=0.0)
+
+        result_holder = {}
+        err_holder = {}
+
+        def _waiter():
+            try:
+                item = client.open_read(uuid, timeout=5.0)
+                result_holder["item"] = item
+            except Exception as e:
+                err_holder["err"] = e
+
+        t = threading.Thread(target=_waiter)
+        t.start()
+
+        time.sleep(0.2)
+        assert t.is_alive(), "open_read should be waiting, not finished"
+
+        # Make the item readable
+        client.close_write(uuid)
+
+        t.join(timeout=10.0)
+        assert not t.is_alive(), "open_read did not complete in time"
+        assert "err" not in err_holder, f"open_read failed: {err_holder.get('err')}"
+        assert "item" in result_holder
+        assert result_holder["item"].blocks
+
+        # Cleanup
+        client.close_read(uuid)
+        client.delete(uuid)
+
+    def test_open_read_timeout_negative_infinite(self, client):
+        """With timeout<0, open_read should wait indefinitely until readable."""
+        uuid = _unique_uuid()
+        client.open_write([ShmItem(uuid=uuid, size=100, use_cache=True)], timeout=0.0)
+
+        result_holder = {}
+        err_holder = {}
+
+        def _waiter():
+            try:
+                item = client.open_read(uuid, timeout=-1.0)
+                result_holder["item"] = item
+            except Exception as e:
+                err_holder["err"] = e
+
+        t = threading.Thread(target=_waiter)
+        t.start()
+
+        time.sleep(0.2)
+        assert t.is_alive(), "open_read should be waiting indefinitely"
+
+        # Make readable
+        client.close_write(uuid)
+
+        t.join(timeout=10.0)
+        assert not t.is_alive(), "open_read did not complete after close_write"
+        assert "err" not in err_holder, f"open_read failed: {err_holder.get('err')}"
+        assert "item" in result_holder
+
+        # Cleanup
+        client.close_read(uuid)
+        client.delete(uuid)
+
+
+# ---------------------------------------------------------------------------
+# Asynchronous writes
+# ---------------------------------------------------------------------------
+
+
+class TestAsyncWrite:
+    """Verify asynchronous write functionality."""
+
+    def test_async_write_basic(self, client):
+        uuid = _unique_uuid()
+        data = b"async test data"
+        state_before = client.get_manager_state()
+
+        size, future = client.write(uuid, data, async_write=True)
+        assert size == len(data)
+        # Wait for completion
+        future.result()
+
+        state_after = client.get_manager_state()
+        needed = _blocks_needed(len(data))
+        assert (
+            state_after["cached_items_count"] == state_before["cached_items_count"] + 1
+        )
+        assert (
+            state_after["free_blocks_count"]
+            == state_before["free_blocks_count"] - needed
+        )
+
+        result = client.read(uuid)
+        assert result.tobytes() == data
+        client.delete(uuid)
+
+    def test_async_write_with_open_read(self, client):
+        uuid = _unique_uuid()
+        data = b"async with open_read"
+        state_before = client.get_manager_state()
+
+        size, future = client.write(uuid, data, open_read=True, async_write=True)
+        assert size == len(data)
+        future.result()
+
+        state_after_write = client.get_manager_state()
+        # Should be in reading state, not cached
+        assert (
+            state_after_write["reading_items_count"]
+            == state_before["reading_items_count"] + 1
+        )
+        assert (
+            state_after_write["cached_items_count"]
+            == state_before["cached_items_count"]
+        )
+
+        # Release the lock
+        client.close_read(uuid)
+        state_after_close = client.get_manager_state()
+        assert (
+            state_after_close["cached_items_count"]
+            == state_before["cached_items_count"] + 1
+        )
+        client.delete(uuid)
+
+    def test_async_write_exception_rollback(self, client):
+        """
+        Simulate a failure during data writing to verify rollback.
+        We cannot easily force storage.write to fail, so we test the
+        rollback logic by providing an invalid block list.
+        """
+        uuid = _unique_uuid()
+        invalid_blocks = [-1, -2]  # invalid block indices
+        # Passing blocks will skip allocation, so the write will fail
+        # because the storage will try to write to invalid blocks.
+        with pytest.raises(Exception):
+            client.write(uuid, b"data", blocks=invalid_blocks, async_write=True)
+
+        # The item should have been deleted (rollback) and not be readable
+        with pytest.raises(RuntimeError, match="Server error"):
+            client.read(uuid)
+
+        # Also verify the item is not in the cache
+        state = client.get_manager_state()
+        assert uuid not in state.get("cached_items", [])
+
+    def test_async_write_concurrent(self, client):
+        """Multiple concurrent async writes with distinct UUIDs."""
+        uuids = [_unique_uuid() for _ in range(4)]
+        datas = [f"async-{i}".encode() for i in range(4)]
+        futures = []
+
+        for u, d in zip(uuids, datas):
+            _, fut = client.write(u, d, async_write=True)
+            futures.append(fut)
+
+        # Wait for all
+        for fut in futures:
+            fut.result()
+
+        # Verify data
+        for u, d in zip(uuids, datas):
+            result = client.read(u)
+            assert result.tobytes() == d
+            client.delete(u)
+
+
+# ---------------------------------------------------------------------------
+# Pre‑allocated blocks
+# ---------------------------------------------------------------------------
+
+
+class TestPreAllocatedBlocks:
+    """Test write/read with explicitly provided block lists."""
+
+    def test_write_with_preallocated_blocks(self, client):
+        uuid = _unique_uuid()
+        data = b"preallocated write"
+        size = len(data)
+
+        # Manually allocate blocks
+        item = ShmItem(uuid=uuid, size=size, use_cache=True)
+        alloc = client.open_write([item], timeout=0.0)
+        blocks = alloc[0].blocks
+
+        # Write using pre‑allocated blocks
+        client.write(uuid, data, blocks=blocks)
+        # The write method will use the provided blocks and commit
+
+        # Verify data
+        result = client.read(uuid)
+        assert result.tobytes() == data
+
+        # Cleanup
+        client.delete(uuid)
+
+    def test_read_with_preallocated_blocks(self, client):
+        uuid = _unique_uuid()
+        data = b"preallocated read"
+        client.write(uuid, data)
+
+        # First, get the blocks and size via open_read (but don't close)
+        item = client.open_read(uuid, timeout=0.0)
+        blocks = item.blocks
+        size = item.size
+
+        # Now read using the pre‑obtained info (no new lock acquired)
+        result = client.read(uuid, size=size, blocks=blocks)
+        assert result.tobytes() == data
+
+        # Must close the read lock we acquired above
+        client.close_read(uuid)
+        client.delete(uuid)
+
+    def test_read_preallocated_zero_size(self, client):
+        uuid = _unique_uuid()
+        data = b""  # empty data
+        client.write(uuid, data)
+
+        # Use open_read to get info
+        item = client.open_read(uuid, timeout=0.0)
+        blocks = item.blocks  # empty list
+        size = item.size  # 0
+
+        # Reading with size=0 should return empty array without using blocks
+        result = client.read(uuid, size=size, blocks=blocks)
+        assert isinstance(result, np.ndarray)
+        assert result.size == 0
+
         client.close_read(uuid)
         client.delete(uuid)

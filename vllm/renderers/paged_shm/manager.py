@@ -46,12 +46,9 @@ class PagedShmManager:
         self._pinned_items: set[str] = set()
 
     def open_write(self, items: list[ShmItem]) -> list[AllocatedShmItemInternal]:
-        """Allocate blocks for a batch of items for write.
-
-        Note:
-            If a request requires allocating multiple items, be sure to submit
-            the allocation request as a single batch to avoid deadlock
-            refer to the wiki:Dining philosophers problem.
+        """Allocate blocks for a batch of items. To avoid partial allocation,
+        submit multiple items in one batch.
+        Refer to the wiki:Dining philosophers problem.
         """
         # 0. Confirm there are no UUID conflicts with existing items.
         for item in items:
@@ -104,7 +101,8 @@ class PagedShmManager:
 
         if not open_read:
             item.ref_count = 0
-            # Insert into LRU cache if caching is enabled and item is not pinned
+            # Insert into LRU cache if open_read is False, caching is enabled,
+            # and item is not pinned
             if item.use_cache and uuid not in self._pinned_items:
                 self._total_available_blocks += item.n_block()
                 self._lru_cache.put(uuid, item)
@@ -118,7 +116,7 @@ class PagedShmManager:
         if item.ref_count < 0:
             raise ValueError(f"UUID {uuid} is being written")
 
-        # If the item is idle and cacheable/pinned, take it out of the cache
+        # If the item is idle and cacheable, take it out of the cache
         update_cache = (
             item.use_cache and item.ref_count == 0 and uuid not in self._pinned_items
         )
@@ -141,7 +139,7 @@ class PagedShmManager:
         if item.ref_count > 0:
             item.ref_count -= 1
 
-        # If the item is now idle and cacheable/pinned, put it back into the cache
+        # If the item is now idle and cacheable, put it back into the cache
         update_cache = (
             item.use_cache and item.ref_count == 0 and uuid not in self._pinned_items
         )
@@ -209,7 +207,12 @@ class PagedShmManager:
         if item is None:
             raise ValueError(f"UUID {uuid} not found")
 
-        return {"uuid": item.uuid, "size": item.size, "use_cache": item.use_cache}
+        return {
+            "uuid": item.uuid,
+            "size": item.size,
+            "use_cache": item.use_cache,
+            "ref_count": item.ref_count,
+        }
 
     def get_manager_state(self) -> dict[str, int]:
         idle_count = 0

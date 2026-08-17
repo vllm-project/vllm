@@ -35,10 +35,11 @@ def test_ppl(
 
 @pytest.mark.parametrize("model_info", MODELS[:1])
 def test_pshm(hf_runner, vllm_runner, model_info: GenerateModelInfo):
+    GB = 1024 * 1024 * 1024
     vqa_ppl_test(
         hf_runner,
         vllm_runner,
         model_info,
-        vllm_extra_kwargs={"paged_shm_size": 1073741824},
+        vllm_extra_kwargs={"paged_shm_size": 1 * GB},
         mm_processor_kwargs=mm_processor_kwargs,
     )

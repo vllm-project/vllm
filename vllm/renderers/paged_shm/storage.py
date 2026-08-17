@@ -131,7 +131,7 @@ class PagedShmStorage:
             array[:offset] = data_np[start : start + offset]
 
     def write_from_device(self, data: torch.Tensor, blocks: list[int]) -> None:
-        """GPU → CPU bulk copy using batched cuMemcpy (requires pinned memory)."""
+        """GPU → CPU bulk copy using batched custom CUDA operation (requires pinned memory)."""
         if not self.is_pinned:
             raise RuntimeError(
                 "Cannot write from device: shared memory is not pinned. "
@@ -206,7 +206,9 @@ class PagedShmStorage:
         return output_tensor
 
     def read_to_device(self, size: int, blocks: list[int], device: DeviceLikeType):
-        """CPU → GPU bulk copy using batched cuMemcpy (requires pinned memory)."""
+        """CPU → GPU bulk copy using batched custom CUDA operation (requires pinned memory).
+        If the current stream is the default stream, a separate stream is used and synchronized
+        to avoid blocking the default stream unnecessarily."""
         if not self.is_pinned:
             raise RuntimeError(
                 "Cannot read to device: shared memory is not pinned. "
@@ -238,6 +240,7 @@ class PagedShmStorage:
         dst_addrs = torch.tensor(dst_addrs_list, dtype=torch.int64)
         sizes = torch.tensor(sizes_list, dtype=torch.int64)
 
+        # Determine whether we need a separate stream to avoid blocking the default stream
         current_stream = torch.cuda.current_stream()
         default_stream = torch.cuda.default_stream()
         sync = current_stream == default_stream

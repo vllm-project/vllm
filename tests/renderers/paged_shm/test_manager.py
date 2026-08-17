@@ -186,16 +186,65 @@ class TestPinUnpin:
         assert manager._total_available_blocks == 4
 
     def test_pin_non_cacheable(self, manager, item_nocache):
+        """
+        For items with use_cache=False, pin/unpin have no effect,
+        but unpin when ref_count==0 will delete the item (as designed).
+        """
         manager.open_write([item_nocache])
 
+        # While writing (ref_count=-1), pin/unpin do nothing
         manager.pin("nocache")
         manager.unpin("nocache")
         assert "nocache" in manager._all_items
 
         manager.close_write("nocache")
+        # Now ref_count=0, pin does nothing, unpin triggers deletion
         manager.pin("nocache")
         manager.unpin("nocache")
         assert "nocache" not in manager._all_items
+
+    def test_pin_during_write(self, manager, item_small):
+        """Pinning an item before it is closed keeps it out of cache on close."""
+        manager.open_write([item_small])
+        manager.pin("small")  # pin while still writing
+        manager.close_write("small")  # should NOT go into cache because pinned
+        item = manager._all_items["small"]
+        assert item.ref_count == 0
+        assert "small" not in manager._lru_cache
+        assert manager._total_available_blocks == 3  # blocks remain unavailable
+        manager.unpin("small")
+        assert "small" in manager._lru_cache
+        assert manager._total_available_blocks == 4
+
+    def test_unpin_during_write(self, manager, item_small):
+        """Unpinning during write has no effect because item not yet pinned."""
+        manager.open_write([item_small])
+        manager.unpin("small")  # item not pinned, so no-op
+        manager.close_write("small")
+        # Since unpin did nothing, close_write will put it into cache
+        assert "small" in manager._lru_cache
+        assert manager._total_available_blocks == 4
+
+    def test_unpin_with_ref_count_positive(self, manager, item_small):
+        """Unpinning while ref_count > 0 should not re‑insert into cache."""
+        manager.open_write([item_small])
+        manager.close_write("small")
+        manager.pin("small")
+        manager.open_read("small")  # ref_count becomes 1
+        manager.unpin("small")  # unpin while ref_count=1
+        # Item should not be in cache because ref_count>0
+        assert "small" not in manager._lru_cache
+        assert manager._total_available_blocks == 3
+        manager.close_read("small")  # ref_count=0, but unpin already called,
+        # so it should NOT be inserted automatically (unpin already did nothing)
+        # Actually, since unpin was called while ref_count>0, it didn't insert,
+        # and after close_read ref_count=0, we need to check if it gets inserted.
+        # According to manager.unpin logic, if unpin was called when ref_count>0,
+        # it sets nothing; then close_read sees ref_count==0 and use_cache=True,
+        # and will put it into cache. So after close_read, it should be in cache.
+        # This is correct behavior.
+        assert "small" in manager._lru_cache
+        assert manager._total_available_blocks == 4
 
 
 # ---------------------------------------------------------------------------
@@ -357,3 +406,44 @@ class TestLRUEviction:
         # After eviction of third (2 blocks) and allocation of new (1 block),
         # one block remains free.
         assert len(manager._free_blocks) == 1
+
+
+# ---------------------------------------------------------------------------
+# Info and state reporting
+# ---------------------------------------------------------------------------
+
+
+class TestInfoAndState:
+    def test_get_info(self, manager, item_small):
+        manager.open_write([item_small])
+        manager.close_write("small")
+        info = manager.get_info("small")
+        assert info["uuid"] == "small"
+        assert info["size"] == 200
+        assert info["use_cache"] is True
+        assert info["ref_count"] == 0
+
+    def test_get_info_nonexistent_raises(self, manager):
+        with pytest.raises(ValueError, match="not found"):
+            manager.get_info("ghost")
+
+    def test_get_manager_state(self, manager, item_small, item_large):
+        state = manager.get_manager_state()
+        assert state["size"] == 1024
+        assert state["block_size"] == 256
+        assert state["n_block"] == 4
+        assert state["free_blocks_count"] == 4
+        assert state["total_available_blocks"] == 4
+        assert state["cached_items_count"] == 0
+        assert state["cached_blocks_count"] == 0
+        assert state["pinned_items_count"] == 0
+        assert state["total_items_count"] == 0
+
+        manager.open_write([item_small, item_large])
+        manager.close_write("small")
+        state = manager.get_manager_state()
+        assert state["free_blocks_count"] == 1  # 4 - (1+2) = 1
+        assert state["total_available_blocks"] == 3  # item_large not cached yet
+        assert state["cached_items_count"] == 1  # small
+        assert state["cached_blocks_count"] == 1  # small's block
+        assert state["total_items_count"] == 2
