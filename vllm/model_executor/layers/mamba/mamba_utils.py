@@ -335,7 +335,10 @@ def get_conv_copy_spec(
     DS layout ``(num_blocks, dim, state_len)``.
     """
     src_block_id = block_ids[cur_block_idx]
-    offset = num_accepted_tokens - 1
+    # num_accepted_tokens can be 0 for stale rows whose sampled tokens were
+    # discarded; clamp so the offset never goes negative (a negative value
+    # would silently slice from the end of the state).
+    offset = max(num_accepted_tokens - 1, 0)
     if is_conv_state_dim_first():
         # DS offset > 0 is handled by the fused postprocess kernel.
         assert offset == 0, (
@@ -358,7 +361,10 @@ def get_temporal_copy_spec(
     num_accepted_tokens: int,
 ) -> MambaCopySpec:
     """Return a MambaCopySpec for copying a temporal state slice."""
-    src_block_id = block_ids[cur_block_idx + num_accepted_tokens - 1]
+    # num_accepted_tokens can be 0 for stale rows whose sampled tokens were
+    # discarded; clamp so the index never goes negative (a negative value
+    # would silently pick a block from the end of the list).
+    src_block_id = block_ids[cur_block_idx + max(num_accepted_tokens - 1, 0)]
     src_state = state[src_block_id]
     return MambaCopySpec(
         start_addr=src_state.data_ptr(), num_elements=src_state.numel()

@@ -103,7 +103,9 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
             if IS_SPEC_DECODING:
-                i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
+                # num_accepted_tokens can be 0 for stale rows whose sampled
+                # tokens were discarded; clamp so the index stays in bounds.
+                i_t = tl.maximum(tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1, 0)
             else:
                 i_t = 0
             # Load state index and check for invalid entries
