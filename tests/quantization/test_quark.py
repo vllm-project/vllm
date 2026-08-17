@@ -701,11 +701,32 @@ def test_non_fused_layer_unaffected():
 
 
 def test_substr_match_on_fused_name():
-    # skip_with_substr=True path: fused-name substring match should also
+    # Substring matching: a fused-name match should also
     # short-circuit before shard expansion.
     assert is_layer_skipped(
         prefix="model.layers.0.self_attn.qkv_proj",
         ignored_layers=["self_attn.qkv_proj"],
         fused_mapping=FUSED_MAPPING,
-        skip_with_substr=True,
+        match_mode="substring",
+    )
+
+
+@pytest.mark.parametrize(
+    ("prefix", "ignored_layer", "expected"),
+    [
+        ("model.layers.0.self_attn.b_proj", "b_proj", True),
+        ("model.layers.0.self_attn.q_b_proj", "b_proj", False),
+        ("model.layers.0.self_attn.kv_b_proj", "b_proj", False),
+        ("model.layers.5.self_attn.g_proj", "5.self_attn.g_proj", True),
+        ("model.layers.6.self_attn.g_proj", "5.self_attn.g_proj", False),
+    ],
+)
+def test_suffix_match_at_module_boundary(prefix, ignored_layer, expected):
+    assert (
+        is_layer_skipped(
+            prefix=prefix,
+            ignored_layers=[ignored_layer],
+            match_mode="suffix",
+        )
+        is expected
     )

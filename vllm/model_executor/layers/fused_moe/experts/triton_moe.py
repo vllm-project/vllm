@@ -252,6 +252,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             torch.bfloat16,
             torch.float8_e4m3fn,
             torch.float8_e4m3fnuz,
+            torch.int8,
         ]
 
         # We declared expects_unquantized_inputs (LoRA + DP/EP all2all), so the
@@ -298,6 +299,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         elif (
             hidden_states.dtype == torch.float8_e4m3fn
             or hidden_states.dtype == torch.float8_e4m3fnuz
+            or hidden_states.dtype == torch.int8
         ):
             compute_type = tl.bfloat16
         else:
