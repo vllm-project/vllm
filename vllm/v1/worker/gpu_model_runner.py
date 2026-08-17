@@ -6755,11 +6755,20 @@ class GPUModelRunner(
             supports_encoder_cudagraph,
         )
         from vllm.v1.worker.encoder_cudagraph import (
+            ENCODER_CUDAGRAPH_TOWER_CONNECTOR_LORA_WARNING,
             EncoderCudaGraphManager,
         )
 
         raw_model = self.get_model()
         if not supports_encoder_cudagraph(raw_model):
+            return None
+
+        # Encoder graph capture has no explicit tower/connector-LoRA setup,
+        # and replay may reorder or split the scheduler-ordered LoRA mapping.
+        # Keep this configuration on the eager encoder path until capture and
+        # per-graph-batch mappings both support it.
+        if self.lora_config and self.lora_manager.supports_tower_connector_lora():
+            logger.warning_once(ENCODER_CUDAGRAPH_TOWER_CONNECTOR_LORA_WARNING)
             return None
 
         return EncoderCudaGraphManager(

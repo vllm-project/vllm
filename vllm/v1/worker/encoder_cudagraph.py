@@ -27,6 +27,11 @@ from vllm.v1.worker.encoder_cudagraph_defs import (
 
 logger = init_logger(__name__)
 
+ENCODER_CUDAGRAPH_TOWER_CONNECTOR_LORA_WARNING = (
+    "`cudagraph_mm_encoder` is incompatible with "
+    "`enable_tower_connector_lora`; using eager encoder execution."
+)
+
 
 @dataclass
 class BudgetGraphMetadata:

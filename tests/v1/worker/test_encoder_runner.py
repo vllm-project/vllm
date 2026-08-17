@@ -1,23 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for EncoderRunner.gather_mm_embeddings (model runner V2).
+"""Tests for multimodal encoder execution in model runner V2.
 
-Covers the speculative-drafter encoder-cache handling: the drafter reads one
-position ahead of the target model (``draft_lookahead``). The +1 look-ahead
-feature past the processed boundary is used when its encoder output is present
-and tolerated (token-embedding fallback) when it is not, while a miss within
-the processed range still fails loudly.
+Covers encoder CUDA graph selection, encoder cache execution and gathering,
+speculative-drafter look-ahead, and encoder timing.
 """
 
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock
 
 import numpy as np
 import pytest
 import torch
+from torch import nn
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
+from vllm.v1.worker.encoder_cudagraph import (
+    ENCODER_CUDAGRAPH_TOWER_CONNECTOR_LORA_WARNING,
+)
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
+from vllm.v1.worker.gpu.model_states import interface as model_state_module
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 
 pytestmark = pytest.mark.cpu_test
@@ -184,6 +187,77 @@ def test_gather_preserves_mixed_modalities():
     assert len(mm_embeds) == 2
     assert [e.modality for e in mm_embeds] == ["video", "audio"]
     assert int(is_mm_embed.sum()) == 8
+
+
+class _TestModelState(ModelState):
+    def get_mm_embeddings(self, *args, **kwargs):
+        return None
+
+    def prepare_inputs(self, *args, **kwargs):
+        return {}
+
+    def prepare_dummy_inputs(self, *args, **kwargs):
+        return {}
+
+    def prepare_attn(self, *args, **kwargs):
+        return {}
+
+
+@pytest.mark.parametrize(
+    "supports_tower_connector_lora",
+    [None, False, True],
+    ids=["no-mm-lora-support", "language-only", "tower-connector"],
+)
+def test_model_state_encoder_cudagraph_respects_tower_connector_lora(
+    monkeypatch: pytest.MonkeyPatch,
+    supports_tower_connector_lora: bool | None,
+):
+    model = nn.Module()
+    lora_manager = SimpleNamespace()
+    if supports_tower_connector_lora is not None:
+        lora_manager.supports_tower_connector_lora = supports_tower_connector_lora
+    model.lora_manager = lora_manager
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=torch.float32,
+            enforce_eager=False,
+            max_model_len=64,
+            get_inputs_embeds_size=lambda: HIDDEN,
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=2,
+            max_num_batched_tokens=64,
+        ),
+        compilation_config=SimpleNamespace(cudagraph_mm_encoder=True),
+        observability_config=None,
+    )
+    cudagraph_manager = object()
+    manager_cls = Mock(return_value=cudagraph_manager)
+    warning_once = Mock()
+
+    monkeypatch.setattr(
+        model_state_module, "supports_encoder_cudagraph", lambda model: True
+    )
+    monkeypatch.setattr(model_state_module, "EncoderCudaGraphManager", manager_cls)
+    monkeypatch.setattr(model_state_module.logger, "warning_once", warning_once)
+
+    state = _TestModelState(
+        vllm_config=vllm_config,
+        model=model,
+        encoder_cache=EncoderCache(),
+        device=torch.device("cpu"),
+    )
+
+    if supports_tower_connector_lora:
+        manager_cls.assert_not_called()
+        warning_once.assert_called_once_with(
+            ENCODER_CUDAGRAPH_TOWER_CONNECTOR_LORA_WARNING
+        )
+        assert not state.encoder_runner.has_cudagraph()
+    else:
+        manager_cls.assert_called_once()
+        warning_once.assert_not_called()
+        assert state.encoder_runner.cudagraph_manager is cudagraph_manager
 
 
 def test_execute_mm_encoder_caches_outputs_without_gathering():

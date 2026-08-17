@@ -22,6 +22,7 @@ class TestConfig:
     max_loras: int = 2
     max_lora_rank: int = 32
     enable_tower_connector_lora: bool = False
+    compilation_config: dict[str, object] | None = None
     max_model_len: int = 8192
     gpu_memory_utilization: float = 0.85
     mm_processor_kwargs: dict[str, object] | None = None
@@ -45,6 +46,10 @@ class TestConfig:
                 }
 
 
+def _has_v2_encoder_cudagraph(worker) -> bool:
+    return worker.model_runner.model_state.encoder_runner.has_cudagraph()
+
+
 class Qwen2VLTester:
     """Test helper for Qwen2 VL models with LoRA"""
 
@@ -64,6 +69,7 @@ class Qwen2VLTester:
             max_loras=config.max_loras,
             max_lora_rank=config.max_lora_rank,
             enable_tower_connector_lora=config.enable_tower_connector_lora,
+            compilation_config=config.compilation_config,
             gpu_memory_utilization=config.gpu_memory_utilization,
             mm_processor_kwargs=config.mm_processor_kwargs,
             mm_processor_cache_gb=config.mm_processor_cache_gb,
@@ -73,6 +79,9 @@ class Qwen2VLTester:
     @property
     def llm(self) -> vllm.LLM:
         return self._runner.get_llm()
+
+    def has_v2_encoder_cudagraph(self) -> list[bool]:
+        return self._runner.collective_rpc(_has_v2_encoder_cudagraph)
 
     def __enter__(self) -> "Qwen2VLTester":
         return self
@@ -185,6 +194,13 @@ QWEN2VL_MODEL_PATH = "Qwen/Qwen2-VL-2B-Instruct"
 QWEN25VL_MODEL_PATH = "Qwen/Qwen2.5-VL-3B-Instruct"
 QWEN3VL_MODEL_PATH = "Qwen/Qwen3-VL-4B-Instruct"
 
+ENCODER_CUDAGRAPH_COMPILATION_CONFIG: dict[str, object] = {
+    "cudagraph_mm_encoder": True,
+    "cudagraph_capture_sizes": [4],
+    "encoder_cudagraph_token_budgets": [2048],
+    "encoder_cudagraph_max_vision_items_per_batch": 2,
+}
+
 
 def _enable_deterministic_lora_shrink(monkeypatch: pytest.MonkeyPatch) -> None:
     # These tests assert exact greedy outputs. Force the Triton LoRA shrink
@@ -290,6 +306,7 @@ def test_qwen2vl_multiple_lora_types(
     qwen2vl_language_lora_files,
     qwen2vl_vision_tower_connector_lora_files,
     qwen2vl_vision_tower_lora_files,
+    enable_pickle,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """
@@ -302,6 +319,9 @@ def test_qwen2vl_multiple_lora_types(
     language-only and vision-enabled LoRA adapters.
     """
     _enable_deterministic_lora_shrink(monkeypatch)
+    test_encoder_cudagraph = current_platform.is_cuda()
+    if test_encoder_cudagraph:
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
 
     config = TestConfig(
         model_path=QWEN2VL_MODEL_PATH,
@@ -313,6 +333,9 @@ def test_qwen2vl_multiple_lora_types(
         # TODO: Remove this restriction
         mm_processor_cache_gb=0,
         enable_tower_connector_lora=True,
+        compilation_config=(
+            ENCODER_CUDAGRAPH_COMPILATION_CONFIG if test_encoder_cudagraph else None
+        ),
     )
     with Qwen2VLTester(config) as tester:
         # Test 1: Language-only LoRA adapter
@@ -344,3 +367,8 @@ def test_qwen2vl_multiple_lora_types(
                 lora_id=lora_id,
                 lora_name="vision_tower",
             )
+
+        if test_encoder_cudagraph:
+            graph_states = tester.has_v2_encoder_cudagraph()
+            assert graph_states, "collective_rpc returned no workers"
+            assert not any(graph_states)

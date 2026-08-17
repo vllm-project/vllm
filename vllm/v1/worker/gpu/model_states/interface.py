@@ -8,6 +8,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     SupportsEncoderCudaGraph,
     supports_encoder_cudagraph,
@@ -16,12 +17,17 @@ from vllm.tasks import GenerationTask
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+from vllm.v1.worker.encoder_cudagraph import (
+    ENCODER_CUDAGRAPH_TOWER_CONNECTOR_LORA_WARNING,
+    EncoderCudaGraphManager,
+)
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
+
+logger = init_logger(__name__)
 
 
 class ModelSpecificAttnMetadata:
@@ -69,6 +75,19 @@ class ModelState(ABC):
                 and vllm_config.compilation_config.cudagraph_mm_encoder
                 and supports_encoder_cudagraph(model)
             )
+            # The model-attached LoRAModelManager exposes this as a bool;
+            # WorkerLoRAManager exposes the same name as a method in V1.
+            lora_manager = getattr(model, "lora_manager", None)
+            if (
+                enable_encoder_cuda_graph
+                and lora_manager is not None
+                and getattr(lora_manager, "supports_tower_connector_lora", False)
+            ):
+                # Capture does not install a valid tower/connector mapping,
+                # while replay may reorder or split media independently of it.
+                logger.warning_once(ENCODER_CUDAGRAPH_TOWER_CONNECTOR_LORA_WARNING)
+                enable_encoder_cuda_graph = False
+
             cudagraph_manager = (
                 EncoderCudaGraphManager(
                     vllm_config=vllm_config,

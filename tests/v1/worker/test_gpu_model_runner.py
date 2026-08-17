@@ -9,6 +9,8 @@ import numpy as np
 import pytest
 import torch
 
+import vllm.model_executor.models.interfaces as model_interfaces
+import vllm.v1.worker.encoder_cudagraph as encoder_cudagraph_module
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
     AttentionConfig,
@@ -55,6 +57,9 @@ from vllm.v1.worker.block_table import (
     MultiGroupBlockTable,
     SlotMappingMode,
     get_block_table_width,
+)
+from vllm.v1.worker.encoder_cudagraph import (
+    ENCODER_CUDAGRAPH_TOWER_CONNECTOR_LORA_WARNING,
 )
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
@@ -382,6 +387,71 @@ def test_sample_tokens_skips_pp_group_lookup_without_async_scheduling(
 
     output = GPUModelRunner.sample_tokens(runner, None)
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("model_supports_cudagraph", "supports_tower_connector_lora"),
+    [(False, True), (True, False), (True, True)],
+    ids=["unsupported-model", "language-only", "tower-connector"],
+)
+def test_encoder_cudagraph_manager_respects_model_and_lora_support(
+    monkeypatch: pytest.MonkeyPatch,
+    model_supports_cudagraph: bool,
+    supports_tower_connector_lora: bool,
+):
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.compilation_config = SimpleNamespace(cudagraph_mm_encoder=True)
+    runner.supports_mm_inputs = True
+    runner.vllm_config = object()
+    runner.device = torch.device("cpu")
+    runner.dtype = torch.float32
+    runner.lora_config = object()
+    runner.lora_manager = Mock()
+    runner.lora_manager.supports_tower_connector_lora.return_value = (
+        supports_tower_connector_lora
+    )
+    model = object()
+    runner.get_model = Mock(return_value=model)
+    supports_cudagraph = Mock(return_value=model_supports_cudagraph)
+    cudagraph_manager = object()
+    manager_cls = Mock(return_value=cudagraph_manager)
+    warning_once = Mock()
+
+    monkeypatch.setattr(
+        model_interfaces, "supports_encoder_cudagraph", supports_cudagraph
+    )
+    monkeypatch.setattr(
+        encoder_cudagraph_module, "EncoderCudaGraphManager", manager_cls
+    )
+    monkeypatch.setattr(gpu_model_runner_module.logger, "warning_once", warning_once)
+
+    result = runner._create_encoder_cudagraph_manager()
+
+    runner.get_model.assert_called_once_with()
+    supports_cudagraph.assert_called_once_with(model)
+    if not model_supports_cudagraph:
+        assert result is None
+        runner.lora_manager.supports_tower_connector_lora.assert_not_called()
+        manager_cls.assert_not_called()
+        warning_once.assert_not_called()
+    elif supports_tower_connector_lora:
+        assert result is None
+        runner.lora_manager.supports_tower_connector_lora.assert_called_once_with()
+        manager_cls.assert_not_called()
+        warning_once.assert_called_once_with(
+            ENCODER_CUDAGRAPH_TOWER_CONNECTOR_LORA_WARNING
+        )
+    else:
+        assert result is cudagraph_manager
+        runner.lora_manager.supports_tower_connector_lora.assert_called_once_with()
+        manager_cls.assert_called_once_with(
+            vllm_config=runner.vllm_config,
+            device=runner.device,
+            dtype=runner.dtype,
+            model=model,
+        )
+        warning_once.assert_not_called()
 
 
 def test_select_common_block_size_no_valid_option():
