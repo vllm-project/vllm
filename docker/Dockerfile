@@ -729,6 +729,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
             'import nvidia; from pathlib import Path; print(Path(next(iter(nvidia.__path__))) / "cu13")') \
         && test -x "${CUDA_PYPI_ROOT}/bin/nvcc" \
         && test -x "${CUDA_PYPI_ROOT}/bin/ptxas" \
+        && mkdir -p "${CUDA_PYPI_ROOT}/lib/stubs" \
+        && printf 'INPUT ( libcuda.so.1 )\n' \
+            > "${CUDA_PYPI_ROOT}/lib/stubs/libcuda.so" \
         && for library in "${CUDA_PYPI_ROOT}"/lib/*.so.*; do \
             linker_name="${library%%.so.*}.so"; \
             if [ ! -e "${linker_name}" ]; then \
