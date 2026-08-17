@@ -80,7 +80,7 @@ class BaseRenderer(ABC, Generic[_T]):
         self.api_process_rank = config.parallel_config._api_process_rank
 
         self._resources = ExitStack()
-        self._resources.callback(logger.debug, "[shutdown] BaseRenderer")
+        self._resources.callback(logger.debug, f"[shutdown] {self.__class__.__name__}")
         self._finalizer = weakref.finalize(self, self._resources.close)
 
         self.tokenizer = tokenizer
