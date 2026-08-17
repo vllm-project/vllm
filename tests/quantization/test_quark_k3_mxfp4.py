@@ -18,18 +18,20 @@ from vllm.model_executor.layers.quantization.quark import quark_moe
 
 
 @pytest.mark.parametrize(
-    ("scheme", "opt_in", "aiter_supported", "expected"),
+    ("scheme", "aiter_enabled", "expected"),
     [
-        ("w_mxfp4_a_mxfp4", True, True, True),
-        ("w_mxfp4_a_mxfp4", False, True, False),
-        ("w_mxfp4_a_mxfp4", True, False, False),
-        ("w_mxfp4", True, True, False),
-        ("w_mxfp4_a_fp8", True, True, False),
+        ("w_mxfp4_a_mxfp4", True, True),
+        ("w_mxfp4_a_mxfp4", False, False),
+        ("w_mxfp4", True, False),
+        ("w_mxfp4_a_fp8", True, False),
     ],
 )
-def test_use_k3_situ_aiter_a8w4(monkeypatch, scheme, opt_in, aiter_supported, expected):
-    monkeypatch.setattr(quark_moe.envs, "VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4", opt_in)
-    monkeypatch.setattr(quark_moe, "_use_k3_situ_aiter", lambda _moe: aiter_supported)
+def test_use_k3_situ_aiter_a8w4(monkeypatch, scheme, aiter_enabled, expected):
+    monkeypatch.setattr(
+        quark_moe.rocm_aiter_ops,
+        "is_fused_moe_situv2_a8w4_enabled",
+        lambda: aiter_enabled,
+    )
 
     assert quark_moe._use_k3_situ_aiter_a8w4(MagicMock(), scheme) is expected
 
@@ -80,7 +82,7 @@ def test_convert_k3_situ_weight_to_kernel_format(monkeypatch, guinterleave):
     aiter_module = ModuleType("aiter")
     aiter_utility_module = ModuleType("aiter.utility")
     fp4_utils_module = ModuleType("aiter.utility.fp4_utils")
-    fp4_utils_module.e8m0_shuffle = e8m0_shuffle
+    setattr(fp4_utils_module, "e8m0_shuffle", e8m0_shuffle)
 
     with (
         patch.dict(

@@ -5,7 +5,6 @@ from typing import Any
 
 import torch
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
@@ -57,7 +56,6 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
-from vllm.model_executor.layers.quantization.mxfp4 import _use_k3_situ_aiter
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
     OCP_MX_Scheme,
@@ -100,8 +98,7 @@ def _use_k3_situ_aiter_a8w4(
     """Whether Quark K3 should override A4 activations with native A8."""
     return (
         ocp_mx_scheme == "w_mxfp4_a_mxfp4"
-        and envs.VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4
-        and _use_k3_situ_aiter(moe)
+        and rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
     )
 
 
