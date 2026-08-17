@@ -3,6 +3,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     LoadSpec,
     MooncakeStoreWorkerMetadata,
@@ -177,6 +179,29 @@ def _add_unfinished_request(
     )
 
 
+def _setup_decode_request(
+    *,
+    kv_role: str = "kv_consumer",
+    save_decode_cache: bool = False,
+    token_len: int = 47,
+) -> tuple[MooncakeStoreScheduler, RequestTracker]:
+    scheduler = _make_bare_scheduler(
+        kv_role=kv_role, save_decode_cache=save_decode_cache
+    )
+    token_ids = list(range(token_len + 1))
+    _add_unfinished_request(
+        scheduler,
+        token_ids=token_ids,
+        block_hashes=[b"h0", b"h1", b"h2"],
+        prefill_end_tokens=32,
+    )
+    tracker = scheduler._request_trackers["req-0"]
+    tracker.token_len = token_len
+    tracker.allocated_block_ids = ([0, 1, 2],)
+    tracker.token_ids = token_ids[:token_len]
+    return scheduler, tracker
+
+
 def test_cached_request_with_spec_decode_does_not_save_scheduled_drafts():
     # Drafts in scheduled_spec_decode_tokens are not appended to all_token_ids
     # yet, so the tracker's token_len does not advance and num_tokens_to_save
@@ -223,40 +248,9 @@ def test_cached_request_without_spec_decode_keeps_current_step_save_overlap():
     assert tracker.num_saved_tokens == 48
 
 
-def test_consumer_does_not_save_decode_by_default():
-    scheduler = _make_bare_scheduler(kv_role="kv_consumer")
-    _add_unfinished_request(
-        scheduler,
-        token_ids=list(range(48)),
-        block_hashes=[b"h0", b"h1", b"h2"],
-        prefill_end_tokens=32,
-    )
-    tracker = scheduler._request_trackers["req-0"]
-    tracker.token_len = 47
-    tracker.allocated_block_ids = ([0, 1, 2],)
-
-    meta = scheduler.build_connector_meta(
-        _make_decode_scheduler_output(num_computed_tokens=47)
-    )
-
-    assert meta.requests == []
-    # Preserve the existing consumer behavior when the feature is disabled.
-    assert tracker.token_len == 47
-    assert tracker.num_saved_tokens == 32
-
-
-def test_kv_both_skips_decode_tracking_by_default():
-    scheduler = _make_bare_scheduler(kv_role="kv_both")
-    _add_unfinished_request(
-        scheduler,
-        token_ids=list(range(48)),
-        block_hashes=[b"h0", b"h1", b"h2"],
-        prefill_end_tokens=32,
-    )
-    tracker = scheduler._request_trackers["req-0"]
-    tracker.token_len = 47
-    tracker.allocated_block_ids = ([0, 1, 2],)
-    tracker.token_ids = list(range(47))
+@pytest.mark.parametrize("kv_role", ["kv_consumer", "kv_both"])
+def test_decode_tracking_is_skipped_by_default(kv_role):
+    scheduler, tracker = _setup_decode_request(kv_role=kv_role)
 
     meta = scheduler.build_connector_meta(
         _make_decode_scheduler_output(num_computed_tokens=47)
@@ -291,61 +285,29 @@ def test_consumer_decode_offload_does_not_save_prefill():
     assert tracker.num_saved_tokens == 32
 
 
-def test_consumer_saves_full_decode_block_without_new_allocation():
-    scheduler = _make_bare_scheduler(
-        kv_role="kv_consumer",
-        save_decode_cache=True,
+@pytest.mark.parametrize("token_len, saved_tokens", [(46, 32), (47, 48)])
+def test_consumer_saves_only_full_decode_blocks(token_len, saved_tokens):
+    scheduler, tracker = _setup_decode_request(
+        save_decode_cache=True, token_len=token_len
     )
-    _add_unfinished_request(
-        scheduler,
-        token_ids=list(range(48)),
-        block_hashes=[b"h0", b"h1", b"h2"],
-        prefill_end_tokens=32,
-    )
-    tracker = scheduler._request_trackers["req-0"]
-    tracker.token_len = 47
-    tracker.allocated_block_ids = ([0, 1, 2],)
-    tracker.token_ids = list(range(47))
 
     meta = scheduler.build_connector_meta(
-        _make_decode_scheduler_output(num_computed_tokens=47)
+        _make_decode_scheduler_output(num_computed_tokens=token_len)
     )
 
-    assert len(meta.requests) == 1
-    req_meta = meta.requests[0]
-    assert req_meta.can_save is True
-    assert req_meta.token_len_chunk == 48
-    assert req_meta.block_ids == ([0, 1, 2],)
-    assert req_meta.token_ids == list(range(32, 48))
-    assert req_meta.token_ids_start == 32
-    assert tracker.num_saved_tokens == 48
-    tracker.token_ids.append(999)
-    assert req_meta.token_ids == list(range(32, 48))
-
-
-def test_consumer_does_not_save_partial_decode_block():
-    scheduler = _make_bare_scheduler(
-        kv_role="kv_consumer",
-        save_decode_cache=True,
-    )
-    _add_unfinished_request(
-        scheduler,
-        token_ids=list(range(47)),
-        block_hashes=[b"h0", b"h1", b"h2"],
-        prefill_end_tokens=32,
-    )
-    tracker = scheduler._request_trackers["req-0"]
-    tracker.token_len = 46
-    tracker.allocated_block_ids = ([0, 1, 2],)
-    tracker.token_ids = list(range(46))
-
-    meta = scheduler.build_connector_meta(
-        _make_decode_scheduler_output(num_computed_tokens=46)
-    )
-
-    assert meta.requests == []
-    assert tracker.token_len == 47
-    assert tracker.num_saved_tokens == 32
+    assert tracker.token_len == token_len + 1
+    assert tracker.num_saved_tokens == saved_tokens
+    if saved_tokens == 32:
+        assert meta.requests == []
+    else:
+        [req_meta] = meta.requests
+        assert req_meta.can_save is True
+        assert req_meta.token_len_chunk == 48
+        assert req_meta.block_ids == ([0, 1, 2],)
+        assert req_meta.token_ids == list(range(32, 48))
+        assert req_meta.token_ids_start == 32
+        tracker.token_ids.append(999)
+        assert req_meta.token_ids == list(range(32, 48))
 
 
 def test_preemption_resets_tracker():

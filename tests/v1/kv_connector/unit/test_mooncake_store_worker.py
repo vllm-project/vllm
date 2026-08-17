@@ -2213,6 +2213,19 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
     assert swa_event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[3]))]
 
 
+def _make_event_store_req(token_len: int, token_ids_start: int = 0) -> ReqMeta:
+    num_blocks = token_len // 16
+    return ReqMeta(
+        req_id="r0",
+        token_len_chunk=token_len,
+        block_ids=(list(range(num_blocks)),),
+        block_hashes=[f"a{i}".encode() for i in range(num_blocks)],
+        can_save=True,
+        token_ids=list(range(token_ids_start, token_len)),
+        token_ids_start=token_ids_start,
+    )
+
+
 def test_store_sending_thread_kv_events_use_token_suffix():
     store = MagicMock()
     store.batch_is_exist.return_value = [0]
@@ -2221,18 +2234,7 @@ def test_store_sending_thread_kv_events_use_token_suffix():
     thread.enable_kv_event = True
 
     thread._saved_offset["r0"] = 16
-    _run_store_req(
-        thread,
-        ReqMeta(
-            req_id="r0",
-            token_len_chunk=32,
-            block_ids=([0, 1],),
-            block_hashes=[b"a0", b"a1"],
-            can_save=True,
-            token_ids=list(range(16, 32)),
-            token_ids_start=16,
-        ),
-    )
+    _run_store_req(thread, _make_event_store_req(32, 16))
 
     [event] = thread.get_kv_events()
     assert event.token_ids == list(range(16, 32))
@@ -2246,18 +2248,7 @@ def test_store_sending_thread_kv_events_retry_without_covered_tokens():
     thread = _make_store_sending_thread(store)
     thread.enable_kv_event = True
 
-    _run_store_req(
-        thread,
-        ReqMeta(
-            req_id="r0",
-            token_len_chunk=32,
-            block_ids=([0, 1],),
-            block_hashes=[b"a0", b"a1"],
-            can_save=True,
-            token_ids=list(range(16, 32)),
-            token_ids_start=16,
-        ),
-    )
+    _run_store_req(thread, _make_event_store_req(32, 16))
 
     retry_event, suffix_event = thread.get_kv_events()
     assert retry_event.token_ids == []
@@ -2271,33 +2262,12 @@ def test_store_sending_thread_kv_events_recover_suffix_after_put_failure():
     thread = _make_store_sending_thread(store)
     thread.enable_kv_event = True
 
-    _run_store_req(
-        thread,
-        ReqMeta(
-            req_id="r0",
-            token_len_chunk=16,
-            block_ids=([0],),
-            block_hashes=[b"a0"],
-            can_save=True,
-            token_ids=list(range(16)),
-        ),
-    )
+    _run_store_req(thread, _make_event_store_req(16))
 
     assert thread.get_kv_events() == []
     assert thread._retry_token_ids["r0"] == (0, list(range(16)))
 
-    _run_store_req(
-        thread,
-        ReqMeta(
-            req_id="r0",
-            token_len_chunk=32,
-            block_ids=([0, 1],),
-            block_hashes=[b"a0", b"a1"],
-            can_save=True,
-            token_ids=list(range(16, 32)),
-            token_ids_start=16,
-        ),
-    )
+    _run_store_req(thread, _make_event_store_req(32, 16))
 
     retry_event, suffix_event = thread.get_kv_events()
     assert retry_event.token_ids == list(range(16))
@@ -2877,17 +2847,16 @@ def test_lookup_applies_swa_mask_before_accessing_hashes():
 # ---------------------------------------------------------------------------
 
 
-def test_consumer_starts_send_thread_only_when_put_is_enabled():
+@pytest.mark.parametrize("save_decode_cache", [False, True])
+def test_consumer_starts_send_thread_only_when_put_is_enabled(save_decode_cache):
     num_blocks = 10
     tensor = torch.zeros(num_blocks, 64, dtype=torch.float16)
 
-    default_consumer = _make_bare_worker(kv_role="kv_consumer")
-    _register_with_mocked_threads(default_consumer, {"layer0": tensor})
-    assert default_consumer.kv_send_thread is None
-
-    putting_consumer = _make_bare_worker(kv_role="kv_consumer", save_decode_cache=True)
-    _register_with_mocked_threads(putting_consumer, {"layer0": tensor})
-    assert putting_consumer.kv_send_thread is not None
+    worker = _make_bare_worker(
+        kv_role="kv_consumer", save_decode_cache=save_decode_cache
+    )
+    _register_with_mocked_threads(worker, {"layer0": tensor})
+    assert (worker.kv_send_thread is not None) == save_decode_cache
 
 
 def test_putting_consumer_queues_decode_save():

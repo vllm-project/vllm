@@ -285,7 +285,7 @@ class MooncakeStoreScheduler:
                         allocated_block_ids=new_block_ids,
                         num_saved_tokens=0,
                         token_ids=(
-                            prefill_tokens[:num_tokens_to_compute].copy()
+                            prefill_tokens[:num_tokens_to_compute]
                             if self.enable_kv_events
                             else None
                         ),

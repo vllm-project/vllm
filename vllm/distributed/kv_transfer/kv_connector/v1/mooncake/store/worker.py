@@ -1355,11 +1355,7 @@ class MooncakeStoreWorker:
         # Mirrors MooncakeStoreConnector._capacity_only.
         self._capacity_only = (
             self.kv_role == "kv_consumer"
-            and not (
-                vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                    "enable_lookup", True
-                )
-            )
+            and not extra_config.get("enable_lookup", True)
             and not self.can_put
         )
         self.cache_config = vllm_config.cache_config

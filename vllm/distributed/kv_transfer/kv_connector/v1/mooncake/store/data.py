@@ -412,7 +412,7 @@ class ReqMeta:
         if tracker.token_ids and not skip_save:
             # Scheduler tracking continues while this job is handled by an
             # asynchronous worker, so metadata must own a stable snapshot.
-            token_ids = tracker.token_ids[token_ids_start:num_tokens_to_save].copy()
+            token_ids = tracker.token_ids[token_ids_start:num_tokens_to_save]
 
         if load_spec is not None and load_spec.can_load:
             logger.debug(
