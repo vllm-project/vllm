@@ -54,6 +54,7 @@ from vllm.multimodal.processing import (
     TimingContext,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 if TYPE_CHECKING:
     from transformers import BatchFeature, PreTrainedModel
@@ -726,12 +727,17 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         kwargs.pop("token_type_ids", None)
         kwargs.pop("mm_token_type_ids", None)
 
-        audio_output = self.model.get_audio_features(
-            input_features, return_dict=True, **kwargs
-        )
+        # HuggingFace's `get_audio_features` implementations branch on
+        # per-sample feature lengths internally.
+        with gpu_sync_allowed():
+            audio_output = self.model.get_audio_features(
+                input_features, return_dict=True, **kwargs
+            )
         audio_embeddings = audio_output.pooler_output
 
-        split_sizes = num_audio_tokens.flatten().tolist()
+        # Per-audio token counts are needed as Python ints to split.
+        with gpu_sync_allowed():
+            split_sizes = num_audio_tokens.flatten().tolist()
         return self._split_embeddings(audio_embeddings, split_sizes)
 
     def _process_image_input(self, **kwargs) -> list[torch.Tensor] | None:
@@ -749,7 +755,12 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         num_image_patches = kwargs.pop("num_image_patches")
 
-        vision_embeddings = self.model.get_image_features(pixel_values, **kwargs)
+        # The underlying HuggingFace `get_image_features` implementations
+        # contain model-internal syncs (e.g. Idefics3 filters all-zero
+        # padding images via boolean-mask indexing, LlavaOnevision
+        # branches on per-sample batch counts).
+        with gpu_sync_allowed():
+            vision_embeddings = self.model.get_image_features(pixel_values, **kwargs)
 
         # Transformers `v5`, `self.get_image_features` returns a tuple
         # containing the features and optionally attentions/hidden_states
