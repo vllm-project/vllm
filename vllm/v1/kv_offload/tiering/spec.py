@@ -105,7 +105,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.LOOKUP_SYNC_DELAY] = (
             OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of blocking time spent in a per-block tier lookup "
+                    "Histogram of blocking time spent in a per-chunk tier lookup "
                     "that resolved as a hit or miss, labeled by tier, in seconds."
                 ),
                 labelnames=("tier",),
@@ -127,7 +127,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         metrics[TieringOffloadingMetrics.LOOKUP_ASYNC_DELAY] = (
             OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of wall-clock time from a per-block tier lookup "
+                    "Histogram of wall-clock time from a per-chunk tier lookup "
                     "first returning retry until that same tier lookup resolves "
                     "as a hit or miss, labeled by tier, in seconds."
                 ),
@@ -191,14 +191,14 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 labelnames=("tier",),
             )
         )
-        metrics[TieringOffloadingMetrics.BLOCK_QUERIES] = OffloadingCounterMetadata(
+        metrics[TieringOffloadingMetrics.CHUNK_QUERIES] = OffloadingCounterMetadata(
             documentation=(
-                "Number of block lookup queries sent to a tier, labeled by tier."
+                "Number of chunk lookup queries sent to a tier, labeled by tier."
             ),
             labelnames=("tier",),
         )
-        metrics[TieringOffloadingMetrics.BLOCK_HITS] = OffloadingCounterMetadata(
-            documentation="Number of block lookup hits in a tier, labeled by tier.",
+        metrics[TieringOffloadingMetrics.CHUNK_HITS] = OffloadingCounterMetadata(
+            documentation="Number of chunk lookup hits in a tier, labeled by tier.",
             labelnames=("tier",),
         )
         metrics[TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES] = (

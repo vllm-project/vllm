@@ -205,8 +205,8 @@ class TieringOffloadingManager(OffloadingManager):
         assert primary_view.strides is not None
         self._metrics = TieringMetricsTracker(
             tier_types=[tier.tier_type for tier in self.secondary_tiers],
-            num_primary_blocks=self.primary_tier._num_chunks,
-            primary_block_size=primary_view.strides[0],
+            num_primary_chunks=self.primary_tier._num_chunks,
+            primary_chunk_size=primary_view.strides[0],
         )
 
         # Pending promotion requests accumulated during lookup() calls; flushed
