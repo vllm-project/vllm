@@ -10,7 +10,8 @@
 #include <torch/library.h>
 #include <c10/util/Optional.h>
 
-#include "cpu_types.hpp"
+#include "cpu/cpu_types.hpp"
+#include "dispatch_utils.h"
 
 // ---------------------------------------------------------------------------
 // causal_conv1d_update

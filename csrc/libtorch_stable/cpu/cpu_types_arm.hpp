@@ -1,32 +1,26 @@
 #include <cmath>
+#include <iostream>
+#include <tuple>
 #include <type_traits>
+#include <utility>
 
 #include <arm_neon.h>
 
-#include "cpu/cpu_tanhf_neon.hpp"
+#include <torch/headeronly/util/BFloat16.h>
+#include <torch/headeronly/util/Exception.h>
+#include <torch/headeronly/util/Half.h>
 
-#include <torch/all.h>
-#include <ATen/cpu/vec/functional.h>
-#include <ATen/cpu/vec/vec.h>
+#include "cpu_tanhf_neon.hpp"
+#include "cpu_types_arm_vec.hpp"
 
 #if defined(__APPLE__)
   #include "omp.h"
 #endif
 
-using namespace at::vec;
-
 namespace vec_op {
 
 struct fp8_e4m3_tag {};
 struct fp8_e5m2_tag {};
-
-#define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)         \
-  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__) \
-  AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)  \
-  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__)
-
-#define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...) \
-  AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
 
 #ifndef CPU_OP_GUARD
   #define CPU_KERNEL_GUARD_IN(NAME)
@@ -72,12 +66,12 @@ union AliasReg {
   T values[VEC_ELEM_NUM];
 };
 
-// Template over at::vec::Vectorized<T> to support
+// Template over arm_vec::Vectorized<T> (cpu_types_arm_vec.hpp) to support
 // multiple vectorised registers into 1 of length VEC_REG_NUM val
 template <int N, typename T>
 struct NxVectorizedTVecReg {
   using value_t = T;
-  using VectorizedT = Vectorized<T>;
+  using VectorizedT = arm_vec::Vectorized<T>;
 
   VectorizedT val[N];
 
@@ -168,7 +162,7 @@ struct NxVectorizedTVecReg {
 template <typename DerivedClassT, int N, typename T>
 struct VectorizedRegWrapper {
   using ScalarT = T;
-  using VectorizedT = Vectorized<T>;
+  using VectorizedT = arm_vec::Vectorized<T>;
   using NxVectorizedTArray = NxVectorizedTVecReg<N, T>;
 
   constexpr static int VEC_REG_NUM = N;
@@ -194,7 +188,7 @@ struct VectorizedRegWrapper {
   FORCE_INLINE void save(void* ptr) const { reg.save(ptr); }
   void save(void* ptr, const int elem_num) const { reg.save(ptr, elem_num); }
 
-// Define optimized functions using at::vec::Vectorized<T> where possible
+// Define optimized functions using arm_vec::Vectorized<T> where possible
 // Fallback to std:: functions when not available
 #define OPT_TORCH_IMPL(FUNC_NAME, STD_FUNC_NAME, TORCH_FUNC_NAME, ...)         \
   FORCE_INLINE DerivedClassT FUNC_NAME() const {                               \
@@ -213,14 +207,7 @@ struct VectorizedRegWrapper {
   OPT_TORCH_IMPL(er, erf, erf, float)
   OPT_TORCH_IMPL(exp, exp, fexp_u20, float)
   OPT_TORCH_IMPL(exp_u20, exp, exp_u20, float)
-  OPT_TORCH_IMPL(sin, sin, sin, float)
-  OPT_TORCH_IMPL(sinh, sinh, sinh, float)
-  OPT_TORCH_IMPL(cos, cos, cos, float)
-  OPT_TORCH_IMPL(cosh, cosh, cosh, float)
-  OPT_TORCH_IMPL(log, log, log, float)
-  OPT_TORCH_IMPL(log10, log10, log10, float)
   OPT_TORCH_IMPL(sqrt, sqrt, sqrt, c10::Half, float)
-  OPT_TORCH_IMPL(tan, tan, tan, float)
   OPT_TORCH_IMPL(tanh, tanh, tanh, float)
 
 #undef OPT_TORCH_IMPL
@@ -288,10 +275,10 @@ struct BF16Vec8 : public VectorizedRegWrapper<BF16Vec8, 1, c10::BFloat16> {
   using Base::get_elem_num;
   using Base::VEC_ELEM_NUM;
 
-  explicit BF16Vec8(at_bfloat16x8_t data) : Base(VectorizedT(data)) {};
+  explicit BF16Vec8(arm_vec::at_bfloat16x8_t data) : Base(VectorizedT(data)) {};
 
   explicit BF16Vec8(float32x4x2_t v) {
-    reg.val[0] = convert_float_bfloat16(v.val[0], v.val[1]);
+    reg.val[0] = arm_vec::convert_float_bfloat16(v.val[0], v.val[1]);
   };
 
   explicit BF16Vec8(const FP32Vec8&);
@@ -308,8 +295,8 @@ struct BF16Vec16 : public VectorizedRegWrapper<BF16Vec16, 2, c10::BFloat16> {
   explicit BF16Vec16(bool, const void* ptr) : Base(ptr) {}
 
   explicit BF16Vec16(float32x4x4_t v) {
-    reg.val[0] = convert_float_bfloat16(v.val[0], v.val[1]);
-    reg.val[1] = convert_float_bfloat16(v.val[2], v.val[3]);
+    reg.val[0] = arm_vec::convert_float_bfloat16(v.val[0], v.val[1]);
+    reg.val[1] = arm_vec::convert_float_bfloat16(v.val[2], v.val[3]);
   };
 
   explicit BF16Vec16(const FP32Vec16&);
@@ -378,40 +365,40 @@ struct FP32Vec8 : public VectorizedRegWrapper<FP32Vec8, 2, float> {
   };
 
   explicit FP32Vec8(const BF16Vec8& v) {
-    std::tie(reg.val[0], reg.val[1]) = convert_bfloat16_float(v.reg.val[0]);
+    std::tie(reg.val[0], reg.val[1]) =
+        arm_vec::convert_bfloat16_float(v.reg.val[0]);
   };
   explicit FP32Vec8(const FP16Vec8& v) {
-    reg.val[0] = Vectorized<float>(vcvt_f32_f16(vget_low_f16(v.reg.val[0])));
-    reg.val[1] = Vectorized<float>(vcvt_f32_f16(vget_high_f16(v.reg.val[0])));
+    reg.val[0] =
+        arm_vec::Vectorized<float>(vcvt_f32_f16(vget_low_f16(v.reg.val[0])));
+    reg.val[1] =
+        arm_vec::Vectorized<float>(vcvt_f32_f16(vget_high_f16(v.reg.val[0])));
   };
   explicit FP32Vec8(float16x8_t v) {
-    reg.val[0] = Vectorized<float>(vcvt_f32_f16(vget_low_f16(v)));
-    reg.val[1] = Vectorized<float>(vcvt_f32_f16(vget_high_f16(v)));
+    reg.val[0] = arm_vec::Vectorized<float>(vcvt_f32_f16(vget_low_f16(v)));
+    reg.val[1] = arm_vec::Vectorized<float>(vcvt_f32_f16(vget_high_f16(v)));
   };
-  explicit FP32Vec8(at_bfloat16x8_t v) {
+  explicit FP32Vec8(arm_vec::at_bfloat16x8_t v) {
     std::tie(reg.val[0], reg.val[1]) =
-        convert_bfloat16_float(Vectorized<c10::BFloat16>(v));
+        arm_vec::convert_bfloat16_float(arm_vec::Vectorized<c10::BFloat16>(v));
   };
   explicit FP32Vec8(float32x4x2_t data) {
-    reg.val[0] = Vectorized<float>(data.val[0]);
-    reg.val[1] = Vectorized<float>(data.val[1]);
+    reg.val[0] = arm_vec::Vectorized<float>(data.val[0]);
+    reg.val[1] = arm_vec::Vectorized<float>(data.val[1]);
   }
 
   FORCE_INLINE FP32Vec8 tanh() const {
     FP32Vec8 r(uninit);
-    r.reg.val[0] = Vectorized<float>(fast_tanhf_f32x4(reg.val[0]));
-    r.reg.val[1] = Vectorized<float>(fast_tanhf_f32x4(reg.val[1]));
+    r.reg.val[0] = arm_vec::Vectorized<float>(fast_tanhf_f32x4(reg.val[0]));
+    r.reg.val[1] = arm_vec::Vectorized<float>(fast_tanhf_f32x4(reg.val[1]));
     return r;
   }
 
   FORCE_INLINE float reduce_sum() const noexcept {
     float answer = 0;
-    std::plus<VectorizedT> add;
 
-    unroll_loop<int, VEC_REG_NUM>([&](int i) {
-      answer += at::vec::vec_reduce_all<float, std::plus<VectorizedT>>(
-          add, reg.val[i]);
-    });
+    unroll_loop<int, VEC_REG_NUM>(
+        [&](int i) { answer += arm_vec::vec_reduce_all<float>(reg.val[i]); });
     return answer;
   }
 
@@ -493,8 +480,10 @@ struct FP32Vec16 : public VectorizedRegWrapper<FP32Vec16, 4, float> {
   };
 
   explicit FP32Vec16(const BF16Vec16& v) {
-    std::tie(reg.val[0], reg.val[1]) = convert_bfloat16_float(v.reg.val[0]);
-    std::tie(reg.val[2], reg.val[3]) = convert_bfloat16_float(v.reg.val[1]);
+    std::tie(reg.val[0], reg.val[1]) =
+        arm_vec::convert_bfloat16_float(v.reg.val[0]);
+    std::tie(reg.val[2], reg.val[3]) =
+        arm_vec::convert_bfloat16_float(v.reg.val[1]);
   };
 
   explicit FP32Vec16(const BF16Vec8& v) : FP32Vec16(FP32Vec8(v)) {};
@@ -504,18 +493,22 @@ struct FP32Vec16 : public VectorizedRegWrapper<FP32Vec16, 4, float> {
   explicit FP32Vec16(const BF16Vec32&, int) : Base() {}
 
   explicit FP32Vec16(const FP16Vec16& v) {
-    reg.val[0] = Vectorized<float>(vcvt_f32_f16(vget_low_f16(v.reg.val[0])));
-    reg.val[1] = Vectorized<float>(vcvt_f32_f16(vget_high_f16(v.reg.val[0])));
-    reg.val[2] = Vectorized<float>(vcvt_f32_f16(vget_low_f16(v.reg.val[1])));
-    reg.val[3] = Vectorized<float>(vcvt_f32_f16(vget_high_f16(v.reg.val[1])));
+    reg.val[0] =
+        arm_vec::Vectorized<float>(vcvt_f32_f16(vget_low_f16(v.reg.val[0])));
+    reg.val[1] =
+        arm_vec::Vectorized<float>(vcvt_f32_f16(vget_high_f16(v.reg.val[0])));
+    reg.val[2] =
+        arm_vec::Vectorized<float>(vcvt_f32_f16(vget_low_f16(v.reg.val[1])));
+    reg.val[3] =
+        arm_vec::Vectorized<float>(vcvt_f32_f16(vget_high_f16(v.reg.val[1])));
   };
 
   FORCE_INLINE FP32Vec16 tanh() const {
     FP32Vec16 r(uninit);
-    r.reg.val[0] = Vectorized<float>(fast_tanhf_f32x4(reg.val[0]));
-    r.reg.val[1] = Vectorized<float>(fast_tanhf_f32x4(reg.val[1]));
-    r.reg.val[2] = Vectorized<float>(fast_tanhf_f32x4(reg.val[2]));
-    r.reg.val[3] = Vectorized<float>(fast_tanhf_f32x4(reg.val[3]));
+    r.reg.val[0] = arm_vec::Vectorized<float>(fast_tanhf_f32x4(reg.val[0]));
+    r.reg.val[1] = arm_vec::Vectorized<float>(fast_tanhf_f32x4(reg.val[1]));
+    r.reg.val[2] = arm_vec::Vectorized<float>(fast_tanhf_f32x4(reg.val[2]));
+    r.reg.val[3] = arm_vec::Vectorized<float>(fast_tanhf_f32x4(reg.val[3]));
     return r;
   }
 
@@ -587,28 +580,28 @@ struct FP32Vec16 : public VectorizedRegWrapper<FP32Vec16, 4, float> {
   FORCE_INLINE FP32Vec16 clamp(const FP32Vec16& min,
                                const FP32Vec16& max) const {
     FP32Vec16 r(uninit);
-    r.reg.val[0] = at::vec::clamp(reg.val[0], min.reg.val[0], max.reg.val[0]);
-    r.reg.val[1] = at::vec::clamp(reg.val[1], min.reg.val[1], max.reg.val[1]);
-    r.reg.val[2] = at::vec::clamp(reg.val[2], min.reg.val[2], max.reg.val[2]);
-    r.reg.val[3] = at::vec::clamp(reg.val[3], min.reg.val[3], max.reg.val[3]);
+    r.reg.val[0] = arm_vec::clamp(reg.val[0], min.reg.val[0], max.reg.val[0]);
+    r.reg.val[1] = arm_vec::clamp(reg.val[1], min.reg.val[1], max.reg.val[1]);
+    r.reg.val[2] = arm_vec::clamp(reg.val[2], min.reg.val[2], max.reg.val[2]);
+    r.reg.val[3] = arm_vec::clamp(reg.val[3], min.reg.val[3], max.reg.val[3]);
     return r;
   };
 
   FORCE_INLINE FP32Vec16 min(const FP32Vec16& b) const {
     FP32Vec16 r(uninit);
-    r.reg.val[0] = minimum(b.reg.val[0], reg.val[0]),
-    r.reg.val[1] = minimum(b.reg.val[1], reg.val[1]);
-    r.reg.val[2] = minimum(b.reg.val[2], reg.val[2]);
-    r.reg.val[3] = minimum(b.reg.val[3], reg.val[3]);
+    r.reg.val[0] = arm_vec::minimum(b.reg.val[0], reg.val[0]),
+    r.reg.val[1] = arm_vec::minimum(b.reg.val[1], reg.val[1]);
+    r.reg.val[2] = arm_vec::minimum(b.reg.val[2], reg.val[2]);
+    r.reg.val[3] = arm_vec::minimum(b.reg.val[3], reg.val[3]);
     return r;
   };
 
   FORCE_INLINE FP32Vec16 max(const FP32Vec16& b) const {
     FP32Vec16 r(uninit);
-    r.reg.val[0] = maximum(b.reg.val[0], reg.val[0]);
-    r.reg.val[1] = maximum(b.reg.val[1], reg.val[1]);
-    r.reg.val[2] = maximum(b.reg.val[2], reg.val[2]);
-    r.reg.val[3] = maximum(b.reg.val[3], reg.val[3]);
+    r.reg.val[0] = arm_vec::maximum(b.reg.val[0], reg.val[0]);
+    r.reg.val[1] = arm_vec::maximum(b.reg.val[1], reg.val[1]);
+    r.reg.val[2] = arm_vec::maximum(b.reg.val[2], reg.val[2]);
+    r.reg.val[3] = arm_vec::maximum(b.reg.val[3], reg.val[3]);
     return r;
   };
 
@@ -624,7 +617,7 @@ struct FP32Vec16 : public VectorizedRegWrapper<FP32Vec16, 4, float> {
 
     FP32Vec16 res(uninit);
     for (int i = 0; i < full_blocks; i++)
-      res.reg.val[i] = minimum(b.reg.val[i], reg.val[i]);
+      res.reg.val[i] = arm_vec::minimum(b.reg.val[i], reg.val[i]);
 
     if (remainder > 0) {
       float min_v = std::min(vgetq_lane_f32(reg.val[full_blocks], 0),
@@ -661,7 +654,7 @@ struct FP32Vec16 : public VectorizedRegWrapper<FP32Vec16, 4, float> {
     FP32Vec16 res(uninit);
 
     for (int i = 0; i < full_blocks; i++)
-      res.reg.val[i] = maximum(b.reg.val[i], reg.val[i]);
+      res.reg.val[i] = arm_vec::maximum(b.reg.val[i], reg.val[i]);
 
     if (remainder > 0) {
       float max_v = std::max(vgetq_lane_f32(reg.val[full_blocks], 0),
@@ -687,7 +680,7 @@ struct FP32Vec16 : public VectorizedRegWrapper<FP32Vec16, 4, float> {
   float reduce_max() const {
     VectorizedT max_vec = reg.val[0];
     unroll_loop<int, VEC_REG_NUM>([&](int i) {
-      if (i > 0) max_vec = maximum(max_vec, reg.val[i]);
+      if (i > 0) max_vec = arm_vec::maximum(max_vec, reg.val[i]);
     });
 
     return vmaxvq_f32(max_vec);
@@ -696,7 +689,7 @@ struct FP32Vec16 : public VectorizedRegWrapper<FP32Vec16, 4, float> {
   float reduce_min() const {
     VectorizedT min_vec = reg.val[0];
     unroll_loop<int, VEC_REG_NUM>([&](int i) {
-      if (i > 0) min_vec = minimum(min_vec, reg.val[i]);
+      if (i > 0) min_vec = arm_vec::minimum(min_vec, reg.val[i]);
     });
 
     return vminvq_f32(min_vec);
@@ -717,10 +710,8 @@ struct FP32Vec16 : public VectorizedRegWrapper<FP32Vec16, 4, float> {
 
   float reduce_sum() const {
     float answer = 0;
-    std::plus<VectorizedT> add;
-    unroll_loop<int, VEC_REG_NUM>([&](int i) {
-      answer += at::vec::vec_reduce_all<float>(add, reg.val[i]);
-    });
+    unroll_loop<int, VEC_REG_NUM>(
+        [&](int i) { answer += arm_vec::vec_reduce_all<float>(reg.val[i]); });
 
     return answer;
   }
@@ -808,7 +799,7 @@ struct INT8Vec64 : public Vec<INT8Vec64> {
 
   // masked store
   void save(int8_t* p, int elem_num) const {
-    TORCH_CHECK(elem_num <= VEC_ELEM_NUM && elem_num > 0);
+    STD_TORCH_CHECK(elem_num <= VEC_ELEM_NUM && elem_num > 0);
 
     if (elem_num == VEC_ELEM_NUM) {
       vst1q_s8_x4(p, reg);
@@ -934,48 +925,49 @@ inline void storeFP32<c10::Half>(float v, c10::Half* ptr) {
 }
 
 inline FP16Vec8::FP16Vec8(const FP32Vec8& v) {
-  reg.val[0] = convert_float_half(v.reg.val[0], v.reg.val[1]);
+  reg.val[0] = arm_vec::convert_float_half(v.reg.val[0], v.reg.val[1]);
 };
 
 inline FP16Vec16::FP16Vec16(const FP32Vec16& v) {
-  reg.val[0] = convert_float_half(v.reg.val[0], v.reg.val[1]);
-  reg.val[1] = convert_float_half(v.reg.val[2], v.reg.val[3]);
+  reg.val[0] = arm_vec::convert_float_half(v.reg.val[0], v.reg.val[1]);
+  reg.val[1] = arm_vec::convert_float_half(v.reg.val[2], v.reg.val[3]);
 };
 
 inline void fma(FP32Vec16& acc, FP32Vec16& a, FP32Vec16& b) {
-  // NOTE: at::vec::fmadd(a, b, c) returns a * b + c and does not mutate its
+  // NOTE: arm_vec::fmadd(a, b, c) returns a * b + c and does not mutate its
   // arguments; we must capture the result back into acc, otherwise the FMA
   // is a no-op. On x86 fma is implemented as `acc = acc + a * b` which does
   // the assignment; the ARM version previously dropped the return value.
-  acc.reg.val[0] = fmadd(a.reg.val[0], b.reg.val[0], acc.reg.val[0]);
-  acc.reg.val[1] = fmadd(a.reg.val[1], b.reg.val[1], acc.reg.val[1]);
-  acc.reg.val[2] = fmadd(a.reg.val[2], b.reg.val[2], acc.reg.val[2]);
-  acc.reg.val[3] = fmadd(a.reg.val[3], b.reg.val[3], acc.reg.val[3]);
+  acc.reg.val[0] = arm_vec::fmadd(a.reg.val[0], b.reg.val[0], acc.reg.val[0]);
+  acc.reg.val[1] = arm_vec::fmadd(a.reg.val[1], b.reg.val[1], acc.reg.val[1]);
+  acc.reg.val[2] = arm_vec::fmadd(a.reg.val[2], b.reg.val[2], acc.reg.val[2]);
+  acc.reg.val[3] = arm_vec::fmadd(a.reg.val[3], b.reg.val[3], acc.reg.val[3]);
 };
 
 inline BF16Vec8::BF16Vec8(const FP32Vec8& v) {
-  reg.val[0] = convert_float_bfloat16(v.reg.val[0], v.reg.val[1]);
+  reg.val[0] = arm_vec::convert_float_bfloat16(v.reg.val[0], v.reg.val[1]);
 };
 
 inline BF16Vec16::BF16Vec16(const FP32Vec16& v) {
-  reg.val[0] = convert_float_bfloat16(v.reg.val[0], v.reg.val[1]);
-  reg.val[1] = convert_float_bfloat16(v.reg.val[2], v.reg.val[3]);
+  reg.val[0] = arm_vec::convert_float_bfloat16(v.reg.val[0], v.reg.val[1]);
+  reg.val[1] = arm_vec::convert_float_bfloat16(v.reg.val[2], v.reg.val[3]);
 };
 
 inline void fma(FP32Vec16& acc, BF16Vec32& a, BF16Vec32& b) {
-  Vectorized<float> a0_low, a0_high, a1_low, a1_high, b0_low, b0_high, b1_low,
-      b1_high;
+  arm_vec::Vectorized<float> a0_low, a0_high, a1_low, a1_high, b0_low, b0_high,
+      b1_low, b1_high;
 
-  std::tie(a0_low, a0_high) = convert_bfloat16_float(a.reg.val[0]);
-  std::tie(a1_low, a1_high) = convert_bfloat16_float(a.reg.val[1]);
-  std::tie(b0_low, b0_high) = convert_bfloat16_float(b.reg.val[0]);
-  std::tie(b1_low, b1_high) = convert_bfloat16_float(b.reg.val[1]);
+  std::tie(a0_low, a0_high) = arm_vec::convert_bfloat16_float(a.reg.val[0]);
+  std::tie(a1_low, a1_high) = arm_vec::convert_bfloat16_float(a.reg.val[1]);
+  std::tie(b0_low, b0_high) = arm_vec::convert_bfloat16_float(b.reg.val[0]);
+  std::tie(b1_low, b1_high) = arm_vec::convert_bfloat16_float(b.reg.val[1]);
 
-  // Same fmadd semantic as the FP32 overload above: capture the result.
-  acc.reg.val[0] = fmadd(a0_low, b0_low, acc.reg.val[0]);
-  acc.reg.val[1] = fmadd(a0_high, b0_high, acc.reg.val[1]);
-  acc.reg.val[2] = fmadd(a1_low, b1_low, acc.reg.val[2]);
-  acc.reg.val[3] = fmadd(a1_high, b1_high, acc.reg.val[3]);
+  // Same arm_vec::fmadd semantic as the FP32 overload above: capture the
+  // result.
+  acc.reg.val[0] = arm_vec::fmadd(a0_low, b0_low, acc.reg.val[0]);
+  acc.reg.val[1] = arm_vec::fmadd(a0_high, b0_high, acc.reg.val[1]);
+  acc.reg.val[2] = arm_vec::fmadd(a1_low, b1_low, acc.reg.val[2]);
+  acc.reg.val[3] = arm_vec::fmadd(a1_high, b1_high, acc.reg.val[3]);
 };
 
 template <>

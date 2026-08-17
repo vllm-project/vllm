@@ -1,5 +1,8 @@
-#include "cpu_types.hpp"
+#include "cpu/cpu_types.hpp"
 #include "dnnl_helper.h"
+
+#include <torch/all.h>
+#include "dispatch_utils.h"
 
 namespace {
 template <typename scalar_t>

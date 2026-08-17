@@ -1,6 +1,7 @@
-#include "cpu_types.hpp"
+#include "cpu/cpu_types.hpp"
 
 #include <algorithm>
+#include <torch/all.h>
 
 namespace cpu_utils {
 

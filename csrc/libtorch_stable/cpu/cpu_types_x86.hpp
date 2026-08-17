@@ -2,10 +2,21 @@
 #ifndef CPU_TYPES_X86_HPP
 #define CPU_TYPES_X86_HPP
 
+#include <cstdint>
 #include <cstring>
+#include <iostream>
+#include <type_traits>
+#include <utility>
+
 #include <immintrin.h>
 #include <sleef.h>
-#include <torch/all.h>
+
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/util/BFloat16.h>
+#include <torch/headeronly/util/Exception.h>
+#include <torch/headeronly/util/Half.h>
+
+#include "libtorch_stable/dispatch_utils.h"
 
 #ifndef __AVX2__
 static_assert(false, "AVX2 must be supported for the current implementation.");
@@ -24,30 +35,20 @@ struct fp8_e5m2_tag {};  // E5M2 → FP16 bits directly (same exponent bias=15)
 struct fp8_bf16_e4m3_tag {};
 struct fp8_bf16_e5m2_tag {};
 
-#define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)            \
-  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
-  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__) \
-  AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)
+#define VLLM_STABLE_DISPATCH_CASE_FLOATING_TYPES_FP8(...) \
+  VLLM_STABLE_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__)   \
+  THO_DISPATCH_CASE(torch::headeronly::ScalarType::Float8_e5m2, __VA_ARGS__)
 
-#define VLLM_DISPATCH_CASE_FLOATING_TYPES_FP8(...)        \
-  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
-  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__) \
-  AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)     \
-  AT_DISPATCH_CASE(at::ScalarType::Float8_e5m2, __VA_ARGS__)
-
-#define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...) \
-  AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
-
-#define VLLM_DISPATCH_FLOATING_TYPES_WITH_E5M2(TYPE, NAME, ...) \
-  AT_DISPATCH_SWITCH(TYPE, NAME,                                \
-                     VLLM_DISPATCH_CASE_FLOATING_TYPES_FP8(__VA_ARGS__))
+#define VLLM_STABLE_DISPATCH_FLOATING_TYPES_WITH_E5M2(TYPE, NAME, ...) \
+  THO_DISPATCH_SWITCH(                                                 \
+      TYPE, NAME, VLLM_STABLE_DISPATCH_CASE_FLOATING_TYPES_FP8(__VA_ARGS__))
 
 #ifndef CPU_OP_GUARD
   #define CPU_KERNEL_GUARD_IN(NAME)
   #define CPU_KERNEL_GUARD_OUT(NAME)
 #else
   #define CPU_KERNEL_GUARD_IN(NAME) \
-    RECORD_FUNCTION(#NAME, c10::ArrayRef<c10::IValue>({}));
+    std::cerr << #NAME << " invoked." << std::endl;
   #define CPU_KERNEL_GUARD_OUT(NAME)
 #endif
 
@@ -956,7 +957,7 @@ struct INT8Vec64 : public Vec<INT8Vec64> {
   }
 
   void save(int8_t* ptr, const int elem_num) const {
-    TORCH_CHECK(elem_num > 0 && elem_num <= VEC_ELEM_NUM);
+    STD_TORCH_CHECK(elem_num > 0 && elem_num <= VEC_ELEM_NUM);
     int8_t values[VEC_ELEM_NUM];
     save(values);
     std::memcpy(ptr, values, elem_num);

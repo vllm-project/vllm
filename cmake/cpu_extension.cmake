@@ -19,6 +19,7 @@ set(ENABLE_ARM_I8MM $ENV{VLLM_CPU_ARM_I8MM})
 set(ENABLE_RVV_BF16 $ENV{VLLM_CPU_RVV_BF16})
 
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
+include_directories("${CMAKE_SOURCE_DIR}/csrc/libtorch_stable")
 
 set (ENABLE_NUMA TRUE)
 
@@ -452,13 +453,10 @@ endif()
 # _C extension
 #
 set(VLLM_EXT_SRC
-    "csrc/cpu/activation.cpp"
     "csrc/cpu/sgl-kernels/fla.cpp"
     "csrc/cpu/utils.cpp"
     "csrc/cpu/spec_decode_utils.cpp"
-    "csrc/cpu/layernorm.cpp"
     "csrc/cpu/mla_decode.cpp"
-    "csrc/cpu/pos_encoding.cpp"
     "csrc/cpu/mamba_cpu.cpp"
     "csrc/moe/dynamic_4bit_int_moe_cpu.cpp"
     "csrc/cpu/cpu_fused_moe.cpp"
@@ -482,7 +480,6 @@ if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"
         "csrc/cpu/activation_lut_bf16.cpp"
-        "csrc/cpu/cpu_tanhf_neon.hpp"
         ${VLLM_EXT_SRC})
     if (ARM_BF16_FOUND)
         if (ARM_I8MM_FOUND)
@@ -537,10 +534,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/mamba_cpu.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files
-        "csrc/cpu/activation.cpp"
-        "csrc/cpu/layernorm.cpp"
         "csrc/cpu/mla_decode.cpp"
-        "csrc/cpu/pos_encoding.cpp"
         "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
 
     set(VLLM_EXT_SRC_AVX2
@@ -553,10 +547,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files
-        "csrc/cpu/activation.cpp"
-        "csrc/cpu/layernorm.cpp"
         "csrc/cpu/mla_decode.cpp"
-        "csrc/cpu/pos_encoding.cpp"
         "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
 
     message(STATUS "CPU extension (AVX512F + BF16 + VNNI + AMX) source files: ${VLLM_EXT_SRC_AVX512} ${VLLM_EXT_SRC_SGL}")
@@ -605,6 +596,60 @@ if (ENABLE_X86_ISA)
         USE_SABI 3
         WITH_SOABI
     )
+
+    #
+    # CPU stable-ABI extensions (TORCH_TARGET_VERSION). Unconverted kernels
+    # stay in _C / _C_AVX* above. Do not set TORCH_TARGET_VERSION on those.
+    #
+    # One source list for all three ISA .so's: moved kernels were in every old
+    # list. Split like VLLM_EXT_SRC_AVX512 / AVX2 / SGL when ISA-specific files move.
+    set(VLLM_CPU_STABLE_SRC
+        "csrc/libtorch_stable/cpu/torch_bindings.cpp"
+        "csrc/libtorch_stable/cpu/activation.cpp"
+        "csrc/libtorch_stable/cpu/layernorm.cpp"
+        "csrc/libtorch_stable/cpu/pos_encoding.cpp")
+    message(STATUS "CPU stable ABI extension source files: ${VLLM_CPU_STABLE_SRC}")
+
+    define_extension_target(
+        _C_stable_libtorch
+        DESTINATION vllm
+        LANGUAGE CXX
+        SOURCES ${VLLM_CPU_STABLE_SRC}
+        COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX512_AMX}
+        USE_SABI 3
+        WITH_SOABI
+        STABLE_LIBTORCH
+    )
+    target_compile_definitions(_C_stable_libtorch PRIVATE
+      "-DCPU_CAPABILITY_AMXBF16")
+    target_compile_definitions(_C_stable_libtorch PRIVATE
+      TORCH_TARGET_VERSION=0x020B000000000000ULL)
+
+    define_extension_target(
+        _C_AVX512_stable_libtorch
+        DESTINATION vllm
+        LANGUAGE CXX
+        SOURCES ${VLLM_CPU_STABLE_SRC}
+        COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX512}
+        USE_SABI 3
+        WITH_SOABI
+        STABLE_LIBTORCH
+    )
+    target_compile_definitions(_C_AVX512_stable_libtorch PRIVATE
+      TORCH_TARGET_VERSION=0x020B000000000000ULL)
+
+    define_extension_target(
+        _C_AVX2_stable_libtorch
+        DESTINATION vllm
+        LANGUAGE CXX
+        SOURCES ${VLLM_CPU_STABLE_SRC}
+        COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX2}
+        USE_SABI 3
+        WITH_SOABI
+        STABLE_LIBTORCH
+    )
+    target_compile_definitions(_C_AVX2_stable_libtorch PRIVATE
+      TORCH_TARGET_VERSION=0x020B000000000000ULL)
 else()
     message(STATUS "CPU extension source files: ${VLLM_EXT_SRC}")
     #
@@ -623,6 +668,28 @@ else()
     if (VLLM_OPENBLAS_LIB)
         target_compile_definitions(_C PRIVATE VLLM_HAS_OPENBLAS)
     endif()
+
+    set(VLLM_CPU_STABLE_SRC
+        "csrc/libtorch_stable/cpu/torch_bindings.cpp"
+        "csrc/libtorch_stable/cpu/activation.cpp"
+        "csrc/libtorch_stable/cpu/layernorm.cpp"
+        "csrc/libtorch_stable/cpu/pos_encoding.cpp")
+    message(STATUS "CPU stable ABI extension source files: ${VLLM_CPU_STABLE_SRC}")
+    define_extension_target(
+        _C_stable_libtorch
+        DESTINATION vllm
+        LANGUAGE CXX
+        SOURCES ${VLLM_CPU_STABLE_SRC}
+        COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
+        USE_SABI 3
+        WITH_SOABI
+        STABLE_LIBTORCH
+    )
+    if (VLLM_OPENBLAS_LIB)
+        target_compile_definitions(_C_stable_libtorch PRIVATE VLLM_HAS_OPENBLAS)
+    endif()
+    target_compile_definitions(_C_stable_libtorch PRIVATE
+      TORCH_TARGET_VERSION=0x020B000000000000ULL)
 endif()
 
 message(STATUS "Enabling C extension.")

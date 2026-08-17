@@ -1,4 +1,4 @@
-#include "cpu_types.hpp"
+#include "cpu/cpu_types.hpp"
 
 #include <array>
 #include <cstdint>

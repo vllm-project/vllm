@@ -2,13 +2,20 @@
 #ifndef CPU_TYPES_VXE_HPP
 #define CPU_TYPES_VXE_HPP
 
-#include <vecintrin.h>
 #include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <iostream>
 #include <limits>
-#include <torch/all.h>
+#include <type_traits>
+#include <utility>
+
+#include <vecintrin.h>
+
+#include <torch/headeronly/util/BFloat16.h>
+#include <torch/headeronly/util/Exception.h>
+#include <torch/headeronly/util/Half.h>
 
 namespace vec_op {
 
@@ -25,13 +32,6 @@ struct fp8_e5m2_tag {};
 
 // NOTE: FP16 (Half) is supported on s390x via custom bit-manipulation
 // conversion. PyTorch itself lacks native s390x FP16 support.
-#define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)            \
-  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
-  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__) \
-  AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)
-
-#define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...) \
-  AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
 
 #ifndef CPU_OP_GUARD
   #define CPU_KERNEL_GUARD_IN(NAME)
@@ -987,7 +987,7 @@ struct INT8Vec64 {
   void save(int8_t* ptr) const { std::memcpy(ptr, data_, sizeof(data_)); }
 
   void save(int8_t* ptr, const int elem_num) const {
-    TORCH_CHECK(elem_num > 0 && elem_num <= VEC_ELEM_NUM);
+    STD_TORCH_CHECK(elem_num > 0 && elem_num <= VEC_ELEM_NUM);
     std::memcpy(ptr, data_, elem_num);
   }
 
