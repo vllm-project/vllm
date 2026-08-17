@@ -1864,10 +1864,22 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
 
   if (CuNeeded > CuCount) throw std::runtime_error("Invalid wvSplitKrc size");
 
-  // Can we increase SplitK by shrinking the K-shared to 256?
-  int chunkk = (CuNeeded * 2 <= CuCount) ? 2 : 1;
-  // N_p2 == 16 always dispatches with CHUNKK=1 below.
-  if (N_p2 == 16) chunkk = 1;
+  // Can we increase SplitK by shrinking the K-shard to 256? That doubles both
+  // the CUs needed and the k-shards to read back, and the readback is serial in
+  // the shard count, so it pays only up to a crossover. The crossover is not a
+  // constant -- it falls as M grows -- so one cap cannot sit on it for every
+  // shape; this value minimizes total time over the admitted shapes. Retune it
+  // if the readback cost changes, and note the directions are not symmetric:
+  // capping too high costs about twice what capping too low does.
+  // Mirrored by rocm_unquantized_gemm_impl() in
+  // vllm/model_executor/layers/utils.py; both must pick the same chunkk or the
+  // host-side fit check bounds the wrong k_rnd.
+  constexpr int64_t CHUNKK2_MAX_SHARDS = 11;
+  const int64_t shards_chunkk2 = (K_in + 256 - 1) / 256;  // 256 == 512 / 2
+  const int chunkk = (N_p2 != 16 && CuNeeded * 2 <= CuCount &&
+                      shards_chunkk2 <= CHUNKK2_MAX_SHARDS)
+                         ? 2
+                         : 1;
 
   // One fp32 partial per (M, N, k-shard) must fit the split-K workspace.
   const int64_t k_rnd = (K_in + 512 / chunkk - 1) / (512 / chunkk);
