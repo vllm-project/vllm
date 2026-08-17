@@ -71,7 +71,9 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .ernie45_vl_moe import Ernie4_5_VLMoeForCausalLM
@@ -446,6 +448,9 @@ class Ernie4_5_VisionTransformer(nn.Module):
         pos_ids = torch.cat(pos_ids, dim=0)
         max_grid_size = grid_thw[:, 1:].max()
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
+        # `pos_ids` is built on the host; stage it over non-blocking so the
+        # gather below doesn't index a device tensor with a CPU one.
+        pos_ids = pos_ids.to(rotary_pos_emb_full.device, non_blocking=True)
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
@@ -530,7 +535,7 @@ class Ernie4_5_VisionTransformer(nn.Module):
         else:
             max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
 
-        cu_seqlens = cu_seqlens.to(device)
+        cu_seqlens = cu_seqlens.to(device, non_blocking=True)
 
         return {
             "rotary_pos_emb": rotary_pos_emb,
@@ -784,7 +789,10 @@ class VariableResolutionResamplerModel(nn.Module):
             return x
 
         def fwd_placeholder(x, grid_thw, to_tensor=False):
-            grid_thw_cpu = grid_thw.cpu().numpy()
+            # The per-image grids drive the Python-level offset arithmetic
+            # below; the same read is wrapped on the cudagraph path.
+            with gpu_sync_allowed():
+                grid_thw_cpu = grid_thw.cpu().numpy()
             grid_t, grid_hw = grid_thw_cpu[:, 0], grid_thw_cpu[:, 1:]
             grid_hw_after_conv = grid_hw.prod(-1) // (self.spatial_conv_size**2)
 
@@ -806,8 +814,8 @@ class VariableResolutionResamplerModel(nn.Module):
                             b_offset + (temp_offset + 1) * spatial_size,
                         )
                     )
-            slice_offsets = torch.tensor(np.concatenate(slice_offsets, axis=-1)).to(
-                x.device
+            slice_offsets = async_tensor_h2d(
+                np.concatenate(slice_offsets, axis=-1), device=x.device
             )
 
             slice_offsets2 = []
@@ -823,8 +831,8 @@ class VariableResolutionResamplerModel(nn.Module):
                             b_offset + (temp_offset + 1) * spatial_size,
                         )
                     )
-            slice_offsets2 = torch.tensor(np.concatenate(slice_offsets2, axis=-1)).to(
-                x.device
+            slice_offsets2 = async_tensor_h2d(
+                np.concatenate(slice_offsets2, axis=-1), device=x.device
             )
 
             x_timestep_1 = torch.index_select(x, dim=0, index=slice_offsets)
@@ -1693,8 +1701,11 @@ class Ernie4_5_VLMoeForConditionalGeneration(
             EncoderCudaGraphReplayBuffers,
         )
 
+        # The per-image grids are needed as Python ints to size the buffers.
+        with gpu_sync_allowed():
+            grid_thw_list = mm_kwargs["image_grid_thw"].tolist()
         metadata = self.vision_model.prepare_encoder_metadata(
-            mm_kwargs["image_grid_thw"].tolist(), max_batch_size=max_batch_size
+            grid_thw_list, max_batch_size=max_batch_size
         )
         values = metadata | {
             "pixel_values": mm_kwargs["pixel_values"],
@@ -1734,7 +1745,10 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         # Ernie only uses the single "default" encoder path.
         output = outputs["default"]
         grid_thw = batch_mm_kwargs["image_grid_thw"].to(output.device)
-        num_valid = int((grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).sum())
+        # The valid token count slices the graph output for the eager
+        # resampler call, so it has to come back to the host.
+        with gpu_sync_allowed():
+            num_valid = int((grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).sum())
         image_embeds = self.resampler_model(output[:num_valid], grid_thw)
         scatter_output_slices(image_embeds, indices, per_item_out_tokens, dest, clone)
 
