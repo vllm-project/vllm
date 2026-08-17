@@ -19,6 +19,10 @@ class AsyncScheduler(Scheduler):
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
+        # Use the latest num of scheduled draft tokens in next step as placeholder.
+        self._spec_token_placeholders = [
+            -1
+        ] * scheduler_output.num_spec_tokens_to_schedule
         for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests[req_id]
             if request.is_prefill_chunk:
@@ -45,23 +49,18 @@ class AsyncScheduler(Scheduler):
                 request.next_decode_eligible_step = self.current_step + self.pp_size
 
     def _update_request_with_output(
-        self, request: Request, new_token_ids: list[int]
+        self, request: Request, new_token_ids: list[int], is_stale: bool = False
     ) -> tuple[list[int], bool]:
-        if request.async_tokens_to_discard > 0:
-            # The request was force-preempted in reset_prefix_cache; drop one
-            # stale in-flight async output frame per call until the counter
-            # is drained.
-            request.async_tokens_to_discard -= 1
-            return [], False
-
         status_before_update = request.status
         new_token_ids, stopped = super()._update_request_with_output(
             request, new_token_ids
         )
 
-        # Update the number of output placeholders.
-        request.num_output_placeholders -= len(new_token_ids)
-        assert request.num_output_placeholders >= 0
+        # Placeholders were zeroed at preemption; a stale delivery must not
+        # decrement them (it would underflow).
+        if not is_stale:
+            request.num_output_placeholders -= len(new_token_ids)
+            assert request.num_output_placeholders >= 0
 
         # Cache the new tokens. Preempted requests should be skipped.
         if status_before_update == RequestStatus.RUNNING:

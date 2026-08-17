@@ -5,7 +5,6 @@
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
-import numpy as np
 import torch
 
 from vllm.config import VllmConfig
@@ -33,8 +32,8 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 _C128A_TOPK_ALIGNMENT = 128
 
 
-class DeepseekV4FlashMLABackend(AttentionBackend):
-    """DeepSeek-V4 sparse-MLA backend.
+class DeepseekV4SparseMLABackend(AttentionBackend):
+    """DeepSeek-V4 sparse-MLA backend base.
 
     Subclasses ``AttentionBackend`` directly (not the V3.2
     ``FlashMLASparseBackend``): DeepSeek-V4 runs its own attention layer
@@ -46,7 +45,6 @@ class DeepseekV4FlashMLABackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
-        "bfloat16",
         "fp8_ds_mla",
         "fp8",  # alias for fp8_ds_mla
     ]
@@ -56,12 +54,8 @@ class DeepseekV4FlashMLABackend(AttentionBackend):
         return [256]
 
     @staticmethod
-    def get_name() -> str:
-        return "FLASHMLA_SPARSE_DSV4"
-
-    @staticmethod
-    def get_builder_cls() -> type["DeepseekV4FlashMLAMetadataBuilder"]:
-        return DeepseekV4FlashMLAMetadataBuilder
+    def get_builder_cls() -> type["DeepseekV4SparseMLAMetadataBuilder"]:
+        return DeepseekV4SparseMLAMetadataBuilder
 
     @staticmethod
     def get_impl_cls() -> type[Any]:
@@ -69,7 +63,7 @@ class DeepseekV4FlashMLABackend(AttentionBackend):
         # not the generic ``Attention``/``MLAAttention`` layer, so the backend's
         # impl class is never instantiated.
         raise NotImplementedError(
-            "DeepseekV4FlashMLABackend has no separate impl class; DeepSeek-V4 "
+            "DeepseekV4SparseMLABackend has no separate impl class; DeepSeek-V4 "
             "attention runs through DeepseekV4Attention."
         )
 
@@ -84,6 +78,10 @@ class DeepseekV4FlashMLABackend(AttentionBackend):
 
     @classmethod
     def is_sparse(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_sink(cls) -> bool:
         return True
 
     @classmethod
@@ -129,7 +127,7 @@ class DeepseekV4FlashMLAMetadata(AttentionMetadata):
     c128a_prefill_topk_indices: torch.Tensor | None = None
 
 
-class DeepseekV4FlashMLAMetadataBuilder(
+class DeepseekV4SparseMLAMetadataBuilder(
     AttentionMetadataBuilder[DeepseekV4FlashMLAMetadata]
 ):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
@@ -199,18 +197,7 @@ class DeepseekV4FlashMLAMetadataBuilder(
         fast_build: bool = False,
     ) -> DeepseekV4FlashMLAMetadata:
         cm = common_attn_metadata
-        num_tokens = cm.num_actual_tokens
-        starts = np.asarray(cm.query_start_loc_cpu, dtype=np.int32)
-        seg_lengths = np.diff(starts)
-        req_id_per_token = np.repeat(
-            np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
-        )
-        # Zero-fill for cudagraphs
-        self.req_id_per_token_buffer.fill_(0)
-        self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
-            torch.from_numpy(req_id_per_token), non_blocking=True
-        )
-        req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
+        req_id_per_token = cm.token_to_req_indices(self.req_id_per_token_buffer)
 
         slot_mapping = cm.slot_mapping
         if self.compress_ratio > 1:
@@ -218,7 +205,7 @@ class DeepseekV4FlashMLAMetadataBuilder(
                 cm.num_actual_tokens,
                 cm.query_start_loc,
                 cm.seq_lens,
-                cm.block_table_tensor.clamp(min=0),
+                cm.block_table_tensor.clamp_(min=0),
                 int(self.kv_cache_spec.storage_block_size),
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
@@ -294,6 +281,20 @@ class DeepseekV4FlashMLAMetadataBuilder(
         if num_prefill_tokens > 0:
             result["c128a_prefill_topk_indices"] = prefill_local
         return result
+
+
+class DeepseekV4FlashMLAMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+
+
+class DeepseekV4FlashMLABackend(DeepseekV4SparseMLABackend):
+    @staticmethod
+    def get_name() -> str:
+        return "FLASHMLA_SPARSE_DSV4"
+
+    @staticmethod
+    def get_builder_cls() -> type[DeepseekV4FlashMLAMetadataBuilder]:
+        return DeepseekV4FlashMLAMetadataBuilder
 
 
 def build_c128a_topk_metadata(

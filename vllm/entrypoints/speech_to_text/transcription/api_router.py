@@ -13,6 +13,7 @@ from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
     with_cancellation,
 )
+from vllm.entrypoints.speech_to_text.base.utils import read_upload_with_limit
 from vllm.logger import init_logger
 
 from .protocol import TranscriptionRequest, TranscriptionResponseVariant
@@ -45,7 +46,7 @@ async def create_transcriptions(
     if handler is None:
         raise NotImplementedError("The model does not support Transcriptions API")
 
-    audio_data = await request.file.read()
+    audio_data = await read_upload_with_limit(request.file)
 
     generator = await handler.create_transcription(audio_data, request, raw_request)
 

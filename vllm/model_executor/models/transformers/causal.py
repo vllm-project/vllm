@@ -16,10 +16,14 @@
 # limitations under the License.
 """Transformers modeling backend mixin for causal language models."""
 
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.models.interfaces_base import VllmModelForTextGeneration
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 
@@ -50,17 +54,35 @@ class CausalMixin(VllmModelForTextGeneration):
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             if tie_word_embeddings:
-                self.lm_head = self.lm_head.tie_weights(
-                    self.model.get_input_embeddings()
-                )
+                for module in self.model.get_input_embeddings().modules():
+                    if isinstance(module, VocabParallelEmbedding):
+                        self.lm_head = self.lm_head.tie_weights(module)
+                        break
 
-            logit_scale = getattr(self.text_config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(
-                self.text_config.vocab_size, scale=logit_scale
+                self.text_config.vocab_size,
+                scale=getattr(self.text_config, "logit_scale", 1.0),
+                soft_cap=getattr(self.text_config, "final_logit_softcapping", None),
             )
         else:
             self.lm_head = PPMissingLayer()
 
+    def load_weights(self, weights: Iterable[tuple[str, "torch.Tensor"]]) -> set[str]:
+        """A thin wrapper around `Base.load_weights` to handle the lm_head bias."""
+
+        lm_head_bias = set()
+
+        def auto_load_lm_head_bias(weights):
+            for name, weight in weights:
+                if name.endswith("lm_head.bias") and self.pp_group.is_last_rank:
+                    self.lm_head._register_bias()
+                    self.lm_head.bias.weight_loader(self.lm_head.bias, weight)
+                    lm_head_bias.add(name)
+                else:
+                    yield name, weight
+
+        return super().load_weights(auto_load_lm_head_bias(weights)) | lm_head_bias
+
     def compute_logits(self, hidden_states: "torch.Tensor") -> "torch.Tensor | None":
-        logits = self.logits_processor(self.lm_head, hidden_states)
+        logits = self.logits_processor(self.lm_head, hidden_states, self.lm_head.bias)
         return logits
