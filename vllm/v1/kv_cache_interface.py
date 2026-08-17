@@ -56,6 +56,12 @@ class KVQuantMode(IntEnum):
     TURBOQUANT_3BIT_NC = 9
     NVFP4_DS_MLA = 10  # opaque-bytes NVFP4 DS-MLA layouts (FlashMLA sparse)
 
+    # Backend self-manages kernel dispatch. Reads as quantized but matches no
+    # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
+    # False). Registered handlers return this when they own kernel selection
+    # rather than reusing an upstream kernel path. See KVCacheDTypeHandler.
+    BACKEND = 11
+
     @property
     def is_per_token_head(self) -> bool:
         """True for any per-token-head quantization mode."""
@@ -80,9 +86,25 @@ class KVQuantMode(IntEnum):
             KVQuantMode.TURBOQUANT_3BIT_NC,
         )
 
+    @property
+    def is_backend(self) -> bool:
+        """True when a platform backend fully self-manages kernel dispatch.
+
+        The attention selector should defer to the backend's own kernel
+        selection rather than a generic per-token-head / fp8 / turboquant
+        path. Distinct from NONE (which means non-quantized): BACKEND is
+        quantized, just with no generic kernel mode.
+        """
+        return self == KVQuantMode.BACKEND
+
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
+    from vllm.config.cache import get_kv_cache_dtype_handler
+
+    handler = get_kv_cache_dtype_handler(kv_cache_dtype)
+    if handler is not None:
+        return handler.quant_mode()
     if kv_cache_dtype == "int4_per_token_head":
         return KVQuantMode.INT4_PER_TOKEN_HEAD
     if kv_cache_dtype == "int8_per_token_head":
@@ -127,11 +149,6 @@ def replace_as(
     }
     kwargs.update(changes)
     return target_cls(**kwargs)
-
-
-def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
-    """Return True if *kv_cache_dtype* needs per-token-head scales."""
-    return get_kv_quant_mode(kv_cache_dtype).is_per_token_head
 
 
 class KVCacheSpecKind(str, Enum):
