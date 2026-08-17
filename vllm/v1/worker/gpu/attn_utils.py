@@ -7,7 +7,6 @@ from typing import Any, cast
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -15,10 +14,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends.utils import (
-    get_kv_cache_layout,
-    resolve_kv_cache_layout,
-)
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -54,9 +50,6 @@ class AttentionCGSupportInfo:
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
-    resolve_kv_cache_layout(
-        get_current_attn_backends(vllm_config), vllm_config.cache_config
-    )
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     layer_type = cast(type[Any], AttentionLayerBase)
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)

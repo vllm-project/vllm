@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable, Iterable
+from collections import defaultdict
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field, fields, make_dataclass
 from typing import (
     TYPE_CHECKING,
@@ -176,6 +177,20 @@ def set_kv_cache_layout(cache_layout: KVCacheLayoutType | None):
 
 _RESOLVED_KV_CACHE_LAYOUT: KVCacheLayout | None = None
 
+# Preference order when no backend declares a supported set.
+_DEFAULT_LAYOUT_PREFERENCE = (
+    KVCacheLayout.LBHNC,
+    KVCacheLayout.LBNHC,
+    KVCacheLayout.BLNHC,
+    KVCacheLayout.BLHNC,
+    KVCacheLayout.BHLNC,
+    KVCacheLayout.LHBNC,
+)
+
+
+def _layout_names(layouts: Iterable[KVCacheLayout]) -> list[str]:
+    return [layout.name for layout in layouts]
+
 
 def _layout_from_name(layout_name: str) -> KVCacheLayout:
     layout_name = _LAYOUT_COMPAT_ALIASES.get(layout_name, layout_name)
@@ -188,91 +203,124 @@ def _layout_from_name(layout_name: str) -> KVCacheLayout:
         ) from None
 
 
-def resolve_kv_cache_layout(
-    backends: Iterable[type[AttentionBackend]], cache_config=None
-) -> KVCacheLayout:
-    """Resolve one layout for all of the model's backends and publish it.
+def _merge_layout_preferences(
+    supported_layouts_lists: Sequence[Sequence[KVCacheLayout]],
+) -> list[KVCacheLayout]:
+    """Layouts every list supports, ordered by first-preference votes.
+
+    Each list is most-preferred-first: the layout the most lists put first wins,
+    ties keeping the enum order. An empty intersection is a hard error.
+    """
+    priorities: dict[KVCacheLayout, int] = defaultdict(int)
+    for preferred_layout, *_ in supported_layouts_lists:
+        priorities[preferred_layout] += 1
+    supported_layouts = set.intersection(*map(set, supported_layouts_lists))
+    candidates = sorted(
+        (layout for layout in KVCacheLayout if layout in supported_layouts),
+        key=lambda layout: priorities[layout],
+        reverse=True,
+    )
+    if not candidates:
+        raise ValueError(
+            "No KV cache layout satisfies every supported set: "
+            f"{list(map(_layout_names, supported_layouts_lists))}."
+        )
+    return candidates
+
+
+def get_supported_kv_cache_layouts(
+    backends: Iterable[type[AttentionBackend]],
+) -> list[KVCacheLayout]:
+    """Layouts every one of the worker's backends supports, most preferred first.
 
     Every backend declares the layouts its kernels support, most preferred first
-    (``supported_kv_cache_layouts``); the resolver picks the most often preferred
-    layout from the intersection of those sets. An explicit ``VLLM_KV_CACHE_LAYOUT``
-    must be satisfiable within the intersection or resolution fails, with the legacy
-    ``NHD``/``HND`` names constraining only the in-block order; the connector's
-    preference is used when compatible and silently dropped otherwise.
-    An empty intersection is a hard error naming each backend's supported set.
+    (``supported_kv_cache_layouts``), or None when any layout works; workers where
+    nothing declares follow the default preference.
+    """
+    supported_layouts_lists: list[Sequence[KVCacheLayout]] = [
+        layouts
+        for backend in backends
+        if (layouts := backend.supported_kv_cache_layouts()) is not None
+    ]
+    return _merge_layout_preferences(
+        supported_layouts_lists or [_DEFAULT_LAYOUT_PREFERENCE]
+    )
+
+
+def publish_kv_cache_layout(layout_name: str, cache_config=None) -> None:
+    """Adopt a layout resolved elsewhere (the engine core) in this process.
 
     The layout is published on ``cache_config.kv_cache_layout`` and in a
     process-local mirror for callers without a config handle.
     """
     global _RESOLVED_KV_CACHE_LAYOUT
+    _RESOLVED_KV_CACHE_LAYOUT = _layout_from_name(layout_name)
+    if cache_config is not None:
+        cache_config.kv_cache_layout = _RESOLVED_KV_CACHE_LAYOUT.name
+
+
+def resolve_kv_cache_layout(
+    supported_layouts: list[list[str]],
+    cache_config=None,
+    kv_cache_specs: Iterable[KVCacheSpec] | None = None,
+) -> KVCacheLayout:
+    """Resolve one layout for the whole model and publish it in this process.
+
+    Runs once in the engine core. Every worker reports the layouts its backends
+    support, most preferred first (``get_supported_kv_cache_layouts``); the layout
+    the most workers put first wins, ties keeping the enum order. Specs mixing HNC
+    shapes narrow the candidates to block-compact layouts. An explicit
+    ``VLLM_KV_CACHE_LAYOUT`` must be one of the candidates or resolution fails,
+    with the legacy ``NHD``/``HND`` names as aliases for ``LBNHC``/``LBHNC``; the
+    connector's preference is used when compatible and dropped with a warning
+    otherwise. Workers adopt the resolved layout through the
+    ``update_kv_cache_layout`` RPC and ``KVCacheConfig.kv_cache_layout``.
+    """
     if _KV_CACHE_LAYOUT_OVERRIDE is not None:
         return _layout_from_name(_KV_CACHE_LAYOUT_OVERRIDE)
 
-    # SSM backends get a single-head, single-state page, so every layout is the
-    # same bytes to them and they never declare support for any of them. Hybrid
-    # models do exclude hoisted-head layouts: mamba pages overlay attention pages,
-    # and hoisting the head dim outside the block dim scatters the attention bytes
-    # of a block that mamba addresses as one contiguous page.
-    has_ssm = any(backend.is_ssm() for backend in backends)
-    backends = [backend for backend in backends if not backend.is_ssm()]
-
-    supported_sets = {
-        backend: backend.supported_kv_cache_layouts() for backend in backends
-    }
-    # Order candidates by how strongly they are requested: the sum of preference
-    # ranks across backends that narrowed their set (default-set backends express
-    # no preference). Ties and the no-preference case follow the default order.
-    default_set = AttentionBackend.supported_kv_cache_layouts()
-    narrowed = [s for s in supported_sets.values() if s != default_set]
-    canonical = list(default_set) + [m for m in KVCacheLayout if m not in default_set]
-    candidates = sorted(
-        (
-            layout
-            for layout in canonical
-            if all(layout in supported for supported in supported_sets.values())
-            and (layout.is_block_compact or not has_ssm)
-        ),
-        key=lambda layout: sum(s.index(layout) for s in narrowed),
+    candidates = _merge_layout_preferences(
+        [[_layout_from_name(name) for name in names] for names in supported_layouts]
+        or [_DEFAULT_LAYOUT_PREFERENCE]
     )
-    if not candidates:
-        listing = ", ".join(
-            f"{backend.get_name()} supports {[m.name for m in supported]}"
-            for backend, supported in sorted(
-                supported_sets.items(), key=lambda kv: kv[0].get_name()
+
+    # A block-compact layout means the block is densely packed in memory, so any mix of
+    # specs can re-interpret HNC with different sizes as long as the total number of
+    # bytes is the same. If not block-compact, each spec must agree on HNC to alias
+    # the same page (this aliasing is done by the Hybrid Memory Allocator, HMA).
+    hnc_shapes = {
+        (spec.num_heads, spec.num_states, spec.page_size_bytes)
+        for spec in kv_cache_specs or ()
+    }
+    if len(hnc_shapes) > 1:
+        candidates = [m for m in candidates if m.is_block_compact]
+        if not candidates:
+            raise ValueError(
+                "Specs with mixed HNC shapes need a block-compact layout, but "
+                f"none is in every supported set: {supported_layouts}."
             )
-        )
-        raise ValueError(
-            f"No KV cache layout satisfies every attention backend: {listing}."
-        )
 
     if (requested := envs.VLLM_KV_CACHE_LAYOUT) is not None:
         layout = _layout_from_name(requested)
-        if requested in _LAYOUT_COMPAT_ALIASES:
-            # Legacy NHD/HND names constrain only the in-block [H, N, C] order, just
-            # as they did before the 5D vocabulary; keep the most preferred candidate
-            # whose block interior matches.
-            interior = layout.stride_order[-3:]
-            layout = next(
-                (c for c in candidates if c.stride_order[-3:] == interior), layout
-            )
         if layout not in candidates:
             raise ValueError(
-                f"VLLM_KV_CACHE_LAYOUT={requested} is not supported by every "
-                f"attention backend; supported layouts: "
-                f"{[m.name for m in candidates]}."
+                f"VLLM_KV_CACHE_LAYOUT={requested} does not satisfy every "
+                f"supported set; valid layouts: {_layout_names(candidates)}."
             )
-    elif (connector := get_kv_connector_cache_layout()) is not None and (
-        connector_layout := _layout_from_name(connector)
-    ) in candidates:
-        layout = connector_layout
+    elif (connector := get_kv_connector_cache_layout()) is not None:
+        layout = _layout_from_name(connector)
+        if layout not in candidates:
+            logger.warning_once(
+                f"KV connector cache layout {connector} does not satisfy every "
+                f"supported set; valid layouts: {_layout_names(candidates)}. "
+                f"Using {candidates[0].name} instead."
+            )
+            layout = candidates[0]
     else:
         layout = candidates[0]
-        if narrowed:
-            logger.info_once("Using %s KV cache layout.", layout.name)
 
-    _RESOLVED_KV_CACHE_LAYOUT = layout
-    if cache_config is not None:
-        cache_config.kv_cache_layout = layout.name
+    logger.info_once("Using %s KV cache layout.", layout.name)
+    publish_kv_cache_layout(layout.name, cache_config)
     return layout
 
 

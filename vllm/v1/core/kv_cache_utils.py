@@ -1303,34 +1303,18 @@ def _get_packed_kv_cache_layout(
     return packed_block_stride, runs
 
 
-def _resolve_layout_for_groups(
+def validate_kv_cache_layout(
     kv_cache_groups: list[KVCacheGroupSpec],
     cache_config=None,
 ) -> KVCacheLayout:
     """Validate that the resolved layout can express this model's packing.
 
-    Read-only: the layout was chosen once at backend selection from the backends'
-    supported sets; a backend whose model overlays cache groups (e.g. the DeepSeek
-    sparse indexer) declares block-outermost layouts there, so an inexpressible
+    Read-only: the layout was chosen once in the engine core from the backends'
+    supported sets; a backend whose model packs pages side by side (e.g. the
+    DeepSeek-V4 indexer) declares block-outermost layouts there, so an inexpressible
     layout reaching this point is an error.
     """
     layout = get_kv_cache_layout(cache_config)
-    # A block-compact layout means the block is densely packed in memory, so any mix of
-    # specs can re-interpret the HNC with different sizes as long as the total number of
-    # bytes is the same. If not block-compact, each spec must agree on HNC to
-    # alias the same page (this aliasing is done by the Hybrid Memory Allocator, HMA).
-    head_counts = {
-        _get_per_layer_spec(group, layer_name).num_heads
-        for group in kv_cache_groups
-        for layer_name in group.layer_names
-    }
-    if not layout.is_block_compact and len(head_counts) > 1:
-        raise ValueError(
-            f"KV cache layout {layout.name} stores each page as multiple head "
-            f"slices, so all layers need the same head count, got: "
-            f"{sorted(head_counts)}. Declare a block-compact layout (e.g. "
-            "LBHNC) to mix head counts."
-        )
     page_sizes = {
         _get_per_layer_spec(group, layer_name).page_size_bytes
         for group in kv_cache_groups
@@ -1340,9 +1324,9 @@ def _resolve_layout_for_groups(
         # A rectangular layer dim exists; every layout can express it.
         return layout
 
-    # Mixed page sizes pack pages side by side within a block, which needs each page to
-    # be one contiguous chunk inside its block (heads inside blocks) and, when groups
-    # overlay, the layer dim inside the block dim.
+    # Mixed page sizes pack pages side by side within a block, which needs each page
+    # to be one contiguous chunk inside its block (a block-compact layout) and, with
+    # multiple KV cache groups, the layer dim inside the block dim.
     if not layout.is_block_compact or (
         len(kv_cache_groups) > 1 and layout.is_layer_compact
     ):
@@ -1388,7 +1372,7 @@ def get_kv_cache_config_from_groups(
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
     size = packed_block_stride * num_blocks
 
-    layout = _resolve_layout_for_groups(kv_cache_groups, vllm_config.cache_config)
+    layout = validate_kv_cache_layout(kv_cache_groups, vllm_config.cache_config)
     kv_cache_tensors = []
     for byte_offset, layer_names, spec in runs:
         layer_stride, block_stride, _, _, _ = compute_layout_strides(  # L, B, H, N, C

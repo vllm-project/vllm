@@ -26,7 +26,6 @@ from vllm.utils.torch_utils import (
     set_random_seed,
 )
 from vllm.v1.attention.backend import (
-    AttentionBackend,
     AttentionCGSupport,
     AttentionType,
     CommonAttentionMetadata,
@@ -580,7 +579,7 @@ def _test_backend_correctness(
             .get_class()
             .supported_kv_cache_layouts()
         )
-        != AttentionBackend.supported_kv_cache_layouts()
+        is not None
     ]
     layout = get_kv_cache_layout()
     if declared and attn_utils._KV_CACHE_LAYOUT_OVERRIDE is None:
@@ -616,11 +615,12 @@ def _test_backend_correctness(
         kv_cache_for_backend = kv_cache
         backend_layout = layout
 
-        if backend_layout not in backend_cls.supported_kv_cache_layouts():
+        backend_supported = backend_cls.supported_kv_cache_layouts()
+        if backend_supported is not None and backend_layout not in backend_supported:
             # Production resolution never pairs this backend with the shared layout
             # (e.g. flex is LBNHC-only next to FlashInfer's LBHNC); give it a copy
             # of the cache in a layout it supports.
-            backend_layout = backend_cls.supported_kv_cache_layouts()[0]
+            backend_layout = backend_supported[0]
             kv_cache_for_backend = _clone_kv_cache_in_layout(kv_cache, backend_layout)
 
         # FlashInfer reads the layout at plan time; override to match

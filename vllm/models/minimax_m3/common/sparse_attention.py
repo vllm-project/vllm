@@ -116,7 +116,7 @@ class MiniMaxM3SparseBackend(AttentionBackend):
         return True
 
     @classmethod
-    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...] | None:
         # AITER sparse PA unbinds K and V as separate contiguous regions, which
         # requires the head dimension to sit outside the block dimension.
         if _minimax_m3_aiter_sparse_pa_requested():

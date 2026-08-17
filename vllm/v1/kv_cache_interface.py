@@ -316,7 +316,7 @@ def compute_layout_strides(
         )
         lb = (inv_order[_DIM_L], inv_order[_DIM_B])
         assert all(physical_shape[i] == 1 for i in range(max(lb) + 1) if i not in lb), (
-            "Padded KV pages need L and B outermost (any dim hoisted between "
+            "Padded KV pages need L and B outermost (any other dim between "
             f"them must have extent 1), got {layout.name}."
         )
 
@@ -1158,6 +1158,8 @@ class KVCacheConfig:
     """
     prefix_cache_retention_interval: int | None = None
     """Resolved retention policy for local prefix-cache checkpoints."""
+    kv_cache_layout: str | None = None
+    """The KV cache layout resolved by the engine core, adopted by all workers."""
 
     @property
     def has_mamba_layers(self) -> bool:

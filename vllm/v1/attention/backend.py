@@ -362,16 +362,10 @@ class AttentionBackend(ABC):
         return invalid_reasons
 
     @classmethod
-    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        """Layouts this backend's kernels can consume, most preferred first"""
-        return (
-            KVCacheLayout.LBNHC,
-            KVCacheLayout.LBHNC,
-            KVCacheLayout.BLNHC,
-            KVCacheLayout.BLHNC,
-            KVCacheLayout.BHLNC,
-            KVCacheLayout.LHBNC,
-        )
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...] | None:
+        """Layouts this backend's kernels can consume, most preferred first, or
+        None when the kernels consume any layout and express no preference."""
+        return None
 
     @classmethod
     def is_ssm(cls) -> bool:

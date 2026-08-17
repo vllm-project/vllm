@@ -523,7 +523,7 @@ class FlashInferBackend(AttentionBackend):
         ) and supports_trtllm_attention(is_prefill=True)
 
     @classmethod
-    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...] | None:
         capability = current_platform.get_device_capability()
         if capability is not None and capability.major == 10:
             # The trtllm-gen kernels consume head-major block interiors; the L/B
