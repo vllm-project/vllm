@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
 from argparse import Namespace
+
+import pytest
 
 from vllm.entrypoints.openai.engine.protocol import StreamOptions
 from vllm.entrypoints.serve.utils import api_utils
@@ -137,12 +138,8 @@ class TestRedactSensitiveArgs:
             "enable_auto_tool_choice": True,
             "tool_call_parser": "qwen3_coder",
         }
-        monkeypatch.setattr(
-            api_utils, "get_non_default_args", lambda args: non_default
-        )
-        with caplog.at_level(
-            "INFO", logger="vllm.entrypoints.serve.utils.api_utils"
-        ):
+        monkeypatch.setattr(api_utils, "get_non_default_args", lambda args: non_default)
+        with caplog.at_level("INFO", logger="vllm.entrypoints.serve.utils.api_utils"):
             api_utils.log_non_default_args(args=Namespace())
         message = caplog.text
         assert self.API_KEY not in message
