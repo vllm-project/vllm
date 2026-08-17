@@ -34,7 +34,6 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.models.deepseek_v32.common.kernels import fused_norm_rope, fused_q
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
-from vllm.v1.kv_offload.sparse.hisparse_runtime import get_indexer_source
 
 
 class DeepseekV32Indexer(nn.Module):
@@ -441,7 +440,7 @@ class DeepseekV32Attention(MLAAttention):
             )
 
         if self.indexer is not None and indexer_slot is not None:
-            source = get_indexer_source(self.indexer.k_cache.prefix)
+            source = self.indexer.k_cache.hisparse_indexer_source
             if source is not None:
                 host_cache, source_slot_mapping = source
                 torch.ops._C_cache_ops.hisparse_backup_indexer(

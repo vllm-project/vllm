@@ -229,7 +229,7 @@ def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     shared_layers: dict[str, str],
     device: torch.device,
-):
+) -> tuple[dict[str, torch.Tensor], list[torch.Tensor]]:
     host_bytes = sum(
         tensor.size
         for tensor in kv_cache_config.kv_cache_tensors
@@ -240,9 +240,11 @@ def _allocate_kv_cache(
 
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
     packed_backings: dict[int, torch.Tensor] = {}
+    pinned_host_pools: list[torch.Tensor] = []
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         if kv_cache_tensor.host_resident:
-            tensor = allocate_pinned_host_pool(kv_cache_tensor.size)
+            tensor, registered_pool = allocate_pinned_host_pool(kv_cache_tensor.size)
+            pinned_host_pools.append(registered_pool)
         elif kv_cache_tensor.block_stride > 0:
             assert kv_cache_tensor.block_pool_id is not None
             # Allocate once; all packed tensors alias the same backing.
@@ -265,7 +267,7 @@ def _allocate_kv_cache(
     assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
         "Some layers are not correctly initialized"
     )
-    return kv_cache_raw_tensors
+    return kv_cache_raw_tensors, pinned_host_pools
 
 
 def _kv_first_layers_sharing_pool_with_mamba(
@@ -597,7 +599,7 @@ def init_kv_cache(
     block_tables: "BlockTables",
 ) -> tuple[dict[str, Any], "HiSparseWorker | None"]:
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
-    kv_cache_raw_tensors = _allocate_kv_cache(
+    kv_cache_raw_tensors, pinned_host_pools = _allocate_kv_cache(
         kv_cache_config, shared_kv_cache_layers, device
     )
     flattened_attn_groups = list(group for groups in attn_groups for group in groups)
@@ -617,6 +619,7 @@ def init_kv_cache(
             raw_tensors=kv_cache_raw_tensors,
             kv_caches=kv_caches,
             block_tables=block_tables,
+            pinned_host_pools=pinned_host_pools,
             max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
             max_model_len=vllm_config.model_config.max_model_len,
             max_concurrent_batches=vllm_config.max_concurrent_batches,

@@ -9,7 +9,6 @@ import torch
 
 import vllm.v1.kv_offload.sparse.hisparse_runtime as hisparse_runtime_module
 import vllm.v1.kv_offload.sparse.hisparse_worker as hisparse_worker_module
-import vllm.v1.worker.utils as worker_utils
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_offload.sparse.base import (
     SparseKVOffloadCommand,
@@ -22,16 +21,14 @@ from vllm.v1.kv_offload.sparse.hisparse_worker import (
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 
 
-def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding(monkeypatch):
+def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():
     waited_for_host_writes = False
 
     def wait_for_host_writes():
         nonlocal waited_for_host_writes
         waited_for_host_writes = True
 
-    monkeypatch.setattr(
-        worker_utils, "wait_for_hisparse_host_writes", wait_for_host_writes
-    )
+    host_write_event = SimpleNamespace(synchronize=wait_for_host_writes)
     backing = torch.full((10, 2, 3), -1, dtype=torch.float32)
     cache = backing[1:9]
     cache[2:4] = 7
@@ -44,6 +41,7 @@ def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding(monkeypatch):
             KVCacheBlockCopy(1, 0),
             KVCacheBlockCopy(3, 2),
         ],
+        host_write_event=host_write_event,
     )
 
     torch.testing.assert_close(cache[0:2], torch.full_like(cache[0:2], 7))
@@ -99,7 +97,7 @@ def test_hisparse_runtime_invalidates_only_scheduled_request_states():
 
 
 def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatch):
-    """Followers must release duplicate LRU state before memory profiling."""
+    """Followers must not allocate duplicate runtime state before profiling."""
     config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
             max_num_seqs=2,
@@ -119,25 +117,29 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
         "from_vllm_config",
         classmethod(lambda cls, vllm_config, model_top_k: resolved),
     )
-    monkeypatch.setattr(
-        hisparse_runtime_module,
-        "_get_group_plan",
-        lambda device, max_rows, top_k: object(),
-    )
-    monkeypatch.setattr(
-        hisparse_runtime_module, "_get_copy_stream", lambda device: object()
-    )
-    monkeypatch.setattr(hisparse_runtime_module, "_CURRENT_INDEX_GROUP", None)
-    group_scope = object()
+    plans: list[object] = []
+    streams: list[object] = []
+
+    def create_plan(_device, _max_rows, _top_k):
+        plans.append(object())
+        return plans[-1]
+
+    def create_stream(_device):
+        streams.append(object())
+        return streams[-1]
+
+    monkeypatch.setattr(hisparse_runtime_module, "_create_group_plan", create_plan)
+    monkeypatch.setattr(hisparse_runtime_module, "_create_copy_stream", create_stream)
+    index_group_builder = hisparse_runtime_module.HiSparseIndexGroupBuilder()
 
     def make_cache_handle(is_leader: bool):
         cache_handle = hisparse_runtime_module.create_hisparse_cache_handle(
             config,
             model_top_k=4,
-            index_group_scope=group_scope,
             is_index_group_leader=is_leader,
             row_width=8,
             kv_dtype=torch.float32,
+            index_group_builder=index_group_builder,
             device="cpu",
         )
         assert cache_handle is not None
@@ -150,6 +152,10 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
 
     assert first_follower.runtime.leader is first_leader.runtime
     assert second_follower.runtime.leader is second_leader.runtime
+    assert first_follower.runtime._plan is first_leader.runtime._plan
+    assert second_follower.runtime._plan is second_leader.runtime._plan
+    assert first_leader.runtime._plan is not second_leader.runtime._plan
+    assert len(plans) == len(streams) == 2
     assert first_follower.runtime.device_global_indices is None
     assert first_follower.runtime.lru_slots is None
     assert second_follower.runtime.device_global_indices is None
@@ -398,11 +404,15 @@ def test_hisparse_worker_reports_each_completed_transfer_once():
 def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker = object.__new__(HiSparseWorker)
     worker.cache_handles = []
+    worker.pinned_host_pools = []
+    indexer_source_layer = SimpleNamespace(hisparse_indexer_source=object())
+    worker.indexer_source_layers = [indexer_source_layer]
     released = False
 
-    def release_pinned_state(runtimes):
+    def release_pinned_state(runtimes, pinned_host_pools):
         nonlocal released
         assert runtimes == []
+        assert pinned_host_pools == []
         released = True
 
     monkeypatch.setattr(
@@ -412,6 +422,7 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     worker.shutdown()
 
     assert released
+    assert indexer_source_layer.hisparse_indexer_source is None
 
 
 def test_bind_kv_cache(default_vllm_config):

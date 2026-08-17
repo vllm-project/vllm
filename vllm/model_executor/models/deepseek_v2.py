@@ -99,6 +99,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec, MLACacheRole
+from vllm.v1.kv_offload.sparse.hisparse_runtime import HiSparseIndexGroupBuilder
 
 from .interfaces import (
     MixtureOfExperts,
@@ -971,6 +972,7 @@ class DeepseekV2MLAAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
+        hisparse_index_group_builder: HiSparseIndexGroupBuilder | None = None,
         input_size: int | None = None,
         reduce_results: bool = True,
         non_causal_multi_token_decode: bool = False,
@@ -1152,6 +1154,7 @@ class DeepseekV2MLAAttention(nn.Module):
             indexer_rotary_emb=self.indexer_rope_emb,
             is_sparse=self.is_v32,
             topk_indices_buffer=topk_indices_buffer,
+            hisparse_index_group_builder=hisparse_index_group_builder,
         )
 
         self.mla_attn = MultiHeadLatentAttentionWrapper(
@@ -1195,6 +1198,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         prefix: str,
         config: DeepseekV2Config | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
+        hisparse_index_group_builder: HiSparseIndexGroupBuilder | None = None,
     ) -> None:
         super().__init__()
 
@@ -1243,6 +1247,11 @@ class DeepseekV2DecoderLayer(nn.Module):
             and parallel_config.pipeline_parallel_size == 1
             and is_moe_layer
         )
+        attn_kwargs = (
+            {"hisparse_index_group_builder": hisparse_index_group_builder}
+            if attn_cls is DeepseekV2MLAAttention
+            else {}
+        )
         self.self_attn = attn_cls(
             vllm_config=vllm_config,
             config=config,
@@ -1259,6 +1268,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
             reduce_results=not self.use_sequence_parallel_moe,
+            **attn_kwargs,
         )
 
         if is_moe_layer:
@@ -1382,6 +1392,11 @@ class DeepseekV2Model(nn.Module):
             )
         else:
             topk_indices_buffer = None
+        hisparse_index_group_builder = (
+            HiSparseIndexGroupBuilder()
+            if self.is_v32 and vllm_config.attention_config.hisparse_config is not None
+            else None
+        )
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -1398,6 +1413,7 @@ class DeepseekV2Model(nn.Module):
                 vllm_config=vllm_config,
                 prefix=prefix,
                 topk_indices_buffer=topk_indices_buffer,
+                hisparse_index_group_builder=hisparse_index_group_builder,
             ),
             prefix=f"{prefix}.layers",
         )

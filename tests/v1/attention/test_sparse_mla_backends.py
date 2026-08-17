@@ -1774,7 +1774,6 @@ def test_hisparse_apply_multi_step_plan_matches_independent():
     )
     req_ids = torch.arange(num_reqs, dtype=torch.int32, device=device)
     seq_len = blocks_per_req * block_size
-    hisparse_runtime._get_group_plan.cache_clear()
     producer, shared, indep = make(), make(), make()
     shared.join_group(producer)
     for _ in range(8):

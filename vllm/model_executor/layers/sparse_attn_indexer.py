@@ -35,7 +35,6 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
-from vllm.v1.kv_offload.sparse.hisparse_runtime import get_indexer_source
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -317,6 +316,8 @@ def sparse_attn_indexer(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
+    hisparse_host_cache: torch.Tensor | None = None,
+    hisparse_source_slot_mapping: torch.Tensor | None = None,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -405,9 +406,8 @@ def sparse_attn_indexer(
             quant_block_size,
             scale_fmt,
         )
-        source = get_indexer_source(k_cache_prefix)
-        if source is not None:
-            host_cache, source_slot_mapping = source
+        if hisparse_host_cache is not None:
+            assert hisparse_source_slot_mapping is not None
             if use_pcp:
                 raise NotImplementedError(
                     "HiSparse indexer source backup does not support PCP."
@@ -415,8 +415,8 @@ def sparse_attn_indexer(
             torch.ops._C_cache_ops.hisparse_backup_indexer(
                 kv_cache,
                 slot_mapping_for_cache,
-                host_cache,
-                source_slot_mapping[: slot_mapping_for_cache.numel()],
+                hisparse_host_cache,
+                hisparse_source_slot_mapping[: slot_mapping_for_cache.numel()],
                 head_dim,
             )
 
@@ -727,6 +727,8 @@ def sparse_attn_indexer_fake(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
+    hisparse_host_cache: torch.Tensor | None = None,
+    hisparse_source_slot_mapping: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -734,7 +736,7 @@ def sparse_attn_indexer_fake(
 direct_register_custom_op(
     op_name="sparse_attn_indexer",
     op_func=sparse_attn_indexer,
-    mutates_args=["topk_indices_buffer"],
+    mutates_args=["topk_indices_buffer", "hisparse_host_cache"],
     fake_impl=sparse_attn_indexer_fake,
     dispatch_key=current_platform.dispatch_key,
 )
@@ -822,6 +824,8 @@ class SparseAttnIndexer(CustomOp):
             q_values, q_scale = q_quant
         else:
             q_values, q_scale = q_quant, None
+        source = self.k_cache.hisparse_indexer_source
+        host_cache, source_slot_mapping = source or (None, None)
         return torch.ops.vllm.sparse_attn_indexer(
             hidden_states,
             _encode_layer_name(self.k_cache.prefix),
@@ -844,6 +848,9 @@ class SparseAttnIndexer(CustomOp):
             self.dcp_rank,
             self.dcp_world_size,
             self.cp_kv_cache_interleave_size,
+            False,
+            host_cache,
+            source_slot_mapping,
         )
 
     def forward_xpu(

@@ -1118,18 +1118,29 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Apply copy-on-write block copies for partial prefix-cache hits, after
         # zeroing new blocks and before the forward pass reads them.
         if scheduler_output.kv_cache_block_copies:
-            for pool_id, num_blocks in enumerate(
-                self.kv_cache_config.num_blocks_by_pool
-            ):
+            for copy_pool_id, pool_caches in self.kv_caches_by_pool.items():
                 copies = [
                     copy
                     for copy in scheduler_output.kv_cache_block_copies
-                    if copy.block_pool_id == pool_id
+                    if copy.block_pool_id == copy_pool_id
                 ]
+                if not copies:
+                    continue
+                num_blocks = (
+                    self.kv_cache_config.hisparse_host_num_blocks
+                    if copy_pool_id is None
+                    else self.kv_cache_config.num_blocks_by_pool[copy_pool_id]
+                )
+                assert num_blocks is not None
                 copy_kv_cache_blocks_inplace(
-                    self.kv_caches_by_pool.get(pool_id, ()),
+                    pool_caches,
                     num_blocks,
                     copies,
+                    (
+                        self.hisparse_worker.host_write_event
+                        if copy_pool_id is None and self.hisparse_worker is not None
+                        else None
+                    ),
                 )
 
     def gather_batch_req_state(

@@ -35,10 +35,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
-from vllm.v1.kv_offload.sparse.hisparse_runtime import (
-    compress_hisparse_slot_mapping,
-    get_indexer_source,
-)
+from vllm.v1.kv_offload.sparse.hisparse_runtime import compress_hisparse_slot_mapping
 
 if TYPE_CHECKING:
     from vllm.models.deepseek_v4.eager_scratch import DeepseekV4EagerScratchPool
@@ -501,7 +498,7 @@ class DeepseekCompressor(nn.Module):
             )
 
         if self.head_dim == 128:
-            source = get_indexer_source(self.k_cache_prefix)
+            source = k_cache_layer.hisparse_indexer_source
             if source is not None:
                 host_cache, source_slot_mapping = source
                 src_slots = source_k_cache_metadata.slot_mapping

@@ -5,9 +5,7 @@
 from __future__ import annotations
 
 import time
-from contextlib import suppress
 from dataclasses import dataclass
-from functools import cache
 from math import gcd
 
 import psutil
@@ -191,7 +189,7 @@ def check_hisparse_host_memory(rank_bytes: int) -> None:
         )
 
 
-def allocate_pinned_host_pool(size: int) -> torch.Tensor:
+def allocate_pinned_host_pool(size: int) -> tuple[torch.Tensor, torch.Tensor]:
     """Allocate and deterministically register an exact-size host KV region."""
     page = 4096
     padded_size = round_up(size, page)
@@ -199,35 +197,14 @@ def allocate_pinned_host_pool(size: int) -> torch.Tensor:
     aligned_offset = (-backing.data_ptr()) % page
     registered = backing[aligned_offset : aligned_offset + padded_size]
     pin_tensor(registered)
-    _PINNED_HOST_POOLS.append(registered)
-    return registered[:size]
+    return registered[:size], registered
 
 
-def register_indexer_source(
-    layer_name: str, cache: torch.Tensor, slot_mapping: torch.Tensor
+def release_pinned_state(
+    runtimes: list[HiSparseRuntime], pinned_host_pools: list[torch.Tensor]
 ) -> None:
-    _INDEXER_SOURCES[layer_name] = (cache, slot_mapping)
-
-
-def get_indexer_source(
-    layer_name: str,
-) -> tuple[torch.Tensor, torch.Tensor] | None:
-    return _INDEXER_SOURCES.get(layer_name)
-
-
-def _covers_registered_host_range(ptr: int, nbytes: int) -> bool:
-    return any(
-        pool.data_ptr() <= ptr and ptr + nbytes <= pool.data_ptr() + pool.nbytes
-        for pool in _PINNED_HOST_POOLS
-    )
-
-
-def release_pinned_state(runtimes: list[HiSparseRuntime]) -> None:
-    """Synchronize, unregister host KV pools, and drop global state."""
-    global _CURRENT_INDEX_GROUP
-
-    _CURRENT_INDEX_GROUP = None
-    if _PINNED_HOST_POOLS:
+    """Synchronize and release one worker's registered host KV pools."""
+    if pinned_host_pools:
         try:
             torch.accelerator.synchronize()
         except RuntimeError as e:
@@ -235,27 +212,27 @@ def release_pinned_state(runtimes: list[HiSparseRuntime]) -> None:
                 "HiSparse: CUDA context unusable at teardown (%s); leaving "
                 "%d host-pool tensors pinned for kernel exit reclaim.",
                 e,
-                len(_PINNED_HOST_POOLS),
+                len(pinned_host_pools),
             )
             return
 
         cudart = torch.cuda.cudart()
         release_start = time.perf_counter()
         freed_bytes = 0
-        while _PINNED_HOST_POOLS:
-            tensor = _PINNED_HOST_POOLS[-1]
+        while pinned_host_pools:
+            tensor = pinned_host_pools[-1]
             err = cudart.cudaHostUnregister(tensor.data_ptr())
             if err.value != 0:
                 logger.warning(
                     "HiSparse: cudaHostUnregister failed (code=%d); leaving "
                     "%d host-pool tensors pinned for kernel exit reclaim.",
                     err.value,
-                    len(_PINNED_HOST_POOLS),
+                    len(pinned_host_pools),
                 )
                 cudart.cudaGetLastError()
                 break
             freed_bytes += tensor.nbytes
-            _PINNED_HOST_POOLS.pop()
+            pinned_host_pools.pop()
         if freed_bytes:
             logger.info(
                 "HiSparse: unpinned %.1f GiB of host pool in %.1fs.",
@@ -265,22 +242,6 @@ def release_pinned_state(runtimes: list[HiSparseRuntime]) -> None:
 
     for runtime in runtimes:
         runtime._host_cache = None
-    _get_group_plan.cache_clear()
-    _get_copy_stream.cache_clear()
-    _HOST_WRITE_EVENTS.clear()
-    with suppress(RuntimeError):
-        torch._C._host_emptyCache()
-    _INDEXER_SOURCES.clear()
-
-
-def wait_for_hisparse_host_writes() -> None:
-    """Wait for pending GPU writes before accessing host KV from the CPU."""
-    for event in _HOST_WRITE_EVENTS.values():
-        event.synchronize()
-
-
-def register_host_write_event(device: torch.device, event: torch.Event) -> None:
-    _HOST_WRITE_EVENTS[str(device)] = event
 
 
 def hisparse_prefill_staging_remap(
@@ -359,20 +320,19 @@ class _GroupPlan:
         self.valid_counts = torch.empty(max_rows, dtype=torch.int32, device=device)
 
 
-_PINNED_HOST_POOLS: list[torch.Tensor] = []
-_INDEXER_SOURCES: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
-_HOST_WRITE_EVENTS: dict[str, torch.Event] = {}
-_CURRENT_INDEX_GROUP: tuple[object, HiSparseRuntime | None] | None = None
-
-
-@cache
-def _get_group_plan(device: torch.device, max_rows: int, top_k: int) -> _GroupPlan:
+def _create_group_plan(device: torch.device, max_rows: int, top_k: int) -> _GroupPlan:
     return _GroupPlan(device, max_rows, top_k)
 
 
-@cache
-def _get_copy_stream(device: torch.device) -> torch.Stream:
+def _create_copy_stream(device: torch.device) -> torch.Stream:
     return torch.Stream(device=device)
+
+
+@dataclass
+class HiSparseIndexGroupBuilder:
+    """Carry the latest index-producing runtime through model construction."""
+
+    leader: HiSparseRuntime | None = None
 
 
 class HiSparseRuntime:
@@ -388,6 +348,7 @@ class HiSparseRuntime:
         storage_block_size: int | None = None,
         row_value_bytes: int | None = None,
         max_swap_rows: int | None = None,
+        leader: HiSparseRuntime | None = None,
     ) -> None:
         if not _has_hisparse_ops():
             raise RuntimeError(
@@ -419,29 +380,36 @@ class HiSparseRuntime:
 
         self.hot: PagedCacheView | None = None
         self.hot_block_table: torch.Tensor | None = None
-        # Per-request LRU state; released in join_group for index-sharing
-        # followers, which replay their leader's plan and never resolve
-        # the LRU themselves.
-        self.device_global_indices: torch.Tensor | None = torch.full(
-            (max_num_reqs, self.region_stride),
-            -1,
-            dtype=torch.int32,
-            device=self.device,
-        )
-        lru_init = torch.arange(
-            self.region_stride, dtype=torch.int16, device=self.device
-        )
-        self._lru_init: torch.Tensor | None = lru_init
-        self.lru_slots: torch.Tensor | None = lru_init.repeat(
-            max_num_reqs, 1
-        ).contiguous()
-        self._plan = _get_group_plan(
-            self.device, max_swap_rows or max_num_reqs, config.top_k
-        )
+        # Only leaders allocate per-request LRU state. Followers replay their
+        # leader's plan and never resolve the LRU themselves.
         self.followers: list[HiSparseRuntime] = []
-        self.leader: HiSparseRuntime | None = None
+        self.leader = leader
         self._prefetch_event: torch.Event | None = None
-        self._copy_stream = _get_copy_stream(self.device)
+        if leader is None:
+            self.device_global_indices: torch.Tensor | None = torch.full(
+                (max_num_reqs, self.region_stride),
+                -1,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            lru_init = torch.arange(
+                self.region_stride, dtype=torch.int16, device=self.device
+            )
+            self._lru_init: torch.Tensor | None = lru_init
+            self.lru_slots: torch.Tensor | None = lru_init.repeat(
+                max_num_reqs, 1
+            ).contiguous()
+            self._plan = _create_group_plan(
+                self.device, max_swap_rows or max_num_reqs, config.top_k
+            )
+            self._copy_stream = _create_copy_stream(self.device)
+        else:
+            self.device_global_indices = None
+            self._lru_init = None
+            self.lru_slots = None
+            self._plan = leader._plan
+            self._copy_stream = leader._copy_stream
+            leader.followers.append(self)
 
         self._host_cache: torch.Tensor | None = None
         self.eager_host_mirror = False
@@ -455,21 +423,7 @@ class HiSparseRuntime:
         self.device_global_indices = None
         self.lru_slots = None
         self._lru_init = None
-
-    def join_index_group(self, scope: object, is_leader: bool) -> None:
-        """Join the model-order index-sharing group during construction."""
-        global _CURRENT_INDEX_GROUP
-
-        leader = None
-        if _CURRENT_INDEX_GROUP is not None:
-            current_scope, leader = _CURRENT_INDEX_GROUP
-            if current_scope is not scope:
-                leader = None
-        if is_leader:
-            leader = self
-        elif leader is not None:
-            self.join_group(leader)
-        _CURRENT_INDEX_GROUP = (scope, leader)
+        self._copy_stream = leader._copy_stream
 
     def bind_hot_cache(
         self,
@@ -494,7 +448,9 @@ class HiSparseRuntime:
         )
         self.hot_block_table = block_table
 
-    def bind_source_cache(self, kv_cache: torch.Tensor) -> None:
+    def bind_source_cache(
+        self, kv_cache: torch.Tensor, *, explicitly_registered: bool = False
+    ) -> None:
         if kv_cache.dtype != self.kv_dtype or kv_cache.shape[-1] != self.row_width:
             raise ValueError(
                 "HiSparse runtime bound to a KV cache with mismatched "
@@ -512,10 +468,7 @@ class HiSparseRuntime:
         # unpin at shutdown); torch's is_pinned() only recognizes its own
         # caching-host-allocator memory, so also accept ranges the model
         # allocator explicitly registered.
-        if not (
-            kv_cache.is_pinned()
-            or _covers_registered_host_range(kv_cache.data_ptr(), kv_cache.nbytes)
-        ):
+        if not (kv_cache.is_pinned() or explicitly_registered):
             raise ValueError("HiSparse host-resident KV pool must be pinned memory.")
 
         self._host_cache = (
@@ -899,10 +852,10 @@ def create_hisparse_cache_handle(
     vllm_config: VllmConfig,
     model_top_k: int,
     *,
-    index_group_scope: object,
     is_index_group_leader: bool,
     row_width: int,
     kv_dtype: torch.dtype,
+    index_group_builder: HiSparseIndexGroupBuilder | None = None,
     device: torch.device | str | None = None,
     storage_block_size: int | None = None,
     row_value_bytes: int | None = None,
@@ -932,6 +885,11 @@ def create_hisparse_cache_handle(
             current_platform.device_type, torch.accelerator.current_device_index()
         )
 
+    leader = (
+        None
+        if is_index_group_leader or index_group_builder is None
+        else index_group_builder.leader
+    )
     runtime = HiSparseRuntime(
         config=config,
         max_num_reqs=max_num_reqs,
@@ -941,8 +899,10 @@ def create_hisparse_cache_handle(
         device=device,
         storage_block_size=storage_block_size,
         row_value_bytes=row_value_bytes,
+        leader=leader,
     )
-    runtime.join_index_group(index_group_scope, is_index_group_leader)
+    if is_index_group_leader and index_group_builder is not None:
+        index_group_builder.leader = runtime
     kv_transfer_config = vllm_config.kv_transfer_config
     runtime.eager_host_mirror = bool(
         kv_transfer_config is not None and kv_transfer_config.is_kv_producer

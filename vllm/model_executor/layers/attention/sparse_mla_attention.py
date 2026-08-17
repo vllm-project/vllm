@@ -47,6 +47,7 @@ from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_offload.sparse.hisparse_runtime import (
     FP8_DS_MLA_ROW_BYTES,
     HiSparseCacheHandle,
+    HiSparseIndexGroupBuilder,
     HiSparsePrefillStagingPlan,
     build_hisparse_prefill_staging_plan,
     create_hisparse_cache_handle,
@@ -559,6 +560,7 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
         kv_b_proj: "ColumnParallelLinear",
         indexer: object | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
+        hisparse_index_group_builder: HiSparseIndexGroupBuilder | None = None,
         q_pad_num_heads: int | None = None,
     ) -> None:
         super().__init__(
@@ -603,14 +605,10 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             self.hisparse_cache = create_hisparse_cache_handle(
                 vllm_config,
                 model_top_k,
-                index_group_scope=(
-                    self.topk_indices_buffer
-                    if self.topk_indices_buffer is not None
-                    else vllm_config
-                ),
                 is_index_group_leader=indexer is not None,
                 row_width=row_width,
                 kv_dtype=kv_dtype,
+                index_group_builder=hisparse_index_group_builder,
             )
             assert self.hisparse_cache is not None
         self._hisparse_dummy_batch = False

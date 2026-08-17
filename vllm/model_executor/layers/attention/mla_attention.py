@@ -207,7 +207,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import Enum
 from math import lcm
-from typing import ClassVar, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, ClassVar, Generic, TypeVar, cast
 
 import numpy as np
 import torch
@@ -304,6 +304,11 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
     get_kv_quant_mode,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.kv_offload.sparse.hisparse_runtime import (
+        HiSparseIndexGroupBuilder,
+    )
 
 logger = init_logger(__name__)
 
@@ -408,6 +413,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         use_sparse: bool = False,
         indexer: object | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
+        hisparse_index_group_builder: "HiSparseIndexGroupBuilder | None" = None,
         non_causal_multi_token_decode: bool = False,
         sliding_window: int | None = None,
         prefill_backend_cls: type[MLAPrefillBackend] | None = None,
@@ -513,6 +519,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # explicitly so backbone "skip" layers (indexer=None) still find it.
         if use_sparse:
             extra_impl_args["topk_indices_buffer"] = topk_indices_buffer
+            if hisparse_index_group_builder is not None:
+                extra_impl_args["hisparse_index_group_builder"] = (
+                    hisparse_index_group_builder
+                )
 
         impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
         impl = impl_cls(

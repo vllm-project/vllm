@@ -348,6 +348,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if prefix:
             compilation_config.static_forward_context[prefix] = self
         self.kv_cache = torch.tensor([])
+        self.hisparse_indexer_source: tuple[torch.Tensor, torch.Tensor] | None = None
         self.hisparse_cache: HiSparseCacheHandle | None = None
         if (
             vllm_config.attention_config.hisparse_config is not None
@@ -365,11 +366,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self.hisparse_cache = create_hisparse_cache_handle(
                 vllm_config,
                 config.index_topk,
-                index_group_scope=(
-                    self.topk_indices_buffer
-                    if self.topk_indices_buffer is not None
-                    else vllm_config
-                ),
                 is_index_group_leader=True,
                 row_width=584,
                 kv_dtype=torch.uint8,
@@ -801,6 +797,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
     ):
         super().__init__()
         self.kv_cache = torch.tensor([])
+        self.hisparse_indexer_source: tuple[torch.Tensor, torch.Tensor] | None = None
         self.hisparse_cache: HiSparseCacheHandle | None = None
         self.head_dim = head_dim
         self.prefix = prefix

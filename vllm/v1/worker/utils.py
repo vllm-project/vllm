@@ -36,7 +36,6 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.kv_offload.sparse.hisparse_runtime import wait_for_hisparse_host_writes
 from vllm.v1.worker.block_table import get_block_table_width
 
 logger = init_logger(__name__)
@@ -527,6 +526,7 @@ def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor | list[torch.Tensor]],
     num_blocks: int,
     kv_cache_block_copies: Sequence[KVCacheBlockCopy],
+    host_write_event: torch.Event | None = None,
 ) -> None:
     if not kv_cache_block_copies:
         return
@@ -554,7 +554,8 @@ def copy_kv_cache_blocks_inplace(
         if device.type == "cpu":
             # Pinned host pages may still be read or written by HiSparse's
             # compute stream from the prior step.
-            wait_for_hisparse_host_writes()
+            if host_write_event is not None:
+                host_write_event.synchronize()
             indices = torch.from_numpy(indices_np)
             src_indices, dst_indices = indices.unbind(dim=1)
             for tensor in storage_tensors:

@@ -32,8 +32,6 @@ from vllm.v1.kv_offload.sparse.base import (
 )
 from vllm.v1.kv_offload.sparse.hisparse_runtime import (
     HiSparseCacheHandle,
-    register_host_write_event,
-    register_indexer_source,
     release_pinned_state,
 )
 
@@ -76,6 +74,8 @@ class HiSparseWorker:
         source_group_id: int,
         indexer_group_id: int,
         device: torch.device,
+        pinned_host_pools: list[torch.Tensor],
+        indexer_source_layers: list[Any],
     ) -> None:
         self.cache_pairs = cache_pairs
         kernel_block_size = cache_pairs[0][0].shape[1]
@@ -83,6 +83,8 @@ class HiSparseWorker:
         self.blocks_per_kv_block = blocks_per_kv_block
         self.source_group_id = source_group_id
         self.indexer_group_id = indexer_group_id
+        self.pinned_host_pools = pinned_host_pools
+        self.indexer_source_layers = indexer_source_layers
         capacity = max_num_reqs * cdiv(max_model_len, kernel_block_size)
         self.src_cpu = torch.empty(capacity, dtype=torch.int32, pin_memory=True)
         self.dst_cpu = torch.empty(capacity, dtype=torch.int32, pin_memory=True)
@@ -177,7 +179,6 @@ class HiSparseWorker:
         self.backup_src_rows = src_rows
         self.backup_row_value_bytes = row_value_bytes
         self.host_write_event = torch.Event()
-        register_host_write_event(device, self.host_write_event)
         self.spill_row_capacity = max_model_len
         spill_staging_count = max_concurrent_batches + 1
         self.spill_src_cpu = torch.empty(
@@ -358,7 +359,12 @@ class HiSparseWorker:
         return enqueued, completed
 
     def shutdown(self) -> None:
-        release_pinned_state([cache.runtime for cache in self.cache_handles])
+        for layer in self.indexer_source_layers:
+            layer.hisparse_indexer_source = None
+        self.indexer_source_layers.clear()
+        release_pinned_state(
+            [cache.runtime for cache in self.cache_handles], self.pinned_host_pools
+        )
 
     def restore_prefix(
         self,
@@ -429,6 +435,7 @@ def init_hisparse_worker(
     max_model_len: int,
     max_concurrent_batches: int,
     device: torch.device,
+    pinned_host_pools: list[torch.Tensor],
 ) -> HiSparseWorker:
     tensor_configs = {
         name: tensor_config
@@ -451,6 +458,7 @@ def init_hisparse_worker(
     assert host_num_blocks is not None
 
     cache_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
+    indexer_source_layers: list[Any] = []
     for layer_name in indexer_group.layer_names:
         cache_name = f"{layer_name}{HISPARSE_INDEXER_SOURCE_SUFFIX}"
         tensor_config = tensor_configs[cache_name]
@@ -480,11 +488,12 @@ def init_hisparse_worker(
                 1,
             ),
         )
-        register_indexer_source(
-            layer_name,
+        indexer_source_layer = forward_context[layer_name]
+        indexer_source_layer.hisparse_indexer_source = (
             source_cache,
             block_tables.slot_mappings[source_group_id],
         )
+        indexer_source_layers.append(indexer_source_layer)
         kv_caches[cache_name] = source_cache
         cache_pairs.append((source_cache, kv_caches[layer_name]))
 
@@ -547,7 +556,9 @@ def init_hisparse_worker(
                 or resident.cache.stride() != hot.cache.stride()
             ):
                 raise RuntimeError("HiSparse resident and hot layouts must match.")
-            cache_handle.runtime.bind_source_cache(kv_caches[layer_name])
+            cache_handle.runtime.bind_source_cache(
+                kv_caches[layer_name], explicitly_registered=True
+            )
             cache_handles.append(cache_handle)
 
     block_size = source_group.kv_cache_spec.block_size
@@ -566,4 +577,6 @@ def init_hisparse_worker(
         source_group_id,
         indexer_group_id,
         device,
+        pinned_host_pools,
+        indexer_source_layers,
     )
