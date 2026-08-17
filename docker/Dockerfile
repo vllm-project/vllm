@@ -179,6 +179,14 @@ RUN mkdir -p "${UV_PYTHON_INSTALL_DIR}" "${UV_CACHE_DIR}" "${UV_INSTALL_DIR}" \
 # managed Python source so ensurepip / `python3 -m pip` still resolve.
 ENV UV_LINK_MODE=copy
 
+# Preserve the driver stub before a developer-preview toolkit replaces
+# /usr/local/cuda. The runtime image also needs it for JIT linking.
+RUN CUDA_DRIVER_STUB=$(find -H /usr/local/cuda \
+        -path '*/stubs/libcuda.so' -print -quit) \
+    && test -n "${CUDA_DRIVER_STUB}" \
+    && install -D -m 0644 "${CUDA_DRIVER_STUB}" \
+        /opt/cuda-driver-stub/libcuda.so
+
 # Developer-preview CUDA toolkits may be published as Python packages before
 # NVIDIA container images are available. Overlay the complete toolkit on the
 # regular manylinux builder while preserving the default image-based path.
@@ -190,11 +198,9 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             'import nvidia; from pathlib import Path; print(Path(next(iter(nvidia.__path__))) / "cu13")') \
         && test -x "${CUDA_PYPI_ROOT}/bin/nvcc" \
         && test -x "${CUDA_PYPI_ROOT}/bin/ptxas" \
-        && CUDA_DRIVER_STUB=$(find -H /usr/local/cuda \
-            -path '*/stubs/libcuda.so' -print -quit) \
-        && test -n "${CUDA_DRIVER_STUB}" \
         && mkdir -p "${CUDA_PYPI_ROOT}/lib/stubs" \
-        && cp "${CUDA_DRIVER_STUB}" "${CUDA_PYPI_ROOT}/lib/stubs/libcuda.so" \
+        && cp /opt/cuda-driver-stub/libcuda.so \
+            "${CUDA_PYPI_ROOT}/lib/stubs/libcuda.so" \
         && for library in "${CUDA_PYPI_ROOT}"/lib/*.so.*; do \
             linker_name="${library%%.so.*}.so"; \
             if [ ! -e "${linker_name}" ]; then \
@@ -716,6 +722,9 @@ RUN apt-get update -y \
 # Install uv for faster pip installs
 RUN python3 -m pip install uv
 
+COPY --from=base /opt/cuda-driver-stub/libcuda.so \
+    /tmp/cuda-driver-stub/libcuda.so
+
 # Install CUDA development tools for runtime JIT compilation. Developer-
 # preview builds use NVIDIA's public Python packages when no CUDA base image
 # or apt repository is available.
@@ -730,8 +739,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && test -x "${CUDA_PYPI_ROOT}/bin/nvcc" \
         && test -x "${CUDA_PYPI_ROOT}/bin/ptxas" \
         && mkdir -p "${CUDA_PYPI_ROOT}/lib/stubs" \
-        && printf 'INPUT ( libcuda.so.1 )\n' \
-            > "${CUDA_PYPI_ROOT}/lib/stubs/libcuda.so" \
+        && cp /tmp/cuda-driver-stub/libcuda.so \
+            "${CUDA_PYPI_ROOT}/lib/stubs/libcuda.so" \
         && for library in "${CUDA_PYPI_ROOT}"/lib/*.so.*; do \
             linker_name="${library%%.so.*}.so"; \
             if [ ! -e "${linker_name}" ]; then \
@@ -758,6 +767,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     && apt-get install -y --no-install-recommends \
         libnuma-dev \
         numactl \
+    && rm -rf /tmp/cuda-driver-stub \
     && rm -rf /var/lib/apt/lists/*
 
 ENV CUDA_HOME=/usr/local/cuda

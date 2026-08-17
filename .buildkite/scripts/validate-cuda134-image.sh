@@ -35,22 +35,17 @@ trap '\''rm -rf "${tmp_dir}"'\'' EXIT
 printf "%s\n" "int main(void) { return 0; }" > "${tmp_dir}/smoke.c"
 printf "%s\n" "int main() { return 0; }" > "${tmp_dir}/smoke.cc"
 printf "%s\n" \
-  "int cuInit(unsigned int flags) { return flags; }" \
-  > "${tmp_dir}/cuda-driver.c"
-printf "%s\n" \
   "extern int cuInit(unsigned int);" \
-  "int main(void) { return cuInit(0); }" \
+  "int call_cu_init(void) { return cuInit(0); }" \
   > "${tmp_dir}/cuda-link.c"
 gcc "${tmp_dir}/smoke.c" -o "${tmp_dir}/smoke-c"
 g++ "${tmp_dir}/smoke.cc" -o "${tmp_dir}/smoke-cxx"
-gcc -shared -fPIC -Wl,-soname,libcuda.so.1 \
-  "${tmp_dir}/cuda-driver.c" -o "${tmp_dir}/libcuda.so.1"
-gcc "${tmp_dir}/cuda-link.c" \
-  -L/usr/local/cuda/lib64/stubs -L"${tmp_dir}" \
-  -Wl,-rpath,"${tmp_dir}" -lcuda -o "${tmp_dir}/smoke-cuda-link"
+gcc -shared -fPIC -Wl,--no-undefined "${tmp_dir}/cuda-link.c" \
+  -L/usr/local/cuda/lib64/stubs -lcuda \
+  -o "${tmp_dir}/smoke-cuda-link.so"
+readelf -d "${tmp_dir}/smoke-cuda-link.so" | grep -q libcuda.so.1
 "${tmp_dir}/smoke-c"
 "${tmp_dir}/smoke-cxx"
-"${tmp_dir}/smoke-cuda-link"
 '
 
 docker run --rm --entrypoint /usr/local/cuda/bin/nvcc "${image_ref}" \
