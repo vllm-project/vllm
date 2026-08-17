@@ -245,42 +245,37 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         if not isinstance(secondary_tier_configs, list):
             raise ValueError("secondary_tiers must be a list of tier configurations")
 
-        has_backpressure = False
         for tier_config in secondary_tier_configs:
             assert isinstance(tier_config, dict)
             tier_cls = SecondaryTierFactory.get_tier_class(tier_config)
             metrics.update(tier_cls.build_metric_definitions(tier_config))
-            if tier_config.get("backpressure") is not None:
-                has_backpressure = True
 
-        if has_backpressure:
-            metrics[TieringOffloadingMetrics.BACKPRESSURE_STORE_LATENCY_EMA] = (
-                OffloadingGaugeMetadata(
-                    documentation=(
-                        "Exponential moving average of store latency "
-                        "for back-pressure detection, in seconds."
-                    ),
-                    labelnames=("tier",),
-                )
+        metrics[TieringOffloadingMetrics.BACKPRESSURE_STORE_LATENCY_EMA] = (
+            OffloadingGaugeMetadata(
+                documentation=(
+                    "Exponential moving average of store latency "
+                    "for back-pressure detection, in s/MiB."
+                ),
+                labelnames=("tier",),
             )
-            metrics[TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED] = (
-                OffloadingCounterMetadata(
-                    documentation=(
-                        "Number of store operations dropped due to "
-                        "back-pressure on a secondary tier."
-                    ),
-                    labelnames=("tier",),
-                )
+        )
+        metrics[TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of store operations dropped due to "
+                    "back-pressure on a secondary tier."
+                ),
+                labelnames=("tier",),
             )
-            metrics[TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED] = (
-                OffloadingCounterMetadata(
-                    documentation=(
-                        "Number of blocks dropped due to back-pressure "
-                        "on a secondary tier."
-                    ),
-                    labelnames=("tier",),
-                )
+        )
+        metrics[TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED] = (
+            OffloadingCounterMetadata(
+                documentation=(
+                    "Number of blocks dropped due to back-pressure on a secondary tier."
+                ),
+                labelnames=("tier",),
             )
+        )
 
         return metrics
 
