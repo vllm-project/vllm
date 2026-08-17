@@ -30,6 +30,10 @@ from typing import Any
 
 import msgspec
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 class CustomNotification(
     msgspec.Struct,
@@ -42,6 +46,9 @@ class CustomNotification(
     put event data in `payload`. Frontends ignore keys they do not know. Left
     GC-tracked, unlike its siblings: `payload` is plugin-supplied, and a cycle
     routed through an untracked struct is never collected.
+
+    `payload` must hold string keys and msgpack-encodable values; this is
+    checked only when the engine serializes it, not at construction.
     """
 
     key: str
@@ -50,11 +57,21 @@ class CustomNotification(
 
 EngineNotification = CustomNotification
 
+MAX_BUFFERED_NOTIFICATIONS = 1024
+
 _worker_notifications: list[EngineNotification] = []
 
 
 def publish_worker_notification(notification: EngineNotification) -> None:
     """Queue a notification from inside the worker process."""
+    if len(_worker_notifications) >= MAX_BUFFERED_NOTIFICATIONS:
+        logger.warning_once(
+            "Worker notification buffer is full (%d); dropping the oldest "
+            "notification. Set VLLM_WORKER_NOTIFICATION_POLL_INTERVAL so the "
+            "engine drains the buffer.",
+            MAX_BUFFERED_NOTIFICATIONS,
+        )
+        del _worker_notifications[0]
     _worker_notifications.append(notification)
 
 
