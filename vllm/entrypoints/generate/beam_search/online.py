@@ -16,7 +16,11 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import collect_from_async_generator
 
-from .utils import BeamSearchSequence, create_sort_beams_key_function
+from .utils import (
+    BeamSearchSequence,
+    check_beam_search_stop,
+    create_sort_beams_key_function,
+)
 
 
 class BeamSearchOnlineMixin(ABC):
@@ -40,6 +44,7 @@ class BeamSearchOnlineMixin(ABC):
         temperature = params.temperature
         length_penalty = params.length_penalty
         include_stop_str_in_output = params.include_stop_str_in_output
+        stop_strings = params.stop_strings
 
         tokenizer = self.renderer.get_tokenizer()
         eos_token_id = tokenizer.eos_token_id
@@ -146,6 +151,28 @@ class BeamSearchOnlineMixin(ABC):
                                 )
                             )
                         else:
+                            if stop_strings:
+                                candidate_tokens = current_beam.tokens + [token_id]
+                                stop_result = check_beam_search_stop(
+                                    tokenizer,
+                                    prompt,
+                                    candidate_tokens,
+                                    stop_strings,
+                                    include_stop_str_in_output,
+                                )
+                                if stop_result is not None:
+                                    completed.append(
+                                        BeamSearchSequence(
+                                            orig_prompt=prompt,
+                                            tokens=candidate_tokens,
+                                            logprobs=current_beam.logprobs + [logprobs],
+                                            cum_logprob=candidate_logprob,
+                                            text=stop_result.output_text,
+                                            finish_reason="stop",
+                                            stop_reason=stop_result.stop_reason,
+                                        )
+                                    )
+                                    continue
                             candidates.append(
                                 (
                                     candidate_logprob,
@@ -192,6 +219,10 @@ class BeamSearchOnlineMixin(ABC):
         best_beams = sorted_completed[:beam_width]
 
         for beam in best_beams:
+            # A stop string can end inside the final token. That token ID is retained
+            # for logprobs, so preserve the truncated text instead of re-decoding it.
+            if beam.text is not None:
+                continue
             if beam.tokens[-1] == eos_token_id and not ignore_eos:
                 # Skip the eos token in the text.
                 tokens = beam.tokens[tokenized_length:-1]

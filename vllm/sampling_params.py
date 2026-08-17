@@ -8,10 +8,10 @@ import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any
+from typing import Annotated, Any, TypeAlias
 
 import msgspec
-from pydantic import BeforeValidator
+from pydantic import BeforeValidator, Field
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
@@ -75,6 +75,10 @@ ThinkingTokenBudget = Annotated[
     int | None,
     BeforeValidator(validate_thinking_token_budget),
 ]
+
+StopParam: TypeAlias = (
+    str | Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
+)
 
 
 class SamplingType(IntEnum):
@@ -1258,6 +1262,17 @@ class BeamSearchParams(
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
     structured_outputs: StructuredOutputsParams | None = None
+    stop: StopParam = None
+
+    @property
+    def stop_strings(self) -> list[str]:
+        if self.stop is None:
+            return []
+        if isinstance(self.stop, str):
+            return [self.stop]
+        return self.stop
 
     def __post_init__(self) -> None:
         _verify_num_sequences(self.beam_width, "beam_width")
+        if any(not stop_str for stop_str in self.stop_strings):
+            raise VLLMValidationError("stop cannot contain an empty string.")
