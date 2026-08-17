@@ -6,7 +6,7 @@ The vLLM Mixture of Experts (MoE) subsystem lives under `vllm/model_executor/lay
 
 ## Object Relationship Diagram
 
-```python
+```text
 Model (e.g. Mixtral, DeepSeek)
   │
   │  calls FusedMoEFactory(...) factory   ──────────────────────────────────┐
@@ -20,6 +20,9 @@ MoERunner (nn.Module, is the return value)                           │
   ├── shared_expert_gate: nn.Module?  ◄── model-provided             │
   ├── routed_input_transform: nn.Module?                             │
   ├── routed_output_transform: nn.Module?                            │
+  ├── routed_scaling_factor: float?                                  │
+  ├── enable_dbo: bool                                               │
+  ├── layer_name: str                                                │
   └── moe_config: FusedMoEConfig     ◄── created by factory         │
                                                                      │
 RoutedExperts (nn.Module)                                            │
@@ -30,7 +33,9 @@ RoutedExperts (nn.Module)                                            │
                                                                      │
 FusedMoERouter (ABC, not nn.Module)                                  │
   ├── eplb_state: EplbLayerState?                                    │
-  └── Concrete: TopKRouter, ZeroExpertRouter, etc.                   │
+  └── Concrete: FusedTopKRouter, ZeroExpertRouter,                   │
+      GroupedTopKRouter, FusedTopKBiasRouter,                        │
+      AiterSharedRoutedFusedMoERouter, RoutingSimulatorRouter, etc.  │
                                                                      │
 ExpertMapManager                                                     │
   ├── expert_map: Tensor?  (global→local mapping)                    │
@@ -64,7 +69,7 @@ FusedMoEConfig (dataclass)                                           │
 
 **Role**: The orchestrator. This is the `nn.Module` that models call `.forward()` on. It coordinates the entire MoE forward pass.
 
-**Inherits**: `MoERunnerInterface` → `PluggableLayer` → `nn.Module`
+**Inherits**: `MoERunnerInterface(PluggableLayer, ABC)` → `PluggableLayer` → `nn.Module`
 
 **Key responsibilities**:
 
@@ -95,6 +100,8 @@ forward()
         → routed_experts.forward_modular() / forward_monolithic()
         → shared_experts(MULTI_STREAM_OVERLAPPED)
       → _maybe_combine()
+  → truncate fused_output to og_hidden_dim_pre_xform (if padded)
+  → _maybe_reduce_routed_output_before_transform()  (latent MoE pre-reduction)
   → _maybe_reduce_shared_expert_output()
   → _maybe_apply_routed_scale_to_output()
   → apply_routed_output_transform()
@@ -115,9 +122,13 @@ forward()
 
 **Concrete implementations** (via `create_fused_moe_router` factory in `router/router_factory.py`):
 
-- `TopKRouter` — standard softmax/sigmoid + top-k routing
+- `FusedTopKRouter` — standard softmax/sigmoid + top-k routing
+- `FusedTopKBiasRouter` — top-k routing with e_score_bias (DeepSeek V3, MiniMax)
+- `GroupedTopKRouter` — grouped top-k routing (DeepSeek V3 style)
 - `ZeroExpertRouter` — adds a "zero expert" bias term to the output
-- Custom routing function wrapper
+- `AiterSharedRoutedFusedMoERouter` — ROCm AITER shared+routed fused router
+- `RoutingSimulatorRouter` — routing simulation for testing/analysis
+- `CustomRoutingRouter` — wrapper for custom routing functions
 
 **Not an `nn.Module`**: The router has no trainable parameters in the fused MoE path (the gate weights live on the model or on `MoERunner`).
 
@@ -156,17 +167,27 @@ forward()
 
 - `num_experts`, `experts_per_token` (top_k), `hidden_dim`, `intermediate_size`
 - `num_local_experts`, `num_logical_experts` (for EPLB)
-- `activation: MoEActivation` (silu, gelu, etc. with gated/ungated distinction)
+- `activation: MoEActivation` (silu, gelu, situglu, etc. with gated/ungated distinction)
 - `in_dtype`, `router_logits_dtype`
 - `moe_parallel_config: FusedMoEParallelConfig` (all parallelism settings)
 - `routing_method: RoutingMethodType`
-- Computed: `intermediate_size_per_partition`, ROCm AITER flags
+- `device: torch.device | str`
+- `hidden_dim_unpadded`, `intermediate_size_per_partition_unpadded`, `intermediate_pad` (padding/alignment)
+- `moe_backend: MoEBackend` (kernel selection)
+- `max_num_tokens`, `has_bias`, `is_lora_enabled`
+- `skip_final_all_reduce`, `defer_moe_finalize` (reduction/finalization control)
+- `swiglu_limit`, `swiglu_alpha`, `swiglu_beta` (SwiGLU clamp parameters)
+- `activation_situ_beta`, `activation_situ_linear_beta` (SituGLU parameters)
+- `max_capture_size` (CUDA graph capture)
+- Computed: `intermediate_size_per_partition`, `rocm_aiter_fmoe_enabled`, `aiter_fmoe_shared_expert_enabled`
 
 ### 7. `FusedMoEParallelConfig` (`config.py`)
 
 **Role**: Dataclass encoding all parallelism dimensions and backend selection.
 
 **Key fields**: `tp_size/rank`, `dp_size/rank`, `ep_size/rank`, `pcp_size/rank`, `sp_size`, `use_ep`, `all2all_backend`, `enable_eplb`.
+
+**Computed properties**: `use_all2all_kernels`, `use_deepep_ht_kernels`, `use_deepep_ll_kernels`, `use_deepep_v2_kernels`, `use_fi_nvl_two_sided_kernels`, `use_fi_nvl_one_sided_kernels`, `use_ag_rs_all2all_kernels`, `use_mori_kernels`, `use_nixl_ep_kernels`, `use_batched_activation_format`, `needs_round_robin_routing_tables`, `is_sequence_parallel`.
 
 **Notable behavior**: When EP is enabled, TP is "collapsed" into EP — each device owns a full subset of experts rather than a shard of every expert. The `make()` factory method computes this flattening.
 
@@ -189,7 +210,7 @@ forward()
 - `create_weights()` — register the right parameters on `RoutedExperts`
 - `apply()` — execute the fused MoE kernel with pre-computed routing (modular)
 - `apply_monolithic()` — execute a kernel that handles routing internally (monolithic)
-- `get_fused_moe_quant_config()` — produce a `FusedMoEQuantConfig` describing scales/shapes
+- `get_fused_moe_quant_config()` — produce a `FusedMoEQuantConfig` describing scales/shapes (activations and weights each have a `FusedMoEQuantDesc`)
 
 **Two execution modes**:
 
@@ -198,7 +219,7 @@ forward()
 
 ## Data Flow Summary
 
-```python
+```text
 hidden_states (from transformer block)
     │
     ▼
@@ -228,11 +249,19 @@ MoERunner.forward()
     │
     ├── [optional] combine (DP/EP result aggregation)
     │
-    ├── shared_output + fused_output  (element-wise add)
+    ├── [optional] truncate fused_output (undo hidden_dim padding)
+    │
+    ├── [optional] pre-transform all-reduce (latent MoE: reduce before non-linear output transform)
+    │
+    ├── [optional] reduce shared_expert_output (when fused_output already reduced)
+    │
+    ├── [optional] apply routed_scaling_factor
     │
     ├── [optional] routed_output_transform (latent → full dim)
     │
-    ├── [optional] all-reduce (TP/EP)
+    ├── shared_output + fused_output  (element-wise add)
+    │
+    ├── [optional] all-reduce (TP/EP, when not already reduced above)
     │
     └── final output → back to transformer block
 ```
