@@ -352,6 +352,27 @@ print(response.choices[0].message.reasoning)
 print(response.choices[0].message.content)
 ```
 
+## Mapping Unsupported Reasoning Efforts
+
+Some chat templates accept only a subset of the reasoning effort ladder and raise a template error on anything else (for example, a template that supports only `low`, `medium`, and `xhigh`). Clients such as agent harnesses often send the full OpenAI-style range, so a mismatch fails the request at render time.
+
+Declare the levels the served model accepts with `--supported-reasoning-efforts`, and vLLM remaps any other requested value to the nearest supported level on the ladder `minimal < low < medium < high < xhigh < max`:
+
+```bash
+vllm serve Qwen/Qwen3.8-27B \
+  --supported-reasoning-efforts low medium xhigh \
+  --reasoning-effort-rounding down
+```
+
+`--reasoning-effort-rounding` controls the direction:
+
+- `down` (default): the highest supported level at or below the requested one; if nothing is at or below, the lowest supported level. With the set above, `high` → `medium`, `minimal` → `low`.
+- `up`: the lowest supported level at or above the requested one; if nothing is at or above, the highest supported level. With the set above, `high` → `xhigh`.
+
+`reasoning_effort: "none"` (reasoning disabled) always passes through untouched, so the mapping never turns thinking on or off. Each distinct remap is logged once as a warning. When `--supported-reasoning-efforts` is not set, requests are passed through unchanged (existing behavior).
+
+The mapping applies to the Chat Completions, Responses, and Anthropic Messages APIs.
+
 ## Suppressing Reasoning Output
 
 You can suppress reasoning content from API responses using the `include_reasoning` parameter. When set to `false`, reasoning tokens are still generated (so model quality is unaffected) but excluded from the response. This reduces network traffic without changing inference behavior.
