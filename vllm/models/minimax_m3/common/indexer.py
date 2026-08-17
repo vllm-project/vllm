@@ -353,6 +353,9 @@ class MiniMaxM3IndexerImpl(nn.Module):
     # Set by each impl so the side cache reports the matching backend + builder.
     indexer_backend_cls: ClassVar[type[AttentionBackend]] = MiniMaxM3IndexerBackend
 
+
+    emits_sparse_block_table: ClassVar[bool] = False
+
     def __init__(
         self,
         *,
@@ -369,6 +372,8 @@ class MiniMaxM3IndexerImpl(nn.Module):
         cache_config: CacheConfig | None = None,
         indexer_kv_dtype: IndexerKVDType = "bf16",
         topk_indices_buffer: torch.Tensor | None = None,
+        sparse_bt_buffer: torch.Tensor | None = None,
+        sparse_ctx_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.num_kv_heads = num_kv_heads
@@ -381,9 +386,18 @@ class MiniMaxM3IndexerImpl(nn.Module):
         self.num_index_heads = num_index_heads
         self.index_head_dim = index_head_dim
         self.indexer_kv_dtype = indexer_kv_dtype
+        # The attention layer that owns this indexer, which is also the key its
+        # metadata sits under: the side cache and the main cache are separate
+        # KV-cache groups, so anything about the attend's pages has to come from
+        # there rather than from the indexer's own metadata.
+        self.attend_layer_name = prefix
         # Shared, stable-address top-k output buffer (set by the model for the
         # cudagraph-safe MSA impl); None -> impl allocates fresh (eager).
         self.topk_indices_buffer = topk_indices_buffer
+        # Shared, stable-address page table + per-row context bound, filled only
+        # by impls whose top-k emits them (see emits_sparse_block_table).
+        self.sparse_bt_buffer = sparse_bt_buffer
+        self.sparse_ctx_buffer = sparse_ctx_buffer
         # Owns the side cache (registers itself in the static forward context).
         self.index_cache = MiniMaxM3IndexerCache(
             head_dim=index_head_dim,
@@ -476,13 +490,18 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
 def select_indexer_impl_cls(
     *,
     topk_blocks: int,
+    sparse_block_size: int,
+    num_index_heads: int,
+    index_head_dim: int,
     indexer_kv_dtype: IndexerKVDType = "bf16",
 ) -> type[MiniMaxM3IndexerImpl]:
     """Pick the indexer impl off the platform, top-k count, and cache dtype.
 
     On Blackwell (SM100) with ``topk_blocks == 16`` (the only width fmha_sm100's
     ``sparse_topk_select`` kernel supports), the fmha_sm100 score + top-k path is
-    used for both bf16 and fp8 index caches. Everything else falls back to the
+    used for both bf16 and fp8 index caches. On ROCm an fp8 index cache picks the
+    AITER fp8 MFMA score + top-k, provided the shape limits in
+    ``aiter_indexer_unsupported_reason`` hold. Everything else falls back to the
     Triton indexer (bf16 only).
     """
     if indexer_kv_dtype in ("mxfp4", "nvfp4"):
@@ -490,6 +509,36 @@ def select_indexer_impl_cls(
             f"indexer_kv_dtype={indexer_kv_dtype!r} needs the (not-yet-added) "
             "CuteDSL indexer impl."
         )
+    if current_platform.is_rocm():
+        # Lazy import so non-ROCm never reaches for AITER.
+        from vllm.models.minimax_m3.amd.indexer_aiter import (
+            MiniMaxM3IndexerAiterImpl,
+            aiter_indexer_max_decode_query_len,
+            aiter_indexer_unsupported_reason,
+        )
+
+        vllm_config = get_current_vllm_config()
+        reason = aiter_indexer_unsupported_reason(
+            topk_blocks=topk_blocks,
+            sparse_block_size=sparse_block_size,
+            num_index_heads=num_index_heads,
+            index_head_dim=index_head_dim,
+            indexer_kv_dtype=indexer_kv_dtype,
+            max_model_len=vllm_config.model_config.max_model_len,
+            max_decode_query_len=aiter_indexer_max_decode_query_len(vllm_config),
+        )
+        if reason is None:
+            logger.info_once(
+                "MiniMax M3 indexer: selected AITER (fp8 MFMA score + top-k) "
+                "[topk_blocks=%d, indexer_kv_dtype=%s]",
+                topk_blocks,
+                indexer_kv_dtype,
+            )
+            return MiniMaxM3IndexerAiterImpl
+        # An fp8 cache with no AITER path has nowhere else to go: the Triton
+        # indexer below is bf16-only.
+        logger.info_once("MiniMax M3 indexer: AITER unavailable (%s)", reason)
+
     is_sm100 = (
         current_platform.is_cuda() and current_platform.is_device_capability_family(100)
     )
@@ -549,10 +598,15 @@ class MiniMaxM3Indexer(nn.Module):
         cache_config: CacheConfig | None = None,
         indexer_kv_dtype: IndexerKVDType = "bf16",
         topk_indices_buffer: torch.Tensor | None = None,
+        sparse_bt_buffer: torch.Tensor | None = None,
+        sparse_ctx_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         impl_cls = select_indexer_impl_cls(
             topk_blocks=topk_blocks,
+            sparse_block_size=sparse_block_size,
+            num_index_heads=num_index_heads,
+            index_head_dim=index_head_dim,
             indexer_kv_dtype=indexer_kv_dtype,
         )
         self.impl = impl_cls(
@@ -569,6 +623,8 @@ class MiniMaxM3Indexer(nn.Module):
             cache_config=cache_config,
             indexer_kv_dtype=indexer_kv_dtype,
             topk_indices_buffer=topk_indices_buffer,
+            sparse_bt_buffer=sparse_bt_buffer,
+            sparse_ctx_buffer=sparse_ctx_buffer,
         )
 
     @property
