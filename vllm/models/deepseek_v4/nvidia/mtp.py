@@ -510,6 +510,10 @@ class DeepSeekV4MTP(nn.Module):
         for layer in self.model.layers.values():
             layer.mtp_block.ffn.finalize_mega_moe_weights()
 
+    def process_weights_after_loading(self) -> None:
+        # Finalize megamoe weights for dummy load, which skips load_weights().
+        self.finalize_mega_moe_weights()
+
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """
         Rewrite the weight name to match the format of the original model.

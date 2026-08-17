@@ -514,6 +514,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         for layer in self.model.layers:
             layer.ffn.finalize_mega_moe_weights()
 
+    def process_weights_after_loading(self) -> None:
+        # Finalize megamoe weights for dummy load, which skips load_weights().
+        self._finalize_moe()
+
     def _remap_dspark_name(self, name: str) -> str | None:
         """Map a checkpoint ``mtp.{i}.*`` name to this model's parameter path.
 
