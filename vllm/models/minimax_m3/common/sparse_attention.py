@@ -40,6 +40,7 @@ else:
         minimax_m3_sparse_attn,
         minimax_m3_sparse_attn_decode,
     )
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,

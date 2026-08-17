@@ -10,8 +10,10 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_quantized_kv_cache
-from vllm.v1.kv_cache_interface import kv_cache_uses_per_token_head_scales
+from vllm.utils.torch_utils import (
+    is_quantized_kv_cache,
+    kv_cache_uses_per_token_head_scales,
+)
 
 logger = init_logger(__name__)
 
