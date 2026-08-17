@@ -478,14 +478,18 @@ ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
 ARG LMCACHE_REF="140819c9d57a975dbc5678a6459a218e544cb58b"
 ARG LMCACHE_VERSION="0.5.3"
 
-# Remove NVIDIA-only optional dependencies from the ROCm wheel metadata.
+# Remove NVIDIA-only dependencies and accept the release image's NumPy version.
 RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
     && git clone --depth=1 --branch "v${LMCACHE_VERSION}" \
         "${LMCACHE_REPO}" /app/lmcache \
     && test "$(git -C /app/lmcache rev-parse HEAD)" = "${LMCACHE_REF}" \
     && test "$(grep -Ec '^(cufile-python|nvtx)([<=>[:space:]]|$)' \
         /app/lmcache/requirements/common.txt)" -eq 2 \
-    && sed -i -E '/^(cufile-python|nvtx)([<=>[:space:]]|$)/d' \
+    && test "$(grep -Fxc 'numpy<=2.2.6' \
+        /app/lmcache/requirements/common.txt)" -eq 1 \
+    && sed -i -E \
+        -e '/^(cufile-python|nvtx)([<=>[:space:]]|$)/d' \
+        -e 's/^numpy<=2\.2\.6$/numpy<=2.3.5/' \
         /app/lmcache/requirements/common.txt \
     && rm -rf /app/lmcache/.git
 
@@ -973,6 +977,7 @@ FROM final_common AS final_lmcache_true
 RUN --mount=type=bind,from=build_lmcache,src=/app/install,target=/lmcache_install \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system /lmcache_install/*.whl \
+    && test "$(python3 -c 'import numpy; print(numpy.__version__)')" = "2.3.5" \
     && uv pip check --system \
     && python3 -c "import lmcache, lmcache.c_ops; print('lmcache', lmcache.__version__)"
 
