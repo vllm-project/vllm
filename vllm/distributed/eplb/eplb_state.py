@@ -906,6 +906,9 @@ class EplbState:
                         eplb_model_state.communicator,
                         is_profile,
                         rank_mapping,
+                        enable_migration_batching=(
+                            self.parallel_config.eplb_config.enable_migration_batching
+                        ),
                     )
 
                     if not is_profile:
