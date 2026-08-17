@@ -320,7 +320,11 @@ class InprocClient(EngineCoreClient):
     def get_output(self) -> EngineCoreOutputs:
         outputs, model_executed = self.engine_core.step_fn()
         self.engine_core.post_step(model_executed=model_executed)
-        return outputs and outputs.get(0) or EngineCoreOutputs()
+        # post_step may have gathered notifications; flush them into this
+        # call's outputs or a request-less frontend never sees them.
+        outputs = outputs or {}
+        self.engine_core._flush_notifications(outputs)
+        return outputs.get(0) or EngineCoreOutputs()
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
