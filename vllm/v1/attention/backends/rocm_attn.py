@@ -263,8 +263,10 @@ class RocmAttentionBackend(AttentionBackend):
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
         # The native HIP kernels hardcode group-contiguous block addressing, so
-        # the K and V groups must span all blocks (H outermost within the layer).
-        return (KVCacheLayout.LHBNC,)
+        # they need the K and V groups to span all blocks (H outermost within the layer)
+        # The Triton fallbacks are stride-aware, so block-interior LBHNC is also
+        # supported, just without the native kernels.
+        return (KVCacheLayout.LHBNC, KVCacheLayout.LBHNC)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:

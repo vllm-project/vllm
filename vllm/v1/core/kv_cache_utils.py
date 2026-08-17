@@ -1315,6 +1315,22 @@ def _resolve_layout_for_groups(
     layout reaching this point is an error.
     """
     layout = get_kv_cache_layout(cache_config)
+    # A block-compact layout means the block is densely packed in memory, so any mix of
+    # specs can re-interpret the HNC with different sizes as long as the total number of
+    # bytes is the same. If not block-compact, each spec must agree on HNC to
+    # alias the same page (this aliasing is done by the Hybrid Memory Allocator, HMA).
+    head_counts = {
+        _get_per_layer_spec(group, layer_name).num_heads
+        for group in kv_cache_groups
+        for layer_name in group.layer_names
+    }
+    if not layout.is_block_compact and len(head_counts) > 1:
+        raise ValueError(
+            f"KV cache layout {layout.name} stores each page as multiple head "
+            f"slices, so all layers need the same head count, got: "
+            f"{sorted(head_counts)}. Declare a block-compact layout (e.g. "
+            "LBHNC) to mix head counts."
+        )
     page_sizes = {
         _get_per_layer_spec(group, layer_name).page_size_bytes
         for group in kv_cache_groups
@@ -1327,7 +1343,7 @@ def _resolve_layout_for_groups(
     # Mixed page sizes pack pages side by side within a block, which needs each page to
     # be one contiguous chunk inside its block (heads inside blocks) and, when groups
     # overlay, the layer dim inside the block dim.
-    if layout.heads_outside_blocks or (
+    if not layout.is_block_compact or (
         len(kv_cache_groups) > 1 and layout.is_layer_compact
     ):
         raise ValueError(

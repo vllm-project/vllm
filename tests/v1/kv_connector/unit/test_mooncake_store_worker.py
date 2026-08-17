@@ -2780,7 +2780,7 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
     )
 
     db = worker.token_dbs[0]
-    if layout.heads_outside_blocks:
+    if not layout.is_block_compact:
         # Each head group is its own region, so a block spans L*H regions.
         head_cache = caches[0][:, 0]
         assert db.kv_caches_base_addr == [

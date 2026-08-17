@@ -1167,7 +1167,7 @@ def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool
             assert registered_ptrs == [raw.data_ptr()]
             assert registered_lens == [raw.nbytes]
 
-            if layout.heads_outside_blocks:
+            if not layout.is_block_compact:
                 expected_addrs = [
                     cache[:, head_idx].data_ptr()
                     for cache in (tensor1, tensor2)

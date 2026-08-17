@@ -266,8 +266,10 @@ class KVCacheLayout(Enum):
         return self.value[-3:] == (_DIM_H, _DIM_N, _DIM_C)
 
     @property
-    def heads_outside_blocks(self) -> bool:
-        return self.value.index(_DIM_H) < self.value.index(_DIM_B)
+    def is_block_compact(self) -> bool:
+        """True when each page's [H, N, C] bytes form one contiguous run; i.e.
+        the L and B dimensions are outermost."""
+        return set(self.value[:2]) == {_DIM_L, _DIM_B}
 
     def swap_layer_and_block(self) -> KVCacheLayout:
         """Return the equivalent layout with the L and B axes exchanged."""

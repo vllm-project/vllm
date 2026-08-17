@@ -230,7 +230,7 @@ def resolve_kv_cache_layout(
             layout
             for layout in canonical
             if all(layout in supported for supported in supported_sets.values())
-            and not (has_ssm and layout.heads_outside_blocks)
+            and (layout.is_block_compact or not has_ssm)
         ),
         key=lambda layout: sum(s.index(layout) for s in narrowed),
     )

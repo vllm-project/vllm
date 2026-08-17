@@ -1568,7 +1568,7 @@ class MooncakeStoreWorker:
                         ret,
                     )
 
-            if layout.heads_outside_blocks:
+            if not layout.is_block_compact:
                 for head_idx in range(cache.shape[1]):
                     head_cache = cache[:, head_idx]
                     region_addr = head_cache.data_ptr()

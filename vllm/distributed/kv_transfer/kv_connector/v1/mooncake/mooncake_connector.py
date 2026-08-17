@@ -1655,7 +1655,7 @@ class MooncakeConnectorWorker:
             # One raw page tensor per layer; for Mamba that page holds all the
             # recurrent states, unpacked only when binding the cache for execution.
             self._log_debug_cache_registration(layer_name, cache)
-            if layout.heads_outside_blocks:
+            if not layout.is_block_compact:
                 region_caches = [cache[:, head] for head in range(cache.shape[1])]
             else:
                 region_caches = [cache]
@@ -1667,8 +1667,7 @@ class MooncakeConnectorWorker:
 
                 kv_block_len = (
                     layer_spec.page_size_bytes
-                    if isinstance(layer_spec, AttentionSpec)
-                    and not layout.heads_outside_blocks
+                    if isinstance(layer_spec, AttentionSpec) and layout.is_block_compact
                     else block_len
                 )
                 self.block_len_per_layer.append(block_len)

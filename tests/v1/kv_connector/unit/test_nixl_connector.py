@@ -1799,6 +1799,18 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
     llm.llm_engine.engine_core.shutdown()
 
 
+def element_byte_addrs(view: torch.Tensor) -> list[int]:
+    """Absolute byte addresses of every element of a (possibly strided) view."""
+    offsets = torch.zeros(view.shape, dtype=torch.int64)
+    for dim, (size, stride) in enumerate(zip(view.shape, view.stride())):
+        shape = [1] * view.ndim
+        shape[dim] = size
+        offsets = offsets + torch.arange(size, dtype=torch.int64).view(shape) * stride
+    esize = view.element_size()
+    starts = (view.data_ptr() + offsets.flatten() * esize).tolist()
+    return [addr + i for addr in starts for i in range(esize)]
+
+
 @pytest.mark.parametrize(
     "attn_backend",
     [
@@ -1931,31 +1943,6 @@ def test_register_kv_caches(
             "layer3": tensor0,
         }
 
-        if KVCacheLayout[layout].heads_outside_blocks:
-            # Each head group is separate, so one region per (layer, head).
-            expected_base_addrs = [
-                cache[:, head_idx].data_ptr()
-                for cache in (tensor0, tensor1, tensor2)
-                for head_idx in range(cache.shape[1])
-            ]
-            expected_block_len = tensor0.stride(0) * tensor0.element_size()
-            expected_blocks_count = num_blocks * len(expected_base_addrs)
-        elif layout in ("LBHNC", "LBNHC", "BLHNC"):
-            expected_base_addrs = [
-                tensor0.data_ptr(),
-                tensor1.data_ptr(),
-                tensor2.data_ptr(),
-            ]
-            expected_block_len = kv_cache_spec.page_size_bytes
-            expected_blocks_count = kv_cache_config.num_blocks * 3
-        else:
-            expected_base_addrs = [raw0.data_ptr(), raw1.data_ptr()]
-            expected_block_len = {
-                raw0.nbytes // num_blocks,
-                raw1.nbytes // num_blocks,
-            }
-            expected_blocks_count = kv_cache_config.num_blocks * 2
-
         # Execute register_kv_caches
         connector.register_kv_caches(kv_caches)
 
@@ -1973,24 +1960,36 @@ def test_register_kv_caches(
         assert mock_wrapper_instance.get_xfer_descs.called
         blocks_data, _ = mock_wrapper_instance.get_xfer_descs.call_args[0]
 
-        # Validate blocks_data structure and size
-        assert len(blocks_data) == expected_blocks_count, (
-            f"Expected {expected_blocks_count} blocks, got {len(blocks_data)}"
-        )
+        # Layout-blind contract: whatever regions the worker carves out,
+        # transferring "block b" must move exactly logical block b's bytes for
+        # every layer. Map each registered byte to the block that owns it, then
+        # require every descriptor window to hold bytes of a single block and
+        # the windows of block b to cover exactly block b's bytes.
+        owner: dict[int, int] = {}
+        for cache in (tensor0, tensor1, tensor2):
+            for blk in range(num_blocks):
+                for addr in element_byte_addrs(cache[blk]):
+                    assert owner.setdefault(addr, blk) == blk
+        block_bytes = defaultdict(set)
+        for addr, blk in owner.items():
+            block_bytes[blk].add(addr)
 
-        for i, block_entry in enumerate(blocks_data):
-            block_start_addr, block_len, tp_rank = block_entry
-            if isinstance(expected_block_len, set):
-                assert block_len in expected_block_len
-            else:
-                assert block_len == expected_block_len
+        covered = defaultdict(set)
+        for block_start_addr, block_len, _tp_rank in blocks_data:
+            window = range(block_start_addr, block_start_addr + block_len)
+            owners = {owner[addr] for addr in window}
+            assert len(owners) == 1, "descriptor window spans logical blocks"
+            covered[owners.pop()].update(window)
+        assert covered == block_bytes
 
-        assert (
-            connector.connector_worker.kv_caches_base_addr[
-                connector.connector_worker.engine_id
-            ][0]
-            == expected_base_addrs
-        )
+        # Region bases are exactly the block-0 window starts, one per region.
+        base_addrs = connector.connector_worker.kv_caches_base_addr[
+            connector.connector_worker.engine_id
+        ][0]
+        assert set(base_addrs) == {
+            start for start, _len, _tp in blocks_data if owner[start] == 0
+        }
+        assert len(blocks_data) == num_blocks * len(base_addrs)
 
         assert connector.connector_worker.block_size == 16
 

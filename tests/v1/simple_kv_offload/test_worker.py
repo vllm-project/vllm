@@ -228,7 +228,7 @@ def test_register_shared_kv_cache_storage(monkeypatch, layout: KVCacheLayout):
         set_kv_cache_layout(None)
 
     assert worker.gpu_kv_caches is not None
-    if layout.heads_outside_blocks:
+    if layout.is_layer_compact and not layout.is_block_compact:
         expected_regions = num_layers * spec.num_heads
         expected_block_bytes = spec.page_size_bytes // spec.num_heads
     elif layout.is_layer_compact:
