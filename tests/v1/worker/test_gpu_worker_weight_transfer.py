@@ -8,8 +8,12 @@ session is active. These tests verify that delegation and the session guard.
 """
 
 import pytest
+import torch
+import torch.nn as nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.lora.layers import BaseLayerWithLoRA
+from vllm.v1.worker.gpu_model_runner import _get_parameter_for_reload
 from vllm.v1.worker.gpu_worker import Worker
 
 
@@ -21,6 +25,7 @@ class _RecordingEngine:
         self.started = False
         self.finished = False
         self.reset_count = 0
+        self.supports_draft_weight_update = False
         self.update_calls: list[dict] = []
         self.seen_configs: list[VllmConfig] = []
 
@@ -48,9 +53,13 @@ class _RecordingEngine:
 class _RecordingModelRunner:
     def __init__(self) -> None:
         self.seen_config: VllmConfig | None = None
+        self.reset_lora_calls = 0
 
     def reload_weights(self) -> None:
         self.seen_config = get_current_vllm_config()
+
+    def reset_lora_state(self) -> None:
+        self.reset_lora_calls += 1
 
 
 def _make_worker(engine: _RecordingEngine | None) -> Worker:
@@ -58,6 +67,8 @@ def _make_worker(engine: _RecordingEngine | None) -> Worker:
     worker.vllm_config = VllmConfig()
     worker.weight_transfer_engine = engine
     worker._weight_update_active = False
+    worker._weight_update_is_draft = False
+    worker.model_runner = _RecordingModelRunner()
     return worker
 
 
@@ -69,6 +80,22 @@ def test_reload_weights_sets_current_config():
     Worker.reload_weights(worker)
 
     assert model_runner.seen_config is worker.vllm_config
+
+
+def test_reload_parameter_lookup_preserves_lora_module_names():
+    base_layer = nn.Module()
+    qweight = nn.Parameter(torch.ones(1))
+    base_layer.register_parameter("qweight", qweight)
+    wrapper = BaseLayerWithLoRA()
+    wrapper.base_layer = base_layer
+    model = nn.Module()
+    model.proj = wrapper
+
+    named_parameters = dict(model.named_parameters())
+    assert set(named_parameters) == {"proj.base_layer.qweight"}
+    assert named_parameters["proj.base_layer.qweight"] is qweight
+    assert model.get_parameter("proj.base_layer.qweight") is qweight
+    assert _get_parameter_for_reload(model, "proj.qweight") is qweight
 
 
 def test_start_update_finish_delegates_to_engine():
@@ -88,6 +115,19 @@ def test_start_update_finish_delegates_to_engine():
     assert engine.reset_count == 1
     assert worker._weight_update_active is False
     assert engine.seen_configs == [worker.vllm_config] * 3
+    assert worker.model_runner.reset_lora_calls == 1
+
+
+def test_finish_draft_session_keeps_lora_state():
+    engine = _RecordingEngine()
+    engine.supports_draft_weight_update = True
+    worker = _make_worker(engine)
+    worker._set_draft_weight_update_target = lambda: None
+
+    Worker.start_draft_weight_update(worker)
+    Worker.finish_weight_update(worker)
+
+    assert worker.model_runner.reset_lora_calls == 0
 
 
 def test_double_start_raises():

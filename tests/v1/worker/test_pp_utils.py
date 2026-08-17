@@ -1,34 +1,215 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for PPHandler broadcast/draft relay and sparse MLA stale-buffer fix."""
+"""Unit tests for the PPHandler sampled-token / draft-token relay under PP."""
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
+from vllm.v1.worker.gpu import pp_utils
+from vllm.v1.worker.gpu.pp_utils import PPHandler
 
-class FakePPHandler:
-    """Minimal stand-in for PPHandler that skips CUDA/distributed setup.
+requires_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="PPHandler drives a side CUDA stream"
+)
 
-    Replicates the broadcast padding logic from PPHandler.broadcast().
-    """
 
-    def __init__(self, max_sample_len: int, is_last_rank: bool):
-        self.max_sample_len = max_sample_len
-        self.is_last_rank = is_last_rank
+def make_handler(
+    monkeypatch,
+    *,
+    is_last_rank: bool,
+    num_speculative_steps: int,
+    relay_draft_tokens: bool,
+    world_size: int = 2,
+) -> PPHandler:
+    """Build a real PPHandler with the PP group stubbed out."""
+    pp_group = SimpleNamespace(
+        is_last_rank=is_last_rank,
+        last_rank=world_size - 1,
+        world_size=world_size,
+        make_sibling_device_group=lambda group_desc: object(),
+    )
+    monkeypatch.setattr(pp_utils, "get_pp_group", lambda: pp_group)
+    return PPHandler(
+        max_num_reqs=8,
+        num_speculative_steps=num_speculative_steps,
+        device=torch.device("cuda"),
+        relay_draft_tokens=relay_draft_tokens,
+    )
 
-    def broadcast(self, sampled_token_ids: torch.Tensor) -> torch.Tensor:
-        assert self.is_last_rank
-        width = sampled_token_ids.shape[-1]
-        if width != self.max_sample_len:
-            assert width < self.max_sample_len
-            padded = sampled_token_ids.new_full(
-                (sampled_token_ids.shape[0], self.max_sample_len), -1
-            )
-            padded[:, :width] = sampled_token_ids
-            sampled_token_ids = padded
-        return sampled_token_ids
+
+def record_broadcasts(monkeypatch) -> list[torch.Tensor]:
+    """Capture every tensor handed to the collective, in call order."""
+    calls: list[torch.Tensor] = []
+    monkeypatch.setattr(
+        torch.distributed, "broadcast", lambda t, src, group: calls.append(t)
+    )
+    return calls
+
+
+def make_input_batch(num_reqs: int = 3, *, needs_sample: bool = True):
+    # compute_need_sampled_mask only reads these fields. With needs_sample=False
+    # every request is already at max_seq_len, so no sample is needed next step.
+    return SimpleNamespace(
+        num_reqs=num_reqs,
+        num_computed_tokens_np=np.zeros(num_reqs, dtype=np.int32),
+        prefill_len_np=np.full(num_reqs, 4, dtype=np.int32),
+        num_scheduled_tokens=np.full(num_reqs, 4, dtype=np.int32),
+        max_seq_len_np=np.full(num_reqs, 100 if needs_sample else 1, dtype=np.int32),
+        idx_mapping=torch.arange(num_reqs, device="cuda"),
+        idx_mapping_np=np.arange(num_reqs, dtype=np.int32),
+    )
+
+
+def send_step(handler, input_batch, *, width: int, with_draft: bool):
+    num_reqs = input_batch.num_reqs
+    sampled = torch.zeros(num_reqs, width, dtype=torch.int64, device="cuda")
+    counts = torch.zeros(num_reqs, dtype=torch.int32, device="cuda")
+    handler.broadcast(sampled, counts, counts, input_batch)
+    if with_draft:
+        draft = torch.zeros(
+            num_reqs, handler.max_sample_len - 1, dtype=torch.int64, device="cuda"
+        )
+        handler.broadcast_draft(draft, input_batch)
+
+
+# ---------------------------------------------------------------------------
+# broadcast() pads so send/recv element counts match on every step
+# ---------------------------------------------------------------------------
+
+
+@requires_cuda
+@pytest.mark.parametrize("width,num_spec", [(1, 1), (1, 3), (2, 3)])
+def test_broadcast_pads_sampled_tokens_to_max_sample_len(monkeypatch, width, num_spec):
+    """The sampler emits width 1 on steps with no draft tokens (prefill, first
+    decode) and num_spec+1 only after rejection sampling. The receiver always
+    posts a max_sample_len buffer, so an unpadded send is a count mismatch."""
+    handler = make_handler(
+        monkeypatch,
+        is_last_rank=True,
+        num_speculative_steps=num_spec,
+        relay_draft_tokens=True,
+    )
+    calls = record_broadcasts(monkeypatch)
+    input_batch = make_input_batch()
+
+    send_step(handler, input_batch, width=width, with_draft=False)
+
+    sent_sampled = calls[0]
+    assert sent_sampled.shape == (input_batch.num_reqs, handler.max_sample_len)
+    # Placeholder columns are ignored by post_update, which advances each
+    # request by its own num_sampled count.
+    assert (sent_sampled[:, width:] == -1).all()
+    assert (sent_sampled[:, :width] == 0).all()
+
+
+# ---------------------------------------------------------------------------
+# Sender and receiver must post the same number of collectives per step
+# ---------------------------------------------------------------------------
+
+
+@requires_cuda
+def test_send_and_recv_op_counts_match_with_speculator(monkeypatch):
+    """With a speculator the step is three broadcasts: sampled, combined, draft."""
+    sender = make_handler(
+        monkeypatch, is_last_rank=True, num_speculative_steps=3, relay_draft_tokens=True
+    )
+    calls = record_broadcasts(monkeypatch)
+    send_step(sender, make_input_batch(), width=1, with_draft=True)
+    assert len(calls) == 3
+
+    receiver = make_handler(
+        monkeypatch,
+        is_last_rank=False,
+        num_speculative_steps=3,
+        relay_draft_tokens=True,
+    )
+    calls.clear()
+    assert receiver.receive(make_input_batch())
+    assert len(calls) == 3
+    assert calls[2].shape == (3, sender.max_sample_len - 1)
+
+
+@requires_cuda
+def test_send_and_recv_op_counts_match_without_speculator(monkeypatch):
+    """Diffusion LLMs set num_speculative_steps > 0 but have no speculator, so
+    the last rank never relays draft tokens. Gating the receiver's third recv on
+    num_speculative_steps instead of on the speculator hangs the non-last ranks
+    waiting for a broadcast that is never issued."""
+    sender = make_handler(
+        monkeypatch,
+        is_last_rank=True,
+        num_speculative_steps=3,
+        relay_draft_tokens=False,
+    )
+    calls = record_broadcasts(monkeypatch)
+    send_step(sender, make_input_batch(), width=1, with_draft=False)
+    assert len(calls) == 2
+
+    receiver = make_handler(
+        monkeypatch,
+        is_last_rank=False,
+        num_speculative_steps=3,
+        relay_draft_tokens=False,
+    )
+    calls.clear()
+    assert receiver.receive(make_input_batch())
+    assert len(calls) == 2
+    assert receiver.queue[-1].draft_tokens is None
+
+
+@requires_cuda
+def test_both_ranks_skip_when_no_request_needs_sampling(monkeypatch):
+    """The skip gate must be symmetric, or the ranks desynchronize."""
+    sender = make_handler(
+        monkeypatch, is_last_rank=True, num_speculative_steps=3, relay_draft_tokens=True
+    )
+    calls = record_broadcasts(monkeypatch)
+    send_step(sender, make_input_batch(needs_sample=False), width=1, with_draft=True)
+    assert calls == []
+
+    receiver = make_handler(
+        monkeypatch,
+        is_last_rank=False,
+        num_speculative_steps=3,
+        relay_draft_tokens=True,
+    )
+    calls.clear()
+    assert not receiver.receive(make_input_batch(needs_sample=False))
+    assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Relayed draft tokens survive the deferred consume
+# ---------------------------------------------------------------------------
+
+
+@requires_cuda
+def test_relayed_draft_tokens_reach_get_prev_sampled_outputs(monkeypatch):
+    """Draft tokens received at step T must come back out pp_size steps later,
+    so the next combine_sampled_and_draft_tokens reads real values rather than
+    zero-init."""
+    receiver = make_handler(
+        monkeypatch,
+        is_last_rank=False,
+        num_speculative_steps=3,
+        relay_draft_tokens=True,
+        world_size=2,
+    )
+    record_broadcasts(monkeypatch)
+    receiver.receive(make_input_batch())
+
+    # The pre-seeded placeholders drain first; the entry lands pp_size steps on.
+    outputs = None
+    for _ in range(3):
+        outputs = receiver.get_prev_sampled_outputs()
+        if outputs is not None:
+            break
+    assert outputs is not None
+    assert outputs["draft_tokens"] is not None
+    assert outputs["draft_tokens"].shape == (3, receiver.max_sample_len - 1)
 
 
 # ---------------------------------------------------------------------------
@@ -36,135 +217,11 @@ class FakePPHandler:
 # ---------------------------------------------------------------------------
 
 
-def test_deepseek_mtp_implements_supports_pp():
+def test_deepseek_mtp_passes_supports_pp_gate():
     """DeepSeekMTP must pass the supports_pp() gate used at model resolution;
-    otherwise the engine refuses to build it under pipeline parallelism."""
+    otherwise the engine refuses to build it under pipeline parallelism. The
+    gate covers both the SupportsPP MRO entry and the forward() signature."""
     from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
     from vllm.model_executor.models.interfaces import supports_pp
 
-    assert supports_pp(DeepSeekMTP), (
-        "DeepSeekMTP must implement SupportsPP to be built under PP"
-    )
-
-
-def test_deepseek_mtp_has_make_empty_intermediate_tensors():
-    """DeepSeekMTP must provide make_empty_intermediate_tensors."""
-    from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
-
-    assert hasattr(DeepSeekMTP, "make_empty_intermediate_tensors"), (
-        "DeepSeekMTP must provide make_empty_intermediate_tensors"
-    )
-
-
-# ---------------------------------------------------------------------------
-# PPHandler.broadcast() pads sampled_token_ids to max_sample_len
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "width,max_sample_len",
-    [
-        (1, 2),  # prefill / first decode (width=1, max_sample_len=2)
-        (1, 4),  # K=3 spec decode (width=1, max_sample_len=4)
-        (2, 4),  # K=1 spec decode (width=2, max_sample_len=4)
-    ],
-)
-def test_pphandler_broadcast_pads_to_max_sample_len(width, max_sample_len):
-    """broadcast() must pad sampled_token_ids to max_sample_len so the
-    NCCL send/recv element counts always match."""
-    handler = FakePPHandler(max_sample_len=max_sample_len, is_last_rank=True)
-    num_reqs = 4
-    sampled = torch.zeros(num_reqs, width, dtype=torch.int64)
-    result = handler.broadcast(sampled)
-    assert result.shape == (num_reqs, max_sample_len)
-    # Trailing positions should be -1 (ignored by post_update)
-    assert (result[:, width:] == -1).all()
-    # Original values preserved
-    assert (result[:, :width] == 0).all()
-
-
-def test_pphandler_broadcast_no_pad_when_already_max():
-    """broadcast() should not pad when width == max_sample_len."""
-    handler = FakePPHandler(max_sample_len=4, is_last_rank=True)
-    sampled = torch.zeros(4, 4, dtype=torch.int64)
-    result = handler.broadcast(sampled)
-    assert result.shape == (4, 4)
-    assert (result == 0).all()
-
-
-# ---------------------------------------------------------------------------
-# Sparse MLA backends read topk_indices_buffer dynamically
-# ---------------------------------------------------------------------------
-
-
-def test_sparse_mla_backend_reads_topk_indices_buffer_dynamically():
-    """Sparse MLA backends must read topk_indices_buffer dynamically via
-    self._indexer: after _maybe_share_lm_head replaces
-    Indexer.topk_indices_buffer, the impl must see the new buffer."""
-
-    # Simulate the pattern used in all sparse MLA backends:
-    # __init__ stores self._indexer = indexer
-    # forward_mqa reads self._indexer.topk_indices_buffer dynamically
-
-    initial_buffer = torch.zeros(128, 128, dtype=torch.int32)
-    indexer = SimpleNamespace(topk_indices_buffer=initial_buffer)
-
-    # Create a minimal impl that follows the same pattern as the real backends
-    class FakeSparseMLAImpl:
-        def __init__(self, indexer=None, topk_indices_buffer=None):
-            self._indexer = indexer
-            self.topk_indices_buffer = (
-                indexer.topk_indices_buffer
-                if indexer is not None
-                else topk_indices_buffer
-            )
-
-        def forward_mqa(self):
-            buf = (
-                self._indexer.topk_indices_buffer
-                if self._indexer is not None
-                else self.topk_indices_buffer
-            )
-            return buf
-
-    impl = FakeSparseMLAImpl(indexer=indexer)
-
-    # Simulate _maybe_share_lm_head replacing the buffer
-    new_buffer = torch.ones(128, 128, dtype=torch.int32)
-    indexer.topk_indices_buffer = new_buffer
-
-    # The impl should read the new buffer dynamically
-    assert impl.forward_mqa() is new_buffer, (
-        "Impl must read topk_indices_buffer dynamically via self._indexer"
-    )
-    assert impl.forward_mqa() is not initial_buffer, (
-        "Impl must not hold a stale reference to the old buffer"
-    )
-
-
-def test_sparse_mla_backend_handles_no_indexer():
-    """Verify sparse MLA backends handle indexer=None (skip-topk layers)."""
-
-    class FakeSparseMLAImpl:
-        def __init__(self, indexer=None, topk_indices_buffer=None):
-            self._indexer = indexer
-            self.topk_indices_buffer = (
-                indexer.topk_indices_buffer
-                if indexer is not None
-                else topk_indices_buffer
-            )
-
-        def forward_mqa(self):
-            buf = (
-                self._indexer.topk_indices_buffer
-                if self._indexer is not None
-                else self.topk_indices_buffer
-            )
-            return buf
-
-    # No indexer, buffer passed directly
-    buffer = torch.ones(128, 128, dtype=torch.int32)
-    impl = FakeSparseMLAImpl(indexer=None, topk_indices_buffer=buffer)
-    assert impl.forward_mqa() is buffer
-
-
+    assert supports_pp(DeepSeekMTP)

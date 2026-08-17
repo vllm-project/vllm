@@ -66,6 +66,10 @@ pub fn default_ready_response() -> EngineCoreReadyResponse {
         instance_id: "test-instance".to_string(),
         kv_cache_size_tokens: None,
         kv_cache_max_concurrency: None,
+        kv_events_config: None,
+        weight_transfer_backend: None,
+        enable_sleep_mode: false,
+        supports_draft_weight_updates: false,
     }
 }
 

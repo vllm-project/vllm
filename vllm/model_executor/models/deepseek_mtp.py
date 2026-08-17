@@ -70,6 +70,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
 
+        assert vllm_config.speculative_config is not None
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
         quant_config = vllm_config.quant_config
@@ -449,7 +450,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
                     # with expert_id.
                     is_expert_weight = False
                     for mapping in expert_params_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping
+                        param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in chunk_name:
                             continue
 
@@ -472,7 +473,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
                             param,
                             weight_to_load,
                             name_mapped,
-                            shard_id=shard_id,
+                            shard_id=expert_shard_id,
                             expert_id=expert_id,
                             return_success=True,
                         )
@@ -493,9 +494,10 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
                         if name.endswith(".bias") and name not in params_dict:
                             continue
 
-                        name = maybe_remap_kv_scale_name(name, params_dict)
-                        if name is None:
+                        remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                        if remapped_name is None:
                             continue
+                        name = remapped_name
 
                         # According to DeepSeek-V3 Technical Report, MTP modules
                         # shares embedding layer. We only load the first weights.
