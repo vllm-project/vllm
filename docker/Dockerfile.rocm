@@ -6,6 +6,7 @@ ARG COMMON_WORKDIR=/app
 ARG BASE_IMAGE=rocm/vllm-dev:base
 ARG CI_BASE_IMAGE=rocm/vllm-dev:ci_base
 ARG ROCM_TRITON_KERNELS_COMMIT=0f380657dbf3ee86eb57558ff71df24f03b5d4e7
+ARG INSTALL_LMCACHE=false
 ARG MOONCAKE_BRANCH=df508641d76be20803349bf715d3bfc5205a7b58
 ARG MOONCAKE_REPO=https://github.com/kvcache-ai/Mooncake.git
 # NIC backend for MoRI RDMA support.
@@ -399,7 +400,7 @@ RUN apt-get -y update && apt-get -y install autoconf libtool pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system meson meson-python pybind11 pyyaml types-PyYAML \
+    uv pip install --system meson meson-python pyyaml types-PyYAML \
         auditwheel build patchelf pytest tomlkit "setuptools>=80.9.0"
 
 RUN --mount=type=cache,target=/root/.cache/ccache \
@@ -472,6 +473,71 @@ RUN cd /opt/nixl && \
         --nixl-plugins-dir ${NIXL_HOME}/lib/$(uname -m)-linux-gnu/plugins \
         /tmp/nixl_wheels/repaired/*.whl && \
     cp /tmp/nixl_wheels/repaired/*.whl /app/install
+
+# Fetch and verify pinned LMCache source.
+FROM base AS lmcache_source
+ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
+ARG LMCACHE_REF="140819c9d57a975dbc5678a6459a218e544cb58b"
+ARG LMCACHE_VERSION="0.5.3"
+
+# Remove NVIDIA-only dependencies and accept the release image's NumPy version.
+RUN printf '%s\n' "${LMCACHE_REF}" | grep -Eq '^[0-9a-f]{40}$' \
+    && git clone --depth=1 --branch "v${LMCACHE_VERSION}" \
+        "${LMCACHE_REPO}" /app/lmcache \
+    && test "$(git -C /app/lmcache rev-parse HEAD)" = "${LMCACHE_REF}" \
+    && test "$(grep -Ec '^(cufile-python|nvtx)([<=>[:space:]]|$)' \
+        /app/lmcache/requirements/common.txt)" -eq 2 \
+    && test "$(grep -Fxc 'numpy<=2.2.6' \
+        /app/lmcache/requirements/common.txt)" -eq 1 \
+    && sed -i -E \
+        -e '/^(cufile-python|nvtx)([<=>[:space:]]|$)/d' \
+        -e 's/^numpy<=2\.2\.6$/numpy<=2.3.5/' \
+        /app/lmcache/requirements/common.txt \
+    && rm -rf /app/lmcache/.git
+
+FROM base AS build_lmcache
+COPY --from=lmcache_source \
+    /app/lmcache/requirements/build.txt /tmp/lmcache-build-requirements.txt
+RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
+    uv pip install --system -r /tmp/lmcache-build-requirements.txt
+
+ARG LMCACHE_VERSION="0.5.3"
+ARG LMCACHE_ROCM_ARCH="gfx942;gfx950"
+ARG USE_SCCACHE
+
+COPY --from=lmcache_source /app/lmcache /app/lmcache
+WORKDIR /app/lmcache
+
+RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
+    set -eu; \
+    printf '%s\n' "${LMCACHE_ROCM_ARCH}" \
+        | grep -Eq '^gfx[0-9a-z]+(;gfx[0-9a-z]+)*$'; \
+    offload_flags="$(printf '%s' "${LMCACHE_ROCM_ARCH}" \
+        | sed 's/;/ --offload-arch=/g; s/^/--offload-arch=/')"; \
+    if [ "${USE_SCCACHE:-0}" = "1" ]; then \
+        export HIP_CLANG_PATH=/opt/sccache-wrappers; \
+    fi; \
+    mkdir -p /app/install; \
+    SETUPTOOLS_SCM_PRETEND_VERSION="${LMCACHE_VERSION}" \
+    PYTORCH_ROCM_ARCH="${LMCACHE_ROCM_ARCH}" \
+    HIPCC_COMPILE_FLAGS_APPEND="${offload_flags}" \
+    BUILD_WITH_HIP=1 CXX=hipcc \
+        python3 setup.py bdist_wheel --dist-dir=/app/install; \
+    test "$(find /app/install -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
+
+RUN --mount=type=tmpfs,target=/tmp/lmcache-wheel \
+    set -eu; \
+    python3 -m zipfile -e /app/install/*.whl /tmp/lmcache-wheel; \
+    c_ops="$(find /tmp/lmcache-wheel -type f -name 'c_ops*.so')"; \
+    test "$(find /tmp/lmcache-wheel -type f -name 'c_ops*.so' | wc -l)" -eq 1; \
+    expected="$(printf '%s' "${LMCACHE_ROCM_ARCH}" | tr ';' '\n' | sort -u)"; \
+    actual="$(/opt/rocm/llvm/bin/llvm-objdump --offloading "${c_ops}" \
+        | grep -oE 'gfx[0-9a-z]+' | sort -u)"; \
+    if [ "${actual}" != "${expected}" ]; then \
+        printf 'LMCache code objects mismatch\nexpected:\n%s\nactual:\n%s\n' \
+            "${expected}" "${actual}" >&2; \
+        exit 1; \
+    fi
 
 # ROCShmem build stage - split from DeepEP so changing DEEPEP_BRANCH does not
 # invalidate the slow ROCShmem build.
@@ -845,6 +911,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system /tmp/vllm_test_utils \
     && rm -rf /tmp/vllm_test_utils
 
+RUN --mount=type=bind,from=build_lmcache,src=/app/install,target=/lmcache_install \
+    --mount=type=bind,source=requirements/test/rocm.txt,target=/tmp/lmcache-constraints.txt \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --constraint /tmp/lmcache-constraints.txt \
+        /lmcache_install/*.whl \
+    && python3 -c "import lmcache, lmcache.c_ops; print('lmcache', lmcache.__version__)"
+
 RUN --mount=type=bind,from=export_mooncake,src=/,target=/mooncake_install,ro \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system --no-deps \
@@ -877,9 +950,12 @@ COPY --from=export_vllm /vllm_v1 /usr/local/lib/python${PYTHON_VERSION}/dist-pac
 # Hide source under src/ so it won't shadow the installed package in tests.
 RUN mkdir src && mv vllm src/vllm
 
+# Catch GPU<->CPU syncs in execute_model/sample_tokens during tests.
+ENV VLLM_GPU_SYNC_CHECK=error
+
 # -----------------------
 # Final vLLM image
-FROM mori_base AS final
+FROM mori_base AS final_common
 
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 
@@ -967,6 +1043,18 @@ RUN echo "VLLM_BASE_IMAGE=${BASE_IMAGE}" >> ${COMMON_WORKDIR}/versions.txt \
     && echo "MOONCAKE_REPO=${MOONCAKE_REPO}" >> ${COMMON_WORKDIR}/versions.txt
 
 CMD ["/bin/bash"]
+
+FROM final_common AS final_lmcache_false
+
+FROM final_common AS final_lmcache_true
+RUN --mount=type=bind,from=build_lmcache,src=/app/install,target=/lmcache_install \
+    --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system /lmcache_install/*.whl \
+    && test "$(python3 -c 'import numpy; print(numpy.__version__)')" = "2.3.5" \
+    && uv pip check --system \
+    && python3 -c "import lmcache, lmcache.c_ops; print('lmcache', lmcache.__version__)"
+
+FROM final_lmcache_${INSTALL_LMCACHE} AS final
 
 #Set entrypoint for vllm-openai official images
 FROM final AS vllm-openai
