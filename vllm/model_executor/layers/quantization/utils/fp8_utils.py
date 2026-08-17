@@ -935,7 +935,10 @@ def w8a8_triton_block_scaled_mm(
     C_shape = A.shape[:-1] + (N,)
     C = A.new_empty(C_shape, dtype=output_dtype)
 
-    configs = get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])
+    if envs.VLLM_BATCH_INVARIANT:
+        configs = None  # use the default config
+    else:
+        configs = get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])
     if configs:
         # Get the optimal config if there is one
         config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
