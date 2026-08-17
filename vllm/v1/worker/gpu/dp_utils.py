@@ -9,6 +9,7 @@ import torch.distributed as dist
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_dp_group
+from vllm.v1.worker.dp_utils import DPProfilerSync
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
@@ -36,34 +37,6 @@ class DPSyncState:
     # Agreed upper bound on any rank's request count. Holds the padded count when
     # a FULL descriptor imposed one, else the most any rank scheduled.
     num_reqs: int
-
-
-class DPProfilerSync:
-    """Synchronize profiler start requests through the per-step DP all-reduce."""
-
-    def __init__(self) -> None:
-        # start_profile received, capture not yet begun.
-        self._pending = False
-        # Latched consensus, cleared when the worker consumes it.
-        self.start_now = False
-
-    def request_start(self) -> None:
-        self._pending = True
-
-    def cancel(self) -> None:
-        self._pending = False
-        self.start_now = False
-
-    def observe(self, consensus: bool) -> None:
-        if consensus:
-            self.start_now = True
-
-    def consume_start(self) -> bool:
-        if self.start_now:
-            self.start_now = False
-            self._pending = False
-            return True
-        return False
 
 
 def sync_cudagraph_and_dp_padding(

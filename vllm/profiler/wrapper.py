@@ -121,11 +121,8 @@ class WorkerProfiler(ABC):
             and self._running
             and self._profiling_for_iters > self._max_iters
         ):
-            # Automatically stop the profiler after max iters. Go through the
-            # public stop() (not _call_stop() directly) so _active and the
-            # iteration counters reset too -- otherwise a later start_profile
-            # is silently ignored forever, since start() bails out early
-            # whenever _active is still True.
+            # Use stop(), not _call_stop(), so _active resets too --
+            # otherwise a later start_profile is ignored forever.
             logger.info_once("Max profiling iterations reached. Stopping profiler...")
             self.stop()
             return
@@ -214,24 +211,8 @@ class TorchProfilerWrapper(WorkerProfiler):
             )
 
         def _async_trace_ready(prof: torch.profiler.profile) -> None:
-            """Runs the trace export (JSON serialization + optional gzip) on a
-            background thread instead of inline on whatever called
-            profiler.step()/stop() -- normally this worker's own request-
-            handling loop.
-
-            By the time this fires, Kineto has already stopped collecting and
-            holds a complete, immutable snapshot of the trace in memory (the
-            CUDA-side stop happens synchronously just before this callback, as
-            part of the same profiler.stop()/step() call) -- so none of this
-            touches CUDA or the model-execution stream anymore, and it's safe
-            to run concurrently with whatever this worker does next.
-
-            This matters because export_chrome_trace() with gzip enabled
-            writes the full uncompressed JSON to a temp file, rereads it, and
-            recompresses it with single-threaded stdlib gzip -- for a
-            multi-hundred-MB-to-GB trace this can take tens of seconds, during
-            which (without this) the worker cannot schedule its next step.
-            """
+            """Export the trace on a background thread so gzip/JSON export
+            doesn't block the worker's next step."""
 
             def run() -> None:
                 try:

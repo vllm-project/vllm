@@ -388,9 +388,7 @@ class TestDPProfilerSync:
         sync.request_start()
         sync.cancel()
         assert sync._pending is False
-        # A stale reduce value must not resurrect a cancelled request as a start
-        # this rank acts on; but if the OR is genuinely True from another rank it
-        # still starts. Here nothing else requested, so no start.
+        # A stale reduce must not resurrect a cancelled request.
         sync.observe(consensus=False)
         assert sync.consume_start() is False
 

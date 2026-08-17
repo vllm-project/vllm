@@ -19,22 +19,8 @@ logger = init_logger(__name__)
 
 
 class DPProfilerSync:
-    """Starts the torch profiler on the same step across all DP ranks.
-
-    ``start_profile`` reaches each DP rank asynchronously, at a different point
-    in its own step loop, and every step all DP ranks must jointly execute the
-    EP all-to-all / DP coordination collective. A separate barrier on the
-    profiler control path therefore deadlocks: the first rank to reach it stops
-    stepping, so the others wedge on the next collective before they ever reach
-    their own barrier (see VLLM_ENABLE_MULTINODE_PROFILING).
-
-    Instead this rides the per-step DP coordination all-reduce that every rank
-    already executes in lockstep. ``request_start`` sets a pending flag; the
-    flag is OR-reduced across DP ranks inside ``_synchronize_dp_ranks``; once any
-    rank has requested it, ``start_now`` latches on every rank on the same step,
-    and the worker starts capture next step. No extra collective, no deadlock,
-    and it needs only one rank to receive start_profile (the OR propagates it).
-    """
+    """Starts the torch profiler on the same step across all DP ranks by
+    OR-reducing a pending start request onto the per-step DP all-reduce."""
 
     def __init__(self) -> None:
         # start_profile received, capture not yet begun.
@@ -265,9 +251,8 @@ def coordinate_batch_across_dp(
             only contains single token decodes
         cudagraph_mode: The cudagraph mode for this rank (0=NONE, 1=PIECEWISE, 2=FULL).
             DP padding is enabled when synced cudagraph mode across ranks is not NONE.
-        profiler_sync: Optional DPProfilerSync. When provided, its pending
-            profiler-start request is OR-reduced across DP ranks so capture
-            starts on the same step everywhere (see VLLM_ENABLE_MULTINODE_PROFILING).
+        profiler_sync: Optional DPProfilerSync whose pending start request
+            gets OR-reduced across DP ranks.
 
     Returns: tuple[
         ubatch_slices: if this is set then all DP ranks have agreed to
