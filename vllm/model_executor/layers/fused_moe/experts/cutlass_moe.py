@@ -182,7 +182,6 @@ def run_cutlass_moe_fp8(
             padded_M,
             N,
             K,
-            local_E * padded_M <= 64,
         )
 
         w1_scale = w1_scale.reshape(w1_scale.size(0), -1)
@@ -1114,6 +1113,41 @@ class CutlassExpertsMxfp4(mk.FusedMoEExpertsModular):
 
 
 # W4A8
+def _get_w4a8_batched_moe_mm_data(
+    expert_num_tokens: torch.Tensor,
+    padded_m: int,
+    n: int,
+    k: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Build physical offsets and SwapAB problem shapes for batched W4A8."""
+    num_experts = expert_num_tokens.numel()
+    expert_offsets = (
+        torch.arange(
+            num_experts,
+            dtype=torch.int64,
+            device=expert_num_tokens.device,
+        )
+        * padded_m
+    )
+    problem_sizes1 = torch.stack(
+        (
+            torch.full_like(expert_num_tokens, 2 * n),
+            expert_num_tokens,
+            torch.full_like(expert_num_tokens, k),
+        ),
+        dim=1,
+    )
+    problem_sizes2 = torch.stack(
+        (
+            torch.full_like(expert_num_tokens, k),
+            expert_num_tokens,
+            torch.full_like(expert_num_tokens, n),
+        ),
+        dim=1,
+    )
+    return expert_offsets, problem_sizes1, problem_sizes2
+
+
 def run_cutlass_moe_w4a8_fp8(
     output: torch.Tensor,
     hidden_states: torch.Tensor,
@@ -1207,21 +1241,18 @@ def run_cutlass_moe_w4a8_fp8(
         )
         mm2_out = _resize_cache(workspace2, (local_E * padded_m, K))
 
-        expert_offsets = torch.empty((local_E,), dtype=torch.int32, device=device)
-        ops.get_cutlass_batched_moe_mm_data(
+        (
             expert_offsets,
             problem_sizes1,
             problem_sizes2,
+        ) = _get_w4a8_batched_moe_mm_data(
             expert_num_tokens,
-            local_E,
             padded_m,
             N,
             K,
-            True,
         )
         a1q = a1q.reshape(local_E * padded_m, K)
         a1q_scale = a1q_scale.reshape(local_E * padded_m, 1)
-        expert_offsets = expert_offsets.to(torch.int64)
     else:
         assert expert_num_tokens is None
         assert a1q_scale is not None

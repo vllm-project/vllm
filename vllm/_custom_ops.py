@@ -940,7 +940,6 @@ def get_cutlass_batched_moe_mm_data(
     padded_m: int,
     n: int,
     k: int,
-    swap_ab: bool,
 ):
     """
     Prepare data necessary to perform CUTLASS grouped matrix multiplications
@@ -964,7 +963,6 @@ def get_cutlass_batched_moe_mm_data(
         padded_m,
         n,
         k,
-        swap_ab,
     )
 
 

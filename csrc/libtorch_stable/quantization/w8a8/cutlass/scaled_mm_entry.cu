@@ -109,7 +109,7 @@ void get_cutlass_batched_moe_mm_data_caller(
     torch::stable::Tensor& problem_sizes2,
     const torch::stable::Tensor& expert_num_tokens,
     const int64_t num_local_experts, const int64_t padded_m, const int64_t n,
-    const int64_t k, const bool swap_ab);
+    const int64_t k);
 #endif
 
 void cutlass_scaled_mm_azp_sm75(
@@ -358,16 +358,16 @@ void get_cutlass_batched_moe_mm_data(
     torch::stable::Tensor& problem_sizes2,
     const torch::stable::Tensor& expert_num_tokens,
     const int64_t num_local_experts, const int64_t padded_m, const int64_t n,
-    const int64_t k, const bool swap_ab) {
+    const int64_t k) {
   // This function currently gets compiled only if we have a valid cutlass moe
   // mm to run it for.
   int32_t version_num = get_sm_version_num();
 #if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) ||   \
     (defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100) || \
     (defined ENABLE_CUTLASS_MOE_SM120 && ENABLE_CUTLASS_MOE_SM120)
-  get_cutlass_batched_moe_mm_data_caller(
-      expert_offsets, problem_sizes1, problem_sizes2, expert_num_tokens,
-      num_local_experts, padded_m, n, k, swap_ab);
+  get_cutlass_batched_moe_mm_data_caller(expert_offsets, problem_sizes1,
+                                         problem_sizes2, expert_num_tokens,
+                                         num_local_experts, padded_m, n, k);
   return;
 #endif
   STD_TORCH_CHECK_NOT_IMPLEMENTED(

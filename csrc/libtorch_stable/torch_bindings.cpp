@@ -176,7 +176,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "                             Tensor! problem_sizes2, "
       "                             Tensor expert_num_tokens, "
       "                             int num_local_experts, int padded_m, "
-      "                             int n, int k, bool swap_ab) -> ()");
+      "                             int n, int k) -> ()");
 
   // Check if cutlass scaled_mm supports block quantization (used by DeepSeekV3)
   ops.def(

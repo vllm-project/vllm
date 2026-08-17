@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsFp8,
     CutlassExpertsMxfp4,
     CutlassExpertsW4A8Fp8,
+    _get_w4a8_batched_moe_mm_data,
     run_cutlass_moe_fp8,
 )
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
@@ -219,6 +220,27 @@ def test_cutlass_w4a8_batched_workspace_contract():
         (1, 128, 2048),
         (1, 128, 2048),
     )
+
+
+def test_cutlass_w4a8_batched_metadata_uses_physical_offsets_and_swap_ab():
+    offsets, problem_sizes1, problem_sizes2 = _get_w4a8_batched_moe_mm_data(
+        torch.tensor([0, 5, 2], dtype=torch.int32),
+        padded_m=8,
+        n=1024,
+        k=2048,
+    )
+
+    assert offsets.tolist() == [0, 8, 16]
+    assert problem_sizes1.tolist() == [
+        [2048, 0, 2048],
+        [2048, 5, 2048],
+        [2048, 2, 2048],
+    ]
+    assert problem_sizes2.tolist() == [
+        [2048, 0, 1024],
+        [2048, 5, 1024],
+        [2048, 2, 1024],
+    ]
 
 
 def test_cutlass_w4a8_batched_support_is_deepep_ll_only():
