@@ -473,9 +473,9 @@ impl SharedRuntimeArgs {
                 output_address,
                 engine_start_index,
                 engine_count,
+                data_parallel_size,
                 ready_timeout,
             },
-            data_parallel_size,
             coordinator_mode: match coordinator_address {
                 Some(address) => CoordinatorMode::External { address },
                 None => CoordinatorMode::None,
@@ -532,7 +532,6 @@ impl SharedRuntimeArgs {
                 local_input_address,
                 local_output_address,
             },
-            data_parallel_size: engine_count,
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
             served_model_name: self.served_model_name,
