@@ -2543,6 +2543,7 @@ class VllmConfig:
             self.cache_config.use_kda_recoverssm = False
             return self
         self.cache_config.use_kda_recoverssm = self.num_speculative_tokens > 0
+
         if self.model_config is not None and not self.model_config.supports_replayssm:
             raise ValueError(
                 "--use-replayssm is not supported for architecture "
@@ -2575,41 +2576,26 @@ class VllmConfig:
                 raise ValueError(
                     "RecoverSSM currently requires pipeline_parallel_size=1"
                 )
+            if self.mamba_config.backend != MambaBackendEnum.TRITON:
+                raise ValueError("RecoverSSM requires --mamba-backend triton")
         elif self.cache_config.mamba_cache_mode == "all":
             raise ValueError(
                 "--use-replayssm supports prefix caching only in align mode; "
                 "pass --mamba-cache-mode align"
             )
-        if self.num_speculative_tokens > 0:
-            raise ValueError("--use-replayssm does not support speculative decoding")
-        if self.mamba_config.ssu_algorithm is not None:
+        elif self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
+            if self.cache_config.mamba_cache_mode == "align":
+                raise ValueError(
+                    "FlashInfer ReplaySSM does not support "
+                    "--mamba-cache-mode align yet; use none"
+                )
+        elif self.mamba_config.backend != MambaBackendEnum.TRITON:
             raise ValueError(
-                "--mamba-ssu-algorithm selects a plain FlashInfer SSU tactic "
-                "and is not compatible with ReplaySSM"
+                "--use-replayssm requires --mamba-backend triton or flashinfer"
             )
-        if self.mamba_config.backend not in (
-            MambaBackendEnum.TRITON,
-            MambaBackendEnum.FLASHINFER,
-        ):
+        elif self.use_v2_model_runner:
             raise ValueError(
-                "--use-replayssm requires --mamba-backend triton or flashinfer "
-                f"(got {self.mamba_config.backend.value!r})"
-            )
-        if (
-            self.mamba_config.backend == MambaBackendEnum.FLASHINFER
-            and self.cache_config.mamba_cache_mode == "align"
-        ):
-            raise ValueError(
-                "FlashInfer ReplaySSM does not support "
-                "--mamba-cache-mode align yet; use none"
-            )
-        if (
-            self.use_v2_model_runner
-            and self.mamba_config.backend == MambaBackendEnum.TRITON
-        ):
-            raise ValueError(
-                "Triton ReplaySSM does not support Model Runner V2 because it "
-                "requires V1 CPU decode-position metadata; use "
+                "Triton ReplaySSM requires Model Runner V1; use "
                 "--mamba-backend flashinfer or Model Runner V1"
             )
         if (

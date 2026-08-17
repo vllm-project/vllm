@@ -117,7 +117,6 @@ def _replayssm_config(
     *,
     backend: MambaBackendEnum,
     use_v2_model_runner: bool = False,
-    ssu_algorithm: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         cache_config=SimpleNamespace(
@@ -126,10 +125,7 @@ def _replayssm_config(
         ),
         model_config=None,
         num_speculative_tokens=0,
-        mamba_config=SimpleNamespace(
-            backend=backend,
-            ssu_algorithm=ssu_algorithm,
-        ),
+        mamba_config=SimpleNamespace(backend=backend),
         use_v2_model_runner=use_v2_model_runner,
         kv_transfer_config=None,
     )
@@ -141,7 +137,7 @@ def test_v2_replayssm_requires_flashinfer():
         use_v2_model_runner=True,
     )
 
-    with pytest.raises(ValueError, match="Triton ReplaySSM does not support"):
+    with pytest.raises(ValueError, match="requires Model Runner V1"):
         VllmConfig.validate_mamba_cached_kernel(config)
 
 
@@ -152,16 +148,6 @@ def test_v2_flashinfer_replayssm_is_supported():
     )
 
     assert VllmConfig.validate_mamba_cached_kernel(config) is config
-
-
-def test_replayssm_rejects_plain_ssu_algorithm_override():
-    config = _replayssm_config(
-        backend=MambaBackendEnum.FLASHINFER,
-        ssu_algorithm="auto",
-    )
-
-    with pytest.raises(ValueError, match="plain FlashInfer SSU tactic"):
-        VllmConfig.validate_mamba_cached_kernel(config)
 
 
 def test_rocm_defaults_deepseek_v4_to_mrv1(monkeypatch):
