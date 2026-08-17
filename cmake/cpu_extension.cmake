@@ -621,8 +621,7 @@ if (ENABLE_X86_ISA)
         STABLE_LIBTORCH
     )
     target_compile_definitions(_C_stable_libtorch PRIVATE
-      "-DCPU_CAPABILITY_AMXBF16")
-    target_compile_definitions(_C_stable_libtorch PRIVATE
+      CPU_CAPABILITY_AMXBF16
       TORCH_TARGET_VERSION=0x020B000000000000ULL)
 
     define_extension_target(

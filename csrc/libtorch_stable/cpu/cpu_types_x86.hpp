@@ -4,19 +4,40 @@
 
 #include <cstdint>
 #include <cstring>
-#include <iostream>
 #include <type_traits>
 #include <utility>
 
 #include <immintrin.h>
 #include <sleef.h>
 
+#include <torch/csrc/inductor/aoti_torch/c/shim.h>
 #include <torch/headeronly/core/ScalarType.h>
 #include <torch/headeronly/util/BFloat16.h>
 #include <torch/headeronly/util/Exception.h>
 #include <torch/headeronly/util/Half.h>
 
 #include "libtorch_stable/dispatch_utils.h"
+
+// Stable stand-in for at::RecordFunction. AOTI's RAIIAtenRecordFunctionHandle
+// lives in aoti_runtime/utils.h, which is wrapped out under
+// TORCH_TARGET_VERSION.
+struct RecordFunctionGuard {
+  explicit RecordFunctionGuard(const char* name) {
+    (void)aoti_record_function_start(name, nullptr, nullptr, 0, &handle_);
+  }
+  ~RecordFunctionGuard() {
+    if (handle_ != nullptr) {
+      (void)aoti_record_function_end(handle_);
+    }
+  }
+  RecordFunctionGuard(const RecordFunctionGuard&) = delete;
+  RecordFunctionGuard& operator=(const RecordFunctionGuard&) = delete;
+
+ private:
+  AtenRecordFunctionHandle handle_ = nullptr;
+};
+
+#define STABLE_RECORD_FUNCTION(fn) RecordFunctionGuard guard(fn);
 
 #ifndef __AVX2__
 static_assert(false, "AVX2 must be supported for the current implementation.");
@@ -47,8 +68,7 @@ struct fp8_bf16_e5m2_tag {};
   #define CPU_KERNEL_GUARD_IN(NAME)
   #define CPU_KERNEL_GUARD_OUT(NAME)
 #else
-  #define CPU_KERNEL_GUARD_IN(NAME) \
-    std::cerr << #NAME << " invoked." << std::endl;
+  #define CPU_KERNEL_GUARD_IN(NAME) STABLE_RECORD_FUNCTION(#NAME);
   #define CPU_KERNEL_GUARD_OUT(NAME)
 #endif
 
