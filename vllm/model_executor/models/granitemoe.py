@@ -26,7 +26,6 @@
 
 from collections.abc import Iterable, Iterator
 from itertools import islice
-from typing import Any
 
 import torch
 from torch import nn
@@ -76,8 +75,8 @@ from .utils import (
     maybe_prefix,
 )
 
-# Packed expert / router tensors, in both the legacy checkpoint spelling and the
-# current one. The layouts are identical, so only the names differ.
+# Packed expert / router tensors, in both the legacy HF checkpoint spelling and
+# the current one. The layouts are identical, so only the names differ.
 _MOE_GATE_UP_NAMES = (
     ".block_sparse_moe.input_linear.weight",
     ".block_sparse_moe.experts.gate_up_proj",
@@ -189,16 +188,15 @@ class GraniteMoeMoE(nn.Module):
 class GraniteMoeAttention(nn.Module):
     def __init__(
         self,
+        config: PretrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
         max_position: int = 4096 * 32,
-        rope_parameters: dict[str, Any] | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         attention_multiplier: float | None = None,
         prefix: str = "",
-        config: PretrainedConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -241,26 +239,21 @@ class GraniteMoeAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        if config is None:
-            sliding_window, has_sink = None, False
-            rope_theta = (rope_parameters or {}).get("rope_theta")
-        else:
-            sliding_window, rope_theta, has_sink = granite_layer_attn_params(
-                config, extract_layer_index(prefix)
-            )
-            rope_parameters = {**rope_parameters, "rope_theta": rope_theta}
+        sliding_window, rope_theta, has_sink = granite_layer_attn_params(
+            config, extract_layer_index(prefix)
+        )
 
         self.use_rope = rope_theta != 0
         if self.use_rope:
             self.rotary_emb = get_rope(
                 self.head_dim,
                 max_position=max_position,
-                rope_parameters=rope_parameters,
+                rope_parameters={**config.rope_parameters, "rope_theta": rope_theta},
                 is_neox_style=True,
             )
 
         if has_sink:
-            self.sinks = nn.Parameter(torch.zeros(self.num_heads), requires_grad=False)
+            self.sinks = nn.Parameter(torch.empty(self.num_heads), requires_grad=False)
             set_weight_attrs(self.sinks, {"weight_loader": sharded_weight_loader(0)})
         else:
             self.sinks = None
@@ -306,16 +299,15 @@ class GraniteMoeDecoderLayer(nn.Module):
 
         self.hidden_size = config.hidden_size
         self.self_attn = GraniteMoeAttention(
+            config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
-            rope_parameters=config.rope_parameters,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             attention_multiplier=config.attention_multiplier,
-            config=config,
         )
         self.block_sparse_moe = GraniteMoeMoE(
             num_experts=config.num_local_experts,

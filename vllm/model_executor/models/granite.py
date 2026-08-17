@@ -76,14 +76,14 @@ def granite_layer_attn_params(
 ) -> tuple[int | None, float, bool]:
     """Resolve one layer's sliding window, RoPE base and sink usage.
 
-    Plain Granite configs carry none of the SWA fields and fall back to full
-    attention, the global RoPE base and no sink. Sink presence is inferred from
-    `layer_types`, since the published SWA checkpoints have no dedicated flag;
-    `attention_sinks` overrides that inference either way.
+    Plain Granite configs carry no SWA fields and fall back to full
+    attention, global RoPE base and no sink. HF SWA checkpoints use
+    sinks without a dedicated flag, so assume true when `layer_types`
+    is used, and allow `attention_sinks` to override that decision.
 
     Returns:
         Sliding window size (`None` for full attention), RoPE base theta (`0`
-        for NoPE), and whether the layer has an attention sink.
+        for NoPE), and attention sink presence/absence.
     """
     layer_types = getattr(config, "layer_types", None)
     sliding_window = (
@@ -208,10 +208,9 @@ class GraniteAttention(nn.Module):
                 rope_parameters={**config.rope_parameters, "rope_theta": rope_theta},
             )
 
-        # Per-head sink, applied by the backend as an extra logit in the softmax
-        # denominator. Zeros so a sinkless checkpoint cannot leave it undefined.
+        # Per-head sink, applied in backend as extra logit in the softmax denom
         if has_sink:
-            self.sinks = nn.Parameter(torch.zeros(self.num_heads), requires_grad=False)
+            self.sinks = nn.Parameter(torch.empty(self.num_heads), requires_grad=False)
             set_weight_attrs(self.sinks, {"weight_loader": sharded_weight_loader(0)})
         else:
             self.sinks = None
