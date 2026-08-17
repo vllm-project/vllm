@@ -174,6 +174,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.int32,
                 device=device,
             )
+        self.decode_bc_pre_scratch: torch.Tensor | None = None
+        self.decode_replayssm_scratch: (
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None
+        ) = None
         # ReplaySSM CUDA-graph buffers for the selected backend.
         if self.use_replayssm and not self.use_flashinfer_replayssm:
             self.decode_write_pos_d: torch.Tensor = torch.empty(
@@ -192,7 +196,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             bc_scratch_bs = max(
                 self.decode_cudagraph_max_bs, scheduler_config.max_num_seqs
             )
-            self.decode_bc_pre_scratch: torch.Tensor = torch.empty(
+            self.decode_bc_pre_scratch = torch.empty(
                 (
                     bc_scratch_bs,
                     bc_ngroups,
@@ -201,13 +205,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.float32,
                 device=device,
             )
-            self.decode_replayssm_scratch = None
         elif self.use_flashinfer_replayssm:
             from flashinfer.mamba.checkpointing_ssu import (
                 allocate_checkpointing_ssu_scratch,
             )
 
-            self.decode_bc_pre_scratch = None
             nheads = kv_cache_spec.shapes[2][0]
             self.decode_replayssm_scratch = allocate_checkpointing_ssu_scratch(
                 batch_size=scheduler_config.max_num_seqs,
@@ -217,9 +219,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=vllm_config.model_config.dtype,
                 device=device,
             )
-        else:
-            self.decode_bc_pre_scratch = None
-            self.decode_replayssm_scratch = None
 
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
         if self.use_spec_decode:
