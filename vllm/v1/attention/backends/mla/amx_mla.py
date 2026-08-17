@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """AMX-only, high-performance MLA backend for DeepSeek V2/V3/R1 on CPU.
 
-Ports SGLang's CPU MLA kernels (``decode.cpp``/``extend.cpp``/``bmm.cpp``/
-``qkv_proj.cpp``, vendored under ``csrc/cpu/sgl-kernels/``) into vLLM's
-``MLACommonBackend``/``MLACommonImpl`` abstraction, the same way every other
-concrete MLA backend (``TritonMLAImpl``, etc.) plugs in.
+Built on the AMX decode/extend/bmm/qkv-proj kernels vendored under
+``csrc/cpu/sgl-kernels/``, plugged into vLLM's ``MLACommonBackend``/
+``MLACommonImpl`` abstraction the same way every other concrete MLA backend
+(``TritonMLAImpl``, etc.) does.
 
 This is a separate backend from the reference ``CPUMLABackend``
 (``vllm/v1/attention/backends/mla/cpu_mla.py``): that one targets every CPU
@@ -22,9 +22,9 @@ both explained in the CPU MLA design plan:
   ``MLACommonBaseImpl``): the GPU "compute-friendly" prefill path depends on
   a pluggable ``MLAPrefillBackend`` and CUDA-only chunked-context gather ops,
   neither of which exist on CPU. Instead, this attends directly in
-  latent-MQA space via the ported ``extend_attention_cpu`` kernel, which
-  handles cached-prefix continuation and fresh prefill in one causal pass
-  (the KV cache already contains the new tokens by the time this runs, since
+  latent-MQA space via the ``extend_attention_cpu`` kernel, which handles
+  cached-prefix continuation and fresh prefill in one causal pass (the KV
+  cache already contains the new tokens by the time this runs, since
   ``do_kv_cache_update`` executes first).
 - Weight absorption for the prefill path is done with this impl's own
   VNNI-packed copies of ``W_UK``/``W_UV`` (computed in
@@ -72,9 +72,9 @@ def _compute_num_kv_splits(max_seq_len: int, num_threads: int) -> int:
 
 
 def _expand_block_table(block_table: torch.Tensor, block_size: int) -> torch.Tensor:
-    """Adapter: vLLM's block-table paging -> SGLang kernels' flat
-    per-(request, position) physical row index, built once per step (see
-    AMXMLAMetadataBuilder), not per layer.
+    """Adapter: vLLM's block-table paging -> the flat per-(request, position)
+    physical row index the decode/extend kernels expect. Called once per step
+    from ``AMXMLAMetadataBuilder.build``, not per layer.
     """
     offsets = torch.arange(
         block_size, device=block_table.device, dtype=block_table.dtype
@@ -119,19 +119,25 @@ class AMXMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
         attn_metadata = super().build(
             common_prefix_len, common_attn_metadata, fast_build
         )
+        block_size = self.kv_cache_spec.block_size
+        if attn_metadata.decode is not None:
+            # Built once per step and reused by every layer, instead of
+            # recomputing the same tensor arithmetic in every forward_mqa call.
+            attn_metadata.decode.req_to_token = _expand_block_table(  # type: ignore[attr-defined]
+                attn_metadata.decode.block_table, block_size
+            )
         if attn_metadata.prefill is not None:
-            # The only piece of information the ported extend kernel needs
-            # that isn't already on the shared (unmodified)
-            # MLACommonPrefillMetadata: total per-request context length
-            # (prefix + new tokens). Attached as a plain extra attribute on
-            # the already-built dataclass instance, computed directly from
-            # common_attn_metadata -- no shared-code changes, no new
-            # dataclass subclass.
+            # cpu_seq_lens: total per-request context length (prefix + new
+            # tokens), the one thing the extend kernel needs that isn't
+            # already on the shared MLACommonPrefillMetadata.
             num_decodes = attn_metadata.num_decodes
             num_prefills = attn_metadata.num_prefills
             attn_metadata.prefill.cpu_seq_lens = common_attn_metadata.seq_lens[  # type: ignore[attr-defined]
                 num_decodes : num_decodes + num_prefills
             ].to(torch.int64)
+            attn_metadata.prefill.req_to_token = _expand_block_table(  # type: ignore[attr-defined]
+                attn_metadata.prefill.block_table, block_size
+            ).to(torch.int64)
         return attn_metadata
 
 
@@ -221,7 +227,7 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
             "AMXMLAImpl only supports an unquantized (bf16) KV cache; fp8 "
             "KV cache for CPU MLA is not yet implemented."
         )
-        ops.cpu_mla_concat_and_cache(
+        ops.amx_mla_concat_and_cache(
             kv_c_normed, k_pe.squeeze(1), kv_cache, slot_mapping.flatten()
         )
 
@@ -242,13 +248,12 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert attn_metadata.decode is not None
 
         num_tokens = q.shape[0]
-        block_size = kv_c_and_k_pe_cache.size(1)
         kv_cache_flat = kv_c_and_k_pe_cache.view(-1, 1, self.head_size)
         v_buffer = kv_cache_flat[..., : self.kv_lora_rank]
 
         block_table = attn_metadata.decode.block_table
         seq_lens = attn_metadata.decode.seq_lens.to(torch.int64)
-        req_to_token = _expand_block_table(block_table, block_size)
+        req_to_token = attn_metadata.decode.req_to_token  # type: ignore[attr-defined]
         req_pool_indices = torch.arange(
             block_table.size(0), dtype=torch.int64, device=q.device
         )
@@ -325,13 +330,10 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         ops.bmm_cpu(ql_nope, q_nope_t, self._w_uk_packed, True, None)
         mqa_q = torch.cat([ql_nope.transpose(0, 1), q_pe], dim=-1)
 
-        block_size = kv_c_and_k_pe_cache.size(1)
         kv_cache_flat = kv_c_and_k_pe_cache.view(-1, 1, self.head_size)
         v_buffer = kv_cache_flat[..., : self.kv_lora_rank]
 
-        req_to_token = _expand_block_table(prefill.block_table, block_size).to(
-            torch.int64
-        )
+        req_to_token = prefill.req_to_token  # type: ignore[attr-defined]
         req_pool_indices = torch.arange(
             prefill.block_table.size(0), dtype=torch.int64, device=q.device
         )
@@ -392,9 +394,8 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         """Duck-typed hook consumed by MultiHeadLatentAttentionWrapper.forward
         (mla.py) when present: fuses fused_qkv_a_proj -> both RMSNorms ->
-        q_b_proj -> RoPE into one AMX kernel (ported from SGLang's
-        qkv_proj_with_rope_fused_weight, stopping before Q-absorption -- see
-        module docstring). Returns the standard unabsorbed (q, kv_c_normed,
+        q_b_proj -> RoPE into one AMX kernel, stopping before Q-absorption --
+        see module docstring. Returns the standard unabsorbed (q, kv_c_normed,
         k_pe) tuple, or None to fall back to the unfused path (bf16-only for
         now; also skipped for DCP/sparse-indexer/llama4-scaling batches,
         which mla.py itself guards before calling this).

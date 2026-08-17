@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Correctness tests for the AMX-only CPU MLA backend: the vendored SGLang
-decode/extend/bmm kernels, the CPU-native KV cache write, and the
-``AMXMLAImpl`` backend built on top of them.
+"""Correctness tests for the AMX-only CPU MLA backend: the vendored
+decode/extend/bmm kernels, the KV cache write, and the ``AMXMLAImpl``
+backend built on top of them.
 """
 
 import pytest
@@ -97,7 +97,7 @@ def test_concat_and_cache_mla_round_trip():
     k_pe = torch.randn(num_tokens, QK_ROPE_HEAD_DIM, dtype=DTYPE)
     slot_mapping = torch.randperm(num_blocks * block_size)[:num_tokens].to(torch.int64)
 
-    ops.cpu_mla_concat_and_cache(kv_c_normed, k_pe, kv_cache, slot_mapping)
+    ops.amx_mla_concat_and_cache(kv_c_normed, k_pe, kv_cache, slot_mapping)
 
     flat = _flatten_cache(kv_cache)
     read_back = flat[slot_mapping]
@@ -283,16 +283,18 @@ def _make_amx_mla_impl(num_heads, qk_nope_head_dim, v_head_dim, kv_lora_rank):
 
 
 class _FakePrefillMetadata:
-    def __init__(self, block_table, cpu_seq_lens, query_start_loc):
+    def __init__(self, block_table, cpu_seq_lens, query_start_loc, req_to_token):
         self.block_table = block_table
         self.cpu_seq_lens = cpu_seq_lens
         self.query_start_loc = query_start_loc
+        self.req_to_token = req_to_token
 
 
 class _FakeDecodeMetadata:
-    def __init__(self, block_table, seq_lens):
+    def __init__(self, block_table, seq_lens, req_to_token):
         self.block_table = block_table
         self.seq_lens = seq_lens
+        self.req_to_token = req_to_token
 
 
 class _FakeAttnMetadata:
@@ -324,6 +326,7 @@ def test_amx_mla_impl_forward_mqa_matches_reference(default_vllm_config):
 
     kv_cache = torch.randn(num_blocks, block_size, head_size, dtype=DTYPE)
     block_table = torch.randperm(num_blocks).view(num_seqs, max_blocks).to(torch.int64)
+    req_to_token = _expand_block_table(block_table, block_size)
 
     q_nope = torch.randn(num_seqs, num_heads, qk_nope_head_dim, dtype=DTYPE)
     q_pe = torch.randn(num_seqs, num_heads, QK_ROPE_HEAD_DIM, dtype=DTYPE)
@@ -332,7 +335,9 @@ def test_amx_mla_impl_forward_mqa_matches_reference(default_vllm_config):
 
     attn_metadata = _FakeAttnMetadata(
         decode=_FakeDecodeMetadata(
-            block_table=block_table, seq_lens=torch.tensor(seq_lens, dtype=torch.int64)
+            block_table=block_table,
+            seq_lens=torch.tensor(seq_lens, dtype=torch.int64),
+            req_to_token=req_to_token,
         ),
         max_seq_len=max(seq_lens),
     )
@@ -344,7 +349,6 @@ def test_amx_mla_impl_forward_mqa_matches_reference(default_vllm_config):
     out_real = torch.einsum("bnl,lnv->bnv", o.float(), w_uv.float())
 
     flat_cache = _flatten_cache(kv_cache)
-    req_to_token = _expand_block_table(block_table, block_size)
     scale = impl.scale
     for i, seq_len in enumerate(seq_lens):
         token_ids = req_to_token[i, :seq_len]
@@ -420,6 +424,7 @@ def test_amx_mla_impl_forward_mha_matches_reference(default_vllm_config):
             block_table=block_table,
             cpu_seq_lens=torch.tensor(seq_lens, dtype=torch.int64),
             query_start_loc=query_start_loc,
+            req_to_token=req_to_token,
         )
     )
     output = torch.empty(total_new_tokens, num_heads * v_head_dim, dtype=DTYPE)

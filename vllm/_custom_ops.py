@@ -4112,7 +4112,7 @@ if hasattr(torch.ops._C, "qkv_proj_with_rope_fused_weight"):
         return q, k_input, v_input
 
 
-def cpu_mla_concat_and_cache(
+def amx_mla_concat_and_cache(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     kv_cache: torch.Tensor,
