@@ -109,10 +109,13 @@ def _fixup_moe_tuning_config(tuning_config: list, max_k_block: int = 128) -> Non
         if not (block_shape and len(block_shape) == 3):
             continue
         block_m, block_n, block_k = block_shape
+
+        logger.info_once(f"Overriding humming GEMM config. Previous config\n: {config}")
         if block_k > max_k_block:
-            config["block_shape"] = [block_m, block_n, max_k_block]
+            config["block_shape"] = [16, 128, 128]
         warp_shape = config.get("warp_shape")
-        config["warp_shape"] = [warp_shape[0], 32, warp_shape[2]]
+        config["warp_shape"] = [16, 32, 128]
+        logger.info_once(f"Overridden humming GEMM config. Current config\n: {config}")
 
 
 class HummingExpertsBase(mk.FusedMoEExpertsModular):
