@@ -22,7 +22,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequest, core
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
-from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.engine.core_client import EngineCoreClient, InprocClient
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.notifications import (
     MAX_BUFFERED_NOTIFICATIONS,
@@ -126,6 +126,57 @@ def test_publish_drops_oldest_at_capacity():
     assert len(taken) == MAX_BUFFERED_NOTIFICATIONS
     assert taken[0].payload == {"n": 2}
     assert taken[-1].payload == {"n": MAX_BUFFERED_NOTIFICATIONS + 1}
+
+
+def test_publish_take_race_is_safe():
+    """Concurrent producers and a drainer share the buffer; per-producer
+    order must survive and nothing may raise or duplicate."""
+    errors: list[BaseException] = []
+    received: list[CustomNotification] = []
+
+    def produce(key: str):
+        try:
+            for i in range(2000):
+                publish_worker_notification(
+                    CustomNotification(key=key, payload={"n": i})
+                )
+        except BaseException as e:
+            errors.append(e)
+
+    producers = [
+        threading.Thread(target=produce, args=(f"producer-{i}",)) for i in range(4)
+    ]
+    for producer in producers:
+        producer.start()
+    while any(producer.is_alive() for producer in producers):
+        received.extend(take_worker_notifications() or ())
+    for producer in producers:
+        producer.join()
+    received.extend(take_worker_notifications() or ())
+
+    assert not errors
+    assert take_worker_notifications() is None
+    # Strictly increasing per producer: no duplicates, no reordering; gaps
+    # are legal (the cap drops the oldest).
+    last_seen: dict[str, int] = {}
+    for event in received:
+        assert event.payload["n"] > last_seen.get(event.key, -1)
+        last_seen[event.key] = event.payload["n"]
+
+
+def test_inproc_get_output_flushes_post_step_notifications():
+    """A notification gathered in post_step must ride the same get_output
+    call; a request-less frontend has no reason to call again."""
+    event = CustomNotification(key="my_plugin")
+    engine_core = _bare_engine_core()
+    engine_core.step_fn = lambda: ({}, False)
+    engine_core.post_step = lambda model_executed: engine_core._publish_notifications(
+        [event]
+    )
+    client = InprocClient.__new__(InprocClient)
+    client.engine_core = engine_core
+
+    assert client.get_output().engine_notifications == [event]
 
 
 def test_worker_notifications_survive_until_the_first_drain():
@@ -300,18 +351,37 @@ def test_poll_interval_gates_the_rpc(monkeypatch):
 def _wait_for_outputs(client, predicate, timeout_s: float = 180.0):
     """Bounded drain of client.get_output(), which otherwise blocks forever."""
     box: list = []
+    error: list[BaseException] = []
     done = threading.Event()
 
     def drain():
-        while not done.is_set():
-            outputs = client.get_output()
-            if result := predicate(outputs):
-                box.append(result)
-                done.set()
+        try:
+            while not done.is_set():
+                outputs = client.get_output()
+                if result := predicate(outputs):
+                    box.append(result)
+                    return
+        except BaseException as e:
+            error.append(e)
+        finally:
+            done.set()
 
     threading.Thread(target=drain, daemon=True).start()
     assert done.wait(timeout_s), "timed out waiting for engine output"
+    if error:
+        raise error[0]
     return box[0]
+
+
+def test_wait_for_outputs_reraises_drain_errors():
+    """An engine failure must surface as itself, not as a timeout."""
+
+    class FailingClient:
+        def get_output(self):
+            raise RuntimeError("engine died")
+
+    with pytest.raises(RuntimeError, match="engine died"):
+        _wait_for_outputs(FailingClient(), lambda outputs: True, timeout_s=5.0)
 
 
 @pytest.mark.skipif(
