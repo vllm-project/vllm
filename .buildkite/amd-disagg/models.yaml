@@ -95,3 +95,12 @@ models:
       tp: "--gpu-memory-utilization 0.9"
     decode:
       tp: "--gpu-memory-utilization 0.9"
+
+  - model: DeepSeek-V4-Pro
+    env:
+      VLLM_ROCM_USE_AITER: "1"
+    base_flags: '--trust-remote-code --kv-cache-dtype fp8 --max-num-seqs 512 --max-num-batched-tokens 8192 --tokenizer-mode deepseek_v4 --reasoning-parser deepseek_v4 --tool-call-parser deepseek_v4 --enable-auto-tool-choice --compilation-config {"mode":3,"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    prefill:
+      tp: "--gpu-memory-utilization 0.9"
+    decode:
+      tp: "--gpu-memory-utilization 0.9"
