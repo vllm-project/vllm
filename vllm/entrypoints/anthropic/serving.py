@@ -46,6 +46,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.reasoning_effort import ReasoningEffortRounding
 from vllm.entrypoints.serve.exception_handling.utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -116,6 +117,8 @@ class AnthropicServingMessages(OpenAIServingChat):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        supported_reasoning_efforts: list[str] | None = None,
+        reasoning_effort_rounding: ReasoningEffortRounding = "down",
     ):
         super().__init__(
             engine_client=engine_client,
@@ -132,6 +135,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             enable_prompt_tokens_details=enable_prompt_tokens_details,
             enable_force_include_usage=enable_force_include_usage,
             default_chat_template_kwargs=default_chat_template_kwargs,
+            supported_reasoning_efforts=supported_reasoning_efforts,
+            reasoning_effort_rounding=reasoning_effort_rounding,
         )
         self.stop_reason_map = {
             "stop": "end_turn",

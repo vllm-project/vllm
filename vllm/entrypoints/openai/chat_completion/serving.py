@@ -47,6 +47,10 @@ from vllm.entrypoints.openai.engine.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.reasoning_effort import (
+    ReasoningEffortRounding,
+    normalize_reasoning_effort,
+)
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
@@ -135,6 +139,8 @@ class OpenAIServingChat(GenerateBaseServing):
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         enable_per_request_metrics: bool = False,
+        supported_reasoning_efforts: list[str] | None = None,
+        reasoning_effort_rounding: ReasoningEffortRounding = "down",
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -149,6 +155,10 @@ class OpenAIServingChat(GenerateBaseServing):
         self.chat_template_content_format: Final = chat_template_content_format
         self.trust_request_chat_template = trust_request_chat_template
         self.default_chat_template_kwargs = default_chat_template_kwargs or {}
+        self.supported_reasoning_efforts = supported_reasoning_efforts
+        self.reasoning_effort_rounding: ReasoningEffortRounding = (
+            reasoning_effort_rounding
+        )
         self.enable_log_outputs = enable_log_outputs
         self.enable_log_deltas = enable_log_deltas
 
@@ -186,6 +196,11 @@ class OpenAIServingChat(GenerateBaseServing):
     def _effective_chat_template_kwargs(
         self, request: ChatCompletionRequest
     ) -> dict[str, Any]:
+        request.reasoning_effort = normalize_reasoning_effort(
+            request.reasoning_effort,
+            self.supported_reasoning_efforts,
+            self.reasoning_effort_rounding,
+        )
         return (
             request.build_chat_params(
                 self.chat_template,
