@@ -56,6 +56,7 @@ def ds4_silu_mul_quant_fp8(
     input: torch.Tensor,
     *,
     use_ue8m0: bool,
+    round_scale: bool | None = None,
     masked_m: torch.Tensor | None,
     output_q: torch.Tensor | None = None,
     group_size: int = 128,
@@ -65,6 +66,10 @@ def ds4_silu_mul_quant_fp8(
     if not path:
         raise RuntimeError("VLLM_DS4_ALIGNMENT_KERNEL_LIB is not set")
     _load_ds4_alignment_library(path)
+    if round_scale is None:
+        round_scale = use_ue8m0
+    if use_ue8m0 and not round_scale:
+        raise ValueError("packed UE8M0 scales require round_scale=True")
 
     if input.ndim not in (2, 3) or input.shape[-1] % (2 * group_size):
         raise ValueError(f"invalid DS4 activation shape: {tuple(input.shape)}")
@@ -114,6 +119,7 @@ def ds4_silu_mul_quant_fp8(
         1e-10,
         -448.0,
         448.0,
+        round_scale,
         use_ue8m0,
         True,
         masked_m,

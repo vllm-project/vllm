@@ -256,6 +256,7 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
         ):
             if scale_fmt not in (
                 DeepGemmQuantScaleFMT.FLOAT32,
+                DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
                 DeepGemmQuantScaleFMT.UE8M0,
             ):
                 raise RuntimeError(
@@ -266,6 +267,7 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
                 input,
                 output_q=output,
                 use_ue8m0=scale_fmt == DeepGemmQuantScaleFMT.UE8M0,
+                round_scale=scale_fmt != DeepGemmQuantScaleFMT.FLOAT32,
                 masked_m=None,
                 group_size=block_k,
             )

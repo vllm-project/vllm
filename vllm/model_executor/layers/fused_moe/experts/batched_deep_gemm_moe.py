@@ -246,6 +246,7 @@ def persistent_masked_m_silu_mul_quant(
     if is_ds4_alignment_quant_enabled():
         if quant_scale_fmt not in (
             DeepGemmQuantScaleFMT.FLOAT32,
+            DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
             DeepGemmQuantScaleFMT.UE8M0,
         ):
             raise RuntimeError(
@@ -255,6 +256,7 @@ def persistent_masked_m_silu_mul_quant(
         return ds4_silu_mul_quant_fp8(
             y,
             use_ue8m0=quant_scale_fmt == DeepGemmQuantScaleFMT.UE8M0,
+            round_scale=quant_scale_fmt != DeepGemmQuantScaleFMT.FLOAT32,
             masked_m=tokens_per_expert,
             group_size=group_size,
         )
