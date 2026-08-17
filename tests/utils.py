@@ -1130,7 +1130,13 @@ class RemoteLaunchRenderServer(RemoteVLLMServer):
             )
 
     def _wait_for_gpu_memory_release(
-        self, timeout: float = 30.0, log_interval: float = 10.0
+        self,
+        timeout: float = 30.0,
+        log_interval: float = 10.0,
+        *,
+        device_ids: tuple[str, ...] | None = None,
+        baseline: float | None = None,
+        cleanup_scope: tuple[str, tuple[str, ...]] | None = None,
     ):
         pass  # No GPU used
 

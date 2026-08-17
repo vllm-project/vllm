@@ -184,10 +184,15 @@ def test_overlapping_scope_cannot_bypass_failed_cleanup():
     )
     server = make_server(5 * GIB)
     server._gpu_device_scope = ("cuda", ("0", "1"))
-    measured_device_ids = []
-    server._get_gpu_memory_used = (  # type: ignore[method-assign]
-        lambda device_ids=None: measured_device_ids.append(device_ids) or 5 * GIB
-    )
+    measured_device_ids: list[tuple[str, ...] | None] = []
+
+    def get_gpu_memory_used(
+        device_ids: tuple[str, ...] | None = None,
+    ) -> float:
+        measured_device_ids.append(device_ids)
+        return 5 * GIB
+
+    server._get_gpu_memory_used = get_gpu_memory_used  # type: ignore[method-assign]
 
     with pytest.raises(RuntimeError, match="Refusing to start"):
         server._ensure_failed_gpu_cleanup_recovered()
