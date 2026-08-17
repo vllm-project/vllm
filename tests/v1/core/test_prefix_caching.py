@@ -633,6 +633,16 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
         [external.request_id]
     )
     assert external.request_id not in manager.hisparse_coordinator.host_valid_pages
+    manager.hisparse_coordinator.complete_device_import(external.request_id)
+    assert not manager.hisparse_coordinator.build_offload_command(
+        ["other"]
+    ).indexer_ready_req_ids
+    assert manager.hisparse_coordinator.build_offload_command(
+        [external.request_id]
+    ).indexer_ready_req_ids == (external.request_id,)
+    assert not manager.hisparse_coordinator.build_offload_command(
+        [external.request_id]
+    ).indexer_ready_req_ids
 
 
 @pytest.mark.parametrize("ends_on_page_boundary", [False, True])

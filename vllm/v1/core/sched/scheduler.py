@@ -2726,6 +2726,10 @@ class Scheduler(SchedulerInterface):
         """
         assert self.connector is not None
 
+        device_import = (request.kv_transfer_params or {}).pop(
+            "_hisparse_device_import", False
+        )
+
         if request.request_id in self.failed_recving_kv_req_ids:
             # Request had KV load failures; num_computed_tokens was already
             # updated in _update_requests_with_invalid_blocks
@@ -2753,6 +2757,10 @@ class Scheduler(SchedulerInterface):
             if request.hisparse_host_import:
                 self.kv_cache_manager.hisparse_coordinator.complete_host_import(
                     request.request_id, request.num_computed_tokens
+                )
+            elif device_import:
+                self.kv_cache_manager.hisparse_coordinator.complete_device_import(
+                    request.request_id
                 )
             self.kv_cache_manager.cache_blocks(request, request.num_computed_tokens)
 

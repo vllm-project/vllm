@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -233,7 +234,8 @@ class HiSparseWorker:
                 block_ids.extend(new_block_ids[0])
 
         self._pending_invalid_block_ids.extend(block_ids)
-        self.restore_prefix(scheduler_output)
+        indexer_ready_req_ids = command.indexer_ready_req_ids if command else ()
+        self.restore_prefix(scheduler_output, indexer_ready_req_ids)
 
     def invalidate_blocks(
         self, block_ids: list[int], request_state_indices: torch.Tensor
@@ -354,7 +356,11 @@ class HiSparseWorker:
     def shutdown(self) -> None:
         release_pinned_state([cache.runtime for cache in self.cache_handles])
 
-    def restore_prefix(self, scheduler_output: SchedulerOutput) -> None:
+    def restore_prefix(
+        self,
+        scheduler_output: SchedulerOutput,
+        indexer_ready_req_ids: Collection[str],
+    ) -> None:
         src = self.src_cpu.numpy()
         dst = self.dst_cpu.numpy()
         num_pairs = 0
@@ -385,12 +391,13 @@ class HiSparseWorker:
             num_pairs = end
 
         for request in scheduler_output.scheduled_new_reqs:
-            append_pairs(request.block_ids, request.num_computed_tokens)
+            if request.req_id not in indexer_ready_req_ids:
+                append_pairs(request.block_ids, request.num_computed_tokens)
         cached = scheduler_output.scheduled_cached_reqs
         for req_id, block_ids, num_tokens in zip(
             cached.req_ids, cached.new_block_ids, cached.num_computed_tokens
         ):
-            if req_id in cached.resumed_req_ids:
+            if req_id in cached.resumed_req_ids and req_id not in indexer_ready_req_ids:
                 assert block_ids is not None
                 append_pairs(block_ids, num_tokens)
 

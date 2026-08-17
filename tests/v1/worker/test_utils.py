@@ -211,15 +211,54 @@ def test_hisparse_worker_prepare_step_queues_invalidation_and_restores(monkeypat
     cache_handle = SimpleNamespace(fully_resident=False)
     worker.cache_handles = [cache_handle]
     calls: list[tuple[Any, ...]] = []
-    worker.restore_prefix = lambda output: calls.append(("restore", output))
+    worker.restore_prefix = lambda output, ready: calls.append(
+        ("restore", output, ready)
+    )
     worker._enqueue_transfers = lambda transfers: calls.append(("transfer", transfers))
 
     worker.prepare_step(command, scheduler_output)
 
-    assert calls == [("restore", scheduler_output)]
+    assert calls == [("restore", scheduler_output, ())]
     assert worker._pending_invalid_block_ids == [2, 3, 4]
     assert cache_handle.fully_resident
     assert worker._post_forward_transfers == []
+
+
+def test_hisparse_worker_preserves_directly_imported_indexer(monkeypatch):
+    worker = object.__new__(HiSparseWorker)
+    worker.kernel_block_size = 4
+    worker.blocks_per_kv_block = 2
+    worker.src_cpu = torch.empty(2, dtype=torch.int32)
+    worker.dst_cpu = torch.empty(2, dtype=torch.int32)
+    worker.src_gpu = torch.empty(2, dtype=torch.int32)
+    worker.dst_gpu = torch.empty(2, dtype=torch.int32)
+    worker.cache_pairs = [(torch.empty(1), torch.empty(1))]
+    copied: list[tuple[list[int], list[int]]] = []
+
+    def copy_blocks(source, indexer, src, dst):
+        copied.append((src.tolist(), dst.tolist()))
+
+    monkeypatch.setattr(torch.ops._C_cache_ops, "hisparse_copy_blocks", copy_blocks)
+    scheduler_output = SimpleNamespace(
+        scheduled_new_reqs=[
+            SimpleNamespace(
+                req_id="direct", block_ids=([1], [10]), num_computed_tokens=4
+            ),
+            SimpleNamespace(
+                req_id="host", block_ids=([2], [20]), num_computed_tokens=4
+            ),
+        ],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=[],
+            new_block_ids=[],
+            num_computed_tokens=[],
+            resumed_req_ids=set(),
+        ),
+    )
+
+    worker.restore_prefix(scheduler_output, {"direct"})
+
+    assert copied == [([4], [20])]
 
 
 def test_hisparse_worker_prepare_step_accepts_warmup_without_command():
@@ -234,13 +273,15 @@ def test_hisparse_worker_prepare_step_accepts_warmup_without_command():
     cache_handle = SimpleNamespace(fully_resident=True)
     worker.cache_handles = [cache_handle]
     calls = []
-    worker.restore_prefix = lambda output: calls.append(("restore", output))
+    worker.restore_prefix = lambda output, ready: calls.append(
+        ("restore", output, ready)
+    )
 
     worker.prepare_step(None, scheduler_output)
 
     assert not cache_handle.fully_resident
     assert worker._post_forward_transfers == []
-    assert calls == [("restore", scheduler_output)]
+    assert calls == [("restore", scheduler_output, ())]
     assert worker._pending_invalid_block_ids == []
 
 

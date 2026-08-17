@@ -133,6 +133,7 @@ class HiSparseCoordinator:
         self.pending_spills: dict[int, _PendingSpill] = {}
         self.pending_pages: dict[tuple[str, int], int] = {}
         self.host_valid_pages: dict[str, set[int]] = {}
+        self.indexer_ready_req_ids: set[str] = set()
         self.transition_target_pages: dict[str, int] = {}
         self.next_spill_id = 0
 
@@ -358,6 +359,11 @@ class HiSparseCoordinator:
             range(cdiv(num_computed_tokens, block_size))
         )
 
+    def complete_device_import(self, request_id: str) -> None:
+        """Record that NIXL populated this request's GPU indexer directly."""
+        if self.resident_managers:
+            self.indexer_ready_req_ids.add(request_id)
+
     def _plan_spill(
         self,
         request_id: str,
@@ -420,10 +426,15 @@ class HiSparseCoordinator:
             for request_id in self.block_table_updates
         }
         self.block_table_updates.clear()
+        indexer_ready_req_ids = tuple(
+            sorted(self.indexer_ready_req_ids.intersection(request_ids))
+        )
+        self.indexer_ready_req_ids.difference_update(indexer_ready_req_ids)
         command = SparseKVOffloadCommand(
             block_table_updates=block_table_updates,
             page_transfers=self.spills_to_send,
             fully_resident=self.are_requests_fully_resident(request_ids),
+            indexer_ready_req_ids=indexer_ready_req_ids,
         )
         self.spills_to_send = []
         return command
@@ -533,3 +544,4 @@ class HiSparseCoordinator:
 
     def free(self, request_id: str) -> None:
         self.host_valid_pages.pop(request_id, None)
+        self.indexer_ready_req_ids.discard(request_id)
