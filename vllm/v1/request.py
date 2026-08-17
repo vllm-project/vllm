@@ -142,11 +142,19 @@ class Request:
             prompt_token_ids, prompt_embeds
         )
         self._output_token_ids: list[int] = []
-        self._all_token_ids: list[int] = (
-            self.prompt_token_ids.copy()
-            if self.prompt_token_ids is not None
-            else [0] * self.num_prompt_tokens
-        )
+        if self.prompt_token_ids is None:
+            self._all_token_ids: list[int] = [0] * self.num_prompt_tokens
+        elif self.prompt_is_token_ids is None:
+            self._all_token_ids = self.prompt_token_ids.copy()
+        else:
+            # Mixed-mode prompt: positions covered by prompt_embeds hold a sentinel
+            # special token id that may lie outside the embedding. Zero them, matching
+            # the no-token-ids case above, so embedding gathers over these placeholder
+            # ids stay in bounds; the actual inputs come from prompt_embeds.
+            self._all_token_ids = [
+                t if is_tok else 0
+                for t, is_tok in zip(self.prompt_token_ids, self.prompt_is_token_ids)
+            ]
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
