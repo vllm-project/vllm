@@ -31,6 +31,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     KVCacheLayoutType,
+    get_num_attention_heads_from_layers,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -126,9 +127,6 @@ class CPUAttentionMetadata:
     scheduler_metadata: torch.Tensor | None
     causal: bool = True
     dynamic_causal: torch.Tensor | None = None
-    # Set only when the group's layers do not all share one query head count,
-    # in which case each layer takes the metadata matching its own count.
-    scheduler_metadata_by_num_heads: dict[int, torch.Tensor] | None = None
 
     # can be removed after deprecate sdpa
     use_sdpa_prefill: bool = False
@@ -154,13 +152,15 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
 
         parallel_config = vllm_config.parallel_config
         self.num_kv_heads = kv_cache_spec.num_kv_heads
-        self.num_heads = vllm_config.model_config.get_num_attention_heads(
-            parallel_config
-        )
+        # The scheduler metadata built here sizes a scratchpad from the query
+        # head count, so it must come from this group's layers: the model-wide
+        # count is wrong for models that vary it per layer (e.g. Laguna).
+        self.num_heads = get_num_attention_heads_from_layers(
+            vllm_config, layer_names
+        ) or vllm_config.model_config.get_num_attention_heads(parallel_config)
         self.head_dim = kv_cache_spec.head_size
         self.dtype = vllm_config.model_config.dtype
         self.window_size = self._group_sliding_window()
-        self.extra_num_heads = self._group_extra_num_heads()
         self.block_size = vllm_config.cache_config.block_size
         self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self.isa = _get_attn_isa(
@@ -194,26 +194,6 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             return -1
         window = windows.pop()
         return -1 if window is None else window
-
-    def _group_extra_num_heads(self) -> set[int]:
-        """Query head counts in this group that differ from ``self.num_heads``.
-
-        Scheduler metadata describes an attention scratchpad whose layout
-        depends on the number of query heads, and it is built once for the
-        whole group. Some models (e.g. Laguna) give individual layers their own
-        head count, which the model-wide default used here does not reflect, so
-        those layers need metadata of their own. Sharing one blob would let the
-        wider layers index past the end of the split-KV reduction scratchpad.
-        """
-        layers = get_layers_from_vllm_config(
-            self.vllm_config, Attention, self.layer_names
-        )
-        return {
-            layer.impl.num_heads
-            for layer in layers.values()
-            if isinstance(layer.impl, CPUAttentionBackendImpl)
-            and layer.impl.num_heads != self.num_heads
-        }
 
     def build(
         self,
@@ -269,31 +249,21 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             )
             block_table_tensor = encoder_block_table
 
-        def build_scheduler_metadata(num_heads: int) -> torch.Tensor:
-            return ops.cpu_attn_get_scheduler_metadata(
-                num_reqs=num_reqs,
-                num_heads=num_heads,
-                num_kv_heads=self.num_kv_heads,
-                head_dim=self.head_dim,
-                seq_lens=seq_lens,
-                dtype=self.dtype,
-                query_start_loc=query_start_loc,
-                causal=causal,
-                sliding_window_size=self.window_size,
-                isa=self.isa,
-                enable_kv_split=envs.VLLM_CPU_ATTN_SPLIT_KV,
-                dynamic_causal=dynamic_casual,
-                kv_cache_dtype=self.kv_cache_dtype,
-            )
-
-        scheduler_metadata = build_scheduler_metadata(self.num_heads)
-        scheduler_metadata_by_num_heads = None
-        if self.extra_num_heads:
-            scheduler_metadata_by_num_heads = {self.num_heads: scheduler_metadata}
-            for num_heads in self.extra_num_heads:
-                scheduler_metadata_by_num_heads[num_heads] = build_scheduler_metadata(
-                    num_heads
-                )
+        scheduler_metadata = ops.cpu_attn_get_scheduler_metadata(
+            num_reqs=num_reqs,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_dim=self.head_dim,
+            seq_lens=seq_lens,
+            dtype=self.dtype,
+            query_start_loc=query_start_loc,
+            causal=causal,
+            sliding_window_size=self.window_size,
+            isa=self.isa,
+            enable_kv_split=envs.VLLM_CPU_ATTN_SPLIT_KV,
+            dynamic_causal=dynamic_casual,
+            kv_cache_dtype=self.kv_cache_dtype,
+        )
 
         attn_metadata = CPUAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -307,7 +277,6 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             causal=causal,
             encoder_cache=encoder_cache_tensor,
             dynamic_causal=dynamic_casual,
-            scheduler_metadata_by_num_heads=scheduler_metadata_by_num_heads,
         )
 
         return attn_metadata
@@ -437,12 +406,6 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 kv_cache_dtype=self.kv_cache_dtype,
             )
 
-        scheduler_metadata = attn_metadata.scheduler_metadata
-        if attn_metadata.scheduler_metadata_by_num_heads is not None:
-            scheduler_metadata = attn_metadata.scheduler_metadata_by_num_heads[
-                self.num_heads
-            ]
-
         ops.cpu_attention_with_kv_cache(
             query=query[:num_actual_tokens],
             key_cache=key_cache,
@@ -456,7 +419,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
             sliding_window=self.sliding_window,
             block_table=attn_metadata.block_table,
             softcap=self.logits_soft_cap,
-            scheduler_metadata=scheduler_metadata,
+            scheduler_metadata=attn_metadata.scheduler_metadata,
             s_aux=self.sinks,
             dynamic_causal=attn_metadata.dynamic_causal,
             k_scale=layer._k_scale_float,
