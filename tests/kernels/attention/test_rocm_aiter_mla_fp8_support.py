@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for ROCm AITER MLA FP8 support detection."""
+"""Tests for ROCm AITER MLA FP8 support detection."""
 
 import sys
 import types
@@ -10,6 +10,12 @@ from unittest.mock import patch
 import pytest
 
 from vllm.platforms import current_platform
+
+_SKIP_UNSUPPORTED_AITER_HARDWARE = True
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import get_cdna_version
+
+    _SKIP_UNSUPPORTED_AITER_HARDWARE = get_cdna_version() <= 2
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="ROCm-specific tests"
@@ -82,6 +88,23 @@ def test_aiter_mla_fp8_support_rejects_missing_fp8_signature(monkeypatch):
     _install_fake_aiter_modules(monkeypatch, supports_fp8=False)
 
     assert _check_aiter_mla_fp8_support() is False
+
+
+@pytest.mark.skipif(
+    _SKIP_UNSUPPORTED_AITER_HARDWARE,
+    reason="Installed AITER MLA FP8 check requires CDNA 3 or newer",
+)
+def test_installed_aiter_mla_supports_fp8():
+    """Supported ROCm CI must provide AITER with MLA FP8 scaling."""
+    from vllm._aiter_ops import (
+        _check_aiter_mla_fp8_support,
+        is_aiter_found_and_supported,
+    )
+
+    assert is_aiter_found_and_supported(), (
+        "AITER must be installed on supported ROCm hardware"
+    )
+    assert _check_aiter_mla_fp8_support() is True
 
 
 @pytest.mark.parametrize(
