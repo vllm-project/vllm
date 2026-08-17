@@ -6,6 +6,8 @@ Compares chunk_kda against a naive recurrent reference (float32).
 Uses torch.rand for q/k/v to match FLA's test pattern.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -22,6 +24,12 @@ from vllm.models.kimi_k3.nvidia.kda import (
     is_flashkda_supported,
     is_fused_kda_decode_supported,
 )
+from vllm.models.kimi_k3.nvidia.model import KimiLinearForCausalLM
+from vllm.models.kimi_k3.nvidia.ops import recoverssm as recoverssm_ops
+from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
+    KDARecoverSSMCommitContext,
+    kda_recoverssm_verify,
+)
 from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     chunk_kda,
     chunk_kda_with_fused_gate,
@@ -30,9 +38,15 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     fused_recurrent_kda_fwd,
     fused_recurrent_kda_packed_decode,
 )
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
-DEVICE = "cuda"
+DEVICE = current_platform.device_type
+
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="The KDA kernels require a CUDA-alike or XPU device.",
+)
 
 # The AMD and NVIDIA copies of the KDA kernels are vendored separately and are
 # free to diverge, so the shared-semantics tests below run against both.
@@ -40,6 +54,38 @@ PACKED_DECODE_IMPLS = {
     "nvidia": fused_recurrent_kda_packed_decode,
     "amd": fused_recurrent_kda_packed_decode_amd,
 }
+
+
+def test_kda_recoverssm_config_state_layout():
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_config=SimpleNamespace(
+                linear_attn_config={
+                    "num_heads": 4,
+                    "head_dim": 32,
+                    "short_conv_kernel_size": 4,
+                }
+            ),
+        ),
+        cache_config=SimpleNamespace(
+            mamba_cache_dtype="auto",
+            use_kda_recoverssm=True,
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        speculative_config=SimpleNamespace(num_speculative_tokens=2),
+    )
+
+    assert KimiLinearForCausalLM.get_mamba_state_dtype_from_config(vllm_config) == (
+        torch.bfloat16,
+        torch.float32,
+        torch.float32,
+        torch.bfloat16,
+    )
+    assert KimiLinearForCausalLM.get_mamba_state_shape_from_config(vllm_config)[2:] == (
+        (4, 3, 32),
+        (4, 3, 64),
+    )
 
 
 @torch.inference_mode()
@@ -527,6 +573,308 @@ def test_kda_spec_decode_correctness(
         err_atol=3e-3,
     )
     assert torch.isnan(output_storage[..., H * D :]).all()
+
+
+@pytest.mark.parametrize(
+    (
+        "conv_state_dim_first",
+        "use_request_indices",
+        "lower_bound",
+        "align_mode",
+    ),
+    [
+        pytest.param(False, False, None, False, id="baseline"),
+        pytest.param(True, True, -5.0, True, id="all-features"),
+        pytest.param(False, True, -5.0, False, id="request-indexed"),
+        pytest.param(True, False, None, True, id="aligned"),
+    ],
+)
+@torch.inference_mode()
+def test_kda_recoverssm_verify_and_group_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    lower_bound: float | None,
+    use_request_indices: bool,
+    conv_state_dim_first: bool,
+    align_mode: bool,
+):
+    monkeypatch.setattr(
+        recoverssm_ops,
+        "is_conv_state_dim_first",
+        lambda: conv_state_dim_first,
+    )
+    num_layers, num_seqs, query_len = 2, 2, 8
+    num_blocks, num_heads, dim = (7 if align_mode else 3), 4, 128
+    total_tokens = num_seqs * query_len
+    torch.manual_seed(20260808)
+
+    q, k, v, raw_g = [
+        torch.randn(
+            1,
+            total_tokens,
+            num_heads,
+            dim,
+            dtype=torch.bfloat16,
+            device=DEVICE,
+        )
+        for _ in range(4)
+    ]
+    raw_beta = torch.randn(
+        1,
+        total_tokens,
+        num_heads,
+        dtype=torch.bfloat16,
+        device=DEVICE,
+    )
+    query_start_loc = torch.arange(
+        0,
+        total_tokens + 1,
+        query_len,
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+    state_indices = torch.tensor(
+        [5, 6] if align_mode else [1, 2], dtype=torch.int32, device=DEVICE
+    )
+    accepted = [2, 8]
+    if use_request_indices:
+        global_num_accepted = torch.tensor(
+            [0, accepted[0], 0, accepted[1]],
+            dtype=torch.int32,
+            device=DEVICE,
+        )
+        request_indices = torch.tensor([1, 3], dtype=torch.int32, device=DEVICE)
+    else:
+        global_num_accepted = torch.tensor(accepted, dtype=torch.int32, device=DEVICE)
+        request_indices = None
+
+    block_table = None
+    num_computed_tokens = None
+    mamba_block_size = None
+    if align_mode:
+        batch_size = 4 if use_request_indices else num_seqs
+        block_table = torch.full((batch_size, 2), -1, dtype=torch.int32, device=DEVICE)
+        rows = (
+            request_indices
+            if request_indices is not None
+            else torch.arange(num_seqs, device=DEVICE)
+        )
+        block_table[rows] = torch.tensor(
+            [[1, 5], [2, 6]],
+            dtype=torch.int32,
+            device=DEVICE,
+        )
+        num_computed_tokens = torch.zeros(batch_size, dtype=torch.int32, device=DEVICE)
+        num_computed_tokens[rows] = 4
+        mamba_block_size = 8
+
+    layers = []
+    expected_outputs = []
+    expected_states = []
+    initial_states = []
+    initial_conv_states = []
+    history_len, conv_dim = 3, 12
+    for layer_idx in range(num_layers):
+        A_log = (
+            0.2 * torch.randn(num_heads, dtype=torch.float32, device=DEVICE)
+            + layer_idx * 0.03
+        ).contiguous()
+        dt_bias = (
+            0.1 * torch.randn(num_heads, dim, dtype=torch.float32, device=DEVICE)
+        ).contiguous()
+        checkpoint = 0.01 * torch.randn(
+            num_blocks,
+            num_heads,
+            dim,
+            dim,
+            dtype=torch.float32,
+            device=DEVICE,
+        )
+        conv_shape = (
+            (num_blocks, conv_dim, history_len + query_len - 1)
+            if conv_state_dim_first
+            else (num_blocks, history_len + query_len - 1, conv_dim)
+        )
+        conv_state = torch.randn(conv_shape, dtype=torch.bfloat16, device=DEVICE)
+        correction_cache = torch.empty(
+            num_blocks,
+            num_heads,
+            query_len,
+            dim,
+            dtype=torch.float32,
+            device=DEVICE,
+        )
+        kg_cache = torch.empty(
+            num_blocks,
+            num_heads,
+            query_len,
+            2 * dim,
+            dtype=torch.bfloat16,
+            device=DEVICE,
+        )
+        layer = SimpleNamespace(
+            kv_cache=(
+                conv_state,
+                checkpoint,
+                correction_cache,
+                kg_cache,
+            ),
+            A_log=A_log,
+            dt_bias=dt_bias,
+            local_num_heads=num_heads,
+            head_dim=dim,
+            gate_lower_bound=lower_bound,
+        )
+        layers.append(layer)
+        initial_states.append(checkpoint.clone())
+        initial_conv_states.append(conv_state.clone())
+
+        actual_output = kda_recoverssm_verify(
+            q=q,
+            k=k,
+            v=v,
+            raw_g=raw_g,
+            raw_beta=raw_beta,
+            A_log=A_log,
+            dt_bias=dt_bias,
+            lower_bound=lower_bound,
+            checkpoint_state=checkpoint,
+            correction_cache=correction_cache,
+            kg_cache=kg_cache,
+            query_start_loc=query_start_loc,
+            state_indices=state_indices,
+            spec_query_len=query_len,
+        )
+
+        normalized_q = q.float() * torch.rsqrt(
+            q.float().square().sum(dim=-1, keepdim=True) + 1e-6
+        )
+        normalized_k = k.float() * torch.rsqrt(
+            k.float().square().sum(dim=-1, keepdim=True) + 1e-6
+        )
+        gate_input = raw_g.float() + dt_bias.view(1, 1, num_heads, dim)
+        if lower_bound is None:
+            gate = -A_log.exp().view(1, 1, num_heads, 1) * F.softplus(gate_input)
+        else:
+            gate = lower_bound * torch.sigmoid(
+                A_log.exp().view(1, 1, num_heads, 1) * gate_input
+            )
+        beta = raw_beta.float().sigmoid()
+
+        reference_output = []
+        committed_states = checkpoint.clone()
+        for seq_idx, commit_len in enumerate(accepted):
+            start = seq_idx * query_len
+            end = start + query_len
+            output, _ = naive_recurrent_kda(
+                normalized_q[:, start:end],
+                normalized_k[:, start:end],
+                v[:, start:end],
+                gate[:, start:end],
+                beta[:, start:end],
+                initial_state=checkpoint[state_indices[seq_idx]].transpose(-1, -2),
+            )
+            reference_output.append(output)
+            _, committed_state = naive_recurrent_kda(
+                normalized_q[:, start : start + commit_len],
+                normalized_k[:, start : start + commit_len],
+                v[:, start : start + commit_len],
+                gate[:, start : start + commit_len],
+                beta[:, start : start + commit_len],
+                initial_state=checkpoint[state_indices[seq_idx]].transpose(-1, -2),
+                output_final_state=True,
+            )
+            assert committed_state is not None
+            final_block = state_indices[seq_idx]
+            if align_mode:
+                assert block_table is not None
+                row = request_indices[seq_idx] if use_request_indices else seq_idx
+                final_block = block_table[row, (4 + commit_len) // 8]
+            committed_states[final_block] = committed_state.transpose(-1, -2)
+            if align_mode and 4 + commit_len >= 8:
+                _, boundary_state = naive_recurrent_kda(
+                    normalized_q[:, start : start + 4],
+                    normalized_k[:, start : start + 4],
+                    v[:, start : start + 4],
+                    gate[:, start : start + 4],
+                    beta[:, start : start + 4],
+                    initial_state=checkpoint[state_indices[seq_idx]].transpose(-1, -2),
+                    output_final_state=True,
+                )
+                assert boundary_state is not None
+                assert block_table is not None
+                row = request_indices[seq_idx] if use_request_indices else seq_idx
+                committed_states[block_table[row, 0]] = boundary_state.transpose(-1, -2)
+        expected_outputs.append(torch.cat(reference_output, dim=1))
+        expected_states.append(committed_states)
+        torch.testing.assert_close(checkpoint, initial_states[-1])
+        torch.testing.assert_close(
+            actual_output,
+            expected_outputs[-1],
+            atol=3e-2,
+            rtol=3e-2,
+        )
+
+    context = KDARecoverSSMCommitContext.create(
+        layers,
+        spec_query_len=query_len,
+        max_num_reqs=global_num_accepted.shape[0],
+    )
+    context.commit(
+        global_num_accepted,
+        state_indices,
+        query_start_loc,
+        request_indices=request_indices,
+        block_table=block_table,
+        num_computed_tokens=num_computed_tokens,
+        mamba_block_size=mamba_block_size,
+    )
+
+    for layer_idx, layer in enumerate(layers):
+        torch.testing.assert_close(
+            layer.kv_cache[1],
+            expected_states[layer_idx],
+            atol=3e-3,
+            rtol=3e-3,
+        )
+        for seq_idx, commit_len in enumerate(accepted):
+            block = state_indices[seq_idx]
+            if align_mode:
+                assert block_table is not None
+                row = request_indices[seq_idx] if use_request_indices else seq_idx
+                block = block_table[row, (4 + commit_len) // 8]
+            source_block = state_indices[seq_idx] if align_mode else block
+            if conv_state_dim_first:
+                actual_conv = layer.kv_cache[0][block, :, :history_len]
+                expected_conv = initial_conv_states[layer_idx][
+                    source_block,
+                    :,
+                    commit_len - 1 : commit_len - 1 + history_len,
+                ]
+            else:
+                actual_conv = layer.kv_cache[0][block, :history_len]
+                expected_conv = initial_conv_states[layer_idx][
+                    source_block,
+                    commit_len - 1 : commit_len - 1 + history_len,
+                ]
+            torch.testing.assert_close(actual_conv, expected_conv)
+            if align_mode and 4 + commit_len >= 8:
+                assert block_table is not None
+                boundary_block = block_table[row, 0]
+                if conv_state_dim_first:
+                    actual_boundary_conv = layer.kv_cache[0][
+                        boundary_block, :, :history_len
+                    ]
+                    expected_boundary_conv = initial_conv_states[layer_idx][
+                        state_indices[seq_idx], :, 3 : 3 + history_len
+                    ]
+                else:
+                    actual_boundary_conv = layer.kv_cache[0][
+                        boundary_block, :history_len
+                    ]
+                    expected_boundary_conv = initial_conv_states[layer_idx][
+                        state_indices[seq_idx], 3 : 3 + history_len
+                    ]
+                torch.testing.assert_close(actual_boundary_conv, expected_boundary_conv)
 
 
 @pytest.mark.parametrize(
