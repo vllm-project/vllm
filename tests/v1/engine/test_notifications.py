@@ -8,18 +8,28 @@ so no model is needed.
 
 import queue
 import time
+import uuid
 from types import SimpleNamespace
 
 import msgspec
 import pytest
 
-from vllm.v1.engine import EngineCoreOutputs, core
+from vllm import SamplingParams
+from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import current_platform
+from vllm.usage.usage_lib import UsageContext
+from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequest, core
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
+from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.executor.abstract import Executor
 from vllm.v1.notifications import (
     CustomNotification,
     publish_worker_notification,
     take_worker_notifications,
 )
+
+from ...utils import create_new_process_for_each_test
 
 
 @pytest.fixture(autouse=True)
@@ -276,3 +286,82 @@ def test_poll_interval_gates_the_rpc(monkeypatch):
 
     proc._maybe_gather_worker_notifications()
     assert len(gathered) == 1, "gathered again inside the interval"
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="Requires a CUDA-alike platform to run a real engine.",
+)
+@create_new_process_for_each_test("spawn")
+def test_custom_notification_reaches_frontend(monkeypatch: pytest.MonkeyPatch):
+    """Full path with a real engine: a plugin-style publish inside the worker
+    process, the interval poll gather, the msgpack wire, and delivery on the
+    frontend client, interleaved with normal generation traffic."""
+    monkeypatch.setenv("VLLM_WORKER_NOTIFICATION_POLL_INTERVAL", "0.001")
+    # The publish callable rides collective_rpc as a cloudpickle payload.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    engine_args = EngineArgs(model="Qwen/Qwen3-0.6B", enforce_eager=True)
+    vllm_config = engine_args.create_engine_config(UsageContext.UNKNOWN_CONTEXT)
+    executor_class = Executor.get_class(vllm_config)
+
+    with set_default_torch_num_threads(1):
+        client = EngineCoreClient.make_client(
+            multiprocess_mode=True,
+            asyncio_mode=False,
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            log_stats=False,
+        )
+
+    try:
+        # What a LoRA-hotswap plugin would emit after landing an adapter,
+        # so a router can steer matching requests to this worker.
+        adapter_loaded = {
+            "event": "adapter_loaded",
+            "adapter": "shakespeare-insults-v2",
+            "rank": 0,
+            "load_ms": 128,
+        }
+
+        def publish(worker):
+            from vllm.v1.notifications import (
+                CustomNotification,
+                publish_worker_notification,
+            )
+
+            publish_worker_notification(
+                CustomNotification(key="lora_hotswap", payload=adapter_loaded)
+            )
+            return "published"
+
+        assert client.collective_rpc(publish) == ["published"]
+
+        request_id = f"request-{uuid.uuid4()}"
+        client.add_request(
+            EngineCoreRequest(
+                request_id=request_id,
+                external_req_id=request_id,
+                prompt_token_ids=list(range(10, 30)),
+                mm_features=None,
+                sampling_params=SamplingParams(max_tokens=5),
+                pooling_params=None,
+                arrival_time=time.time(),
+                lora_request=None,
+                cache_salt=None,
+                data_parallel_rank=None,
+            )
+        )
+
+        notifications: list[CustomNotification] = []
+        finished = False
+        while not (notifications and finished):
+            outputs = client.get_output()
+            notifications.extend(outputs.engine_notifications or ())
+            finished |= any(out.finished for out in outputs.outputs)
+
+        assert notifications == [
+            CustomNotification(key="lora_hotswap", payload=adapter_loaded)
+        ]
+    finally:
+        client.shutdown()
