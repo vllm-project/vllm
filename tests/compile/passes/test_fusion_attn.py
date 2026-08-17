@@ -43,7 +43,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     get_kv_quant_mode,
@@ -123,7 +123,9 @@ class AttentionQuantPatternModel(torch.nn.Module):
             dtype=self.attn.kv_cache_torch_dtype,
             kv_quant_mode=get_kv_quant_mode(self.attn.kv_cache_dtype),
         )
-        layout = get_kv_cache_layout()
+        layout = resolve_kv_cache_layout(
+            [self.attn.attn_backend], self.vllm_config.cache_config
+        )
         raw_tensor = torch.zeros(
             num_blocks * spec.page_size_bytes,
             dtype=torch.int8,

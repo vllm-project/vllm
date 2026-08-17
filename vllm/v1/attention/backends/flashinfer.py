@@ -2369,7 +2369,7 @@ class FlashInferImpl(AttentionImpl):
                         window_left=self.window_left,
                         out=output[:num_decode_tokens],
                         sinks=self.sinks,
-                        kv_layout=get_kv_cache_layout(),
+                        kv_layout=get_flashinfer_layout_string(),
                         q_len_per_req=q_len_per_req,
                         mask=attn_metadata.decode.mask,
                         q_cu_seq_lens=attn_metadata.decode.q_cu_seq_lens,
