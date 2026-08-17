@@ -15,6 +15,9 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_upd
 from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
     gather_initial_states,
 )
+from vllm.models.kimi_k3.amd.ops.third_party.kda import (
+    fused_recurrent_kda_packed_decode as fused_recurrent_kda_packed_decode_amd,
+)
 from vllm.models.kimi_k3.nvidia.kda import (
     is_flashkda_supported,
     is_fused_kda_decode_supported,
@@ -27,9 +30,22 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     fused_recurrent_kda_fwd,
     fused_recurrent_kda_packed_decode,
 )
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
-DEVICE = "cuda"
+DEVICE = current_platform.device_type
+
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="The KDA kernels require a CUDA-alike or XPU device.",
+)
+
+# The AMD and NVIDIA copies of the KDA kernels are vendored separately and are
+# free to diverge, so the shared-semantics tests below run against both.
+PACKED_DECODE_IMPLS = {
+    "nvidia": fused_recurrent_kda_packed_decode,
+    "amd": fused_recurrent_kda_packed_decode_amd,
+}
 
 
 @torch.inference_mode()
@@ -273,11 +289,13 @@ def test_chunk_kda_fused_gate_cumsum_matches_unfused(
 @pytest.mark.parametrize("num_seqs", [1, 8, 32])
 @pytest.mark.parametrize("lower_bound", [-5.0, None])
 @pytest.mark.parametrize("state_indices_stride", [1, 8])
+@pytest.mark.parametrize("impl", PACKED_DECODE_IMPLS.keys())
 @torch.inference_mode()
 def test_packed_kda_decode_correctness(
     num_seqs: int,
     lower_bound: float | None,
     state_indices_stride: int,
+    impl: str,
 ):
     H, D = 8, 128
     torch.manual_seed(321)
@@ -361,7 +379,7 @@ def test_packed_kda_decode_correctness(
         use_qk_l2norm_in_kernel=True,
     )
     packed_state = state
-    packed_out, _ = fused_recurrent_kda_packed_decode(
+    packed_out, _ = PACKED_DECODE_IMPLS[impl](
         mixed_qkv=mixed_qkv,
         raw_g=raw_g,
         raw_beta=raw_beta,
