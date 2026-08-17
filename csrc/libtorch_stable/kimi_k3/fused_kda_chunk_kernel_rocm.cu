@@ -100,7 +100,7 @@ struct Params {
   float* ht;
   bf16_t* out;
   const int* cu;
-  const int* choff;
+  const int64_t* choff;
   int H;
   float scale;
   // Group-split workspaces, live only when G > 1.  Each group walks its own
@@ -1644,8 +1644,8 @@ void fused_kda_chunk(
                       cu_seqlens.scalar_type() == ScalarType::Int,
                   "cu_seqlens must be a contiguous int32 GPU tensor");
   STD_TORCH_CHECK(chunk_offsets.is_cuda() && chunk_offsets.is_contiguous() &&
-                      chunk_offsets.scalar_type() == ScalarType::Int,
-                  "chunk_offsets must be a contiguous int32 GPU tensor");
+                      chunk_offsets.scalar_type() == ScalarType::Long,
+                  "chunk_offsets must be a contiguous int64 GPU tensor");
 
   float const* h0_ptr = nullptr;
   if (initial_state.has_value()) {
@@ -1682,7 +1682,7 @@ void fused_kda_chunk(
                 ht_ptr,
                 static_cast<bf16_t*>(out.data_ptr()),
                 static_cast<const int*>(cu_seqlens.data_ptr()),
-                static_cast<const int*>(chunk_offsets.data_ptr()),
+                static_cast<const int64_t*>(chunk_offsets.data_ptr()),
                 static_cast<int>(num_heads),
                 static_cast<float>(scale)};
 

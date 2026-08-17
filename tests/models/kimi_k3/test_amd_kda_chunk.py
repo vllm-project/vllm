@@ -61,7 +61,7 @@ def _inputs(seqlens: list[int], seed: int) -> dict:
     )
 
 
-def _run(inp: dict, use_fused: bool, out: torch.Tensor | None = None):
+def _run(inp: dict, use_fused: bool, out: torch.Tensor | None = None, **kw):
     from vllm.models.kimi_k3.amd.ops.kda_prefill import chunk_kda_prefill
 
     return chunk_kda_prefill(
@@ -79,6 +79,7 @@ def _run(inp: dict, use_fused: bool, out: torch.Tensor | None = None):
         cu_seqlens=inp["cu"],
         use_fused_chunk=use_fused,
         out=out,
+        **kw,
     )
 
 
@@ -390,6 +391,36 @@ def test_chunk_group_scan_matches_serial_walk(
     o_ref, state_ref = _run(inp, use_fused=True)
     _force_groups(monkeypatch, groups)
     o_got, state_got = _run(inp, use_fused=True)
+
+    torch.testing.assert_close(o_got.float(), o_ref.float(), rtol=2e-2, atol=2e-2)
+    torch.testing.assert_close(state_got, state_ref, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("seqlens", [[320], [513, 64, 1, 1200], [64, 64, 64]])
+def test_accepts_chunk_metadata_from_the_attention_builder(
+    seqlens: list[int],
+) -> None:
+    """The layer passes precomputed chunk metadata, not None.
+
+    ``KimiK3ROCmKDAMetadataBuilder`` builds these on device to avoid a blocking
+    device->host copy. Passing ``None`` instead takes a different path that
+    builds them locally, so drive the op with the builder's own tensors.
+    """
+    _requires_kernel()
+
+    from vllm.models.kimi_k3.amd.kda_metadata import prepare_chunk_metadata_device
+    from vllm.third_party.flash_linear_attention.ops.utils import FLA_CHUNK_SIZE
+
+    inp = _inputs(seqlens, seed=17)
+    cu = inp["cu"]
+    chunk_indices, chunk_offsets = prepare_chunk_metadata_device(
+        cu, cu.cpu(), FLA_CHUNK_SIZE
+    )
+
+    o_ref, state_ref = _run(inp, use_fused=True)
+    o_got, state_got = _run(
+        inp, use_fused=True, chunk_indices=chunk_indices, chunk_offsets=chunk_offsets
+    )
 
     torch.testing.assert_close(o_got.float(), o_ref.float(), rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(state_got, state_ref, rtol=1e-3, atol=1e-3)

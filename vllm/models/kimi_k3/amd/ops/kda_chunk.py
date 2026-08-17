@@ -83,7 +83,8 @@ def fused_kda_prologue(
     # explicit per-token stride, so neither is copied here.
     _, t_total, num_heads, _ = q.shape
     if chunk_indices is None:
-        chunk_indices = prepare_chunk_indices(cu_seqlens, CHUNK_SIZE).to(torch.int32)
+        chunk_indices = prepare_chunk_indices(cu_seqlens, CHUNK_SIZE)
+    chunk_indices = chunk_indices.to(torch.int32)
     num_chunks = chunk_indices.shape[0]
     dev = q.device
 
@@ -222,7 +223,7 @@ def fused_kda_chunk(
         )
     cu_seqlens = cu_seqlens.to(torch.int32)
     if chunk_offsets is None:
-        chunk_offsets = prepare_chunk_offsets(cu_seqlens, CHUNK_SIZE).to(torch.int32)
+        chunk_offsets = prepare_chunk_offsets(cu_seqlens, CHUNK_SIZE)
 
     # The chunk walk is serial in chunks. Splitting each sequence into `groups`
     # stretches that run in parallel costs a second pass and a scan, and only
