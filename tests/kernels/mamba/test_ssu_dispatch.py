@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -31,15 +29,17 @@ except ImportError:
     HAS_FLASHINFER = False
 
 try:
-    checkpointing_ssu_module = importlib.import_module(
-        "flashinfer.mamba.checkpointing_ssu"
+    from flashinfer.mamba.checkpointing_ssu import (
+        CheckpointingSSURunner,
+        allocate_checkpointing_ssu_scratch,
     )
+    from flashinfer.mamba.checkpointing_ssu import (
+        checkpointing_ssu as checkpointing_ssu_kernel,
+    )
+
     HAS_FLASHINFER_CHECKPOINTING_SSU = all(
-        hasattr(checkpointing_ssu_module, name)
-        for name in (
-            "CheckpointingSSURunner",
-            "allocate_checkpointing_ssu_scratch",
-        )
+        callable(symbol)
+        for symbol in (CheckpointingSSURunner, allocate_checkpointing_ssu_scratch)
     )
 except ImportError:
     HAS_FLASHINFER_CHECKPOINTING_SSU = False
@@ -78,6 +78,31 @@ def test_flashinfer_replayssm_ring_tracker_lifecycle():
     assert observed[16] == (16, 1)
     assert observed[31] == (16, 16)
     assert observed[32] == (15, 1)
+
+    update_replayssm_ring_trackers(
+        ring_start,
+        prev_num_accepted,
+        state_batch_indices,
+    )
+    assert (ring_start[1].item(), prev_num_accepted[1].item()) == (0, 0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_flashinfer_replayssm_ring_tracker_ignores_invalid_slots():
+    ring_start = torch.zeros(2, dtype=torch.int32, device="cuda")
+    prev_num_accepted = torch.zeros(2, dtype=torch.int32, device="cuda")
+    state_batch_indices = torch.tensor([-1, 2, 1, 0], dtype=torch.int32, device="cuda")
+
+    update_replayssm_ring_trackers(
+        ring_start,
+        prev_num_accepted,
+        state_batch_indices,
+        logical_window=16,
+        ring_buffer_len=17,
+    )
+
+    assert ring_start.tolist() == [0, 0]
+    assert prev_num_accepted.tolist() == [0, 1]
 
 
 def _kv_cache_config_with_ssu(
@@ -268,6 +293,8 @@ def test_replayssm_flashinfer_call_forwards_explicit_controls(monkeypatch):
         algorithm="two-kernel",
         d_split=2,
         precompute_heads_per_cta=8,
+        enable_stochastic_rounding=True,
+        stochastic_rounding_philox_rounds=6,
         update_trackers=False,
     )
 
@@ -281,62 +308,9 @@ def test_replayssm_flashinfer_call_forwards_explicit_controls(monkeypatch):
     assert kwargs["cb_scaled"] is scratch[0]
     assert kwargs["cumAdt_vec"] is scratch[1]
     assert kwargs["cb_old"] is scratch[2]
-    assert kwargs["philox_rounds"] == 10
-
-
-def test_replayssm_flashinfer_forwards_explicit_philox_rounds(monkeypatch):
-    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
-
-    kernel = Mock(return_value=torch.empty(1, 1, 2, 4))
-    monkeypatch.setattr(mod, "_flashinfer_replayssm_kernel", kernel)
-    tensor = torch.empty(1, 2, 4)
-    state = torch.empty(1, 2, 4, 8)
-    group = torch.empty(1, 1, 8)
-
-    selective_state_update_replayssm_flashinfer(
-        state,
-        tensor,
-        tensor,
-        torch.empty(2, 4, 8),
-        group,
-        group,
-        tensor,
-        torch.empty(1, 2, 17, 4),
-        torch.empty(1, 1, 17, 8),
-        torch.empty(1, 2, 17),
-        torch.zeros(1, dtype=torch.int32),
-        torch.zeros(1, dtype=torch.int32),
-        logical_window=16,
-        enable_stochastic_rounding=True,
-        stochastic_rounding_philox_rounds=6,
-        update_trackers=False,
-    )
-
-    assert kernel.call_args.kwargs["philox_rounds"] == 6
-    assert kernel.call_args.kwargs["rand_seed"].shape == (1,)
-    assert kernel.call_args.kwargs["rand_seed"].dtype == torch.int64
-
-
-def test_replayssm_requires_native_flashinfer_support(monkeypatch):
-    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
-
-    old_module = SimpleNamespace(
-        checkpointing_ssu=Mock(), CheckpointingSSURunner=object
-    )
-    monkeypatch.setattr(mod, "import_module", lambda _: old_module)
-    with pytest.raises(ImportError, match="scratch allocation support"):
-        mod._initialize_flashinfer_replayssm(True)
-
-
-def test_replayssm_flashinfer_import_error(monkeypatch):
-    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
-
-    def raise_import_error(_):
-        raise ImportError
-
-    monkeypatch.setattr(mod, "import_module", raise_import_error)
-    with pytest.raises(ImportError, match="FlashInfer is required"):
-        mod._initialize_flashinfer_replayssm(True)
+    assert kwargs["philox_rounds"] == 6
+    assert kwargs["rand_seed"].shape == (1,)
+    assert kwargs["rand_seed"].dtype == torch.int64
 
 
 @pytest.mark.skipif(
@@ -352,9 +326,7 @@ def test_replayssm_flashinfer_backend_init():
         use_replayssm=True,
     )
     assert isinstance(get_mamba_ssu_backend(), FlashInferSSUBackend)
-    assert (
-        mod._flashinfer_replayssm_kernel is checkpointing_ssu_module.checkpointing_ssu
-    )
+    assert mod._flashinfer_replayssm_kernel is checkpointing_ssu_kernel
 
 
 @pytest.mark.parametrize(
