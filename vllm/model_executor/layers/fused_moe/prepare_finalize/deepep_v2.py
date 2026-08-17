@@ -243,10 +243,18 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if recv_topk_weights is not None and recv_topk_weights.ndim == 1:
             recv_topk_weights = recv_topk_weights.unsqueeze(1)
 
-        expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
-            recv_expert_num_tokens,
-            device=expert_x.device,
-        )
+        # do_cpu_sync=False (decode/cudagraph mode) skips the device->host sync,
+        # so DeepEP returns an empty per-expert count list. Leave the metadata
+        # unset rather than wrapping the empty list: a non-None metadata holding
+        # zero-element tensors suppresses the consumers' fallback to
+        # count_expert_num_tokens(recv_topk_idx) and makes them size their
+        # workspaces to zero rows.
+        expert_tokens_meta = None
+        if recv_expert_num_tokens:
+            expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
+                recv_expert_num_tokens,
+                device=expert_x.device,
+            )
 
         if not quant_config.is_block_quantized and not defer_input_quant:
             expert_x_scale = None
