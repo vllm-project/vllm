@@ -239,8 +239,12 @@ class SpeculativeConfig:
     Mutually exclusive with synthetic_acceptance_rates."""
 
     enable_adaptive_verification: bool = False
-    """Whether to adaptively size the draft-verification budget from per-request
-    confidence. Currently only supported for method="dspark"."""
+    """Whether to adaptively size speculative decoding from runtime costs.
+
+    DSpark sizes the verification budget from per-request confidence. DFlash
+    chooses one graph-aware draft length for the next batch from accepted-prefix
+    history. Only supported for methods ``"dspark"`` and ``"dflash"``.
+    """
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
@@ -1138,10 +1142,18 @@ class SpeculativeConfig:
                     )
                 )
 
-        if self.method != "dspark" and self.enable_adaptive_verification:
-            raise ValueError("Adaptive verification only supported with DSpark")
+        self._validate_adaptive_verification()
 
         return self
+
+    def _validate_adaptive_verification(self) -> None:
+        if self.enable_adaptive_verification and self.method not in (
+            "dspark",
+            "dflash",
+        ):
+            raise ValueError(
+                "Adaptive verification is only supported with DSpark and DFlash"
+            )
 
     def _validate_suffix_decoding(self):
         if not has_arctic_inference():

@@ -623,6 +623,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        return_aux_hidden_states: bool = True,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -640,7 +641,11 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             hidden_states = sequence_parallel_chunk(hidden_states)
             assert residual is None
 
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        aux_hidden_states = (
+            self._maybe_add_hidden_state([], 0, hidden_states, residual)
+            if return_aux_hidden_states
+            else []
+        )
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
@@ -650,9 +655,10 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                 hidden_states=hidden_states,
                 residual=residual,
             )
-            self._maybe_add_hidden_state(
-                aux_hidden_states, layer_idx + 1, hidden_states, residual
-            )
+            if return_aux_hidden_states:
+                self._maybe_add_hidden_state(
+                    aux_hidden_states, layer_idx + 1, hidden_states, residual
+                )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -791,10 +797,15 @@ class Qwen3NextForCausalLM(
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        return_aux_hidden_states: bool = True,
         **kwargs: object,
     ):
         hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            return_aux_hidden_states=return_aux_hidden_states,
         )
 
         return hidden_states

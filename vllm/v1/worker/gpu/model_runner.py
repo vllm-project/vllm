@@ -21,7 +21,7 @@ import functools
 import gc
 import time
 from copy import deepcopy
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import torch
@@ -46,6 +46,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.models.interfaces import SupportsEagle3
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -133,6 +134,9 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
     maybe_create_adaptive_verification_manager,
 )
+from vllm.v1.worker.gpu.spec_decode.dflash.adaptive_k import (
+    DFlashAdaptiveKManager,
+)
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
@@ -153,6 +157,14 @@ from vllm.v1.worker.utils import (
 from vllm.v1.worker.workspace import use_workspace_lane
 
 logger = init_logger(__name__)
+
+
+def _is_dflash_baseline_cudagraph(
+    selected: ModelCudaGraphManager | None,
+    baseline: ModelCudaGraphManager | None,
+) -> bool:
+    """Return whether an initialized K=0 graph manager was selected."""
+    return baseline is not None and selected is baseline
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -283,6 +295,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_prefill_lookahead=num_prefill_lookahead,
         )
         self.adaptive_verification: AdaptiveVerificationManager | None = None
+        self.dflash_adaptive_k: DFlashAdaptiveKManager | None = None
+        self.dflash_baseline_cudagraph_manager: ModelCudaGraphManager | None = None
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
@@ -548,6 +562,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_bonus_tokens=self.model_state.num_new_sampled_tokens_per_step,
             max_total_logits=get_max_chunk_logits(self.vocab_size),
         )
+        if getattr(self.speculator, "enable_adaptive_k", False):
+            self.dflash_adaptive_k = DFlashAdaptiveKManager(
+                self.req_states,
+                self.input_buffers.query_start_loc,
+                self.model_state.num_new_sampled_tokens_per_step,
+                get_max_chunk_logits(self.vocab_size),
+            )
 
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
@@ -571,7 +592,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
         )
-        if self.adaptive_verification is not None:
+        if self.adaptive_verification is not None or self.dflash_adaptive_k is not None:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
             attn_cg_support.min_cg_support,
@@ -590,6 +611,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             lora_capture_cases=self.lora_capture_cases,
             varlen_decode=self.adaptive_verification is not None,
         )
+        if self.dflash_adaptive_k is not None:
+            self.dflash_baseline_cudagraph_manager = ModelCudaGraphManager(
+                self.vllm_config,
+                self.device,
+                CUDAGraphMode.FULL,
+                decode_query_len=1,
+                lora_capture_cases=self.lora_capture_cases,
+                decode_query_lens=[1],
+            )
         check_attention_cp_compatibility(self.vllm_config)
         if isinstance(self.speculator, DraftModelSpeculator):
             # HACK(woosuk)
@@ -636,6 +666,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         *args,
         skip_attn: bool = False,
         uniform_decode: bool = False,
+        uniform_decode_query_len: int | None = None,
+        profile_verify: bool = False,
         context_len: int = 0,
         skip_eplb: bool = False,
         is_profile: bool = False,
@@ -651,14 +683,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Create a dummy scheduler output.
         num_reqs = min(num_tokens, self.max_num_reqs)
-        if uniform_decode:
+        if uniform_decode or uniform_decode_query_len is not None:
             # HACK(lucas): for now since the worker is shared between MRV1 and MRV2,
             # and for spec-decode with MTP we want to make sure the dummy runs use
             # 1+num_speculative_tokens we use max here, this will likely be eventually
             # changed in the worker: https://github.com/vllm-project/vllm/pull/35243
-            num_tokens = max(num_tokens, self.decode_query_len)
-            num_reqs = num_tokens // self.decode_query_len
-            assert num_tokens % self.decode_query_len == 0
+            query_len = uniform_decode_query_len or self.decode_query_len
+            num_tokens = max(num_tokens, query_len)
+            num_reqs = num_tokens // query_len
+            assert num_tokens % query_len == 0
         # Distribute the remainder evenly so no dummy request exceeds
         # ceil(num_tokens / num_reqs) <= max_model_len tokens.
         num_tokens_per_request = [
@@ -714,6 +747,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         aux_hidden_states = self.execute_model_state.aux_hidden_states
         self.execute_model_state = None
 
+        if profile_verify:
+            assert hidden_states is not None
+            self._dummy_sampler_run(hidden_states[input_batch.logits_indices])
         self.step_timing.forward_end()
 
         # dummy run the eagle speculator's propose to ensure DP/EP sync.
@@ -855,7 +891,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             and self.model_state.encoder_runner.has_cudagraph()
         )
         capture_decoder = self.cudagraph_manager.needs_capture()
-        if not capture_encoder and not capture_decoder:
+        capture_dflash_baseline = (
+            self.dflash_baseline_cudagraph_manager is not None
+            and self.dflash_baseline_cudagraph_manager.needs_capture()
+        )
+        if not capture_encoder and not capture_decoder and not capture_dflash_baseline:
             logger.warning(
                 "Skipping encoder and decoder CUDA graph capture. To enable "
                 "encoder capture, ensure `cudagraph_mm_encoder` is enabled; "
@@ -874,6 +914,37 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if capture_encoder:
                 self.model_state.encoder_runner.capture()
 
+            # Capture the ordinary decode specialization before the DFlash
+            # target specialization. torch.compile guards the auxiliary-layer
+            # tuple, so doing this second would replay the already-specialized
+            # target output shape instead of compiling a no-auxiliary path.
+            if capture_dflash_baseline:
+                assert self.dflash_baseline_cudagraph_manager is not None
+                assert self.speculative_config is not None
+                dflash_target = cast(SupportsEagle3, self.model)
+                dflash_target.set_aux_hidden_state_layers(())
+                try:
+                    self.dflash_baseline_cudagraph_manager.capture(
+                        self.model,
+                        self.model_state,
+                        self.input_buffers,
+                        self.intermediate_tensors,
+                        self.block_tables,
+                        self.attn_groups,
+                        self.kv_cache_config,
+                        has_lora=self.lora_config is not None,
+                        use_aux_hidden_state_outputs=False,
+                        discard_aux_hidden_state_outputs=True,
+                        lora_capture_hook=create_lora_capture_hook(
+                            self.lora_config, self
+                        ),
+                        progress_bar_desc="Capturing DFlash K=0 CUDA graphs",
+                    )
+                finally:
+                    set_eagle3_aux_hidden_state_layers(
+                        self.model, self.speculative_config
+                    )
+
             if capture_decoder:
                 self.cudagraph_manager.capture(
                     self.model,
@@ -890,13 +961,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if self.speculator is not None:
                     with use_workspace_lane(self._draft_workspace_lane):
                         self.speculator.capture()
-                if self.adaptive_verification is not None:
+                cost_manager = self.adaptive_verification or self.dflash_adaptive_k
+                if cost_manager is not None:
                     with self.step_timing.collect() as timings:
-                        for batch in self.adaptive_verification.batches_to_profile(
+                        for batch in cost_manager.batches_to_profile(
                             self.cudagraph_manager.captured_token_counts()
                         ):
                             self._dummy_run(**batch)
-                    self.adaptive_verification.set_initial_cost_curves(timings)
+                    cost_manager.set_initial_cost_curves(timings)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
@@ -1080,10 +1152,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ]
         is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
 
-        if self.adaptive_verification is not None and draft_tokens:
-            num_toks = self.adaptive_verification.get_num_tokens(
+        verification_manager = self.adaptive_verification or self.dflash_adaptive_k
+        if verification_manager is not None and draft_tokens:
+            num_toks = verification_manager.get_num_tokens(
                 num_tokens_per_req, draft_tokens
             )
+            if isinstance(verification_manager, DFlashAdaptiveKManager):
+                max_query_len = verification_manager.batch_query_len
 
         batch_state = BatchReqState(
             req_ids=req_ids,
@@ -1152,7 +1227,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
         adaptive_verification = (
-            self.adaptive_verification if num_draft_tokens_per_req is not None else None
+            self.adaptive_verification or self.dflash_adaptive_k
+            if num_draft_tokens_per_req is not None
+            else None
         )
         num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
         if adaptive_verification is not None:
@@ -1166,6 +1243,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     cu_num_logits_np,
                 )
             )
+            if (
+                isinstance(adaptive_verification, DFlashAdaptiveKManager)
+                and adaptive_verification.consume_unmodified_batch()
+            ):
+                adaptive_verification = None
+            else:
+                (
+                    num_scheduled_tokens_upper_bound,
+                    num_draft_tokens_per_req,
+                ) = _get_adaptive_batch_metadata(
+                    adaptive_verification,
+                    num_scheduled_tokens_upper_bound,
+                    num_draft_tokens_per_req,
+                    num_scheduled_tokens_np,
+                )
 
         # Get query_start_loc.
         # num_reqs_padded is None for PIECEWISE graphs (no request padding needed)
@@ -1395,6 +1487,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
         )
 
+    def _select_dflash_draft_k(
+        self,
+        input_batch: InputBatch,
+        num_sampled: torch.Tensor,
+    ) -> int:
+        manager = self.dflash_adaptive_k
+        if manager is None:
+            return self.num_speculative_steps
+        num_sampling_reqs = int(
+            np.count_nonzero(
+                input_batch.num_computed_tokens_np + input_batch.num_scheduled_tokens
+                >= input_batch.prefill_len_np
+            )
+        )
+        manager.record_outcomes(num_sampled, input_batch)
+        return manager.proposal_k(num_sampling_reqs)
+
     def _merge_ec_connector_no_forward(
         self, scheduler_output: SchedulerOutput, output: ModelRunnerOutput
     ) -> ModelRunnerOutput:
@@ -1453,8 +1562,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # cross-attention cache with dynamic encoder outputs.
             skip_compiled = True
 
+        cudagraph_manager = self.cudagraph_manager
+        if (
+            self.dflash_baseline_cudagraph_manager is not None
+            and self.dflash_adaptive_k is not None
+            and self.dflash_adaptive_k.current_k == 0
+            and batch_req_state is not None
+            and not batch_req_state.has_prefill
+            and uniform_tok_count == 1
+        ):
+            cudagraph_manager = self.dflash_baseline_cudagraph_manager
+        use_dflash_baseline = _is_dflash_baseline_cudagraph(
+            cudagraph_manager, self.dflash_baseline_cudagraph_manager
+        )
+
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
-            self.cudagraph_manager,
+            cudagraph_manager,
             num_reqs,
             num_toks,
             uniform_tok_count,
@@ -1599,6 +1722,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # values above.
             **self.model_state.prepare_inputs(input_batch, self.req_states),
         }
+        if use_dflash_baseline:
+            model_inputs["return_aux_hidden_states"] = False
         if not self.is_first_pp_rank:
             # Update for non-first PP ranks.
             model_inputs["input_ids"] = None
@@ -1630,9 +1755,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Use explicit cudagraph replay for FULL mode.
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
-            assert self.cudagraph_manager is not None
+            assert cudagraph_manager is not None
             self.kv_connector.pre_forward(scheduler_output)
-            model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
+            model_output = cudagraph_manager.run_fullgraph(batch_desc)
         else:
             # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(
@@ -1666,10 +1791,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     model_output = self.model(**model_inputs)
 
         if self.is_last_pp_rank:
-            if self.use_aux_hidden_state_outputs:
+            use_aux_hidden_state_outputs = (
+                self.use_aux_hidden_state_outputs and not use_dflash_baseline
+            )
+            if use_aux_hidden_state_outputs:
                 assert isinstance(model_output, tuple)
                 hidden_states, aux_hidden_states = model_output
             else:
+                if isinstance(model_output, tuple):
+                    model_output, _ = model_output
                 assert isinstance(model_output, torch.Tensor)
                 hidden_states = model_output
                 aux_hidden_states = None
@@ -1814,43 +1944,49 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
+        published_draft_tokens = self.req_states.draft_tokens[input_batch.idx_mapping]
         if self.speculator is not None:
             assert self.sampler is not None
-            # Let the target override the hidden state fed to the drafter
-            # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
-            # target returns a persistent buffer sized at max_num_batched_tokens;
-            # slice to the active token count that propose() expects.
-            spec_hidden_states = hidden_states
-            if hasattr(self.model, "get_mtp_target_hidden_states"):
-                pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
-            with use_workspace_lane(self._draft_workspace_lane):
-                draft_tokens = self.speculator.propose(
-                    input_batch,
-                    attn_metadata,
-                    slot_mappings_by_layer,
-                    spec_hidden_states,
-                    aux_hidden_states,
-                    num_sampled,
-                    num_rejected,
-                    self.req_states.last_sampled_tokens,
-                    self.req_states.next_prefill_tokens,
-                    self.sampler.sampling_states.temperature.gpu,
-                    self.sampler.sampling_states.seeds.gpu,
-                    mm_inputs=mm_inputs,
-                )
-            self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-            if self.adaptive_verification is not None:
-                self.adaptive_verification.record_confidences(
-                    self.speculator.draft_token_confidence_probs, input_batch
-                )
+            draft_k = self._select_dflash_draft_k(input_batch, num_sampled)
+            if draft_k > 0:
+                # Let the target override the hidden state fed to the drafter
+                # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
+                # target returns a persistent buffer sized at max_num_batched_tokens;
+                # slice to the active token count that propose() expects.
+                spec_hidden_states = hidden_states
+                if hasattr(self.model, "get_mtp_target_hidden_states"):
+                    pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
+                    spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]
+                with use_workspace_lane(self._draft_workspace_lane):
+                    draft_tokens = self.speculator.propose(
+                        input_batch,
+                        attn_metadata,
+                        slot_mappings_by_layer,
+                        spec_hidden_states,
+                        aux_hidden_states,
+                        num_sampled,
+                        num_rejected,
+                        self.req_states.last_sampled_tokens,
+                        self.req_states.next_prefill_tokens,
+                        self.sampler.sampling_states.temperature.gpu,
+                        self.sampler.sampling_states.seeds.gpu,
+                        mm_inputs=mm_inputs,
+                    )
+                self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+                published_draft_tokens = draft_tokens[:, :draft_k]
+                if self.adaptive_verification is not None:
+                    self.adaptive_verification.record_confidences(
+                        self.speculator.draft_token_confidence_probs, input_batch
+                    )
+            else:
+                published_draft_tokens = published_draft_tokens[:, :0]
 
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
             # not have a speculator (i.e. self.speculator is None)
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
-                self.req_states.draft_tokens[input_batch.idx_mapping],
+                published_draft_tokens,
             )
 
         # Post-step KV connector related operations.
@@ -1920,6 +2056,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
         self.cudagraph_manager = None
+        self.dflash_baseline_cudagraph_manager = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
         if hasattr(self, "attn_groups"):
@@ -2001,6 +2138,19 @@ class BatchReqState(NamedTuple):
     num_computed_prefill_tokens_np: np.ndarray  # [num_reqs]
     is_prefilling_np: np.ndarray  # [num_reqs]
     has_prefill: bool
+
+
+def _get_adaptive_batch_metadata(
+    manager: AdaptiveVerificationManager,
+    scheduled_tokens: np.ndarray,
+    scheduled_drafts: np.ndarray,
+    compacted_tokens: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Expose DFlash's exact uniform K to hybrid model metadata."""
+    if isinstance(manager, DFlashAdaptiveKManager):
+        non_draft_tokens = scheduled_tokens - scheduled_drafts
+        return compacted_tokens, compacted_tokens - non_draft_tokens
+    return scheduled_tokens, scheduled_drafts
 
 
 def sort_batch_req_ids(

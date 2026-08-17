@@ -103,7 +103,6 @@ def test_dynamic_sd_full_cudagraph_covers_all_uniform_decode_shapes(monkeypatch)
         "get_pp_group",
         lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
     )
-
     vllm_config = _create_vllm_config_for_dsd(
         max_num_seqs=max_num_seqs,
         max_spec_tokens=max_spec_tokens,
@@ -149,6 +148,57 @@ def test_dynamic_sd_full_cudagraph_covers_all_uniform_decode_shapes(monkeypatch)
             assert desc.num_tokens == num_tokens
             assert desc.num_reqs == num_reqs
             assert desc.num_active_loras == 0
+
+
+def test_dflash_adaptive_k_captures_compact_uniform_query_lengths(monkeypatch):
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    monkeypatch.setattr(
+        gpu_cudagraph_utils.current_platform,
+        "get_global_graph_pool",
+        lambda: None,
+    )
+    max_num_seqs = 8
+    max_spec_tokens = 3
+    vllm_config = _create_vllm_config_for_dsd(
+        max_num_seqs=max_num_seqs,
+        max_spec_tokens=max_spec_tokens,
+        use_dynamic_sd=False,
+    )
+    speculative_config = vllm_config.speculative_config
+    speculative_config.method = "dflash"
+    speculative_config.enable_adaptive_verification = True
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_len=max_spec_tokens + 1,
+    )
+    manager._graphs_captured = True
+
+    for query_len in (1, 2, 4):
+        desc = manager.dispatch(
+            num_reqs=4,
+            num_tokens=4 * query_len,
+            uniform_token_count=query_len,
+            num_active_loras=0,
+        )
+        assert desc.cg_mode == CUDAGraphMode.FULL
+        assert desc.uniform_token_count == query_len
+
+    baseline_manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL,
+        decode_query_len=1,
+        decode_query_lens=[1],
+    )
+    baseline_manager._graphs_captured = True
+    assert baseline_manager.dispatch(4, 4, 1, 0).cg_mode == CUDAGraphMode.FULL
+    assert baseline_manager.decode_query_lens == [1]
 
 
 def test_dynamic_sd_non_uniform_batch_falls_back_to_piecewise(monkeypatch):

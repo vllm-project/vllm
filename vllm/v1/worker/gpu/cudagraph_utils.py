@@ -108,6 +108,7 @@ class CudaGraphManager:
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        decode_query_lens: list[int] | None = None,
     ):
         self.vllm_config = vllm_config
         self.device = device
@@ -116,6 +117,7 @@ class CudaGraphManager:
         assert self.compilation_config is not None
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
+        self.decode_query_lens = decode_query_lens
         self.varlen_decode = varlen_decode
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
@@ -194,7 +196,9 @@ class CudaGraphManager:
         # draft tokens. The scheduler might use a smaller number so we need
         # to capture graphs for all possible values during decode.
         speculative_config = self.vllm_config.speculative_config
-        if (
+        if self.decode_query_lens is not None:
+            decode_query_lens = self.decode_query_lens
+        elif (
             speculative_config
             and speculative_config.uses_dynamic_speculative_decoding()
         ):
@@ -212,6 +216,18 @@ class CudaGraphManager:
             # Each entry is (range_start, range_end, num_speculative_tokens).
             decode_query_lens = [
                 x[2] + num_new_sampled_tokens_per_step for x in num_spec_per_batch_size
+            ]
+        elif (
+            speculative_config
+            and speculative_config.method == "dflash"
+            and speculative_config.enable_adaptive_verification
+        ):
+            from vllm.v1.worker.gpu.spec_decode.dflash.adaptive_k import (
+                get_dflash_k_candidates,
+            )
+
+            decode_query_lens = [
+                k + 1 for k in get_dflash_k_candidates(self.decode_query_len - 1)
             ]
         else:
             decode_query_lens = [self.decode_query_len]
@@ -449,6 +465,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
+        decode_query_lens: list[int] | None = None,
     ):
         super().__init__(
             vllm_config,
@@ -457,6 +474,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
             varlen_decode=varlen_decode,
+            decode_query_lens=decode_query_lens,
         )
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []
@@ -474,6 +492,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         kv_cache_config: KVCacheConfig,
         has_lora: bool = False,
         use_aux_hidden_state_outputs: bool = False,
+        discard_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
@@ -504,6 +523,8 @@ class ModelCudaGraphManager(CudaGraphManager):
                 "positions": input_buffers.positions[:num_tokens],
                 **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
             }
+            if discard_aux_hidden_state_outputs:
+                model_inputs["return_aux_hidden_states"] = False
             if not self.is_first_pp_rank:
                 # Update for non-first PP ranks.
                 model_inputs["input_ids"] = None
@@ -560,6 +581,11 @@ class ModelCudaGraphManager(CudaGraphManager):
                     # Last PP rank (common case).
                     if self.use_aux_hidden_state_outputs:
                         hidden_states, aux_hidden_states = model_output
+                    elif discard_aux_hidden_state_outputs and isinstance(
+                        model_output, tuple
+                    ):
+                        hidden_states, _ = model_output
+                        aux_hidden_states = []
                     else:
                         hidden_states = model_output
                         aux_hidden_states = []

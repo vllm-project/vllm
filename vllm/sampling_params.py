@@ -917,6 +917,7 @@ class SamplingParams(
         # the logprobs D2H, so it could ride along on that copy.
         if (
             speculative_config.enable_adaptive_verification
+            and speculative_config.method == "dspark"
             and self.num_logprobs is not None
         ):
             raise ValueError(

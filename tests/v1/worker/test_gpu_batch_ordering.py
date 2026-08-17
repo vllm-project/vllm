@@ -21,7 +21,15 @@ import torch
 
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner, sort_batch_req_ids
+from vllm.v1.worker.gpu.model_runner import (
+    GPUModelRunner,
+    _get_adaptive_batch_metadata,
+    _is_dflash_baseline_cudagraph,
+    sort_batch_req_ids,
+)
+from vllm.v1.worker.gpu.spec_decode.dflash.adaptive_k import (
+    DFlashAdaptiveKManager,
+)
 from vllm.v1.worker.utils import get_uniform_decode_token_count
 
 
@@ -114,6 +122,72 @@ def test_adaptive_verification_sizes_only_batches_with_drafts():
     assert uniform_tok_count is None
 
 
+def test_dflash_manager_trims_without_using_dspark_varlen_slot():
+    decodes = {"d0": (16, 16), "d1": (16, 16)}
+    runner = _make_runner(decodes, decode_query_len=16)
+    manager = SimpleNamespace(
+        get_num_tokens=lambda _num_tokens_per_req, _draft_tokens: 2
+    )
+    runner.adaptive_verification = None
+    runner.dflash_adaptive_k = manager
+    scheduler_output = SimpleNamespace(
+        num_scheduled_tokens={req_id: 16 for req_id in decodes},
+        total_num_scheduled_tokens=32,
+        scheduled_spec_decode_tokens={req_id: list(range(15)) for req_id in decodes},
+    )
+
+    state, uniform_tok_count = runner.gather_batch_req_state(scheduler_output, False)
+
+    assert state is not None
+    assert state.num_tokens == 2
+    assert uniform_tok_count is None
+
+
+def test_dflash_adaptive_k_uses_sampling_batch_and_records_outcomes():
+    calls: dict[str, Any] = {}
+
+    def proposal_k(batch_size: int) -> int:
+        calls["batch_size"] = batch_size
+        return 0
+
+    manager = SimpleNamespace(
+        proposal_k=proposal_k,
+        record_outcomes=lambda num_sampled, input_batch: calls.update(
+            num_sampled=num_sampled, input_batch=input_batch
+        ),
+    )
+    runner: Any = GPUModelRunner.__new__(GPUModelRunner)
+    runner.num_speculative_steps = 15
+    runner.dflash_adaptive_k = manager
+    input_batch = SimpleNamespace(
+        num_computed_tokens_np=np.array([16, 8], dtype=np.int32),
+        num_scheduled_tokens=np.array([1, 8], dtype=np.int32),
+        prefill_len_np=np.array([16, 40], dtype=np.int32),
+    )
+    num_sampled = torch.tensor([1, 0], dtype=torch.int32)
+
+    assert runner._select_dflash_draft_k(input_batch, num_sampled) == 0
+    assert calls == {
+        "batch_size": 1,
+        "num_sampled": num_sampled,
+        "input_batch": input_batch,
+    }
+
+
+def test_dflash_compacted_lengths_reach_hybrid_model_metadata():
+    manager = DFlashAdaptiveKManager.__new__(DFlashAdaptiveKManager)
+    scheduled = np.array([16, 16], dtype=np.int32)
+    drafts = np.array([15, 15], dtype=np.int32)
+    compacted = np.array([1, 1], dtype=np.int32)
+
+    metadata_scheduled, metadata_drafts = _get_adaptive_batch_metadata(
+        manager, scheduled, drafts, compacted
+    )
+
+    np.testing.assert_array_equal(metadata_scheduled, [1, 1])
+    np.testing.assert_array_equal(metadata_drafts, [0, 0])
+
+
 def test_prompt_chunk_of_decode_query_len_is_not_uniform_decode():
     # Two prompt chunks whose query length coincides with the K+1 spec-decode
     # query length must reject the batch (issue #49918).
@@ -140,6 +214,14 @@ def test_dummy_batches_stay_uniform_decode():
     )
     assert state is None
     assert uniform_tok_count == 8
+
+
+def test_uncaptured_dflash_baseline_does_not_change_profile_output_shape():
+    # Before KV-cache initialization both managers are None. Identity alone
+    # must not classify the ordinary profile run as the K=0 baseline graph.
+    assert not _is_dflash_baseline_cudagraph(None, None)
+    baseline = object()
+    assert _is_dflash_baseline_cudagraph(baseline, baseline)
 
 
 def test_sort_batch_req_ids_no_spec():

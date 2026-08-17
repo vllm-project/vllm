@@ -4,7 +4,11 @@ Speculative decoding buys fewer decode steps with more compute. At batch size 1 
 
 That matters because per-position acceptance decays fast. While the GPU is memory-bound that slot is effectively free and worth the gamble; once it saturates the gamble has a real throughput cost. The crossover moves with load and with workload-dependent acceptance rates, so no static `num_speculative_tokens` is right across concurrencies.
 
-Adaptive verification decides per step how much of the draft to verify instead. Every (request, position) draft slot is scored by its *survival probability*, the running product of that request's per-position confidences, and the highest-scoring slots are admitted until a global budget is spent. Slots compete across requests: position 5 of a confident request can outrank position 1 of a doubtful one, so one request keeps its full block while another could be trimmed after a token or two.
+Adaptive verification decides per step how much of the draft to verify instead.
+DSpark scores every (request, position) draft slot by its *survival
+probability*, the running product of that request's per-position confidences,
+and admits the highest-scoring slots until a global budget is spent. DFlash
+uses its observed accepted-prefix survival to choose one K for the next batch.
 
 The budget itself comes from a cost model profiled at startup. vLLM measures what a step costs at each shape, then picks the token count that maximizes expected accepted tokens per second.
 
@@ -12,7 +16,13 @@ The practical effect is that one configuration holds up across the whole load ra
 
 ## Support
 
-Adaptive verification needs per-position acceptance estimates, so today it is only supported for DSpark with a **confidence head**.
+Adaptive verification supports:
+
+- DSpark checkpoints with a **confidence head**. It trims the current
+  verification batch per request.
+- DFlash checkpoints. It chooses a uniform K from batch size, accepted-prefix
+  history, and the profiled draft/verify costs. K=0 skips the DFlash forward and
+  runs ordinary target decoding for the next step.
 
 ## Usage
 
@@ -32,11 +42,23 @@ vllm serve deepseek-ai/DeepSeek-V4-Flash-DSpark \
 
 Set `enable_adaptive_verification: false` to verify the full block for every request.
 
+For DFlash, use the same flag with `"method": "dflash"`. The configured
+`num_speculative_tokens` remains the maximum K. DFlash drafts all mask positions
+in one parallel forward, so lowering a nonzero K reduces target verification
+work but not draft-model work; K=0 is the only choice that skips the drafter.
+The runtime considers compact graph buckets (K=0, 1, 3, 7, ... and the
+configured maximum) rather than capturing a graph for every integer K.
+
 ## Requirements and limitations
 
-- The attention backend must tolerate device-decided query lengths, since the CPU lengths only bound them from above. Backends that plan off the CPU lengths are excluded by the attention selector, and rejected at startup for models that hard-wire their backend.
-- Full cudagraphs are required: step costs are profiled from captured graphs, so `--enforce-eager` is rejected at startup.
-- Not supported with LoRA (the per-token LoRA mapping is built from CPU-side boundaries), pipeline parallelism (cost curves and confidences exist only on the last rank), or output logprobs (to be fixed).
+- DSpark requires an attention backend that tolerates device-decided query
+  lengths. Backends that plan off CPU lengths are rejected at startup.
+- Full cudagraphs are required: step costs are profiled from captured graphs,
+  so `--enforce-eager` is rejected at startup.
+- Adaptive verification is not supported with LoRA or pipeline parallelism.
+  DSpark additionally does not support output logprobs. DFlash automatic K
+  does not compact the current verification logits and supports output
+  logprobs.
 
 ## Tuning the cost profile
 

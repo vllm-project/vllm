@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
@@ -49,3 +50,22 @@ def test_diffusion_accepts_top_k_top_p():
 def test_non_diffusion_models_unaffected():
     params = SamplingParams(temperature=0.7, top_k=10, seed=42)
     params.verify(MockModelConfig(), None, None, None)
+
+
+def test_dflash_adaptive_k_allows_output_logprobs():
+    params = SamplingParams(logprobs=1)
+    speculative_config = SimpleNamespace(
+        method="dflash", enable_adaptive_verification=True
+    )
+
+    params._validate_spec_decode(speculative_config)
+
+
+def test_dspark_adaptive_verification_rejects_output_logprobs():
+    params = SamplingParams(logprobs=1)
+    speculative_config = SimpleNamespace(
+        method="dspark", enable_adaptive_verification=True
+    )
+
+    with pytest.raises(ValueError, match="DSpark confidence-based"):
+        params._validate_spec_decode(speculative_config)
