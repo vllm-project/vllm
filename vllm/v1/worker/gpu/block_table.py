@@ -162,7 +162,9 @@ class BlockTables:
         )
         return tuple(bt[:num_reqs_padded] for bt in out)
 
-    def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
+    def get_dummy_block_tables(
+        self, num_reqs: int, first_block_id: int | None = None
+    ) -> tuple[torch.Tensor, ...]:
         # NOTE(woosuk): The output may be used for CUDA graph capture.
         # Therefore, this method must return the persistent tensor
         # with the same memory address as that used during the model's forward pass,
@@ -171,9 +173,19 @@ class BlockTables:
         # Zero the rows so dummy runs write mamba state to the reserved null
         # block rather than through the previous real step's (stale) block
         # ids, which may point at blocks since freed and reallocated.
-        return tuple(
+        result = tuple(
             block_table[:num_reqs].zero_() for block_table in self.input_block_tables
         )
+        if first_block_id is not None:
+            block_ids = torch.arange(
+                first_block_id,
+                first_block_id + num_reqs,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            for block_table in result:
+                block_table[:, 0].copy_(block_ids)
+        return result
 
     def compute_slot_mappings(
         self,

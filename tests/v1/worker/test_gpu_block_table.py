@@ -193,3 +193,20 @@ def test_get_dummy_block_tables_returns_zeroed_rows():
     assert (dummy[0] == 0).all()
     # CUDA graph invariant: same persistent tensor, not a fresh allocation.
     assert dummy[0].data_ptr() == block_tables.input_block_tables[0].data_ptr()
+
+
+def test_get_dummy_block_tables_can_assign_non_null_state_slots():
+    block_tables = BlockTables(
+        block_sizes=[16],
+        max_num_reqs=4,
+        max_num_batched_tokens=64,
+        max_num_blocks_per_group=[8],
+        device=torch.device("cuda"),
+        kernel_block_sizes=[16],
+    )
+
+    (dummy,) = block_tables.get_dummy_block_tables(3, first_block_id=1)
+
+    assert dummy[:, 0].tolist() == [1, 2, 3]
+    assert torch.count_nonzero(dummy[:, 1:]) == 0
+    assert dummy.data_ptr() == block_tables.input_block_tables[0].data_ptr()

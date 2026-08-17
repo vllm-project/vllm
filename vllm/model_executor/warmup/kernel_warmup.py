@@ -246,24 +246,39 @@ def _flashinfer_replayssm_autotune_kwargs(
         and config.mamba_config.backend == MambaBackendEnum.FLASHINFER
     ):
         return None
-    query_len = runner.uniform_decode_query_len
+    use_v2_model_runner = config.use_v2_model_runner
+    v2_runner: Any = runner
+    query_len = (
+        v2_runner.decode_query_len
+        if use_v2_model_runner
+        else runner.uniform_decode_query_len
+    )
     max_num_reqs = min(
         runner.scheduler_config.max_num_seqs,
         runner.max_num_tokens // query_len,
+        runner.kv_cache_config.num_blocks - 1,
     )
-    if max_num_reqs == 0:
-        raise RuntimeError(
-            "FlashInfer ReplaySSM autotuning needs room for one decode request."
+    if max_num_reqs <= 0:
+        logger.warning_once(
+            "Skipping FlashInfer ReplaySSM autotuning because no non-padding "
+            "state slot is available."
         )
+        return None
 
-    return max_num_reqs, {
+    decode_kwargs = {
         **max_token_prefill_kwargs,
         "num_tokens": max_num_reqs * query_len,
         "uniform_decode": True,
-        "allow_microbatching": False,
-        "force_attention": True,
-        "profile_seq_lens": query_len + 1,
     }
+    if use_v2_model_runner:
+        decode_kwargs["dummy_first_block_id"] = 1
+    else:
+        decode_kwargs.update(
+            allow_microbatching=False,
+            force_attention=True,
+            profile_seq_lens=query_len + 1,
+        )
+    return max_num_reqs, decode_kwargs
 
 
 @contextmanager
@@ -271,45 +286,82 @@ def _temporary_replayssm_autotune_slots(
     runner: "GPUModelRunner", max_num_reqs: int
 ) -> Iterator[None]:
     from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+    from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+        reset_replayssm_ring_trackers,
+    )
 
     reset_tensors: list[torch.Tensor] = []
     seen: set[int] = set()
+    tracker_pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
+    seen_tracker_pairs: set[tuple[int, int]] = set()
     for module in runner.get_model().modules():
         if not isinstance(module, MambaMixer2) or not module.use_replayssm:
             continue
-        tensors = (
-            *module.kv_cache,
+        tracker_pair = (
             module._replayssm_ring_start,
             module._replayssm_prev_num_accepted,
+        )
+        tracker_ptrs = (tracker_pair[0].data_ptr(), tracker_pair[1].data_ptr())
+        if tracker_ptrs not in seen_tracker_pairs:
+            tracker_pairs.append(tracker_pair)
+            seen_tracker_pairs.add(tracker_ptrs)
+        tensors = (
+            *module.kv_cache,
+            *tracker_pair,
         )
         for tensor in tensors:
             if not tensor.numel():
                 continue
-            if tensor.shape[0] <= max_num_reqs:
-                raise RuntimeError(
-                    "FlashInfer ReplaySSM autotuning needs max_num_reqs + 1 "
-                    "state slots."
-                )
             data_ptr = tensor.data_ptr()
             if data_ptr not in seen:
                 reset_tensors.append(tensor)
                 seen.add(data_ptr)
 
-    block_tables = runner.input_batch.block_table.block_tables
-    saved_block_ids = tuple(
-        block_table.block_table.np[:max_num_reqs, 0].copy()
-        for block_table in block_tables
-    )
-    dummy_block_ids = range(1, max_num_reqs + 1)
-    for block_table in block_tables:
-        block_table.block_table.np[:max_num_reqs, 0] = dummy_block_ids
+    use_v2_model_runner = runner.vllm_config.use_v2_model_runner
+    v2_runner: Any = runner
+    block_tables = saved_block_ids = None
+    if not use_v2_model_runner:
+        block_tables = runner.input_batch.block_table.block_tables
+        saved_block_ids = tuple(
+            block_table.block_table.np[:max_num_reqs, 0].copy()
+            for block_table in block_tables
+        )
+        dummy_block_ids = range(1, max_num_reqs + 1)
+        for block_table in block_tables:
+            block_table.block_table.np[:max_num_reqs, 0] = dummy_block_ids
+
+    if tracker_pairs and tracker_pairs[0][0].is_cuda:
+        if use_v2_model_runner:
+            # Match the strided first-column view used by production prefill;
+            # Triton specializes this tracker reset separately from a fresh,
+            # contiguous arange tensor.
+            state_batch_indices = v2_runner.block_tables.get_dummy_block_tables(
+                max_num_reqs, first_block_id=1
+            )[0][:, 0]
+        else:
+            state_batch_indices = torch.arange(
+                1,
+                max_num_reqs + 1,
+                dtype=torch.int32,
+                device=tracker_pairs[0][0].device,
+            )
+        for ring_start, prev_num_accepted in tracker_pairs:
+            reset_replayssm_ring_trackers(
+                ring_start,
+                prev_num_accepted,
+                state_batch_indices,
+            )
 
     try:
         yield
     finally:
-        for block_table, block_ids in zip(block_tables, saved_block_ids):
-            block_table.block_table.np[:max_num_reqs, 0] = block_ids
-        runner.input_batch.block_table.commit_block_table(max_num_reqs)
+        if use_v2_model_runner:
+            v2_runner.block_tables.get_dummy_block_tables(max_num_reqs)
+        else:
+            assert block_tables is not None and saved_block_ids is not None
+            for block_table, block_ids in zip(block_tables, saved_block_ids):
+                block_table.block_table.np[:max_num_reqs, 0] = block_ids
+            runner.input_batch.block_table.commit_block_table(max_num_reqs)
         for tensor in reset_tensors:
             tensor[1 : max_num_reqs + 1].zero_()
 
