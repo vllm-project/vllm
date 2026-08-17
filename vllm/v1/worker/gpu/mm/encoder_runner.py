@@ -64,6 +64,7 @@ class EncoderRunner:
         )
 
         self._pshm_tensor_ipc = PagedShmTensorIPC(vllm_config.model_config, pin=True)
+
     def has_cudagraph(self) -> bool:
         return self.cudagraph_manager is not None
 

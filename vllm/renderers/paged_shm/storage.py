@@ -52,16 +52,14 @@ class PagedShmStorage:
                     raise FileNotFoundError(
                         f"Shared memory '{name}' not found"
                     ) from None
-        self._resources.callback(_close_shm, self._shm, self._created)
         assert self._shm.buf is not None, "Buffer was not created"
+        self._resources.callback(_close_shm, self._shm, self._created)
 
         self.name = self._shm.name
         self._shm_np = np.ndarray(self.size, dtype=self.dtype, buffer=self._shm.buf)
         self._shm_np.resize(self.n_block, self.block_size)
-
         self._shm_tensor = torch.from_numpy(self._shm_np)
 
-        # Pin memory if requested and the global flag allows it
         self.is_pinned = False
         if pin and PIN_MEMORY:
             from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor, unpin_tensor
