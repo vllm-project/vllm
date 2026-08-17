@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import re
 from argparse import Namespace
 from typing import get_args
 
 import pytest
+import regex as re
 from fastapi import FastAPI
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -16,7 +16,7 @@ from vllm.entrypoints.serve.middleware.authenticate import (
     GUARDED_PREFIX,
     AuthenticationMiddleware,
 )
-from vllm.tasks import SupportedTask
+from vllm.tasks import POOLING_TASKS, SupportedTask
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -59,6 +59,16 @@ def _create_app_with_mock_routes(routes: list[tuple[str, list[str]]]) -> FastAPI
     return app
 
 
+class MockModelConfig:
+    def __init__(self):
+        self.hf_config = Namespace()
+        self.hf_config.num_labels = 1
+
+    def get_pooling_task(self, supported_tasks: tuple["SupportedTask", ...]):
+        pooling_tasks = [s for s in supported_tasks if s in POOLING_TASKS]
+        return pooling_tasks[0] if len(pooling_tasks) > 0 else None
+
+
 @pytest.fixture(params=get_args(SupportedTask))
 def task_routes(request, monkeypatch) -> tuple[str, list[tuple[str, list[str]]]]:
     """For each supported task, build an app with only that task's routers,
@@ -73,7 +83,9 @@ def task_routes(request, monkeypatch) -> tuple[str, list[tuple[str, list[str]]]]
     app.state.args = args
 
     # Register routers for this specific task (development mode already enabled).
-    register_api_routers(args, app, supported_tasks=(task,))
+    register_api_routers(
+        args, app, supported_tasks=(task,), model_config=MockModelConfig()
+    )
 
     routes = get_all_http_routes(app)
     return task, routes
