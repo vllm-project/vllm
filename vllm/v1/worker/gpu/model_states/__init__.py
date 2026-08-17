@@ -3,8 +3,9 @@
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
-from vllm.model_executor.layers.attention import CrossAttention, EncoderOnlyAttention
+from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.model_executor.layers.attention import Attention, CrossAttention
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 
@@ -39,8 +40,11 @@ def resolve_model_state_cls(
 
         return EncoderDecoderModelState
 
-    # Encoder-only models (BERT/RoBERTa): non-causal self-attention, no KV cache.
-    if any(isinstance(m, EncoderOnlyAttention) for m in model.modules()):
+    # Encoder-only attention is non-causal and needs no KV cache.
+    if any(
+        layer.attn_type == AttentionType.ENCODER_ONLY
+        for layer in get_layers_from_vllm_config(vllm_config, Attention).values()
+    ):
         from vllm.v1.worker.gpu.model_states.encoder_only import EncoderOnlyModelState
 
         return EncoderOnlyModelState

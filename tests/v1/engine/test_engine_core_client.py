@@ -1066,6 +1066,7 @@ def test_kv_cache_events(
         model=model_name,
         enforce_eager=True,
         enable_prefix_caching=True,
+        prefix_cache_retention_interval=None,
         block_size=block_size,
     )
     engine_args.kv_events_config = publisher_config
