@@ -283,18 +283,22 @@ def _make_amx_mla_impl(num_heads, qk_nope_head_dim, v_head_dim, kv_lora_rank):
 
 
 class _FakePrefillMetadata:
-    def __init__(self, block_table, cpu_seq_lens, query_start_loc, req_to_token):
+    def __init__(
+        self, block_table, cpu_seq_lens, query_start_loc, req_to_token, req_pool_indices
+    ):
         self.block_table = block_table
         self.cpu_seq_lens = cpu_seq_lens
         self.query_start_loc = query_start_loc
         self.req_to_token = req_to_token
+        self.req_pool_indices = req_pool_indices
 
 
 class _FakeDecodeMetadata:
-    def __init__(self, block_table, seq_lens, req_to_token):
+    def __init__(self, block_table, seq_lens, req_to_token, req_pool_indices):
         self.block_table = block_table
-        self.seq_lens = seq_lens
+        self.seq_lens_i64 = seq_lens.to(torch.int64)
         self.req_to_token = req_to_token
+        self.req_pool_indices = req_pool_indices
 
 
 class _FakeAttnMetadata:
@@ -338,6 +342,7 @@ def test_amx_mla_impl_forward_mqa_matches_reference(default_vllm_config):
             block_table=block_table,
             seq_lens=torch.tensor(seq_lens, dtype=torch.int64),
             req_to_token=req_to_token,
+            req_pool_indices=torch.arange(num_seqs, dtype=torch.int64),
         ),
         max_seq_len=max(seq_lens),
     )
@@ -425,6 +430,7 @@ def test_amx_mla_impl_forward_mha_matches_reference(default_vllm_config):
             cpu_seq_lens=torch.tensor(seq_lens, dtype=torch.int64),
             query_start_loc=query_start_loc,
             req_to_token=req_to_token,
+            req_pool_indices=torch.arange(num_seqs, dtype=torch.int64),
         )
     )
     output = torch.empty(total_new_tokens, num_heads * v_head_dim, dtype=DTYPE)

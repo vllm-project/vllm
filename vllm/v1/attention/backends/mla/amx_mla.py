@@ -123,21 +123,34 @@ class AMXMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
         if attn_metadata.decode is not None:
             # Built once per step and reused by every layer, instead of
             # recomputing the same tensor arithmetic in every forward_mqa call.
-            attn_metadata.decode.req_to_token = _expand_block_table(  # type: ignore[attr-defined]
-                attn_metadata.decode.block_table, block_size
+            decode = attn_metadata.decode
+            decode.req_to_token = _expand_block_table(  # type: ignore[attr-defined]
+                decode.block_table, block_size
+            )
+            decode.seq_lens_i64 = decode.seq_lens.to(torch.int64)  # type: ignore[attr-defined]
+            decode.req_pool_indices = torch.arange(  # type: ignore[attr-defined]
+                decode.block_table.size(0),
+                dtype=torch.int64,
+                device=decode.block_table.device,
             )
         if attn_metadata.prefill is not None:
             # cpu_seq_lens: total per-request context length (prefix + new
             # tokens), the one thing the extend kernel needs that isn't
             # already on the shared MLACommonPrefillMetadata.
+            prefill = attn_metadata.prefill
             num_decodes = attn_metadata.num_decodes
             num_prefills = attn_metadata.num_prefills
-            attn_metadata.prefill.cpu_seq_lens = common_attn_metadata.seq_lens[  # type: ignore[attr-defined]
+            prefill.cpu_seq_lens = common_attn_metadata.seq_lens[  # type: ignore[attr-defined]
                 num_decodes : num_decodes + num_prefills
             ].to(torch.int64)
-            attn_metadata.prefill.req_to_token = _expand_block_table(  # type: ignore[attr-defined]
-                attn_metadata.prefill.block_table, block_size
+            prefill.req_to_token = _expand_block_table(  # type: ignore[attr-defined]
+                prefill.block_table, block_size
             ).to(torch.int64)
+            prefill.req_pool_indices = torch.arange(  # type: ignore[attr-defined]
+                prefill.block_table.size(0),
+                dtype=torch.int64,
+                device=prefill.block_table.device,
+            )
         return attn_metadata
 
 
@@ -251,12 +264,9 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         kv_cache_flat = kv_c_and_k_pe_cache.view(-1, 1, self.head_size)
         v_buffer = kv_cache_flat[..., : self.kv_lora_rank]
 
-        block_table = attn_metadata.decode.block_table
-        seq_lens = attn_metadata.decode.seq_lens.to(torch.int64)
+        seq_lens = attn_metadata.decode.seq_lens_i64  # type: ignore[attr-defined]
         req_to_token = attn_metadata.decode.req_to_token  # type: ignore[attr-defined]
-        req_pool_indices = torch.arange(
-            block_table.size(0), dtype=torch.int64, device=q.device
-        )
+        req_pool_indices = attn_metadata.decode.req_pool_indices  # type: ignore[attr-defined]
 
         num_kv_splits = _compute_num_kv_splits(
             attn_metadata.max_seq_len, current_platform.num_compute_units()
@@ -334,9 +344,7 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         v_buffer = kv_cache_flat[..., : self.kv_lora_rank]
 
         req_to_token = prefill.req_to_token  # type: ignore[attr-defined]
-        req_pool_indices = torch.arange(
-            prefill.block_table.size(0), dtype=torch.int64, device=q.device
-        )
+        req_pool_indices = prefill.req_pool_indices  # type: ignore[attr-defined]
 
         seq_lens = prefill.cpu_seq_lens  # type: ignore[attr-defined]
         query_start_loc = prefill.query_start_loc.to(torch.int64)
