@@ -7,6 +7,59 @@ For two-tower vision encoders (e.g., DeepSeek-OCR's SAM + CLIP with dynamic tili
 !!! note
     Encoder CUDA Graphs are orthogonal to decoder CUDA Graphs — both can be enabled simultaneously. Encoder graphs capture the vision encoder execution (e.g., ViT in Qwen3-VL), while decoder graphs capture the language model execution as described in the [CUDA Graphs design document](cuda_graphs.md).
 
+## Compatibility Matrix
+
+!!! note
+    The symbols used below have the following meanings:
+
+    - ✅ = Full compatibility
+    - 🟠 = Partial compatibility
+    - ❌ = No compatibility
+    - ❔ = Unknown or TBD
+
+### Model x Feature
+
+| Architecture | Models | CG for Image | CG for Video | Multi-Path Graph |
+| ------------ | ------ | ------------ | ------------ | --------------- |
+| `DeepseekOCRForCausalLM` | `DeepSeek-OCR` | ✅︎ | ❌︎ | ✅︎ |
+| `Ernie4_5_VLMoeForConditionalGeneration` | `ERNIE-4.5-VL` | ✅︎ | ❌︎ | ❌︎ |
+| `Gemma3ForConditionalGeneration` | `Gemma3` | ✅︎ | ❌︎ | ❌︎ |
+| `Glm4vForConditionalGeneration` | `GLM-4.1V, GLM-4.6V-Flash` | ✅︎ | ✅︎ | ❌︎ |
+| `Gemma4ForConditionalGeneration` | `Gemma-4` | ✅︎ | ✅︎ | ❌︎ |
+| `InternVLChatModel` | `InternVL3.5`, `InternVL3`, `InternVL2.5`, `InternVL2` | ✅︎ | ✅︎ | ❌︎ |
+| `KimiVLForConditionalGeneration` | `Kimi-VL` | ✅︎ | ❌︎ | ❌︎ |
+| `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ | ❌︎ | ❌︎ |
+| `Qwen2VLForConditionalGeneration` | `Qwen2-VL` | ✅︎ | ✅︎ | ❌︎ |
+| `Qwen2_5_VLForConditionalGeneration` | `Qwen2.5-VL` | ✅︎ | ✅︎ | ❌︎ |
+| `Qwen3VLForConditionalGeneration` | `Qwen3-VL` | ✅︎ | ✅︎ | ❌︎ |
+| `Qwen3_5ForConditionalGeneration` | `Qwen3.5`, `Qwen3.6` | ✅︎ | ✅︎ | ❌︎ |
+| `Qwen3_5MoeForConditionalGeneration` | `Qwen3.5-MoE`, `Qwen3.6-MoE` | ✅︎ | ✅︎ | ❌︎ |
+| `Step3VLForConditionalGeneration` | `Step3-VL` | ✅︎ | ❌︎ | ✅︎ |
+
+### Model x Hardware
+
+| Architecture | NV Blackwell | NV Ampere | AMD MI300X | AMD MI350X / MI355X |
+| ------------ | ---------------- | ------------- | -------------- | --------------------- |
+| `DeepseekOCRForCausalLM` | ✅︎ | ✅︎ | ❔ | ✅︎ |
+| `Ernie4_5_VLMoeForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
+| `Gemma3ForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
+| `Glm4vForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
+| `Gemma4ForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
+| `InternVLChatModel` | ✅︎ | ✅︎ | ❔ | ✅︎ |
+| `KimiVLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
+| `Llama4ForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
+| `Qwen2VLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
+| `Qwen2_5_VLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
+| `Qwen3VLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
+| `Qwen3_5ForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
+| `Qwen3_5MoeForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
+| `Step3VLForConditionalGeneration` | ✅︎ | ✅︎ | ❔ | ✅︎ |
+
+!!! note
+    Encoder CUDA Graph has currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
+    For Qwen2-VL and Qwen2.5-VL only FA2 and FA3 has been tested.
+    Encoder CUDA Graph has also been tested with AMD MI350X (gfx950) used `--mm-encoder-attn-backend=FLASH_ATTN` (the ROCm default).
+
 ## Motivation
 
 Vision encoder inference incurs CUDA kernel launch overhead on the host side. The overhead is more significant when the batch size is small or image size is small.
@@ -113,29 +166,6 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 !!! note
     The `SupportsEncoderCudaGraph` protocol is designed to be model-agnostic. New vision encoder models can opt-in by implementing the protocol methods without modifying the manager.
 
-**Supported models:**
-
-| Architecture | Models | CG for Image | CG for Video | Dual-Path Graph |
-| ------------ | ------ | ------------ | ------------ | --------------- |
-| `DeepseekOCRForCausalLM` | `DeepSeek-OCR` | ✅︎ | ❌︎ | ✅︎ |
-| `Ernie4_5_VLMoeForConditionalGeneration` | `ERNIE-4.5-VL` | ✅︎ | ❌︎ | ❌︎ |
-| `Gemma3ForConditionalGeneration` | `Gemma3` | ✅︎ | ❌︎ | ❌︎ |
-| `Glm4vForConditionalGeneration` | `GLM-4.1V, GLM-4.6V-Flash` | ✅︎ | ✅︎ | ❌︎ |
-| `Gemma4ForConditionalGeneration` | `Gemma-4` | ✅︎ | ✅︎ | ❌︎ |
-| `InternVLChatModel` | `InternVL3.5`, `InternVL3`, `InternVL2.5`, `InternVL2` | ✅︎ | ✅︎ | ❌︎ |
-| `KimiVLForConditionalGeneration` | `Kimi-VL` | ✅︎ | ❌︎ | ❌︎ |
-| `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ | ❌︎ | ❌︎ |
-| `Qwen2VLForConditionalGeneration` | `Qwen2-VL` | ✅︎ | ✅︎ | ❌︎ |
-| `Qwen2_5_VLForConditionalGeneration` | `Qwen2.5-VL` | ✅︎ | ✅︎ | ❌︎ |
-| `Qwen3VLForConditionalGeneration` | `Qwen3-VL` | ✅︎ | ✅︎ | ❌︎ |
-| `Qwen3_5ForConditionalGeneration` | `Qwen3.5`, `Qwen3.6` | ✅︎ | ✅︎ | ❌︎ |
-| `Qwen3_5MoeForConditionalGeneration` | `Qwen3.5-MoE`, `Qwen3.6-MoE` | ✅︎ | ✅︎ | ❌︎ |
-| `Step3VLForConditionalGeneration` | `Step3-VL` | ✅︎ | ❌︎ | ✅︎ |
-
-!!! note
-    Encoder CUDA Graphs have currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
-    For Qwen2-VL and Qwen2.5-VL only FA2 and FA3 has been tested.
-
 ## Configuration
 
 Four fields in `CompilationConfig` control encoder CUDA Graphs:
@@ -228,7 +258,7 @@ model = vllm.LLM(
 )
 ```
 
-## About the Performance
+## Benchmark Results
 
 The following benchmarks were run on Blackwell GPUs (GB200) using `vllm bench mm-processor`. See [#35963](https://github.com/vllm-project/vllm/pull/35963) for full details.
 
