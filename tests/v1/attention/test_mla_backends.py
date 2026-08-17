@@ -34,7 +34,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
-from vllm.v1.attention.backends.mla import flashinfer_mla as flashinfer_mla_module
 from vllm.v1.attention.backends.mla import flashmla as flashmla_module
 from vllm.v1.attention.backends.mla import tokenspeed_mla as tokenspeed_mla_module
 from vllm.v1.attention.backends.mla.prefill import (
@@ -843,6 +842,10 @@ def test_tokenspeed_mla_noncausal_capability():
 
 
 def test_flashinfer_mla_dcp_multi_token_decode_uses_per_query_bounds(monkeypatch):
+    flashinfer_mla_module = pytest.importorskip(
+        "vllm.v1.attention.backends.mla.flashinfer_mla"
+    )
+
     decode_call = None
 
     def fake_decode(**kwargs):
