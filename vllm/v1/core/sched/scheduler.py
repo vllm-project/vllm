@@ -1442,6 +1442,9 @@ class Scheduler(SchedulerInterface):
             session.num_prompt_tokens : num_computed_tokens
         ]
         del session._all_token_ids[num_computed_tokens:]
+        # update_block_hashes only appends, so drop hashes covering discarded
+        # tokens; blocks fully inside the kept prefix stay valid.
+        del session.block_hashes[num_computed_tokens // self.hash_block_size :]
         session._output_token_ids.clear()
         assert session.prompt_token_ids is not None
         # Extend prompt with kept output tokens.
