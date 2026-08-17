@@ -41,6 +41,9 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     batched_fused_marlin_moe,
     fused_marlin_moe,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    get_moe_wna16_block_config,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_use_td_hw_supported,
 )
@@ -218,6 +221,23 @@ FUSED_MOE_WN16_MNK_FACTORS = [
     (32, 2048, 128),
     (222, 2048, 1024),
 ]
+
+
+def test_moe_wna16_block_config_updates_num_blocks_before_resizing():
+    config = get_moe_wna16_block_config(
+        config={},
+        use_moe_wna16_cuda=True,
+        num_valid_tokens=1,
+        size_k=1024,
+        size_n=8192,
+        num_experts=8,
+        group_size=128,
+        real_top_k=1,
+        block_size_m=16,
+    )
+
+    assert config == {"BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 256}
+
 
 vllm_config = VllmConfig()
 
