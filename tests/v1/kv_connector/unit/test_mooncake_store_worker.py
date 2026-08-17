@@ -1957,8 +1957,8 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
 
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
-    store.batch_put_from_multi_buffers.side_effect = (
-        lambda keys, addrs, sizes, *_args: [256] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, addrs, sizes, *_args: (
+        [256] * len(keys)
     )
 
     full_spec = FullAttentionSpec(
@@ -3251,3 +3251,115 @@ def test_blob_block_hashes_empty():
     view = BlobBlockHashes(memoryview(b""), 0)
     assert len(view) == 0
     assert list(view) == []
+
+
+def test_handle_preemptions_cancels_queued_store_job():
+    """When handle_preemptions is invoked prior to forward pass, queued store jobs
+    for the preempted request must be aborted without calling batch_put_from_multi_buffers."""
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+    thread = _make_store_sending_thread(store)
+
+    thread.add_stored_request("req-preempt-q")
+    # Synchronous preemption notification before forward pass
+    thread.handle_preempted_requests({"req-preempt-q"})
+
+    # Store thread attempts to process the queued job
+    thread._handle_request(_make_store_req("req-preempt-q", [b"p0", b"p1"]))
+
+    assert store.batch_put_from_multi_buffers.call_count == 0
+    assert thread.request_queue.task_done.call_count == 1
+
+
+def test_handle_preemptions_waits_for_active_in_flight_put():
+    """If an active batch_put_from_multi_buffers is currently reading GPU memory,
+    handle_preemptions must wait for it to complete before returning, ensuring
+    device memory is not overwritten mid-transfer by the upcoming forward pass."""
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+
+    put_started = threading.Event()
+    finish_put = threading.Event()
+
+    def _slow_batch_put(*args, **kwargs):
+        put_started.set()
+        finish_put.wait(timeout=2.0)
+        return [256, 256]
+
+    store.batch_put_from_multi_buffers.side_effect = _slow_batch_put
+    thread = _make_store_sending_thread(store)
+    thread.add_stored_request("req-active-put")
+
+    # Start store in background thread
+    store_exec_thread = threading.Thread(
+        target=thread._handle_request,
+        args=(_make_store_req("req-active-put", [b"a0", b"a1"]),),
+    )
+    store_exec_thread.start()
+
+    # Wait until batch_put is actively executing
+    assert put_started.wait(timeout=2.0)
+
+    preempt_completed = threading.Event()
+
+    def _run_handle_preemptions():
+        thread.handle_preempted_requests({"req-active-put"})
+        preempt_completed.set()
+
+    preempt_thread = threading.Thread(target=_run_handle_preemptions)
+    preempt_thread.start()
+
+    # Preemption handler must block while active batch_put is running
+    assert not preempt_completed.wait(timeout=0.1)
+
+    # Let the active put finish
+    finish_put.set()
+    store_exec_thread.join(timeout=2.0)
+
+    # Now handle_preemptions finishes
+    assert preempt_completed.wait(timeout=2.0)
+    preempt_thread.join(timeout=2.0)
+
+    assert store.batch_put_from_multi_buffers.call_count == 1
+
+
+def test_preemption_guard_before_batch_put():
+    """If preemption occurs during key preparation/event sync, the pre-put
+    guard must abort before issuing batch_put_from_multi_buffers."""
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+    thread = _make_store_sending_thread(store)
+
+    thread.add_stored_request("req-preempt-mid")
+
+    def _simulate_preempt_during_prep(*args, **kwargs):
+        thread.handle_preempted_requests({"req-preempt-mid"})
+        return [0, 0]
+
+    store.batch_is_exist.side_effect = _simulate_preempt_during_prep
+
+    thread._handle_request(_make_store_req("req-preempt-mid", [b"p0", b"p1"]))
+
+    assert store.batch_put_from_multi_buffers.call_count == 0
+
+
+def test_resumed_request_clears_preemption_status():
+    """Resuming a request in a new generation clears preemption status so
+    new store operations succeed."""
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+    thread = _make_store_sending_thread(store)
+
+    thread.add_stored_request("req-resumed")
+    thread.handle_preempted_requests({"req-resumed"})
+    assert "req-resumed" in thread._preempted_requests
+
+    # Resumed request arrives
+    thread.add_stored_request("req-resumed")
+    assert "req-resumed" not in thread._preempted_requests
+
+    thread._handle_request(_make_store_req("req-resumed", [b"r0", b"r1"]))
+    assert store.batch_put_from_multi_buffers.call_count == 1

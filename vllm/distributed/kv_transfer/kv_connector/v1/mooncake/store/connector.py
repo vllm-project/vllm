@@ -298,6 +298,13 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         ), "Cross-layer KV cache does not supported with hybrid models"
         self.connector_worker.register_cross_layers_kv_caches(kv_cache)
 
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata):
+        """Handle preempted requests before GPU blocks are overwritten."""
+        if self.connector_worker is not None and isinstance(
+            kv_connector_metadata, MooncakeStoreConnectorMetadata
+        ):
+            self.connector_worker.handle_preemptions(kv_connector_metadata)
+
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         # No-op: loads are issued in get_finished() for compute overlap.
         pass

@@ -530,6 +530,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # Per-request high-water mark of tokens actually persisted; the next
         # batch resumes here, so pressure-skipped or failed ranges are retried.
         self._saved_offset: dict[str, int] = {}
+        self._preempted_requests: set[str] = set()
+        self._active_put_req_id: str | None = None
+        self._active_put_event = threading.Event()
+        self._active_put_event.set()
 
     def add_request(self, request: ReqMeta) -> None:
         # Register before enqueueing so a job is never picked up unledgered.
@@ -538,10 +542,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self.stored_requests.setdefault(request.req_id, set()).add(
                 request.store_job_id
             )
+            self._preempted_requests.discard(request.req_id)
         super().add_request(request)
 
     def is_live_store_job(self, req_meta: ReqMeta) -> bool:
         with self.done_task_lock:
+            if req_meta.req_id in self._preempted_requests:
+                return False
             return req_meta.store_job_id in self.stored_requests.get(
                 req_meta.req_id, ()
             )
@@ -552,6 +559,29 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 del self.stored_requests[req_id]
             self._skip_store_requests.discard(req_id)
             self._saved_offset.pop(req_id, None)
+            self._preempted_requests.add(req_id)
+
+    def handle_preempted_requests(self, preempted_req_ids: set[str]) -> None:
+        """Cancel queued store jobs and synchronously wait for any active
+        in-flight batch_put reading GPU device memory to complete before the
+        upcoming forward pass overwrites those physical GPU blocks."""
+        with self.done_task_lock:
+            for req_id in preempted_req_ids:
+                self._preempted_requests.add(req_id)
+                self.stored_requests.pop(req_id, None)
+                self._skip_store_requests.discard(req_id)
+                self._saved_offset.pop(req_id, None)
+
+        self._wait_active_put_for_preempted(preempted_req_ids)
+
+    def _wait_active_put_for_preempted(self, preempted_req_ids: set[str]) -> None:
+        while True:
+            with self.done_task_lock:
+                active_req = self._active_put_req_id
+                if active_req is None or active_req not in preempted_req_ids:
+                    break
+                event = self._active_put_event
+            event.wait(timeout=0.5)
 
     def finish_store_job(self, req_meta: ReqMeta) -> None:
         """Retire a job from the ledger and report its blocks as no longer read.
@@ -960,6 +990,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if current_event is not None:
                 current_event.synchronize()
 
+            with self.done_task_lock:
+                if (
+                    req_id not in self.stored_requests
+                    or req_id in self._preempted_requests
+                ):
+                    return
+                self._active_put_req_id = req_id
+                self._active_put_event.clear()
+
             if group_ids is not None:
                 assert len(group_ids) == len(keys)
                 self.replicate_config.group_ids = group_ids
@@ -1023,6 +1062,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     num_failed_keys=len(keys),
                 )
                 logger.error("Failed to put key %s, error: %s", keys, e)
+            finally:
+                with self.done_task_lock:
+                    self._active_put_req_id = None
+                    self._active_put_event.set()
 
             if self.enable_kv_event and stored_events:
                 self.update_kv_event(stored_events)
@@ -1674,6 +1717,14 @@ class MooncakeStoreWorker:
     ):
         """No-op: stores are issued in get_finished() for overlap."""
         pass
+
+    def handle_preemptions(self, metadata: MooncakeStoreConnectorMetadata) -> None:
+        """Synchronously handle preemption before the forward pass runs."""
+        if not metadata.preempted_req_ids or self.kv_send_thread is None:
+            return
+        self.kv_send_thread.handle_preempted_requests(metadata.preempted_req_ids)
+        for req_id in metadata.preempted_req_ids:
+            self.finished_store_req.discard(req_id)
 
     def get_finished(
         self,

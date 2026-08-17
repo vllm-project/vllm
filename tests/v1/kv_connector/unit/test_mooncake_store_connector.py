@@ -802,3 +802,28 @@ def test_shutdown_scheduler_role_is_noop():
     # Scheduler role holds no store handle, so shutdown must be a safe no-op.
     assert connector.connector_worker is None
     connector.shutdown()
+
+
+def test_handle_preemptions_delegates_to_worker():
+    """MooncakeStoreConnector.handle_preemptions delegates to the worker."""
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreWorker"
+        ) as mock_worker_cls,
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
+
+    meta = MooncakeStoreConnectorMetadata(
+        unfinished_req_ids=set(),
+        preempted_req_ids={"req-preempt-test"},
+    )
+    connector.handle_preemptions(meta)
+
+    mock_worker_cls.return_value.handle_preemptions.assert_called_once_with(meta)
