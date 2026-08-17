@@ -5,9 +5,15 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from vllm.v1.attention.selector import _uses_device_decided_verification_lengths
 from vllm.v1.worker.gpu.async_utils import StepTimingSample
 from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     AdaptiveVerificationManager,
+)
+from vllm.v1.worker.gpu.spec_decode.dflash.adaptive_k import (
+    DFlashAdaptiveKManager,
+    DFlashAdaptiveKPolicy,
+    get_dflash_k_candidates,
 )
 from vllm.v1.worker.gpu.structured_outputs import _build_grammar_mapping
 
@@ -217,3 +223,295 @@ def test_zero_budget_keeps_one_grammar_row_per_scheduled_draft():
     # (request, position) keys, so the kernel can mask rows the compacted
     # device layout no longer has room for.
     assert mapping == [0, 1, 2, 3, 4, 5, 6]
+
+
+def _make_dflash_policy(
+    draft_cost_ms: np.ndarray,
+    verify_cost_ms: np.ndarray,
+    max_k: int = 3,
+) -> DFlashAdaptiveKPolicy:
+    policy = DFlashAdaptiveKPolicy(max_k=max_k, history_weight=1.0)
+    shaped_verify = np.full((len(draft_cost_ms), max_k + 1), np.inf)
+    for batch_size in range(1, len(draft_cost_ms)):
+        for k in policy.candidates:
+            total_tokens = batch_size * (k + 1)
+            if total_tokens < len(verify_cost_ms):
+                shaped_verify[batch_size, k] = verify_cost_ms[total_tokens]
+    policy.set_cost_tables(draft_cost_ms, shaped_verify)
+    return policy
+
+
+def test_dflash_adaptive_k_uses_graph_covered_verify_cost():
+    draft = np.full(9, 0.2)
+    verify = np.ones(33)
+    policy = _make_dflash_policy(draft, verify)
+
+    assert policy.select_k(batch_size=4) == 3
+
+
+def test_dflash_adaptive_k_uses_compact_graph_buckets():
+    assert get_dflash_k_candidates(15) == [0, 1, 3, 7, 15]
+    assert DFlashAdaptiveKPolicy._batch_bucket(0) == 0
+
+
+def test_dflash_profiles_real_batch_and_query_length_shapes():
+    manager = DFlashAdaptiveKManager.__new__(DFlashAdaptiveKManager)
+    manager.req_states = SimpleNamespace(max_num_batched_tokens=2048, max_num_reqs=32)
+    manager.num_speculative_steps = 15
+    manager.policy = SimpleNamespace(candidates=[0, 1, 3, 7, 15])
+
+    batches = list(manager.batches_to_profile([1, 2, 4, 8, 16, 32, 64, 128, 512]))
+
+    assert {
+        "num_tokens": 32 * 16,
+        "uniform_decode_query_len": 16,
+        "profile_verify": True,
+        "context_len": 8192,
+    } in batches
+    assert {
+        "num_tokens": 8 * 8,
+        "uniform_decode_query_len": 8,
+        "profile_verify": True,
+        "context_len": 8192,
+    } in batches
+
+
+def test_dflash_shape_costs_distinguish_equal_total_token_counts(monkeypatch):
+    manager = DFlashAdaptiveKManager.__new__(DFlashAdaptiveKManager)
+    manager.req_states = SimpleNamespace(max_num_batched_tokens=2048, max_num_reqs=32)
+    manager.num_speculative_steps = 15
+    manager._capture_sizes = {1, 2, 4, 8, 16, 32, 64, 128, 512}
+    manager._outcome_buffers = []
+    manager._selected_k_by_batch = {}
+    manager._selection_uses_by_batch = {}
+    manager._global_k_cap = 15
+    manager.current_k = 15
+    captured: dict[str, np.ndarray] = {}
+    manager.policy = SimpleNamespace(
+        candidates=[0, 1, 3, 7, 15],
+        set_cost_tables=lambda draft, verify: captured.update(
+            draft=draft, verify=verify
+        ),
+        reset_history=lambda: None,
+    )
+    monkeypatch.setattr(
+        "vllm.v1.worker.gpu.spec_decode.dflash.adaptive_k.get_tp_group",
+        lambda: SimpleNamespace(broadcast_object=lambda value, src: value),
+    )
+    samples = [
+        # Same total token count, materially different per-request query shape.
+        StepTimingSample(1.0, 0.1, 32, 32, True),
+        StepTimingSample(2.0, 0.2, 2, 1, True),
+        StepTimingSample(3.0, 0.3, 4, 1, True),
+        StepTimingSample(4.0, 0.4, 8, 1, True),
+        StepTimingSample(9.0, 0.5, 32, 2, True),
+    ]
+
+    manager.set_initial_cost_curves(samples)
+
+    assert captured["verify"][32, 0] == 1.0
+    assert captured["verify"][2, 15] == 9.0
+
+
+def test_dflash_adaptive_k_preserves_full_draft_for_serial_decode():
+    draft = np.full(17, 100.0)
+    verify = np.ones(257)
+    policy = _make_dflash_policy(draft, verify, max_k=15)
+
+    assert policy.select_k(batch_size=1) == 15
+
+
+def test_dflash_adaptive_k_falls_back_to_baseline_on_graph_miss():
+    draft = np.full(65, 0.5)
+    verify = np.ones(257)
+    verify[33:] = 10.0
+    policy = _make_dflash_policy(draft, verify)
+
+    assert policy.select_k(batch_size=32) == 0
+
+
+def test_dflash_adaptive_k_uses_observed_accepted_prefix():
+    draft = np.full(9, 0.2)
+    verify = np.ones(33)
+    verify[5:] = 1.5
+    policy = _make_dflash_policy(draft, verify)
+    assert policy.select_k(batch_size=4) == 3
+
+    policy.record_outcomes(
+        num_sampled=np.ones(4, dtype=np.int32),
+        num_draft_tokens=np.full(4, 3, dtype=np.int32),
+    )
+
+    assert policy.select_k(batch_size=4) == 3
+
+
+def test_dflash_adaptive_k_calibrates_shared_runtime_overhead():
+    draft = np.full(65, 0.2)
+    verify = np.ones(1025)
+    policy = _make_dflash_policy(draft, verify, max_k=15)
+    assert policy.select_k(batch_size=32) == 15
+
+    # The runtime interval also includes scheduler and sampling work that every
+    # K pays. Treating it as K=15-only cost would falsely disable drafting.
+    for _ in range(2):
+        policy.record_runtime(batch_size=31, k=15, num_sampled=32, elapsed_ms=64.0)
+
+    assert policy.select_k(batch_size=32) == 15
+
+
+def test_dflash_adaptive_k_disables_drafting_after_rejections():
+    draft = np.full(65, 0.2)
+    verify = np.ones(1025)
+    policy = _make_dflash_policy(draft, verify, max_k=15)
+    assert policy.select_k(batch_size=32) == 15
+
+    policy.record_outcomes(
+        num_sampled=np.ones(32, dtype=np.int32),
+        num_draft_tokens=np.full(32, 15, dtype=np.int32),
+    )
+
+    assert policy.select_k(batch_size=32) == 0
+
+
+def test_dflash_adaptive_k_keeps_serial_friendly_small_batches():
+    draft = np.full(17, 0.2)
+    verify = np.ones(257)
+    policy = _make_dflash_policy(draft, verify, max_k=15)
+    for _ in range(4):
+        policy.record_runtime(batch_size=8, k=15, num_sampled=8, elapsed_ms=64.0)
+
+    assert policy.select_k(batch_size=8) != 0
+
+
+def test_dflash_adaptive_k_never_disables_drafting_for_small_batches():
+    draft = np.full(17, 100.0)
+    verify = np.ones(257)
+    policy = _make_dflash_policy(draft, verify, max_k=15)
+    policy.record_outcomes(
+        num_sampled=np.ones(8, dtype=np.int32),
+        num_draft_tokens=np.full(8, 15, dtype=np.int32),
+    )
+
+    assert policy.select_k(batch_size=8) > 0
+
+
+def test_dflash_profile_outcomes_do_not_seed_runtime_history():
+    draft = np.full(9, 0.2)
+    verify = np.ones(33)
+    policy = _make_dflash_policy(draft, verify)
+    policy.record_outcomes(
+        num_sampled=np.ones(4, dtype=np.int32),
+        num_draft_tokens=np.full(4, 3, dtype=np.int32),
+    )
+    assert policy.select_k(batch_size=4) == 3
+
+    policy.reset_history()
+
+    assert policy.select_k(batch_size=4) == 3
+
+
+def test_dflash_adaptive_k_trims_current_verification_batch():
+    manager = DFlashAdaptiveKManager.__new__(DFlashAdaptiveKManager)
+    manager.num_speculative_steps = 15
+    manager.select_k = lambda batch_size: 0
+
+    num_tokens = manager.get_num_tokens(
+        {"r0": 16, "r1": 16},
+        {"r0": list(range(15)), "r1": list(range(15))},
+    )
+
+    assert num_tokens == 2
+    assert manager.batch_query_len == 1
+    assert manager._batch_budget == (
+        {"r0": 0, "r1": 0},
+        {"r0": 1, "r1": 1},
+        0,
+    )
+    assert not manager.consume_unmodified_batch()
+
+
+def test_dflash_full_k_preserves_the_original_verification_path():
+    manager = DFlashAdaptiveKManager.__new__(DFlashAdaptiveKManager)
+    manager.num_speculative_steps = 15
+    manager.select_k = lambda batch_size: 15
+    manager._write_idx = 0
+    manager._runtime_start_events = [SimpleNamespace(record=lambda: None)]
+    manager._pending_runtime = [None]
+    manager._pending_draft_counts = [None]
+
+    num_tokens = manager.get_num_tokens(
+        {"r0": 16, "r1": 16},
+        {"r0": list(range(15)), "r1": list(range(15))},
+    )
+
+    assert num_tokens == 32
+    assert manager.consume_unmodified_batch()
+    assert manager._batch_budget is None
+
+
+def test_dflash_adaptive_k_holds_decision_between_updates():
+    manager = DFlashAdaptiveKManager.__new__(DFlashAdaptiveKManager)
+    manager._outcome_buffers = []
+    manager._selected_k_by_batch = {}
+    manager._selection_uses_by_batch = {}
+    manager._global_k_cap = 15
+    manager.current_k = 15
+    manager.decision_interval = 2
+    choices = iter((15, 0))
+    manager.policy = SimpleNamespace(select_k=lambda batch_size: next(choices))
+
+    assert manager.select_k(32) == 15
+    assert manager.select_k(32) == 15
+    assert manager.select_k(32) == 0
+
+
+def test_dflash_empty_batch_does_not_disable_drafting():
+    manager = DFlashAdaptiveKManager.__new__(DFlashAdaptiveKManager)
+    manager._outcome_buffers = []
+    manager._global_k_cap = 15
+    manager.current_k = 15
+    manager.policy = SimpleNamespace(select_k=lambda batch_size: 0)
+
+    assert manager.select_k(0) == 15
+    assert manager._global_k_cap == 15
+
+
+def test_dflash_outcome_poll_does_not_synchronize_the_gpu():
+    manager = DFlashAdaptiveKManager.__new__(DFlashAdaptiveKManager)
+    event = SimpleNamespace(
+        query=lambda: False,
+        synchronize=lambda: (_ for _ in ()).throw(AssertionError("GPU sync")),
+    )
+    manager._copy_events = [event]
+    manager._pending_draft_counts = [np.ones(2, dtype=np.int32)]
+    manager._pending_runtime = [None]
+
+    assert not manager._consume_outcomes(0, wait=False)
+    assert manager._pending_draft_counts[0] is not None
+
+
+def test_dflash_adaptive_k_is_monotonic_within_graph_batch_bucket():
+    manager = DFlashAdaptiveKManager.__new__(DFlashAdaptiveKManager)
+    manager._outcome_buffers = []
+    manager._selected_k_by_batch = {}
+    manager._selection_uses_by_batch = {}
+    manager._global_k_cap = 15
+    manager.current_k = 15
+    manager.decision_interval = 1
+    choices = iter((15, 3, 7, 0))
+    manager.policy = SimpleNamespace(select_k=lambda batch_size: next(choices))
+
+    assert manager.select_k(32) == 15
+    assert manager.select_k(31) == 3
+    assert manager.select_k(32) == 3
+    assert manager.select_k(31) == 0
+    assert manager.proposal_k(32) == 0
+    assert manager.select_k(8) == 0
+
+
+def test_only_dspark_uses_device_decided_verification_lengths():
+    dspark = SimpleNamespace(method="dspark", enable_adaptive_verification=True)
+    dflash = SimpleNamespace(method="dflash", enable_adaptive_verification=True)
+
+    assert _uses_device_decided_verification_lengths(dspark)
+    assert not _uses_device_decided_verification_lengths(dflash)

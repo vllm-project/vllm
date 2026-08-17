@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Adaptive verification for DSpark speculative decoding."""
+"""Cost profiling and adaptive verification for speculative decoding."""
 
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
@@ -234,7 +234,7 @@ class AdaptiveVerificationManager:
             self.req_states.max_num_batched_tokens,
             self._cudagraph_limit,
         )
-        logger.debug("DSpark cost tables: %s", self.cost_tables)
+        logger.debug("Adaptive speculative decoding cost tables: %s", self.cost_tables)
 
     def record_confidences(
         self,

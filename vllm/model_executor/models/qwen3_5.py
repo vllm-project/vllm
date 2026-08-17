@@ -366,10 +366,15 @@ class Qwen3_5ForCausalLMBase(
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        return_aux_hidden_states: bool = True,
         **kwargs: object,
     ):
         hidden_states = self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            return_aux_hidden_states=return_aux_hidden_states,
         )
 
         return hidden_states
@@ -541,6 +546,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        return_aux_hidden_states: bool = True,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for Qwen3.5.
@@ -575,6 +581,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
+            return_aux_hidden_states=return_aux_hidden_states,
         )
 
         return hidden_states

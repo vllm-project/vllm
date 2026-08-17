@@ -21,6 +21,14 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _uses_device_decided_verification_lengths(speculative_config: object) -> bool:
+    return bool(
+        speculative_config is not None
+        and getattr(speculative_config, "method", None) == "dspark"
+        and getattr(speculative_config, "enable_adaptive_verification", False)
+    )
+
+
 class AttentionSelectorConfig(NamedTuple):
     head_size: int
     dtype: torch.dtype
@@ -139,9 +147,8 @@ def get_attn_backend(
     )
 
     speculative_config = vllm_config.speculative_config
-    use_adaptive_verification = (
-        speculative_config is not None
-        and speculative_config.enable_adaptive_verification
+    use_adaptive_verification = _uses_device_decided_verification_lengths(
+        speculative_config
     )
     if use_adaptive_verification:
         from vllm.compilation.backends import model_tag

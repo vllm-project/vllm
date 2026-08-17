@@ -1814,6 +1814,28 @@ def test_draft_sample_method_gumbel_is_rejected():
         )
 
 
+def test_adaptive_verification_accepts_dflash():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=3,
+    )
+    speculative_config.method = "dflash"
+    speculative_config.enable_adaptive_verification = True
+
+    speculative_config._validate_adaptive_verification()
+
+
+def test_adaptive_verification_rejects_unrelated_methods():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=3,
+    )
+    speculative_config.enable_adaptive_verification = True
+
+    with pytest.raises(ValueError, match="only supported with DSpark and DFlash"):
+        speculative_config._validate_adaptive_verification()
+
+
 def test_ir_op_priority_default():
     """Test that IR op priority defaults are set correctly."""
     from vllm.config.kernel import IrOpPriorityConfig
