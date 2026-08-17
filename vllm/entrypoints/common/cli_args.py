@@ -27,6 +27,10 @@ from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
     validate_chat_template,
 )
+from vllm.entrypoints.openai.reasoning_effort import (
+    ReasoningEffortRounding,
+    validate_supported_reasoning_efforts,
+)
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevelName
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -106,6 +110,21 @@ class BaseFrontendArgs:
     with request values taking precedence. Useful for setting default
     behavior for reasoning models. Example: '{"enable_thinking": false}'
     to disable thinking mode by default for Qwen3/DeepSeek models."""
+    supported_reasoning_efforts: list[str] | None = None
+    """The reasoning effort levels the served model's chat template accepts,
+    e.g. `low medium xhigh` for models that reject the rest of the ladder.
+    When set, a request whose `reasoning_effort` is not in this set is
+    remapped to the nearest supported level per `--reasoning-effort-rounding`
+    instead of failing at template render time. The special value `none`
+    (reasoning disabled) always passes through and cannot be listed. When
+    unset (the default), efforts are passed through unchanged."""
+    reasoning_effort_rounding: ReasoningEffortRounding = "down"
+    """Direction used to resolve a `reasoning_effort` that is not in
+    `--supported-reasoning-efforts`, on the ladder minimal < low < medium <
+    high < xhigh < max. `down` picks the highest supported level not above
+    the requested one, falling back to the lowest supported level; `up`
+    picks the lowest supported level not below the requested one, falling
+    back to the highest supported level."""
     response_role: str = "assistant"
     """The role name to return if `request.add_generation_prompt=true`."""
     return_tokens_as_token_ids: bool = False
@@ -518,6 +537,8 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         )
 
     validate_grpc_port_arg(args)
+
+    validate_supported_reasoning_efforts(args.supported_reasoning_efforts)
 
     # Enable auto tool needs a tool call parser to be valid
     if args.enable_auto_tool_choice and not args.tool_call_parser:
