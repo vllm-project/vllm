@@ -9,6 +9,8 @@ ARG ROCM_TRITON_KERNELS_COMMIT=0f380657dbf3ee86eb57558ff71df24f03b5d4e7
 ARG INSTALL_LMCACHE=false
 ARG MOONCAKE_BRANCH=df508641d76be20803349bf715d3bfc5205a7b58
 ARG MOONCAKE_REPO=https://github.com/kvcache-ai/Mooncake.git
+ARG MOONCAKE_GO_VERSION=1.25.10
+ARG MOONCAKE_GO_SHA256=42d4f7a32316aa66591eca7e89867256057a4264451aca10570a715b3637ba70
 # NIC backend for MoRI RDMA support.
 # By default (all), drivers and userspace libraries for all supported NIC types
 # (ainic and bnxt) are installed; MoRI selects the appropriate one at runtime.
@@ -636,6 +638,20 @@ RUN /bin/bash -lc 'set -euo pipefail; \
  esac'
 
 FROM base AS mooncake_source
+ARG MOONCAKE_GO_VERSION
+ARG MOONCAKE_GO_SHA256
+ENV PATH=/usr/local/go/bin:${PATH}
+ENV GOTOOLCHAIN=local
+RUN test "$(uname -m)" = "x86_64" \
+    && test ! -e /usr/local/go \
+    && curl --fail --location --retry 5 \
+        --output /tmp/go.tar.gz \
+        "https://go.dev/dl/go${MOONCAKE_GO_VERSION}.linux-amd64.tar.gz" \
+    && echo "${MOONCAKE_GO_SHA256}  /tmp/go.tar.gz" | sha256sum --check - \
+    && tar -C /usr/local -xzf /tmp/go.tar.gz \
+    && rm /tmp/go.tar.gz \
+    && test "$(go env GOVERSION)" = "go${MOONCAKE_GO_VERSION}"
+
 # Build a pinned ROCm Mooncake wheel outside the long-lived ROCm base image.
 ARG MOONCAKE_BRANCH
 ARG MOONCAKE_REPO
@@ -645,11 +661,12 @@ RUN git init mooncake \
     && git fetch --depth=1 origin "${MOONCAKE_BRANCH}" \
     && git checkout --detach FETCH_HEAD \
     && test "$(git rev-parse HEAD)" = "${MOONCAKE_BRANCH}" \
+    && grep -qx 'GOVER=1.25.9' dependencies.sh \
+    && sed -i "s/^GOVER=.*/GOVER=${MOONCAKE_GO_VERSION}/" dependencies.sh \
     && bash dependencies.sh -y
 
 FROM mooncake_source AS build_mooncake
 ARG USE_SCCACHE
-ENV PATH=/usr/local/go/bin:${PATH}
 ENV HIPCC_COMPILE_FLAGS_APPEND=--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/11
 RUN --mount=type=cache,id=vllm-rocm-mooncake-go-mod,target=/root/go/pkg/mod \
     --mount=type=cache,id=vllm-rocm-mooncake-go-build,target=/root/.cache/go-build \
@@ -666,10 +683,25 @@ RUN --mount=type=cache,id=vllm-rocm-mooncake-go-mod,target=/root/go/pkg/mod \
     && cmake --install build
 
 FROM build_mooncake AS package_mooncake
-# dependencies.sh installs patchelf 0.14.3, which corrupts auditwheel RPATHs.
-RUN python3 -m pip install --no-cache-dir "patchelf==0.19.1.0"
+# Pin both the outer packaging tools and the isolated PEP 517 build environment.
+# patchelf 0.14.3 from dependencies.sh corrupts auditwheel RPATHs.
+ENV PIP_CONSTRAINT=/tmp/mooncake-build-constraints.txt
+ENV PIP_BUILD_CONSTRAINT=/tmp/mooncake-build-constraints.txt
 RUN --mount=type=cache,id=vllm-rocm-mooncake-pip,target=/root/.cache/pip \
-    cd mooncake \
+    printf '%s\n' \
+        'pip==26.2.1' \
+        'build==1.5.0' \
+        'setuptools==79.0.1' \
+        'wheel==0.48.0' \
+        'auditwheel==6.8.1' \
+        'packaging==26.3' \
+        'pyproject-hooks==1.2.0' \
+        'pyelftools==0.33' \
+        'patchelf==0.19.1.0' \
+        > "${PIP_CONSTRAINT}" \
+    && python3 -m pip install --upgrade \
+        pip build setuptools wheel auditwheel patchelf \
+    && cd mooncake \
     && export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/usr/local/lib" \
     && HIP_BUILD=1 OUTPUT_DIR=dist PLATFORM_TAG=manylinux_2_35_x86_64 \
         ./scripts/build_wheel.sh \
