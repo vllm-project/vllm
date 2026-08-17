@@ -93,6 +93,7 @@ def test_dsv4_packed_zeroer_geometry():
             cache_dtype_str="fp8_ds_mla",
             alignment=576,
             model_version="deepseek_v4",
+            state_content_bytes=584,  # >576 to allocate room for scales at back of page
         )
         for _ in layer_names
     ]
