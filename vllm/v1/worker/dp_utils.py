@@ -19,8 +19,7 @@ logger = init_logger(__name__)
 
 
 class DPProfilerSync:
-    """Starts the torch profiler on the same step across all DP ranks by
-    OR-reducing a pending start request onto the per-step DP all-reduce."""
+    """Starts the torch profiler on the same step across all DP ranks."""
 
     def __init__(self) -> None:
         # start_profile received, capture not yet begun.
