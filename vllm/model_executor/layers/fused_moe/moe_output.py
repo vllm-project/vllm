@@ -3,8 +3,12 @@
 """Output contract between a MoE layer and a consumer that fuses its tail."""
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 
 
 @dataclass
@@ -58,3 +62,24 @@ class MoEOutput:
     # Applied to the routed sum before the shared add. Already folded into the
     # routing weights for methods that do so, in which case this is 1.0.
     routed_scaling_factor: float = 1.0
+
+
+def can_defer_moe_finalize(moe_config: "FusedMoEConfig", num_tokens: int) -> bool:
+    """Whether this forward may hand back an ``UnfinalizedMoEOutput``.
+
+    The producer's half of the contract: leave the routed output unfinalized
+    only for a batch the fused consumer can actually take. Above its token
+    ceiling -- and on an idle rank's dummy 0-token forward, which the runner
+    divides by on the host -- the kernel finalizes as it always did, which
+    costs nothing over a model that never defers.
+    """
+    if not moe_config.use_deferred_moe_finalize:
+        return False
+
+    from vllm.model_executor.layers.fused_moe_finalize_norm import (
+        moe_tail_fusion_applies,
+    )
+
+    return moe_tail_fusion_applies(
+        num_tokens, moe_config.hidden_dim, moe_config.in_dtype
+    )

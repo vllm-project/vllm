@@ -40,6 +40,9 @@ _fi_ar_workspace = None
 # allreduce backend or a fallback backend when the primary workspace is not
 # available on the current topology.
 _fi_ar_quant_workspace = None
+# Extra workspace for the MoE finalize fusion, which is trtllm-only and so
+# cannot ride on an mnnvl workspace.
+_fi_ar_moe_finalize_workspace = None
 _fi_ar_workspace_groups: dict[int, ProcessGroup] = {}
 
 
@@ -270,27 +273,77 @@ def get_fi_ar_quant_workspace(
     return _fi_ar_quant_workspace
 
 
+def get_fi_ar_moe_finalize_workspace(
+    world_size: int,
+    rank: int,
+    max_token_num: int,
+    hidden_dim: int,
+    dtype: torch.dtype,
+    group: ProcessGroup,
+):
+    """
+    Return the workspace for the MoE finalize + allreduce + norm fusion.
+
+    That pattern has a trtllm implementation only, so unlike the other
+    workspaces this one does not follow VLLM_FLASHINFER_ALLREDUCE_BACKEND: it
+    reuses whichever workspace is already on trtllm and otherwise creates a
+    trtllm one of its own, which is what happens when `auto` picks mnnvl.
+    Multi-node has no trtllm allreduce at all, so it gets None.
+    """
+    global _fi_ar_moe_finalize_workspace
+    if _fi_ar_moe_finalize_workspace is not None:
+        return _fi_ar_moe_finalize_workspace
+
+    if not fi_ar_available or get_node_count() > 1:
+        return None
+
+    for workspace in (_fi_ar_workspace, _fi_ar_quant_workspace):
+        if workspace is not None and workspace.backend == "trtllm":
+            _fi_ar_moe_finalize_workspace = workspace
+            return _fi_ar_moe_finalize_workspace
+
+    _fi_ar_moe_finalize_workspace = _create_workspace(
+        "trtllm", world_size, rank, max_token_num, hidden_dim, dtype, group
+    )
+    if _fi_ar_moe_finalize_workspace is not None:
+        logger.info_once("Initialized FlashInfer MoE finalize fusion workspace")
+    else:
+        logger.warning_once("Failed to initialize FlashInfer MoE finalize workspace")
+
+    return _fi_ar_moe_finalize_workspace
+
+
 _fi_ar_workspace_lock = threading.Lock()
 
 
 def destroy_fi_ar_workspace():
-    global _fi_ar_workspace, _fi_ar_quant_workspace
+    global _fi_ar_workspace, _fi_ar_quant_workspace, _fi_ar_moe_finalize_workspace
     with _fi_ar_workspace_lock:
-        is_alias = _fi_ar_workspace is _fi_ar_quant_workspace
-
-        if _fi_ar_workspace is not None:
-            _fi_ar_workspace.destroy()
-        if _fi_ar_quant_workspace is not None and not is_alias:
-            _fi_ar_quant_workspace.destroy()
+        destroyed: list[int] = []
+        for workspace in (
+            _fi_ar_workspace,
+            _fi_ar_quant_workspace,
+            _fi_ar_moe_finalize_workspace,
+        ):
+            if workspace is None or id(workspace) in destroyed:
+                continue
+            workspace.destroy()
+            destroyed.append(id(workspace))
 
         _fi_ar_workspace = _fi_ar_quant_workspace = None
+        _fi_ar_moe_finalize_workspace = None
         _fi_ar_workspace_groups.clear()
 
 
 def _fi_ar_workspaces_for_group(group: ProcessGroup) -> list[Any]:
-    workspaces = [_fi_ar_workspace]
-    if _fi_ar_quant_workspace is not _fi_ar_workspace:
-        workspaces.append(_fi_ar_quant_workspace)
+    workspaces: list[Any] = []
+    for workspace in (
+        _fi_ar_workspace,
+        _fi_ar_quant_workspace,
+        _fi_ar_moe_finalize_workspace,
+    ):
+        if workspace is not None and not any(w is workspace for w in workspaces):
+            workspaces.append(workspace)
 
     group_workspaces = []
     for workspace in workspaces:

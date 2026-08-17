@@ -1443,9 +1443,12 @@ class FusedMoEConfig:
         ``defer_moe_finalize`` is set after construction, like
         ``skip_final_all_reduce``.
         """
-        # Without TP there is no all-reduce for the top-k reduction to fuse
-        # into, so the deferred form buys nothing.
-        return self.defer_moe_finalize and self.tp_size > 1
+        # The consumer that finalizes also owns the all-reduce, so the routed
+        # output has to be leaving here un-reduced in the first place; and
+        # without TP there is no all-reduce for the reduction to fuse into.
+        return (
+            self.defer_moe_finalize and self.skip_final_all_reduce and self.tp_size > 1
+        )
 
     @property
     def use_deepep_ht_kernels(self):
