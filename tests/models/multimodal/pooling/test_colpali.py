@@ -44,20 +44,6 @@ DTYPE = "half"
 GPU_MEMORY_UTILIZATION = 0.7
 
 
-@pytest.fixture(scope="module", params=MODELS)
-def colpali_model(request, vllm_runner):
-    model = request.param
-    with vllm_runner(
-        model,
-        runner="pooling",
-        dtype=DTYPE,
-        max_model_len=4096,
-        enforce_eager=True,
-        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-    ) as vllm_model:
-        yield model, vllm_model
-
-
 def _make_base64_image(
     width: int = 64, height: int = 64, color: tuple[int, int, int] = (255, 0, 0)
 ) -> str:
@@ -149,21 +135,6 @@ def _run_relevance_test(
     assert scores[2] > scores[1], "DL doc should score higher than weather doc"
 
 
-def test_colpali_token_embed(colpali_model) -> None:
-    model, vllm_model = colpali_model
-    _run_token_embed_test(vllm_model, model)
-
-
-def test_colpali_late_interaction_scoring(colpali_model) -> None:
-    _, vllm_model = colpali_model
-    _run_late_interaction_test(vllm_model)
-
-
-def test_colpali_relevance_ordering(colpali_model) -> None:
-    _, vllm_model = colpali_model
-    _run_relevance_test(vllm_model)
-
-
 # ── Multimodal scoring tests ────────────────────────────────
 
 
@@ -227,16 +198,46 @@ def _run_multimodal_image_query_text_docs_test(
         assert isinstance(s.outputs.score, float)
 
 
-def test_colpali_multimodal_text_query_image_docs(colpali_model) -> None:
-    _, vllm_model = colpali_model
-    _run_multimodal_text_query_image_docs_test(vllm_model)
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", [DTYPE])
+def test_colpali_default_runner(
+    vllm_runner,
+    model: str,
+    dtype: str,
+) -> None:
+    with vllm_runner(
+        model,
+        runner="pooling",
+        dtype=dtype,
+        max_model_len=4096,
+        enforce_eager=True,
+        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+    ) as vllm_model:
+        _run_token_embed_test(vllm_model, model)
+        _run_late_interaction_test(vllm_model)
+        _run_relevance_test(vllm_model)
+        _run_multimodal_mixed_docs_test(vllm_model)
+        _run_multimodal_image_query_text_docs_test(vllm_model)
 
 
-def test_colpali_multimodal_mixed_docs(colpali_model) -> None:
-    _, vllm_model = colpali_model
-    _run_multimodal_mixed_docs_test(vllm_model)
-
-
-def test_colpali_multimodal_image_query_text_docs(colpali_model) -> None:
-    _, vllm_model = colpali_model
-    _run_multimodal_image_query_text_docs_test(vllm_model)
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", [DTYPE])
+def test_colpali_v2_multimodal_text_query_image_docs(
+    vllm_runner,
+    monkeypatch: pytest.MonkeyPatch,
+    model: str,
+    dtype: str,
+) -> None:
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with vllm_runner(
+        model,
+        runner="pooling",
+        dtype=dtype,
+        max_model_len=4096,
+        enforce_eager=True,
+        gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
+        attention_backend="FLASH_ATTN",
+        kernel_config={"enable_flashinfer_autotune": False},
+    ) as vllm_model:
+        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
+        _run_multimodal_text_query_image_docs_test(vllm_model)
