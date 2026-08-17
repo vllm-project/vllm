@@ -834,6 +834,13 @@ class HummingIndexedExperts(HummingExpertsBase):
         )
 
         valid_rows = None
+        if (
+            expert_tokens_meta is not None
+            and expert_tokens_meta.expert_num_tokens is not None
+        ):
+            valid_rows = (
+                expert_tokens_meta.expert_num_tokens.to(torch.int64).sum().reshape(1)
+            )
 
         if self.fused_situ_quant_enabled(activation):
             # Fused SITU + FP8 quant (per-token or block-FP8 group-128) straight
