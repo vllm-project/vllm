@@ -66,6 +66,7 @@ from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
+from vllm.transformers_utils.repo_utils import with_retry
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -520,10 +521,7 @@ class HfRunner:
             ):
                 model = model.to(dtype=self.dtype)
 
-            if (
-                getattr(model, "quantization_method", None) != "bitsandbytes"
-                and len({p.device for p in model.parameters()}) < 2
-            ):
+            if len({p.device for p in model.parameters()}) < 2:
                 model = model.to(device=self.device)
 
             self.model = model
@@ -543,9 +541,15 @@ class HfRunner:
             # it will call torch.accelerator.device_count()
             from transformers import AutoProcessor
 
-            self.processor = AutoProcessor.from_pretrained(
-                model_name,
-                trust_remote_code=trust_remote_code,
+            # A concurrent refresh of the shared HF cache can briefly hide
+            # processor configuration files. Retry just as model config loading
+            # does in vllm.transformers_utils.config.
+            self.processor = with_retry(
+                lambda: AutoProcessor.from_pretrained(
+                    model_name,
+                    trust_remote_code=trust_remote_code,
+                ),
+                f"Error loading processor for {model_name}",
             )
         if skip_tokenizer_init:
             if self.processor is None:
@@ -1729,13 +1733,9 @@ def disable_deepgemm_ue8m0(monkeypatch):
 
 
 def _should_clean_gpu_memory_between_tests() -> bool:
-    setting = os.getenv("VLLM_TEST_CLEAN_GPU_MEMORY")
-    if setting == "1":
-        return True
-    if setting == "0":
-        return False
-    # ROCm reclaims VRAM lazily; default to waiting between tests on ROCm CI.
-    return current_platform.is_rocm()
+    # This must stay opt-in: a function-scoped fixture cannot distinguish
+    # stale VRAM from allocations owned by longer-lived module/session fixtures.
+    return os.getenv("VLLM_TEST_CLEAN_GPU_MEMORY", "0") == "1"
 
 
 @pytest.fixture(autouse=True)

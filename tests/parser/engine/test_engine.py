@@ -844,3 +844,61 @@ class TestSkipToolParsing:
         engine.skip_tool_parsing = True
         engine.reset()
         assert engine.skip_tool_parsing is True
+
+
+def _message_header_config(reasoning_end: bool) -> ParserEngineConfig:
+    """MESSAGE_HEADER-based grammar whose tool opener optionally carries
+    REASONING_END, mirroring the two shapes a transition table can take."""
+    return ParserEngineConfig(
+        name=f"message_header_test_{reasoning_end}",
+        initial_state=ParserState.MESSAGE_HEADER,
+        terminals={"HEADER_END": "<|header_end|>", "TOOL_START": "<tool_call>"},
+        transitions={
+            (ParserState.MESSAGE_HEADER, "HEADER_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TEXT_CHUNK,),
+            ),
+            (ParserState.MESSAGE_HEADER, "TOOL_START"): Transition(
+                ParserState.TOOL_ARGS,
+                (EventType.REASONING_END, EventType.TOOL_CALL_START)
+                if reasoning_end
+                else (EventType.TOOL_CALL_START,),
+            ),
+        },
+    )
+
+
+class TestSkipToolParsingFromMessageHeader:
+    """Leaving MESSAGE_HEADER through the skip_tool_parsing gate must honour
+    the transition's REASONING_END.
+
+    The reasoning pass hands off to the tool pass only once it has seen a
+    REASONING_END, so swallowing it under the header passthrough strands the
+    whole tool block in content. Tables carrying no REASONING_END keep the
+    plain passthrough.
+    """
+
+    @staticmethod
+    def _skip_events(reasoning_end: bool):
+        engine = StreamingParserEngine(
+            _message_header_config(reasoning_end), tokenizer=None
+        )
+        engine.skip_tool_parsing = True
+        return engine, engine.parse_complete("name<tool_call>{}")
+
+    def test_reasoning_end_precedes_forwarded_tool_syntax(self):
+        engine, events = self._skip_events(reasoning_end=True)
+        assert [e.type for e in events[:2]] == [
+            EventType.REASONING_END,
+            EventType.TEXT_CHUNK,
+        ]
+        assert events[1].value == "<tool_call>"
+        assert engine._message_header_buffer == ""
+
+    def test_passthrough_only_when_transition_omits_reasoning_end(self):
+        engine, events = self._skip_events(reasoning_end=False)
+        types = [e.type for e in events]
+        assert EventType.REASONING_END not in types
+        assert types[0] == EventType.TEXT_CHUNK
+        assert events[0].value == "<tool_call>"
+        assert engine._message_header_buffer == ""

@@ -49,8 +49,12 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
             pcp_size=kwargs.get("pcp_size", 1),
             dcp_size=kwargs.get("dcp_size", 1),
             data_parallel_index=0,
+            data_parallel_size=1,
+            data_parallel_rank_local=None,
             is_parallelism_agnostic=kwargs.get("is_parallelism_agnostic", False),
         ),
+        replicated_layout=kwargs.get("replicated_layout", False),
+        canonical_layout=kwargs.get("canonical_layout", False),
     )
     spec = MagicMock(spec=OffloadingSpec)
     spec.config = config
@@ -205,3 +209,123 @@ def test_parallel_agnostic_separates_persistent_layouts():
     assert agnostic.base_path != specific.base_path
     assert "parallel_agnostic" not in agnostic.fields
     assert specific.fields["parallel_agnostic"] is False
+
+
+def test_canonical_layout_changes_storage_namespace():
+    # Canonical bytes are not interchangeable with the direct layout, so the
+    # format id must fork the storage namespace.
+    from vllm.v1.attention.backends.utils import set_kv_cache_layout
+
+    set_kv_cache_layout("NHD")
+    try:
+        direct = make_mapper_from_offloading_spec()
+        canonical = make_mapper_from_offloading_spec(canonical_layout=True)
+    finally:
+        set_kv_cache_layout(None)
+    assert "canonical_format" not in direct.fields
+    assert canonical.fields["canonical_format"] == "v1-nhd"
+    assert direct.base_path != canonical.base_path
+
+
+# ---------------------------------------------------------------------------
+# replicated_layout: OR'd into parallel-agnostic identity for compact rows
+# ---------------------------------------------------------------------------
+
+
+def test_replicated_layout_collapses_parallel_identity():
+    shared = dict(
+        model_name="mla-model",
+        groups=((16, "mla_layer"),),
+        replicated_layout=True,
+        parallel_agnostic=True,
+    )
+    tp2 = make_mapper_from_offloading_spec(tp_size=2, world_size=2, rank=1, **shared)
+    tp4 = make_mapper_from_offloading_spec(tp_size=4, world_size=4, rank=3, **shared)
+
+    assert tp2.base_path == tp4.base_path
+    for fm in (tp2, tp4):
+        assert fm.fields["tp_size"] == 1
+        assert fm.fields["pp_size"] == 1
+        assert fm.fields["pcp_size"] == 1
+        assert fm.fields["dcp_size"] == 1
+        assert fm.rank == 0
+        assert "parallel_agnostic" not in fm.fields
+        assert fm.fields["replicated_layout"] is True
+        assert fm.get_file_name(make_offload_key(b"\x01" * 8, 0)).startswith(
+            f"{fm.base_path}_r0/"
+        )
+
+
+def test_replicated_layout_requires_caller_opt_in():
+    fm = make_mapper_from_offloading_spec(
+        tp_size=2,
+        world_size=2,
+        rank=1,
+        replicated_layout=True,
+        parallel_agnostic=False,
+    )
+    assert fm.fields["tp_size"] == 2
+    assert fm.rank == 1
+    assert fm.fields["parallel_agnostic"] is False
+    assert "replicated_layout" not in fm.fields
+    baseline = make_mapper_from_offloading_spec(
+        tp_size=2,
+        world_size=2,
+        rank=1,
+        replicated_layout=False,
+        parallel_agnostic=False,
+    )
+    assert fm.base_path == baseline.base_path
+
+
+def test_non_replicated_keeps_parallel_identity():
+    fm = make_mapper_from_offloading_spec(
+        tp_size=4,
+        world_size=4,
+        rank=2,
+        replicated_layout=False,
+        is_parallelism_agnostic=False,
+        parallel_agnostic=True,
+    )
+    assert fm.fields["tp_size"] == 4
+    assert fm.rank == 2
+    assert fm.fields["parallel_agnostic"] is False
+    assert fm.get_file_name(make_offload_key(b"\x02" * 8, 0)).startswith(
+        f"{fm.base_path}_r2/"
+    )
+
+
+def test_replicated_and_parallelism_agnostic_separate_layouts():
+    shared = dict(
+        model_name="shared-model",
+        groups=((16, "layer0"),),
+        tp_size=2,
+        world_size=2,
+        rank=1,
+        parallel_agnostic=True,
+    )
+    via_agnostic = make_mapper_from_offloading_spec(
+        is_parallelism_agnostic=True,
+        replicated_layout=False,
+        **shared,
+    )
+    via_replicated = make_mapper_from_offloading_spec(
+        is_parallelism_agnostic=False,
+        replicated_layout=True,
+        **shared,
+    )
+    assert via_agnostic.base_path != via_replicated.base_path
+    assert "replicated_layout" not in via_agnostic.fields
+    assert via_replicated.fields["replicated_layout"] is True
+
+
+def test_replicated_layout_run_config_tp_invariant():
+    shared = dict(
+        model_name="mla-model",
+        groups=((16, "mla_layer"),),
+        replicated_layout=True,
+        parallel_agnostic=True,
+    )
+    tp2 = make_mapper_from_offloading_spec(tp_size=2, world_size=2, rank=0, **shared)
+    tp4 = make_mapper_from_offloading_spec(tp_size=4, world_size=4, rank=2, **shared)
+    assert tp2.get_run_config() == tp4.get_run_config()

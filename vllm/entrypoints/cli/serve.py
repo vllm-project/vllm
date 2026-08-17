@@ -58,6 +58,10 @@ class ServeSubcommand(CLISubcommand):
             uvloop.run(serve_grpc(args))
             return
 
+        rust_frontend_path = (
+            envs.VLLM_RUST_FRONTEND_PATH if envs.VLLM_USE_RUST_FRONTEND else None
+        )
+
         if args.headless:
             if args.api_server_count is not None and args.api_server_count > 0:
                 raise ValueError(
@@ -103,7 +107,7 @@ class ServeSubcommand(CLISubcommand):
         # - Hybrid LB: Use local DP size (internal LB for local ranks only)
         # - Internal LB: Use full DP size
         if args.api_server_count is None:
-            if is_multi_port or is_external_lb or envs.VLLM_RUST_FRONTEND_PATH:
+            if is_multi_port or is_external_lb or rust_frontend_path:
                 args.api_server_count = 1
             elif is_hybrid_lb:
                 args.api_server_count = args.data_parallel_size_local or 1
@@ -120,7 +124,7 @@ class ServeSubcommand(CLISubcommand):
                         "Defaulting api_server_count to data_parallel_size (%d).",
                         args.api_server_count,
                     )
-        elif envs.VLLM_RUST_FRONTEND_PATH and args.api_server_count > 1:
+        elif rust_frontend_path and args.api_server_count > 1:
             logger.warning(
                 "Ignoring --api-server-count=%d when using rust front-end process",
                 args.api_server_count,
@@ -140,7 +144,7 @@ class ServeSubcommand(CLISubcommand):
             run_dp_supervisor(args)
         elif args.api_server_count < 1:
             run_headless(args)
-        elif args.api_server_count > 1 or envs.VLLM_RUST_FRONTEND_PATH:
+        elif args.api_server_count > 1 or rust_frontend_path:
             run_multi_api_server(args)
         else:
             # Single API server (this process).
@@ -256,7 +260,9 @@ def run_headless(args: argparse.Namespace):
 
 def run_multi_api_server(args: argparse.Namespace):
     assert not args.headless
-    rust_frontend_path = envs.VLLM_RUST_FRONTEND_PATH
+    rust_frontend_path = (
+        envs.VLLM_RUST_FRONTEND_PATH if envs.VLLM_USE_RUST_FRONTEND else None
+    )
     num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
 
@@ -321,8 +327,11 @@ def run_multi_api_server(args: argparse.Namespace):
     )
 
     with launch_core_engines(
-        vllm_config, executor_class, log_stats, addresses, num_api_servers
-    ) as (local_engine_manager, coordinator, addresses, tensor_queue):
+        vllm_config, executor_class, log_stats, addresses
+    ) as engine_launch:
+        local_engine_manager = engine_launch.engine_manager
+        coordinator = engine_launch.coordinator
+        addresses = engine_launch.addresses
         stats_update_address = (
             coordinator.get_stats_publish_address() if coordinator else None
         )
@@ -343,6 +352,7 @@ def run_multi_api_server(args: argparse.Namespace):
                 output_address=addresses.outputs[0],
                 engine_start_index=expected_engine_start_index,
                 engine_count=expected_engine_count,
+                data_parallel_size=parallel_config.data_parallel_size,
                 stats_update_address=stats_update_address,
             )
         else:
@@ -355,7 +365,7 @@ def run_multi_api_server(args: argparse.Namespace):
                 input_addresses=addresses.inputs,
                 output_addresses=addresses.outputs,
                 stats_update_address=stats_update_address,
-                tensor_queue=tensor_queue,
+                tensor_queue=engine_launch.tensor_queue,
             )
 
             if not is_ray_dp:
@@ -367,6 +377,11 @@ def run_multi_api_server(args: argparse.Namespace):
                 )
                 addresses.inputs = actual_inputs
                 addresses.outputs = actual_outputs
+
+        # Set frontend processes to watch during engine startup.
+        # If any of these processes exit before the engines are up, the engine startup
+        # will be aborted with an error.
+        engine_launch.watched_frontend_processes = api_server_manager.processes
 
     # Wait for API servers.
     try:
