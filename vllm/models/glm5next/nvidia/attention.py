@@ -22,9 +22,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-)
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.model_executor.layers.sparse_attn_indexer_kpool import SparseAttnIndexerKpool
 from vllm.model_executor.models.deepseek_v2 import (
@@ -34,6 +31,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.model_executor.utils import maybe_disable_graph_partition
+from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.glm5_next import Glm5NextConfig
 from vllm.v1.kv_cache_interface import KpoolTailSpec, MLAAttentionSpec
@@ -194,9 +192,6 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
 
 
 class Indexer(nn.Module):
-    # Precomputed Hadamard-128 rotation buffer (registered in __init__).
-    _hadamard: torch.Tensor
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -260,18 +255,8 @@ class Indexer(nn.Module):
         self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
         self.softmax_scale = self.head_dim**-0.5
 
-        # Hadamard rotation for the indexer query (sglang rotate_activation).
-        # The K compress stores Hk, so q must become Hq for the fp8 MQA logits to
-        # equal the trained q·k. Precomputed as a buffer -> CUDA-graph safe (no
-        # dynamic tensor build during capture). head_dim (128) is a power of 2.
-        import math as _math
-
-        _h = torch.tensor([[1.0, 1.0], [1.0, -1.0]], dtype=torch.float32)
-        while _h.shape[0] < self.head_dim:
-            _h = torch.cat([torch.cat([_h, _h], 1), torch.cat([_h, -_h], 1)], 0)
-        self.register_buffer(
-            "_hadamard", _h / _math.sqrt(self.head_dim), persistent=False
-        )
+        # Hadamard-128 rotation of the indexer query is fused with the FP8
+        # quant (see forward: fwht128_quant_fp8) -- no precomputed matrix.
 
         self.scale_fmt = "ue8m0"
         self.quant_block_size = 128  # TODO: get from config
@@ -371,20 +356,15 @@ class Indexer(nn.Module):
         # Without this the head-gate is scored against q.(Hk) -- a rotated basis
         # the gate was never trained against, destroying long-context pool
         # discrimination (the needle's pool drops out of the top-k).
-        # bf16 @ bf16 (tensor-core GEMM, fp32 accumulate) -- avoids the fp32
-        # matmul + .float() memory doubling of the first version. Cast the
-        # constant once to q's dtype (CUDA-graph safe: happens in eager warmup).
-        if self._hadamard.dtype != q.dtype:
-            self._hadamard = self._hadamard.to(q.dtype)
-        q = q @ self._hadamard
-        # we only quant q here since k quant is fused with cache insertion
+        # Fused FWHT + fp8 quant (ops/kpool_compress.fwht128_quant_fp8): the
+        # butterflies run in fp32 with the exact 1/sqrt(128) constant, matching
+        # sglang's fast hadamard_transform (the previous ``q @ _hadamard`` bf16
+        # GEMM stored H in bf16, a ~2^-9 systematic bias), and fusing the quant
+        # saves the rotated tensor's HBM round-trip vs the two-kernel chain.
+        assert self.head_dim == 128 and self.quant_block_size == 128
+        assert self.scale_fmt == "ue8m0"
         q = q.view(-1, self.head_dim)
-        q_fp8, q_scale = per_token_group_quant_fp8(
-            q,
-            self.quant_block_size,
-            column_major_scales=False,
-            use_ue8m0=self.scale_fmt is not None,
-        )
+        q_fp8, q_scale = fwht128_quant_fp8(q)
         q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
         q_scale = q_scale.view(-1, self.n_head, 1)
 

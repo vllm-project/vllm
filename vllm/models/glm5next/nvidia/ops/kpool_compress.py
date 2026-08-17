@@ -61,6 +61,97 @@ def _hadamard128_torch(x: torch.Tensor) -> torch.Tensor:
     return x @ h
 
 
+@triton.jit
+def _fwht_stage(x, N: tl.constexpr, GROUPS: tl.constexpr, STRIDE: tl.constexpr):
+    # One FWHT butterfly stage on a flat tensor of N = GROUPS*2*STRIDE elems;
+    # same construction as _hadamard128_stage but with a parametric N so it can
+    # process BLOCK_R rows at once.
+    x3 = tl.reshape(x, (GROUPS, 2, STRIDE))
+    x3 = tl.trans(x3, 0, 2, 1)
+    a, b = tl.split(x3)
+    x3 = tl.join(a + b, a - b)
+    x3 = tl.trans(x3, 0, 2, 1)
+    return tl.reshape(x3, (N,))
+
+
+@triton.jit
+def _fwht_quant_kernel(
+    q_ptr,
+    qout_ptr,
+    sout_ptr,
+    n_rows,
+    BLOCK_R: tl.constexpr,
+):
+    """Fused Hadamard-128 rotation + per-row absmax FP8 (ue8m0) quant.
+
+    Per row of 128 elements (one indexer head): load bf16 -> fp32 butterflies
+    (exact adds/subs; the 1/sqrt(128) scale stays fp32) -> round to bf16 ->
+    absmax quant with power-of-2 scale. Numerically identical to the unfused
+    sglang chain ``rotate_activation(q)`` (fast FWHT, bf16 out) followed by
+    ``act_quant`` (absmax clamp 1e-4, exp2(ceil(log2)) scale, clamp +-448).
+    """
+    pid = tl.program_id(0)
+    rows = pid * BLOCK_R + tl.arange(0, BLOCK_R)
+    rmask = rows < n_rows
+    offs = tl.arange(0, 128)
+    x = tl.load(
+        q_ptr + rows[:, None] * 128 + offs[None, :], mask=rmask[:, None], other=0.0
+    ).to(tl.float32)
+
+    # Flatten so each row's 128 lanes stay contiguous: every stage's
+    # (GROUPS, 2, STRIDE) tiling has 2*STRIDE dividing 128, so pairs never
+    # straddle a row boundary. GROUPS of each stage scales by BLOCK_R.
+    N: tl.constexpr = BLOCK_R * 128
+    x = tl.reshape(x, (N,))
+    x = _fwht_stage(x, N, BLOCK_R * 64, 1)
+    x = _fwht_stage(x, N, BLOCK_R * 32, 2)
+    x = _fwht_stage(x, N, BLOCK_R * 16, 4)
+    x = _fwht_stage(x, N, BLOCK_R * 8, 8)
+    x = _fwht_stage(x, N, BLOCK_R * 4, 16)
+    x = _fwht_stage(x, N, BLOCK_R * 2, 32)
+    x = _fwht_stage(x, N, BLOCK_R, 64)
+    x = x * 0.08838834764831845  # 1/sqrt(128), exact in fp32
+
+    # Match the unfused path's bf16 materialization before quantizing.
+    x = x.to(tl.bfloat16).to(tl.float32)
+    x = tl.reshape(x, (BLOCK_R, 128))
+
+    absmax = tl.maximum(tl.max(tl.abs(x), axis=1), 1e-4)
+    scale = tl.exp2(tl.ceil(tl.log2(absmax * (1.0 / 448.0))))
+    y = tl.minimum(tl.maximum(x / scale[:, None], -448.0), 448.0)
+
+    tl.store(qout_ptr + rows[:, None] * 128 + offs[None, :], y, mask=rmask[:, None])
+    tl.store(sout_ptr + rows, scale, mask=rmask)
+
+
+def fwht128_quant_fp8(q: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rotate each 128-wide row by the Hadamard-128 transform, then FP8-quant.
+
+    Replaces ``q @ H`` (bf16 GEMM whose H entries are bf16-rounded) plus
+    ``per_token_group_quant_fp8`` with one kernel: the rotation runs in fp32
+    with the exact 1/sqrt(128) constant (matching sglang's fast FWHT), and the
+    quant replicates sglang's ``act_quant`` (block 128, ue8m0 scale).
+
+    Args:
+        q: ``[rows, 128]`` bf16 — one head vector per row.
+
+    Returns:
+        (q_fp8 ``[rows, 128]`` float8_e4m3fn, scale ``[rows, 1]`` float32).
+    """
+    assert q.ndim == 2 and q.shape[1] == 128, q.shape
+    assert q.dtype == torch.bfloat16
+    assert q.is_contiguous()
+    n_rows = q.shape[0]
+    q_fp8 = torch.empty((n_rows, 128), dtype=torch.float8_e4m3fn, device=q.device)
+    q_scale = torch.empty((n_rows, 1), dtype=torch.float32, device=q.device)
+    if n_rows == 0:
+        return q_fp8, q_scale
+    BLOCK_R = 32
+    grid = (triton.cdiv(n_rows, BLOCK_R),)
+    _fwht_quant_kernel[grid](q, q_fp8, q_scale, n_rows, BLOCK_R=BLOCK_R, num_warps=2)
+    return q_fp8, q_scale
+
+
 # ---------------------------------------------------------------------------
 # compute_pooled_write_locs : pool_id -> physical flat slot
 # ---------------------------------------------------------------------------
