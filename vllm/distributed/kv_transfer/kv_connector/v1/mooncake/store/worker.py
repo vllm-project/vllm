@@ -589,6 +589,36 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if req_meta.store_job_id in self.stored_requests.get(req_meta.req_id, ()):
                 self._saved_offset[req_meta.req_id] = token_len
 
+    def _get_retry_token_ids(self, req_meta: ReqMeta) -> tuple[int, list[int]] | None:
+        """Return retry state only if this store job is still live."""
+        with self.done_task_lock:
+            if req_meta.store_job_id not in self.stored_requests.get(
+                req_meta.req_id, ()
+            ):
+                return None
+            return self._retry_token_ids.get(req_meta.req_id)
+
+    def _update_retry_token_ids(
+        self,
+        req_meta: ReqMeta,
+        save_completed: bool,
+        token_ids_start: int,
+        event_token_ids: list[int] | None,
+    ) -> None:
+        """Update retry state without letting a stale job touch a reused ID."""
+        with self.done_task_lock:
+            if req_meta.store_job_id not in self.stored_requests.get(
+                req_meta.req_id, ()
+            ):
+                return
+            if save_completed:
+                self._retry_token_ids.pop(req_meta.req_id, None)
+            elif event_token_ids is not None:
+                self._retry_token_ids[req_meta.req_id] = (
+                    token_ids_start,
+                    event_token_ids,
+                )
+
     def _should_skip_request(self, req_id: str) -> bool:
         with self.done_task_lock:
             return self._store_pressure_active and req_id in self._skip_store_requests
@@ -807,7 +837,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 return
 
             if self.enable_kv_event:
-                retry_token_ids = self._retry_token_ids.get(req_id)
+                retry_token_ids = self._get_retry_token_ids(req_meta)
                 if retry_token_ids is not None and event_token_ids is not None:
                     retry_start, retry_ids = retry_token_ids
                     if retry_start + len(retry_ids) == token_ids_start:
@@ -1059,13 +1089,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.update_kv_event(stored_events)
         finally:
             if self.enable_kv_event and token_len:
-                if save_completed:
-                    self._retry_token_ids.pop(req_id, None)
-                elif event_token_ids is not None:
-                    self._retry_token_ids[req_id] = (
-                        token_ids_start,
-                        event_token_ids,
-                    )
+                self._update_retry_token_ids(
+                    req_meta,
+                    save_completed,
+                    token_ids_start,
+                    event_token_ids,
+                )
             self.finish_store_job(req_meta)
             self.request_queue.task_done()
 

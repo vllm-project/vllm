@@ -943,15 +943,20 @@ def test_stale_store_job_cannot_touch_a_reused_request_id():
     live = _make_store_req("req-a", [b"a0", b"a1"])
     live.store_job_id = 2
     thread.add_request(live)
+    thread._retry_token_ids["req-a"] = (32, list(range(32, 64)))
 
     thread.finish_store_job(stale)
     thread._record_saved(stale, 64)
     thread._mark_request_skipped_for_pressure(stale)
+    thread._update_retry_token_ids(stale, False, 0, list(range(32)))
+    thread._update_retry_token_ids(stale, True, 0, None)
 
     assert thread.is_live_store_job(live)
     assert not thread.is_live_store_job(stale)
     assert thread._saved_offset.get("req-a") is None
     assert "req-a" not in thread._skip_store_requests
+    assert thread._get_retry_token_ids(stale) is None
+    assert thread._get_retry_token_ids(live) == (32, list(range(32, 64)))
 
 
 def test_store_recving_thread_reports_failed_block_ids():
@@ -2215,9 +2220,9 @@ def test_store_sending_thread_kv_events_use_token_suffix():
     thread = _make_store_sending_thread(store)
     thread.enable_kv_event = True
 
-    thread.add_stored_request("r0")
     thread._saved_offset["r0"] = 16
-    thread._handle_request(
+    _run_store_req(
+        thread,
         ReqMeta(
             req_id="r0",
             token_len_chunk=32,
@@ -2226,7 +2231,7 @@ def test_store_sending_thread_kv_events_use_token_suffix():
             can_save=True,
             token_ids=list(range(16, 32)),
             token_ids_start=16,
-        )
+        ),
     )
 
     [event] = thread.get_kv_events()
@@ -2241,8 +2246,8 @@ def test_store_sending_thread_kv_events_retry_without_covered_tokens():
     thread = _make_store_sending_thread(store)
     thread.enable_kv_event = True
 
-    thread.add_stored_request("r0")
-    thread._handle_request(
+    _run_store_req(
+        thread,
         ReqMeta(
             req_id="r0",
             token_len_chunk=32,
@@ -2251,7 +2256,7 @@ def test_store_sending_thread_kv_events_retry_without_covered_tokens():
             can_save=True,
             token_ids=list(range(16, 32)),
             token_ids_start=16,
-        )
+        ),
     )
 
     retry_event, suffix_event = thread.get_kv_events()
@@ -2266,8 +2271,8 @@ def test_store_sending_thread_kv_events_recover_suffix_after_put_failure():
     thread = _make_store_sending_thread(store)
     thread.enable_kv_event = True
 
-    thread.add_stored_request("r0")
-    thread._handle_request(
+    _run_store_req(
+        thread,
         ReqMeta(
             req_id="r0",
             token_len_chunk=16,
@@ -2275,14 +2280,14 @@ def test_store_sending_thread_kv_events_recover_suffix_after_put_failure():
             block_hashes=[b"a0"],
             can_save=True,
             token_ids=list(range(16)),
-        )
+        ),
     )
 
     assert thread.get_kv_events() == []
     assert thread._retry_token_ids["r0"] == (0, list(range(16)))
 
-    thread.add_stored_request("r0")
-    thread._handle_request(
+    _run_store_req(
+        thread,
         ReqMeta(
             req_id="r0",
             token_len_chunk=32,
@@ -2291,7 +2296,7 @@ def test_store_sending_thread_kv_events_recover_suffix_after_put_failure():
             can_save=True,
             token_ids=list(range(16, 32)),
             token_ids_start=16,
-        )
+        ),
     )
 
     retry_event, suffix_event = thread.get_kv_events()
@@ -2888,9 +2893,9 @@ def test_consumer_starts_send_thread_only_when_put_is_enabled():
 def test_putting_consumer_queues_decode_save():
     w = _make_bare_worker(kv_role="kv_consumer", save_decode_cache=True)
     send_thread = MagicMock()
-    send_thread.stored_requests = {}
     w.kv_send_thread = send_thread
     req = _make_store_req("decode-req", [b"h0", b"h1"])
+    req.store_job_id = 1
     meta = mooncake_store_worker.MooncakeStoreConnectorMetadata(set(), set())
     meta.add_request(req)
 
@@ -2899,7 +2904,6 @@ def test_putting_consumer_queues_decode_save():
         w.get_finished(set(), meta)
 
     event.record.assert_called_once_with()
-    send_thread.add_stored_request.assert_called_once_with("decode-req")
     send_thread.add_request.assert_called_once_with(req)
     assert req.current_event is event
 
