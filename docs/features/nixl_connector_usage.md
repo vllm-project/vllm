@@ -2,6 +2,8 @@
 
 NixlConnector is a high-performance KV cache transfer connector for vLLM's disaggregated prefilling feature. It provides fully asynchronous send/receive operations using the NIXL library for efficient cross-process KV cache transfer.
 
+`NixlConnector` is a backward-compatible alias for `NixlPullConnector`. vLLM also ships `NixlPushConnector`. See [Pull vs push](#pull-vs-push) for which name to use.
+
 For feature compatibility details (supported model architectures, TP configurations, and feature interactions), see the [NixlConnector Compatibility Matrix](nixl_connector_compatibility.md).
 
 ## Prerequisites
@@ -76,7 +78,25 @@ vllm serve <MODEL> \
   }'
 ```
 
+## Pull vs push
+
+vLLM registers three NIXL connector names:
+
+| Name | Behavior |
+| --- | --- |
+| `NixlPullConnector` | Decode reads KV from prefill with NIXL READ |
+| `NixlConnector` | Alias for `NixlPullConnector` (the default name in examples) |
+| `NixlPushConnector` | Prefill writes KV into decode memory with NIXL WRITE |
+
+On InfiniBand or RoCE, READ and WRITE are both line-rate, so pull is a reasonable default.
+
+Same-node pull over UCX `cuda_ipc` needs CUDA IPC GET. NIXL 1.5 enables CUDA IPC GET by default ([nixl#2208](https://github.com/ai-dynamo/nixl/pull/2208)). On older NIXL, set `UCX_CUDA_IPC_ENABLE_GET_ZCOPY=on` if you want pull/READ on the same node. `NixlPushConnector` is still available when WRITE fits your layout better; use the same connector name on both instances. Mixing pull and push is not supported.
+
+For the push design, see [NIXL push-mode KV transfer](../design/nixl_kv_push_connector.md).
+
 ## Basic Usage (on the same host)
+
+The examples below use `NixlPushConnector` on a same-host layout. You can keep `"kv_connector":"NixlConnector"` (pull) on the same node with NIXL 1.5+, or with `UCX_CUDA_IPC_ENABLE_GET_ZCOPY=on` on older NIXL.
 
 ### Producer (Prefiller) Configuration
 
@@ -90,7 +110,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=5600 \
 vllm serve Qwen/Qwen3-0.6B \
   --port 8100 \
   --enforce-eager \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
+  --kv-transfer-config '{"kv_connector":"NixlPushConnector","kv_role":"kv_producer","kv_load_failure_policy":"fail"}'
 ```
 
 ### Consumer (Decoder) Configuration
@@ -105,7 +125,7 @@ VLLM_NIXL_SIDE_CHANNEL_PORT=5601 \
 vllm serve Qwen/Qwen3-0.6B \
   --port 8200 \
   --enforce-eager \
-  --kv-transfer-config '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
+  --kv-transfer-config '{"kv_connector":"NixlPushConnector","kv_role":"kv_consumer","kv_load_failure_policy":"fail"}'
 ```
 
 ### Proxy Server
