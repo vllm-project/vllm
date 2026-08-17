@@ -161,6 +161,43 @@ def _scatter_decode_tokens_by_request(
     return out
 
 
+def _decode_topk_seq_lens(
+    positions: torch.Tensor,
+    decode_lens: torch.Tensor,
+    num_decode_tokens: int,
+    batch_size: int,
+    next_n: int,
+    requires_padding: bool,
+) -> torch.Tensor:
+    """Token-granular seq_len (pos + 1) per pool-topk row, layout-aware.
+
+    ``pool_topk`` (and the logits it comes from) follow the padded
+    ``[batch_size, next_n]`` grid whenever ``requires_padding`` is set, so row
+    ``(b, t)`` corresponds to flat decode token ``offset_b + t`` -- NOT
+    ``b * next_n + t``. Slicing flat ``positions[: batch_size * next_n]``
+    (the uniform-layout shortcut) misaligns every row after the first
+    non-uniform request and, past the decode region, reads prefill tokens'
+    positions; ``expand_pools_and_append_tail`` then anchors the tail at
+    another request's length, dropping the row's real tail tokens or emitting
+    indices past its sequence (out-of-bounds block-table reads). Padded rows
+    get 0 (empty tail); they are dropped by ``unpack_seq_triton`` anyway.
+    """
+    n = batch_size * next_n
+    if not requires_padding:
+        return positions[:n].to(torch.int32) + 1
+    scatter_idx = _build_decode_scatter_indices(
+        decode_lens, batch_size, num_decode_tokens
+    )
+    padded = _scatter_decode_tokens_by_request(
+        positions[:num_decode_tokens].to(torch.int32),
+        -1,
+        batch_size,
+        next_n,
+        scatter_idx,
+    )
+    return padded.reshape(n) + 1  # pad rows: -1 + 1 = 0 -> empty tail
+
+
 def _gather_workspace_shapes(
     total_seq_lens: int,
     head_dim: int,
@@ -817,9 +854,18 @@ def sparse_attn_indexer_kpool(
             # so recover it from the decode tokens' positions (pos == seq_len-1).
             # Using the compressed seq_lens yields dec_seq=0 for seq_len<kpool
             # -> empty topk -> the sparse MLA attends to nothing -> decode
-            # degradation.
+            # degradation. The row->token mapping must follow the PADDED
+            # [B, next_n] layout on non-uniform batches (see
+            # _decode_topk_seq_lens).
             if positions is not None:
-                dec_seq = positions[:n].to(torch.int32) + 1
+                dec_seq = _decode_topk_seq_lens(
+                    positions,
+                    decode_lens,
+                    num_decode_tokens,
+                    batch_size,
+                    next_n,
+                    decode_metadata.requires_padding,
+                )
             else:
                 dec_seq = decode_metadata.seq_lens[:n]
                 if dec_seq.ndim == 2:
