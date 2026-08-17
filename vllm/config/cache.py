@@ -7,7 +7,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import config, get_from_deprecated_env_if_set
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import (
     is_quantized_kv_cache,
@@ -35,6 +35,17 @@ CacheDType = Literal[
     "nvfp4",
     "nvfp4_4over6",
 ]
+
+
+def _get_prefix_cache_retention_interval() -> int | None:
+    env_value = get_from_deprecated_env_if_set(
+        "VLLM_PREFIX_CACHE_RETENTION_INTERVAL",
+        "v0.29",
+        "prefix_cache_retention_interval",
+    )
+    return 0 if env_value is None else int(env_value)
+
+
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
@@ -111,6 +122,15 @@ class CacheConfig:
       security risk tolerance against the performance benefits before turning this on.
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
       reproducible hashing. Requires the optional ``xxhash`` package."""
+    prefix_cache_retention_interval: int | None = Field(
+        default_factory=_get_prefix_cache_retention_interval, ge=0
+    )
+    """Token interval between retained sliding-window and Mamba prefix-cache
+    checkpoints. ``0`` retains only semantic checkpoints, including the latest
+    replay boundary and shared-prefix junctions. Positive values additionally
+    retain periodic checkpoints at the specified interval, which must be a
+    multiple of the scheduler block size. ``None`` retains checkpoints densely.
+    Applies only to sliding-window and Mamba cache groups."""
     kv_cache_dtype_skip_layers: list[str] = field(default_factory=list)
     """Layer patterns to skip KV cache quantization. Accepts layer indices
     (e.g., '0', '2', '4') or attention type names (e.g., 'sliding_window')."""
@@ -144,9 +164,8 @@ class CacheConfig:
       caching is enabled.
     """
     replayssm_buffer_len: int = Field(default=16, gt=0)
-    """ReplaySSM history buffer length B: with use_replayssm, standard decode
-    caches recent SSM inputs in a size-B ring buffer and flushes the checkpoint
-    state to HBM every B steps. Default 16."""
+    """ReplaySSM history buffer length B for standard Mamba2 decode. Kimi-K3
+    speculative decoding does not use B. Default 16."""
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
@@ -154,6 +173,8 @@ class CacheConfig:
     mamba backend; standard (non-speculative) decode only. In align mode flushes
     are most efficient when mamba_block_size is a multiple of replayssm_buffer_len,
     but this is not required."""
+    use_kda_recoverssm: bool = field(default=False, init=False)
+    """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)
@@ -217,6 +238,7 @@ class CacheConfig:
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
+            "prefix_cache_retention_interval",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
             "mamba_page_size_padded",
