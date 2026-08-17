@@ -43,6 +43,7 @@ class _PendingSpill:
 class _PendingPublication:
     request: Request
     num_computed_tokens: int
+    num_pages: int
     retention_interval: int | None
 
 
@@ -141,6 +142,7 @@ class HiSparseCoordinator:
         self.pending_spills: dict[int, _PendingSpill] = {}
         self.pending_pages: dict[tuple[str, int], int] = {}
         self.host_valid_pages: dict[str, set[int]] = {}
+        self.host_ready_prefix_pages: dict[str, int] = {}
         self.indexer_ready_req_ids: set[str] = set()
         self.transition_target_pages: dict[str, int] = {}
         self.pending_publications: dict[str, _PendingPublication] = {}
@@ -155,8 +157,10 @@ class HiSparseCoordinator:
         has_cpu_history = bool(new_computed_blocks)
         if self.resident_managers and has_cpu_history:
             block_size = self.resident_managers[0].block_size
-            self.host_valid_pages.setdefault(request_id, set()).update(
-                range(cdiv(num_local_computed_tokens, block_size))
+            num_pages = cdiv(num_local_computed_tokens, block_size)
+            self.host_valid_pages.setdefault(request_id, set()).update(range(num_pages))
+            self.host_ready_prefix_pages[request_id] = max(
+                num_pages, self.host_ready_prefix_pages.get(request_id, 0)
             )
         if not self.resident_managers or has_cpu_history:
             for manager in self.hot_managers:
@@ -372,29 +376,45 @@ class HiSparseCoordinator:
         num_pages = (
             num_computed_tokens // manager.block_size * self.pages_per_host_block
         )
-        valid_pages = self.host_valid_pages.get(request.request_id, set())
-        if all(page_idx in valid_pages for page_idx in range(num_pages)):
+        request_id = request.request_id
+        if self.host_ready_prefix_pages.get(request_id, 0) >= num_pages:
             manager.cache_blocks(
                 request,
                 num_computed_tokens,
                 retention_interval=retention_interval,
             )
-            self.pending_publications.pop(request.request_id, None)
+            self.pending_publications.pop(request_id, None)
             return
-        self.pending_publications[request.request_id] = _PendingPublication(
+        self.pending_publications[request_id] = _PendingPublication(
             request=request,
             num_computed_tokens=num_computed_tokens,
+            num_pages=num_pages,
             retention_interval=retention_interval,
         )
+
+    def _publish_host_blocks_if_ready(self, request_id: str) -> None:
+        publication = self.pending_publications.get(request_id)
+        if publication is None or (
+            self.host_ready_prefix_pages.get(request_id, 0) < publication.num_pages
+        ):
+            return
+        assert self.host_manager is not None
+        self.host_manager.cache_blocks(
+            publication.request,
+            publication.num_computed_tokens,
+            retention_interval=publication.retention_interval,
+        )
+        del self.pending_publications[request_id]
 
     def complete_host_import(self, request_id: str, num_computed_tokens: int) -> None:
         """Publish externally populated host pages after connector completion."""
         if not self.resident_managers:
             return
         block_size = self.resident_managers[0].block_size
-        self.host_valid_pages[request_id] = set(
-            range(cdiv(num_computed_tokens, block_size))
-        )
+        num_pages = cdiv(num_computed_tokens, block_size)
+        self.host_valid_pages[request_id] = set(range(num_pages))
+        self.host_ready_prefix_pages[request_id] = num_pages
+        self._publish_host_blocks_if_ready(request_id)
 
     def complete_device_import(self, request_id: str) -> None:
         """Record that NIXL populated this request's GPU indexer directly."""
@@ -571,21 +591,25 @@ class HiSparseCoordinator:
             and pending.expected_worker_completions
             and pending.worker_completions >= pending.expected_worker_completions
         ]
+        completed_request_ids: set[str] = set()
         for pending in completed:
             self.pending_spills.pop(pending.transfer_id, None)
             self.pending_pages.pop(pending.page, None)
             request_id, page_idx = pending.page
             self.host_valid_pages.setdefault(request_id, set()).add(page_idx)
+            completed_request_ids.add(request_id)
             assert self.host_manager is not None
             self.host_manager.block_pool.free_blocks([pending.host_block])
-        for request_id, publication in tuple(self.pending_publications.items()):
-            self.cache_host_blocks_when_ready(
-                publication.request,
-                publication.num_computed_tokens,
-                publication.retention_interval,
-            )
+        for request_id in completed_request_ids:
+            valid_pages = self.host_valid_pages[request_id]
+            ready_pages = self.host_ready_prefix_pages.get(request_id, 0)
+            while ready_pages in valid_pages:
+                ready_pages += 1
+            self.host_ready_prefix_pages[request_id] = ready_pages
+            self._publish_host_blocks_if_ready(request_id)
 
     def free(self, request_id: str) -> None:
         self.host_valid_pages.pop(request_id, None)
+        self.host_ready_prefix_pages.pop(request_id, None)
         self.indexer_ready_req_ids.discard(request_id)
         self.pending_publications.pop(request_id, None)

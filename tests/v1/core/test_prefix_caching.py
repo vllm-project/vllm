@@ -526,6 +526,10 @@ def test_hisparse_reclamation_caps_each_worker_spill_batch():
 
 
 def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
+    """A host prefix becomes visible only when every page is durable.
+
+    Completing a later page first must not expose a prefix with a hole.
+    """
     block_size = 16
     full = FullAttentionSpec(
         block_size=block_size,
@@ -582,22 +586,22 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
         enable_caching=True,
         hash_block_size=block_size,
     )
-    tokens = list(range(block_size))
+    tokens = list(range(2 * block_size))
     request = make_request("resident", tokens, block_size, sha256)
-    assert manager.allocate_slots(request, num_new_tokens=block_size) is not None
+    assert manager.allocate_slots(request, num_new_tokens=2 * block_size) is not None
     blocks = manager.get_block_ids(request.request_id)
-    assert len(blocks[2]) == 1
+    assert len(blocks[2]) == 2
     assert blocks[3] == []
     assert manager.hisparse_coordinator.are_requests_fully_resident(
         [request.request_id]
     )
 
     spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
-    assert len(spills) == 1
-    assert spills[0].after_forward
-    spill_counts = {spills[0].transfer_id: 1}
+    assert len(spills) == 2
+    assert all(spill.after_forward for spill in spills)
+    spill_counts = {spill.transfer_id: 1 for spill in spills}
     duplicate = make_request(
-        "duplicate", list(range(2 * block_size)), block_size, sha256
+        "duplicate", list(range(3 * block_size)), block_size, sha256
     )
     _, num_computed, _ = manager.get_computed_blocks(duplicate)
     assert num_computed == 0
@@ -606,17 +610,21 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
     _, num_computed, _ = manager.get_computed_blocks(duplicate)
     assert num_computed == 0
 
-    manager.hisparse_coordinator.update_spills({}, spill_counts)
+    manager.hisparse_coordinator.update_spills({}, {spills[1].transfer_id: 1})
     _, num_computed, _ = manager.get_computed_blocks(duplicate)
-    assert num_computed == block_size
+    assert num_computed == 0
+
+    manager.hisparse_coordinator.update_spills({}, {spills[0].transfer_id: 1})
+    _, num_computed, _ = manager.get_computed_blocks(duplicate)
+    assert num_computed == 2 * block_size
     blocks = manager.get_block_ids(request.request_id)
-    assert len(blocks[2]) == 1
+    assert len(blocks[2]) == 2
     assert blocks[3] == []
 
     manager.free(request)
-    reused = make_request("reused", list(range(2 * block_size)), block_size, sha256)
+    reused = make_request("reused", list(range(3 * block_size)), block_size, sha256)
     computed, num_computed, _ = manager.get_computed_blocks(reused)
-    assert num_computed == block_size
+    assert num_computed == 2 * block_size
     assert (
         manager.allocate_slots(
             reused,
