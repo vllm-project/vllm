@@ -103,8 +103,10 @@ fi
 cleanup_instances() {
   echo ""
   echo "Cleaning up..."
+  # shellcheck disable=SC2046  # word splitting is intentional for multiple PIDs
   kill $(jobs -pr) 2>/dev/null || true
   sleep 1
+  # shellcheck disable=SC2046
   kill -9 $(jobs -pr) 2>/dev/null || true
   pkill -9 -f "vllm serve.*${MODEL_NAME}" 2>/dev/null || true
   pkill -9 -f "toy_proxy_server.*8192" 2>/dev/null || true
@@ -186,7 +188,7 @@ else
   else
     num=1
   fi
-  for (( g=0; g<num; g++ )); do ALL_GPUS+=($g); done
+  for (( g=0; g<num; g++ )); do ALL_GPUS+=("$g"); done
 fi
 
 TOTAL_GPUS_NEEDED=$(( (NUM_PREFILL_INSTANCES * PREFILLER_TP_SIZE) + (NUM_DECODE_INSTANCES * DECODER_TP_SIZE) ))
@@ -315,10 +317,10 @@ run_test_for_device() {
   echo "Starting proxy server on port $PROXY_PORT..."
   python3 "${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py" \
     --port $PROXY_PORT \
-    --prefiller-hosts ${PREFILL_HOSTS[*]} \
-    --prefiller-ports ${PREFILL_PORTS[*]} \
-    --decoder-hosts ${DECODE_HOSTS[*]} \
-    --decoder-ports ${DECODE_PORTS[*]} &
+    --prefiller-hosts "${PREFILL_HOSTS[@]}" \
+    --prefiller-ports "${PREFILL_PORTS[@]}" \
+    --decoder-hosts "${DECODE_HOSTS[@]}" \
+    --decoder-ports "${DECODE_PORTS[@]}" &
   local PROXY_PID=$!
 
   wait_for_server "$PROXY_PORT" "$PROXY_PID" "proxy" "/healthcheck" 60
