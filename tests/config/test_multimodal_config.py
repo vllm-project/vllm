@@ -57,11 +57,8 @@ def test_language_model_only_affects_model_hash():
     assert base_hash != lm_only_hash
 
 
-@pytest.mark.parametrize("backend_arg", ["video_backend", "backend"])
-def test_use_gpu_video_backend_from_media_io_kwargs(backend_arg: str):
-    config = MultiModalConfig(
-        media_io_kwargs={"video": {backend_arg: "pynvvideocodec"}}
-    )
+def test_use_gpu_video_backend_from_media_io_kwargs():
+    config = MultiModalConfig(media_io_kwargs={"video": {"backend": "pynvvideocodec"}})
 
     assert config.use_gpu_video_backend()
 

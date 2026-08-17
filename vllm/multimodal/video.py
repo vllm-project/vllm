@@ -168,6 +168,7 @@ class VideoLoader:
 
 
 VIDEO_LOADER_REGISTRY = VideoLoaderRegistry()
+VIDEO_LOADER_REGISTRY.register_gpu_codec(PYNVVIDEOCODEC_VIDEO_BACKEND)
 VIDEO_LOADER_REGISTRY.register_gpu_codec("deepstream")
 
 
@@ -283,40 +284,6 @@ class VideoBackend(VideoLoader):
             source=source,
             video_backend=f"{backend}{cls._sampling_suffix}",
             valid_frame_indices=valid,
-        )
-
-
-@VIDEO_LOADER_REGISTRY.register(PYNVVIDEOCODEC_VIDEO_BACKEND, requires_gpu=True)
-class PyNvVideoCodecVideoBackend(VideoBackend):
-    """Hardware-accelerated video backend using PyNvVideoCodec.
-
-    The backend first opens the stream only to read metadata and compute the
-    sampled frame indices. It then acquires the raw decoded RGB byte count from
-    the process-local multimodal GPU memory pool before decoding the selected
-    frames into VRAM. Decoded frames are copied into pinned host memory before
-    the lease is released, so downstream preprocessing continues to receive a
-    CPU ``np.ndarray`` in NHWC RGB format.
-    """
-
-    @classmethod
-    def load_bytes(
-        cls,
-        data: bytes,
-        num_frames: int = -1,
-        fps: int = -1,
-        max_duration: int = 300,
-        frame_recovery: bool = False,
-        **kwargs,
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
-        kwargs.pop("backend", None)
-        return super().load_bytes(
-            data,
-            num_frames=num_frames,
-            fps=fps,
-            max_duration=max_duration,
-            frame_recovery=frame_recovery,
-            backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
-            **kwargs,
         )
 
 

@@ -944,16 +944,8 @@ cache and uses it to bound concurrent frontend decode allocations. If the
 budget is exhausted, decode work waits instead of consuming the engine's VRAM
 headroom and potentially causing an out-of-memory error while serving requests.
 
-Select the backend with an environment variable and specify a workload-appropriate
-VRAM budget. For example, to reserve 1 GiB:
-
-```bash
-export VLLM_VIDEO_LOADER_BACKEND=pynvvideocodec
-vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
-  --mm-ipc-gpu-memory-gb 1
-```
-
-Alternatively, select it with `--media-io-kwargs`:
+Select it with `--media-io-kwargs` and specify a workload-appropriate VRAM
+budget. For example, to reserve 1 GiB:
 
 ```bash
 vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
@@ -990,14 +982,7 @@ apt-get install -y \
   python3-gi python3-gst-1.0 libv4l-0 cuda-libraries-13-0
 ```
 
-Select the backend either with an environment variable:
-
-```bash
-export VLLM_VIDEO_LOADER_BACKEND=deepstream
-vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct
-```
-
-or per request via `--media-io-kwargs`:
+Select it with `--media-io-kwargs`:
 
 ```bash
 vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
