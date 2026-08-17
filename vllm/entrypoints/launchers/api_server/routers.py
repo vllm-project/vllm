@@ -15,7 +15,6 @@ def register_api_routers(
     supported_tasks: tuple["SupportedTask", ...],
     model_config: ModelConfig | None = None,
 ):
-
     from vllm.entrypoints.serve import register_vllm_serve_api_routers
 
     register_vllm_serve_api_routers(app)

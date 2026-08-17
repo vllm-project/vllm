@@ -6,10 +6,6 @@ from collections.abc import Awaitable
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-
 
 class XRequestIdMiddleware:
     """
