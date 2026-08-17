@@ -924,25 +924,15 @@ class precompiled_wheel_utils:
                 )
                 commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
             print(f"Using precompiled wheel commit {commit} with variant {variant}")
-            try_default = False
-            wheels, repo_url, download_filename = None, None, None
-            try:
-                wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
-                    commit, variant
-                )
-            except Exception as e:
-                logger.warning(
-                    "Failed to fetch precompiled wheel metadata for variant %s: %s",
-                    variant,
-                    e,
-                )
-                try_default = True  # try outside handler to keep the stacktrace simple
-            if try_default:
-                print("Trying the default variant from remote")
-                wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
-                    commit, None
-                )
-                # if this also fails, then we have nothing more to try / cache
+            wheels, repo_url = precompiled_wheel_utils.fetch_metadata_for_variant(
+                commit, variant
+            )
+            # Do not fall back to the root/default variant here: the root index
+            # may contain wheels for a different CUDA variant than the one
+            # selected (or auto-detected) above, and nothing downstream checks
+            # that compatibility. If the variant's metadata cannot be fetched,
+            # propagate the failure instead of silently installing a wheel built
+            # for the wrong CUDA version.
             assert wheels is not None and repo_url is not None, (
                 "Failed to fetch precompiled wheel metadata"
             )
