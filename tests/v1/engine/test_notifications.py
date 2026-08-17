@@ -7,6 +7,7 @@ so no model is needed.
 """
 
 import queue
+import threading
 import time
 import uuid
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ from vllm.v1.engine.core import DPEngineCoreProc, EngineCore, EngineCoreProc
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.notifications import (
+    MAX_BUFFERED_NOTIFICATIONS,
     CustomNotification,
     publish_worker_notification,
     take_worker_notifications,
@@ -114,6 +116,18 @@ def test_worker_publish_take_roundtrip():
     assert take_worker_notifications() is None
 
 
+def test_publish_drops_oldest_at_capacity():
+    """Overflow drops the oldest so an undrained buffer stays bounded."""
+    for i in range(MAX_BUFFERED_NOTIFICATIONS + 2):
+        publish_worker_notification(CustomNotification(key="k", payload={"n": i}))
+
+    taken = take_worker_notifications()
+    assert taken is not None
+    assert len(taken) == MAX_BUFFERED_NOTIFICATIONS
+    assert taken[0].payload == {"n": 2}
+    assert taken[-1].payload == {"n": MAX_BUFFERED_NOTIFICATIONS + 1}
+
+
 def test_worker_notifications_survive_until_the_first_drain():
     """Load-time producers publish before any gather runs."""
     first = CustomNotification(key="my_plugin", payload={"n": 1})
@@ -156,31 +170,17 @@ def test_gather_publishes_nothing_when_all_ranks_are_quiet():
     assert outputs == {}
 
 
-def test_gather_tolerates_ranks_that_cannot_report():
-    """A worker without the method replies None."""
-    event = CustomNotification(key="my_plugin", payload={"rank": 1})
-    engine_core = _gathering_engine_core([None, [event]])
-
-    engine_core.gather_worker_notifications()
-
-    outputs: dict[int, EngineCoreOutputs] = {}
-    engine_core._flush_notifications(outputs)
-    assert outputs[0].engine_notifications == [event]
-
-
-def test_gather_never_raises_into_the_engine():
-    """A metrics channel must not take down an engine operation."""
+def test_gather_propagates_executor_failure():
+    """A swallowed failure would leave stale rank replies queued for the
+    next collective."""
     engine_core = _bare_engine_core()
 
     def boom(method):
         raise RuntimeError("executor is gone")
 
     engine_core.model_executor = SimpleNamespace(collective_rpc=boom)
-    engine_core.gather_worker_notifications()
-
-    outputs: dict[int, EngineCoreOutputs] = {}
-    engine_core._flush_notifications(outputs)
-    assert outputs == {}
+    with pytest.raises(RuntimeError, match="executor is gone"):
+        engine_core.gather_worker_notifications()
 
 
 def test_engine_core_outputs_round_trip_over_the_wire():
@@ -220,11 +220,7 @@ def test_proc_broadcasts_to_every_frontend():
 
 
 def test_dp_busy_loop_gathers_on_startup():
-    """The DP override of run_busy_loop shipped without either gather call
-    once; pin the startup gather so it cannot regress. Pre-loop placement is
-    the point: the ordering test below cannot tell pre-loop from
-    first-iteration, and a first-iteration gather would be an unthrottled rpc
-    per iteration."""
+    """Pre-loop placement: an in-loop gather would be an unthrottled rpc."""
     proc = DPEngineCoreProc.__new__(DPEngineCoreProc)
     gathered = []
     proc.gather_worker_notifications = lambda: gathered.append("startup")
@@ -236,28 +232,41 @@ def test_dp_busy_loop_gathers_on_startup():
     assert gathered == ["startup"]
 
 
-def test_dp_busy_loop_polls_inside_each_iteration():
-    """The interval poll sits between input processing and the step, matching
-    the non-DP loop."""
-    proc = DPEngineCoreProc.__new__(DPEngineCoreProc)
-    calls = []
-    proc.gather_worker_notifications = lambda: calls.append("startup")
-    proc._handle_shutdown = lambda: True
-    proc._process_input_queue = lambda: calls.append("input")
-    proc._maybe_publish_request_counts = lambda: None
+def test_post_step_polls_for_notifications():
+    """Both engine flavors route through post_step, so the poll lives there."""
+    engine_core = _bare_engine_core()
+    engine_core.check_for_draft_tokens = False
+    polled = []
+    engine_core._maybe_gather_worker_notifications = lambda: polled.append(1)
+
+    engine_core.post_step(model_executed=True)
+
+    assert polled == [1]
+
+
+def test_idle_wait_polls_for_notifications(monkeypatch):
+    """The idle input-queue wait must reach the poll, or idle-published
+    events sit until the next request arrives."""
+    monkeypatch.setattr(core.envs, "VLLM_WORKER_NOTIFICATION_POLL_INTERVAL", 0.01)
+    proc = EngineCoreProc.__new__(EngineCoreProc)
+    proc.input_queue = queue.Queue()
+    proc.aborts_queue = queue.Queue()
+    proc.process_input_queue_block = True
+    proc.has_work = lambda: False
+    proc.is_running = lambda: True
+    proc._notify_idle_state_callbacks = lambda: None
+    polled = []
 
     def poll():
-        calls.append("poll")
-        # The rest of the iteration needs a scheduler and an executor; the
-        # wiring is proven by reaching here, so stop the loop.
+        polled.append(1)
         raise SystemExit
 
     proc._maybe_gather_worker_notifications = poll
 
     with pytest.raises(SystemExit):
-        proc.run_busy_loop()
+        proc._process_input_queue()
 
-    assert calls == ["startup", "input", "poll"]
+    assert polled == [1]
 
 
 def test_poll_is_off_by_default(monkeypatch):
@@ -288,16 +297,33 @@ def test_poll_interval_gates_the_rpc(monkeypatch):
     assert len(gathered) == 1, "gathered again inside the interval"
 
 
+def _wait_for_outputs(client, predicate, timeout_s: float = 180.0):
+    """Bounded drain of client.get_output(), which otherwise blocks forever."""
+    box: list = []
+    done = threading.Event()
+
+    def drain():
+        while not done.is_set():
+            outputs = client.get_output()
+            if result := predicate(outputs):
+                box.append(result)
+                done.set()
+
+    threading.Thread(target=drain, daemon=True).start()
+    assert done.wait(timeout_s), "timed out waiting for engine output"
+    return box[0]
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="Requires a CUDA-alike platform to run a real engine.",
 )
 @create_new_process_for_each_test("spawn")
 def test_custom_notification_reaches_frontend(monkeypatch: pytest.MonkeyPatch):
-    """Full path with a real engine: a plugin-style publish inside the worker
-    process, the interval poll gather, the msgpack wire, and delivery on the
-    frontend client, interleaved with normal generation traffic."""
-    monkeypatch.setenv("VLLM_WORKER_NOTIFICATION_POLL_INTERVAL", "0.001")
+    """Full path with a real engine: worker-side publishes delivered through
+    both the idle-wait poll and the post-step poll, msgpack-decoded at the
+    frontend client."""
+    monkeypatch.setenv("VLLM_WORKER_NOTIFICATION_POLL_INTERVAL", "0.05")
     # The publish callable rides collective_rpc as a cloudpickle payload.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
@@ -315,8 +341,7 @@ def test_custom_notification_reaches_frontend(monkeypatch: pytest.MonkeyPatch):
         )
 
     try:
-        # What a LoRA-hotswap plugin would emit after landing an adapter,
-        # so a router can steer matching requests to this worker.
+        # What a LoRA-hotswap plugin would emit after landing an adapter.
         adapter_loaded = {
             "event": "adapter_loaded",
             "adapter": "shakespeare-insults-v2",
@@ -324,19 +349,32 @@ def test_custom_notification_reaches_frontend(monkeypatch: pytest.MonkeyPatch):
             "load_ms": 128,
         }
 
-        def publish(worker):
+        def publish(worker, payload):
             from vllm.v1.notifications import (
                 CustomNotification,
                 publish_worker_notification,
             )
 
             publish_worker_notification(
-                CustomNotification(key="lora_hotswap", payload=adapter_loaded)
+                CustomNotification(key="lora_hotswap", payload=payload)
             )
             return "published"
 
-        assert client.collective_rpc(publish) == ["published"]
+        assert client.collective_rpc(publish, args=(adapter_loaded,)) == ["published"]
 
+        # Nothing queued: only the idle-wait poll can deliver this.
+        notifications = _wait_for_outputs(
+            client, lambda outputs: outputs.engine_notifications
+        )
+        assert notifications == [
+            CustomNotification(key="lora_hotswap", payload=adapter_loaded)
+        ]
+
+        # Published mid-generation: the post-step poll delivers this one.
+        adapter_evicted = {
+            "event": "adapter_evicted",
+            "adapter": "shakespeare-insults-v2",
+        }
         request_id = f"request-{uuid.uuid4()}"
         client.add_request(
             EngineCoreRequest(
@@ -344,7 +382,7 @@ def test_custom_notification_reaches_frontend(monkeypatch: pytest.MonkeyPatch):
                 external_req_id=request_id,
                 prompt_token_ids=list(range(10, 30)),
                 mm_features=None,
-                sampling_params=SamplingParams(max_tokens=5),
+                sampling_params=SamplingParams(max_tokens=64),
                 pooling_params=None,
                 arrival_time=time.time(),
                 lora_request=None,
@@ -352,16 +390,18 @@ def test_custom_notification_reaches_frontend(monkeypatch: pytest.MonkeyPatch):
                 data_parallel_rank=None,
             )
         )
+        assert client.collective_rpc(publish, args=(adapter_evicted,)) == ["published"]
 
-        notifications: list[CustomNotification] = []
-        finished = False
-        while not (notifications and finished):
-            outputs = client.get_output()
-            notifications.extend(outputs.engine_notifications or ())
-            finished |= any(out.finished for out in outputs.outputs)
+        seen: dict = {"notifications": [], "finished": False}
 
-        assert notifications == [
-            CustomNotification(key="lora_hotswap", payload=adapter_loaded)
+        def notified_and_finished(outputs):
+            seen["notifications"].extend(outputs.engine_notifications or ())
+            seen["finished"] |= any(out.finished for out in outputs.outputs)
+            return seen["notifications"] and seen["finished"]
+
+        _wait_for_outputs(client, notified_and_finished)
+        assert seen["notifications"] == [
+            CustomNotification(key="lora_hotswap", payload=adapter_evicted)
         ]
     finally:
         client.shutdown()
