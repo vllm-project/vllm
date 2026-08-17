@@ -159,11 +159,8 @@ class EMABackpressureDetector(BackpressureDetector):
         low_water_s: float,
         alpha: float = DEFAULT_ALPHA,
         warmup_completions: int = DEFAULT_WARMUP_COMPLETIONS,
-        policy_cls: type[BackpressurePolicy] | None = None,
+        policy: BackpressurePolicy | None = None,
     ):
-        policy_ctor = policy_cls if policy_cls else DropStorePolicy
-        policy = policy_ctor()
-
         super().__init__(policy=policy)
         if not (0 < alpha <= 1):
             raise ValueError(f"alpha must be in (0, 1], got {alpha}")
