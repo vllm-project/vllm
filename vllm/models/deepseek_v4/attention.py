@@ -200,12 +200,9 @@ def _validate_index_cache_ubatching(skip_topk: bool, use_ubatching: bool) -> Non
     """Reject IndexCache under DBO, where the shared top-k buffer is unsafe.
 
     ``topk_indices_buffer`` has no ubatch dimension. Micro-batches yield at the
-    MoE boundary, after attention, so a layer that writes and reads the buffer
-    itself stays on one side of a yield. A skipped layer instead reads a buffer
-    written a layer earlier, which the other micro-batch has since overwritten.
-
-    Raises:
-        NotImplementedError: If any layer would reuse top-k while ubatching.
+    MoE boundary, after attention, so a layer that writes and reads it within
+    one layer is safe; a skipped layer reads across the yield, by which point
+    the other micro-batch has overwritten it.
     """
     if not skip_topk or not use_ubatching:
         return
@@ -372,8 +369,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.eager_scratch_pool = eager_scratch_pool
 
         self.indexer = None
-        # IndexCache: skipped layers keep their indexer allocated but never run
-        # it. The topk buffer is rank-local, hence this rank's layer range.
+        # Skipped layers keep their indexer allocated and never run it.
         pp_group = get_pp_group()
         local_start, local_end = get_pp_indices(
             config.num_hidden_layers, pp_group.rank_in_group, pp_group.world_size

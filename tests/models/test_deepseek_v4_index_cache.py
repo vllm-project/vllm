@@ -136,8 +136,7 @@ def test_each_pipeline_stage_computes_its_own_first_c4a_layer():
     stage0 = _skipped_layers(config, local_start_layer=0, local_end_layer=24)
     stage1 = _skipped_layers(config, local_start_layer=24, local_end_layer=43)
 
-    # topk_indices_buffer is rank-local: reusing here would read a buffer that
-    # only the other rank ever wrote.
+    # Reusing here would read a buffer only the other rank ever wrote.
     assert 24 not in stage1
     assert stage1 == [28, 32, 36, 40]
     assert C4A_LAYERS[0] not in stage0
@@ -145,8 +144,6 @@ def test_each_pipeline_stage_computes_its_own_first_c4a_layer():
 
 
 def test_reuse_is_rejected_under_ubatching():
-    # Micro-batches share one topk_indices_buffer, so a skipped layer would read
-    # whichever micro-batch wrote last.
     with pytest.raises(NotImplementedError, match="DBO/ubatching"):
         _validate_index_cache_ubatching(skip_topk=True, use_ubatching=True)
 
