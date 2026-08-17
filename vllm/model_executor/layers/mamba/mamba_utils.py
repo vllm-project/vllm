@@ -221,6 +221,11 @@ class MambaStateShapeCalculator:
         )
 
     @classmethod
+    def replayssm_spec_ring_len(cls, replayssm_buffer_len: int, num_spec: int) -> int:
+        """Physical ring length L = B + 1 + num_spec."""
+        return replayssm_buffer_len + 1 + num_spec
+
+    @classmethod
     def short_conv_state_shape(
         cls,
         tp_world_size: int,
