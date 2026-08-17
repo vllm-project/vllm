@@ -3,12 +3,12 @@
 """Low-level CUDA/HIP memory helpers: pinning and batch DMA transfers."""
 
 import ctypes
-import os
 from typing import Any, NamedTuple
 
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -65,13 +65,9 @@ _batch_memcpy: tuple[Any, int] | None = None
 # Max copy descriptors per batch call, resolved lazily on first use.
 _max_batch_descriptors: int | None = None
 
-# Safe default descriptor cap on ROCm. hipMemcpyBatchAsync GPU-faults (memory
-# access fault in __amd_rocclr_copyBufferBatch, process abort/segfault) for any
-# call with count > 8192 on ROCm 7.15 / MI350X (gfx950) — independent of copy
-# size, direction, and numAttrs.
-# 4096 keeps a 2x margin below the ceiling; the ~10% lower
-# per-batch bandwidth vs 8192 is negligible since the copy is overlapped.
-_ROCM_DEFAULT_MAX_BATCH_DESCRIPTORS = 4096
+# ROCm hipMemcpyBatchAsync faults for count > 8192 (MI350X/gfx950), so we chunk
+# at that ceiling. Override via VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS.
+_ROCM_DEFAULT_MAX_BATCH_DESCRIPTORS = 8192
 
 
 def _resolve_max_batch_descriptors() -> int:
@@ -84,24 +80,13 @@ def _resolve_max_batch_descriptors() -> int:
     """
     global _max_batch_descriptors
     if _max_batch_descriptors is None:
-        override = os.getenv("VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS")
-        val: int | None = None
-        if override is not None:
-            try:
-                parsed = int(override)
-            except ValueError:
-                logger.warning(
-                    "Ignoring invalid VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS=%r",
-                    override,
-                )
-            else:
-                if parsed > 0:
-                    val = parsed
-        if val is None:
-            val = (
+        override = envs.VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS
+        if override > 0:
+            _max_batch_descriptors = override
+        else:
+            _max_batch_descriptors = (
                 _ROCM_DEFAULT_MAX_BATCH_DESCRIPTORS if current_platform.is_rocm() else 0
             )
-        _max_batch_descriptors = val
     return _max_batch_descriptors
 
 
@@ -264,8 +249,8 @@ def copy_blocks(
     sz_all = np.repeat(params.bpb, n)
     total = n * params.num_layers
 
-    # Chunk on ROCm (hipMemcpyBatchAsync faults above 8192 descriptors/call);
-    # CUDA is uncapped (max_desc == 0), so it issues a single call as before.
+    # Chunk on ROCm: hipMemcpyBatchAsync faults above 8192 descriptors/call.
+    # CUDA is uncapped (max_desc == 0) and issues a single call.
     max_desc = _resolve_max_batch_descriptors()
     step = total if max_desc <= 0 else max_desc
     for off in range(0, total, step):
