@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
 
+import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
@@ -42,6 +43,9 @@ class BlockTables:
 
         self.blocks_per_kv_block = [
             bs // kbs for bs, kbs in zip(block_sizes, kernel_block_sizes)
+        ]
+        self.kernel_block_arange_per_group = [
+            np.arange(bpk, dtype=np.int32) for bpk in self.blocks_per_kv_block
         ]
 
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
@@ -104,6 +108,21 @@ class BlockTables:
         )
         self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
+    def _map_to_kernel_blocks(
+        self,
+        group_id: int,
+        kv_manager_block_ids: list[int],
+    ) -> list[int]:
+        bpk = self.blocks_per_kv_block[group_id]
+        if bpk == 1 or not kv_manager_block_ids:
+            return kv_manager_block_ids
+
+        block_ids = np.asarray(kv_manager_block_ids, dtype=np.int32)
+        kernel_block_arange = self.kernel_block_arange_per_group[group_id]
+        assert kernel_block_arange is not None
+        kernel_block_ids = block_ids.reshape(-1, 1) * bpk + kernel_block_arange
+        return kernel_block_ids.reshape(-1).tolist()
+
     def append_block_ids(
         self,
         req_index: int,
@@ -112,10 +131,7 @@ class BlockTables:
     ) -> None:
         for i in range(self.num_kv_cache_groups):
             start = self.num_blocks.np[i, req_index] if not overwrite else 0
-            block_ids = new_block_ids[i]
-            bpk = self.blocks_per_kv_block[i]
-            if bpk > 1:
-                block_ids = [b * bpk + k for b in block_ids for k in range(bpk)]
+            block_ids = self._map_to_kernel_blocks(i, new_block_ids[i])
             self.block_tables[i].stage_write(req_index, start, block_ids)
             self.num_blocks.np[i, req_index] = start + len(block_ids)
 
