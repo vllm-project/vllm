@@ -331,16 +331,13 @@ def test_replayssm_flashinfer_backend_init():
 
 
 @pytest.mark.parametrize(
-    ("backend", "num_speculative_tokens", "expected_ring_len"),
+    ("backend", "expected_ring_len"),
     [
-        (MambaBackendEnum.TRITON, 0, 16),
-        (MambaBackendEnum.FLASHINFER, 0, 17),
-        (MambaBackendEnum.FLASHINFER, 3, 20),
+        (MambaBackendEnum.TRITON, 16),
+        (MambaBackendEnum.FLASHINFER, 17),
     ],
 )
-def test_replayssm_physical_ring_shape(
-    backend, num_speculative_tokens, expected_ring_len
-):
+def test_replayssm_physical_ring_shape(backend, expected_ring_len):
     base_shapes = ((64, 3), (8, 4, 16))
 
     shapes = MambaStateShapeCalculator.append_replayssm_ring(
@@ -349,7 +346,6 @@ def test_replayssm_physical_ring_shape(
         tp_world_size=2,
         logical_window=16,
         backend=backend,
-        num_speculative_tokens=num_speculative_tokens,
     )
 
     assert shapes[2:] == (
