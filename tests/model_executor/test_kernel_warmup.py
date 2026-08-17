@@ -105,9 +105,13 @@ def test_replayssm_autotune_slots_restore_state_and_trackers():
     mixer = MambaMixer2.__new__(MambaMixer2)
     torch.nn.Module.__init__(mixer)
     mixer.use_replayssm = True
+    mixer.replayssm_buffer_len = 16
     mixer.kv_cache = (
         torch.full((4, 2), 3.0),
         torch.full((4, 2), 3.0),
+        torch.full((4, 2, 17), 3.0),
+        torch.full((4, 2, 17), 3.0),
+        torch.full((4, 2, 17), 3.0),
     )
     mixer._replayssm_ring_start = torch.full((4,), 3, dtype=torch.int32)
     mixer._replayssm_prev_num_accepted = torch.full((4,), 3, dtype=torch.int32)
@@ -149,7 +153,14 @@ def test_replayssm_autotune_slots_reset_v2_dummy_tables_and_state():
     mixer = MambaMixer2.__new__(MambaMixer2)
     torch.nn.Module.__init__(mixer)
     mixer.use_replayssm = True
-    mixer.kv_cache = (torch.full((4, 2), 3.0),)
+    mixer.replayssm_buffer_len = 16
+    mixer.kv_cache = (
+        torch.full((4, 2), 3.0),
+        torch.full((4, 2), 3.0),
+        torch.full((4, 2, 17), 3.0),
+        torch.full((4, 2, 17), 3.0),
+        torch.full((4, 2, 17), 3.0),
+    )
     mixer._replayssm_ring_start = torch.full((4,), 3, dtype=torch.int32)
     mixer._replayssm_prev_num_accepted = torch.full((4,), 3, dtype=torch.int32)
     block_tables = SimpleNamespace(get_dummy_block_tables=Mock())
