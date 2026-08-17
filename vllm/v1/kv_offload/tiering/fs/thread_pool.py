@@ -96,7 +96,7 @@ class DualQueueThreadPool:
         self._finished_q: deque[tuple[JobId, bool, float]] = deque()
         self._inflight_jobs = 0  # guarded by _condition
 
-        assert self.total_threads > 0, "ThreadPool needs atleast one thread"
+        assert self.total_threads > 0, "ThreadPool needs at least one thread"
 
         for i in range(self._n_read_threads):
             t = threading.Thread(
