@@ -899,6 +899,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         hc_fn: torch.Tensor,
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
+        norm_weight: torch.Tensor | None = None,
+        norm_eps: float = 0.0,
     ):
         post_mix, res_mix, layer_input = self.mhc_pre(
             residual=x,
@@ -910,6 +912,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             hc_sinkhorn_eps=self.hc_eps,
             hc_post_mult_value=self.hc_post_alpha,
             sinkhorn_repeat=self.hc_sinkhorn_iters,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
         )
         return layer_input, post_mix, res_mix
 
@@ -933,11 +937,18 @@ class DeepseekV4DecoderLayer(nn.Module):
     ) -> tuple[
         torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
     ]:
+        attn_norm_weight = self.attn_norm.weight.data
+        attn_norm_eps = self.attn_norm.variance_epsilon
         if residual is None:
             # First layer: run standalone hc_pre
             residual = x
             x, post_mix, res_mix = self.hc_pre(
-                x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+                x,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                norm_weight=attn_norm_weight,
+                norm_eps=attn_norm_eps,
             )
         else:
             residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
@@ -953,11 +964,13 @@ class DeepseekV4DecoderLayer(nn.Module):
                 self.hc_eps,
                 self.hc_post_alpha,
                 self.hc_sinkhorn_iters,
+                norm_weight=attn_norm_weight,
+                norm_eps=attn_norm_eps,
             )
 
-        x = self.attn_norm(x)
         x = self.attn(positions, x, None)
-
+        ffn_norm_weight = self.ffn_norm.weight.data
+        ffn_norm_eps = self.ffn_norm.variance_epsilon
         residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
             x,
             residual,
@@ -971,8 +984,9 @@ class DeepseekV4DecoderLayer(nn.Module):
             self.hc_eps,
             self.hc_post_alpha,
             self.hc_sinkhorn_iters,
+            norm_weight=ffn_norm_weight,
+            norm_eps=ffn_norm_eps,
         )
-        x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
         return x, residual, post_mix, res_mix
 
