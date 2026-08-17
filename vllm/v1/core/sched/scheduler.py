@@ -60,7 +60,12 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus, StreamingUpdate
+from vllm.v1.request import (
+    HiSparseImportTarget,
+    Request,
+    RequestStatus,
+    StreamingUpdate,
+)
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
@@ -2797,9 +2802,8 @@ class Scheduler(SchedulerInterface):
         """
         assert self.connector is not None
 
-        device_import = (request.kv_transfer_params or {}).pop(
-            "_hisparse_device_import", False
-        )
+        import_target = request.hisparse_import_target
+        request.hisparse_import_target = HiSparseImportTarget.NONE
 
         if request.request_id in self.failed_recving_kv_req_ids:
             # Request had KV load failures; num_computed_tokens was already
@@ -2825,11 +2829,11 @@ class Scheduler(SchedulerInterface):
         else:
             # Now that the blocks are ready, actually cache them.
             # This will cache the blocks iff caching is enabled.
-            if request.hisparse_host_import:
+            if import_target is HiSparseImportTarget.HOST:
                 self.kv_cache_manager.hisparse_coordinator.complete_host_import(
                     request.request_id, request.num_computed_tokens
                 )
-            elif device_import:
+            elif import_target is HiSparseImportTarget.DEVICE:
                 self.kv_cache_manager.hisparse_coordinator.complete_device_import(
                     request.request_id
                 )

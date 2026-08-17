@@ -25,7 +25,7 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.metrics.stats import PrefixCacheStats
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import HiSparseImportTarget, Request, RequestStatus
 
 logger = init_logger(__name__)
 
@@ -747,6 +747,14 @@ class KVCacheManager:
             )
 
         request.hisparse_host_import = hisparse_host_import
+        if allow_hisparse_host_import and num_external_computed_tokens > 0:
+            request.hisparse_import_target = (
+                HiSparseImportTarget.HOST
+                if hisparse_host_import
+                else HiSparseImportTarget.DEVICE
+            )
+        else:
+            request.hisparse_import_target = HiSparseImportTarget.NONE
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id,

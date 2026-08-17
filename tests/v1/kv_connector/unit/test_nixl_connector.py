@@ -2982,7 +2982,7 @@ def test_failed_request_skips_kv_postprocessing(
     default_vllm_config, dist_init, failure_mode
 ):
     """Test that failed requests skip KV sync and post-processing in
-    get_finished().
+    get_transfer_results().
 
     This is the core safety behavior: when a KV transfer fails at any stage,
     the request must still appear in done_recving (so the scheduler can apply
@@ -3067,11 +3067,12 @@ def test_failed_request_skips_kv_postprocessing(
         patch.object(worker, "sync_recved_kv_to_device") as mock_sync,
         patch.object(worker, "post_process_device_kv_on_receive") as mock_postprocess,
     ):
-        _, done_recving = connector.get_finished(finished_req_ids=set())
+        results = connector.get_transfer_results(finished_req_ids=set())
 
     # The failed request must appear in done_recving so the scheduler
     # can handle it (e.g., trigger recompute via kv_load_failure_policy).
-    assert request_id in done_recving
+    assert request_id in results.finished_recving
+    assert results.failed_recving == {request_id}
 
     # Critical: KV sync and post-processing must NOT have been called
     # since no valid KV data was received for the failed request.

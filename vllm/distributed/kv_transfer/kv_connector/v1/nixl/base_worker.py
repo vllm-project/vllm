@@ -33,7 +33,10 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     kv_postprocess_blksize_on_receive,
     kv_postprocess_layout_on_receive,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import CopyBlocksOp
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    CopyBlocksOp,
+    KVConnectorTransferResults,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
     HostReadStager,
@@ -554,7 +557,6 @@ class NixlBaseConnectorWorker:
         # every sibling transfer is terminal and its blocks are safe to reuse.
         self._failed_recv_pending: set[ReqId] = set()
         self._failed_recv_reported: set[ReqId] = set()
-        self._last_failed_recv_reqs: set[ReqId] = set()
         self._failed_recv_lock = threading.Lock()
 
         # Handshake metadata of this worker for NIXL transfers.
@@ -2415,9 +2417,10 @@ class NixlBaseConnectorWorker:
                 indices=indices,
             )
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_transfer_results(self) -> KVConnectorTransferResults:
         """
-        Get requests that are done sending or recving on this specific worker.
+        Get transfers that completed on this specific worker.
+
         The scheduler process (via the MultiprocExecutor) will use this output
         to track which workers are done.
         """
@@ -2442,8 +2445,6 @@ class NixlBaseConnectorWorker:
         # Add failed requests to done_recving for scheduler tracking
         # (blocks are already marked invalid, scheduler will handle recompute)
         done_recving.update(failed_recv_reqs)
-        self._last_failed_recv_reqs = failed_recv_reqs
-
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
                 "Rank %s, get_finished: %s requests done sending "
@@ -2555,7 +2556,16 @@ class NixlBaseConnectorWorker:
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
 
-        return done_sending, done_recving
+        return KVConnectorTransferResults(
+            finished_sending=done_sending,
+            finished_recving=done_recving,
+            failed_recving=failed_recv_reqs,
+        )
+
+    def get_finished(self) -> tuple[set[str], set[str]]:
+        """Compatibility wrapper for the legacy completion API."""
+        results = self.get_transfer_results()
+        return results.finished_sending, results.finished_recving
 
     def _sync_device_after_direct_recv(self, done_recving: set[str]) -> None:
         """Make direct NIXL writes visible before model execution."""
@@ -2820,7 +2830,7 @@ class NixlBaseConnectorWorker:
             if req_id in self._failed_recv_reported:
                 return
             self._failed_recv_reported.add(req_id)
-        # Use .get() here as the metadata cleanup is handled by get_finished()
+        # Use .get() here; transfer-result collection owns metadata cleanup.
         # TODO (NickLucche) handle failed transfer for HMA.
         if (meta := self._recving_metadata.get(req_id)) and not self._is_hma_required:
             self._invalid_block_ids.put(set(meta.local_block_ids[0]))
@@ -3118,11 +3128,6 @@ class NixlBaseConnectorWorker:
             except queue.Empty:
                 break
         return result
-
-    def get_failed_recving(self) -> set[str]:
-        failed = self._last_failed_recv_reqs
-        self._last_failed_recv_reqs = set()
-        return failed
 
     def _evict_stale_engines(self) -> None:
         """Scan for and evict remote engines that have exceeded their TTL.

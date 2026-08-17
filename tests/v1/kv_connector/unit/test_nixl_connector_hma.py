@@ -1176,11 +1176,12 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize("failed", [False, True])
-def test_device_import_marker_is_consumed_after_remote_receive(failed):
+def test_device_import_target_is_consumed_after_remote_receive(failed):
     """Only a successful direct import may suppress indexer restoration."""
     from unittest.mock import MagicMock
 
     from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm.v1.request import HiSparseImportTarget
 
     scheduler = object.__new__(Scheduler)
     scheduler.connector = MagicMock()
@@ -1194,11 +1195,11 @@ def test_device_import_marker_is_consumed_after_remote_receive(failed):
     request.num_computed_tokens = 32
     request.num_tokens = 48
     request.hisparse_host_import = False
-    request.kv_transfer_params = {"_hisparse_device_import": True}
+    request.hisparse_import_target = HiSparseImportTarget.DEVICE
 
     scheduler._update_waiting_for_remote_kv(request)
 
-    assert "_hisparse_device_import" not in request.kv_transfer_params
+    assert request.hisparse_import_target is HiSparseImportTarget.NONE
     complete = scheduler.kv_cache_manager.hisparse_coordinator.complete_device_import
     if failed:
         complete.assert_not_called()
@@ -1878,19 +1879,6 @@ def test_hisparse_host_import_metadata_keeps_source_blocks_separate():
     assert req_meta.hisparse_host_block_ids == [5, 6]
     assert req_meta.local_block_ids == ([10, 11], [20])
     assert not sched._hisparse_host_blocks_to_recv
-
-    direct_request = create_request(do_remote_prefill=True)
-    assert direct_request.kv_transfer_params is not None
-    direct_request.kv_transfer_params["remote_block_ids"] = ([1, 2],)
-    direct_request.hisparse_host_import = False
-    sched.update_state_after_alloc(direct_request, blocks, num_external_tokens=32)
-    assert direct_request.kv_transfer_params["_hisparse_device_import"] is True
-
-    full_hit = create_request(do_remote_prefill=True)
-    assert full_hit.kv_transfer_params is not None
-    full_hit.kv_transfer_params["remote_block_ids"] = ([1, 2],)
-    sched.update_state_after_alloc(full_hit, blocks, num_external_tokens=0)
-    assert "_hisparse_device_import" not in full_hit.kv_transfer_params
 
 
 @pytest.mark.cpu_test

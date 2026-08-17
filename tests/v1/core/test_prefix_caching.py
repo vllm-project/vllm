@@ -53,6 +53,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.request import HiSparseImportTarget
 
 pytestmark = pytest.mark.cpu_test
 
@@ -758,6 +759,7 @@ def test_hisparse_external_import_falls_back_to_hard_gpu_footprint(
 
     assert allocated is not None
     assert request.hisparse_host_import
+    assert request.hisparse_import_target is HiSparseImportTarget.HOST
     source, indexer, resident, hot = manager.get_blocks(request.request_id).blocks
     assert len(source) == num_prompt_blocks
     assert len(indexer) == num_prompt_blocks
@@ -848,6 +850,7 @@ def test_hisparse_host_import_decision_survives_capacity_retry(
         is not None
     )
     assert not first.hisparse_host_import
+    assert first.hisparse_import_target is HiSparseImportTarget.DEVICE
 
     assert (
         manager.allocate_slots(
@@ -860,6 +863,7 @@ def test_hisparse_host_import_decision_survives_capacity_retry(
         )
         is None
     )
+    assert second.hisparse_import_target is HiSparseImportTarget.NONE
 
     manager.free(first)
     assert (
@@ -874,6 +878,7 @@ def test_hisparse_host_import_decision_survives_capacity_retry(
         is not None
     )
     assert second.hisparse_host_import
+    assert second.hisparse_import_target is HiSparseImportTarget.HOST
     _, _, resident, hot = manager.get_blocks(second.request_id).blocks
     assert all(block.is_null for block in resident[:-1])
     assert not resident[-1].is_null

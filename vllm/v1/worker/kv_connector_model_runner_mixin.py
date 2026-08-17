@@ -99,11 +99,13 @@ class KVConnectorModelRunnerMixin:
             if wait_for_save and not defer_finalize:
                 kv_connector.wait_for_save()
 
-            output.finished_sending, output.finished_recving = (
-                kv_connector.get_finished(scheduler_output.finished_req_ids)
+            transfer_results = kv_connector.get_transfer_results(
+                scheduler_output.finished_req_ids
             )
+            output.finished_sending = transfer_results.finished_sending or None
+            output.finished_recving = transfer_results.finished_recving or None
+            output.failed_recving = transfer_results.failed_recving
             output.invalid_block_ids = kv_connector.get_block_ids_with_load_errors()
-            output.failed_recving = kv_connector.get_failed_recving()
 
             output.kv_connector_stats = kv_connector.get_kv_connector_stats()
             output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()

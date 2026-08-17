@@ -168,11 +168,6 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         self._hisparse_host_blocks_to_recv[request.request_id] = list(
                             unhashed_local_block_ids[source_group_ids[0]]
                         )
-                    elif (
-                        num_external_tokens > 0
-                        and self.kv_cache_config.hisparse_host_num_blocks is not None
-                    ):
-                        params["_hisparse_device_import"] = True
                     local_block_ids = self.get_exchange_clipped_blocks(
                         unhashed_local_block_ids
                     )

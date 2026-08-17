@@ -41,6 +41,9 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorTransferResults,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -774,13 +777,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._reqs_to_send.pop(req_id, None)
         return notified_req_ids
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_transfer_results(self) -> KVConnectorTransferResults:
         # Engine main thread asking for completions: also wake the writer
         # so it gets a chance to drain NIXL notifs (heartbeats, completion
         # notifs, late PUSH_REGs) even if it had been parked.
         self._push_writer_wake.set()
 
-        done_sending, done_recving = super().get_finished()
+        results = super().get_transfer_results()
+        done_sending = results.finished_sending
 
         # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
         # writer thread also appends to it, so guard the pop.
@@ -802,4 +806,4 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if done_sending:
             self._push_writer_wake.set()
 
-        return done_sending, done_recving
+        return results

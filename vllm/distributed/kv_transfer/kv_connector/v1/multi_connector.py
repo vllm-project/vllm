@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorTransferResults,
     KVConnectorWorkerMetadata,
     SupportsHMA,
     supports_hma,
@@ -346,41 +347,37 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
-        finished_sending: set[str] = set()
-        finished_recving: set[str] = set()
-        for c in self._connectors:
-            sending, recving = c.get_finished(finished_req_ids)
-            if not recving and not sending:
-                continue
-            # Aggregate finished recving request ids.
-            finished_recving.update(recving or ())
-            # Aggregate finished sending request ids - only include
-            # once we've drained the "extra" count (for cases where
-            # more than one connector is async-saving the same request).
-            for req_id in sending or ():
+        results = self.get_transfer_results(finished_req_ids)
+        return (
+            results.finished_sending or None,
+            results.finished_recving or None,
+        )
+
+    def get_transfer_results(
+        self, finished_req_ids: set[str]
+    ) -> KVConnectorTransferResults:
+        results = KVConnectorTransferResults()
+        for connector in self._connectors:
+            child_results = connector.get_transfer_results(finished_req_ids)
+            results.finished_recving.update(child_results.finished_recving)
+            results.failed_recving.update(child_results.failed_recving)
+            for req_id in child_results.finished_sending:
                 extra_pending = self._extra_async_saves.get(req_id)
                 if extra_pending is None:
-                    finished_sending.add(req_id)
-                    continue
-                assert extra_pending > 0
-                if extra_pending == 1:
-                    del self._extra_async_saves[req_id]
+                    results.finished_sending.add(req_id)
                 else:
-                    self._extra_async_saves[req_id] = extra_pending - 1
-
-        return finished_sending or None, finished_recving or None
+                    assert extra_pending > 0
+                    if extra_pending == 1:
+                        del self._extra_async_saves[req_id]
+                    else:
+                        self._extra_async_saves[req_id] = extra_pending - 1
+        return results
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         agg_block_ids: set[int] = set()
         for c in self._connectors:
             agg_block_ids |= c.get_block_ids_with_load_errors()
         return agg_block_ids
-
-    def get_failed_recving(self) -> set[str]:
-        failed: set[str] = set()
-        for connector in self._connectors:
-            failed.update(connector.get_failed_recving())
-        return failed
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         """Set xPU-specific copy ops for all sub-connectors."""
