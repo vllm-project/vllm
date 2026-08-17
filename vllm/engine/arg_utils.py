@@ -10,7 +10,6 @@ import os
 import sys
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
-from itertools import permutations
 from types import UnionType
 from typing import (
     TYPE_CHECKING,
@@ -1457,13 +1456,6 @@ class EngineArgs:
         observability_group.add_argument(
             "--otlp-traces-endpoint", **observability_kwargs["otlp_traces_endpoint"]
         )
-        # TODO: generalise this special case
-        choices = observability_kwargs["collect_detailed_traces"]["choices"]
-        metavar = f"{{{','.join(choices)}}}"
-        observability_kwargs["collect_detailed_traces"]["metavar"] = metavar
-        observability_kwargs["collect_detailed_traces"]["choices"] += [
-            ",".join(p) for p in permutations(get_args(DetailedTraceModules), r=2)
-        ]
         observability_group.add_argument(
             "--collect-detailed-traces",
             **observability_kwargs["collect_detailed_traces"],
