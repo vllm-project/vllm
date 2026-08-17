@@ -14,6 +14,7 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import SpeculativeConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDAMetadataBuilder
 from vllm.models.kimi_k3.nvidia.kda_metadata import (
     KimiK3KDAAttentionBackend,
     KimiK3KDAMetadata,
@@ -41,9 +42,6 @@ DEVICE = torch.device("cpu")
 PRUNED_METADATA_FIELDS = {
     "chunk_indices",
     "chunk_offsets",
-    "prefill_query_start_loc",
-    "prefill_state_indices",
-    "prefill_has_initial_state",
     "spec_sequence_masks",
 }
 
@@ -550,3 +548,59 @@ def test_aligned_block_table_matches_shared_gdn():
     )
 
     torch.testing.assert_close(actual, expected)
+
+
+def test_mixed_regular_decode_and_prefill_preserves_prefill_views():
+    batch = BatchSpec(seq_lens=[65, 100], query_lens=[1, 50])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, DEVICE
+    ).replace(is_prefilling=torch.tensor([False, True]))
+    actual = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=0,
+        full_cuda_graph=False,
+    ).build(0, common_attn_metadata)
+
+    assert actual.num_decodes == 1
+    assert actual.num_prefills == 1
+    assert actual.prefill_query_start_loc is not None
+    assert actual.prefill_state_indices is not None
+    assert actual.prefill_has_initial_state is not None
+    torch.testing.assert_close(
+        actual.prefill_query_start_loc,
+        torch.tensor([0, 50], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        actual.prefill_state_indices,
+        actual.non_spec_state_indices_tensor[1:],
+    )
+    torch.testing.assert_close(
+        actual.prefill_has_initial_state,
+        torch.tensor([True]),
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_rocm_kimi_k3_prefill_builds_chunk_metadata_on_device():
+    device = torch.device("cuda")
+    batch = BatchSpec(seq_lens=[1024, 513], query_lens=[1024, 513])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device
+    ).replace(is_prefilling=torch.tensor([True, True]))
+    reference = _make_builder(
+        GDNAttentionMetadataBuilder,
+        num_speculative_tokens=0,
+        full_cuda_graph=False,
+        device=device,
+    ).build(0, common_attn_metadata)
+    actual = _make_builder(
+        KimiK3ROCmKDAMetadataBuilder,
+        num_speculative_tokens=0,
+        full_cuda_graph=False,
+        device=device,
+    ).build(0, common_attn_metadata)
+
+    assert actual.chunk_indices is not None
+    assert actual.chunk_offsets is not None
+    torch.testing.assert_close(actual.chunk_indices, reference.chunk_indices)
+    torch.testing.assert_close(actual.chunk_offsets, reference.chunk_offsets)

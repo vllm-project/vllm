@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi-K3 specialization of GDN attention metadata.
 
+Shared by the NVIDIA and ROCm paths; the ROCm builder subclasses it and
+overrides the prefill chunk-metadata hook.
+
 The request classification and cudagraph staging intentionally mirror
 ``GDNAttentionMetadataBuilder``. Kimi-K3 builds the metadata required by its
 prefill KDA kernel internally, so this builder omits the shared FLA chunk
@@ -340,6 +343,16 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         self.recoverssm_context = context
         return context
 
+    def _build_chunk_metadata(
+        self,
+        prefill_query_start_loc: torch.Tensor,
+        prefill_query_start_loc_cpu: torch.Tensor,
+        device: torch.device,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        # NVIDIA KDA builds this metadata inside its prefill kernel. ROCm
+        # overrides this hook to build it on device for the chunk KDA kernel.
+        return None, None
+
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
@@ -543,16 +556,49 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         # Unlike the shared GDN layer, Kimi-K3's prefill KDA wrapper prepares
         # its own chunk indices. Only causal-convolution metadata is needed here.
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
+        chunk_indices, chunk_offsets = None, None
+        prefill_query_start_loc = None
+        prefill_state_indices = None
+        prefill_has_initial_state = None
         if num_prefills > 0:
+            assert non_spec_query_start_loc is not None
+            assert non_spec_query_start_loc_cpu is not None
+            assert non_spec_state_indices_tensor is not None
+
+            # AMD peels ordinary decodes off a mixed non-spec batch before its
+            # chunk KDA call. Preserve the prefill-only views at no extra device
+            # cost; NVIDIA ignores them.
+            if num_spec_decodes == 0 and num_decodes > 0:
+                prefill_query_start_loc = (
+                    non_spec_query_start_loc[num_decodes:] - num_decode_tokens
+                )
+                prefill_query_start_loc_cpu = (
+                    non_spec_query_start_loc_cpu[num_decodes:] - num_decode_tokens
+                )
+                prefill_state_indices = non_spec_state_indices_tensor[num_decodes:]
+            else:
+                prefill_query_start_loc = non_spec_query_start_loc
+                prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu
+                prefill_state_indices = non_spec_state_indices_tensor
+
             has_initial_state = m.compute_num_computed_tokens() > 0
             if num_spec_decodes > 0:
                 has_initial_state = has_initial_state[active_non_spec_mask_cpu]
-                assert non_spec_query_start_loc_cpu is not None
             nums_dict, batch_ptr, token_chunk_offset_ptr = (
                 compute_causal_conv1d_metadata(
                     non_spec_query_start_loc_cpu,
                     device=query_start_loc.device,
                 )
+            )
+            chunk_indices, chunk_offsets = self._build_chunk_metadata(
+                prefill_query_start_loc,
+                prefill_query_start_loc_cpu,
+                query_start_loc.device,
+            )
+            prefill_has_initial_state = (
+                has_initial_state[num_decodes:]
+                if num_spec_decodes == 0 and num_decodes > 0
+                else has_initial_state
             )
         else:
             has_initial_state = None
@@ -647,6 +693,11 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
+            chunk_indices=chunk_indices,
+            chunk_offsets=chunk_offsets,
+            prefill_query_start_loc=prefill_query_start_loc,
+            prefill_state_indices=prefill_state_indices,
+            prefill_has_initial_state=prefill_has_initial_state,
         )
 
 

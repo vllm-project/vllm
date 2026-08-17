@@ -319,13 +319,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         has_initial_state = m.has_initial_state
         non_spec_query_start_loc = m.non_spec_query_start_loc
         non_spec_state_indices_tensor = m.non_spec_state_indices_tensor
-        spec_sequence_masks = m.spec_sequence_masks
         spec_token_indx = m.spec_token_indx
         non_spec_token_indx = m.non_spec_token_indx
         spec_state_indices_tensor = m.spec_state_indices_tensor
         spec_query_start_loc = m.spec_query_start_loc
         num_accepted_tokens = m.num_accepted_tokens
         num_actual_tokens = m.num_actual_tokens
+        has_spec_decode = m.num_spec_decodes > 0
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
@@ -341,7 +341,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if (
             self.decode_conv1d_weight is not None
             and self.decode_norm_weight is not None
-            and spec_sequence_masks is None
+            and not has_spec_decode
             and m.num_prefills == 0
             and m.num_decodes > 0
         ):
@@ -377,7 +377,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         # Split tokens into the multi-query spec-decode part and the remaining
         # (prefill / plain decode) part.
-        if spec_sequence_masks is not None:
+        if has_spec_decode:
             if m.num_prefills == 0 and m.num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
                 g1_spec, beta_spec = g1, beta
@@ -395,7 +395,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
         # ---------- spec-decode multi-query path ----------
         core_attn_out_spec = None
-        if spec_sequence_masks is not None:
+        if has_spec_decode:
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
             spec_conv_indices = spec_state_indices_tensor[:, 0][: m.num_spec_decodes]
@@ -495,7 +495,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 # Send them to the recurrent kernel and give the chunk kernel the
                 # prefill tail only.
                 core_attn_out_decode = None
-                split_non_spec = spec_sequence_masks is None and m.num_decodes > 0
+                split_non_spec = not has_spec_decode and m.num_decodes > 0
                 if split_non_spec:
                     assert non_spec_query_start_loc is not None
                     nd_tok = m.num_decode_tokens
