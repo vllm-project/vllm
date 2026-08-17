@@ -287,6 +287,7 @@ def _temporary_replayssm_autotune_state(
 ) -> Iterator[None]:
     from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
     from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+        reset_replayssm_ring_trackers,
         update_replayssm_ring_trackers,
     )
 
@@ -341,7 +342,9 @@ def _temporary_replayssm_autotune_state(
             logical_window,
             ring_buffer_len,
         ) in tracker_specs.values():
-            update_replayssm_ring_trackers(ring_start, prev_num_accepted, state_slots)
+            # Compile reset (prefill) and advance (decode) before inference.
+            # The final reset leaves the decode tuning run in a clean state.
+            reset_replayssm_ring_trackers(ring_start, prev_num_accepted, state_slots)
             update_replayssm_ring_trackers(
                 ring_start,
                 prev_num_accepted,
@@ -349,7 +352,7 @@ def _temporary_replayssm_autotune_state(
                 logical_window,
                 ring_buffer_len,
             )
-            update_replayssm_ring_trackers(ring_start, prev_num_accepted, state_slots)
+            reset_replayssm_ring_trackers(ring_start, prev_num_accepted, state_slots)
 
     try:
         yield
