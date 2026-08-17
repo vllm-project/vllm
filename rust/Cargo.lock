@@ -2402,9 +2402,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja"
-version = "2.18.0"
+version = "2.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "328251e58ad8e415be6198888fc207502727dc77945806421ab34f35bf012e7d"
+checksum = "ef84a52be188a1d4124bd717903fdde96ca4705f2b56adfe2d91fcc57fcb6987"
 dependencies = [
  "indexmap 2.13.0",
  "memo-map",
@@ -2414,9 +2414,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja-contrib"
-version = "2.18.0"
+version = "2.22.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c6302e47d2b51f9fc978268ff7f5a014de5caa2ad48440309fd10ee711480d7"
+checksum = "fd6e279dc925840c2d9ebc1e9f85410611d01292561297463ba3e516c3ad94dd"
 dependencies = [
  "minijinja",
  "serde",
@@ -5520,7 +5520,6 @@ dependencies = [
  "expect-test",
  "futures",
  "half",
- "indexmap 2.13.0",
  "itertools 0.14.0",
  "llm-multimodal",
  "minijinja",
@@ -5753,6 +5752,7 @@ dependencies = [
  "tracing",
  "tracing-futures",
  "tracing-subscriber",
+ "url",
  "uuid",
  "validator",
  "vllm-chat",
