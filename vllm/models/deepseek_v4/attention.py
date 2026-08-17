@@ -385,9 +385,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     ) -> None:
         """Input GEMMs + RMSNorm + attention preparation + sparse attention.
 
-        Platform override point: the ROCm CSA multi-stream path forks side
-        streams before the input GEMMs and overrides ``_prepare_and_attn``
-        to run only the post-join tail.
+        Platform override point: the ROCm CSA multi-stream path skips this
+        prologue and forks side streams inside its ``_prepare_and_attn``
+        override, keeping the overlap within the eager-break dispatch.
         """
         # Keep the attention input preparation in the captured graph. Only the
         # sparse indexer and MLA attention run in the eager break below.

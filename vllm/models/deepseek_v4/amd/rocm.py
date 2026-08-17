@@ -496,26 +496,62 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             # path.
             self.aux_stream_list = None
 
-        # Hand-off from the fork in _attn_pipeline to the tail in
-        # _prepare_and_attn; per-layer instance state, valid for one forward.
-        self._csa_q: torch.Tensor | None = None
-
-    def _csa_fork_and_join(
+    def _attn_pipeline(
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Fork before the input GEMMs and join after the compressor chains.
+        o_padded: torch.Tensor,
+    ) -> None:
+        if self.aux_stream_list is None:
+            return super()._attn_pipeline(hidden_states, positions, o_padded)
+        # CSA multi-stream: skip the base input-GEMM/rmsnorm prologue — the
+        # fork in _prepare_and_attn covers the input GEMMs and the compressor
+        # chains. Dispatching through _prepare_and_attn_fn keeps the whole
+        # overlap inside the eager-break region (required by MRV1 piecewise
+        # graphs); the skipped projection outputs are None sentinels.
+        self._prepare_and_attn_fn(
+            hidden_states,
+            None,
+            None,
+            None,
+            None,
+            None,
+            positions,
+            o_padded,
+        )
 
-        Each stream runs a self-contained chain straight from ``hidden_states``
-        (no fine-grained cross-stream deps — HIP events are unreliable under
-        multi-stream overlap), and the two compressor wkv_gate GEMMs ride side
-        streams off the serial critical path.
-        Default: fused_wqa_wkv GEMM → rmsnorm → wq_b → qnorm/rope/SWA insert.
-        aux0: main-compressor wkv_gate GEMM → compress kernels.
-        aux1: indexer-compressor wkv_gate GEMM → K-cache write.
-        After the join, weights_proj runs serially (consumed by forward_q).
-        """
+    def _prepare_and_attn(
+        self,
+        hidden_states: torch.Tensor,
+        qr: torch.Tensor | None,
+        kv: torch.Tensor | None,
+        kv_score: torch.Tensor | None,
+        indexer_kv_score: torch.Tensor | None,
+        indexer_weights: torch.Tensor | None,
+        positions: torch.Tensor,
+        o_padded: torch.Tensor,
+    ) -> None:
+        if self.aux_stream_list is None:
+            return super()._prepare_and_attn(
+                hidden_states,
+                qr,
+                kv,
+                kv_score,
+                indexer_kv_score,
+                indexer_weights,
+                positions,
+                o_padded,
+            )
+
+        # CSA multi-stream: fork before the input GEMMs and join after the
+        # compressor chains. Each stream runs a self-contained chain straight
+        # from ``hidden_states`` (no fine-grained cross-stream deps — HIP
+        # events are unreliable under multi-stream overlap), and the two
+        # compressor wkv_gate GEMMs ride side streams off the serial critical
+        # path.
+        # Default: fused_wqa_wkv GEMM → rmsnorm → wq_b → qnorm/rope/SWA insert.
+        # aux0: main-compressor wkv_gate GEMM → compress kernels.
+        # aux1: indexer-compressor wkv_gate GEMM → K-cache write.
         assert self.indexer is not None
         assert self.compressor is not None
         aux_streams = self.aux_stream_list
@@ -563,64 +599,16 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             [aux_streams[0], aux_streams[1]],
             enable=True,
         )
-        # ReplicatedLinear returns (output, bias); bias is None.
+
+        # After the join, weights_proj runs serially; then the indexer q-side
+        # and the sparse attention finish the tail. Running inside the
+        # _prepare_and_attn_fn dispatch keeps the overlap eager for MRV1
+        # (piecewise graphs break here) and captured for V2.
         indexer_weights, _ = indexer.weights_proj(hidden_states)
-        return q, qr, kv, indexer_weights
-
-    def _attn_pipeline(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        o_padded: torch.Tensor,
-    ) -> None:
-        if self.aux_stream_list is None:
-            return super()._attn_pipeline(hidden_states, positions, o_padded)
-        # CSA multi-stream: fork before the input GEMMs, then keep the base's
-        # eager-break dispatch (MRV1 wide / V2 narrow) by handing the
-        # post-join tail to _prepare_and_attn via _csa_q.
-        q, qr, kv, indexer_weights = self._csa_fork_and_join(hidden_states, positions)
-        self._csa_q = q
-        self._prepare_and_attn_fn(
-            hidden_states,
-            qr,
-            kv,
-            None,
-            None,
-            indexer_weights,
-            positions,
-            o_padded,
-        )
-        self._csa_q = None
-
-    def _prepare_and_attn(
-        self,
-        hidden_states: torch.Tensor,
-        qr: torch.Tensor,
-        kv: torch.Tensor,
-        kv_score: torch.Tensor | None,
-        indexer_kv_score: torch.Tensor | None,
-        indexer_weights: torch.Tensor,
-        positions: torch.Tensor,
-        o_padded: torch.Tensor,
-    ) -> None:
-        if self.aux_stream_list is None:
-            return super()._prepare_and_attn(
-                hidden_states,
-                qr,
-                kv,
-                kv_score,
-                indexer_kv_score,
-                indexer_weights,
-                positions,
-                o_padded,
-            )
-        # CSA multi-stream: the overlap already ran in _attn_pipeline; only
-        # the post-join tail remains (indexer q-side + sparse indexer + MLA).
-        # The inherited _prepare_and_attn_eager delegates here, so the MRV1
-        # wide-eager dispatch keeps working.
-        assert self._csa_q is not None
-        assert self.indexer is not None
-        q_quant, weights = self.indexer.forward_q(
+        index_q: torch.Tensor | None = None
+        index_q_scale: torch.Tensor | None = None
+        index_weights_out: torch.Tensor | None = None
+        q_quant, weights = indexer.forward_q(
             qr, positions, self.indexer_rotary_emb, indexer_weights
         )
         if q_quant is not None:
@@ -629,10 +617,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             else:
                 index_q, index_q_scale = q_quant, None
             index_weights_out = weights
-        else:
-            index_q, index_q_scale, index_weights_out = None, None, None
-        q = self._csa_q
-        self._csa_q = None
+
         self._sparse_indexer_and_attn(
             hidden_states,
             index_q,
