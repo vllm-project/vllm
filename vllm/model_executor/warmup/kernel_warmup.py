@@ -340,29 +340,26 @@ def _temporary_replayssm_autotune_slots(
 
     if tracker_specs and tracker_specs[0][0].is_cuda:
         if use_v2_model_runner:
-            # Match every group-specific first-column stride and pointer
-            # alignment used by production mixed decode/prefill batches.
-            # Triton specializes the tracker kernels for these views. Four
-            # row offsets cover every int32 pointer alignment class; retain a
-            # one-element view as well because scalar value 1 is specialized.
-            state_batch_indices_variants = tuple(
-                block_table[offset:, 0]
-                for block_table in v2_runner.block_tables.get_dummy_block_tables(
-                    max_num_reqs, first_block_id=1
-                )
-                for offset in sorted(
-                    {0, *range(1, min(4, max_num_reqs)), max_num_reqs - 1}
-                )
+            index_block_tables = v2_runner.block_tables.get_dummy_block_tables(
+                max_num_reqs, first_block_id=1
             )
         else:
-            state_batch_indices_variants = (
-                torch.arange(
-                    1,
-                    max_num_reqs + 1,
-                    dtype=torch.int32,
-                    device=tracker_specs[0][0].device,
-                ),
+            assert block_tables is not None
+            runner.input_batch.block_table.commit_block_table(max_num_reqs)
+            index_block_tables = tuple(
+                block_table.block_table.gpu[:max_num_reqs]
+                for block_table in block_tables
             )
+        # Match every group-specific first-column stride and pointer alignment
+        # used by production mixed decode/prefill batches. Triton specializes
+        # the tracker kernels for these views. Four row offsets cover every
+        # int32 pointer alignment class; retain a one-element view as well
+        # because scalar value 1 is specialized.
+        state_batch_indices_variants = tuple(
+            block_table[offset:, 0]
+            for block_table in index_block_tables
+            for offset in sorted({0, *range(1, min(4, max_num_reqs)), max_num_reqs - 1})
+        )
         for state_batch_indices in state_batch_indices_variants:
             for (
                 ring_start,
