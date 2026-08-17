@@ -3,16 +3,14 @@
 """
 Dispatch module for Mamba selective state update (SSU) backends.
 
-Provides a unified ``selective_state_update`` function that dispatches to
-Triton, FlashInfer, or CPU based on ``MambaBackendEnum``. It also contains the
-FlashInfer ReplaySSM adapter and shared ring-tracker kernels. On CPU-only
-platforms the baseline SSU backend defaults to CPU.
+Provides a unified `selective_state_update` function that dispatches to
+the Triton, FlashInfer, or CPU backend based on the configured
+`MambaBackendEnum`. On CPU-only platforms (PowerPC, x86 without CUDA)
+the backend defaults to 'cpu'.
 """
 
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from importlib import import_module
-from types import ModuleType
 
 import torch
 
@@ -26,107 +24,80 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 logger = init_logger(__name__)
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=["n_slots", "state_batch_indices_stride"],
+    do_not_specialize_on_alignment=["state_batch_indices"],
+)
 def _update_replayssm_ring_trackers_kernel(
     ring_start,
     prev_num_accepted,
     state_batch_indices,
+    state_batch_indices_stride,
     n_slots,
+    num_states,
     logical_window: tl.constexpr,
     ring_buffer_len: tl.constexpr,
     pad_slot_id: tl.constexpr,
+    RESET: tl.constexpr,
     BLOCK: tl.constexpr,
 ) -> None:
     offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offsets < n_slots
-    slots = tl.load(state_batch_indices + offsets, mask=mask, other=pad_slot_id)
-    valid = mask & (slots != pad_slot_id)
-    prev = tl.load(prev_num_accepted + slots, mask=valid, other=0)
-    start = tl.load(ring_start + slots, mask=valid, other=0)
-    must_checkpoint = prev + 1 > logical_window
-    next_start = tl.where(
-        must_checkpoint,
-        (start + prev) % ring_buffer_len,
-        start,
+    slots = tl.load(
+        state_batch_indices + offsets * state_batch_indices_stride,
+        mask=mask,
+        other=pad_slot_id,
     )
-    next_prev = tl.where(must_checkpoint, 1, prev + 1)
-    tl.store(ring_start + slots, next_start, mask=valid)
-    tl.store(prev_num_accepted + slots, next_prev, mask=valid)
-
-
-@triton.jit
-def _reset_replayssm_ring_trackers_kernel(
-    ring_start,
-    prev_num_accepted,
-    state_batch_indices,
-    n_slots,
-    pad_slot_id: tl.constexpr,
-    BLOCK: tl.constexpr,
-) -> None:
-    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    mask = offsets < n_slots
-    slots = tl.load(state_batch_indices + offsets, mask=mask, other=pad_slot_id)
-    valid = mask & (slots != pad_slot_id)
-    tl.store(ring_start + slots, 0, mask=valid)
-    tl.store(prev_num_accepted + slots, 0, mask=valid)
+    valid = mask & (slots != pad_slot_id) & (slots >= 0) & (slots < num_states)
+    if RESET:
+        tl.store(ring_start + slots, 0, mask=valid)
+        tl.store(prev_num_accepted + slots, 0, mask=valid)
+    else:
+        prev = tl.load(prev_num_accepted + slots, mask=valid, other=0)
+        start = tl.load(ring_start + slots, mask=valid, other=0)
+        must_checkpoint = prev + 1 > logical_window
+        next_start = tl.where(
+            must_checkpoint,
+            (start + prev) % ring_buffer_len,
+            start,
+        )
+        next_prev = tl.where(must_checkpoint, 1, prev + 1)
+        tl.store(ring_start + slots, next_start, mask=valid)
+        tl.store(prev_num_accepted + slots, next_prev, mask=valid)
 
 
 def update_replayssm_ring_trackers(
     ring_start: torch.Tensor,
     prev_num_accepted: torch.Tensor,
     state_batch_indices: torch.Tensor,
-    logical_window: int,
-    ring_buffer_len: int,
+    logical_window: int | None = None,
+    ring_buffer_len: int | None = None,
     pad_slot_id: int = NULL_BLOCK_ID,
 ) -> None:
-    _validate_replayssm_ring_trackers(ring_start, prev_num_accepted)
-    state_batch_indices = state_batch_indices.reshape(-1)
+    """Reset selected trackers, or advance them when a window is provided."""
+    if state_batch_indices.dim() > 1:
+        state_batch_indices = state_batch_indices[:, 0]
     n_slots = state_batch_indices.numel()
     if n_slots == 0:
         return
+    reset = logical_window is None
+    if reset:
+        logical_window = 0
+        ring_buffer_len = 1
+    else:
+        assert ring_buffer_len is not None
     block = 128
     _update_replayssm_ring_trackers_kernel[(triton.cdiv(n_slots, block),)](
         ring_start,
         prev_num_accepted,
         state_batch_indices,
+        state_batch_indices.stride(0),
         n_slots,
+        min(ring_start.numel(), prev_num_accepted.numel()),
         logical_window,
         ring_buffer_len,
         pad_slot_id,
-        BLOCK=block,
-    )
-
-
-def _validate_replayssm_ring_trackers(
-    ring_start: torch.Tensor,
-    prev_num_accepted: torch.Tensor,
-) -> None:
-    if ring_start.shape != prev_num_accepted.shape:
-        raise ValueError("ReplaySSM tracker tensors must have matching shapes")
-    if ring_start.dim() != 1:
-        raise ValueError("ReplaySSM tracker tensors must be one-dimensional")
-    if not ring_start.is_contiguous() or not prev_num_accepted.is_contiguous():
-        raise ValueError("ReplaySSM tracker tensors must be contiguous")
-
-
-def reset_replayssm_ring_trackers(
-    ring_start: torch.Tensor,
-    prev_num_accepted: torch.Tensor,
-    state_batch_indices: torch.Tensor,
-    pad_slot_id: int = NULL_BLOCK_ID,
-) -> None:
-    _validate_replayssm_ring_trackers(ring_start, prev_num_accepted)
-    state_batch_indices = state_batch_indices.reshape(-1)
-    n_slots = state_batch_indices.numel()
-    if n_slots == 0:
-        return
-    block = 128
-    _reset_replayssm_ring_trackers_kernel[(triton.cdiv(n_slots, block),)](
-        ring_start,
-        prev_num_accepted,
-        state_batch_indices,
-        n_slots,
-        pad_slot_id,
+        RESET=reset,
         BLOCK=block,
     )
 
@@ -374,60 +345,6 @@ _mamba_ssu_backend: MambaSSUBackend | None = None
 _flashinfer_replayssm_kernel: Callable[..., torch.Tensor] | None = None
 
 
-def _load_flashinfer_replayssm_module() -> ModuleType:
-    try:
-        module = import_module("flashinfer.mamba.checkpointing_ssu")
-    except (ImportError, ModuleNotFoundError) as e:
-        raise ImportError(
-            "FlashInfer is required for the flashinfer ReplaySSM backend. "
-            "Install a compatible flashinfer-python package."
-        ) from e
-
-    required = (
-        "checkpointing_ssu",
-        "CheckpointingSSURunner",
-        "allocate_checkpointing_ssu_scratch",
-    )
-    missing = [name for name in required if not hasattr(module, name)]
-    if missing:
-        raise ImportError(
-            "FlashInfer ReplaySSM requires native autotuning and scratch "
-            f"allocation support; missing {missing}."
-        )
-    return module
-
-
-def allocate_flashinfer_replayssm_scratch(
-    *,
-    batch_size: int,
-    num_heads: int,
-    num_predicted_tokens: int,
-    max_window: int,
-    dtype: torch.dtype,
-    device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Allocate native FlashInfer ReplaySSM scratch after capability checks."""
-    module = _load_flashinfer_replayssm_module()
-    return module.allocate_checkpointing_ssu_scratch(
-        batch_size=batch_size,
-        num_heads=num_heads,
-        num_predicted_tokens=num_predicted_tokens,
-        max_window=max_window,
-        dtype=dtype,
-        device=device,
-    )
-
-
-def _initialize_flashinfer_replayssm(enabled: bool) -> None:
-    global _flashinfer_replayssm_kernel
-    _flashinfer_replayssm_kernel = None
-    if not enabled:
-        return
-
-    module = _load_flashinfer_replayssm_module()
-    _flashinfer_replayssm_kernel = module.checkpointing_ssu
-
-
 def selective_state_update_replayssm_flashinfer(
     state: torch.Tensor,
     x: torch.Tensor,
@@ -536,7 +453,7 @@ def initialize_mamba_ssu_backend(
     ):
         return
 
-    global _mamba_ssu_backend
+    global _flashinfer_replayssm_kernel, _mamba_ssu_backend
     backend = mamba_config.backend
 
     if backend == MambaBackendEnum.TRITON:
@@ -565,9 +482,20 @@ def initialize_mamba_ssu_backend(
         _mamba_ssu_backend = backend_cls(mamba_config)
         logger.info("Using %s Mamba SSU backend.", _mamba_ssu_backend.name)
 
-    _initialize_flashinfer_replayssm(
-        use_replayssm and backend == MambaBackendEnum.FLASHINFER
-    )
+    _flashinfer_replayssm_kernel = None
+    if use_replayssm and backend == MambaBackendEnum.FLASHINFER:
+        try:
+            from flashinfer.mamba.checkpointing_ssu import (
+                CheckpointingSSURunner,
+                checkpointing_ssu,
+            )
+        except ImportError as e:
+            raise ImportError(
+                "FlashInfer ReplaySSM requires a compatible flashinfer-python package"
+            ) from e
+        if not callable(CheckpointingSSURunner):
+            raise ImportError("FlashInfer ReplaySSM requires native autotuning support")
+        _flashinfer_replayssm_kernel = checkpointing_ssu
     if use_replayssm:
         logger.info("Using %s ReplaySSM backend.", backend.value)
 

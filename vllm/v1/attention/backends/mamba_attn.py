@@ -174,10 +174,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.int32,
                 device=device,
             )
-        # ReplaySSM CUDA-graph buffers.
-        # Triton: write_pos / is_flush / bc_pre.
-        # FlashInfer: two-kernel scratch, so algorithm="auto" can pick the
-        # monolith or two-kernel implementation.
+        # ReplaySSM CUDA-graph buffers for the selected backend.
         if self.use_replayssm and not self.use_flashinfer_replayssm:
             self.decode_write_pos_d: torch.Tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,),
@@ -206,13 +203,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
             self.decode_replayssm_scratch = None
         elif self.use_flashinfer_replayssm:
-            from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-                allocate_flashinfer_replayssm_scratch,
+            from flashinfer.mamba.checkpointing_ssu import (
+                allocate_checkpointing_ssu_scratch,
             )
 
             self.decode_bc_pre_scratch = None
             nheads = kv_cache_spec.shapes[2][0]
-            self.decode_replayssm_scratch = allocate_flashinfer_replayssm_scratch(
+            self.decode_replayssm_scratch = allocate_checkpointing_ssu_scratch(
                 batch_size=scheduler_config.max_num_seqs,
                 num_heads=nheads,
                 num_predicted_tokens=1,

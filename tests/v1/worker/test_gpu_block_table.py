@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 pytestmark = pytest.mark.skipif(
     not current_platform.is_cuda(),
@@ -195,18 +198,21 @@ def test_get_dummy_block_tables_returns_zeroed_rows():
     assert dummy[0].data_ptr() == block_tables.input_block_tables[0].data_ptr()
 
 
-def test_get_dummy_block_tables_can_assign_non_null_state_slots():
-    block_tables = BlockTables(
+def test_prepare_dummy_attn_can_assign_valid_state_slots():
+    runner = object.__new__(GPUModelRunner)
+    runner.device = torch.device("cuda")
+    runner.pcp_manager = None
+    runner.block_tables = BlockTables(
         block_sizes=[16],
         max_num_reqs=4,
         max_num_batched_tokens=64,
         max_num_blocks_per_group=[8],
-        device=torch.device("cuda"),
+        device=runner.device,
         kernel_block_sizes=[16],
     )
+    input_batch = SimpleNamespace(num_reqs=3, num_tokens=3)
 
-    (dummy,) = block_tables.get_dummy_block_tables(3, first_block_id=1)
+    block_tables, _ = runner.prepare_dummy_attn(input_batch, valid_state_slots=True)
 
-    assert dummy[:, 0].tolist() == [1, 2, 3]
-    assert torch.count_nonzero(dummy[:, 1:]) == 0
-    assert dummy.data_ptr() == block_tables.input_block_tables[0].data_ptr()
+    assert block_tables[0][:, 0].tolist() == [1, 2, 3]
+    assert torch.count_nonzero(block_tables[0][:, 1:]) == 0

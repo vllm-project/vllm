@@ -11,10 +11,11 @@ from ...utils import large_gpu_mark, multi_gpu_test
 
 try:
     from flashinfer.mamba.checkpointing_ssu import (
+        CheckpointingSSURunner,
         allocate_checkpointing_ssu_scratch,  # noqa: F401
     )
 
-    HAS_FLASHINFER_CHECKPOINTING_SSU = True
+    HAS_FLASHINFER_CHECKPOINTING_SSU = callable(CheckpointingSSURunner)
 except ImportError:
     HAS_FLASHINFER_CHECKPOINTING_SSU = False
 
@@ -88,6 +89,22 @@ def test_replayssm_flashinfer_decode_matches_baseline(vllm_runner, model_name):
         model_name,
         mamba_backend="flashinfer",
         name_1="replayssm_flashinfer",
+    )
+
+
+@multi_gpu_test(num_gpus=2)
+@pytest.mark.skipif(
+    not HAS_FLASHINFER_CHECKPOINTING_SSU,
+    reason="flashinfer.mamba.checkpointing_ssu not available",
+)
+@pytest.mark.parametrize("model_name", [MAMBA2_MODEL])
+def test_replayssm_flashinfer_decode_matches_baseline_tp2(vllm_runner, model_name):
+    _check_replayssm_parity(
+        vllm_runner,
+        model_name,
+        tensor_parallel_size=2,
+        mamba_backend="flashinfer",
+        name_1="replayssm_flashinfer_tp2",
     )
 
 

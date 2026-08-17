@@ -237,7 +237,7 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
     return None
 
 
-def _flashinfer_replayssm_autotune_kwargs(
+def _replayssm_autotune_kwargs(
     runner: "GPUModelRunner", max_token_prefill_kwargs: dict[str, Any]
 ) -> tuple[int, dict[str, Any]] | None:
     config = runner.vllm_config
@@ -271,7 +271,7 @@ def _flashinfer_replayssm_autotune_kwargs(
         "uniform_decode": True,
     }
     if use_v2_model_runner:
-        decode_kwargs["dummy_first_block_id"] = 1
+        decode_kwargs["valid_dummy_state_slots"] = True
     else:
         decode_kwargs.update(
             allow_microbatching=False,
@@ -282,48 +282,39 @@ def _flashinfer_replayssm_autotune_kwargs(
 
 
 @contextmanager
-def _temporary_replayssm_autotune_slots(
+def _temporary_replayssm_autotune_state(
     runner: "GPUModelRunner", max_num_reqs: int
 ) -> Iterator[None]:
     from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
     from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
-        reset_replayssm_ring_trackers,
         update_replayssm_ring_trackers,
     )
 
-    reset_tensors: list[torch.Tensor] = []
-    seen: set[int] = set()
-    tracker_specs: list[tuple[torch.Tensor, torch.Tensor, int, int]] = []
-    seen_tracker_pairs: set[tuple[int, int]] = set()
+    reset_tensors: dict[int, torch.Tensor] = {}
+    tracker_specs: dict[int, tuple[torch.Tensor, torch.Tensor, int, int]] = {}
     for module in runner.get_model().modules():
         if not isinstance(module, MambaMixer2) or not module.use_replayssm:
             continue
-        tracker_pair = (
-            module._replayssm_ring_start,
-            module._replayssm_prev_num_accepted,
+        assert module.replayssm_buffer_len is not None
+        ring_start = module._replayssm_ring_start
+        prev_num_accepted = module._replayssm_prev_num_accepted
+        tracker_specs.setdefault(
+            ring_start.data_ptr(),
+            (
+                ring_start,
+                prev_num_accepted,
+                module.replayssm_buffer_len,
+                module.kv_cache[2].size(2),
+            ),
         )
-        tracker_ptrs = (tracker_pair[0].data_ptr(), tracker_pair[1].data_ptr())
-        if tracker_ptrs not in seen_tracker_pairs:
-            assert module.replayssm_buffer_len is not None
-            tracker_specs.append(
-                (
-                    *tracker_pair,
-                    module.replayssm_buffer_len,
-                    module.kv_cache[2].size(2),
-                )
-            )
-            seen_tracker_pairs.add(tracker_ptrs)
         tensors = (
             *module.kv_cache,
-            *tracker_pair,
+            ring_start,
+            prev_num_accepted,
         )
         for tensor in tensors:
-            if not tensor.numel():
-                continue
-            data_ptr = tensor.data_ptr()
-            if data_ptr not in seen:
-                reset_tensors.append(tensor)
-                seen.add(data_ptr)
+            if tensor.numel():
+                reset_tensors.setdefault(tensor.data_ptr(), tensor)
 
     use_v2_model_runner = runner.vllm_config.use_v2_model_runner
     v2_runner: Any = runner
@@ -337,53 +328,28 @@ def _temporary_replayssm_autotune_slots(
         dummy_block_ids = range(1, max_num_reqs + 1)
         for block_table in block_tables:
             block_table.block_table.np[:max_num_reqs, 0] = dummy_block_ids
+        runner.input_batch.block_table.commit_block_table(max_num_reqs)
 
-    if tracker_specs and tracker_specs[0][0].is_cuda:
-        if use_v2_model_runner:
-            index_block_tables = v2_runner.block_tables.get_dummy_block_tables(
-                max_num_reqs, first_block_id=1
-            )
-        else:
-            assert block_tables is not None
-            runner.input_batch.block_table.commit_block_table(max_num_reqs)
-            index_block_tables = tuple(
-                block_table.block_table.gpu[:max_num_reqs]
-                for block_table in block_tables
-            )
-        # Match every group-specific first-column stride and pointer alignment
-        # used by production mixed decode/prefill batches. Triton specializes
-        # the tracker kernels for these views. Four row offsets cover every
-        # int32 pointer alignment class; retain a one-element view as well
-        # because scalar value 1 is specialized.
-        state_batch_indices_variants = tuple(
-            block_table[offset:, 0]
-            for block_table in index_block_tables
-            for offset in sorted({0, *range(1, min(4, max_num_reqs)), max_num_reqs - 1})
+    first_tracker = next(iter(tracker_specs.values()), None)
+    if first_tracker is not None and first_tracker[0].is_cuda:
+        state_slots = torch.arange(
+            1, max_num_reqs + 1, dtype=torch.int32, device=first_tracker[0].device
         )
-        for state_batch_indices in state_batch_indices_variants:
-            for (
+        for (
+            ring_start,
+            prev_num_accepted,
+            logical_window,
+            ring_buffer_len,
+        ) in tracker_specs.values():
+            update_replayssm_ring_trackers(ring_start, prev_num_accepted, state_slots)
+            update_replayssm_ring_trackers(
                 ring_start,
                 prev_num_accepted,
+                state_slots,
                 logical_window,
                 ring_buffer_len,
-            ) in tracker_specs:
-                reset_replayssm_ring_trackers(
-                    ring_start,
-                    prev_num_accepted,
-                    state_batch_indices,
-                )
-                update_replayssm_ring_trackers(
-                    ring_start,
-                    prev_num_accepted,
-                    state_batch_indices,
-                    logical_window,
-                    ring_buffer_len,
-                )
-                reset_replayssm_ring_trackers(
-                    ring_start,
-                    prev_num_accepted,
-                    state_batch_indices,
-                )
+            )
+            update_replayssm_ring_trackers(ring_start, prev_num_accepted, state_slots)
 
     try:
         yield
@@ -395,7 +361,7 @@ def _temporary_replayssm_autotune_slots(
             for block_table, block_ids in zip(block_tables, saved_block_ids):
                 block_table.block_table.np[:max_num_reqs, 0] = block_ids
             runner.input_batch.block_table.commit_block_table(max_num_reqs)
-        for tensor in reset_tensors:
+        for tensor in reset_tensors.values():
             tensor[1 : max_num_reqs + 1].zero_()
 
 
@@ -449,9 +415,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         is_profile=True,
         randomize_inputs=True,
     )
-    replayssm_autotune = _flashinfer_replayssm_autotune_kwargs(
-        runner, max_token_prefill_kwargs
-    )
+    replayssm_autotune = _replayssm_autotune_kwargs(runner, max_token_prefill_kwargs)
 
     # Read cached autotune results and broadcast to all ranks.
     cached_results: bytes | None = None
@@ -474,7 +438,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
             runner._dummy_run(**max_token_prefill_kwargs)
             if replayssm_autotune is not None:
                 max_num_reqs, max_batch_decode_kwargs = replayssm_autotune
-                with _temporary_replayssm_autotune_slots(runner, max_num_reqs):
+                with _temporary_replayssm_autotune_state(runner, max_num_reqs):
                     runner._dummy_run(**max_batch_decode_kwargs)
     finally:
         set_autotune_process_group(None)
