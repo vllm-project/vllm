@@ -297,10 +297,11 @@ class OpenAIServingCompletion(GenerateBaseServing):
         previous_num_tokens = [0] * num_choices * num_prompts
         has_echoed = [False] * num_choices * num_prompts
         num_prompt_tokens = [0] * num_prompts
-        num_cached_tokens = None
-        num_local_cached_tokens = None
-        num_external_cached_tokens = None
-        first_iteration = True
+        # Cache stats describe a prompt, so they are captured once per prompt
+        # rather than once per stream.
+        num_cached_tokens: list[int | None] = [None] * num_prompts
+        num_local_cached_tokens: list[int | None] = [None] * num_prompts
+        num_external_cached_tokens: list[int | None] = [None] * num_prompts
 
         stream_options = request.stream_options
         include_usage, include_continuous_usage = should_include_usage(
@@ -314,11 +315,15 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
 
-                if first_iteration:
-                    num_cached_tokens = res.num_cached_tokens
-                    num_local_cached_tokens = res.num_local_cached_tokens
-                    num_external_cached_tokens = res.num_external_cached_tokens
-                    first_iteration = False
+                if (
+                    num_cached_tokens[prompt_idx] is None
+                    and res.num_cached_tokens is not None
+                ):
+                    num_cached_tokens[prompt_idx] = res.num_cached_tokens
+                    num_local_cached_tokens[prompt_idx] = res.num_local_cached_tokens
+                    num_external_cached_tokens[prompt_idx] = (
+                        res.num_external_cached_tokens
+                    )
 
                 prompt_text = res.prompt
                 if prompt_text is None:
@@ -454,11 +459,25 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 total_tokens=total_prompt_tokens + total_completion_tokens,
             )
 
-            if self.enable_prompt_tokens_details and num_cached_tokens is not None:
+            if self.enable_prompt_tokens_details and any(
+                cached is not None for cached in num_cached_tokens
+            ):
+                has_cache_source_split = any(
+                    cached is not None
+                    for cached in num_local_cached_tokens + num_external_cached_tokens
+                )
                 final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
-                    cached_tokens=num_cached_tokens,
-                    local_cached_tokens=num_local_cached_tokens,
-                    external_cached_tokens=num_external_cached_tokens,
+                    cached_tokens=sum(cached or 0 for cached in num_cached_tokens),
+                    local_cached_tokens=(
+                        sum(cached or 0 for cached in num_local_cached_tokens)
+                        if has_cache_source_split
+                        else None
+                    ),
+                    external_cached_tokens=(
+                        sum(cached or 0 for cached in num_external_cached_tokens)
+                        if has_cache_source_split
+                        else None
+                    ),
                 )
 
             if include_usage:
@@ -517,6 +536,13 @@ class OpenAIServingCompletion(GenerateBaseServing):
         choices: list[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
+        # Cache stats describe a prompt, so they aggregate once per prompt
+        # rather than once per choice.
+        num_cached_tokens = 0
+        num_local_cached_tokens = 0
+        num_external_cached_tokens = 0
+        has_cached_tokens = False
+        has_cache_source_split = False
         kv_transfer_params = None
         ec_transfer_params = None
         last_final_res = None
@@ -600,6 +626,15 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 num_generated_tokens += len(output.token_ids)
 
             num_prompt_tokens += len(prompt_token_ids)
+            if final_res.num_cached_tokens is not None:
+                has_cached_tokens = True
+                num_cached_tokens += final_res.num_cached_tokens
+            if final_res.num_local_cached_tokens is not None:
+                has_cache_source_split = True
+                num_local_cached_tokens += final_res.num_local_cached_tokens
+            if final_res.num_external_cached_tokens is not None:
+                has_cache_source_split = True
+                num_external_cached_tokens += final_res.num_external_cached_tokens
 
         usage = UsageInfo(
             prompt_tokens=num_prompt_tokens,
@@ -607,15 +642,15 @@ class OpenAIServingCompletion(GenerateBaseServing):
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
 
-        if (
-            self.enable_prompt_tokens_details
-            and last_final_res
-            and last_final_res.num_cached_tokens is not None
-        ):
+        if self.enable_prompt_tokens_details and has_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=last_final_res.num_cached_tokens,
-                local_cached_tokens=last_final_res.num_local_cached_tokens,
-                external_cached_tokens=last_final_res.num_external_cached_tokens,
+                cached_tokens=num_cached_tokens,
+                local_cached_tokens=(
+                    num_local_cached_tokens if has_cache_source_split else None
+                ),
+                external_cached_tokens=(
+                    num_external_cached_tokens if has_cache_source_split else None
+                ),
             )
 
         request_metadata.final_usage_info = usage

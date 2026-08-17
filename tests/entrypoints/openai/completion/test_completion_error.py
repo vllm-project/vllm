@@ -180,26 +180,64 @@ def test_completion_per_request_metrics_follow_server_flag():
     assert enabled_response.metrics.time_to_first_token_ms == pytest.approx(500.0)
 
 
-def _make_cache_split_request_output() -> RequestOutput:
+def _make_cache_split_request_output(
+    local_cached: int = 400, external_cached: int = 200
+) -> RequestOutput:
     request_output = _make_metrics_request_output()
-    request_output.num_cached_tokens = 600
-    request_output.num_local_cached_tokens = 400
-    request_output.num_external_cached_tokens = 200
+    request_output.num_cached_tokens = local_cached + external_cached
+    request_output.num_local_cached_tokens = local_cached
+    request_output.num_external_cached_tokens = external_cached
     return request_output
 
 
-async def _single_prompt_result(
-    request_output: RequestOutput,
+async def _prompt_results(
+    *request_outputs: RequestOutput,
 ) -> AsyncIterator[tuple[int, RequestOutput]]:
-    yield 0, request_output
+    for prompt_idx, request_output in enumerate(request_outputs):
+        yield prompt_idx, request_output
 
 
-def test_completion_reports_cache_source_breakdown():
-    """Distributed prefix-cache hits reach the client split by source."""
+async def _collect_stream_usage(
+    serving: OpenAIServingCompletion,
+    request: CompletionRequest,
+    result_generator: AsyncIterator[tuple[int, RequestOutput]],
+    num_prompts: int,
+) -> dict[str, Any]:
+    usage_chunks = []
+    async for line in serving.completion_stream_generator(
+        request,
+        [{"prompt_token_ids": [1, 2, 3]}] * num_prompts,
+        result_generator,
+        "cmpl-test-id",
+        0,
+        MODEL_NAME,
+        num_prompts,
+        None,
+        RequestResponseMetadata(request_id="cmpl-test-id"),
+    ):
+        payload = line.removeprefix("data: ").strip()
+        if not payload or payload == "[DONE]":
+            continue
+        chunk = json.loads(payload)
+        if chunk.get("usage"):
+            usage_chunks.append(chunk["usage"])
+
+    assert usage_chunks
+    return usage_chunks[-1]
+
+
+def _build_cache_details_serving() -> OpenAIServingCompletion:
     serving = _build_minimal_metrics_serving_completion(
         enable_per_request_metrics=False
     )
     serving.enable_prompt_tokens_details = True
+    serving.enable_force_include_usage = False
+    return serving
+
+
+def test_completion_reports_cache_source_breakdown():
+    """Distributed prefix-cache hits reach the client split by source."""
+    serving = _build_cache_details_serving()
 
     response = serving.request_output_to_completion_response(
         [_make_cache_split_request_output()],
@@ -222,14 +260,10 @@ def test_completion_reports_cache_source_breakdown():
 @pytest.mark.asyncio
 async def test_completion_streaming_reports_cache_source_breakdown():
     """The streamed final usage chunk carries the same split as non-streaming."""
-    serving = _build_minimal_metrics_serving_completion(
-        enable_per_request_metrics=False
-    )
-    serving.enable_prompt_tokens_details = True
-    serving.enable_force_include_usage = False
+    serving = _build_cache_details_serving()
 
-    usage_chunks = []
-    async for line in serving.completion_stream_generator(
+    usage = await _collect_stream_usage(
+        serving,
         CompletionRequest(
             model=MODEL_NAME,
             prompt="Test prompt",
@@ -237,30 +271,74 @@ async def test_completion_streaming_reports_cache_source_breakdown():
             stream=True,
             stream_options={"include_usage": True},
         ),
-        [{"prompt_token_ids": [1, 2, 3]}],
-        _single_prompt_result(_make_cache_split_request_output()),
-        "cmpl-test-id",
-        0,
-        MODEL_NAME,
-        1,
-        None,
-        RequestResponseMetadata(request_id="cmpl-test-id"),
-    ):
-        payload = line.removeprefix("data: ").strip()
-        if not payload or payload == "[DONE]":
-            continue
-        chunk = json.loads(payload)
-        if chunk.get("usage"):
-            usage_chunks.append(chunk["usage"])
+        _prompt_results(_make_cache_split_request_output()),
+        num_prompts=1,
+    )
 
-    assert usage_chunks
-    details = usage_chunks[-1]["prompt_tokens_details"]
+    details = usage["prompt_tokens_details"]
     assert details["local_cached_tokens"] == 400
     assert details["external_cached_tokens"] == 200
     assert (
         details["cached_tokens"]
         == details["local_cached_tokens"] + details["external_cached_tokens"]
     )
+
+
+# Distinct per-prompt cache stats, so aggregating them cannot be confused with
+# reporting a single prompt's.
+_MULTI_PROMPT_CACHE_SPLITS = [(400, 200), (10, 5), (1, 0)]
+
+
+def test_completion_aggregates_cache_stats_across_prompts():
+    """Cache stats cover every prompt in the batch, not just the last one."""
+    serving = _build_cache_details_serving()
+
+    response = serving.request_output_to_completion_response(
+        [
+            _make_cache_split_request_output(local, external)
+            for local, external in _MULTI_PROMPT_CACHE_SPLITS
+        ],
+        CompletionRequest(model=MODEL_NAME, prompt=["a", "b", "c"], max_tokens=10),
+        "cmpl-test-id",
+        0,
+        MODEL_NAME,
+        None,
+        RequestResponseMetadata(request_id="cmpl-test-id"),
+    )
+
+    details = response.usage.prompt_tokens_details
+    assert details.local_cached_tokens == 411
+    assert details.external_cached_tokens == 205
+    assert details.cached_tokens == 616
+
+
+@pytest.mark.asyncio
+async def test_completion_streaming_aggregates_cache_stats_across_prompts():
+    """Streaming keeps every prompt's cache stats, not only the first result's."""
+    serving = _build_cache_details_serving()
+
+    usage = await _collect_stream_usage(
+        serving,
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt=["a", "b", "c"],
+            max_tokens=10,
+            stream=True,
+            stream_options={"include_usage": True},
+        ),
+        _prompt_results(
+            *(
+                _make_cache_split_request_output(local, external)
+                for local, external in _MULTI_PROMPT_CACHE_SPLITS
+            )
+        ),
+        num_prompts=len(_MULTI_PROMPT_CACHE_SPLITS),
+    )
+
+    details = usage["prompt_tokens_details"]
+    assert details["local_cached_tokens"] == 411
+    assert details["external_cached_tokens"] == 205
+    assert details["cached_tokens"] == 616
 
 
 def test_completion_per_request_metrics_suppressed_for_multiple_prompts():
