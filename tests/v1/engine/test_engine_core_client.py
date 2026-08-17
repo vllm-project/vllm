@@ -340,6 +340,7 @@ def test_apply_ready_response_syncs_block_size():
     client._apply_ready_response(payload)
     assert client.vllm_config.cache_config.block_size == 1056
 
+
 def test_apply_ready_response_syncs_mamba_block_size():
     import msgspec
 
