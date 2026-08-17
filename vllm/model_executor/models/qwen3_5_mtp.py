@@ -58,11 +58,18 @@ def _should_bypass_mtp_quant(
     unquantized despite the base model using a quantization config."""
     if not quant_config:
         return False
+    # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
+    # missing from hf_quant_config.json exclude_modules. Force unquantized.
+    # Ref: https://github.com/vllm-project/vllm/pull/38650
+    # Ref: https://github.com/NVIDIA/Model-Optimizer/pull/1124
     if quant_config.get_name() == "modelopt_fp4":
         return True
     if not isinstance(hf_qc, dict):
         return False
 
+    # GPTQ: quantized checkpoints may exclude MTP from quantization via
+    # quantization_config.dynamic with "-:pattern" entries. When detected,
+    # disable quantization for MTP layers so they use unquantized params.
     dynamic = hf_qc.get("dynamic", {})
     if any(k.startswith("-:") and "mtp" in k for k in dynamic):
         return True
