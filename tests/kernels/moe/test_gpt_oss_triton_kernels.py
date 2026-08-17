@@ -309,7 +309,7 @@ def test_equiv(num_token, a_dtype, w_dtype, tp, workspace_init):
         pc2,
     ) = init_compute_data(M, K, N, E, a_dtype, w_dtype, num_warps=8)
 
-    if current_platform.is_device_capability_family(100):
+    if current_platform.has_device_capability(100):
         constraints = {
             "is_persistent": True,
         }
@@ -371,3 +371,37 @@ def test_unit_shuffle():
     )
 
     assert_close(ref=out_ref, tri=out)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="native MXFP is a CUDA path")
+def test_swizzle_mxfp4_sets_persistent_for_native_mxfp():
+    """`matmul_ogs` rejects native MXFP unless the persistent kernel is on.
+
+    `has_native_mxfp()` is `cuda_capability_geq(10, 0)`, so it is true for
+    consumer Blackwell (sm120/sm121) as well as sm100. `_swizzle_mxfp4` is the
+    only place that sets the matching `is_persistent` constraint, so gating it
+    on the sm100 family alone leaves sm120 requiring a constraint that nothing
+    sets, and every native-MXFP matmul raises.
+    """
+    from triton_kernels import target_info
+
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        _swizzle_mxfp4,
+    )
+
+    E, N, K = 4, 128, 256
+    w = torch.randn((E, N, K), dtype=torch.bfloat16, device="cuda")
+    w_quant, w_scale = downcast_to_mxfp(w, torch.uint8, axis=1)
+
+    opt_flags.reset_opt_flags_constraints()
+    try:
+        _swizzle_mxfp4(w_quant, w_scale)
+        constraints = opt_flags._opt_flags_constraints
+        if target_info.has_native_mxfp():
+            assert constraints.get("is_persistent"), (
+                "native MXFP requires the persistent kernel, but "
+                f"_swizzle_mxfp4 set {constraints} on capability "
+                f"{current_platform.get_device_capability()}"
+            )
+    finally:
+        opt_flags.reset_opt_flags_constraints()

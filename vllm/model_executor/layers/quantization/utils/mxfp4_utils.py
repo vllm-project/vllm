@@ -87,7 +87,10 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
                 K = scale.shape[-1]
                 pad_k = -K % 4
                 scale = torch.nn.functional.pad(scale, (0, pad_k))
-        elif current_platform.is_device_capability_family(100):
+        elif current_platform.has_device_capability(100):
+            # Native MXFP requires the persistent kernel, and
+            # `has_native_mxfp()` is `cuda_capability_geq(10, 0)` -- so this
+            # must cover sm120/sm121 too, not just the sm100 family.
             constraints = {
                 "is_persistent": True,
                 "epilogue_subtile": 1,
