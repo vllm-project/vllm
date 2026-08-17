@@ -19,6 +19,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartTextParam,
 )
 from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
+from vllm.platforms import current_platform
 
 from ....conftest import VllmRunner
 
@@ -215,6 +216,7 @@ def _run_multimodal_text_query_image_docs_test(
         _make_image_mm_param(red_image),
         _make_image_mm_param(blue_image),
     ]
+    attention_backend = "FLASH_ATTN" if current_platform.is_cuda() else None
 
     with vllm_runner(
         model,
@@ -223,7 +225,7 @@ def _run_multimodal_text_query_image_docs_test(
         max_model_len=4096,
         enforce_eager=True,
         gpu_memory_utilization=GPU_MEMORY_UTILIZATION,
-        attention_backend="FLASH_ATTN",
+        attention_backend=attention_backend,
         kernel_config={"enable_flashinfer_autotune": False},
     ) as vllm_model:
         assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
