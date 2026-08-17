@@ -1060,8 +1060,8 @@ class RoutedExperts(PluggableLayer):
         if routed_experts_prefix != "":
             routed_experts_prefix = f"{routed_experts_prefix}."
 
-        w13 = f"experts.{routed_experts_prefix}{lora_base_layer_prefix}w13_"
-        w2 = f"experts.{routed_experts_prefix}{lora_base_layer_prefix}w2_"
+        w13 = f"experts.{lora_base_layer_prefix}{routed_experts_prefix}w13_"
+        w2 = f"experts.{lora_base_layer_prefix}{routed_experts_prefix}w2_"
 
         fused_mapping = []
         if include_fused:
