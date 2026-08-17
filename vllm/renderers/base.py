@@ -5,6 +5,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
+from dataclasses import replace
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
 
@@ -513,11 +514,31 @@ class BaseRenderer(ABC, Generic[_T]):
         params: TokenizeParams,
     ) -> EmbedsPrompt: ...
 
+    def _apply_default_padding(
+        self,
+        prompt: SingletonDictPrompt,
+        params: TokenizeParams,
+    ) -> TokenizeParams:
+        # Frontends build TokenizeParams from the request and do not inherit
+        # model-level defaults, so a model that is only correct with padded
+        # inputs (SigLIP) would be served unpadded. Multi-modal prompts are left
+        # alone: their text is replaced by placeholder tokens during processing.
+        if params.pad_prompt_tokens is not None or prompt.get("multi_modal_data"):
+            return params
+
+        default = self.default_cmpl_tok_params.pad_prompt_tokens
+        if default is None:
+            return params
+
+        return replace(params, pad_prompt_tokens=default)
+
     def _tokenize_singleton_prompt(
         self,
         prompt: SingletonDictPrompt,
         params: TokenizeParams,
     ) -> SingletonTokPrompt:
+        params = self._apply_default_padding(prompt, params)
+
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             if not isinstance(prompt.get("prompt"), str):
                 raise TypeError(
@@ -554,6 +575,8 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: SingletonDictPrompt,
         params: TokenizeParams,
     ) -> SingletonTokPrompt:
+        params = self._apply_default_padding(prompt, params)
+
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
             if not isinstance(prompt.get("prompt"), str):
                 raise TypeError(
