@@ -247,7 +247,9 @@ def _make_vllm_config(
     )
 
 
-def _make_kv_cache_config(*, block_size: int = 16) -> object:
+def _make_kv_cache_config(
+    *, block_size: int = 16, prefix_cache_retention_interval: int | None = 0
+) -> object:
     """Minimal single-group KVCacheConfig for topology tests."""
     from vllm.v1.kv_cache_interface import (
         FullAttentionSpec,
@@ -262,6 +264,7 @@ def _make_kv_cache_config(*, block_size: int = 16) -> object:
         num_blocks=10,
         kv_cache_tensors=[],
         kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
+        prefix_cache_retention_interval=prefix_cache_retention_interval,
     )
 
 
@@ -1594,6 +1597,7 @@ def test_requester_worker_init_uses_positional_setup(tmp_path, monkeypatch):
         "mlx5_0",
         "10.0.0.7:50051",
     )
+    assert w.coord.retention_interval == 0
 
 
 def test_requester_worker_init_prefers_local_hostname_override(
