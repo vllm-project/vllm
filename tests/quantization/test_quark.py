@@ -926,6 +926,76 @@ class TestQuarkInt4Format:
                 f"{key} should be supported by TritonWNA16Experts"
             )
 
+    def test_quark_moe_loader_shards_w2_zero_point_across_tp_ranks(self):
+        """w2 zero-points are sharded along the intermediate dim per TP rank.
+
+        Loading the same Quark checkpoint tensor at tensor_parallel_size=2 for
+        both ranks must jointly reconstruct the tensor_parallel_size=1 (full)
+        result, with no overlap or gap. This guards the custom loader's TP
+        split for the packed zero-point layout.
+        """
+
+        class _FakeMoEConfig:
+            has_bias = False
+
+            def __init__(self, tp_size, tp_rank):
+                self.tp_size = tp_size
+                self.tp_rank = tp_rank
+
+        class _FakeLayer:
+            def __init__(self, moe_config):
+                self.moe_config = moe_config
+                self.intermediate_size_per_partition = 64
+                self.group_size_div_factor = 1
+
+        def load_w2_zero_point(raw_zp, tp_size, tp_rank):
+            from unittest.mock import MagicMock, patch
+
+            quant_config = QuarkConfig.from_config(
+                _quark_int4_config(symmetric=False)
+            )
+            moe_config = _FakeMoEConfig(tp_size, tp_rank)
+            with patch(
+                "vllm.model_executor.layers.quantization.quark.quark_moe"
+                ".select_wna16_moe_backend",
+                return_value=(MagicMock(), MagicMock()),
+            ):
+                method = QuarkW4A16Int4MoEMethod(
+                    quant_config.quant_config["global_quant_config"]["weight"],
+                    quant_config.pack_method,
+                    moe_config,
+                )
+
+            layer = _FakeLayer(moe_config)
+            # The loader converts the packed zero-point, then writes the
+            # per-rank slice into param.data[expert_id]. A single expert dim is
+            # enough; the last dim shrinks by tp_size after sharding.
+            param = torch.nn.Parameter(
+                torch.zeros(1, 16, 8 // tp_size, dtype=torch.uint8),
+                requires_grad=False,
+            )
+            loader = method.get_weight_loader(layer, weight_loader=None)
+            loader(
+                param,
+                raw_zp.clone(),
+                weight_name="w2_weight_zero_point",
+                shard_id="w2",
+                expert_id=0,
+            )
+            return param.data[0]
+
+        # Quark-packed zero-point for one expert: rows = hidden // pack_factor,
+        # cols carry the (packed) intermediate dim, split evenly across ranks.
+        raw_zp = torch.randint(0, 256, (8, 16), dtype=torch.uint8)
+
+        full = load_w2_zero_point(raw_zp, tp_size=1, tp_rank=0)
+        shard0 = load_w2_zero_point(raw_zp, tp_size=2, tp_rank=0)
+        shard1 = load_w2_zero_point(raw_zp, tp_size=2, tp_rank=1)
+
+        expected = full.view(full.size(0), 2, -1)
+        torch.testing.assert_close(shard0, expected[:, 0])
+        torch.testing.assert_close(shard1, expected[:, 1])
+
     def test_quark_shared_expert_gate_keeps_quantized_tensors(self):
         quant_config = QuarkConfig.from_config(_quark_int4_config())
         mapper = quant_config.get_cache_scale_mapper()
