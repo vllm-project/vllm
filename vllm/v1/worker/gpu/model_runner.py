@@ -46,11 +46,13 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.models.interfaces import requires_raw_input_tokens
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
     set_offloader,
 )
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
@@ -171,6 +173,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculative_config is not None and self.speculative_config.use_dspark()
         )
         self.observability_config = vllm_config.observability_config
+        self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         self.device = device
         self.dtype = self.model_config.dtype
@@ -229,6 +232,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.mm_registry = MULTIMODAL_REGISTRY
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             self.model_config
+        )
+        self.uses_inputs_embeds = (
+            self.supports_mm_inputs or self.model_config.enable_prompt_embeds
         )
         self.encoder_cache = None
         if self.supports_mm_inputs and self.is_first_pp_rank:
@@ -426,6 +432,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 vocab_size=self.vocab_size,
                 device=self.device,
                 mask_stride=self.decode_query_len,
+                num_bonus_tokens=self.model_state.num_new_sampled_tokens_per_step,
             )
 
         if self.is_pooling_model and self.is_last_pp_rank:
@@ -957,7 +964,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
-            assert new_req_data.prompt_token_ids is not None
             assert new_req_data.prefill_token_ids is not None
             req_id = new_req_data.req_id
 
@@ -966,7 +972,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # with the updated prompt_token_ids and mm_features.
             self._remove_request(req_id)
 
-            prompt_len = len(new_req_data.prompt_token_ids)
+            prompt_len = new_req_data.prompt_len
             sampling_params = new_req_data.sampling_params
             self.req_states.add_request(
                 req_id=req_id,
@@ -981,6 +987,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             if self.pooling_runner is not None:
                 assert new_req_data.pooling_params is not None
+                assert new_req_data.prompt_token_ids is not None
                 self.pooling_runner.add_request(
                     req_id,
                     req_index,
@@ -1551,17 +1558,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         input_ids = input_batch.input_ids
         inputs_embeds = None
         ec_connector_output = None
-        if self.supports_mm_inputs and self.is_first_pp_rank:
-            # Run MM encoder (if needed) and get multimodal embeddings.
-            # Only first PP rank prepares multimodal embeddings.
+        if self.uses_inputs_embeds and self.is_first_pp_rank:
+            # Prepare inputs_embeds (MM encoder outputs and/or prompt_embeds
+            # overlay). Only first PP rank prepares them.
             if dummy_run:
-                # Obtain mm embeddings of correct shape for compiled model.
+                # Obtain embeddings of correct shape for compiled model.
                 inputs_embeds = self.model_state.dummy_inputs_embeds(
                     input_batch.num_tokens_after_padding
                 )
             else:
                 scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
-                if self.lora_config is not None:
+                if self.supports_mm_inputs and self.lora_config is not None:
                     set_active_mm_loras(
                         model=self.model,
                         lora_manager=self.lora_manager,
@@ -1575,16 +1582,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 ) as ec_connector_output:
                     if self.is_encoder_only:
                         # Encode and publish, nothing else: this instance runs no
-                        # language model, so the gather inside get_mm_embeddings
+                        # language model, so the gather inside prepare_inputs_embeds
                         # would build an inputs_embeds nobody reads -- and it
                         # raises "Encoder cache miss" for any scheduled item this
                         # instance did not encode, taking the engine down with it.
                         self.model_state.execute_mm_encoder(scheduled_encoder_inputs)
                     else:
-                        inputs_embeds = self.model_state.get_mm_embeddings(
+                        inputs_embeds = self.model_state.prepare_inputs_embeds(
                             scheduled_encoder_inputs, input_batch, self.req_states
                         )
-            if inputs_embeds is not None and not self.model.requires_raw_input_tokens:
+            if inputs_embeds is not None and not requires_raw_input_tokens(self.model):
                 input_ids = None
 
         if self.is_encoder_only:
