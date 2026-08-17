@@ -250,7 +250,6 @@ class Glm5NextMoE(nn.Module):
         already_sequence_parallel: bool = False,
     ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
-        hidden_states = hidden_states.view(-1, hidden_dim)
 
         # Chunk the hidden states so they aren't replicated across TP ranks.
         # This avoids duplicate computation in self.experts.
@@ -356,6 +355,8 @@ class Glm5NextDecoderLayer(nn.Module):
                 swiglu_limit=config.swiglu_limit,
             )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        # Cached for the hot forward path (isinstance per layer per step).
+        self._mlp_is_moe = isinstance(self.mlp, Glm5NextMoE)
         # In SP, the attention output projection leaves a partial sum; the
         # decoder-layer reduce_scatter after attention completes it (DSv4 pattern).
         # MTP layers use the non-mHC path which has no sp_reduce_scatter, so
@@ -491,7 +492,7 @@ class Glm5NextDecoderLayer(nn.Module):
         )
 
         # Fully Connected
-        if isinstance(self.mlp, Glm5NextMoE):
+        if self._mlp_is_moe:
             x = self.mlp(x, already_sequence_parallel=self.is_sequence_parallel)
         else:
             x = self.mlp(x)
@@ -649,6 +650,9 @@ class Glm5NextModel(nn.Module):
             get_layer,
             prefix=f"{prefix}.layers",
         )
+        # The active slice is fixed after construction; cache it so forward
+        # doesn't rebuild the slice (a fresh list) every step.
+        self._active_layers = self.layers[self.start_layer : self.end_layer]
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -696,7 +700,7 @@ class Glm5NextModel(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sp_shard(hidden_states)
 
-        for i, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
+        for layer in self._active_layers:
             hidden_states, residual, post, comb = layer(
                 positions, hidden_states, residual, post, comb
             )
