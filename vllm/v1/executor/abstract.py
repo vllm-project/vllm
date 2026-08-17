@@ -174,8 +174,13 @@ class Executor(ABC):
 
     @abstractmethod
     def collective_rpc(
-        self, method, timeout=None, args=(), kwargs=None, non_block: bool = False
-    ):
+        self,
+        method: str | Callable[[WorkerBase], _R],
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict | None = None,
+        non_block: bool = False,
+    ) -> list[_R] | Future[list[_R]]:
         """Execute an RPC call on all workers.
 
         Args:

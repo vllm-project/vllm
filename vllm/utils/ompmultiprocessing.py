@@ -194,9 +194,10 @@ class OMPProcessManager:
 
         Args:
             cpu_selector: a callable object to select CPUs from a CPU list
-            of a physical core. The input is a LogicalCPUInfo list contains
-            logical CPUs of a physical CPU, sorted by the LogicalCPUInfo.id.
-            A selected LogicalCPUInfo list should be returned.
+                of a physical core. The input is a LogicalCPUInfo list contains
+                logical CPUs of a physical CPU, sorted by the
+                LogicalCPUInfo.id. A selected LogicalCPUInfo list should be
+                returned.
 
         """
         # this memory node list has been sliced for DP offset

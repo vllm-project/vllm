@@ -7,7 +7,7 @@ https://arxiv.org/abs/2310.18547
 """
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -282,7 +282,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         x: torch.Tensor,
         lora_a_stacked: tuple[torch.Tensor, ...],
         scale: float,
-        **kwargs,
+        **kwargs: Any,
     ) -> torch.Tensor | None:
         """Performs GEMM  for multiple slices of lora_a.
 
@@ -310,7 +310,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         output_slices: tuple[int, ...],
         offset_start: int = 0,
         add_inputs=True,
-        **kwargs,
+        **kwargs: Any,
     ) -> torch.Tensor | None:
         """Performs GEMM for multiple slices of lora_b.
 
@@ -341,7 +341,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         x: torch.Tensor,
         lora_b_stacked: torch.Tensor,
         add_inputs: bool = True,
-        **kwargs,
+        **kwargs: Any,
     ) -> torch.Tensor | None:
         """Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
         and this layer only requires the expand operation.
@@ -370,7 +370,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         output_slices: tuple[int, ...],
         *,
         buffer: tuple[torch.Tensor, ...] | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> torch.Tensor | None:
         """Applicable to linear-related lora.
 
@@ -407,7 +407,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         scale,
         *,
         buffer: torch.Tensor | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> torch.Tensor | None:
         """Applies lora  specifically for LogitsProcessorWithLoRA.
 

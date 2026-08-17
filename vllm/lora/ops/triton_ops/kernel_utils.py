@@ -7,11 +7,11 @@ from vllm.triton_utils import tl, triton
 
 @triton.jit
 def mm_k(
-    a_ptr,
-    b_ptr,
-    ak_stride,
-    bk_stride,
-    offset_k,
+    a_ptr: tl.tensor,
+    b_ptr: tl.tensor,
+    ak_stride: int,
+    bk_stride: int,
+    offset_k: tl.tensor,
     K: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
@@ -21,7 +21,7 @@ def mm_k(
     CAST_TYPE: tl.constexpr,
     b_dtype: tl.constexpr,
     USE_GDC: tl.constexpr,
-    base_k,
+    base_k: int,
 ):
     """Given a_ptr and b_ptr, that identify the rows of A (m x k) and columns of
     B (k x n), iterate, through the K dimension to compute the partial/complete
@@ -41,10 +41,10 @@ def mm_k(
         BLOCK_N: N dimension of the output block m x n
         BLOCK_K: K dimension atom
         EVEN_K: True if the blocks of A and B can be loaded without any
-          masking.
+            masking.
         SPLIT_K: Parameter signifying parallelism in the K dimension.
         CAST_TYPE: if True, cast the values from the A matrix to the B
-          matrix dtype.
+            matrix dtype.
         b_dtype: datatype of the B matrix
         USE_GDC: Whether to use PDL. True indicates use.
         base_k: Base offset along K dimension for current SPLIT_K group

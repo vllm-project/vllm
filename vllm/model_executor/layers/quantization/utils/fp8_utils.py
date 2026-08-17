@@ -548,7 +548,7 @@ def per_token_group_quant_fp8(
         group_size: The group size used for quantization.
         eps: The minimum to avoid dividing zero.
         dtype: The dtype of output tensor. Note that only `torch.float8_e4m3fn`
-        is supported for now.
+            is supported for now.
         column_major_scales: Outputs scales in column major.
         tma_aligned_scales: Outputs scales in TMA-aligned layout.
         out_q: Optional output tensor. If not provided, function will create.
@@ -877,7 +877,7 @@ def w8a8_triton_block_scaled_mm(
         As: The per-token-group quantization scale for `A`.
         Bs: The per-block quantization scale for `B`.
         block_size: The block size for per-block quantization. It should
-        be 2-dim, e.g., [128, 128].
+            be 2-dim, e.g., [128, 128].
         output_dtype: The dtype of the returned tensor.
 
     Returns:

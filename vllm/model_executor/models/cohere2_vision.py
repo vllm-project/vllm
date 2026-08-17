@@ -370,7 +370,7 @@ class Cohere2VisionForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def _process_image_input(
-        self, image_input: Cohere2VisionImagePixelInputs, **kwargs
+        self, image_input: Cohere2VisionImagePixelInputs, **kwargs: object
     ) -> list[torch.Tensor]:
         """Process image pixels through vision tower and projector.
 

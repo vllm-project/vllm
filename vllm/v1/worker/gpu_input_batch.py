@@ -1009,10 +1009,11 @@ class InputBatch:
 
         Returns:
             1. prompt_lora_mapping: A tuple of size np.sum(num_sampled_tokens)
-               where, prompt_lora_mapping[i] is the LoRA id to use for the ith
-               sampled token.
+                where, prompt_lora_mapping[i] is the LoRA id to use for the ith
+                sampled token.
             2. token_lora_mapping: A tuple of size np.sum(num_scheduled_tokens)
-               where, token_lora_mapping[i] is the LoRA id to use for ith token.
+                where, token_lora_mapping[i] is the LoRA id to use for ith
+                token.
             3. lora_requests: Set of relevant LoRA requests.
 
         """

@@ -6,7 +6,7 @@ Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
 """
 
-from typing import final
+from typing import Any, final
 
 import torch
 
@@ -94,7 +94,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         x: torch.Tensor,
         lora_a_stacked: tuple[torch.Tensor, ...],
         scale: float,
-        **kwargs,
+        **kwargs: Any,
     ):
         """Performs GEMM  for multiple slices of lora_a.
 
@@ -129,7 +129,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         output_slices: tuple[int, ...],
         offset_start: int = 0,
         add_inputs=True,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         """Performs GEMM for multiple slices of lora_b.
 
@@ -177,7 +177,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         x: torch.Tensor,
         lora_b_stacked: torch.Tensor,
         add_inputs: bool = True,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         """Applies lora  specifically for VocabParallelEmbeddingWithLoRA.
 
@@ -213,7 +213,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         output_slices: tuple[int, ...],
         *,
         buffer: torch.Tensor | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         """Applicable to linear-related lora.
 
@@ -277,7 +277,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         scale,
         *,
         buffer: torch.Tensor | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         """Applies lora  specifically for LogitsProcessorWithLoRA.
 

@@ -881,7 +881,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         positions: torch.Tensor,
         intermediate_tensors: torch.Tensor | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        **kwargs,
+        **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for Ultravox.
 

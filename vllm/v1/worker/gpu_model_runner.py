@@ -7761,7 +7761,7 @@ class GPUModelRunner(
 
         Args:
             kv_cache_config: Configuration for the KV cache, including the KV
-            cache size of each layer
+                cache size of each layer
             is_profiling: Whether this call is part of a profiling run.
 
         """

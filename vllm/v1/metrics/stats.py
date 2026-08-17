@@ -36,8 +36,7 @@ class CachingMetrics:
     """Metrics for caching with a hit rate of the most recent N requests.
 
     Args:
-        interval: The number of the most recent requests to aggregate.
-            Defaults to 1000.
+        max_recent_requests: The number of the most recent requests to aggregate.
 
     """
 

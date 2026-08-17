@@ -1170,7 +1170,7 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
             key (torch.Tensor): (batch, time2, size)
             value(torch.Tensor): (batch, time2, size)
             mask (torch.Tensor): (batch, time1, time2)
-            pos_emb (torch.Tensor) : (batch, time1, size)
+            pos_emb (torch.Tensor): (batch, time1, size)
 
         Returns:
             output (torch.Tensor): transformed `value`

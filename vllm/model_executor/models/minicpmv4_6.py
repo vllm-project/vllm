@@ -517,7 +517,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
 
     def _compute_visual_tokens(
         self,
-        image_size,
+        image_size: ImageSize,
         max_slice_nums: int | None = None,
         downsample_mode: str | None = None,
     ) -> tuple[list[int], int, int]:

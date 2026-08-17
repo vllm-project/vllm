@@ -895,9 +895,10 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
                 batch.
             positions: Flattened (concatenated) position ids corresponding to a
                 batch.
-            pixel_values_videos: Pixels in each frames for each input videos.
             intermediate_tensors: Intermediate tensors from prior forward pass.
             inputs_embeds: Optional tensor of input embeddings.
+            **kwargs: Multimodal inputs for this batch, forwarded to the
+                multimodal embedding path.
 
         """
         if intermediate_tensors is not None:
