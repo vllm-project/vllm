@@ -374,7 +374,7 @@ ColBERT weights. The examples below therefore override the architecture with
 The three retrieval modes map to concrete pooling tasks as follows:
 
 | Retrieval mode | Pooling task | Output |
-|----------------|--------------|--------|
+| -------------- | ------------ | ------ |
 | Dense | `embed` | One embedding vector per input |
 | Lexical/sparse | `token_classify` | One scalar weight per non-special token |
 | ColBERT multi-vector | `token_embed` | One embedding vector per non-special token |
