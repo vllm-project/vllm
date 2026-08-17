@@ -9,9 +9,10 @@ FlashInfer ReplaySSM adapter and shared ring-tracker kernels. On CPU-only
 platforms the baseline SSU backend defaults to CPU.
 """
 
-import importlib
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from importlib import import_module
+from types import ModuleType
 
 import torch
 
@@ -75,14 +76,10 @@ def update_replayssm_ring_trackers(
     prev_num_accepted: torch.Tensor,
     state_batch_indices: torch.Tensor,
     logical_window: int,
+    ring_buffer_len: int,
     pad_slot_id: int = NULL_BLOCK_ID,
 ) -> None:
-    if ring_start.shape != prev_num_accepted.shape:
-        raise ValueError("ReplaySSM tracker tensors must have matching shapes")
-    if ring_start.dim() != 1:
-        raise ValueError("ReplaySSM tracker tensors must be one-dimensional")
-    if not ring_start.is_contiguous() or not prev_num_accepted.is_contiguous():
-        raise ValueError("ReplaySSM tracker tensors must be contiguous")
+    _validate_replayssm_ring_trackers(ring_start, prev_num_accepted)
     state_batch_indices = state_batch_indices.reshape(-1)
     n_slots = state_batch_indices.numel()
     if n_slots == 0:
@@ -94,10 +91,22 @@ def update_replayssm_ring_trackers(
         state_batch_indices,
         n_slots,
         logical_window,
-        logical_window + 1,
+        ring_buffer_len,
         pad_slot_id,
         BLOCK=block,
     )
+
+
+def _validate_replayssm_ring_trackers(
+    ring_start: torch.Tensor,
+    prev_num_accepted: torch.Tensor,
+) -> None:
+    if ring_start.shape != prev_num_accepted.shape:
+        raise ValueError("ReplaySSM tracker tensors must have matching shapes")
+    if ring_start.dim() != 1:
+        raise ValueError("ReplaySSM tracker tensors must be one-dimensional")
+    if not ring_start.is_contiguous() or not prev_num_accepted.is_contiguous():
+        raise ValueError("ReplaySSM tracker tensors must be contiguous")
 
 
 def reset_replayssm_ring_trackers(
@@ -106,6 +115,7 @@ def reset_replayssm_ring_trackers(
     state_batch_indices: torch.Tensor,
     pad_slot_id: int = NULL_BLOCK_ID,
 ) -> None:
+    _validate_replayssm_ring_trackers(ring_start, prev_num_accepted)
     state_batch_indices = state_batch_indices.reshape(-1)
     n_slots = state_batch_indices.numel()
     if n_slots == 0:
@@ -364,14 +374,9 @@ _mamba_ssu_backend: MambaSSUBackend | None = None
 _flashinfer_replayssm_kernel: Callable[..., torch.Tensor] | None = None
 
 
-def _initialize_flashinfer_replayssm(enabled: bool) -> None:
-    global _flashinfer_replayssm_kernel
-    _flashinfer_replayssm_kernel = None
-    if not enabled:
-        return
-
+def _load_flashinfer_replayssm_module() -> ModuleType:
     try:
-        module = importlib.import_module("flashinfer.mamba.checkpointing_ssu")
+        module = import_module("flashinfer.mamba.checkpointing_ssu")
     except (ImportError, ModuleNotFoundError) as e:
         raise ImportError(
             "FlashInfer is required for the flashinfer ReplaySSM backend. "
@@ -389,6 +394,37 @@ def _initialize_flashinfer_replayssm(enabled: bool) -> None:
             "FlashInfer ReplaySSM requires native autotuning and scratch "
             f"allocation support; missing {missing}."
         )
+    return module
+
+
+def allocate_flashinfer_replayssm_scratch(
+    *,
+    batch_size: int,
+    num_heads: int,
+    num_predicted_tokens: int,
+    max_window: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Allocate native FlashInfer ReplaySSM scratch after capability checks."""
+    module = _load_flashinfer_replayssm_module()
+    return module.allocate_checkpointing_ssu_scratch(
+        batch_size=batch_size,
+        num_heads=num_heads,
+        num_predicted_tokens=num_predicted_tokens,
+        max_window=max_window,
+        dtype=dtype,
+        device=device,
+    )
+
+
+def _initialize_flashinfer_replayssm(enabled: bool) -> None:
+    global _flashinfer_replayssm_kernel
+    _flashinfer_replayssm_kernel = None
+    if not enabled:
+        return
+
+    module = _load_flashinfer_replayssm_module()
     _flashinfer_replayssm_kernel = module.checkpointing_ssu
 
 
@@ -405,9 +441,9 @@ def selective_state_update_replayssm_flashinfer(
     dt_cache: torch.Tensor,
     ring_start: torch.Tensor,
     prev_num_accepted_tokens: torch.Tensor,
+    logical_window: int,
     D: torch.Tensor | None = None,
     dt_bias: torch.Tensor | None = None,
-    z: torch.Tensor | None = None,
     dt_softplus: bool = False,
     state_batch_indices: torch.Tensor | None = None,
     null_block_id: int = NULL_BLOCK_ID,
@@ -417,7 +453,7 @@ def selective_state_update_replayssm_flashinfer(
     precompute_heads_per_cta: int = 0,
     update_trackers: bool = True,
     enable_stochastic_rounding: bool = False,
-    stochastic_rounding_philox_rounds: int | None = None,
+    stochastic_rounding_philox_rounds: int = 0,
 ) -> torch.Tensor:
     """Run FlashInfer checkpointing SSU and optionally advance shared trackers."""
     if _flashinfer_replayssm_kernel is None:
@@ -432,7 +468,6 @@ def selective_state_update_replayssm_flashinfer(
         B = B.unsqueeze(1)
         C = C.unsqueeze(1)
         out = out.unsqueeze(1)
-        z = z.unsqueeze(1) if z is not None else None
 
     indices = state_batch_indices
     if indices is not None and indices.dim() > 1:
@@ -461,7 +496,6 @@ def selective_state_update_replayssm_flashinfer(
         C,
         out,
         D=D,
-        z=z,
         dt_bias=dt_bias,
         dt_softplus=dt_softplus,
         state_batch_indices=indices,
@@ -480,7 +514,8 @@ def selective_state_update_replayssm_flashinfer(
             ring_start,
             prev_num_accepted_tokens,
             indices,
-            logical_window=x_cache.size(2) - x.size(1),
+            logical_window=logical_window,
+            ring_buffer_len=x_cache.size(2),
             pad_slot_id=null_block_id,
         )
     return result

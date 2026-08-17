@@ -26,7 +26,6 @@ from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.config.mamba import MambaBackendEnum
 from vllm.config.parallel import ParallelConfig
 from vllm.distributed import get_ep_group, get_tensor_model_parallel_world_size
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
@@ -785,16 +784,13 @@ class NemotronHForCausalLM(
             num_spec=vllm_config.num_speculative_tokens,
         )
         if cache_config.use_replayssm:
-            ring_buffer_len = cache_config.replayssm_buffer_len
-            if vllm_config.mamba_config.backend == MambaBackendEnum.FLASHINFER:
-                # FlashInfer's physical ring includes room for the new token
-                # while replaying the B live old tokens.
-                ring_buffer_len += 1
             return MambaStateShapeCalculator.append_replayssm_ring(
-                base_shape,
-                hf_config.n_groups,
-                parallel_config.tensor_parallel_size,
-                ring_buffer_len,
+                base_shapes=base_shape,
+                n_groups=hf_config.n_groups,
+                tp_world_size=parallel_config.tensor_parallel_size,
+                logical_window=cache_config.replayssm_buffer_len,
+                backend=vllm_config.mamba_config.backend,
+                num_speculative_tokens=vllm_config.num_speculative_tokens,
             )
         return base_shape
 

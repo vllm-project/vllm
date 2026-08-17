@@ -10,6 +10,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config.cache import MambaDType
+from vllm.config.mamba import MambaBackendEnum
 from vllm.config.model import ModelDType
 from vllm.distributed import divide
 from vllm.logger import init_logger
@@ -213,13 +214,20 @@ class MambaStateShapeCalculator:
         base_shapes: tuple[tuple[int, ...], ...],
         n_groups: int,
         tp_world_size: int,
-        ring_buffer_len: int,
+        logical_window: int,
+        backend: MambaBackendEnum,
+        num_speculative_tokens: int = 0,
     ) -> tuple[tuple[int, ...], ...]:
         """Append the physical ReplaySSM ring shapes.
 
         ``base_shapes[1]`` is ``(nheads // tp, head_dim, state_size)``;
         B_cache uses the un-extended ``n_groups``.
         """
+        ring_buffer_len = logical_window
+        if backend == MambaBackendEnum.FLASHINFER:
+            # FlashInfer keeps the live window, the token being appended, and
+            # any predicted tokens in the physical ring at the same time.
+            ring_buffer_len += 1 + num_speculative_tokens
         local_nheads, head_dim, state_size = base_shapes[1]
         local_ngroups = divide(n_groups, tp_world_size)
         return (
