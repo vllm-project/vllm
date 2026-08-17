@@ -676,12 +676,6 @@ class VllmConfig:
         if model_config is None:
             return False
 
-        if model_config.runner_type == "pooling":
-            if model_config.is_multimodal_model:
-                return False
-            # Fall through rather than return, so pooling models are still
-            # subject to the MoE and hybrid checks below.
-        elif model_config.runner_type != "generate":
         if model_config.runner_type == "pooling" and model_config.is_multimodal_model:
             return False
 
