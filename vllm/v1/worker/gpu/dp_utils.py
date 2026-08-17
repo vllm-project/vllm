@@ -79,21 +79,20 @@ def sync_cudagraph_and_dp_padding(
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
-    multinode_profiling = profiler_sync is not None
     # Row 4 (profiler start request) only added under VLLM_ENABLE_MULTINODE_PROFILING.
     tensor = torch.zeros(
-        5 if multinode_profiling else 4, dp_size, dtype=torch.int32, device="cpu"
+        5 if profiler_sync is not None else 4, dp_size, dtype=torch.int32, device="cpu"
     )
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
     tensor[3][dp_rank] = max_query_len or -1  # (-1 means None)
-    if multinode_profiling:
+    if profiler_sync is not None:
         tensor[4][dp_rank] = 1 if profiler_sync._pending else 0
     dist.all_reduce(tensor, group=group)
 
     # Latch the OR-reduced profiler start request across ranks.
-    if multinode_profiling:
+    if profiler_sync is not None:
         profiler_sync.observe(bool(tensor[4].any().item()))
 
     num_tokens_across_dp = tensor[0]
