@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import cast
 
 import torch
 
@@ -11,6 +11,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import get_forward_context
+from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import dequantize_and_gather_k_cache
 from vllm.models.deepseek_v4.sparse_mla import (
@@ -21,6 +22,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import _ON_GFX950
 from vllm.triton_utils import tl, triton
+from vllm.utils.multi_stream_utils import execute_in_parallel
 from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
@@ -490,27 +492,157 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         if self.indexer is None:
             # Only CSA layers (compress_ratio=4, indexer present) use multi-stream
             # overlap on ROCm. HCA layers (compress_ratio=128, indexer absent) run
-            # the compressor sequentially via the base forward() HCA path.
+            # the compressor sequentially via the base _prepare_and_attn() HCA
+            # path.
             self.aux_stream_list = None
-        else:
-            # Disable indexer-inner stream overlap, keep that serial on ROCm.
-            self.indexer.aux_stream = None
 
-    def attn_gemm_parallel_execute(self, hidden_states) -> tuple[Any, ...]:
-        # When CSA multi-stream overlap is enabled the available aux streams are
-        # reserved for the attention-level overlap in attention_impl().  To avoid
-        # contention we temporarily clear aux_stream_list so that the base-class
-        # input-GEMM fan-out runs serially on the default stream.  The streams
-        # are restored afterwards so they remain available for the outer
-        # execute_in_parallel / maybe_execute_in_parallel dispatch.
+        # Hand-off from the fork in _attn_pipeline to the tail in
+        # _prepare_and_attn; per-layer instance state, valid for one forward.
+        self._csa_q: torch.Tensor | None = None
+
+    def _csa_fork_and_join(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Fork before the input GEMMs and join after the compressor chains.
+
+        Each stream runs a self-contained chain straight from ``hidden_states``
+        (no fine-grained cross-stream deps — HIP events are unreliable under
+        multi-stream overlap), and the two compressor wkv_gate GEMMs ride side
+        streams off the serial critical path.
+        Default: fused_wqa_wkv GEMM → rmsnorm → wq_b → qnorm/rope/SWA insert.
+        aux0: main-compressor wkv_gate GEMM → compress kernels.
+        aux1: indexer-compressor wkv_gate GEMM → K-cache write.
+        After the join, weights_proj runs serially (consumed by forward_q).
+        """
+        assert self.indexer is not None
+        assert self.compressor is not None
+        aux_streams = self.aux_stream_list
+        assert aux_streams is not None
+
+        compressor = self.compressor
+        indexer = self.indexer
+
+        def default_chain() -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            qr_kv = self._fused_wqa_wkv_gemm(hidden_states)
+            qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
+            qr, kv = fused_q_kv_rmsnorm(
+                qr,
+                kv,
+                self.q_norm.weight.data,
+                self.kv_norm.weight.data,
+                self.eps,
+            )
+            attn_metadata = get_forward_context().attn_metadata
+            q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
+            q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
+            return q, qr, kv
+
+        def main_compressor_chain() -> None:
+            kv_score = torch.mm(
+                hidden_states,
+                compressor.fused_wkv_wgate.weight.T,
+                out_dtype=torch.float32,
+            )
+            compressor(kv_score, positions, self.rotary_emb)
+
+        def indexer_compressor_chain() -> None:
+            indexer_kv_score = torch.mm(
+                hidden_states,
+                indexer.compressor.fused_wkv_wgate.weight.T,
+                out_dtype=torch.float32,
+            )
+            indexer.compressor(indexer_kv_score, positions, self.indexer_rotary_emb)
+
+        (q, qr, kv), _ = execute_in_parallel(
+            default_chain,
+            [main_compressor_chain, indexer_compressor_chain],
+            self.ln_events[0],
+            [self.ln_events[1], self.ln_events[2]],
+            [aux_streams[0], aux_streams[1]],
+            enable=True,
+        )
+        # ReplicatedLinear returns (output, bias); bias is None.
+        indexer_weights, _ = indexer.weights_proj(hidden_states)
+        return q, qr, kv, indexer_weights
+
+    def _attn_pipeline(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        o_padded: torch.Tensor,
+    ) -> None:
         if self.aux_stream_list is None:
-            return super().attn_gemm_parallel_execute(hidden_states)
-        saved_streams = self.aux_stream_list
-        self.aux_stream_list = None
-        try:
-            return super().attn_gemm_parallel_execute(hidden_states)
-        finally:
-            self.aux_stream_list = saved_streams
+            return super()._attn_pipeline(hidden_states, positions, o_padded)
+        # CSA multi-stream: fork before the input GEMMs, then keep the base's
+        # eager-break dispatch (MRV1 wide / V2 narrow) by handing the
+        # post-join tail to _prepare_and_attn via _csa_q.
+        q, qr, kv, indexer_weights = self._csa_fork_and_join(hidden_states, positions)
+        self._csa_q = q
+        self._prepare_and_attn_fn(
+            hidden_states,
+            qr,
+            kv,
+            None,
+            None,
+            indexer_weights,
+            positions,
+            o_padded,
+        )
+        self._csa_q = None
+
+    def _prepare_and_attn(
+        self,
+        hidden_states: torch.Tensor,
+        qr: torch.Tensor,
+        kv: torch.Tensor,
+        kv_score: torch.Tensor | None,
+        indexer_kv_score: torch.Tensor | None,
+        indexer_weights: torch.Tensor,
+        positions: torch.Tensor,
+        o_padded: torch.Tensor,
+    ) -> None:
+        if self.aux_stream_list is None:
+            return super()._prepare_and_attn(
+                hidden_states,
+                qr,
+                kv,
+                kv_score,
+                indexer_kv_score,
+                indexer_weights,
+                positions,
+                o_padded,
+            )
+        # CSA multi-stream: the overlap already ran in _attn_pipeline; only
+        # the post-join tail remains (indexer q-side + sparse indexer + MLA).
+        # The inherited _prepare_and_attn_eager delegates here, so the MRV1
+        # wide-eager dispatch keeps working.
+        assert self._csa_q is not None
+        assert self.indexer is not None
+        q_quant, weights = self.indexer.forward_q(
+            qr, positions, self.indexer_rotary_emb, indexer_weights
+        )
+        if q_quant is not None:
+            if isinstance(q_quant, tuple):
+                index_q, index_q_scale = q_quant
+            else:
+                index_q, index_q_scale = q_quant, None
+            index_weights_out = weights
+        else:
+            index_q, index_q_scale, index_weights_out = None, None, None
+        q = self._csa_q
+        self._csa_q = None
+        self._sparse_indexer_and_attn(
+            hidden_states,
+            index_q,
+            index_q_scale,
+            index_weights_out,
+            q,
+            kv,
+            positions,
+            o_padded,
+        )
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:

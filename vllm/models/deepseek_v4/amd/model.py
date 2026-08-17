@@ -541,9 +541,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_dim = self.hc_mult * config.hidden_size
         self.rms_norm_eps = config.rms_norm_eps
 
-        # Three aux streams for CSA kernel-level overlap in attention_impl
-        # (main compressor + indexer on side streams; input GEMMs stay serial).
-        # On ROCm, opt in via VLLM_ROCM_DSV4_CSA_MULTI_STREAM.
+        # Three aux streams for CSA multi-stream overlap on ROCm: the fork
+        # happens in _attn_pipeline before the input GEMMs.
+        # Opt in via VLLM_ROCM_DSV4_CSA_MULTI_STREAM.
         aux_stream_list = (
             [torch.cuda.Stream() for _ in range(3)]
             if (current_platform.is_rocm() and envs.VLLM_ROCM_DSV4_CSA_MULTI_STREAM)
