@@ -1459,6 +1459,49 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250:
+        from aiter.ops.shuffle import moe_shuffle_scale, moe_shuffle_weight
+
+        fp4_dtype = torch.float4_e2m1fn_x2
+        e8m0_dtype = torch.float8_e8m0fnu
+        guinterleave = True
+        if activation == MoEActivation.SITU:
+            from vllm._aiter_ops import rocm_aiter_ops
+            guinterleave = rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
+
+        w13_raw = w13_weight.data.view(fp4_dtype)
+        w2_raw = w2_weight.data.view(fp4_dtype)
+        w13_scale_raw = w13_weight_scale.data.view(e8m0_dtype)
+        w2_scale_raw = w2_weight_scale.data.view(e8m0_dtype)
+        w13_scale_raw = w13_scale_raw.view(-1, w13_scale_raw.shape[-1])
+        w2_scale_raw = w2_scale_raw.view(-1, w2_scale_raw.shape[-1])
+
+        w13 = moe_shuffle_weight(
+            w13_raw, num_experts,
+            is_guinterleave=guinterleave, gate_up=True,
+        )
+        w2 = moe_shuffle_weight(
+            w2_raw, num_experts,
+            is_guinterleave=False, gate_up=False,
+        )
+        w13_scale = moe_shuffle_scale(
+            w13_scale_raw, num_experts,
+            is_guinterleave=guinterleave, gate_up=True,
+        )
+        w2_scale = moe_shuffle_scale(
+            w2_scale_raw, num_experts,
+            is_guinterleave=False, gate_up=False,
+        )
+        w13.is_shuffled = True
+        w2.is_shuffled = True
+
+        if w13_bias is not None:
+            w13_bias = w13_bias.data.to(torch.float32)
+        if w2_bias is not None:
+            w2_bias = w2_bias.data.to(torch.float32)
+
+        return (w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
+
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and not is_gfx1250:
         # Initially introduced for DeepSeekV4
 
@@ -1547,54 +1590,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
-    elif mxfp4_backend in TRITON_BACKENDS or (
-        mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250
-    ):
-        if (
-            mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16
-            and is_gfx1250
-            and activation == MoEActivation.SITU
-        ):
-            from aiter.ops.shuffle import moe_shuffle_scale, moe_shuffle_weight
-
-            from vllm._aiter_ops import rocm_aiter_ops
-
-            fp4_dtype = torch.float4_e2m1fn_x2
-            e8m0_dtype = torch.float8_e8m0fnu
-            guinterleave = rocm_aiter_ops.is_fused_moe_situv2_a8w4_enabled()
-            w13_raw = w13_weight.data.view(fp4_dtype)
-            w2_raw = w2_weight.data.view(fp4_dtype)
-            w13_scale_raw = w13_weight_scale.data.view(e8m0_dtype)
-            w2_scale_raw = w2_weight_scale.data.view(e8m0_dtype)
-            w13_scale_raw = w13_scale_raw.view(-1, w13_scale_raw.shape[-1])
-            w2_scale_raw = w2_scale_raw.view(-1, w2_scale_raw.shape[-1])
-
-            w13 = moe_shuffle_weight(
-                w13_raw, num_experts,
-                is_guinterleave=guinterleave, gate_up=True,
-            )
-            w2 = moe_shuffle_weight(
-                w2_raw, num_experts,
-                is_guinterleave=False, gate_up=False,
-            )
-            w13_scale = moe_shuffle_scale(
-                w13_scale_raw, num_experts,
-                is_guinterleave=guinterleave, gate_up=True,
-            )
-            w2_scale = moe_shuffle_scale(
-                w2_scale_raw, num_experts,
-                is_guinterleave=False, gate_up=False,
-            )
-            w13.is_shuffled = True
-            w2.is_shuffled = True
-
-            if w13_bias is not None:
-                w13_bias = w13_bias.data.to(torch.float32)
-            if w2_bias is not None:
-                w2_bias = w2_bias.data.to(torch.float32)
-
-            return (w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
-
+    elif mxfp4_backend in TRITON_BACKENDS:
         from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
         if mxfp4_backend == Mxfp4MoeBackend.TRITON:
