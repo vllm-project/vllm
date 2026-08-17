@@ -17,7 +17,7 @@ import pytest
 from fastapi import FastAPI
 from vllm_add_dummy_endpoint_plugin import DummyAdminEndpointPlugin
 
-from vllm.entrypoints.openai.api_server import (
+from vllm.entrypoints.launchers.api_server.entry import (
     _attach_endpoint_plugins,
     _init_endpoint_plugins_state,
     build_app,

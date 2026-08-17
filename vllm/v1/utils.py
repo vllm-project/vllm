@@ -37,7 +37,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     import numpy as np
 
-    from vllm.v1.engine.coordinator import DPCoordinator
     from vllm.v1.engine.utils import CoreEngineActorManager, CoreEngineProcManager
 
 logger = init_logger(__name__)
@@ -503,7 +502,7 @@ def run_api_server_worker_proc(
 ) -> None:
     """Entrypoint for individual API server worker processes."""
 
-    from vllm.entrypoints.openai.api_server import run_server_worker
+    from vllm.entrypoints.launchers.api_server.entry import run_server_worker
 
     client_config = client_config or {}
     server_index = client_config.get("client_index", 0)

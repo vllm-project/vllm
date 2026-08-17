@@ -6,9 +6,8 @@ from tempfile import TemporaryDirectory
 import httpx
 import pytest
 
+from tests.utils import RemoteOpenAIServer
 from vllm.version import __version__ as VLLM_VERSION
-
-from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
