@@ -280,6 +280,13 @@ def test_recoverssm_spec_uses_one_state_slot_and_current_window(
         use_recoverssm=True,
     )
     assert isinstance(builder, KimiK3KDAMetadataBuilder)
+    if mamba_cache_mode == "align":
+        builder.mamba_aligned_state_indices = mamba_get_block_table_tensor(
+            common_attn_metadata.block_table_tensor,
+            common_attn_metadata.seq_lens,
+            builder.kv_cache_spec,
+            mamba_cache_mode,
+        )
     context = builder.recoverssm_context
     assert context is not None
     actual = builder.build(
