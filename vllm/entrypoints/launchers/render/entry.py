@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 
 from ..app_state import build_app
 from ..launcher import serve_http, setup_server
-from ..utils.uvicorn_utils import get_uvicorn_log_config
+from ..utils.server_utils import get_uvicorn_log_config
 from .app_state import init_render_app_state
 
 logger = init_logger("vllm.entrypoints.launchers.render.entry")

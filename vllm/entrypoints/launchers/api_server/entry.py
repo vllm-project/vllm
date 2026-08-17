@@ -23,7 +23,7 @@ from vllm.utils.system_utils import decorate_logs
 
 from ..app_state import build_app, init_app_state
 from ..launcher import serve_http, setup_server
-from ..utils.uvicorn_utils import get_uvicorn_log_config
+from ..utils.server_utils import get_uvicorn_log_config
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
