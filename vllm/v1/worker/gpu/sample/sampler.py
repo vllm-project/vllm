@@ -40,6 +40,7 @@ class Sampler:
         logprobs_mode: LogprobsMode = "raw_logprobs",
         num_speculative_tokens: int = 1,
         use_fp64_gumbel: bool = False,
+        enable_trace_replay: bool = False,
         reasoning_config: ReasoningConfig | None = None,
         return_sampling_mask: bool = False,
     ):
@@ -54,7 +55,9 @@ class Sampler:
         self.bad_words_state = BadWordsState(req_states)
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
         self.thinking_budget_state = ThinkingBudgetState(req_states, reasoning_config)
-        self.trace_replay_state = TraceReplayState(req_states)
+        self.trace_replay_state = (
+            TraceReplayState(req_states) if enable_trace_replay else None
+        )
         self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
@@ -71,7 +74,8 @@ class Sampler:
         self.bad_words_state.add_request(req_idx, sampling_params)
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         self.thinking_budget_state.add_request(req_idx, sampling_params)
-        self.trace_replay_state.add_request(req_idx, sampling_params)
+        if self.trace_replay_state is not None:
+            self.trace_replay_state.add_request(req_idx, sampling_params)
 
         states = self.sampling_states
         temperature = states.temperature.np[req_idx]
@@ -96,7 +100,8 @@ class Sampler:
         self.bad_words_state.apply_staged_writes()
         self.logprob_token_ids_state.apply_staged_writes()
         self.thinking_budget_state.apply_staged_writes()
-        self.trace_replay_state.apply_staged_writes()
+        if self.trace_replay_state is not None:
+            self.trace_replay_state.apply_staged_writes()
 
     def __call__(
         self,
@@ -135,12 +140,13 @@ class Sampler:
         # Overwrite sampled tokens with the replay trace (if any) before
         # computing logprobs, so logprobs and ranks reflect the real
         # distribution of the forced token.
-        self.trace_replay_state.apply_trace(
-            sampled,
-            idx_mapping,
-            self.req_states.total_len.gpu,
-            self.req_states.prompt_len.gpu,
-        )
+        if self.trace_replay_state is not None:
+            self.trace_replay_state.apply_trace(
+                sampled,
+                idx_mapping,
+                self.req_states.total_len.gpu,
+                self.req_states.prompt_len.gpu,
+            )
 
         if return_logprobs:
             if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
