@@ -1497,12 +1497,16 @@ class TestGetLayerConfigFusedQKV:
 # device: ARK can use XMX int8 on some XPUs, and the default ("auto")
 # preference order is deliberately left unchanged.
 #
-# Most of these tests stub out int4_gemm_w4a8 so they run without an XPU: what
-# needs guarding is the calling convention (scale dtypes, argument order,
-# weight reuse, batch-size gate), which is where this path is easy to get
-# silently wrong — the kernel accepts bf16 scales and returns
-# plausible-looking garbage rather than raising. The end-to-end tests load a
-# real int4 checkpoint and are skipped unless an XPU with the op is present.
+# The backend-selection tests stub out ARK and the platform; the weight-creation
+# tests only need the TP-rank stubs. Both run anywhere. The apply_weights tests
+# stub out int4_gemm_w4a8 — what needs guarding there is the calling convention
+# (scale dtypes, argument order, weight reuse, batch-size gate), which is where
+# this path is easy to get silently wrong, since the kernel accepts bf16 scales
+# and returns plausible-looking garbage rather than raising. The ones that cross
+# the token threshold reach ``vllm._xpu_ops`` for the activation quantizer, so
+# they are XPU-image only; the small-batch fallback test returns before that
+# import and must stay unmarked to keep covering the gate off-XPU. The
+# end-to-end tests load a real int4 checkpoint and additionally need the op.
 # ---------------------------------------------------------------------------
 
 _BACKEND_ENV = "VLLM_XPU_INC_WNA16_BACKEND"
@@ -1525,11 +1529,12 @@ E2E_MODELS = [
 ]
 
 
-def _has_w4a8_kernel() -> bool:
-    """True when this build can actually run the w4a8 GEMM.
+def _has_xpu_ops() -> bool:
+    """True when ``vllm._xpu_ops`` is importable.
 
-    The op is registered as a side effect of importing ``vllm._xpu_ops``, so it
-    is not visible on ``torch.ops._xpu_C`` until that import happens.
+    ``apply_weights`` imports it for the activation quantizer, and the stubs
+    below patch through it, so tests that exercise that path cannot even be set
+    up on a build without vllm-xpu-kernels installed.
     """
     if not current_platform.is_xpu():
         return False
@@ -1537,8 +1542,22 @@ def _has_w4a8_kernel() -> bool:
         import vllm._xpu_ops  # noqa: F401
     except ImportError:
         return False
-    return hasattr(torch.ops._xpu_C, "int4_gemm_w4a8")
+    return True
 
+
+def _has_w4a8_kernel() -> bool:
+    """True when this build can actually run the w4a8 GEMM.
+
+    The op is registered as a side effect of importing ``vllm._xpu_ops``, so it
+    is not visible on ``torch.ops._xpu_C`` until that import happens.
+    """
+    return _has_xpu_ops() and hasattr(torch.ops._xpu_C, "int4_gemm_w4a8")
+
+
+requires_xpu_ops = pytest.mark.skipif(
+    not _has_xpu_ops(),
+    reason="needs an XPU image with vllm._xpu_ops available",
+)
 
 requires_w4a8_kernel = pytest.mark.skipif(
     not _has_w4a8_kernel(),
@@ -1892,6 +1911,7 @@ def test_falls_back_to_w4a16_for_small_batches(monkeypatch, w4a8_layer) -> None:
     assert out.shape == (tokens, OUT_FEATURES)
 
 
+@requires_xpu_ops
 def test_calls_kernel_at_threshold(monkeypatch, w4a8_layer) -> None:
     """At/above the threshold, activations are int8-quantized per token."""
     method, layer = w4a8_layer
@@ -1943,6 +1963,7 @@ def test_calls_kernel_at_threshold(monkeypatch, w4a8_layer) -> None:
     assert out.shape == (tokens, OUT_FEATURES)
 
 
+@requires_xpu_ops
 @pytest.mark.parametrize("act_dtype", [torch.bfloat16, torch.float16])
 def test_scales_are_fp16_for_any_activation_dtype(
     monkeypatch, w4a8_layer, act_dtype
@@ -1964,6 +1985,7 @@ def test_scales_are_fp16_for_any_activation_dtype(
     assert out.dtype is act_dtype
 
 
+@requires_xpu_ops
 def test_forwards_bias_to_kernel(monkeypatch, w4a8_layer) -> None:
     """Bias is applied by the kernel, not added afterwards."""
     method, layer = w4a8_layer
@@ -1980,6 +2002,7 @@ def test_forwards_bias_to_kernel(monkeypatch, w4a8_layer) -> None:
     assert captured["gemm_args"][8] is bias
 
 
+@requires_xpu_ops
 def test_preserves_leading_dims(monkeypatch, w4a8_layer) -> None:
     """3D activations must round-trip through the flatten/reshape."""
     method, layer = w4a8_layer
@@ -1996,6 +2019,7 @@ def test_preserves_leading_dims(monkeypatch, w4a8_layer) -> None:
     assert out.dtype is torch.bfloat16
 
 
+@requires_xpu_ops
 def test_batch_gate_uses_flattened_token_count(monkeypatch, w4a8_layer) -> None:
     """The gate counts total tokens, not the leading dimension."""
     method, layer = w4a8_layer
