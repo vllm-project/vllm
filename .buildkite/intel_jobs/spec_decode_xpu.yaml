@@ -34,9 +34,56 @@ steps:
     'export VLLM_WORKER_MULTIPROC_METHOD=spawn || true &&
     cd tests &&
     pytest -v -s -m not slow_test v1/spec_decode || true'
-- label: Spec Decode Eagle
+- label: 'Spec Decode Eagle 1: DeepSeek + Qwen'
   device: intel_gpu
   timeout_in_minutes: 25
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s v1/e2e/spec_decode/eagle/ -k "deepseek_eagle or qwen3_eagle3"
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/
+  - tests/v1/e2e/spec_decode/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s v1/e2e/spec_decode/eagle/ -k deepseek_eagle or qwen3_eagle3 || true'
+- label: 'Spec Decode Eagle 2: Llama 3 + Qwen VL + Other'
+  device: intel_gpu
+  timeout_in_minutes: 25
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s v1/e2e/spec_decode/eagle/ -k "not deepseek_eagle and not qwen3_eagle3"
+  source_file_dependencies:
+  - vllm/v1/spec_decode/
+  - vllm/v1/worker/gpu/spec_decode/
+  - tests/v1/e2e/spec_decode/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s v1/e2e/spec_decode/eagle/ -k not deepseek_eagle and not qwen3_eagle3 || true'
+- label: Spec Decode Eagle Nightly (B200)
+  device: intel_gpu
+  timeout_in_minutes: 25
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -108,8 +155,7 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s v1/e2e/spec_decode/ngram_suffix/ || true &&
-    python3 spec_decode/test_custom_proposer.py || true'
+    pytest -v -s v1/e2e/spec_decode/ngram_suffix/ || true'
 - label: Spec Decode Draft Model
   device: intel_gpu
   timeout_in_minutes: 45
@@ -161,7 +207,7 @@ steps:
     'export VLLM_ALLOW_INSECURE_SERIALIZATION=1 || true &&
     cd tests &&
     pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test || true'
-- label: Spec Decode DeepSeek MTP Parallel Load (B200)
+- label: Spec Decode DeepSeek MTP Parallel Load (2xB200-2xMI300)
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 2

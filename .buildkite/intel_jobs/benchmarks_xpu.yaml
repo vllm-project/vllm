@@ -18,6 +18,7 @@ steps:
   - pytest -v -s benchmarks/
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/benchmarks/
   commands:
   - >-
