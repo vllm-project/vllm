@@ -87,7 +87,9 @@ MM_DATA_PATCHES = {
 _XPU_EXCLUDED_MODEL_IDS = {
     "baidu/Unlimited-OCR",
     "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
+    "moonshotai/Kimi-K3",
     "Qwen/Qwen2.5-Omni-7B-AWQ",
+    "thinkingmachines/Inkling-NVFP4",
 }
 
 
@@ -130,6 +132,17 @@ def get_model_ids_to_test():
     }
 
     return _get_model_ids_to_test(vllm_only_archs)
+
+
+def get_transformers_backend_model_ids_to_test():
+    return sorted(
+        {
+            model_id
+            for arch, info in _TRANSFORMERS_BACKEND_MODELS.items()
+            if "MultiModal" in arch
+            for model_id in (info.default, *info.extras.values())
+        }
+    )
 
 
 def get_text_token_prompts(
@@ -209,6 +222,7 @@ def _test_processing_correctness(
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
+    model_impl: str = "auto",
 ):
     if model_id_or_arch in HF_EXAMPLE_MODELS.get_supported_archs():
         # Use model architecture to get the default model id
@@ -236,6 +250,7 @@ def _test_processing_correctness(
         enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
+        model_impl=model_impl,
     )
     # Ensure that the cache can fit all of the data
     # (set after because ModelConfig would set it to 0 for encoder-decoder models)
@@ -475,6 +490,25 @@ def test_processing_correctness(
         hit_rate=hit_rate,
         num_batches=num_batches,
         simplify_rate=simplify_rate,
+    )
+
+
+@pytest.mark.parametrize("model_id", get_transformers_backend_model_ids_to_test())
+@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
+@pytest.mark.parametrize("num_batches", [32])
+@pytest.mark.parametrize("simplify_rate", [1.0])
+def test_processing_correctness_transformers(
+    model_id: str,
+    hit_rate: float,
+    num_batches: int,
+    simplify_rate: float,
+):
+    _test_processing_correctness(
+        model_id,
+        hit_rate=hit_rate,
+        num_batches=num_batches,
+        simplify_rate=simplify_rate,
+        model_impl="transformers",
     )
 
 

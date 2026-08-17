@@ -140,8 +140,8 @@ class ParallelConfig:
     """Local rank of the data parallel group, set only in SPMD mode."""
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
-    data_parallel_rpc_port: int = 29550
-    """Port for data parallel messaging."""
+    data_parallel_rpc_port: int = Field(default=29550, ge=1, le=65535)
+    """Fixed port for data parallel messaging, shared by all nodes."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
     data_parallel_backend: DataParallelBackend = "mp"
@@ -687,6 +687,14 @@ class ParallelConfig:
         )
 
     @property
+    def use_all2all(self) -> bool:
+        return (
+            self.data_parallel_size > 1
+            or self.use_sequence_parallel_moe
+            or (self.enable_expert_parallel and self.prefill_context_parallel_size > 1)
+        )
+
+    @property
     def use_batched_dp_moe(self) -> bool:
         return (
             self.all2all_backend
@@ -786,6 +794,7 @@ class ParallelConfig:
             "data_parallel_master_ip",
             "data_parallel_master_port",
             "_data_parallel_master_port_list",
+            "_coord_store_port",
             "data_parallel_rpc_port",
             "rank",
             "master_addr",
@@ -1019,14 +1028,20 @@ class ParallelConfig:
                 "Disabled the custom all-reduce kernel because it is not "
                 "supported on current platform."
             )
-        if self.nnodes > 1:
-            self.disable_custom_all_reduce = True
-            logger.debug(
-                "Disabled the custom all-reduce since we are running on multi-node."
-            )
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError(
                 "Unable to use nsight profiling unless workers run with Ray."
             )
 
         return self
+
+    def reconfigure_for_independent_dp_rank(self) -> None:
+        """Reconfigure for a single independent non-MoE DP rank."""
+        # Capture these before changing DP fields.
+        nnodes = self.nnodes_within_dp
+        node_rank = self.node_rank_within_dp
+        self.data_parallel_size = 1
+        self.data_parallel_size_local = 1
+        self.data_parallel_rank = 0
+        self.nnodes = nnodes
+        self.node_rank = node_rank

@@ -48,9 +48,17 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
 )
 from transformers.video_utils import VideoMetadata
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import (
+    BaseDummyOptions,
+    MultiModalConfig,
+    VideoDummyOptions,
+    VideoPruningMethod,
+)
 from vllm.distributed import get_pp_group, parallel_state
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
@@ -69,12 +77,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.evs import (
-    compute_mrope_for_media,
-    compute_retained_tokens_count,
-    compute_retention_mask,
-    recompute_mrope_positions,
-)
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
@@ -92,12 +94,25 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.video_prune.evs import (
+    compute_mrope_for_media,
+    compute_retained_tokens_count,
+    compute_retention_mask,
+    recompute_mrope_positions,
+)
+from vllm.multimodal.video_prune.vidcom2 import (
+    compute_retained_tokens_count as vidcom2_compute_retained_tokens_count,
+)
+from vllm.multimodal.video_prune.vidcom2 import (
+    compute_retention_mask as vidcom2_compute_retention_mask,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.protocol import TokenizerLike
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
 from ...utils.torch_utils import async_tensor_h2d
@@ -131,6 +146,7 @@ from .qwen3 import Qwen3ForCausalLM, Qwen3Model
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    StageMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
     maybe_prefix,
@@ -344,6 +360,13 @@ def pos_embed_interpolate_native(
     return repeated.to(dtype=dtype)
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "x": 0,
+    },
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
 class Qwen3_VisionPatchEmbed(nn.Module):
     def __init__(
         self,
@@ -410,6 +433,17 @@ class Qwen3_VisionMLP(nn.Module):
         return mlp_output
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "x": 0,
+        "cu_seqlens": 0,
+        "rotary_pos_emb_cos": 0,
+        "rotary_pos_emb_sin": 0,
+        "sequence_lengths": 0,
+    },
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
 class Qwen3_VisionBlock(nn.Module):
     def __init__(
         self,
@@ -672,7 +706,15 @@ class Qwen3_VisionTransformer(nn.Module):
             else self.rot_pos_ids(h, w, self.spatial_merge_size).repeat(t, 1)
             for t, h, w in grid_thw
         ]
-        pos_ids = torch.cat(pos_ids, dim=0).to(self.device, non_blocking=True)
+        num_pos = sum(p.shape[0] for p in pos_ids)
+        pinned = torch.empty(
+            (num_pos, pos_ids[0].shape[1]),
+            dtype=pos_ids[0].dtype,
+            pin_memory=PIN_MEMORY,
+        )
+        pos_ids = torch.cat(pos_ids, dim=0, out=pinned).to(
+            self.device, non_blocking=True
+        )
 
         # Use pre-computed cos_sin_cache from RotaryEmbedding
         cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
@@ -867,6 +909,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             self.get_hf_config().vision_config.spatial_merge_size,
             video_needs_metadata=True,
             expected_hidden_size=self._get_expected_hidden_size(),
+            embeds_from_ec_connector=self.embeds_from_ec_connector,
         )
 
     def _get_vision_info(
@@ -1256,7 +1299,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             hf_config = self.info.get_hf_config()
             tokenizer = self.info.get_tokenizer()
             merge_size = hf_config.vision_config.spatial_merge_size
-            video_pruning_rate = self.info.ctx.get_mm_config().video_pruning_rate
+            pruning_spec = self.info.ctx.get_mm_config().get_video_pruning_spec()
             vision_start_token_id = hf_config.vision_start_token_id
             vision_end_token_id = hf_config.vision_end_token_id
             video_token_id = hf_config.video_token_id
@@ -1339,11 +1382,18 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     merge_size**2
                 )
 
-                if video_pruning_rate is not None and video_pruning_rate > 0.0:
-                    num_tokens = compute_retained_tokens_count(
+                # Apply video pruning (EVS or VidCom2) if enabled.
+                if pruning_spec is not None:
+                    method, prune_q = pruning_spec
+                    count_fn = (
+                        vidcom2_compute_retained_tokens_count
+                        if method == "vidcom2"
+                        else compute_retained_tokens_count
+                    )
+                    num_tokens = count_fn(
                         tokens_per_frame=tokens_per_frame_base,
                         num_frames=num_frames,
-                        q=video_pruning_rate,
+                        q=prune_q,
                     )
                     tokens_per_frame = [num_tokens] + [0] * (num_frames - 1)
                     select_token_id = False
@@ -1459,16 +1509,22 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 f"video length ({grid_thw[0]})."
             )
 
-            # Compute tokens per frame, with EVS support
+            # Compute tokens per frame, with EVS / VidCom2 support
             num_frames = int(grid_thw[0])
             tokens_per_frame_base = int(grid_thw[1:].prod()) // merge_length
 
-            video_pruning_rate = self.info.ctx.get_mm_config().video_pruning_rate
-            if video_pruning_rate is not None and video_pruning_rate > 0.0:
-                num_tokens = compute_retained_tokens_count(
+            pruning_spec = self.info.ctx.get_mm_config().get_video_pruning_spec()
+            if pruning_spec is not None:
+                method, prune_q = pruning_spec
+                count_fn = (
+                    vidcom2_compute_retained_tokens_count
+                    if method == "vidcom2"
+                    else compute_retained_tokens_count
+                )
+                num_tokens = count_fn(
                     tokens_per_frame=tokens_per_frame_base,
                     num_frames=num_frames,
-                    q=video_pruning_rate,
+                    q=prune_q,
                 )
                 tokens_per_frame = [num_tokens] + [0] * (num_frames - 1)
                 select_token_id = False
@@ -1651,15 +1707,14 @@ class Qwen3LLMForCausalLM(Qwen3ForCausalLM):
         )
 
         if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix="lm_head",
+            )
             if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix="lm_head",
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         else:
             self.lm_head = PPMissingLayer()
 
@@ -1701,6 +1756,8 @@ class Qwen3VLForConditionalGeneration(
 
     supports_encoder_tp_data = True
 
+    supported_video_pruning_methods = ("evs", "vidcom2")
+
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -1719,6 +1776,17 @@ class Qwen3VLForConditionalGeneration(
 
         raise ValueError("Only image or video modality is supported")
 
+    def _init_video_pruning(self, multimodal_config: MultiModalConfig) -> None:
+        pruning_spec = multimodal_config.get_video_pruning_spec()
+        if pruning_spec is None:
+            self.video_pruning_method: VideoPruningMethod | None = None
+            self.video_pruning_rate = multimodal_config.video_pruning_rate
+        else:
+            self.video_pruning_method, self.video_pruning_rate = pruning_spec
+        self.is_multimodal_pruning_enabled = (
+            multimodal_config.is_multimodal_pruning_enabled()
+        )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         super().__init__()
         config: Qwen3VLConfig = vllm_config.model_config.hf_config
@@ -1730,19 +1798,7 @@ class Qwen3VLForConditionalGeneration(
         self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-        self.video_pruning_rate = multimodal_config.video_pruning_rate
-        self.is_multimodal_pruning_enabled = (
-            multimodal_config.is_multimodal_pruning_enabled()
-        )
-
-        self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
-        self.deepstack_num_level = (
-            len(config.vision_config.deepstack_visual_indexes)
-            if self.use_deepstack
-            else 0
-        )
-        self.visual_dim = config.vision_config.out_hidden_size
-        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
+        self._init_video_pruning(multimodal_config)
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = Qwen3_VisionTransformer(
@@ -1752,18 +1808,28 @@ class Qwen3VLForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
-            # register buffer for deepstack
-            if self.use_deepstack:
-                self.deepstack_input_embeds = [
-                    torch.zeros(
-                        vllm_config.scheduler_config.max_num_batched_tokens,
-                        config.text_config.hidden_size,
-                    )
-                    for _ in range(self.deepstack_num_level)
-                ]
-                # Tracks the valid token span currently stored in the buffer.
-                # Zero means there is no active deepstack payload to consume.
-                self.deepstack_input_embeds_num_tokens = 0
+        self.use_deepstack = hasattr(
+            config.vision_config, "deepstack_visual_indexes"
+        ) and not isinstance(self.visual, StageMissingLayer)
+        self.deepstack_num_level = (
+            len(config.vision_config.deepstack_visual_indexes)
+            if self.use_deepstack
+            else 0
+        )
+        self.visual_dim = config.vision_config.out_hidden_size
+        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
+
+        if self.use_deepstack:
+            self.deepstack_input_embeds = [
+                torch.zeros(
+                    vllm_config.scheduler_config.max_num_batched_tokens,
+                    config.text_config.hidden_size,
+                )
+                for _ in range(self.deepstack_num_level)
+            ]
+            # Tracks the valid token span currently stored in the buffer.
+            # Zero means there is no active deepstack payload to consume.
+            self.deepstack_input_embeds_num_tokens = 0
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3LLMForCausalLM(
@@ -1848,7 +1914,7 @@ class Qwen3VLForConditionalGeneration(
             EncoderCudaGraphConfig,
         )
 
-        # When EVS pruning is enabled, embed_multimodal post-processes both
+        # When video pruning is enabled, embed_multimodal post-processes both
         # image and video embeddings (mrope positions are appended for image,
         # prune+append for video). The encoder CUDA graph path bypasses that
         # post-process, producing inconsistent embedding formats vs eager. So
@@ -2291,9 +2357,12 @@ class Qwen3VLForConditionalGeneration(
 
             t, h, w = size
             if self.is_multimodal_pruning_enabled:
-                # For each video, compute retention mask using EVS.
-                # retention_mask: [11424].
-                retention_mask = compute_retention_mask(
+                # Compute the retention mask for each video (EVS or VidCom2).
+                if self.video_pruning_method == "vidcom2":
+                    mask_fn = vidcom2_compute_retention_mask
+                else:
+                    mask_fn = compute_retention_mask
+                retention_mask = mask_fn(
                     emb,
                     size,
                     spatial_merge_size=self.visual.spatial_merge_size,

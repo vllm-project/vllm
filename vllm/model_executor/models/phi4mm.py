@@ -270,8 +270,7 @@ class Phi4MMImageEncoder(nn.Module):
         pixel_values = pixel_values.flatten(0, 1)
 
         img_features = self.get_img_features(
-            pixel_values,
-            image_attention_mask.type(torch.BoolTensor).flatten(0, 1).to(target_device),
+            pixel_values, image_attention_mask.bool().flatten(0, 1)
         )
 
         base_feat_height_target = self.base_feat_height_target
@@ -519,32 +518,6 @@ class Phi4MMAudioEmbeddingInputs(TensorSchema):
 
 
 Phi4MMAudioInputs: TypeAlias = Phi4MMAudioFeatureInputs | Phi4MMAudioEmbeddingInputs
-
-
-def cat_with_pad(tensors, dim, padding_value=0):
-    """
-    cat along dim, while pad to max for all other dims
-    """
-    ndim = tensors[0].dim()
-    assert all(t.dim() == ndim for t in tensors[1:]), (
-        "All tensors must have the same number of dimensions"
-    )
-
-    out_size = [max(t.shape[i] for t in tensors) for i in range(ndim)]
-    out_size[dim] = sum(t.shape[dim] for t in tensors)
-    output = tensors[0].new_full(out_size, padding_value)
-
-    index = 0
-    for t in tensors:
-        # Create a slice list where every dimension except dim is full slice
-        slices = [slice(0, t.shape[d]) for d in range(ndim)]
-        # Update only the concat dimension slice
-        slices[dim] = slice(index, index + t.shape[dim])
-
-        output[slices] = t
-        index += t.shape[dim]
-
-    return output
 
 
 def stack_with_pad(

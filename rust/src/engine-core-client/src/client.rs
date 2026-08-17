@@ -394,6 +394,17 @@ impl EngineCoreClient {
         self.engines.iter().map(|engine| &engine.ready_response).collect()
     }
 
+    /// Return the first engine's ready response.
+    ///
+    /// Per-engine fields such as `data_parallel_rank` should be read through
+    /// [`ready_responses`](Self::ready_responses).
+    pub fn ready_response(&self) -> &EngineCoreReadyResponse {
+        &self
+            .engines
+            .first()
+            .expect("engine core client requires at least one engine")
+            .ready_response
+    }
     /// Return the engine-reported effective model dtype.
     pub fn model_dtype(&self) -> ModelDtype {
         self.engines
@@ -438,15 +449,6 @@ impl EngineCoreClient {
             .expect("engine core client requires at least one engine")
             .ready_response
             .world_size
-    }
-
-    /// Return the data parallel size from the parallel config, if available.
-    pub fn data_parallel_size(&self) -> u64 {
-        self.engines
-            .first()
-            .expect("engine core client requires at least one engine")
-            .ready_response
-            .data_parallel_size
     }
 
     /// Get the model name associated with this client used for metrics
@@ -508,7 +510,7 @@ impl EngineCoreClient {
                 "registered request to engine"
             );
 
-            self.inner.send_to_engine(&engine_id, EngineCoreRequestType::Add, &req).await?;
+            self.inner.send_request_to_engine(&engine_id, req).await?;
             Ok(())
         }
         .await;

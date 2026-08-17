@@ -55,6 +55,7 @@ from vllm.transformers_utils.processors.cohere_asr import (
     CohereASRFeatureExtractor,
     CohereASRProcessor,
 )
+from vllm.utils.collection_utils import is_list_of
 from vllm.v1.attention.backend import (
     AttentionType,
 )
@@ -183,6 +184,7 @@ class CohereASRAttention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor | None = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -241,7 +243,7 @@ class CohereASRCrossAttention(CohereASRAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.Tensor | None,
+        encoder_hidden_states: torch.Tensor | None = None,
     ) -> torch.Tensor:
         q, _ = self.q_proj(hidden_states)
 
@@ -837,7 +839,7 @@ class CausalConv1D(nn.Conv1d):
         out_channels: int,
         kernel_size: int,
         stride: int = 1,
-        padding: str | int = 0,
+        padding: str | int | list[int] | None = 0,
         dilation: int = 1,
         groups: int = 1,
         bias: bool = True,
@@ -845,6 +847,8 @@ class CausalConv1D(nn.Conv1d):
         device=None,
         dtype=None,
     ) -> None:
+        self._left_padding: int
+        self._right_padding: int
         if padding is None:
             self._left_padding = kernel_size - 1
             self._right_padding = stride - 1
@@ -903,7 +907,7 @@ class ConformerConvolution(nn.Module):
         d_model: int,
         kernel_size: int,
         norm_type: str = "batch_norm",
-        conv_context_size: int | None = None,
+        conv_context_size: int | list[int] | None = None,
         pointwise_activation: str = "glu_",
         use_bias: bool = True,
     ) -> None:
@@ -1158,6 +1162,7 @@ class RelPositionMultiHeadAttention(CohereASRMultiHeadAttention):
         q, k, v = self.forward_qkv(query, key, value)
         q = q.transpose(1, 2)  # (batch, time1, head, d_k)
 
+        assert pos_emb is not None
         n_batch_pos = pos_emb.size(0)
         p = self.linear_pos(pos_emb).view(n_batch_pos, -1, self.h, self.d_k)
         p = p.transpose(1, 2)  # (batch, head, time1, d_k)
@@ -1213,7 +1218,7 @@ class ConformerLayer(torch.nn.Module):
         n_heads: int = 4,
         conv_kernel_size: int = 31,
         conv_norm_type: str = "batch_norm",
-        conv_context_size: int | None = None,
+        conv_context_size: int | list[int] | None = None,
         pos_bias_u: nn.Parameter | torch.Tensor | None = None,
         pos_bias_v: nn.Parameter | torch.Tensor | None = None,
         att_context_size: list[int] | None = None,
@@ -1382,6 +1387,7 @@ class ConformerEncoder(nn.Module):
             conv_kernel_size=conv_kernel_size,
         )
 
+        self.xscale: float | None
         if xscaling:
             self.xscale = math.sqrt(d_model)
         else:
@@ -1633,9 +1639,12 @@ class ConformerEncoder(nn.Module):
     ) -> tuple[list[list[int]], list[int], list[float], list[int]]:
         # convert att_context_size to a standard list of lists
         if att_context_size:
-            att_context_size_all = list(att_context_size)
-            if isinstance(att_context_size_all[0], int):
-                att_context_size_all = [att_context_size_all]
+            if is_list_of(att_context_size, int, check="all"):
+                att_context_size_all = [att_context_size]
+            elif is_list_of(att_context_size, list, check="all"):
+                att_context_size_all = att_context_size
+            else:
+                raise ValueError("att_context_size cannot mix nested and flat values")
             for i, att_cs in enumerate(att_context_size_all):
                 if att_context_style == "chunked_limited":
                     if att_cs[0] > 0 and att_cs[0] % (att_cs[1] + 1) > 0:
@@ -1684,6 +1693,7 @@ class ConformerEncoder(nn.Module):
             if conv_context_size == "causal":
                 conv_context_size = [conv_kernel_size - 1, 0]
             else:
+                assert isinstance(conv_context_size, list)
                 total = conv_context_size[0] + conv_context_size[1] + 1
                 if total != conv_kernel_size:
                     raise ValueError(
@@ -1940,7 +1950,7 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
     ):
         if mm_data:
             feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
-            mm_data = dict(audio=mm_data.pop("audios"))
+            mm_data = dict(audio=dict(mm_data).pop("audios"))
             mm_kwargs = dict(
                 **mm_kwargs,
                 sampling_rate=feature_extractor.sampling_rate,
@@ -2045,7 +2055,6 @@ class CohereAsrForConditionalGeneration(
         # (which is different from "_") and encode("▁ABC") ignores the first token
         # so the prompt_text is unreliable. However, prompt_token_ids can be used
         # to get prompt_text but it wont have the first token "▁".
-        prompt_text = None
         prompt_token_ids = cls._get_default_prompt_token_ids(
             tokenizer,
             model_config,
@@ -2053,7 +2062,6 @@ class CohereAsrForConditionalGeneration(
         )
 
         return TokensPrompt(
-            prompt=prompt_text,
             prompt_token_ids=prompt_token_ids,
             multi_modal_data={"audio": (audio, stt_config.sample_rate)},
         )
@@ -2199,7 +2207,9 @@ class CohereAsrForConditionalGeneration(
         audio_input, seq_lens = self._parse_and_validate_audio_input(**kwargs)
 
         if hasattr(audio_input, "input_features"):
-            out = self.model.get_encoder_outputs(audio_input["input_features"])
+            out = self.model.get_encoder_outputs(
+                audio_input["input_features"], seq_lens
+            )
         else:
             out = self.model.get_encoder_outputs(audio_input, seq_lens)
 
@@ -2219,12 +2229,17 @@ class CohereAsrForConditionalGeneration(
                 f"Incorrect type of audio features. Got type: {type(input_features)}"
             )
 
+        if not isinstance(length, torch.Tensor):
+            raise ValueError("Audio feature lengths must be a tensor.")
+
         if isinstance(input_features, torch.Tensor):
             seq_lens = length.reshape(-1)
         else:
+            if not is_list_of(input_features, torch.Tensor, check="all"):
+                raise ValueError("All audio features must be tensors.")
             input_features = [
-                feat.to(self.dtype).squeeze(0).transpose(1, 0)
-                for feat in input_features
+                feature.to(self.dtype).squeeze(0).transpose(1, 0)
+                for feature in input_features
             ]
             seq_lens = length.reshape(-1)
             input_features = torch.nn.utils.rnn.pad_sequence(

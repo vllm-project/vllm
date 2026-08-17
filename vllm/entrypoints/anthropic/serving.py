@@ -486,6 +486,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             temperature=anthropic_request.temperature,
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
+            cache_salt=anthropic_request.cache_salt,
             kv_transfer_params=anthropic_request.kv_transfer_params,
             ec_transfer_params=anthropic_request.ec_transfer_params,
             chat_template_kwargs=anthropic_request.chat_template_kwargs,
@@ -538,6 +539,9 @@ class AnthropicServingMessages(OpenAIServingChat):
             req.tool_choice = None
             return
 
+        req.parallel_tool_calls = (
+            not anthropic_request.tool_choice.disable_parallel_tool_use
+        )
         tool_choice_type = anthropic_request.tool_choice.type
         if tool_choice_type == "auto":
             req.tool_choice = "auto"

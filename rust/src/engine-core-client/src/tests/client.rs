@@ -19,7 +19,7 @@ use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, ZmqMessage};
 
-use crate::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
+use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::multimodal::{
     MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmSlice, PlaceholderRange,
@@ -32,7 +32,7 @@ use crate::protocol::output::{
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
 use crate::protocol::stats::SchedulerStats;
-use crate::protocol::tensor::WireTensor;
+use crate::protocol::tensor::{WireArrayData, WireTensor};
 use crate::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
     IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_sockets,
@@ -162,6 +162,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
             ..EngineCoreSamplingParams::for_test()
         }),
         arrival_time: 42.5,
+        session_id: Some("session-1".to_string()),
         ..EngineCoreRequest::default()
     }
 }
@@ -222,18 +223,8 @@ fn request_output(
     EngineCoreOutput {
         request_id: request_id.to_string(),
         new_token_ids,
-        new_logprobs: None,
-        new_prompt_logprobs_tensors: None,
-        pooling_output: None,
         finish_reason,
-        stop_reason: None,
-        events: None,
-        kv_transfer_params: None,
-        ec_transfer_params: None,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -1729,6 +1720,86 @@ async fn client_decodes_multipart_logprob_outputs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_sends_large_multimodal_tensor_as_aux_frame() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-multimodal-aux".to_vec();
+    let tensor_data = (0..64).map(|value| value as f32).collect::<Vec<_>>();
+    let expected_bytes =
+        tensor_data.iter().flat_map(|value| value.to_ne_bytes()).collect::<Vec<_>>();
+    let mut request = sample_multimodal_request();
+    request.mm_features.as_mut().unwrap()[0]
+        .data
+        .as_mut()
+        .unwrap()
+        .get_mut("pixel_values")
+        .unwrap()
+        .data = Some(MmKwargValue::Tensor(
+        WireTensor::from_f32(vec![64], tensor_data).unwrap(),
+    ));
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        move |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                assert_eq!(add.len(), 3);
+                assert_eq!(add[0].as_ref(), &[0x00]);
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                let MmKwargValue::Tensor(tensor) =
+                    request.mm_features.as_ref().unwrap()[0].data.as_ref().unwrap()["pixel_values"]
+                        .data
+                        .as_ref()
+                        .unwrap()
+                else {
+                    panic!("expected tensor");
+                };
+                assert_eq!(tensor.data, WireArrayData::AuxIndex(1));
+                assert_eq!(add[2].as_ref(), expected_bytes);
+
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(
+                            "req-mm",
+                            vec![],
+                            Some(EngineCoreFinishReason::Length),
+                        )],
+                        finished_requests: Some(BTreeSet::from(["req-mm".to_string()])),
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    let outputs = client.call(request).await.unwrap().collect::<Vec<_>>().await;
+    assert_eq!(outputs.len(), 1);
+    assert!(outputs[0].is_ok());
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
@@ -2427,6 +2498,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let defaults_request_hex = lines.next().expect("missing defaults request fixture line");
     let multimodal_request_hex = lines.next().expect("missing multimodal request fixture line");
     let outputs_hex = lines.next().expect("missing outputs fixture line");
+    let sampling_mask_outputs_hex =
+        lines.next().expect("missing sampling mask outputs fixture line");
     let inline_logprobs_frames = lines.next().expect("missing inline logprobs fixture line");
     let multipart_logprobs_frames = lines.next().expect("missing multipart logprobs fixture line");
     let inline_prompt_frames = lines.next().expect("missing inline prompt logprobs fixture line");
@@ -2437,6 +2510,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
     let outputs_bytes = hex::decode(outputs_hex).unwrap();
+    let sampling_mask_outputs_bytes = hex::decode(sampling_mask_outputs_hex).unwrap();
 
     let decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
     let expected_request = sample_request();
@@ -2500,6 +2574,16 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         decode_value(&rmp_serde::to_vec_named(&expected_multimodal_request.mm_features).unwrap());
     assert_eq!(python_mm_features, rust_mm_features);
 
+    let decoded_sampling_mask_outputs: EngineCoreOutputs =
+        rmp_serde::from_slice(&sampling_mask_outputs_bytes).unwrap();
+    let sampling_mask_output =
+        &decoded_sampling_mask_outputs.as_request_batch().unwrap().outputs[0];
+    assert!(sampling_mask_output.mm_cache_miss_hashes.is_none());
+    assert!(matches!(
+        sampling_mask_output.new_sampling_mask.as_ref(),
+        Some(Value::Array(fields)) if fields.len() == 3
+    ));
+
     let decoded_outputs: EngineCoreOutputs = rmp_serde::from_slice(&outputs_bytes).unwrap();
     expect_test::expect![[r#"
         RequestBatch(
@@ -2526,6 +2610,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         prefill_stats: None,
                         routed_experts: None,
                         num_nans_in_logits: 0,
+                        mm_cache_miss_hashes: None,
+                        new_sampling_mask: None,
                     },
                 ],
                 scheduler_stats: None,
@@ -2597,6 +2683,21 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         rust_ready_keys, python_ready_keys,
         "EngineCoreReadyResponse drifted from the Python dataclass",
     );
+
+    let ready_response: EngineCoreReadyResponse =
+        rmp_serde::from_slice(&hex::decode(ready_response_hex).unwrap()).unwrap();
+    let kv_events_config = ready_response.kv_events_config.expect("KV events config should decode");
+    assert!(kv_events_config.enable_kv_cache_events);
+    assert_eq!(kv_events_config.publisher, "zmq");
+    assert_eq!(kv_events_config.endpoint, "tcp://127.0.0.1:5557");
+    assert_eq!(
+        kv_events_config.replay_endpoint.as_deref(),
+        Some("tcp://127.0.0.1:5558")
+    );
+    assert_eq!(kv_events_config.topic, "kv");
+    assert_eq!(kv_events_config.buffer_steps, 10_000);
+    assert_eq!(kv_events_config.hwm, 100_000);
+    assert_eq!(kv_events_config.max_queue_size, 100_000);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

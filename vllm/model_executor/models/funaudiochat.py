@@ -257,25 +257,6 @@ class FunAudioChatAudioEncoder(nn.Module):
     def dtype(self) -> torch.dtype:
         return self.conv1.weight.dtype
 
-    def _prepare_attention_mask(
-        self, inputs_tensor: torch.Tensor, cu_seqlens: torch.Tensor
-    ) -> torch.Tensor | None:
-        if getattr(self.config, "_attn_implementation", "eager") == "flash_attention_2":
-            return None
-
-        seq_length = inputs_tensor.shape[0]
-        attention_mask = torch.full(
-            (1, 1, seq_length, seq_length),
-            torch.finfo(inputs_tensor.dtype).min,
-            device=inputs_tensor.device,
-            dtype=inputs_tensor.dtype,
-        )
-        for i in range(1, len(cu_seqlens)):
-            start = int(cu_seqlens[i - 1].item())
-            end = int(cu_seqlens[i].item())
-            attention_mask[..., start:end, start:end] = 0
-        return attention_mask
-
     def forward(
         self,
         input_features: torch.Tensor,
@@ -538,12 +519,17 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
 
     @cached_property
     def feature_extractor(self) -> WhisperFeatureExtractor:
-        return WhisperFeatureExtractor.from_pretrained(self.model_id)
+        return WhisperFeatureExtractor.from_pretrained(
+            self.model_id,
+            revision=self.ctx.model_config.revision,
+        )
 
     @cached_property
     def speech_tokenizer(self) -> TokenizersBackend:
         return TokenizersBackend.from_pretrained(
-            self.model_id, subfolder="speech_tokenizer"
+            self.model_id,
+            subfolder="speech_tokenizer",
+            revision=self.ctx.model_config.tokenizer_revision,
         )
 
     def get_feature_extractor(self) -> WhisperFeatureExtractor:
