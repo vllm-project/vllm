@@ -193,11 +193,28 @@ class Glm5NextMultiTokenPredictor(nn.Module):
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
-        mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
+        mtp_layer = self._mtp_layers[current_step_idx]
         # hidden_states is already post-final-norm (produced in the layer
         # forward and recycled as-is); apply the LM head only, without a
         # second RMSNorm.
         return self.logits_processor(mtp_layer.shared_head.head, hidden_states)
+
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        current_step_idx = spec_step_idx % self.num_mtp_layers
+        mtp_layer = self._mtp_layers[current_step_idx]
+        # Vocab-parallel argmax for the greedy draft: per-rank head projection
+        # + local argmax + a [batch, 2*tp] (value, index) reduce, instead of
+        # materializing and all-gathering full [N, vocab] logits per draft
+        # step. Tie-breaking matches the full argmax (shards are contiguous
+        # and rank-ordered, so the lowest-rank winner is the lowest global
+        # index), so greedy draft tokens are unchanged.
+        return self.logits_processor.get_top_tokens(
+            mtp_layer.shared_head.head, hidden_states
+        )
 
 
 class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
@@ -246,6 +263,15 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
+
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        # Greedy-draft path used when use_local_argmax_reduction is enabled:
+        # vocab-parallel argmax, no full-vocab logits.
+        return self.model.get_top_tokens(hidden_states, spec_step_idx)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         spec_layer_weight_names = [
