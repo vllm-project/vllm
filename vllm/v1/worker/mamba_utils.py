@@ -189,19 +189,46 @@ def _copy_mamba_state_block(
         src_block_id = tl.load(block_table_base + src_col).to(tl.int64)
         dim_rows = tl.load(state_dim_row_count_ptr + state_idx)
         row_stride = tl.load(state_dim_row_stride_ptr + state_idx)
-        per_row_bytes = (conv_width - token_bias).to(tl.int64) * state_elem_size
-        bias_bytes = token_bias.to(tl.int64) * state_elem_size
         src_block_addr = state_base_addr + src_block_id * state_block_stride
         offsets = tl.arange(0, COPY_BLOCK_SIZE)
-        for d in range(0, dim_rows):
-            row_src = src_block_addr + d * row_stride + bias_bytes
-            row_dst = dst_addr + d * row_stride
-            for i in range(0, per_row_bytes, COPY_BLOCK_SIZE):
-                mask = (i + offsets) < per_row_bytes
-                curr_src = (row_src + i + offsets).to(tl.pointer_type(tl.uint8))
-                curr_dst = (row_dst + i + offsets).to(tl.pointer_type(tl.uint8))
-                data = tl.load(curr_src, mask=mask)
-                tl.store(curr_dst, data, mask=mask)
+
+        # Stable row-to-lane ownership makes left shifts memmove-safe while
+        # exposing the dimension rows in parallel. All addresses retain
+        # state_elem_size alignment: tensor strides and token offsets are
+        # measured in whole elements before conversion to bytes.
+        num_dst_tokens = conv_width - token_bias
+        for token_idx in range(0, num_dst_tokens):
+            for row_base in range(0, dim_rows, COPY_BLOCK_SIZE):
+                rows = row_base + offsets
+                mask = rows < dim_rows
+                src_byte_addr = (
+                    src_block_addr
+                    + rows * row_stride
+                    + (token_idx + token_bias) * state_elem_size
+                )
+                dst_byte_addr = (
+                    dst_addr + rows * row_stride + token_idx * state_elem_size
+                )
+                if state_elem_size == 2:
+                    src_u16 = src_byte_addr.to(tl.pointer_type(tl.uint16))
+                    dst_u16 = dst_byte_addr.to(tl.pointer_type(tl.uint16))
+                    data_u16 = tl.load(src_u16, mask=mask)
+                    tl.store(dst_u16, data_u16, mask=mask)
+                elif state_elem_size == 4:
+                    src_u32 = src_byte_addr.to(tl.pointer_type(tl.uint32))
+                    dst_u32 = dst_byte_addr.to(tl.pointer_type(tl.uint32))
+                    data_u32 = tl.load(src_u32, mask=mask)
+                    tl.store(dst_u32, data_u32, mask=mask)
+                else:
+                    for byte_idx in range(0, state_elem_size):
+                        src_u8 = (src_byte_addr + byte_idx).to(
+                            tl.pointer_type(tl.uint8)
+                        )
+                        dst_u8 = (dst_byte_addr + byte_idx).to(
+                            tl.pointer_type(tl.uint8)
+                        )
+                        data_u8 = tl.load(src_u8, mask=mask)
+                        tl.store(dst_u8, data_u8, mask=mask)
         return
 
     if is_conv_state:
@@ -210,22 +237,40 @@ def _copy_mamba_state_block(
         # SD conv: copy
         #   state[bt[src_col], token_bias:] ->
         #   state[bt[dst_col], :conv_width - token_bias]
-        # Small per-block bytes (~60-80 KiB) make tiling degenerate, so
-        # conv runs as a single-CTA memcpy (NUM_TILES=1).
         src_block_id = tl.load(block_table_base + src_col).to(tl.int64)
-        src_offset = token_bias.to(tl.int64) * state_inner_size * state_elem_size
-        src_addr = state_base_addr + src_block_id * state_block_stride + src_offset
-        copy_size = (
-            (conv_width - token_bias).to(tl.int64) * state_inner_size * state_elem_size
-        )
-        _memcpy_u64_tiled(
-            src_addr,
-            dst_addr,
-            copy_size,
-            tile_idx,
-            COPY_BLOCK_SIZE=COPY_BLOCK_SIZE,
-            NUM_TILES=1,
-        )
+        src_block_addr = state_base_addr + src_block_id * state_block_stride
+        token_bytes = state_inner_size * state_elem_size
+        num_dst_tokens = conv_width - token_bias
+
+        # Distinct blocks and exact self-copies cannot have a destructive
+        # overlap, so retain the u64-vectorized single-CTA copy.
+        if src_block_id != dest_block_id or token_bias == 0:
+            src_addr = src_block_addr + token_bias.to(tl.int64) * token_bytes
+            copy_size = num_dst_tokens.to(tl.int64) * token_bytes
+            _memcpy_u64_tiled(
+                src_addr,
+                dst_addr,
+                copy_size,
+                tile_idx,
+                COPY_BLOCK_SIZE=COPY_BLOCK_SIZE,
+                NUM_TILES=1,
+            )
+            return
+
+        # Copy tokens from low to high. Each token-sized source and destination
+        # region is disjoint, so same-block left shifts are memmove-safe
+        # without a barrier.
+        for token_idx in range(0, num_dst_tokens):
+            src_token = src_block_addr + (token_idx + token_bias) * token_bytes
+            dst_token = dst_addr + token_idx * token_bytes
+            _memcpy_u64_tiled(
+                src_token,
+                dst_token,
+                token_bytes,
+                tile_idx,
+                COPY_BLOCK_SIZE=COPY_BLOCK_SIZE,
+                NUM_TILES=1,
+            )
         return
 
     # Temporal state: copy state[bt[src_col + token_bias]] -> state[bt[dst_col]]
@@ -522,6 +567,7 @@ def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
     src_ptr = tl.load(src_ptrs + pid)
     dst_ptr = tl.load(dst_ptrs + pid)
     size = tl.load(sizes + pid)
+    is_left_overlap = dst_ptr < src_ptr and dst_ptr + size > src_ptr
 
     offsets = tl.arange(0, BLOCK_SIZE)
     for i in range(0, size, BLOCK_SIZE):
@@ -531,6 +577,10 @@ def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
         curr_dst_ptr = (dst_ptr + i + offsets).to(tl.pointer_type(tl.uint8))
 
         data = tl.load(curr_src_ptr, mask=mask)
+        if is_left_overlap:
+            # Preserve each lane's source before a lower-address lane stores
+            # over it. The condition is uniform within the program.
+            tl.debug_barrier()
         tl.store(curr_dst_ptr, data, mask=mask)
 
 
