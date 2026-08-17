@@ -72,7 +72,6 @@ def get_flash_attn_version(
     head_size: int | None = None,
     head_size_v: int | None = None,
     has_sinks: bool = False,
-    requires_local_attention: bool = False,
 ) -> int | None:
     if current_platform.is_xpu():
         return 2
@@ -169,28 +168,26 @@ def get_flash_attn_version(
             )
             fa_version = 2
 
-        if (
-            fa_version == 4
-            and device_capability.major >= 10
-            and head_size == 256
-            and requires_local_attention
-        ):
+        # TODO: Restore the `requires_local_attention` restriction when FA4
+        # head-dim 256 is re-enabled.
+        if fa_version == 4 and device_capability.major >= 10 and head_size == 256:
             logger.warning_once(
-                "FA4 on Blackwell does not support local attention with "
-                "head_size=256, defaulting to FA version 2."
+                "FA4 on Blackwell is temporarily disabled for head_size=256, "
+                "defaulting to FA version 2."
             )
             fa_version = 2
 
         # FA4 on SM100 (Blackwell) has TMEM capacity limits that restrict
-        # supported head dimensions to ≤128, with exceptions for 256 and 192/128 (MLA
-        # prefill). Development of symmetric 192, 384, and 512 support is being tracked
-        # in https://github.com/Dao-AILab/flash-attention/issues/2456
+        # supported head dimensions to ≤128. The 192/128 MLA prefill case is
+        # supported; 256 is temporarily disabled until upstream supports the
+        # required features. Development of symmetric 192, 384, and 512 support
+        # is tracked in https://github.com/Dao-AILab/flash-attention/issues/2456
         if (
             fa_version == 4
             and device_capability.major >= 10
             and head_size is not None
             and head_size > 128
-            and not (head_size == 256 or (head_size == 192 and head_size_v == 128))
+            and not (head_size == 192 and head_size_v == 128)
         ):
             logger.warning_once(
                 "FA4 on Blackwell does not support head_size=%d due to TMEM "
@@ -241,9 +238,9 @@ def flash_attn_supports_kv_cache_dtype(
         head_size_v=head_size_v,
         has_sinks=has_sinks,
     )
-    return (fa_version == 3 and current_platform.is_device_capability_family(90)) or (
-        fa_version == 4 and current_platform.is_device_capability_family(100)
-    )
+    return (
+        fa_version in (3, 4) and current_platform.is_device_capability_family(90)
+    ) or (fa_version == 4 and current_platform.is_device_capability_family(100))
 
 
 def flash_attn_supports_quant_query_input() -> bool:
