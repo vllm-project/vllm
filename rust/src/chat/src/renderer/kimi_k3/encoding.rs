@@ -191,7 +191,7 @@ pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -
     }
     flush_tool_run(&mut out, &mut pending_tool_run, &tool_call_id_index)?;
 
-    match &request.tool_choice {
+    match request.tool_choice() {
         ChatToolChoice::Required => {
             write_internal_system(
                 &mut out,
@@ -202,7 +202,7 @@ pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -
         }
         // Emit only when tools are present: Rust defaults tool_choice to None
         // for tool-free requests, which must not inject a tool-choice message.
-        ChatToolChoice::None if !request.tools.is_empty() => {
+        ChatToolChoice::None if !request.tools().is_empty() => {
             write_internal_system(
                 &mut out,
                 "tool-choice",
@@ -226,7 +226,7 @@ pub(super) fn render_request(request: &ChatRequest, tokenizer: &dyn Tokenizer) -
 fn request_tools(request: &ChatRequest) -> &[ChatTool] {
     // Declare tools whenever the request carries them. K3 tool-declare is
     // independent of tool_choice; tool_choice only injects control messages.
-    request.tools.as_slice()
+    request.initial_tools()
 }
 
 fn thinking_enabled(request: &ChatRequest) -> Result<bool> {
@@ -291,12 +291,17 @@ fn write_tool_declare(
     let mut specs = Vec::with_capacity(tools.len());
     for tool in tools {
         let mut function = Map::new();
-        function.insert(
-            "description".to_string(),
-            Value::String(tool.description.clone().unwrap_or_default()),
-        );
+        if let Some(description) = &tool.description {
+            function.insert(
+                "description".to_string(),
+                Value::String(description.clone()),
+            );
+        }
         function.insert("name".to_string(), Value::String(tool.name.clone()));
         function.insert("parameters".to_string(), sort_json(&tool.parameters));
+        if let Some(strict) = tool.strict {
+            function.insert("strict".to_string(), Value::Bool(strict));
+        }
         specs.push(json!({
             "function": Value::Object(function),
             "type": "function",

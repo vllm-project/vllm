@@ -13,10 +13,18 @@ Also covers cache usage computation in ``_build_anthropic_usage``.
 """
 
 import json
+from argparse import Namespace
+from http import HTTPStatus
+from typing import Annotated
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from fastapi.testclient import TestClient
+from pydantic import BaseModel, Field, ValidationError
 
+from vllm.entrypoints.anthropic.api_router import attach_router
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesRequest,
 )
@@ -38,6 +46,10 @@ from vllm.entrypoints.openai.engine.protocol import (
     PromptTokenUsageInfo,
     UsageInfo,
 )
+from vllm.entrypoints.serve.exception_handling.handlers.validation import (
+    validation_exception_handler,
+)
+from vllm.exceptions import VLLMValidationError
 
 _convert = AnthropicServingMessages._convert_anthropic_to_openai_request
 _img_url = AnthropicServingMessages._convert_image_source_to_url
@@ -1408,3 +1420,136 @@ class TestCacheSalt:
         request = _make_request([{"role": "user", "content": "Hello"}])
         result = _convert(request)
         assert result.cache_salt is None
+
+    @staticmethod
+    def _make_api_app():
+        app = FastAPI()
+        attach_router(app)
+        app.state.args = Namespace(log_error_stack=False)
+        app.exception_handler(RequestValidationError)(validation_exception_handler)
+
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.create_messages.side_effect = AssertionError(
+            "invalid requests must not reach the serving handler"
+        )
+        app.state.anthropic_serving_messages = handler
+        return app, handler
+
+    def test_cache_salt_openapi_requires_non_empty_string(self):
+        app, _ = self._make_api_app()
+        field_schema = app.openapi()["components"]["schemas"][
+            "AnthropicMessagesRequest"
+        ]["properties"]["cache_salt"]
+        string_schema = next(
+            option for option in field_schema["anyOf"] if option.get("type") == "string"
+        )
+
+        assert string_schema["minLength"] == 1
+
+    def test_empty_cache_salt_returns_bad_request(self):
+        app, handler = self._make_api_app()
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/v1/messages",
+                json={
+                    "model": "test-model",
+                    "max_tokens": 1,
+                    "messages": [{"role": "user", "content": "Hello"}],
+                    "cache_salt": "",
+                },
+            )
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        handler.create_messages.assert_not_awaited()
+
+
+# ======================================================================
+# Client-caused errors are 4xx, not 500 (Issue #52088)
+# ======================================================================
+
+
+class TestClientErrorResponses:
+    @staticmethod
+    def _make_api_app(handler: MagicMock):
+        app = FastAPI()
+        attach_router(app)
+        app.state.args = Namespace(log_error_stack=False)
+        app.exception_handler(RequestValidationError)(validation_exception_handler)
+        app.state.anthropic_serving_messages = handler
+        return app
+
+    @staticmethod
+    def _request_body() -> dict:
+        return {
+            "model": "test-model",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+
+    @staticmethod
+    def _conversion_error() -> ValidationError:
+        """A real pydantic ValidationError like the one ChatCompletionRequest
+        construction raises when Anthropic input violates the OpenAI schema."""
+
+        class _StubRequest(BaseModel):
+            stop: Annotated[list[str], Field(max_length=4)] | None = None
+
+        with pytest.raises(ValidationError) as exc_info:
+            _StubRequest(stop=["a"] * 6)
+        return exc_info.value
+
+    def test_validation_error_returns_bad_request(self):
+        """A pydantic ValidationError during Anthropic->OpenAI conversion is
+        surfaced as a 400 BadRequestError, not a 500."""
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.create_messages.side_effect = self._conversion_error()
+
+        app = self._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post("/v1/messages", json=self._request_body())
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        body = response.json()
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "BadRequestError"
+        assert "at most 4 items" in body["error"]["message"]
+
+    def test_vllm_client_error_returns_bad_request(self):
+        """VLLMClientError raised by the serving layer maps to 400."""
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.create_messages.side_effect = VLLMValidationError(
+            "Invalid value for stop", parameter="stop"
+        )
+
+        app = self._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post("/v1/messages", json=self._request_body())
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        assert response.json()["error"]["type"] == "BadRequestError"
+
+    def test_generic_error_still_returns_internal_server_error(self):
+        """Non-client errors keep the existing 500 behaviour."""
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.create_messages.side_effect = RuntimeError("boom")
+
+        app = self._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post("/v1/messages", json=self._request_body())
+
+        assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert response.json()["error"]["type"] == "InternalServerError"
+
+    def test_count_tokens_validation_error_returns_bad_request(self):
+        """The count_tokens route maps conversion errors to 400 as well."""
+        handler = MagicMock(spec=AnthropicServingMessages)
+        handler.count_tokens.side_effect = self._conversion_error()
+
+        app = self._make_api_app(handler)
+        with TestClient(app, raise_server_exceptions=False) as client:
+            response = client.post(
+                "/v1/messages/count_tokens", json=self._request_body()
+            )
+
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        assert response.json()["error"]["type"] == "BadRequestError"
