@@ -276,8 +276,8 @@ def resolve_kv_cache_layout(
     """Resolve one KV cache layout for the whole model.
 
     Runs once in the engine core. Every worker reports the layouts its backends
-    support, most preferred first (``get_supported_kv_cache_layouts``); the layout
-    the most workers put first wins, ties keeping the enum order. Specs mixing HNC
+    support, most preferred first (``get_supported_kv_cache_layouts``); all
+    ranks run the same backends, so their lists must agree. Specs mixing HNC
     shapes narrow the candidates to block-compact layouts. An explicit
     ``VLLM_KV_CACHE_LAYOUT`` must be one of the candidates or resolution fails,
     with the legacy ``NHD``/``HND`` names as aliases for ``LBNHC``/``LBHNC``; the
@@ -289,10 +289,11 @@ def resolve_kv_cache_layout(
     if _KV_CACHE_LAYOUT_OVERRIDE is not None:
         return _layout_from_name(_KV_CACHE_LAYOUT_OVERRIDE)
 
-    candidates = _merge_layout_preferences(
-        [[_layout_from_name(name) for name in names] for names in supported_layouts]
-        or [_DEFAULT_LAYOUT_PREFERENCE]
+    assert supported_layouts, "No worker reported supported KV cache layouts."
+    assert all(names == supported_layouts[0] for names in supported_layouts[1:]), (
+        f"Workers disagree on supported KV cache layouts: {supported_layouts}."
     )
+    candidates = [_layout_from_name(name) for name in supported_layouts[0]]
 
     # A block-compact layout means the block is densely packed in memory, so any mix of
     # specs can re-interpret HNC with different sizes as long as the total number of
