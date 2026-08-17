@@ -46,6 +46,7 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
@@ -589,10 +590,11 @@ class EplbState:
                     num_tokens_per_rank
                 )
 
-                # Just to make type checker happy
-                tokens_tensors: list[float] = torch.stack(
-                    [avg_tokens_tensor, max_tokens_tensor]
-                ).tolist()
+                # This gpu/cpu sync only happens with expert stat logging enabled.
+                with gpu_sync_allowed():
+                    tokens_tensors: list[float] = torch.stack(
+                        [avg_tokens_tensor, max_tokens_tensor]
+                    ).tolist()
                 avg_tokens, max_tokens = tokens_tensors
                 balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
 
@@ -817,15 +819,17 @@ class EplbState:
             self.model_states.values(), global_expert_load_windows
         ):
             if not self.is_async or is_profile:
-                # Get new expert mappings for the model
-                new_physical_to_logical_map = self.policy.rebalance_experts(
-                    global_expert_load_window.cpu(),
-                    num_replicas,
-                    num_groups,
-                    num_nodes,
-                    num_gpus,
-                    eplb_model_state.physical_to_logical_map.cpu(),
-                )
+                # Get new expert mappings for the model. The policy runs on the
+                # host, so the load window and current map have to come back.
+                with gpu_sync_allowed():
+                    new_physical_to_logical_map = self.policy.rebalance_experts(
+                        global_expert_load_window.cpu(),
+                        num_replicas,
+                        num_groups,
+                        num_nodes,
+                        num_gpus,
+                        eplb_model_state.physical_to_logical_map.cpu(),
+                    )
 
                 skip_rearrange = False
                 if (
@@ -1237,7 +1241,9 @@ def _pad_out_tensor(src: torch.Tensor, dst: torch.Tensor) -> None:
     src_padding = dst.shape[-1] - src.shape[-1]
     assert src_padding >= 0
     new_src = torch.nn.functional.pad(src, (0, src_padding), value=-1)
-    dst.copy_(new_src)
+    # The map is committed from the host once per layer per rearrangement.
+    with gpu_sync_allowed():
+        dst.copy_(new_src)
 
 
 def _commit_eplb_maps_for_layer(
@@ -1263,10 +1269,7 @@ def _commit_eplb_maps_for_layer(
     num_logical_experts = model_state.logical_to_physical_map.shape[1]
     new_logical, new_replica_count = compute_logical_maps(src, num_logical_experts)
     # Commit logical_to_physical_map
-    _pad_out_tensor(
-        src=new_logical,
-        dst=model_state.logical_to_physical_map[layer],
-    )
+    _pad_out_tensor(src=new_logical, dst=model_state.logical_to_physical_map[layer])
 
     # Commit logical_replica_count
     src = new_replica_count

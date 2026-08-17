@@ -167,6 +167,25 @@ def test_get_freed_mm_hashes_clears_freed_list():
     assert manager.get_freed_mm_hashes() == []
 
 
+def test_reallocated_hash_is_not_reported_as_freed():
+    manager = EncoderCacheManager(cache_size=8)
+    req_a = MockRequest("reqA", ["a"], [4])
+    req_b = MockRequest("reqB", ["b"], [4])
+    req_c = MockRequest("reqC", ["c"], [4])
+
+    manager.allocate(req_a, 0)
+    manager.allocate(req_b, 0)
+    manager.free(req_a)
+    manager.free(req_b)
+
+    assert manager.can_allocate(req_c, 0, int(1e9), 0)
+    manager.allocate(req_c, 0)
+    assert manager.can_allocate(req_a, 0, int(1e9), 0)
+    manager.allocate(req_a, 0)
+
+    assert manager.get_freed_mm_hashes() == ["b"]
+
+
 def test_schedule_request_multi_images_respect_space_limit():
     manager = EncoderCacheManager(cache_size=10)
     req = MockRequest("reqA", ["a", "b"], [5, 6])

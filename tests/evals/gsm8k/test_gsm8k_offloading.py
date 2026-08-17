@@ -132,6 +132,7 @@ MODELS = [
         connector="OffloadingConnector",
         # Baseline ~0.49 on 200 questions (measured on GB200).
         accuracy_threshold=0.39,
+        cpu_offload_gib=1,
     ),
     OffloadingModelConfig(
         id="offloading-gemma-4-e4b-it",
@@ -139,6 +140,7 @@ MODELS = [
         connector="OffloadingConnector",
         # Baseline ~0.64 on 200 questions (measured on GB200).
         accuracy_threshold=0.55,
+        cpu_offload_gib=1,
     ),
     OffloadingModelConfig(
         id="offloading-qwen3.5-35b",
