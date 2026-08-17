@@ -6222,6 +6222,72 @@ async fn tokenize_completion_count_and_max_model_len() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn anthropic_count_tokens_returns_prompt_token_count() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/messages/count_tokens",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hi"}],
+            "system": "be brief",
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let input_tokens = json["input_tokens"].as_u64().expect("input_tokens");
+    assert!(input_tokens > 0);
+    assert_eq!(
+        json["context_management"]["original_input_tokens"],
+        json["input_tokens"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn anthropic_count_tokens_unknown_model_returns_anthropic_error() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/messages/count_tokens",
+        json!({
+            "model": "does-not-exist",
+            "messages": [{"role": "user", "content": "hi"}],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(json["type"], "error");
+    assert_eq!(json["error"]["type"], "not_found_error");
+    assert!(json["error"]["message"].as_str().unwrap().contains("does-not-exist"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn anthropic_count_tokens_empty_messages_returns_anthropic_error() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/v1/messages/count_tokens",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [],
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(json["type"], "error");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn tokenize_chat_includes_generation_prompt_in_token_count() {
     let mut app = test_app().await;
     let messages = json!([{"role": "user", "content": "hi"}]);
