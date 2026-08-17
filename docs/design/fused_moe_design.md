@@ -217,6 +217,40 @@ forward()
 - **Modular**: Router selects experts first → `apply(layer, x, topk_weights, topk_ids)`. Used by Triton, CUTLASS, and most backends.
 - **Monolithic**: Kernel handles routing internally → `apply_monolithic(layer, x, router_logits)`. Used by FlashInfer TRTLLM and some specialized backends.
 
+### 10. MoE Kernel Oracle (`oracle/`)
+
+**Role**: Each quantization type has an oracle that selects the best MoE kernel backend for a given (model, hardware, deployment-config) tuple. Oracles live under `fused_moe/oracle/` — one module per quantization type: `unquantized.py`, `fp8.py`, `nvfp4.py`, `mxfp4.py`, `mxfp8.py`, `int8.py`, `int_wna16.py`, `w4a8.py`, `w4a8_int8.py`.
+
+**Target interface**: `MoEKernelOracle` (in `oracle/base.py`) is the abstract base class that all oracles will eventually inherit from. Currently only `UnquantizedMoEKernelOracle` has been migrated to this class-based pattern. The remaining oracles use an equivalent set of module-level free functions following the same informal convention.
+
+**Four responsibilities**:
+
+1. **Backend selection** (`select_backend` / `select_*_moe_backend`): Given a `FusedMoEConfig`, returns the best `(backend_enum, FusedMoEExperts class)` pair. Internally, this enumerates backends in platform-specific priority order (via `get_priority_backends`), maps each to its candidate `FusedMoEExperts` subclasses (via `backend_to_kernel_cls`), and picks the first one where `FusedMoEExperts.is_supported_config()` passes. The user can override the backend via `--moe-backend` (mapped through `map_backend`).
+
+2. **Quantization config construction** (`make_quant_config` / `make_*_moe_quant_config`): Builds a `FusedMoEQuantConfig` from the loaded weight parameters (scales, zero points, block shapes). This config describes the quantization scheme for each of the four tensors (a1, a2, w1, w2) and is passed to the kernel at construction time. Not used by the unquantized oracle.
+
+3. **Weight post-processing** (`convert_to_kernel_format` / `convert_to_*_moe_kernel_format`): Transforms weights into the layout expected by the selected backend after loading. For example, AITER and FlashInfer require specific weight permutations. The default is a no-op pass-through.
+
+4. **Modular kernel construction** (`make_kernel` / `make_*_moe_kernel`): Constructs the `FusedMoEKernel` object by pairing the selected `FusedMoEExperts` subclass with the appropriate `FusedMoEPrepareAndFinalize` subclass (determined by the all2all backend from `FusedMoEParallelConfig`). The resulting `FusedMoEKernel` is stored on `FusedMoEMethodBase.moe_kernel`.
+
+**Free-function oracle convention** (used by all oracles except unquantized):
+
+```text
+oracle/{quant_type}.py
+  ├── {Quant}MoeBackend (Enum)           — backend choices for this quant type
+  ├── _get_priority_backends(...)        — platform-specific backend priority
+  ├── backend_to_kernel_cls(...)         — backend → [FusedMoEExperts subclasses]
+  ├── map_{quant}_backend(...)           — MoEBackend → {Quant}MoeBackend
+  ├── select_{quant}_moe_backend(...)    — primary entry: choose best backend
+  ├── make_{quant}_moe_quant_config(...) — build FusedMoEQuantConfig from weights
+  ├── convert_to_{quant}_moe_kernel_format(...)  — weight layout transform
+  └── make_{quant}_moe_kernel(...)       — construct FusedMoEKernel
+```
+
+**`MoEKernelOracle` class** (target interface in `oracle/base.py`):
+
+The abstract methods mirror the free-function convention: `backend_enum_cls`, `get_priority_backends`, `backend_to_kernel_cls`, `map_backend`, `select_backend`, `make_kernel`, `convert_to_kernel_format`, `make_quant_config`. Going forward, all oracles will be migrated to inherit from `MoEKernelOracle`.
+
 ## Data Flow Summary
 
 ```text
