@@ -237,7 +237,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Do not add +PTX here: vLLM filters torch's top-level PTX flag when it
 # converts global gencode flags into per-kernel arch lists. If a specific
 # kernel needs PTX, add +PTX to that kernel's CMake arch list instead.
-ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
+ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0 12.1'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### BUILD BASE IMAGE ####################
 
@@ -998,7 +998,7 @@ ENV UV_HTTP_TIMEOUT=500
 
 # install kv_connectors if requested
 # Do not add +PTX here; see the main TORCH_CUDA_ARCH_LIST comment above.
-ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
+ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0 12.1'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
