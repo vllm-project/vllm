@@ -644,7 +644,7 @@ def test_load_waits_for_pending_compute_stream_writes(default_vllm_config) -> No
             ],
         ),
         blocks_per_chunk=1,
-        num_cpu_blocks=num_blocks,
+        num_cpu_chunks=num_blocks,
     )
     worker._load_handler.src_tensors[0].fill_(sentinel)
     expected = torch.full((page_size_bytes,), sentinel, dtype=torch.int8)

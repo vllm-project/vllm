@@ -14,6 +14,7 @@ These tests verify:
 from collections.abc import Iterable
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 
@@ -302,7 +303,7 @@ class TestTieringOffloadingManager:
             TransferJob(
                 job_id=job_id,
                 keys=to_keys([1, 2]),
-                block_ids=[0, 1],
+                chunk_slot_ids=np.array([0, 1], dtype=np.int64),
                 is_promotion=True,
                 req_context=_CTX,
             ),
@@ -329,7 +330,7 @@ class TestTieringOffloadingManager:
             TransferJob(
                 job_id=job_id,
                 keys=to_keys([1]),
-                block_ids=[0],
+                chunk_slot_ids=np.array([0], dtype=np.int64),
                 is_promotion=True,
                 req_context=_CTX,
             ),

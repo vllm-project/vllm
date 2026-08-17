@@ -453,11 +453,11 @@ def test_madvise_success_selects_madvise_population(iid, monkeypatch):
     monkeypatch.setattr(sor, "_madvise_populate_write", _spy_madvise)
     monkeypatch.setattr(sor, "_fallback_populate_write", _spy_fallback)
 
-    num_blocks = 3
+    num_chunks = 3
     num_workers = 2
-    with _region(iid, num_blocks=num_blocks, num_workers=num_workers, rank=1):
+    with _region(iid, num_chunks=num_chunks, num_workers=num_workers, rank=1):
         # 1 probe (PAGESIZE) + N populate calls (one per block per worker column).
-        expected_populate = num_blocks  # ranked path: one call per block
+        expected_populate = num_chunks  # ranked path: one call per chunk
         mmap_id = madvise_calls[0][2]
         assert madvise_calls == [
             (0, mmap.PAGESIZE, mmap_id),
@@ -488,7 +488,7 @@ def test_madvise_einval_selects_fallback_for_ranked_region(iid, monkeypatch):
     monkeypatch.setattr(sor, "_madvise_populate_write", _raise_einval)
     monkeypatch.setattr(sor, "_fallback_populate_write", _spy_fallback)
 
-    with _region(iid, num_blocks=3, num_workers=2, rank=1):
+    with _region(iid, num_chunks=3, num_workers=2, rank=1):
         assert fallback_calls == [
             (mmap.PAGESIZE, mmap.PAGESIZE),
             (3 * mmap.PAGESIZE, mmap.PAGESIZE),
@@ -513,7 +513,7 @@ def test_madvise_einval_selects_fallback_for_unranked_region(iid, monkeypatch):
     monkeypatch.setattr(sor, "_madvise_populate_write", _raise_einval)
     monkeypatch.setattr(sor, "_fallback_populate_write", _spy_fallback)
 
-    with _region(iid, num_blocks=3, num_workers=2, rank=None):
+    with _region(iid, num_chunks=3, num_workers=2, rank=None):
         assert fallback_calls == [(0, 6 * mmap.PAGESIZE)]
 
 
@@ -801,9 +801,9 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
     with pytest.raises(RuntimeError, match="Insufficient space"):
         SharedOffloadRegion(
             engine_id=engine_id,
-            num_blocks=4,
+            num_chunks=4,
             rank=0,
-            kv_bytes_per_block=PAGE_SIZE,
+            kv_bytes_per_chunk=PAGE_SIZE,
             cpu_page_size=PAGE_SIZE,
         )
 
@@ -832,9 +832,9 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
     with pytest.raises(OSError, match="ftruncate failed"):
         SharedOffloadRegion(
             engine_id=engine_id,
-            num_blocks=4,
+            num_chunks=4,
             rank=0,
-            kv_bytes_per_block=PAGE_SIZE,
+            kv_bytes_per_chunk=PAGE_SIZE,
             cpu_page_size=PAGE_SIZE,
         )
 

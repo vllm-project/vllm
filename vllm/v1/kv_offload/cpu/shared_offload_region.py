@@ -245,7 +245,7 @@ class SharedOffloadRegion:
         assert new_offset <= self._row_stride
         view = torch.as_strided(
             self._base,
-            size=(self.num_blocks, tensor_page_size),
+            size=(self.num_chunks, tensor_page_size),
             stride=(self._row_stride, 1),
             storage_offset=self._canonical_offset,
         )
