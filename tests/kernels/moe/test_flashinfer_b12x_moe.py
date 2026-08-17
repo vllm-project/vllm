@@ -58,12 +58,16 @@ MNK_FACTORS = [
 
 def _process_b12x_weights(
     experts: FlashInferB12xExperts,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     w1_scale_2: torch.Tensor,
     w2_scale_2: torch.Tensor,
 ) -> None:
     layer = SimpleNamespace(
+        w13_weight=w1,
+        w2_weight=w2,
         w13_weight_scale=w1_scale,
         w13_weight_scale_2=w1_scale_2,
         w2_weight_scale=w2_scale,
@@ -209,11 +213,17 @@ def test_flashinfer_b12x_moe(
         assert experts.source_format == source_format
         _process_b12x_weights(
             experts,
+            w1_q,
+            w2_q,
             w1_blockscale,
             w2_blockscale,
             ones_e,
             ones_e,
         )
+        if activation_precision == "bf16":
+            assert experts._prepared_weights is not None
+            assert experts._prepared_weights.w13.data_ptr() == w1_q.data_ptr()
+            assert experts._prepared_weights.w2.data_ptr() == w2_q.data_ptr()
 
         kernel = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
@@ -345,11 +355,17 @@ def test_flashinfer_b12x_moe_relu2(
         assert experts.source_format == source_format
         _process_b12x_weights(
             experts,
+            w1_q,
+            w2_q,
             w1_blockscale,
             w2_blockscale,
             ones_e,
             ones_e,
         )
+        if activation_precision == "bf16":
+            assert experts._prepared_weights is not None
+            assert experts._prepared_weights.w13.data_ptr() == w1_q.data_ptr()
+            assert experts._prepared_weights.w2.data_ptr() == w2_q.data_ptr()
 
         kernel = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(

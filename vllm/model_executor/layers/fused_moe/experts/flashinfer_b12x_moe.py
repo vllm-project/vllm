@@ -101,6 +101,9 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         self._wrapper: Any | None = None
         self.w1_sf_mma: torch.Tensor | None = None
         self.w2_sf_mma: torch.Tensor | None = None
+        # W4A16 execution owns an explicit FlashInfer packed-weight object.
+        # Its weight tensors reuse w1/w2 storage, avoiding a persistent copy.
+        self._prepared_weights: Any | None = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Normalise block scales to absorb the per-expert weight global scale
@@ -168,6 +171,23 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             num_groups=E_w2,
             sf_vec_size=sf_vec_size,
         )
+
+        if self.activation_precision == "bf16":
+            assert self.g1_alphas is not None and self.g2_alphas is not None
+            self._ensure_wrapper()
+            assert self._wrapper is not None
+            self._prepared_weights = self._wrapper.prepare_weights(
+                layer.w13_weight,
+                self.w1_sf_mma,
+                layer.w2_weight,
+                self.w2_sf_mma,
+                w1_alpha=self.g1_alphas,
+                w2_alpha=self.g2_alphas,
+                reuse_input_storage=True,
+            )
+            # The explicit packed object owns the converted scale tensors.
+            self.w1_sf_mma = None
+            self.w2_sf_mma = None
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -295,27 +315,36 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         assert self.g1_alphas is not None and self.g2_alphas is not None, (
             "g1_alphas and g2_alphas must not be None for FlashInferB12xExperts"
         )
-        assert self._fc2_input_scale is not None, (
-            "_fc2_input_scale must be set by process_weights_after_loading"
-        )
-        assert self.w1_sf_mma is not None and self.w2_sf_mma is not None, (
-            "process_weights_after_loading must run before FlashInferB12xExperts.apply"
-        )
-
         self._ensure_wrapper()
         wrapper = self._wrapper
         assert wrapper is not None
-
-        wrapper_output = wrapper.run(
-            x=hidden_states,
-            w1_weight=w1,
-            w1_weight_sf=self.w1_sf_mma,
-            w1_alpha=self.g1_alphas,
-            fc2_input_scale=self._fc2_input_scale,
-            w2_weight=w2,
-            w2_weight_sf=self.w2_sf_mma,
-            w2_alpha=self.g2_alphas,
-            token_selected_experts=topk_ids.to(torch.int32),
-            token_final_scales=topk_weights,
-        )
+        if self.activation_precision == "bf16":
+            assert self._prepared_weights is not None, (
+                "process_weights_after_loading must prepare W4A16 weights"
+            )
+            wrapper_output = wrapper.run_prepared(
+                x=hidden_states,
+                prepared_weights=self._prepared_weights,
+                token_selected_experts=topk_ids.to(torch.int32),
+                token_final_scales=topk_weights,
+            )
+        else:
+            assert self.w1_sf_mma is not None and self.w2_sf_mma is not None, (
+                "process_weights_after_loading must convert W4A4 scales"
+            )
+            assert self._fc2_input_scale is not None, (
+                "_fc2_input_scale must be set by process_weights_after_loading"
+            )
+            wrapper_output = wrapper.run(
+                x=hidden_states,
+                w1_weight=w1,
+                w1_weight_sf=self.w1_sf_mma,
+                w1_alpha=self.g1_alphas,
+                fc2_input_scale=self._fc2_input_scale,
+                w2_weight=w2,
+                w2_weight_sf=self.w2_sf_mma,
+                w2_alpha=self.g2_alphas,
+                token_selected_experts=topk_ids.to(torch.int32),
+                token_final_scales=topk_weights,
+            )
         output.copy_(wrapper_output)

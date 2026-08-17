@@ -376,9 +376,9 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         if is_global_sf_supported_for_nvfp4_backend(backend):
             num_experts = w13.shape[0]
             enable_eplb = layer.moe_config.moe_parallel_config.enable_eplb
-            a13_scale = amax_for_moe_activation_quant(
-                a13_scale, enable_eplb
-            ).repeat(num_experts)
+            a13_scale = amax_for_moe_activation_quant(a13_scale, enable_eplb).repeat(
+                num_experts
+            )
             a2_scale = amax_for_moe_activation_quant(a2_scale, enable_eplb).repeat(
                 num_experts
             )
