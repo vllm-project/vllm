@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::fs;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
@@ -11,6 +12,7 @@ use std::time::Duration;
 use futures::StreamExt as _;
 use hyper_util::rt::TokioIo;
 use openssl::ssl::{SslConnector, SslFiletype, SslMethod};
+use rmpv::Value;
 use serial_test::serial;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
@@ -29,13 +31,15 @@ use vllm_engine_core_client::mock_engine::{
     DEFAULT_MOCK_BLOCK_SIZE, DEFAULT_MOCK_MAX_MODEL_LEN, DEFAULT_MOCK_NUM_GPU_BLOCKS,
     default_ready_response,
 };
+use vllm_engine_core_client::protocol::decode_value;
+use vllm_engine_core_client::protocol::handshake::{EngineCoreReadyResponse, KvEventsConfig};
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
+    UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
-use vllm_engine_core_client::test_utils::{
-    IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
-};
+use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
+use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task_with_ready};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
 use vllm_llm::Llm;
 use vllm_text::tokenizer::DynTokenizer;
@@ -44,6 +48,7 @@ use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
+use super::control::kv_event_source;
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
 use super::{ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, pb};
@@ -111,18 +116,8 @@ fn request_output(
     EngineCoreOutput {
         request_id: request_id.to_string(),
         new_token_ids,
-        new_logprobs: None,
-        new_prompt_logprobs_tensors: None,
-        pooling_output: None,
         finish_reason,
-        stop_reason: None,
-        events: None,
-        kv_transfer_params: None,
-        ec_transfer_params: None,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -202,6 +197,73 @@ impl ChatRenderer for FakeTextBackend {
     }
 }
 
+struct FakeMultimodalBackend {
+    model_info: vllm_chat::multimodal::MultimodalModelInfo,
+}
+
+impl TextBackend for FakeMultimodalBackend {
+    fn tokenizer(&self) -> DynTokenizer {
+        Arc::new(TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN_IMAGE_TOKEN_ID))
+    }
+
+    fn model_id(&self) -> &str {
+        "test-model"
+    }
+}
+
+impl ChatBackend for FakeMultimodalBackend {
+    fn chat_renderer(&self) -> DynChatRenderer {
+        Arc::new(FakeTextBackend)
+    }
+
+    fn multimodal_model_info(&self) -> Option<&vllm_chat::multimodal::MultimodalModelInfo> {
+        Some(&self.model_info)
+    }
+
+    fn new_chat_output_processor(
+        &self,
+        request: &mut ChatRequest,
+        options: NewChatOutputProcessorOptions<'_>,
+    ) -> vllm_chat::Result<DynChatOutputProcessor> {
+        Ok(Box::new(DefaultChatOutputProcessor::new(
+            request,
+            self.model_id(),
+            self.tokenizer(),
+            options.tool_call_parser,
+            options.reasoning_parser,
+        )?))
+    }
+}
+
+const QWEN_IMAGE_TOKEN_ID: u32 = 151655;
+const TINY_PNG_DATA_URI: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+fn multimodal_backend() -> Arc<dyn ChatTextBackend> {
+    let config_path = std::env::temp_dir().join(format!(
+        "vllm-grpc-qwen-config-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    fs::write(
+        &config_path,
+        r#"{"model_type":"qwen2_vl","image_token_id":151655}"#,
+    )
+    .expect("write qwen test config");
+    let model_info = vllm_chat::multimodal::MultimodalModelInfo::from_paths(
+        "qwen2-vl-test".to_string(),
+        Some("qwen2_vl".to_string()),
+        vllm_chat::multimodal::MultimodalConfigFiles {
+            config: Some(&config_path),
+            ..Default::default()
+        },
+        Arc::new(TestTokenizer::new().with_regular_token("<|image_pad|>", QWEN_IMAGE_TOKEN_ID)),
+        Default::default(),
+    )
+    .expect("load multimodal info")
+    .expect("qwen multimodal info is registered");
+    let _ = fs::remove_file(config_path);
+    Arc::new(FakeMultimodalBackend { model_info })
+}
+
 /// Build the gRPC service + mock engine that serves a single request with the
 /// given output specs. Shared by the plaintext and TLS server fixtures.
 async fn setup_grpc_service(
@@ -213,18 +275,34 @@ async fn setup_grpc_service(
     tokio::sync::watch::Receiver<bool>,
     MockEngineTask,
 ) {
-    let ipc = IpcNamespace::new().expect("create ipc namespace");
-    let handshake_address = ipc.handshake_endpoint();
-    let engine_id = engine_id.into();
+    setup_grpc_service_with_backend(engine_id, output_specs, Arc::new(FakeTextBackend), |_| {})
+        .await
+}
 
-    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
-        handshake_address.clone(),
-        engine_id.clone(),
+async fn setup_grpc_service_with_backend<F>(
+    engine_id: impl Into<EngineId>,
+    output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
+    backend: Arc<dyn ChatTextBackend>,
+    check_request: F,
+) -> (
+    InferenceServer<InferenceServiceImpl>,
+    ControlServer<ControlServiceImpl>,
+    tokio::sync::watch::Receiver<bool>,
+    MockEngineTask,
+)
+where
+    F: FnOnce(&EngineCoreRequest) + Send + 'static,
+{
+    setup_grpc_service_with_engine_script(
+        engine_id,
+        default_ready_response(),
+        backend,
         move |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
                 let request: EngineCoreRequest =
                     rmp_serde::from_slice(&add[1]).expect("decode request");
+                check_request(&request);
                 send_outputs(
                     push,
                     engine_outputs_for_request(&request.request_id, output_specs),
@@ -232,6 +310,33 @@ async fn setup_grpc_service(
                 .await;
             })
         },
+    )
+    .await
+}
+
+async fn setup_grpc_service_with_engine_script<F>(
+    engine_id: impl Into<EngineId>,
+    ready: EngineCoreReadyResponse,
+    backend: Arc<dyn ChatTextBackend>,
+    script: F,
+) -> (
+    InferenceServer<InferenceServiceImpl>,
+    ControlServer<ControlServiceImpl>,
+    tokio::sync::watch::Receiver<bool>,
+    MockEngineTask,
+)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = engine_id.into();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        engine_id.clone(),
+        ready,
+        script,
     ));
 
     let client = EngineCoreClient::connect(
@@ -246,13 +351,11 @@ async fn setup_grpc_service(
     .expect("connect client");
     let engine_health = client.subscribe_health();
 
-    let chat = ChatLlm::from_shared_backend(
-        Llm::new(client),
-        Arc::new(FakeTextBackend) as Arc<dyn ChatTextBackend>,
-    );
+    let chat = ChatLlm::from_shared_backend(Llm::new(client), backend);
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
     (
-        InferenceServer::new(InferenceServiceImpl::new(state.clone())),
+        InferenceServer::new(InferenceServiceImpl::new(state.clone()))
+            .max_decoding_message_size(crate::DEFAULT_REQUEST_BODY_LIMIT_BYTES),
         ControlServer::new(ControlServiceImpl::new(state)),
         engine_health,
         engine_task,
@@ -560,6 +663,142 @@ async fn unary_generate_with_token_ids_prompt() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn unary_generate_prepares_multimodal_input_for_engine_core() {
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_backend(
+            b"engine-grpc-multimodal",
+            default_stream_output_specs(),
+            multimodal_backend(),
+            |request| {
+                let token_ids = request.prompt_token_ids.as_ref().expect("prompt token ids");
+                let features = request.mm_features.as_ref().expect("multimodal features");
+                assert_eq!(features.len(), 1);
+
+                let feature = &features[0];
+                assert_eq!(feature.modality, "image");
+                assert_eq!(feature.identifier, "image-1");
+                assert_eq!(feature.mm_position.offset, 1);
+                assert!(feature.mm_position.length > 1);
+                assert_eq!(token_ids.len(), feature.mm_position.length + 2);
+                assert_eq!(token_ids[0], 11);
+                assert_eq!(token_ids.last(), Some(&12));
+                assert!(
+                    token_ids[feature.mm_position.offset
+                        ..feature.mm_position.offset + feature.mm_position.length]
+                        .iter()
+                        .all(|token_id| *token_id == QWEN_IMAGE_TOKEN_ID)
+                );
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+
+    client
+        .generate(pb::GenerateRequest {
+            request_id: "test-multimodal".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: vec![11, QWEN_IMAGE_TOKEN_ID, 12],
+            })),
+            media: vec![pb::MediaItem {
+                modality: pb::Modality::Image as i32,
+                source: Some(pb::media_item::Source::DataUri(
+                    TINY_PNG_DATA_URI.to_string(),
+                )),
+                mime_type: String::new(),
+                uuid: "image-1".to_string(),
+            }],
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 10,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("multimodal generate");
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn streaming_generate_rejects_text_prompt_with_media() {
+    let (mut client, server_task, _engine_task) = grpc_test_server(
+        b"engine-grpc-stream-media-text",
+        default_stream_output_specs(),
+    )
+    .await;
+
+    let status = client
+        .generate_stream(pb::GenerateRequest {
+            request_id: "test-stream-media-text".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text(
+                "describe this".to_string(),
+            )),
+            media: vec![pb::MediaItem {
+                modality: pb::Modality::Image as i32,
+                source: Some(pb::media_item::Source::DataUri(
+                    TINY_PNG_DATA_URI.to_string(),
+                )),
+                mime_type: String::new(),
+                uuid: "image-1".to_string(),
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect_err("text prompts with media must be rejected");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        status.message(),
+        "multimodal gRPC requests must provide token_ids input"
+    );
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_generate_accepts_request_larger_than_tonic_default() {
+    let (mut client, server_task, _engine_task) =
+        grpc_test_server(b"engine-grpc-large-media", default_stream_output_specs()).await;
+
+    let status = client
+        .generate(pb::GenerateRequest {
+            request_id: "test-large-media".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text(
+                "describe this".to_string(),
+            )),
+            media: vec![pb::MediaItem {
+                modality: pb::Modality::Image as i32,
+                source: Some(pb::media_item::Source::RawBytes(vec![0; 5 * 1024 * 1024])),
+                mime_type: "image/png".to_string(),
+                uuid: "image-1".to_string(),
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect_err("text prompts with media must be rejected after decoding");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert_eq!(
+        status.message(),
+        "multimodal gRPC requests must provide token_ids input"
+    );
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn unary_generate_returns_token_ids_when_requested() {
     let (mut client, server_task, engine_task) =
         grpc_test_server(b"engine-grpc-tok-resp", default_stream_output_specs()).await;
@@ -622,6 +861,37 @@ async fn unary_generate_missing_prompt_returns_invalid_argument() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn unary_generate_unconnected_data_parallel_rank_returns_invalid_argument() {
+    let (mut client, server_task, _engine_task) = grpc_test_server(
+        EngineId::from_engine_index(3),
+        default_stream_output_specs(),
+    )
+    .await;
+
+    let mut request = tonic::Request::new(pb::GenerateRequest {
+        request_id: "test-unconnected-dp-rank".to_string(),
+        model: "test-model".to_string(),
+        prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+        ..Default::default()
+    });
+    request.metadata_mut().insert(
+        "x-data-parallel-rank",
+        "0".parse().expect("valid metadata value"),
+    );
+
+    let status = client
+        .generate(request)
+        .await
+        .expect_err("rank 0 should not select globally ranked engine 3");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("connected ranks: [3]"));
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn unary_generate_min_tokens_above_max_tokens_returns_invalid_argument() {
     let (mut client, server_task, _engine_task) =
         grpc_test_server(b"engine-grpc-min-above-max", default_stream_output_specs()).await;
@@ -644,6 +914,32 @@ async fn unary_generate_min_tokens_above_max_tokens_returns_invalid_argument() {
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
     assert!(status.message().contains("min_tokens=5"));
     assert!(status.message().contains("max_tokens=4"));
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_generate_empty_stop_string_returns_invalid_argument() {
+    let (mut client, server_task, _engine_task) =
+        grpc_test_server(b"engine-grpc-empty-stop", default_stream_output_specs()).await;
+
+    let status = client
+        .generate(pb::GenerateRequest {
+            request_id: "test-empty-stop".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text("hi".to_string())),
+            stopping: Some(pb::StoppingCriteria {
+                stop_strings: vec!["".to_string()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect_err("should fail when stop_strings contains an empty string");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("stop strings cannot be empty"));
 
     server_task.abort();
 }
@@ -1239,6 +1535,11 @@ async fn control_reports_server_and_model_info() {
     assert_eq!(parallelism.data_parallel_size, 1);
     assert_eq!(parallelism.data_parallel_rank, 0);
     assert_eq!(parallelism.decode_context_parallel_size, 1);
+    let rl = server.rl_capabilities.expect("RL capabilities");
+    assert!(!rl.weight_transfer_enabled);
+    assert!(rl.weight_transfer_backend.is_empty());
+    assert!(!rl.sleep_mode_enabled);
+    assert!(!rl.draft_weight_updates_enabled);
 
     let model = client
         .get_model_info(pb::GetModelInfoRequest {})
@@ -1258,6 +1559,65 @@ async fn control_reports_server_and_model_info() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn control_forwards_weight_update_without_pause_guard() {
+    let mut ready = default_ready_response();
+    ready.weight_transfer_backend = Some("nccl".to_string());
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-rl".to_vec(),
+            ready,
+            Arc::new(FakeTextBackend),
+            |dealer, push| {
+                boxed_test_future(async move {
+                    let frames = recv_engine_message(dealer).await;
+                    assert_eq!(frames[0].as_ref(), &[0x03]);
+                    let payload = decode_value(&frames[1]).expect("decode utility payload");
+                    let fields = payload.as_array().expect("utility payload array");
+                    let call_id = fields[1].as_u64().expect("utility call id");
+                    assert_eq!(fields[2].as_str(), Some("collective_rpc"));
+                    let args = fields[3].as_array().expect("collective_rpc arguments");
+                    assert_eq!(args[0].as_str(), Some("update_weights"));
+                    send_outputs(
+                        push,
+                        UtilityCallOutput {
+                            output: UtilityOutput {
+                                call_id: call_id.into(),
+                                failure_message: None,
+                                result: Some(UtilityResultEnvelope::without_type_info(
+                                    Value::Array(vec![Value::Nil]),
+                                )),
+                            },
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                })
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = ControlClient::new(channel);
+
+    client
+        .update_weights(pb::UpdateWeightsRequest {
+            update_info_json: br#"{"names":["model.weight"]}"#.to_vec(),
+        })
+        .await
+        .expect("forward weight update without a pause probe");
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn control_aggregates_multi_engine_capacity() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
@@ -1266,6 +1626,9 @@ async fn control_aggregates_multi_engine_capacity() {
     ready_0.max_model_len = 8_192;
     ready_0.num_gpu_blocks = 10;
     ready_0.data_parallel_size = 2;
+    ready_0.weight_transfer_backend = Some("nccl".to_string());
+    ready_0.enable_sleep_mode = true;
+    ready_0.supports_draft_weight_updates = true;
 
     let mut ready_1 = default_ready_response();
     ready_1.max_model_len = 4_096;
@@ -1274,7 +1637,9 @@ async fn control_aggregates_multi_engine_capacity() {
     ready_1.data_parallel_rank = 1;
 
     let engine_tasks = [ready_0, ready_1].map(|ready| {
-        let engine_id = EngineId::from_engine_index(ready.data_parallel_rank);
+        let engine_id = EngineId::from_engine_index(
+            ready.data_parallel_rank.try_into().expect("test rank fits engine identity"),
+        );
         MockEngineTask::new(spawn_mock_engine_task_with_ready(
             handshake_address.clone(),
             engine_id,
@@ -1302,10 +1667,8 @@ async fn control_aggregates_multi_engine_capacity() {
         Llm::new(client),
         Arc::new(FakeTextBackend) as Arc<dyn ChatTextBackend>,
     );
-    let service = ControlServiceImpl::new(Arc::new(AppState::new(
-        vec!["test-model".to_string()],
-        chat,
-    )));
+    let state = AppState::new(vec!["test-model".to_string()], chat).with_data_parallel_size(4);
+    let service = ControlServiceImpl::new(Arc::new(state));
 
     let server = pb::control_server::Control::get_server_info(
         &service,
@@ -1316,9 +1679,49 @@ async fn control_aggregates_multi_engine_capacity() {
     .into_inner();
     assert_eq!(server.max_model_len, 4_096);
     assert_eq!(server.total_kv_blocks, 30);
+    let rl = server.rl_capabilities.expect("RL capabilities");
+    assert!(!rl.weight_transfer_enabled);
+    assert!(rl.weight_transfer_backend.is_empty());
+    assert!(!rl.sleep_mode_enabled);
+    assert!(!rl.draft_weight_updates_enabled);
+    assert_eq!(server.parallelism.unwrap().data_parallel_size, 4);
 
     drop(engine_tasks);
 }
+
+#[test]
+fn kv_event_source_filters_and_exposes_zmq_publisher() {
+    let mut ready = default_ready_response();
+    ready.data_parallel_rank = 2;
+    ready.kv_events_config = Some(KvEventsConfig {
+        enable_kv_cache_events: false,
+        publisher: "null".to_string(),
+        endpoint: "tcp://*:5559".to_string(),
+        replay_endpoint: Some("tcp://*:5560".to_string()),
+        buffer_steps: 10_000,
+        hwm: 100_000,
+        max_queue_size: 100_000,
+        topic: "kv".to_string(),
+    });
+
+    assert!(kv_event_source(&ready).is_none());
+
+    let config = ready.kv_events_config.as_mut().unwrap();
+    config.enable_kv_cache_events = true;
+    config.publisher = "zmq".to_string();
+    let source = kv_event_source(&ready).expect("configured ZMQ event source");
+    assert_eq!(source.transport, "zmq");
+    assert_eq!(source.endpoint, "tcp://*:5559");
+    assert_eq!(source.topic, "kv");
+    assert_eq!(source.replay_endpoint, "tcp://*:5560");
+    assert_eq!(source.data_parallel_rank, Some(2));
+    assert_eq!(source.encoding, "msgpack");
+    assert_eq!(source.schema_version, 1);
+    assert_eq!(source.buffer_steps, 10_000);
+    assert_eq!(source.hwm, 100_000);
+    assert_eq!(source.max_queue_size, 100_000);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn grpc_health_transitions_to_not_serving_when_engine_becomes_unhealthy() {

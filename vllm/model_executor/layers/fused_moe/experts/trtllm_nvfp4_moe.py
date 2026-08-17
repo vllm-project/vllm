@@ -13,6 +13,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.moe_output import (
+    UnfinalizedMoEOutput,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
@@ -22,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
+    has_flashinfer_situ_activation,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -225,15 +229,15 @@ class TrtLlmNvFp4ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports SiLU, RELU^2 non-gated, GELU, clamped SwiGLU-OAI, and the
-        private SituGLU (SITU) cubin."""
+        """Supports SITU only when the installed FlashInfer exposes it."""
+        if activation == MoEActivation.SITU:
+            return has_flashinfer_situ_activation()
         return activation in [
             MoEActivation.SILU,
             MoEActivation.RELU2_NO_MUL,
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
-            MoEActivation.SITU,
         ]
 
     @staticmethod
@@ -517,7 +521,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | UnfinalizedMoEOutput:
         import flashinfer
 
         assert self._supports_activation(activation)
@@ -542,8 +546,13 @@ class TrtLlmNvFp4ExpertsMonolithic(
 
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
+        num_tokens = hidden_states.shape[0]
+        # The runner divides by the token count on the host, so an idle rank's
+        # dummy 0-token forward has to keep the finalized (empty) form.
+        defer = self.moe_config.use_deferred_moe_finalize and num_tokens > 0
+
         routing_replay_out = self._maybe_make_routing_replay_buffer(
-            num_tokens=hidden_states.shape[0],
+            num_tokens=num_tokens,
             device=hidden_states.device,
         )
         # Invoke kernel.
@@ -577,13 +586,21 @@ class TrtLlmNvFp4ExpertsMonolithic(
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
-            do_finalize=True,
+            do_finalize=not defer,
             activation_type=activation_to_flashinfer_int(activation),
             per_token_scale=per_token_scale,
             tune_max_num_tokens=fi_moe_largest_bucket(self.moe_config),
             routing_replay_out=routing_replay_out,
-        )[0]
-        self._maybe_dispatch_routing_replay(
-            routing_replay_out, num_tokens=hidden_states.shape[0]
         )
-        return result
+        self._maybe_dispatch_routing_replay(routing_replay_out, num_tokens=num_tokens)
+        if defer:
+            # flashinfer returns a flat permute map; the protocol wants
+            # [num_tokens, top_k] so consumers can read top_k from its shape.
+            return UnfinalizedMoEOutput(
+                gemm2_permuted=result[0],
+                expert_weights=result[1],
+                expanded_idx_to_permuted_idx=result[2]
+                .to(torch.int32)
+                .view(num_tokens, self.topk),
+            )
+        return result[0]

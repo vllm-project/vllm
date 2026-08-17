@@ -184,7 +184,14 @@ class StructuredOutputManager:
         try:
             request_type, grammar_spec = struct_request.structured_output_key
             assert self.backend is not None
-            return self.backend.compile_grammar(request_type, grammar_spec)
+            stop_token_ids = (
+                request.sampling_params.all_stop_token_ids
+                if request.sampling_params is not None
+                else None
+            )
+            return self.backend.compile_grammar(
+                request_type, grammar_spec, stop_token_ids=stop_token_ids
+            )
         except Exception:
             logger.exception(
                 "Failed to compile grammar for request %s", request.request_id

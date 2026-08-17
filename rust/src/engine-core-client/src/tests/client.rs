@@ -19,7 +19,7 @@ use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, ZmqMessage};
 
-use crate::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
+use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
 use crate::protocol::logprobs::MaybeWireLogprobs;
 use crate::protocol::multimodal::{
     MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmSlice, PlaceholderRange,
@@ -162,6 +162,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
             ..EngineCoreSamplingParams::for_test()
         }),
         arrival_time: 42.5,
+        session_id: Some("session-1".to_string()),
         ..EngineCoreRequest::default()
     }
 }
@@ -222,18 +223,8 @@ fn request_output(
     EngineCoreOutput {
         request_id: request_id.to_string(),
         new_token_ids,
-        new_logprobs: None,
-        new_prompt_logprobs_tensors: None,
-        pooling_output: None,
         finish_reason,
-        stop_reason: None,
-        events: None,
-        kv_transfer_params: None,
-        ec_transfer_params: None,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -2507,6 +2498,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let defaults_request_hex = lines.next().expect("missing defaults request fixture line");
     let multimodal_request_hex = lines.next().expect("missing multimodal request fixture line");
     let outputs_hex = lines.next().expect("missing outputs fixture line");
+    let sampling_mask_outputs_hex =
+        lines.next().expect("missing sampling mask outputs fixture line");
     let inline_logprobs_frames = lines.next().expect("missing inline logprobs fixture line");
     let multipart_logprobs_frames = lines.next().expect("missing multipart logprobs fixture line");
     let inline_prompt_frames = lines.next().expect("missing inline prompt logprobs fixture line");
@@ -2517,6 +2510,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
     let outputs_bytes = hex::decode(outputs_hex).unwrap();
+    let sampling_mask_outputs_bytes = hex::decode(sampling_mask_outputs_hex).unwrap();
 
     let decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
     let expected_request = sample_request();
@@ -2580,6 +2574,16 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         decode_value(&rmp_serde::to_vec_named(&expected_multimodal_request.mm_features).unwrap());
     assert_eq!(python_mm_features, rust_mm_features);
 
+    let decoded_sampling_mask_outputs: EngineCoreOutputs =
+        rmp_serde::from_slice(&sampling_mask_outputs_bytes).unwrap();
+    let sampling_mask_output =
+        &decoded_sampling_mask_outputs.as_request_batch().unwrap().outputs[0];
+    assert!(sampling_mask_output.mm_cache_miss_hashes.is_none());
+    assert!(matches!(
+        sampling_mask_output.new_sampling_mask.as_ref(),
+        Some(Value::Array(fields)) if fields.len() == 3
+    ));
+
     let decoded_outputs: EngineCoreOutputs = rmp_serde::from_slice(&outputs_bytes).unwrap();
     expect_test::expect![[r#"
         RequestBatch(
@@ -2606,6 +2610,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         prefill_stats: None,
                         routed_experts: None,
                         num_nans_in_logits: 0,
+                        mm_cache_miss_hashes: None,
+                        new_sampling_mask: None,
                     },
                 ],
                 scheduler_stats: None,
@@ -2677,6 +2683,29 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         rust_ready_keys, python_ready_keys,
         "EngineCoreReadyResponse drifted from the Python dataclass",
     );
+
+    let ready_response: EngineCoreReadyResponse =
+        rmp_serde::from_slice(&hex::decode(ready_response_hex).unwrap()).unwrap();
+    assert!(ready_response.supports_lora);
+    assert_eq!(ready_response.max_loras, 8);
+    assert_eq!(
+        ready_response.weight_transfer_backend.as_deref(),
+        Some("nccl")
+    );
+    assert!(ready_response.enable_sleep_mode);
+    assert!(ready_response.supports_draft_weight_updates);
+    let kv_events_config = ready_response.kv_events_config.expect("KV events config should decode");
+    assert!(kv_events_config.enable_kv_cache_events);
+    assert_eq!(kv_events_config.publisher, "zmq");
+    assert_eq!(kv_events_config.endpoint, "tcp://127.0.0.1:5557");
+    assert_eq!(
+        kv_events_config.replay_endpoint.as_deref(),
+        Some("tcp://127.0.0.1:5558")
+    );
+    assert_eq!(kv_events_config.topic, "kv");
+    assert_eq!(kv_events_config.buffer_steps, 10_000);
+    assert_eq!(kv_events_config.hwm, 100_000);
+    assert_eq!(kv_events_config.max_queue_size, 100_000);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
