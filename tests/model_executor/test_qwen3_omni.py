@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pytest
+import torch
+import torch.nn as nn
 from transformers import PretrainedConfig
 
 from vllm.multimodal.processing import InputProcessingContext
@@ -216,6 +219,156 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
     assert len(updates) == expected_total, (
         f"Expected {expected_total} total tokens, got {len(updates)}"
     )
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_exposes_eagle3_to_its_text_backbone():
+    from vllm.model_executor.models.interfaces import EagleModelMixin, supports_eagle3
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+        Qwen3OmniMoeThinkerForConditionalGeneration,
+    )
+
+    class DummyBackbone(nn.Module, EagleModelMixin):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([nn.Identity(), nn.Identity()])
+
+    class DummyLanguageModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = DummyBackbone()
+
+    model = Qwen3OmniMoeThinkerForConditionalGeneration.__new__(
+        Qwen3OmniMoeThinkerForConditionalGeneration
+    )
+    nn.Module.__init__(model)
+    model.language_model = DummyLanguageModel()
+
+    assert supports_eagle3(model)
+    model.set_aux_hidden_state_layers((1, 2))
+    assert model.language_model.model.aux_hidden_state_layers == (1, 2)
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_text_model_collects_post_deepstack_aux_hidden_states():
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import Qwen3MoeLLMModel
+
+    class DummyLayer(nn.Module):
+        def forward(self, positions, hidden_states, residual):
+            return hidden_states + 1, torch.full_like(hidden_states, 10)
+
+    class DummyNorm(nn.Module):
+        def forward(self, hidden_states, residual):
+            return hidden_states + residual, None
+
+    model = Qwen3MoeLLMModel.__new__(Qwen3MoeLLMModel)
+    nn.Module.__init__(model)
+    model.start_layer = 0
+    model.end_layer = 1
+    model.layers = nn.ModuleList([DummyLayer()])
+    model.norm = DummyNorm()
+    model.aux_hidden_state_layers = (1,)
+
+    pp_group = Mock(is_first_rank=True, is_last_rank=True)
+    inputs_embeds = torch.tensor([[1.0]])
+    deepstack_inputs = {"deepstack_input_embeds_0": torch.tensor([[3.0]])}
+    with patch(
+        "vllm.model_executor.models.qwen3_omni_moe_thinker.get_pp_group",
+        return_value=pp_group,
+    ):
+        output, aux_hidden_states = model(
+            input_ids=None,
+            positions=torch.tensor([0]),
+            inputs_embeds=inputs_embeds,
+            deepstack_input_embeds=deepstack_inputs,
+        )
+
+    torch.testing.assert_close(output, torch.tensor([[15.0]]))
+    assert len(aux_hidden_states) == 1
+    torch.testing.assert_close(aux_hidden_states[0], torch.tensor([[15.0]]))
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_dspark_uses_dedicated_model_class():
+    from vllm.model_executor.models.qwen3_omni_dspark import (
+        Qwen3OmniDSparkAttention,
+        Qwen3OmniDSparkDecoderLayer,
+        Qwen3OmniDSparkForCausalLM,
+        Qwen3OmniDSparkModel,
+    )
+
+    assert Qwen3OmniDSparkForCausalLM.model_cls is Qwen3OmniDSparkModel
+    assert Qwen3OmniDSparkModel.decoder_layer_cls is Qwen3OmniDSparkDecoderLayer
+    assert Qwen3OmniDSparkDecoderLayer.attention_cls is Qwen3OmniDSparkAttention
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    ("input_vocab_size", "draft_vocab_size", "weights", "error"),
+    [
+        (101, 100, [], "must include embed_tokens weights"),
+        (100, 40, [], "must include lm_head weights"),
+        (
+            100,
+            40,
+            [("lm_head.weight", torch.empty(40, 8))],
+            "must include a d2t mapping",
+        ),
+    ],
+)
+def test_qwen3_omni_dspark_rejects_incomplete_vocab_weights(
+    input_vocab_size, draft_vocab_size, weights, error
+):
+    from vllm.model_executor.models.qwen3_omni_dspark import (
+        Qwen3OmniDSparkForCausalLM,
+    )
+
+    model = Qwen3OmniDSparkForCausalLM.__new__(Qwen3OmniDSparkForCausalLM)
+    nn.Module.__init__(model)
+    object.__setattr__(
+        model,
+        "config",
+        SimpleNamespace(
+            vocab_size=input_vocab_size,
+            draft_vocab_size=draft_vocab_size,
+        ),
+    )
+    object.__setattr__(model, "target_vocab_size", 100)
+
+    with pytest.raises(ValueError, match=error):
+        model.load_weights(weights)
+
+
+@pytest.mark.skip_global_cleanup
+def test_dspark_probabilistic_buffer_uses_target_output_vocab():
+    from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+
+    def init_parent(self, vllm_config, device):
+        self.vocab_size = 101
+        self.draft_logits = torch.empty(2, 3, 101, device=device)
+        self.draft_model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(
+                sample_from_anchor=True,
+                dspark_draft_topk=None,
+            ),
+            get_hidden_size=lambda: 8,
+        )
+        self.speculative_config = SimpleNamespace(enable_adaptive_verification=False)
+        self.num_speculative_steps = 3
+        self.max_num_tokens = 16
+        self.max_num_reqs = 2
+        self.dtype = torch.float32
+        self.draft_tokens = torch.empty(2, 3, dtype=torch.long, device=device)
+
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(get_vocab_size=lambda: 100)
+    )
+    with patch.object(DFlashSpeculator, "__init__", init_parent):
+        speculator = DSparkSpeculator(vllm_config, torch.device("cpu"))
+
+    assert speculator.vocab_size == 100
+    assert speculator.draft_logits.shape == (2, 3, 100)
 
 
 if __name__ == "__main__":
