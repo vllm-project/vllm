@@ -2,9 +2,10 @@ group: Quantization XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: Quantization
+- label: Quantization %N
   device: intel_gpu
-  timeout_in_minutes: 75
+  timeout_in_minutes: 40
+  parallelism: 4
   working_dir: .
   no_plugin: true
   env:
@@ -17,7 +18,7 @@ steps:
   _raw_old_commands:
   - uv pip install --system torchao==0.17.0 --index-url https://download.pytorch.org/whl/cu130
   - uv pip install --system conch-triton-kernels
-  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py -k 'not test_compressed_tensors_w4a8_fp8'
+  - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py -k 'not test_compressed_tensors_w4a8_fp8' --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
@@ -28,7 +29,7 @@ steps:
     'uv pip install torchao==0.17.0 --index-url https://download.pytorch.org/whl/cu130 || true &&
     uv pip install conch-triton-kernels || true &&
     cd tests &&
-    VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py -k not test_compressed_tensors_w4a8_fp8 || true'
+    VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py -k not test_compressed_tensors_w4a8_fp8 --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT || true'
 - label: Quantized Fusions
   device: intel_gpu
   timeout_in_minutes: 20

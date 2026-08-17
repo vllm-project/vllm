@@ -48,6 +48,7 @@ steps:
   - pytest -v -s -x lora/test_olmoe_tp.py
   - pytest -v -s -x lora/test_gptoss_tp.py
   - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
+  - pytest -v -s -x lora/test_gemma4_tp.py
   source_file_dependencies:
   - vllm/lora
   - vllm/model_executor/layers/fused_moe/
@@ -63,4 +64,5 @@ steps:
     pytest -v -s -x lora/test_qwen3_with_multi_loras.py --deselect="tests/lora/test_qwen3_with_multi_loras.py::test_multi_loras_with_tp_sync" || true &&
     pytest -v -s -x lora/test_olmoe_tp.py -k "not test_olmoe_lora_tp2 and not test_olmoe_lora_tp4" || true &&
     pytest -v -s -x lora/test_gptoss_tp.py || true &&
-    pytest -v -s -x lora/test_qwen35_densemodel_lora.py --deselect="tests/lora/test_qwen35_densemodel_lora.py::test_qwen35_text_lora_tp4" || true'
+    pytest -v -s -x lora/test_qwen35_densemodel_lora.py --deselect="tests/lora/test_qwen35_densemodel_lora.py::test_qwen35_text_lora_tp4" || true &&
+    pytest -v -s -x lora/test_gemma4_tp.py || true &&'

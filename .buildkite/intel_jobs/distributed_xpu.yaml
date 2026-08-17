@@ -22,6 +22,7 @@ steps:
   - pytest -v -s distributed/test_shm_storage.py
   source_file_dependencies:
   - vllm/distributed
+  - '!vllm/distributed/kv_transfer/'
   - tests/distributed
   commands:
   - >-
@@ -52,6 +53,7 @@ steps:
   - DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
   source_file_dependencies:
   - vllm/distributed/
+  - '!vllm/distributed/kv_transfer/'
   - vllm/engine/
   - vllm/executor/
   - vllm/worker/worker_base.py
@@ -84,17 +86,16 @@ steps:
   _raw_old_commands:
   - export NCCL_CUMEM_HOST_ENABLE=0
   - pytest -v -s entrypoints/llm/test_collective_rpc.py
-  - pytest -v -s ./compile/fullgraph/test_basic_correctness.py
   - pytest -v -s ./compile/test_wrapper.py
   source_file_dependencies:
   - vllm/compilation/
   - vllm/distributed/
+  - '!vllm/distributed/kv_transfer/'
   - vllm/engine/
   - vllm/executor/
   - vllm/worker/worker_base.py
   - vllm/v1/engine/
   - vllm/v1/worker/
-  - tests/compile/fullgraph/test_basic_correctness.py
   - tests/compile/test_wrapper.py
   - tests/entrypoints/llm/test_collective_rpc.py
   commands:
@@ -103,7 +104,6 @@ steps:
     'export NCCL_CUMEM_HOST_ENABLE=0 || true &&
     cd tests &&
     pytest -v -s entrypoints/llm/test_collective_rpc.py || true &&
-    pytest -v -s ./compile/fullgraph/test_basic_correctness.py || true &&
     pytest -v -s ./compile/test_wrapper.py || true'
 - label: Distributed Torchrun + Shutdown Tests (2 GPUs)
   device: intel_gpu
@@ -126,6 +126,7 @@ steps:
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
   source_file_dependencies:
   - vllm/distributed/
+  - '!vllm/distributed/kv_transfer/'
   - vllm/engine/
   - vllm/executor/
   - vllm/worker/worker_base.py
@@ -165,10 +166,11 @@ steps:
   - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
   - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
   - python3 examples/features/data_parallel/data_parallel_offline.py --enforce-eager
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_nccl.py
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_ipc.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_nccl.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_http_ipc.py
   source_file_dependencies:
   - vllm/distributed/
+  - '!vllm/distributed/kv_transfer/'
   - tests/distributed/test_torchrun_example.py
   - tests/distributed/test_torchrun_example_moe.py
   - examples/rl/
@@ -207,6 +209,7 @@ steps:
   - pytest -v -s distributed/test_utils.py
   source_file_dependencies:
   - vllm/distributed/
+  - '!vllm/distributed/kv_transfer/'
   - tests/v1/distributed
   - tests/v1/engine/test_engine_core_client.py
   - tests/distributed/test_utils
@@ -221,7 +224,7 @@ steps:
     TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py || true &&
     TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py || true &&
     pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp || true &&
-    pytest -v -s distributed/test_utils.py --deselect="distributed/test_utils.py::test_cuda_device_count_stateless" || true'
+    pytest -v -s distributed/test_utils.py --deselect="tests/distributed/test_utils.py::test_cuda_device_count_stateless" || true'
 - label: Distributed Compile + Comm (4 GPUs)
   device: intel_gpu
   timeout_in_minutes: 70
@@ -237,16 +240,15 @@ steps:
     gpu: 4+
   _raw_old_commands:
   - export NCCL_CUMEM_HOST_ENABLE=0
-  - pytest -v -s compile/fullgraph/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py
   - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
   source_file_dependencies:
   - vllm/distributed/
+  - '!vllm/distributed/kv_transfer/'
   - tests/distributed/test_pynccl
   - tests/distributed/test_events
-  - tests/compile/fullgraph/test_basic_correctness.py
   - tests/distributed/test_symm_mem_allreduce.py
   - tests/distributed/test_multiproc_executor.py
   commands:
@@ -254,7 +256,6 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export NCCL_CUMEM_HOST_ENABLE=0 || true &&
     cd tests &&
-    pytest -v -s compile/fullgraph/test_basic_correctness.py || true &&
     pytest -v -s distributed/test_pynccl.py || true &&
     pytest -v -s distributed/test_events.py || true &&
     pytest -v -s distributed/test_symm_mem_allreduce.py || true &&
@@ -279,6 +280,7 @@ steps:
   - pytest -v -s -x lora/test_mixtral.py
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -331,6 +333,7 @@ steps:
   _raw_old_commands:
   - pytest -v -s tests/distributed/test_context_parallel.py
   - pytest -v -s tests/distributed/test_nccl_symm_mem.py
+  - pytest -v -s tests/kernels/test_kimi_k3_gemm_rs.py
   - pytest -v -s tests/v1/distributed/test_dbo.py
   - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
   commands:
@@ -338,6 +341,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest -v -s tests/distributed/test_context_parallel.py || true &&
     pytest -v -s tests/distributed/test_nccl_symm_mem.py || true &&
+    pytest -v -s tests/kernels/test_kimi_k3_gemm_rs.py || true &&
     pytest -v -s tests/v1/distributed/test_dbo.py || true &&
     pytest -v -s tests/distributed/test_mnnvl_alltoall.py || true'
 - label: Pipeline + Context Parallelism (4 GPUs)
@@ -358,6 +362,7 @@ steps:
   - pytest -v -s distributed/test_pipeline_parallel.py
   source_file_dependencies:
   - vllm/distributed/
+  - '!vllm/distributed/kv_transfer/'
   - vllm/engine/
   - vllm/executor/
   - vllm/model_executor/models/
