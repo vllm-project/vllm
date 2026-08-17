@@ -30,6 +30,10 @@ else:
 logger = init_logger(__name__)
 
 
+# NOTE: registration-time-mutable. Platform backends inject custom
+# --kv-cache-dtype entries here via register_kv_cache_dtype(). Never snapshot
+# this dict (no dict(...), .copy(), list(.keys()), etc.) — every consumer must
+# hold a reference to this live object to see later-registered entries.
 STR_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,
     "half": torch.half,
@@ -75,6 +79,11 @@ PIN_MEMORY = is_pin_memory_available()
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
+    from vllm.config.kv_cache_dtype import get_kv_cache_dtype_handler
+
+    handler = get_kv_cache_dtype_handler(kv_cache_dtype)
+    if handler is not None:
+        return handler.is_quantized()
     return (
         kv_cache_dtype.startswith("fp8")
         or kv_cache_dtype.endswith("per_token_head")
@@ -84,6 +93,11 @@ def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
 
 def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
     """Return True if *kv_cache_dtype* needs per-token-head scales."""
+    from vllm.config.kv_cache_dtype import get_kv_cache_dtype_handler
+
+    handler = get_kv_cache_dtype_handler(kv_cache_dtype)
+    if handler is not None:
+        return handler.quant_mode().is_per_token_head
     return kv_cache_dtype.endswith("per_token_head")
 
 

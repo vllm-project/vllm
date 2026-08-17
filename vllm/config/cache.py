@@ -85,8 +85,10 @@ class CacheConfig:
     not matter if you have another vLLM instance running on the same GPU. For
     example, if you have two vLLM instances running on the same GPU, you can
     set the GPU memory utilization to 0.5 for each instance."""
-    cache_dtype: CacheDType = "auto"
+    cache_dtype: CacheDType | str = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
+    Custom dtypes can registered by platform backends via
+    ``register_kv_cache_dtype`` are accepted (see vllm.config.kv_cache_dtype).
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
     fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc).
     Some models (namely DeepSeekV3.2) default to fp8, set to bfloat16 to use
@@ -292,7 +294,22 @@ class CacheConfig:
 
     @field_validator("cache_dtype", mode="after")
     @classmethod
-    def _validate_cache_dtype(cls, cache_dtype: CacheDType) -> CacheDType:
+    def _validate_cache_dtype(cls, cache_dtype: CacheDType | str) -> CacheDType | str:
+        from vllm.config.kv_cache_dtype import KV_CACHE_DTYPES, is_known_kv_cache_dtype
+        from vllm.platforms import current_platform
+
+        # Accessing current_platform triggers platform activation and lets
+        # backends register their custom dtypes (appending to KV_CACHE_DTYPES
+        # and STR_DTYPE_TO_TORCH_DTYPE), so membership must be checked after
+        # registration and the platform whitelist verification.
+        current_platform.register_kv_cache_dtypes()
+        if cache_dtype != "auto":
+            current_platform.verify_kv_cache_dtype(cache_dtype)
+        if not is_known_kv_cache_dtype(cache_dtype):
+            raise ValueError(
+                f"Invalid kv_cache_dtype: {cache_dtype!r}. "
+                f"Valid values are: {KV_CACHE_DTYPES}"
+            )
         if kv_cache_uses_per_token_head_scales(cache_dtype):
             logger.info(
                 "Using %s data type to store kv cache. It reduces the GPU "

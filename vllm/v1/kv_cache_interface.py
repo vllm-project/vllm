@@ -79,6 +79,11 @@ class KVQuantMode(IntEnum):
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
+    from vllm.config.kv_cache_dtype import get_kv_cache_dtype_handler
+
+    handler = get_kv_cache_dtype_handler(kv_cache_dtype)
+    if handler is not None:
+        return handler.quant_mode()
     if kv_cache_dtype == "int4_per_token_head":
         return KVQuantMode.INT4_PER_TOKEN_HEAD
     if kv_cache_dtype == "int8_per_token_head":

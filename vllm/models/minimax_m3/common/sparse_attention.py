@@ -40,6 +40,7 @@ else:
         minimax_m3_sparse_attn,
         minimax_m3_sparse_attn_decode,
     )
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -54,7 +55,7 @@ from vllm.v1.attention.backends.utils import (
     get_kv_cache_layout,
     split_decodes_and_prefills,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
