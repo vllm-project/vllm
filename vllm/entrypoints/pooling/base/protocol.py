@@ -239,6 +239,8 @@ class ChatRequestOptionsMixin(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_generation_prompt(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("continue_final_message") and data.get("add_generation_prompt"):
             raise VLLMValidationError(
                 "Cannot set both `continue_final_message` and "
