@@ -4,6 +4,27 @@
 
 The vLLM Mixture of Experts (MoE) subsystem lives under `vllm/model_executor/layers/fused_moe/`. The entry point is the `FusedMoEFactory()` factory function in `layer.py`, which assembles a pipeline of cooperating objects and returns a `MoERunner` — the `nn.Module` that models call directly in their forward pass.
 
+## Directory Structure
+
+```text
+fused_moe/
+  ├── layer.py                  — FusedMoEFactory() entry point
+  ├── config.py                 — FusedMoEConfig, FusedMoEParallelConfig, FusedMoEQuantConfig, RoutingMethodType
+  ├── routed_experts.py         — RoutedExperts (weight parameters, loading, execution)
+  ├── modular_kernel.py         — FusedMoEKernel, FusedMoEExperts, FusedMoEPrepareAndFinalize base classes
+  ├── fused_moe_method_base.py  — FusedMoEMethodBase (quant method strategy)
+  ├── expert_map_manager.py     — ExpertMapManager (EP expert placement/mapping)
+  ├── topk_weight_and_reduce.py — TopKWeightAndReduce implementations
+  ├── activation.py             — MoEActivation definitions
+  ├── fused_moe.py              — Legacy fused_experts function (Triton kernel entry)
+  ├── runner/                   — MoERunner orchestrator and SharedExperts wrapper
+  ├── router/                   — FusedMoERouter ABC and concrete router implementations
+  ├── experts/                  — FusedMoEExperts subclasses (Triton, CUTLASS, DeepGemm, FlashInfer, TRTLLM, etc.)
+  ├── prepare_finalize/         — FusedMoEPrepareAndFinalize subclasses (DeepEP, FlashInfer, Mori, NIXL, etc.)
+  ├── oracle/                   — MoE kernel selection oracles (one per quantization type)
+  └── configs/                  — Auto-tuned Triton kernel configs (JSON, keyed by E/N/device/dtype)
+```
+
 ## Object Relationship Diagram
 
 ```text
@@ -16,8 +37,8 @@ MoERunner (nn.Module, is the return value)                           │
   ├── router: FusedMoERouter          ◄── created by factory         │
   ├── routed_experts: RoutedExperts   ◄── created by factory         │
   ├── _shared_experts: SharedExperts? ◄── wraps model-provided layer │
-  ├── gate: nn.Module?                ◄── model-provided             │
-  ├── shared_expert_gate: nn.Module?  ◄── model-provided             │
+  ├── gate: nn.Module?                                               │
+  ├── shared_expert_gate: nn.Module?                                 │
   ├── routed_input_transform: nn.Module?                             │
   ├── routed_output_transform: nn.Module?                            │
   ├── routed_scaling_factor: float?                                  │
@@ -62,6 +83,8 @@ FusedMoEConfig (dataclass)                                           │
 5. Creates `FusedMoEConfig` (the single dataclass carrying all MoE dimensions/settings)
 6. Creates `RoutedExperts` (which triggers `quant_method.create_weights()`)
 7. Creates `MoERunner` and returns it
+
+The concrete classes used for `MoERunner` and `RoutedExperts` can be overridden by passing `runner_cls` / `routed_experts_cls` (and optional `runner_args` / `routed_experts_args`) to the factory. This allows models to supply specialized subclasses when the default implementations are insufficient.
 
 **Returns**: `MoERunner` — what the model stores as its MoE layer.
 
@@ -110,6 +133,55 @@ forward()
   → _maybe_add_zero_expert_output()
 ```
 
+**Data flow summary**:
+
+```text
+hidden_states (from transformer block)
+    │
+    ▼
+MoERunner.forward()
+    │
+    ├── [optional] routed_input_transform (latent projection)
+    │
+    ├── [optional] gate(hidden_states) → router_logits
+    │
+    ├── [optional] dispatch (DP/EP token redistribution)
+    │
+    ├── [MODULAR PATH]
+    │   ├── FusedMoERouter.select_experts(hidden_states, router_logits)
+    │   │   → (topk_weights, topk_ids)
+    │   │
+    │   └── RoutedExperts.forward_modular(x, topk_weights, topk_ids)
+    │       → quant_method.apply(layer=routed_experts, ...)
+    │           → fused MoE kernel (Triton/CUTLASS/etc.)
+    │
+    ├── [MONOLITHIC PATH]
+    │   └── RoutedExperts.forward_monolithic(x, router_logits)
+    │       → quant_method.apply_monolithic(layer=routed_experts, ...)
+    │           → monolithic kernel (FlashInfer TRTLLM, etc.)
+    │
+    ├── [PARALLEL] SharedExperts(shared_input) → shared_output
+    │   (on aux CUDA stream when possible)
+    │
+    ├── [optional] combine (DP/EP result aggregation)
+    │
+    ├── [optional] truncate fused_output (undo hidden_dim padding)
+    │
+    ├── [optional] pre-transform all-reduce (latent MoE: reduce before non-linear output transform)
+    │
+    ├── [optional] reduce shared_expert_output (when fused_output already reduced)
+    │
+    ├── [optional] apply routed_scaling_factor
+    │
+    ├── [optional] routed_output_transform (latent → full dim)
+    │
+    ├── shared_output + fused_output  (element-wise add)
+    │
+    ├── [optional] all-reduce (TP/EP, when not already reduced above)
+    │
+    └── final output → back to transformer block
+```
+
 ### 3. `FusedMoERouter` (`router/fused_moe_router.py`)
 
 **Role**: Abstract base class for token-to-expert routing. Given hidden states and router logits, produces `(topk_weights, topk_ids)`.
@@ -134,7 +206,7 @@ forward()
 
 ### 4. `RoutedExperts` (`routed_experts.py`)
 
-**Role**: Container for expert weight parameters and execution logic. This is where `w13_weight`, `w2_weight`, scales, zero points, etc. are registered as `nn.Parameter`s.
+**Role**: Container for expert weight parameters, weight loading, and execution logic. `RoutedExperts` is the component responsible for all expert weight lifecycle — creation, loading from checkpoints, and passing weights to kernels at inference time. This is where `w13_weight`, `w2_weight`, scales, zero points, etc. are registered as `nn.Parameter`s.
 
 **Inherits**: `PluggableLayer` → `nn.Module`
 
@@ -199,7 +271,7 @@ Each `FusedMoEMethodBase` subclass implements `get_fused_moe_quant_config()` to 
 
 **Additional fields**: `is_scale_swizzled`, `gemm1_alpha`/`gemm1_beta`/`gemm1_clamp_limit` (MXFP4 TRTLLM SwiGLU clamping), `mx_alignment`.
 
-**Usage**: `FusedMoEQuantConfig` is only used with modular kernels — it is passed to `FusedMoEExperts` constructors and consumed by `fused_experts`, `cutlass_moe`, `rocm_aiter_fused_experts`, and `triton_kernel_moe_forward`. Non-modular MoE methods can set it to `None`.
+**Usage**: `FusedMoEQuantConfig` is only used with modular kernels — it is passed to `FusedMoEExperts` constructors. Non-modular MoE methods can set it to `None`.
 
 #### 6d. `FusedMoEParallelConfig`
 
@@ -235,7 +307,7 @@ Each `FusedMoEMethodBase` subclass implements `get_fused_moe_quant_config()` to 
 
 ### 7. `ExpertMapManager` (`expert_map_manager.py`)
 
-**Role**: Manages the mapping between global expert IDs and local (per-rank) expert IDs for Expert Parallelism.
+**Role**: Manages the mapping between global expert IDs and local (per-rank) expert IDs for Expert Parallelism (EP).
 
 **Key outputs**:
 
@@ -306,55 +378,6 @@ oracle/{quant_type}.py
 **`MoEKernelOracle` class** (target interface in `oracle/base.py`):
 
 The abstract methods mirror the free-function convention: `backend_enum_cls`, `get_priority_backends`, `backend_to_kernel_cls`, `map_backend`, `select_backend`, `make_kernel`, `convert_to_kernel_format`, `make_quant_config`. Going forward, all oracles will be migrated to inherit from `MoEKernelOracle`.
-
-## Data Flow Summary
-
-```text
-hidden_states (from transformer block)
-    │
-    ▼
-MoERunner.forward()
-    │
-    ├── [optional] routed_input_transform (latent projection)
-    │
-    ├── [optional] gate(hidden_states) → router_logits
-    │
-    ├── [optional] dispatch (DP/EP token redistribution)
-    │
-    ├── [MODULAR PATH]
-    │   ├── FusedMoERouter.select_experts(hidden_states, router_logits)
-    │   │   → (topk_weights, topk_ids)
-    │   │
-    │   └── RoutedExperts.forward_modular(x, topk_weights, topk_ids)
-    │       → quant_method.apply(layer=routed_experts, ...)
-    │           → fused MoE kernel (Triton/CUTLASS/etc.)
-    │
-    ├── [MONOLITHIC PATH]
-    │   └── RoutedExperts.forward_monolithic(x, router_logits)
-    │       → quant_method.apply_monolithic(layer=routed_experts, ...)
-    │           → monolithic kernel (FlashInfer TRTLLM, etc.)
-    │
-    ├── [PARALLEL] SharedExperts(shared_input) → shared_output
-    │   (on aux CUDA stream when possible)
-    │
-    ├── [optional] combine (DP/EP result aggregation)
-    │
-    ├── [optional] truncate fused_output (undo hidden_dim padding)
-    │
-    ├── [optional] pre-transform all-reduce (latent MoE: reduce before non-linear output transform)
-    │
-    ├── [optional] reduce shared_expert_output (when fused_output already reduced)
-    │
-    ├── [optional] apply routed_scaling_factor
-    │
-    ├── [optional] routed_output_transform (latent → full dim)
-    │
-    ├── shared_output + fused_output  (element-wise add)
-    │
-    ├── [optional] all-reduce (TP/EP, when not already reduced above)
-    │
-    └── final output → back to transformer block
-```
 
 ## Key Design Decisions
 
