@@ -2686,6 +2686,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
 
     let ready_response: EngineCoreReadyResponse =
         rmp_serde::from_slice(&hex::decode(ready_response_hex).unwrap()).unwrap();
+    assert!(ready_response.supports_lora);
+    assert_eq!(ready_response.max_loras, 8);
     assert_eq!(
         ready_response.weight_transfer_backend.as_deref(),
         Some("nccl")

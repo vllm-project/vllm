@@ -286,6 +286,7 @@ impl EngineCoreClient {
         config: EngineCoreClientConfig,
         connected: transport::ConnectedTransport,
     ) -> Result<Self> {
+        validate_lora_capabilities(&connected.engines)?;
         let (output_tx, output_rx) = mpsc::channel(64);
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
         let engines = connected.engines;
@@ -474,6 +475,32 @@ impl EngineCoreClient {
     pub fn health_error(&self) -> Option<Arc<Error>> {
         self.inner.health_error()
     }
+}
+
+fn validate_lora_capabilities(engines: &[ConnectedEngine]) -> Result<()> {
+    let first = engines.first().expect("engine core client requires at least one engine");
+    for engine in engines {
+        let ready = &engine.ready_response;
+        if ready.supports_lora != (ready.max_loras > 0) {
+            return Err(Error::UnexpectedHandshakeMessage {
+                message: format!(
+                    "engine {:?} reported inconsistent LoRA capability (supports_lora={}, max_loras={})",
+                    engine.engine_id, ready.supports_lora, ready.max_loras
+                ),
+            });
+        }
+        if ready.supports_lora != first.ready_response.supports_lora
+            || ready.max_loras != first.ready_response.max_loras
+        {
+            return Err(Error::UnexpectedHandshakeMessage {
+                message: format!(
+                    "engine {:?} reported LoRA capability inconsistent with engine {:?}",
+                    engine.engine_id, first.engine_id
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 // Client API implementation.
