@@ -197,6 +197,20 @@ def _run_deepep_cutlass_w4a8(
 
     expert_start = pgi.rank
     expert_end = expert_start + 1
+    # Materialize rank-local storage as it would be loaded in an EP worker.
+    # Packed group-scale expert views are not sufficiently aligned for CUTLASS.
+    local_w1 = w1[expert_start:expert_end].clone()
+    local_w2 = w2[expert_start:expert_end].clone()
+    local_w1_scale = (
+        w1_scale.view(NUM_EXPERTS, -1)[expert_start:expert_end].clone().view(-1)
+    )
+    local_w2_scale = (
+        w2_scale.view(NUM_EXPERTS, -1)[expert_start:expert_end].clone().view(-1)
+    )
+    local_w1_chan_scale = w1_chan_scale[expert_start:expert_end].clone()
+    local_w2_chan_scale = w2_chan_scale[expert_start:expert_end].clone()
+    local_b_strides1 = b_strides1[expert_start:expert_end].clone()
+    local_b_strides2 = b_strides2[expert_start:expert_end].clone()
     moe_config = make_dummy_moe_config(
         num_experts=NUM_EXPERTS,
         num_local_experts=1,
@@ -215,16 +229,16 @@ def _run_deepep_cutlass_w4a8(
         all2all_backend="deepep_low_latency",
     )
     quant_config = make_w4a8_moe_quant_config(
-        w1_scale=w1_scale[expert_start:expert_end],
-        w2_scale=w2_scale[expert_start:expert_end],
-        g1_alphas=w1_chan_scale[expert_start:expert_end],
-        g2_alphas=w2_chan_scale[expert_start:expert_end],
+        w1_scale=local_w1_scale,
+        w2_scale=local_w2_scale,
+        g1_alphas=local_w1_chan_scale,
+        g2_alphas=local_w2_chan_scale,
     )
     experts = CutlassBatchedExpertsW4A8Fp8(
         moe_config=moe_config,
         quant_config=quant_config,
-        b_strides1=b_strides1[expert_start:expert_end],
-        b_strides2=b_strides2[expert_start:expert_end],
+        b_strides1=local_b_strides1,
+        b_strides2=local_b_strides2,
         group_size=GROUP_SIZE,
         max_num_tokens=MAX_TOKENS_PER_RANK,
         num_dispatchers=WORLD_SIZE,
@@ -247,8 +261,8 @@ def _run_deepep_cutlass_w4a8(
     expert_map[pgi.rank] = 0
     return kernel.apply(
         hidden_states=hidden_states,
-        w1=w1[expert_start:expert_end],
-        w2=w2[expert_start:expert_end],
+        w1=local_w1,
+        w2=local_w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
         activation=MoEActivation.SILU,
