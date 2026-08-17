@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from vllm.config.mamba import MambaBackendEnum, MambaConfig, MambaSSUAlgorithm
+from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     FlashInferSSUBackend,
     TritonSSUBackend,
@@ -44,6 +45,17 @@ except ImportError:
     HAS_FLASHINFER_CHECKPOINTING_SSU = False
 
 
+@pytest.fixture(autouse=True)
+def restore_backend_state():
+    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
+
+    old_backend = mod._mamba_ssu_backend
+    old_replayssm_kernel = mod._flashinfer_replayssm_kernel
+    yield
+    mod._mamba_ssu_backend = old_backend
+    mod._flashinfer_replayssm_kernel = old_replayssm_kernel
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_flashinfer_replayssm_ring_tracker_lifecycle():
     ring_start = torch.zeros(2, dtype=torch.int32, device="cuda")
@@ -57,6 +69,7 @@ def test_flashinfer_replayssm_ring_tracker_lifecycle():
             prev_num_accepted,
             state_batch_indices,
             logical_window=16,
+            ring_buffer_len=17,
         )
         observed.append((int(ring_start[1]), int(prev_num_accepted[1])))
 
@@ -170,6 +183,8 @@ def test_init_is_noop_for_non_ssu_mamba_type(mamba_type):
             MambaConfig(), _kv_cache_config_with_ssu(mamba_type)
         )
         assert mod._mamba_ssu_backend is None
+        with pytest.raises(RuntimeError, match="not been initialized"):
+            get_mamba_ssu_backend()
     finally:
         mod._mamba_ssu_backend = old
 
@@ -248,6 +263,7 @@ def test_replayssm_flashinfer_call_forwards_explicit_controls(monkeypatch):
         dt_cache,
         ring_start,
         prev_num_accepted,
+        logical_window=window,
         scratch=scratch,
         algorithm="two-kernel",
         d_split=2,
@@ -265,6 +281,40 @@ def test_replayssm_flashinfer_call_forwards_explicit_controls(monkeypatch):
     assert kwargs["cb_scaled"] is scratch[0]
     assert kwargs["cumAdt_vec"] is scratch[1]
     assert kwargs["cb_old"] is scratch[2]
+    assert kwargs["philox_rounds"] == 10
+
+
+def test_replayssm_flashinfer_forwards_explicit_philox_rounds(monkeypatch):
+    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
+
+    kernel = Mock(return_value=torch.empty(1, 1, 2, 4))
+    monkeypatch.setattr(mod, "_flashinfer_replayssm_kernel", kernel)
+    tensor = torch.empty(1, 2, 4)
+    state = torch.empty(1, 2, 4, 8)
+    group = torch.empty(1, 1, 8)
+
+    selective_state_update_replayssm_flashinfer(
+        state,
+        tensor,
+        tensor,
+        torch.empty(2, 4, 8),
+        group,
+        group,
+        tensor,
+        torch.empty(1, 2, 17, 4),
+        torch.empty(1, 1, 17, 8),
+        torch.empty(1, 2, 17),
+        torch.zeros(1, dtype=torch.int32),
+        torch.zeros(1, dtype=torch.int32),
+        logical_window=16,
+        enable_stochastic_rounding=True,
+        stochastic_rounding_philox_rounds=6,
+        update_trackers=False,
+    )
+
+    assert kernel.call_args.kwargs["philox_rounds"] == 6
+    assert kernel.call_args.kwargs["rand_seed"].shape == (1,)
+    assert kernel.call_args.kwargs["rand_seed"].dtype == torch.int64
 
 
 def test_replayssm_requires_native_flashinfer_support(monkeypatch):
@@ -273,7 +323,7 @@ def test_replayssm_requires_native_flashinfer_support(monkeypatch):
     old_module = SimpleNamespace(
         checkpointing_ssu=Mock(), CheckpointingSSURunner=object
     )
-    monkeypatch.setattr(mod.importlib, "import_module", lambda _: old_module)
+    monkeypatch.setattr(mod, "import_module", lambda _: old_module)
     with pytest.raises(ImportError, match="scratch allocation support"):
         mod._initialize_flashinfer_replayssm(True)
 
@@ -284,7 +334,7 @@ def test_replayssm_flashinfer_import_error(monkeypatch):
     def raise_import_error(_):
         raise ImportError
 
-    monkeypatch.setattr(mod.importlib, "import_module", raise_import_error)
+    monkeypatch.setattr(mod, "import_module", raise_import_error)
     with pytest.raises(ImportError, match="FlashInfer is required"):
         mod._initialize_flashinfer_replayssm(True)
 
@@ -294,8 +344,43 @@ def test_replayssm_flashinfer_import_error(monkeypatch):
     reason="compatible flashinfer checkpointing_ssu not available",
 )
 def test_replayssm_flashinfer_backend_init():
+    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
+
     initialize_mamba_ssu_backend(
         MambaConfig(backend=MambaBackendEnum.FLASHINFER),
         _kv_cache_config_with_ssu(),
         use_replayssm=True,
+    )
+    assert isinstance(get_mamba_ssu_backend(), FlashInferSSUBackend)
+    assert (
+        mod._flashinfer_replayssm_kernel is checkpointing_ssu_module.checkpointing_ssu
+    )
+
+
+@pytest.mark.parametrize(
+    ("backend", "num_speculative_tokens", "expected_ring_len"),
+    [
+        (MambaBackendEnum.TRITON, 0, 16),
+        (MambaBackendEnum.FLASHINFER, 0, 17),
+        (MambaBackendEnum.FLASHINFER, 3, 20),
+    ],
+)
+def test_replayssm_physical_ring_shape(
+    backend, num_speculative_tokens, expected_ring_len
+):
+    base_shapes = ((64, 3), (8, 4, 16))
+
+    shapes = MambaStateShapeCalculator.append_replayssm_ring(
+        base_shapes,
+        n_groups=4,
+        tp_world_size=2,
+        logical_window=16,
+        backend=backend,
+        num_speculative_tokens=num_speculative_tokens,
+    )
+
+    assert shapes[2:] == (
+        (8, expected_ring_len, 4),
+        (8, expected_ring_len),
+        (2, expected_ring_len, 16),
     )
