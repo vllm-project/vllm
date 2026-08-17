@@ -1127,7 +1127,7 @@ class TestTieringOffloadingManager:
         assert self.manager._processed_jobs_this_step is False
 
         # Primary tier reset to a fresh state.
-        assert self.primary_tier._num_allocated_chunk_slots == 0
+        assert self.primary_tier._num_allocated_chunks == 0
         assert self.primary_tier._free_list == []
         for chunk in chunks:
             assert self.primary_tier.lookup(chunk, _CTX) is LookupResult.MISS
