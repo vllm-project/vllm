@@ -15,7 +15,9 @@ if not current_platform.is_rocm():
 
 from vllm.v1.attention.backends.mla import rocm_aiter_mla  # noqa: E402
 from vllm.v1.attention.backends.mla.rocm_aiter_mla import (  # noqa: E402
+    AiterMLADecodeMetadata,
     AiterMLAHelper,
+    AiterMLAMetadata,
     AiterMLAMetadataBuilder,
 )
 
@@ -372,8 +374,62 @@ def test_decode_expands_kernel_block_page_indices(monkeypatch):
         metadata.paged_kv_indices[: expected_indices.numel()],
         expected_indices,
     )
-    assert expand_kernel.grid == (seq_lens.numel(),)
+    assert expand_kernel.grid == (seq_lens.numel(), 1)
     assert expand_kernel.kernel_block_size == kernel_block_size
+
+
+def test_update_block_table_reuses_schedule_and_rebuilds_page_indices(monkeypatch):
+    expand_kernel = _ExpandPageIndicesKernel()
+    monkeypatch.setattr(rocm_aiter_mla, "_expand_page_indices_kernel", expand_kernel)
+
+    old_block_table = torch.tensor([[1, 2, 3]], dtype=torch.int32)
+    old_slot_mapping = torch.tensor([1, 2, 3], dtype=torch.int64)
+    old_page_indices = torch.tensor([2, 3, 4, 5, 6], dtype=torch.int32)
+    decode = AiterMLADecodeMetadata(
+        block_table=old_block_table,
+        seq_lens=torch.tensor([5], dtype=torch.int32),
+        dcp_tot_seq_lens=None,
+        paged_kv_indptr=torch.tensor([0, 5], dtype=torch.int32),
+        paged_kv_indices=old_page_indices,
+    )
+    metadata = AiterMLAMetadata(
+        num_reqs=1,
+        max_query_len=3,
+        max_seq_len=5,
+        num_actual_tokens=3,
+        query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+        slot_mapping=old_slot_mapping,
+        num_decodes=1,
+        num_decode_tokens=3,
+        num_prefills=0,
+        decode=decode,
+    )
+    builder = SimpleNamespace(
+        paged_kv_indices=torch.empty(5, dtype=torch.int32),
+        kernel_block_size=2,
+    )
+    new_block_table = torch.tensor([[10, 11, 12]], dtype=torch.int32)
+    new_slot_mapping = torch.tensor([4, 5, 6], dtype=torch.int64)
+
+    updated = AiterMLAMetadataBuilder.update_block_table(
+        builder,
+        metadata,
+        new_block_table,
+        new_slot_mapping,
+    )
+
+    assert updated is not metadata
+    assert updated.decode is not metadata.decode
+    assert updated.slot_mapping is new_slot_mapping
+    assert updated.decode.block_table.data_ptr() == new_block_table.data_ptr()
+    assert torch.equal(
+        updated.decode.paged_kv_indices,
+        torch.tensor([20, 21, 22, 23, 24], dtype=torch.int32),
+    )
+    assert expand_kernel.grid == (1, 1)
+    assert metadata.slot_mapping is old_slot_mapping
+    assert metadata.decode.block_table is old_block_table
+    assert metadata.decode.paged_kv_indices is old_page_indices
 
 
 @pytest.mark.parametrize(

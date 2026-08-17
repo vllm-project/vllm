@@ -7,6 +7,8 @@ while keeping per-block content compact, so padding bytes at the end of each pag
 never addressed by the logical view.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -21,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     compute_layout_strides,
 )
+from vllm.v1.worker.gpu import attn_utils
 from vllm.v1.worker.utils import (
     allocate_kv_cache,
     copy_kv_cache_blocks_inplace,
@@ -227,3 +230,94 @@ def test_copy_kv_cache_blocks_with_virtual_block_splitting(
             torch.testing.assert_close(
                 cache[dst_start + physical_idx], expected[layer_idx][physical_idx]
             )
+
+
+def test_build_attn_metadata_reuses_compatible_group_metadata():
+    class Builder:
+        supports_update_block_table = True
+
+        def __init__(self):
+            self.build_calls = []
+            self.capture_calls = []
+            self.update_calls = []
+            self.shared_from = []
+
+        def build(self, **kwargs):
+            self.build_calls.append(kwargs)
+            return SimpleNamespace(source="build")
+
+        def update_block_table(self, metadata, block_table, slot_mapping):
+            self.update_calls.append((metadata, block_table, slot_mapping))
+            return SimpleNamespace(source="update")
+
+        def build_for_cudagraph_capture(self, common_attn_metadata):
+            self.capture_calls.append(common_attn_metadata)
+            return SimpleNamespace(source="capture")
+
+        def share_reusable_metadata_buffers(self, source):
+            self.shared_from.append(source)
+
+    builders = [Builder(), Builder()]
+    attn_groups = [
+        [
+            SimpleNamespace(
+                layer_names=[f"layer.{group}"],
+                get_metadata_builder=lambda _, group=group: builders[group],
+            )
+        ]
+        for group in range(2)
+    ]
+    shared_spec = object()
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(kv_cache_spec=shared_spec),
+            SimpleNamespace(kv_cache_spec=shared_spec),
+        ]
+    )
+    block_tables = [
+        torch.tensor([[1]], dtype=torch.int32),
+        torch.tensor([[2]], dtype=torch.int32),
+    ]
+    slot_mappings = [
+        torch.tensor([1], dtype=torch.int64),
+        torch.tensor([2], dtype=torch.int64),
+    ]
+
+    common_args = dict(
+        attn_groups=attn_groups,
+        num_reqs=1,
+        num_tokens=1,
+        query_start_loc_gpu=torch.tensor([0, 1], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 1], dtype=torch.int32),
+        max_query_len=1,
+        seq_lens=torch.tensor([8], dtype=torch.int32),
+        max_seq_len=8,
+        block_tables=block_tables,
+        slot_mappings=slot_mappings,
+        kv_cache_config=kv_cache_config,
+    )
+    captured = attn_utils.build_attn_metadata(**common_args, for_cudagraph_capture=True)
+    assert captured["layer.0"].source == "capture"
+    assert captured["layer.1"].source == "capture"
+    assert len(builders[0].capture_calls) == 1
+    assert len(builders[1].capture_calls) == 1
+    assert builders[1].shared_from == [builders[0]]
+
+    for builder in builders:
+        builder.capture_calls.clear()
+        builder.shared_from.clear()
+
+    result = attn_utils.build_attn_metadata(**common_args)
+
+    assert result["layer.0"].source == "build"
+    assert result["layer.1"].source == "update"
+    assert len(builders[0].build_calls) == 1
+    assert builders[0].update_calls == []
+    assert builders[0].shared_from == []
+    assert builders[1].build_calls == []
+    assert builders[1].shared_from == [builders[0]]
+    assert len(builders[1].update_calls) == 1
+    cached, block_table, slot_mapping = builders[1].update_calls[0]
+    assert cached is result["layer.0"]
+    assert block_table is block_tables[1]
+    assert slot_mapping is slot_mappings[1]

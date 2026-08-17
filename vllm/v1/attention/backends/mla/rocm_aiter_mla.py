@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import functools
 from dataclasses import dataclass
 from pathlib import Path
@@ -257,6 +258,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     #  https://github.com/vllm-project/vllm/issues/22945
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
+    supports_update_block_table: bool = True
 
     @staticmethod
     def _uniform_padded_mtp_qo_len(
@@ -434,10 +436,52 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self.paged_kv_indptr = torch.zeros(
                 max_num_reqs + 1, dtype=torch.int32, device=device
             )
-
             self.qo_indptr = torch.zeros(
                 max_num_reqs + 1, dtype=torch.int32, device=device
             )
+        self._shared_schedule_needs_build = False
+
+    def share_reusable_metadata_buffers(
+        self, source: "AiterMLAMetadataBuilder"
+    ) -> None:
+        """Share graph-stable numeric schedule storage across compatible groups.
+
+        The schedule is read-only during MLA execution and depends on request
+        geometry, not a group's block table. ``work_meta_data`` remains local:
+        it contains addresses into the shared views and is rebuilt once after
+        rebinding, before graph capture.
+        """
+        if not self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            return
+        schedule_names = (
+            "_mla_work_indptr",
+            "_mla_work_info_set",
+            "_mla_reduce_indptr",
+            "_mla_reduce_final_map",
+            "_mla_reduce_partial_map",
+            "paged_kv_indptr",
+            "qo_indptr",
+        )
+        if self._mla_work_indptr.data_ptr() == source._mla_work_indptr.data_ptr():
+            return
+        for name in schedule_names:
+            destination = getattr(self, name)
+            shared = getattr(source, name)
+            assert destination.shape == shared.shape
+            assert destination.dtype == shared.dtype
+            assert destination.device == shared.device
+            setattr(self, name, shared)
+        self._shared_schedule_needs_build = True
+
+    def get_metadata_reuse_key(self) -> tuple[object, ...]:
+        return (
+            self.num_heads,
+            self._num_attention_heads,
+            self._mtp_decode_qlen,
+            self.kernel_block_size,
+            self._kv_cache_dtype_str,
+            self.decode_attn_out_dtype,
+        )
 
     def _init_fp8_prefill_ps_buffers(
         self,
@@ -676,7 +720,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # to the original _copy_page_indices_kernel).
         # When kernel_block_size=K>1, block_table entry b covering K tokens
         # gets expanded to flat indices b*K, b*K+1, ..., b*K+(K-1).
-        _expand_page_indices_kernel[(num_reqs,)](
+        _expand_page_indices_kernel[(num_reqs, triton.cdiv(max_seq_len, 1024))](
             self.paged_kv_indices,
             block_table_tensor,
             block_table_tensor.stride(0),
@@ -802,6 +846,100 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         return attn_metadata
 
+    def update_block_table(
+        self,
+        metadata: AiterMLAMetadata,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> AiterMLAMetadata:
+        """Reuse request-shape metadata for another MLA KV-cache group.
+
+        Kimi-K3 has several MLA groups with identical request/query geometry
+        but distinct block tables. The persistent decode schedule depends on
+        the geometry, while only the expanded page indices depend on the table.
+
+        Full CUDA graphs capture stable metadata addresses. Compatible groups
+        share their read-only numeric schedule allocation before capture, while
+        retaining group-local page indices and pointer-bearing work metadata.
+        """
+        updated = copy.copy(metadata)
+        updated.slot_mapping = slot_mapping
+
+        if metadata.prefill is not None:
+            prefill = copy.copy(metadata.prefill)
+            prefill.block_table = blk_table[metadata.num_decodes :]
+            prefill.prefill_backend = self._prefill_backend
+            self._prefill_backend.prepare_metadata(prefill)
+            updated.prefill = prefill
+
+        if metadata.decode is not None:
+            decode = copy.copy(metadata.decode)
+            decode.block_table = blk_table[: metadata.num_decodes]
+            assert decode.paged_kv_indptr is not None
+            assert decode.seq_lens is not None
+            numeric_schedule = (
+                ("work_indptr", "_mla_work_indptr"),
+                ("work_info_set", "_mla_work_info_set"),
+                ("reduce_indptr", "_mla_reduce_indptr"),
+                ("reduce_final_map", "_mla_reduce_final_map"),
+                ("reduce_partial_map", "_mla_reduce_partial_map"),
+            )
+            shared_graph_schedule = (
+                hasattr(self, "_shared_schedule_needs_build")
+                and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            )
+            if shared_graph_schedule:
+                assert not self._shared_schedule_needs_build, (
+                    "shared MLA schedule must be initialized before reuse"
+                )
+                assert decode.qo_indptr is not None
+                assert self.paged_kv_indptr.data_ptr() == (
+                    decode.paged_kv_indptr.data_ptr()
+                )
+                assert self.qo_indptr.data_ptr() == decode.qo_indptr.data_ptr()
+                num_indptr = decode.paged_kv_indptr.numel()
+                num_qo_indptr = decode.qo_indptr.numel()
+                decode.paged_kv_indptr = self.paged_kv_indptr[:num_indptr]
+                decode.qo_indptr = self.qo_indptr[:num_qo_indptr]
+
+            _expand_page_indices_kernel[
+                (
+                    metadata.num_decodes,
+                    triton.cdiv(metadata.max_seq_len, 1024),
+                )
+            ](
+                self.paged_kv_indices,
+                decode.block_table,
+                decode.block_table.stride(0),
+                decode.paged_kv_indptr,
+                decode.seq_lens,
+                KERNEL_BLOCK_SIZE=self.kernel_block_size,
+                BLOCK_SIZE=1024,
+            )
+
+            if shared_graph_schedule:
+                decode.paged_kv_last_page_len = self.paged_kv_last_page_len[
+                    : metadata.num_decodes
+                ]
+            decode.paged_kv_indices = self.paged_kv_indices
+            updated.decode = decode
+
+            if shared_graph_schedule:
+                # work_meta_data contains addresses into this builder's
+                # persistent schedule buffers. Keep the pointer table created
+                # for this group at capture time; it cannot be copied.
+                if metadata.work_meta_data is not None:
+                    updated.work_meta_data = self._mla_work_meta_data
+
+                for field, destination_name in numeric_schedule:
+                    source = getattr(metadata, field)
+                    if source is not None:
+                        destination = getattr(self, destination_name)
+                        assert destination.data_ptr() == source.data_ptr()
+                        setattr(updated, field, destination)
+
+        return updated
+
     def build(
         self,
         common_prefix_len: int,
@@ -811,6 +949,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         attn_metadata = super().build(
             common_prefix_len, common_attn_metadata, fast_build
         )
+        self._shared_schedule_needs_build = False
         if (
             attn_metadata.decode is not None
             and attn_metadata.decode.has_persistent_metadata
@@ -854,31 +993,28 @@ def _expand_page_indices_kernel(
     is expanded to flat indices b*K, b*K+1, ..., b*K+(K-1).
     """
     req_idx = tl.program_id(0)
+    token_offsets = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     row_ptr = block_table + req_idx * block_table_stride
     start_idx = tl.load(cu_num_tokens + req_idx)
     num_tokens = tl.load(seq_lens + req_idx)
+    mask = token_offsets < num_tokens
 
-    offset = tl.arange(0, BLOCK_SIZE)
-    for i in tl.range(0, num_tokens, BLOCK_SIZE):
-        token_offsets = i + offset
-        mask = token_offsets < num_tokens
+    # Which block in the block table does this token belong to?
+    block_idx = token_offsets // KERNEL_BLOCK_SIZE
+    # Offset within that block
+    offset_in_block = token_offsets % KERNEL_BLOCK_SIZE
 
-        # Which block in the block table does this token belong to?
-        block_idx = token_offsets // KERNEL_BLOCK_SIZE
-        # Offset within that block
-        offset_in_block = token_offsets % KERNEL_BLOCK_SIZE
+    # Load the block ID from the block table
+    block_ids = tl.load(row_ptr + block_idx, mask=mask)
 
-        # Load the block ID from the block table
-        block_ids = tl.load(row_ptr + block_idx, mask=mask)
+    # Compute flat index in the flattened kv_buffer
+    flat_indices = block_ids * KERNEL_BLOCK_SIZE + offset_in_block
 
-        # Compute flat index in the flattened kv_buffer
-        flat_indices = block_ids * KERNEL_BLOCK_SIZE + offset_in_block
-
-        tl.store(
-            page_indices + start_idx + token_offsets,
-            flat_indices,
-            mask=mask,
-        )
+    tl.store(
+        page_indices + start_idx + token_offsets,
+        flat_indices,
+        mask=mask,
+    )
 
 
 class AiterMLAHelper:
