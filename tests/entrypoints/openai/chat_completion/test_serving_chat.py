@@ -1077,6 +1077,11 @@ def test_mm_prompt_tokens_details():
 
 def test_completion_tokens_details():
     assert _make_completion_tokens_details(7).reasoning_tokens == 7
+    details = _make_completion_tokens_details(7, 3, 2)
+    assert details is not None
+    assert details.reasoning_tokens == 7
+    assert details.accepted_prediction_tokens == 3
+    assert details.rejected_prediction_tokens == 2
 
 
 @pytest.mark.asyncio

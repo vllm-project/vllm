@@ -111,9 +111,7 @@ def _make_completion_tokens_details(
     accepted_prediction_tokens: int = 0,
     rejected_prediction_tokens: int = 0,
 ) -> CompletionTokenUsageInfo | None:
-    has_prediction_tokens = (
-        accepted_prediction_tokens or rejected_prediction_tokens
-    )
+    has_prediction_tokens = accepted_prediction_tokens or rejected_prediction_tokens
     if reasoning_tokens is None and not has_prediction_tokens:
         return None
     if reasoning_tokens is None:
