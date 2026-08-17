@@ -7,57 +7,11 @@ import torch.distributed as dist
 
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import get_dp_group
+from vllm.v1.worker.dp_utils import DPProfilerSync
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
 )
-
-
-class DPProfilerSync:
-    """Starts the torch profiler on the same step across all DP ranks.
-
-    ``start_profile`` reaches each DP rank asynchronously, at a different point
-    in its own step loop, and every step all DP ranks must jointly execute the
-    EP all-to-all / DP coordination collective. A separate barrier on the
-    profiler control path therefore deadlocks: the first rank to reach it stops
-    stepping, so the others wedge on the next collective before they ever reach
-    their own barrier (see VLLM_ENABLE_MULTINODE_PROFILING).
-
-    Instead this rides the per-step DP coordination all-reduce that every rank
-    already executes in lockstep. ``request_start`` sets a pending flag; the
-    flag is OR-reduced across DP ranks inside ``sync_cudagraph_and_dp_padding``;
-    once any rank has requested it, ``start_now`` latches on every rank on the
-    same step, and the worker starts capture next step. No extra collective, no
-    deadlock, and it needs only one rank to receive start_profile (the OR
-    propagates it).
-    """
-
-    def __init__(self) -> None:
-        # start_profile received, capture not yet begun.
-        self._pending = False
-        # Latched consensus, cleared when the worker consumes it.
-        self.start_now = False
-
-    def request_start(self) -> None:
-        self._pending = True
-
-    def cancel(self) -> None:
-        """Drop a pending request (e.g. stop_profile before capture began)."""
-        self._pending = False
-        self.start_now = False
-
-    def observe(self, consensus: bool) -> None:
-        """Record the OR-reduced request flag from a DP coordination reduce."""
-        if consensus:
-            self.start_now = True
-
-    def consume_start(self) -> bool:
-        """Return True once, on the step every rank agreed to start capture."""
-        if self.start_now:
-            self.start_now = False
-            self._pending = False
-            return True
-        return False
 
 
 def sync_cudagraph_and_dp_padding(

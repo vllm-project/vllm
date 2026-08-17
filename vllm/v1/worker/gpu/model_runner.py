@@ -212,10 +212,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.dp_size = self.parallel_config.data_parallel_size
         self.dp_rank = self.parallel_config.data_parallel_rank
 
-        # Rides the per-step DP coordination all-reduce to start the torch
-        # profiler on the same step across all DP ranks. Only meaningful with DP
-        # (that reduce only runs when data_parallel_size > 1) and opt-in via
-        # VLLM_ENABLE_MULTINODE_PROFILING.
+        # Syncs torch profiler start across DP ranks (see DPProfilerSync).
         self.dp_profiler_sync: DPProfilerSync | None = (
             DPProfilerSync()
             if (envs.VLLM_ENABLE_MULTINODE_PROFILING and self.dp_size > 1)

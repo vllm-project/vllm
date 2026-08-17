@@ -1162,10 +1162,8 @@ class Worker(WorkerBase):
 
             dp_profiler_sync = getattr(self.model_runner, "dp_profiler_sync", None)
             if dp_profiler_sync is not None:
-                # Defer the actual start: request it here and let the per-step DP
-                # coordination reduce agree on a common start step across ranks,
-                # so multi-node traces cover the same iterations without a
-                # deadlock-prone barrier (see DPProfilerSync).
+                # Defer start: let the DP coordination reduce agree on a
+                # common start step across ranks (see DPProfilerSync).
                 dp_profiler_sync.request_start()
             else:
                 self.profiler.start()
@@ -1186,12 +1184,8 @@ class Worker(WorkerBase):
                     self.profiler = None
 
     def _create_profiler(self, profile_prefix: str | None = None) -> None:
-        """Build self.profiler (torch/cuda wrapper) if not already created.
-
-        Idempotent: the first call wins the trace name; later calls (e.g. an
-        OR-reduced synced start on a rank that never received /start_profile
-        locally) reuse the existing wrapper.
-        """
+        """Build self.profiler if not already created; idempotent so a
+        rank that never received /start_profile can still build one."""
         if self.profiler is not None:
             return
 
@@ -1227,18 +1221,8 @@ class Worker(WorkerBase):
             )
 
     def _maybe_start_synced_profile(self) -> None:
-        """Start capture once all DP ranks have agreed on the start step.
-
-        Called every worker step (real and dummy) so idle DP ranks start in
-        lockstep with busy ones. No-op unless VLLM_ENABLE_MULTINODE_PROFILING
-        deferred a start via DPProfilerSync.
-
-        Only one rank needs to receive /start_profile: the request is OR-reduced
-        across DP ranks, so a rank that never got the HTTP call still reaches
-        consensus here. Such a rank has no profiler wrapper yet (it is created in
-        profile()), so build it now -- otherwise the latch is consumed and the
-        rank silently never captures.
-        """
+        """Start capture once all DP ranks agree on the start step; builds
+        the profiler lazily for ranks that never got /start_profile."""
         dp_profiler_sync = getattr(self.model_runner, "dp_profiler_sync", None)
         if dp_profiler_sync is None:
             return
@@ -1259,13 +1243,8 @@ class Worker(WorkerBase):
 
     def execute_dummy_batch(self) -> None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        # Advance the profiler on idle (dummy) steps too. An idle DP rank still
-        # runs the DP coordination collective in lockstep with busy ranks, so a
-        # rank that started capture via the OR-reduced synced start but then only
-        # services dummy batches must still count these iterations -- otherwise
-        # its profiler never reaches max_iterations, never stops, and never dumps
-        # a trace, silently degrading multi-node capture to the busy ranks only
-        # (see DPProfilerSync / VLLM_ENABLE_MULTINODE_PROFILING).
+        # Advance the profiler on dummy steps too, so idle DP ranks still
+        # count iterations toward max_iterations (see DPProfilerSync).
         if self.profiler is not None:
             self.profiler.step()
         self.model_runner._dummy_run(num_tokens, uniform_decode=True)
