@@ -1063,6 +1063,21 @@ class TestQuarkInt4Format:
             "language_model.lm_head",
         ]
 
+    def test_quark_apply_mapper_ignores_non_string_list_entries(self):
+        quant_config = QuarkConfig.from_config(
+            {
+                **_quark_int4_config(),
+                "algo_config": [
+                    {"name": "qronos", "inside_layer_modules": ["self_attn.q_proj"]}
+                ],
+            }
+        )
+        quant_config.apply_vllm_mapper(WeightsMapper())
+
+        assert quant_config.quant_config["algo_config"] == [
+            {"name": "qronos", "inside_layer_modules": ["self_attn.q_proj"]}
+        ]
+
     def test_quark_bare_exclude_matches_nested_module_prefix(self):
         quant_config = QuarkConfig.from_config(_quark_int4_config(exclude=["lm_head"]))
         quant_config.apply_vllm_mapper(WeightsMapper())

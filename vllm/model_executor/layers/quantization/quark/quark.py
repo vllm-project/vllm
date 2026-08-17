@@ -140,8 +140,10 @@ class QuarkConfig(QuantizationConfig):
         quant_config_with_hf_to_vllm_mapper: dict[str, Any] = {}
 
         for k, v in self.quant_config.items():
-            if isinstance(v, list):
+            if isinstance(v, list) and all(isinstance(item, str) for item in v):
                 quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_list(v)
+            elif isinstance(v, list):
+                quant_config_with_hf_to_vllm_mapper[k] = v
             elif isinstance(v, dict):
                 quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_dict(v)
             else:
