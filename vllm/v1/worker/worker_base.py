@@ -125,6 +125,10 @@ class WorkerBase:
     def get_model(self) -> nn.Module:
         raise NotImplementedError
 
+    def supports_draft_weight_updates(self) -> bool:
+        """Whether this worker can update its configured speculative model."""
+        return False
+
     def apply_model(self, fn: Callable[[nn.Module], _R]) -> _R:
         """Apply a function on the model inside this worker."""
         return fn(self.get_model())
