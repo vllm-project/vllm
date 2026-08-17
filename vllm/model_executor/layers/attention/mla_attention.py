@@ -1168,6 +1168,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         return MLAAttentionSpec(
             **common_kwargs,
+            is_index_group_leader=self.indexer is not None,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
 

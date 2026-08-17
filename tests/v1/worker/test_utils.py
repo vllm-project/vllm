@@ -198,12 +198,13 @@ def test_hisparse_worker_invalidates_only_index_group_leaders(monkeypatch):
 def test_hisparse_worker_prepare_step_queues_invalidation_and_restores(monkeypatch):
     worker = object.__new__(HiSparseWorker)
     worker.kernel_block_size = 64
+    worker.source_group_id = 1
     worker._pending_invalid_block_ids = []
     worker._post_forward_transfers = []
     scheduler_output = SimpleNamespace(
         num_scheduled_tokens={"request-0": 1, "request-1": 1},
-        scheduled_new_reqs=[SimpleNamespace(block_ids=([2, 3],))],
-        scheduled_cached_reqs=SimpleNamespace(new_block_ids=[([4],), None]),
+        scheduled_new_reqs=[SimpleNamespace(block_ids=([20], [2, 3]))],
+        scheduled_cached_reqs=SimpleNamespace(new_block_ids=[([40], [4]), None]),
     )
     command = SparseKVOffloadCommand(
         block_table_updates={}, page_transfers=[], fully_resident=True
@@ -228,6 +229,8 @@ def test_hisparse_worker_preserves_directly_imported_indexer(monkeypatch):
     worker = object.__new__(HiSparseWorker)
     worker.kernel_block_size = 4
     worker.blocks_per_kv_block = 2
+    worker.source_group_id = 2
+    worker.indexer_group_id = 0
     worker.src_cpu = torch.empty(2, dtype=torch.int32)
     worker.dst_cpu = torch.empty(2, dtype=torch.int32)
     worker.src_gpu = torch.empty(2, dtype=torch.int32)
@@ -242,10 +245,10 @@ def test_hisparse_worker_preserves_directly_imported_indexer(monkeypatch):
     scheduler_output = SimpleNamespace(
         scheduled_new_reqs=[
             SimpleNamespace(
-                req_id="direct", block_ids=([1], [10]), num_computed_tokens=4
+                req_id="direct", block_ids=([10], [], [1]), num_computed_tokens=4
             ),
             SimpleNamespace(
-                req_id="host", block_ids=([2], [20]), num_computed_tokens=4
+                req_id="host", block_ids=([20], [], [2]), num_computed_tokens=4
             ),
         ],
         scheduled_cached_reqs=SimpleNamespace(

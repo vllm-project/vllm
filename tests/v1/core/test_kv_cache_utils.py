@@ -57,6 +57,7 @@ from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
+    MLACacheRole,
     SinkFullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
@@ -71,25 +72,34 @@ pytestmark = pytest.mark.cpu_test
 
 
 def test_hisparse_memory_usage_keeps_indexer_source_on_host():
-    class FixedMemorySpec:
-        def __init__(self, size: int):
-            self.size = size
-
-        def max_memory_usage_bytes(self, _vllm_config):
-            return self.size
-
     specs = {
-        "model.layers.0.self_attn": FixedMemorySpec(300),
-        "model.layers.0.self_attn.indexer": FixedMemorySpec(50),
+        "main": MLAAttentionSpec(
+            block_size=1,
+            num_kv_heads=1,
+            head_size=300,
+            dtype=torch.uint8,
+            is_index_group_leader=True,
+        ),
+        "selection": MLAAttentionSpec(
+            block_size=1,
+            num_kv_heads=1,
+            head_size=50,
+            dtype=torch.uint8,
+            cache_role=MLACacheRole.INDEXER,
+        ),
     }
     group = KVCacheGroupSpec(
         layer_names=list(specs),
         kv_cache_spec=UniformTypeKVCacheSpecs(
-            block_size=16,
-            kv_cache_specs=specs,  # type: ignore[arg-type]
+            block_size=1,
+            kv_cache_specs=specs,
         ),
     )
-    config = SimpleNamespace(attention_config=SimpleNamespace(hisparse_config=object()))
+    config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=object()),
+        model_config=SimpleNamespace(max_model_len=1),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
 
     assert kv_cache_utils._hisparse_gpu_memory_usage(config, [group]) == 50
 
@@ -113,6 +123,7 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
             head_size=576,
             dtype=torch.bfloat16,
             supported_kernel_block_sizes=main_sizes,
+            is_index_group_leader=True,
         ),
         "model.layers.0.self_attn.indexer": MLAAttentionSpec(
             block_size=block_size,
@@ -120,6 +131,7 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
             head_size=128,
             dtype=torch.bfloat16,
             supported_kernel_block_sizes=indexer_sizes,
+            cache_role=MLACacheRole.INDEXER,
         ),
     }
     group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
@@ -190,6 +202,7 @@ def test_hisparse_hma_rejects_mixed_hot_page_sizes():
             head_size=576,
             dtype=torch.bfloat16,
             supported_kernel_block_sizes=(64,),
+            is_index_group_leader=True,
         ),
         "model.layers.0.self_attn.indexer": MLAAttentionSpec(
             block_size=64,
@@ -197,6 +210,7 @@ def test_hisparse_hma_rejects_mixed_hot_page_sizes():
             head_size=128,
             dtype=torch.bfloat16,
             supported_kernel_block_sizes=(64,),
+            cache_role=MLACacheRole.INDEXER,
         ),
         "model.layers.1.self_attn": MLAAttentionSpec(
             block_size=64,
@@ -243,6 +257,7 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
             model_version="deepseek_v4",
             alignment=576,
             supported_kernel_block_sizes=(256,),
+            is_index_group_leader=True,
         ),
         c4_indexer: MLAAttentionSpec(
             block_size=256,
@@ -251,6 +266,7 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
             dtype=torch.uint8,
             compress_ratio=4,
             supported_kernel_block_sizes=(256,),
+            cache_role=MLACacheRole.INDEXER,
         ),
         c128_main: MLAAttentionSpec(
             block_size=256,
@@ -270,6 +286,7 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
             dtype=torch.uint8,
             compress_ratio=128,
             supported_kernel_block_sizes=(256,),
+            cache_role=MLACacheRole.INDEXER,
         ),
     }
     full_uniform = UniformTypeKVCacheSpecs.from_specs(full_specs)

@@ -73,12 +73,16 @@ class HiSparseWorker:
         max_model_len: int,
         max_concurrent_batches: int,
         blocks_per_kv_block: int,
+        source_group_id: int,
+        indexer_group_id: int,
         device: torch.device,
     ) -> None:
         self.cache_pairs = cache_pairs
         kernel_block_size = cache_pairs[0][0].shape[1]
         self.kernel_block_size = kernel_block_size
         self.blocks_per_kv_block = blocks_per_kv_block
+        self.source_group_id = source_group_id
+        self.indexer_group_id = indexer_group_id
         capacity = max_num_reqs * cdiv(max_model_len, kernel_block_size)
         self.src_cpu = torch.empty(capacity, dtype=torch.int32, pin_memory=True)
         self.dst_cpu = torch.empty(capacity, dtype=torch.int32, pin_memory=True)
@@ -227,11 +231,11 @@ class HiSparseWorker:
         block_ids = [
             block_id
             for request in scheduler_output.scheduled_new_reqs
-            for block_id in request.block_ids[0]
+            for block_id in request.block_ids[self.source_group_id]
         ]
         for new_block_ids in scheduler_output.scheduled_cached_reqs.new_block_ids:
             if new_block_ids is not None:
-                block_ids.extend(new_block_ids[0])
+                block_ids.extend(new_block_ids[self.source_group_id])
 
         self._pending_invalid_block_ids.extend(block_ids)
         indexer_ready_req_ids = command.indexer_ready_req_ids if command else ()
@@ -369,8 +373,8 @@ class HiSparseWorker:
             nonlocal num_pairs
             if num_tokens <= 0:
                 return
-            source_blocks = block_ids[0]
-            indexer_blocks = block_ids[1]
+            source_blocks = block_ids[self.source_group_id]
+            indexer_blocks = block_ids[self.indexer_group_id]
             # The host manager returns logical scheduler blocks; the GPU
             # indexer manager returns already-split kernel-page blocks.
             count = min(
@@ -559,5 +563,7 @@ def init_hisparse_worker(
         max_model_len,
         max_concurrent_batches,
         block_size // indexer_block_size,
+        source_group_id,
+        indexer_group_id,
         device,
     )

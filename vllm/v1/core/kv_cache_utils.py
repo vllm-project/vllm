@@ -34,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    MLACacheRole,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
@@ -1365,20 +1366,6 @@ def _hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int | None:
     return int(config.host_pool_gib * 2**30)
 
 
-def _is_hisparse_host_layer(layer_name: str) -> bool:
-    return ".indexer" not in layer_name
-
-
-def get_hisparse_layer_prefix(name: str) -> str:
-    if ".self_attn." in name:
-        return name.partition(".self_attn.")[0]
-    prefix, separator, suffix = name.rpartition(".layers.")
-    layer_index = suffix.partition(".")[0]
-    if separator and layer_index.isdigit():
-        return f"{prefix}{separator}{layer_index}"
-    return name
-
-
 HISPARSE_HOT_SUFFIX = ".hisparse_hot"
 HISPARSE_RESIDENT_SUFFIX = ".hisparse_resident"
 HISPARSE_INDEXER_SOURCE_SUFFIX = ".hisparse_source"
@@ -1416,10 +1403,16 @@ def _get_hisparse_hma_config(
     else:
         specs = all_full_specs
     host_specs = {
-        name: spec for name, spec in specs.items() if _is_hisparse_host_layer(name)
+        name: spec
+        for name, spec in specs.items()
+        if not isinstance(spec, MLAAttentionSpec)
+        or spec.cache_role is MLACacheRole.MAIN
     }
     indexer_specs = {
-        name: spec for name, spec in specs.items() if not _is_hisparse_host_layer(name)
+        name: spec
+        for name, spec in specs.items()
+        if isinstance(spec, MLAAttentionSpec)
+        and spec.cache_role is MLACacheRole.INDEXER
     }
     assert host_specs and indexer_specs
 
@@ -1449,7 +1442,7 @@ def _get_hisparse_hma_config(
 
     # Host pages retain the scheduler block size. The packed GPU slab uses
     # native kernel pages so indexer and hot-cache block IDs share one layout.
-    gpu_indexer_specs = {
+    gpu_indexer_specs: dict[str, KVCacheSpec] = {
         name: spec.copy_with_new_block_size(gpu_block_size)
         for name, spec in indexer_specs.items()
     }
@@ -1497,10 +1490,12 @@ def _get_hisparse_hma_config(
         )
     hot_blocks_per_request = cdiv(config.device_buffer_size, storage_block_size)
 
-    indexer_prefixes = {get_hisparse_layer_prefix(name) for name in indexer_specs}
     hot_units: list[list[tuple[str, KVCacheSpec]]] = []
     for layer_name, layer_spec in host_specs.items():
-        if get_hisparse_layer_prefix(layer_name) in indexer_prefixes or not hot_units:
+        if (
+            isinstance(layer_spec, MLAAttentionSpec)
+            and layer_spec.is_index_group_leader
+        ) or not hot_units:
             hot_units.append([])
         hot_units[-1].append(
             (
@@ -1695,8 +1690,11 @@ def _hisparse_gpu_memory_usage(
     )
     full_group_bytes = sum(
         spec.max_memory_usage_bytes(vllm_config)
-        for name, spec in per_layer_specs.items()
-        if not _is_hisparse_host_layer(name)
+        for spec in per_layer_specs.values()
+        if (
+            isinstance(spec, MLAAttentionSpec)
+            and spec.cache_role is MLACacheRole.INDEXER
+        )
         or (
             is_deepseek_v4
             and isinstance(spec, MLAAttentionSpec)
