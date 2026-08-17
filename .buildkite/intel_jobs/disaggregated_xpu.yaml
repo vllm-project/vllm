@@ -288,3 +288,26 @@ steps:
     'cd tests &&
     bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
     bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh || true'
+- label: Kimi-Linear-48B-A3B Disaggregated DP EP
+  device: intel_gpu
+  timeout_in_minutes: 60
+  num_devices: 4
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 4+
+  _raw_old_commands:
+  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+  - bash v1/kv_connector/nixl_integration/run_accuracy_test.sh
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    bash /workspace/vllm/.buildkite/scripts/install-kv-connectors.sh || true &&
+    bash v1/kv_connector/nixl_integration/run_accuracy_test.sh || true'

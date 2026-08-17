@@ -18,6 +18,7 @@ steps:
   - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/test_initialization.py
   - tests/models/registry.py
   commands:
@@ -65,6 +66,7 @@ steps:
   - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/test_terratorch.py
   - tests/models/transformers/test_backend.py
   - tests/models/test_registry.py
