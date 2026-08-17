@@ -5,6 +5,7 @@ from importlib import import_module
 from typing import Any, Literal
 
 from .base import (
+    PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VideoSourceMetadata,
     VideoTargetMetadata,
@@ -22,7 +23,9 @@ _BACKEND_OPTION_DEFAULTS: dict[str, dict[str, Any]] = {
         "num_ffmpeg_threads": 0,
         "seek_mode": "exact",
     },
-    PYNVVIDEOCODEC_VIDEO_BACKEND: {},
+    PYNVVIDEOCODEC_VIDEO_BACKEND: {
+        "hw_decoders": PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
+    },
     "deepstream": {
         "pool_size": None,
         "timeout_sec": 120.0,
@@ -96,6 +99,7 @@ def decode_video(
 
 
 __all__ = [
+    "PYNVVIDEOCODEC_DEFAULT_HW_DECODERS",
     "PYNVVIDEOCODEC_VIDEO_BACKEND",
     "VideoDecoderBackend",
     "VideoSourceMetadata",

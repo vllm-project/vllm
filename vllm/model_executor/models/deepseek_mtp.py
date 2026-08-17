@@ -44,25 +44,6 @@ from .utils import (
 )
 
 
-def _restore_full_token_layout_if_needed(
-    hidden_states: torch.Tensor,
-    residual: torch.Tensor,
-    num_tokens: int,
-    is_sequence_parallel: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Restore full token rows for the MTP proposer after SP MoE layers."""
-    if not is_sequence_parallel and hidden_states.shape[0] == num_tokens:
-        return hidden_states, residual
-
-    combined_states = torch.cat([hidden_states, residual], dim=-1)
-    combined_states = tensor_model_parallel_all_gather(combined_states, 0)
-    combined_states = combined_states[:num_tokens]
-    hidden_states, residual = combined_states.split(
-        [hidden_states.shape[-1], residual.shape[-1]], dim=-1
-    )
-    return hidden_states, residual
-
-
 class SharedHead(nn.Module):
     def __init__(
         self,
@@ -87,6 +68,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
 
+        assert vllm_config.speculative_config is not None
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
         quant_config = vllm_config.quant_config
@@ -142,13 +124,10 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             hidden_states=hidden_states,
             residual=None,
         )
-        hidden_states, residual = _restore_full_token_layout_if_needed(
-            hidden_states,
-            residual,
-            positions.shape[0],
-            is_sequence_parallel=self.mtp_block.use_sequence_parallel_moe,
-        )
         hidden_states = residual + hidden_states  # pre-final-norm (logits hidden)
+        if self.mtp_block.use_sequence_parallel_moe:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[: positions.shape[0]]
         # Recycle the post-final-norm hidden into the next draft step.
         # compute_logits applies shared_head (== final norm) to the pre-norm
         # element, so logits and the recycle each get exactly one final-norm.
@@ -445,7 +424,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
                     # with expert_id.
                     is_expert_weight = False
                     for mapping in expert_params_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping
+                        param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in chunk_name:
                             continue
 
@@ -468,7 +447,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
                             param,
                             weight_to_load,
                             name_mapped,
-                            shard_id=shard_id,
+                            shard_id=expert_shard_id,
                             expert_id=expert_id,
                             return_success=True,
                         )
@@ -489,9 +468,10 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
                         if name.endswith(".bias") and name not in params_dict:
                             continue
 
-                        name = maybe_remap_kv_scale_name(name, params_dict)
-                        if name is None:
+                        remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                        if remapped_name is None:
                             continue
+                        name = remapped_name
 
                         # According to DeepSeek-V3 Technical Report, MTP modules
                         # shares embedding layer. We only load the first weights.

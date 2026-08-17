@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import importlib
-import inspect
 import multiprocessing
 import multiprocessing.forkserver as forkserver
 import os
@@ -16,9 +14,7 @@ from contextlib import asynccontextmanager
 from typing import Any, cast
 
 import uvloop
-from fastapi import FastAPI, HTTPException
-from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
 from starlette.datastructures import State
 
 import vllm.envs as envs
@@ -27,11 +23,12 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
+from vllm.entrypoints.launchers.api_server.routers import register_api_routers
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
+from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
+from vllm.entrypoints.serve.middleware.register import init_entrypoints_middleware
 from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
@@ -42,19 +39,8 @@ from vllm.entrypoints.serve.utils.api_utils import (
 )
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.server_utils import (
-    engine_error_handler,
-    exception_handler,
-    generation_error_handler,
     get_uvicorn_log_config,
-    http_exception_handler,
     lifespan,
-    log_response,
-    validation_exception_handler,
-)
-from vllm.exceptions import (
-    VLLMNotFoundError,
-    VLLMUnprocessableEntityError,
-    VLLMValidationError,
 )
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
@@ -67,7 +53,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import is_valid_ipv6_address
 from vllm.utils.system_utils import decorate_logs, set_ulimit
-from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.version import __version__ as VLLM_VERSION
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
@@ -217,57 +202,9 @@ def build_app(
     else:
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
+    app.root_path = args.root_path
 
-    from vllm.entrypoints.serve import register_vllm_serve_api_routers
-
-    register_vllm_serve_api_routers(app)
-
-    from vllm.entrypoints.openai.models.api_router import (
-        attach_router as register_models_api_router,
-    )
-
-    register_models_api_router(app)
-
-    from vllm.entrypoints.serve.sagemaker.api_router import (
-        attach_router as register_sagemaker_api_router,
-    )
-
-    register_sagemaker_api_router(app, supported_tasks, model_config)
-
-    if envs.VLLM_SERVER_DEV_MODE:
-        from vllm.entrypoints.serve import register_vllm_dev_api_routers
-
-        register_vllm_dev_api_routers(app)
-
-    if "generate" in supported_tasks:
-        from vllm.entrypoints.generate.api_router import (
-            register_generate_api_routers,
-        )
-
-        register_generate_api_routers(app)
-
-        from vllm.entrypoints.serve.elastic_ep.api_router import (
-            attach_router as elastic_ep_attach_router,
-        )
-
-        elastic_ep_attach_router(app)
-
-    if "generate" in supported_tasks or "render" in supported_tasks:
-        from vllm.entrypoints.scale_out.factories import register_scale_out_api_routers
-
-        register_scale_out_api_routers(app, supported_tasks)
-
-    if "transcription" in supported_tasks or "realtime" in supported_tasks:
-        from vllm.entrypoints.speech_to_text.factories import (
-            register_speech_to_text_api_routers,
-        )
-
-        register_speech_to_text_api_routers(app, supported_tasks)
-
-    if any(task in POOLING_TASKS for task in supported_tasks):
-        from vllm.entrypoints.pooling.factories import register_pooling_api_routers
-
-        register_pooling_api_routers(app, supported_tasks, model_config)
+    register_api_routers(args, app, supported_tasks, model_config)
 
     # Endpoint plugins are attached last so their routes are registered after all core
     # routers. This runs even for the CPU only render server. A plugin eligible for
@@ -275,76 +212,8 @@ def build_app(
     # `engine_client=None` at Phase B (see `_init_endpoint_plugins_state`).
     _attach_endpoint_plugins(app, supported_tasks)
 
-    app.root_path = args.root_path
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=args.allowed_origins,
-        allow_credentials=args.allow_credentials,
-        allow_methods=args.allowed_methods,
-        allow_headers=args.allowed_headers,
-    )
-
-    app.exception_handler(HTTPException)(http_exception_handler)
-    app.exception_handler(RequestValidationError)(validation_exception_handler)
-    app.exception_handler(EngineGenerateError)(engine_error_handler)
-    app.exception_handler(EngineDeadError)(engine_error_handler)
-    app.exception_handler(GenerationError)(generation_error_handler)
-    # Register specific exception types so they are handled by
-    # ExceptionMiddleware (inside the Prometheus middleware) rather than
-    # ServerErrorMiddleware (outside it). Without this, these exceptions
-    # propagate through Prometheus as unhandled and get recorded as 5xx
-    # even though they result in 4xx responses to the client.
-    app.exception_handler(VLLMValidationError)(exception_handler)
-    app.exception_handler(VLLMUnprocessableEntityError)(exception_handler)
-    app.exception_handler(VLLMNotFoundError)(exception_handler)
-    app.exception_handler(ValueError)(exception_handler)
-    app.exception_handler(TypeError)(exception_handler)
-    app.exception_handler(OverflowError)(exception_handler)
-    app.exception_handler(NotImplementedError)(exception_handler)
-    app.exception_handler(Exception)(exception_handler)
-
-    # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
-    if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
-        from vllm.entrypoints.serve.utils.server_utils import AuthenticationMiddleware
-
-        app.add_middleware(AuthenticationMiddleware, tokens=tokens)
-
-    if args.enable_request_id_headers:
-        from vllm.entrypoints.serve.utils.server_utils import XRequestIdMiddleware
-
-        app.add_middleware(XRequestIdMiddleware)
-
-    # Add scaling middleware to check for scaling state
-    app.add_middleware(ScalingMiddleware)
-
-    if "realtime" in supported_tasks:
-        # Add WebSocket metrics middleware
-        from vllm.entrypoints.speech_to_text.factories import (
-            add_websocket_metrics_middleware,
-        )
-
-        add_websocket_metrics_middleware(app)
-
-    if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
-        logger.warning(
-            "CAUTION: Enabling log response in the API Server. "
-            "This can include sensitive information and should be "
-            "avoided in production."
-        )
-        app.middleware("http")(log_response)
-
-    for middleware in args.middleware:
-        module_path, object_name = middleware.rsplit(".", 1)
-        imported = getattr(importlib.import_module(module_path), object_name)
-        if inspect.isclass(imported):
-            app.add_middleware(imported)  # type: ignore[arg-type]
-        elif inspect.iscoroutinefunction(imported):
-            app.middleware("http")(imported)
-        else:
-            raise ValueError(
-                f"Invalid middleware {middleware}. Must be a function or a class."
-            )
-
+    init_exception_handler(app)
+    init_entrypoints_middleware(args, app, supported_tasks)
     app = sagemaker_standards_bootstrap(app)
     return app
 
@@ -423,6 +292,7 @@ async def init_app_state(
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
+    state.online_renderer.warmup()
 
     state.online_derenderer = OnlineDerenderer(
         model_config=engine_client.model_config,
@@ -526,6 +396,7 @@ async def init_render_app_state(
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
+    state.online_renderer.warmup()
 
     state.online_derenderer = OnlineDerenderer(
         model_config=vllm_config.model_config,

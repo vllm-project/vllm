@@ -6,6 +6,7 @@ from typing import Literal, NamedTuple
 from vllm import envs
 
 PYNVVIDEOCODEC_VIDEO_BACKEND: Literal["pynvvideocodec"] = "pynvvideocodec"
+PYNVVIDEOCODEC_DEFAULT_HW_DECODERS = 2
 
 
 class VideoTargetMetadata(NamedTuple):

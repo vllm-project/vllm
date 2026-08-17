@@ -8,7 +8,7 @@ import numpy.typing as npt
 
 from vllm.logger import init_logger
 
-from .base import VideoSourceMetadata, VideoTargetMetadata
+from .base import VideoSourceMetadata, VideoTargetMetadata, check_frame_pixel_limit
 
 logger = init_logger(__name__)
 
@@ -25,6 +25,7 @@ def decode_deepstream(
     from nvidia.deepstream_videodecode import probe_metadata
 
     total_frames, original_fps, duration, _width, _height, codec = probe_metadata(data)
+    check_frame_pixel_limit(_width, _height)
     source = loader_cls._prepare_source(
         VideoSourceMetadata(total_frames, original_fps, duration)
     )

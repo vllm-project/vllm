@@ -79,6 +79,10 @@ class VideoLoaderRegistry(ExtensionManager):
 
         return self.processor2backend.get(video_processor)
 
+    def register_gpu_codec(self, name: str) -> None:
+        """Mark a codec name as requiring GPU without registering a loader."""
+        self._requires_gpu[name] = True
+
     def backend_requires_gpu(self, name: str) -> bool:
         return self._requires_gpu.get(name, False)
 
@@ -164,6 +168,7 @@ class VideoLoader:
 
 
 VIDEO_LOADER_REGISTRY = VideoLoaderRegistry()
+VIDEO_LOADER_REGISTRY.register_gpu_codec("deepstream")
 
 
 @VIDEO_LOADER_REGISTRY.register("opencv")
@@ -246,6 +251,8 @@ class VideoBackend(VideoLoader):
                 at the cost of relying on the file's metadata. See
                 https://meta-pytorch.org/torchcodec/stable/generated_examples/decoding/approximate_mode.html
                 for details.
+            hw_decoders: Maximum number of concurrent PyNvVideoCodec decoder
+                slots. Defaults to 2 and must be a positive integer.
 
         Returns:
             Tuple of ``(frames_array, metadata_dict)``.
