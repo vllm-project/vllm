@@ -259,6 +259,44 @@ class TestParse:
         assert content == "The answer is 4."
         assert tool_calls is None
 
+    def test_stop_string_stripped_from_reasoning(self, harmony_parser, chat_request):
+        # Regression test for https://github.com/vllm-project/vllm/issues/52599:
+        # a stop string matched inside the analysis (reasoning) channel must be
+        # removed when include_stop_str_in_output is false, same as it would be
+        # for the final/content channel.
+        chat_request.stop = ["song"]
+        chat_request.include_stop_str_in_output = False
+        prompt = [Message.from_role_and_content(Role.USER, "Can you write me a song?")]
+        response = [assistant("Sure, here is a song", "analysis")]
+
+        reasoning, content, tool_calls = harmony_parser.parse(
+            "",
+            chat_request,
+            model_output_token_ids=get_model_output_tokens(prompt, response),
+        )
+
+        assert reasoning == "Sure, here is a "
+        assert content is None
+        assert tool_calls is None
+
+    def test_stop_string_kept_when_include_stop_str_in_output(
+        self, harmony_parser, chat_request
+    ):
+        chat_request.stop = ["song"]
+        chat_request.include_stop_str_in_output = True
+        prompt = [Message.from_role_and_content(Role.USER, "Can you write me a song?")]
+        response = [assistant("Sure, here is a song", "analysis")]
+
+        reasoning, content, tool_calls = harmony_parser.parse(
+            "",
+            chat_request,
+            model_output_token_ids=get_model_output_tokens(prompt, response),
+        )
+
+        assert reasoning == "Sure, here is a song"
+        assert content is None
+        assert tool_calls is None
+
     @pytest.mark.parametrize(
         "tool_args",
         [
