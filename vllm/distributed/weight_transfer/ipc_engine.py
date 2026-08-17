@@ -249,21 +249,6 @@ class IPCWeightTransferEngine(
     def shutdown(self) -> None:
         self._packed_importer.close()
 
-    @staticmethod
-    def trainer_send_weights(*args: Any, **kwargs: Any) -> None:
-        """Removed. Use the stateful `IPCTrainerWeightTransferEngine` instead.
-
-        Transitional stub kept only to satisfy the (still abstract)
-        `WeightTransferEngine.trainer_send_weights`; that member is dropped from
-        the worker ABC once every backend has migrated to the trainer engine.
-        """
-        raise NotImplementedError(
-            "The static IPC trainer path has been replaced by "
-            "IPCTrainerWeightTransferEngine. Build it via "
-            "WeightTransferTrainerFactory.trainer_init(IPCTrainerInitInfo(...), "
-            "client=..., source=...) and drive it with send_weights()."
-        )
-
 
 class IPCTrainerWeightTransferEngine(TrainerWeightTransferEngine[IPCTrainerInitInfo]):
     """Trainer-side CUDA IPC weight transfer engine.

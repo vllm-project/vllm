@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 from collections import UserDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -35,19 +35,11 @@ from vllm.sampling_params import StructuredOutputsParams
 
 
 @dataclass
-class ExpectedToolCall:
-    id: str
-    name: str
-    arguments: dict
-
-
-@dataclass
 class ReasoningCase:
     parser_cls: Any
     model_output: str
     expected_reasoning: str | None
     expected_content: str | None
-    expected_tool_calls: list[ExpectedToolCall] = field(default_factory=list)
 
 
 REASONING_CASES = [
@@ -67,9 +59,6 @@ REASONING_CASES = [
     {"tool_call_id": "0", "tool_name": "foo", "parameters": {"query": "query1"}}
 ]
 <|END_ACTION|>""",
-            expected_tool_calls=[
-                ExpectedToolCall(id="0", name="foo", arguments={"query": "query1"}),
-            ],
         ),
         id="cmd3-single_tool_call",
     ),
@@ -89,9 +78,6 @@ REASONING_CASES = [
     {"tool_call_id": "0", "tool_name": "foo", "parameters": {"query": "query1"}}
 ]
 <|END_ACTION|>""",
-            expected_tool_calls=[
-                ExpectedToolCall(id="0", name="foo", arguments={"query": "query1"}),
-            ],
         ),
         id="cmd4-single_tool_call",
     ),
@@ -236,29 +222,8 @@ class TestExtractReasoning:
         assert reasoning == case.expected_reasoning
 
         content = "".join(content_parts) if content_parts else None
-        if case.expected_tool_calls:
-            assert content is None or content == ""
-        else:
-            assert content == case.expected_content
-
-        accumulated: dict[int, dict] = {}
-        for d in tool_call_deltas:
-            idx = d["index"]
-            if idx not in accumulated:
-                accumulated[idx] = {"id": "", "name": "", "arguments": ""}
-            if d["id"]:
-                accumulated[idx]["id"] = d["id"]
-            if d["name"]:
-                accumulated[idx]["name"] = d["name"]
-            if d["arguments"]:
-                accumulated[idx]["arguments"] += d["arguments"]
-
-        assert len(accumulated) == len(case.expected_tool_calls)
-        for i, expected_tc in enumerate(case.expected_tool_calls):
-            tc = accumulated[i]
-            assert tc["id"] == expected_tc.id
-            assert tc["name"] == expected_tc.name
-            assert json.loads(tc["arguments"]) == expected_tc.arguments
+        assert content == case.expected_content
+        assert tool_call_deltas == []
 
 
 class TestIsReasoningEnd:
