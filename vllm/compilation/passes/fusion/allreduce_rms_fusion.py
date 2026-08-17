@@ -209,11 +209,6 @@ if flashinfer_comm is not None:
             if norm_out is not None:
                 norm_out = norm_out.view(-1, hidden)
         num_tokens, hidden_size = allreduce_in.shape
-        print(  # DIAG
-            f"[DIAG-RUNTIME] call_trtllm_fused_allreduce_norm num_tokens={num_tokens} "
-            f"hidden_size={hidden_size} max_token_num={max_token_num}",
-            flush=True,
-        )
         element_size = allreduce_in.element_size()
         current_tensor_size = num_tokens * hidden_size * element_size
         max_tensor_size = max_token_num * hidden_size * element_size
@@ -994,6 +989,23 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
         )
 
 
+def _fused_ar_workspace_hidden_dim(config: VllmConfig) -> int:
+    """Widest hidden size across the target and (optional) draft models.
+
+    The FlashInfer allreduce+RMSNorm workspace is a process-global singleton
+    created eagerly at pass construction and reused by every model. Under
+    speculative decoding the draft shares it, so it must fit the larger of the
+    two hidden sizes; a draft wider than the target otherwise overflows the
+    target-sized buffer (vLLM #52023).
+    """
+    hidden_dim = config.model_config.get_hidden_size()
+    spec = config.speculative_config
+    draft_model_config = getattr(spec, "draft_model_config", None) if spec else None
+    if draft_model_config is not None:
+        hidden_dim = max(hidden_dim, draft_model_config.get_hidden_size())
+    return hidden_dim
+
+
 class AllReduceFusionPass(VllmPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
@@ -1010,20 +1022,9 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
                 "AllReduce fusion pass is disabled for missing model_config."
             )
             return
-        self.hidden_dim = config.model_config.get_hidden_size()
-        _spec = config.speculative_config  # DIAG
-        _draft_cfg = (
-            getattr(_spec, "draft_model_config", None) if _spec else None
-        )  # DIAG
-        _draft_hidden = (  # DIAG
-            _draft_cfg.get_hidden_size() if _draft_cfg is not None else None
-        )
-        print(  # DIAG
-            f"[DIAG-INIT] pass __init__ model={config.model_config.model} "
-            f"model_hidden={self.hidden_dim} spec={'yes' if _spec else 'no'} "
-            f"draft_hidden={_draft_hidden}",
-            flush=True,
-        )
+        # Size the shared workspace for the widest model that reuses it (the
+        # draft under speculative decoding may be wider than the target).
+        self.workspace_hidden_dim = _fused_ar_workspace_hidden_dim(config)
         self.group = get_tp_group().cpu_group
         rank = get_tensor_model_parallel_rank()
         if flashinfer_comm is None:
@@ -1044,7 +1045,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             )
             return
         element_size = torch.tensor([], dtype=self.model_dtype).element_size()
-        self.max_token_num = max_size // (self.hidden_dim * element_size)
+        self.max_token_num = max_size // (self.workspace_hidden_dim * element_size)
         # take the min to save workspace size and we'll never use more
         # than max_num_batched_tokens anyways
         self.max_token_num = min(
@@ -1061,17 +1062,11 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             world_size=self.tp_size,
             rank=rank,
             max_token_num=self.max_token_num,
-            hidden_dim=self.hidden_dim,
+            hidden_dim=self.workspace_hidden_dim,
             dtype=self.model_dtype,
             group=self.group,
         )
-        _eager_ws = get_fi_ar_workspace(**workspace_kwargs)  # DIAG
-        print(  # DIAG
-            f"[DIAG-INIT] eager get_fi_ar_workspace(hidden_dim={self.hidden_dim}) "
-            f"returned={'None' if _eager_ws is None else 'workspace'}",
-            flush=True,
-        )
-        if _eager_ws is None:
+        if get_fi_ar_workspace(**workspace_kwargs) is None:
             logger.warning_once(
                 "Failed to initialize Flashinfer allreduce workspace. "
                 "Flashinfer allreduce-norm fusion will be disabled."
