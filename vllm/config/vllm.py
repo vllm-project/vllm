@@ -2515,7 +2515,9 @@ class VllmConfig:
         if model_config is not None and model_config.is_hybrid:
             unsupported.append("dual batch overlap with hybrid models")
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
-            unsupported.append("dual batch overlap with CUDA graphs ")
+            unsupported.append("dual batch overlap with CUDA graphs")
+        if self.is_encoder_only:
+            unsupported.append("dual batch overlap with encoder only models")
 
         return unsupported
 
