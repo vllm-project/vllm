@@ -580,6 +580,32 @@ class KVCacheManager:
             self.block_pool.free_blocks(pins)
         self.coordinator.free(request.request_id)
 
+    def update_decode_checkpoint_candidates(self, request: Request) -> None:
+        """Retain checkpoints only for tokens whose forward has completed."""
+        if not self.coordinator.retain_decode_checkpoints:
+            return
+        if not self.enable_caching:
+            return
+        processed_end = max(
+            0, request.num_computed_tokens - request.num_in_flight_tokens
+        )
+        materialized_tokens = min(processed_end, request.num_tokens)
+        self.coordinator.update_decode_checkpoint_candidates(
+            request, materialized_tokens
+        )
+
+    def finalize_decode_checkpoints(self, request: Request, keep: bool) -> None:
+        """Publish or discard the request's private decode checkpoints."""
+        if not self.coordinator.retain_decode_checkpoints:
+            return
+        if not self.enable_caching:
+            return
+        processed_end = max(
+            0, request.num_computed_tokens - request.num_in_flight_tokens
+        )
+        materialized_tokens = min(processed_end, request.num_tokens)
+        self.coordinator.finalize_decode_checkpoints(request, materialized_tokens, keep)
+
     def remove_skipped_blocks(
         self,
         request_id: str,
