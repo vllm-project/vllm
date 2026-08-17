@@ -16,8 +16,7 @@ if TYPE_CHECKING:
 
 
 class HunyuanA13BReasoningParser(ReasoningParser):
-    """
-    Reasoning parser for Hunyuan A13B Model
+    """Reasoning parser for Hunyuan A13B Model.
 
     HunyuanReasoningParser
 
@@ -102,8 +101,8 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         Returns:
             tuple[Optional[str], Optional[str]]: Tuple pair containing the
             reasoning content and non-reasoning content.
-        """
 
+        """
         re_match = self.full_match_reasoning_regex.findall(model_output)
         if re_match:
             reasoning, response_content = re_match[0]
@@ -139,7 +138,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        """Extract content using token ID sequence state machine"""
+        """Extract content using token ID sequence state machine."""
         # Define sequences
         think_start_sequence = self.think_start_ids
         response_start_sequence = self.response_start_ids

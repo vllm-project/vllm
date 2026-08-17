@@ -143,7 +143,8 @@ async def test_streaming_output_consistency(client: OpenAI, model_name: str):
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_streaming_logprobs(client: OpenAI, model_name: str):
     """Test that streaming with logprobs returns valid logprob data on
-    output_text.delta events and that top_logprobs has the requested count."""
+    output_text.delta events and that top_logprobs has the requested count.
+    """
     response = await client.responses.create(
         model=model_name,
         input="Say hello.",

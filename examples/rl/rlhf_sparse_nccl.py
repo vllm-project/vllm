@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Demonstrates dense-vs-sparse NCCL weight syncing with a real model.
+"""Demonstrates dense-vs-sparse NCCL weight syncing with a real model.
 
 This example mirrors the validation story used for the sparse NCCL MVP:
 both the dense update path and the sparse patch path start from the same real
@@ -116,7 +115,7 @@ class TrainModel:
         return self.master_address, self.port
 
     def init_dense_engine(self, world_size: int, llm_handle) -> None:
-        """Build the dense NCCL trainer engine"""
+        """Build the dense NCCL trainer engine."""
         self.dense_engine = WeightTransferTrainerFactory.trainer_init(
             init_info=NCCLTrainerInitInfo(
                 master_address=self.master_address,
@@ -131,7 +130,8 @@ class TrainModel:
 
     def shutdown_engines(self) -> None:
         """Drop the NCCL communicators before the vLLM engine they point at
-        goes away, so the next phase rendezvouses from a clean slate."""
+        goes away, so the next phase rendezvouses from a clean slate.
+        """
         for attr in ("dense_engine", "sparse_engine"):
             engine = getattr(self, attr)
             if engine is not None:
@@ -243,7 +243,8 @@ class TrainModel:
 
     def send_dense_weights(self) -> float:
         """One call drives start/update/finish on the inference side
-        concurrently with the NCCL broadcast."""
+        concurrently with the NCCL broadcast.
+        """
         if self.dense_engine is None:
             raise RuntimeError("Dense engine is not initialized")
 
@@ -253,7 +254,7 @@ class TrainModel:
         return (time.perf_counter() - start) * 1000.0
 
     def init_sparse_engine(self, world_size: int, llm_handle) -> None:
-        """Build the sparse trainer engine"""
+        """Build the sparse trainer engine."""
         self.sparse_engine = WeightTransferTrainerFactory.trainer_init(
             init_info=SparseNCCLTrainerInitInfo(
                 master_address=self.master_address,
@@ -267,7 +268,8 @@ class TrainModel:
     def send_pending_sparse_patch(self) -> float:
         """One call drives start/update/finish on the inference side
         concurrently with the patch broadcasts. Sparse deltas differ each round,
-        so the patches are passed to `send_weights` rather than fixed at init."""
+        so the patches are passed to `send_weights` rather than fixed at init.
+        """
         if self.sparse_engine is None:
             raise RuntimeError("Sparse engine is not initialized")
         if self.pending_sparse_patches is None:

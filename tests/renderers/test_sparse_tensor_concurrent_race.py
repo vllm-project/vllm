@@ -217,7 +217,8 @@ class TestCrossLoaderLockSharing:
 
     def test_prompt_and_image_share_lock(self, model_config):
         """Prompt and image loaders cannot run their sparse guards
-        concurrently."""
+        concurrently.
+        """
         valid_prompt = _encode_tensor(_create_valid_dense_tensor())
         valid_image = _encode_tensor(_create_valid_dense_tensor(hidden_size=10))
 

@@ -344,12 +344,11 @@ class CheersVAEDecoderProjector(nn.Module):
 
 
 class CheersImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bn: Batch size * number of images
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values"]
@@ -361,7 +360,8 @@ CheersImageInputs: TypeAlias = CheersImagePixelInputs
 
 class CheersUndProjector(nn.Module):
     """Understanding projector that maps vision features to LLM dimension
-    with 2x2 spatial compression (4x token reduction)."""
+    with 2x2 spatial compression (4x token reduction).
+    """
 
     def __init__(
         self,
@@ -559,8 +559,7 @@ class CheersMultiModalProcessor(BaseMultiModalProcessor[CheersProcessingInfo]):
 class CheersForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP
 ):
-    """
-    Cheers: A unified multimodal model for image understanding and generation.
+    """Cheers: A unified multimodal model for image understanding and generation.
 
     For vLLM, we focus on the image understanding (vision-to-text) capabilities.
     The image generation part is not supported in vLLM.

@@ -130,7 +130,8 @@ def test_disabled_reproduces_the_plain_residual_sum(
 
 def test_taps_the_consumer_layer_when_one_follows(recorder, monkeypatch):
     """The value the next layer reads is the mixture against *its* weights,
-    so the tap has to reach forward rather than use the current layer's."""
+    so the tap has to reach forward rather than use the current layer's.
+    """
     _set_last_rank(monkeypatch, True)
 
     _call(_stub_model(enabled=True), 1, torch.zeros(2), None, torch.zeros(2))
@@ -183,7 +184,8 @@ def test_pending_mlp_output_is_folded_in_rather_than_passed_as_delta(
 ):
     """The kernel writes an applied delta back into the prefix in place, which
     would double-add it into the live residual stream, so the pending output
-    has to arrive already summed into the prefix with `delta` left None."""
+    has to arrive already summed into the prefix with `delta` left None.
+    """
     _set_last_rank(monkeypatch, True)
     prefix_sum = torch.tensor([1.0, 2.0])
     pending = torch.tensor([0.5, 0.25])

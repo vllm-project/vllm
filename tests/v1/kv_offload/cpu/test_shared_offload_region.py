@@ -164,7 +164,8 @@ def _mp_race_construct_and_write(
 ) -> None:
     """Race to construct a SharedOffloadRegion, write fill_value, then wait
     for the parent's cleanup signal before tearing down.  The wait gives the
-    parent a window to read the raw mmap before the creator removes the file."""
+    parent a window to read the raw mmap before the creator removes the file.
+    """
     try:
         region = SharedOffloadRegion(
             engine_id=engine_id,
@@ -196,7 +197,8 @@ def iid():
 
 def test_create_next_worker_view_shape_and_stride(iid):
     """Returned tensor must have shape (num_blocks, tensor_page_size) and
-    stride (row_stride, 1) where row_stride = cpu_page_size * num_workers."""
+    stride (row_stride, 1) where row_stride = cpu_page_size * num_workers.
+    """
     with _region(iid, num_blocks=4, cpu_page_size=2 * PAGE_SIZE) as r:
         t = r.create_next_worker_view(PAGE_SIZE)
         assert t.shape == (4, PAGE_SIZE)
@@ -236,7 +238,8 @@ def test_create_next_worker_view_row_stride_with_multiple_workers(iid):
 
 def test_create_next_worker_view_cursor_advances(iid):
     """Each create_next_worker_view call must advance _worker_offset by
-    tensor_page_size."""
+    tensor_page_size.
+    """
     with _region(iid, cpu_page_size=3 * PAGE_SIZE) as r:
         assert r._worker_offset == 0
         r.create_next_worker_view(PAGE_SIZE)
@@ -293,7 +296,8 @@ def test_create_next_worker_view_overflow_does_not_mutate_cursor(iid):
 
 def test_create_next_worker_view_write_visible_in_raw_mmap(iid):
     """Writes into a create_next_worker_view view must appear at the correct
-    raw mmap offset"""
+    raw mmap offset
+    """
     with _region(iid, num_blocks=4) as r:
         t = r.create_next_worker_view(PAGE_SIZE)
         t[2, :] = 42  # write to block row 2
@@ -326,7 +330,8 @@ def test_create_next_worker_view_multi_tensor_layout(iid):
 
 def test_create_next_worker_view_multiprocess_slots(iid):
     """Each worker process calls create_next_worker_view and writes distinct data;
-    the parent verifies each slot lands at the correct interleaved offset."""
+    the parent verifies each slot lands at the correct interleaved offset.
+    """
     num_workers = 2
     num_blocks = 4
 
@@ -611,7 +616,8 @@ def test_multi_worker_race_shared_memory_visible(iid):
 
 def test_multiprocess_race_construct_and_write(iid):
     """N processes race to construct the same SharedOffloadRegion, each writes
-    fill_value = rank+1 into their slot; parent verifies interleaved layout."""
+    fill_value = rank+1 into their slot; parent verifies interleaved layout.
+    """
     num_workers = 4
     num_blocks = 3
 
@@ -717,7 +723,8 @@ def test_cleanup_idempotent(iid):
 def test_cleanup_after_create_next_worker_view_releases_mmap(iid):
     """cleanup() must close the mmap even after create_next_worker_view was called.
     create_next_worker_view returns a view that shares storage with _base; both must be
-    released before mmap.close() can succeed."""
+    released before mmap.close() can succeed.
+    """
     r = _make_region(iid)
     mmap_obj = r.mmap_obj
 

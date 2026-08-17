@@ -93,7 +93,8 @@ def asr_inter_chunk_separator(
 
 class SpeechToTextBaseServing(GenerateBaseServing):
     """Base class for speech-to-text operations like transcription and
-    translation."""
+    translation.
+    """
 
     def __init__(
         self,
@@ -367,8 +368,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         segment_class: type[SpeechToTextSegment],
         start_time: float = 0,
     ) -> list[SpeechToTextSegment]:
-        """
-        Convert tokens to verbose segments.
+        """Convert tokens to verbose segments.
 
         This method expects the model to produce
         timestamps as tokens (similar to Whisper).
@@ -436,7 +436,8 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         stream_generator_method: Callable[..., AsyncGenerator[str, None]],
     ) -> T | V | AsyncGenerator[str, None] | ErrorResponse:
         """Base method for speech-to-text operations like transcription and
-        translation."""
+        translation.
+        """
         if request.stream and request.use_beam_search:
             return self.create_error_response(
                 "Streaming is not currently supported with beam search"

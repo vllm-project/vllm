@@ -431,8 +431,7 @@ def ref_nvfp4_quant(x, global_scale, block_size):
 def ref_nvfp4_quant_dequant(
     x: torch.Tensor, global_scale: torch.Tensor, block_size: int
 ) -> torch.Tensor:
-    """
-    NVFP4 quantize-dequantize operation.
+    """NVFP4 quantize-dequantize operation.
 
     `global_scale` is expected to have a single element.
     """

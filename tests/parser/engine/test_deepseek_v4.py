@@ -690,7 +690,8 @@ class TestParallelUnwrapping:
 
 class TestStreamingWrapperConsistency:
     """Streamed arg deltas must stay consistent with final extraction
-    when wrapper params like 'arguments' are unwrapped."""
+    when wrapper params like 'arguments' are unwrapped.
+    """
 
     def test_streaming_wrapper_unwrap_consistency(self, mock_tokenizer, mock_request):
         tool = _make_tool("get_weather", {"location": {"type": "string"}})
@@ -971,7 +972,8 @@ class TestDelegatingParserLargeDelta:
     )
     def test_eos_not_leaked_when_reasoning_never_ends(self, chunk_size):
         """EOS must not leak into reasoning_content when the model never
-        emits </think> (generation ends while still in REASONING state)."""
+        emits </think> (generation ends while still in REASONING state).
+        """
         eos_text = "<｜end▁of▁sentence｜>"
         eos_id = 128801
         vocab = {

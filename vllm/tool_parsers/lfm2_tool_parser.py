@@ -42,8 +42,7 @@ TOOL_CALL_END = "<|tool_call_end|>"
 
 
 class Lfm2ToolParser(ToolParser):
-    """
-    Tool call parser for LiquidAI LFM2/LFM2.5 models that produce pythonic
+    """Tool call parser for LiquidAI LFM2/LFM2.5 models that produce pythonic
     tool calls wrapped in <|tool_call_start|> and <|tool_call_end|> tokens.
 
     Example model output:
@@ -115,7 +114,8 @@ class Lfm2ToolParser(ToolParser):
         """Drop any orphan <|tool_call_end|> (and the preceding text) from
         trailing content. LFM2 occasionally echoes the call body after the
         first end token and caps it with a second end token; everything
-        through the last such orphan is model garbage, not user content."""
+        through the last such orphan is model garbage, not user content.
+        """
         last_orphan = raw_after.rfind(TOOL_CALL_END)
         if last_orphan != -1:
             return raw_after[last_orphan + len(TOOL_CALL_END) :]

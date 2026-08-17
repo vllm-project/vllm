@@ -72,7 +72,8 @@ _INTERNAL_LOC_MARKERS = frozenset(
 
 def _is_internal_loc_segment(segment: str) -> bool:
     """True if `segment` is a Pydantic-internal wrapper/union-branch
-    marker rather than a user-meaningful field name or list index."""
+    marker rather than a user-meaningful field name or list index.
+    """
     if _BRACKETED_INTERNAL_RE.search(segment):
         return True
     return segment.lower() in _INTERNAL_LOC_MARKERS

@@ -66,7 +66,8 @@ def _view_flashinfer_nvfp4_scale_out_as_int32(
 
 def _norm_input_weight_dtype_match(match: pm.Match) -> bool:
     """Prevent fusion when the norm input and weight dtypes differ (e.g. a Gemma
-    fp32 weight.float()+1 gamma), covering rms_norm and fused_add_rms_norm."""
+    fp32 weight.float()+1 gamma), covering rms_norm and fused_add_rms_norm.
+    """
     for node in match.nodes:
         if node.target == _IR_RMS_NORM_OP:
             x, weight = node.args[0], node.args[1]
@@ -366,8 +367,7 @@ class BasePattern:
 
 
 class AllReduceRMSNormPattern(BasePattern):
-    """
-    This pattern replaces the allreduce + rms norm (without residual)
+    """This pattern replaces the allreduce + rms norm (without residual)
     with fused flashinfer implementation.
     Applies to allreduce + rmsnorm before attn in the first Transformer block.
     """
@@ -428,8 +428,7 @@ class AllReduceRMSNormPattern(BasePattern):
 
 
 class AllReduceFusedAddRMSNormPattern(BasePattern):
-    """
-    This pattern replaces the allreduce + rms norm (with residual)
+    """This pattern replaces the allreduce + rms norm (with residual)
     with fused flashinfer implementation.
     Applies to o_proj + rmsnorm after attn and mlp + rmsnorm before attn.
     """
@@ -628,8 +627,7 @@ class AllReduceFusedAddGemmaRMSNormPattern(BasePattern):
 
 
 class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
-    """
-    This pattern replaces the allreduce + rms norm (without residual)
+    """This pattern replaces the allreduce + rms norm (without residual)
     + static fp8 quant with fused flashinfer implementation.
     Applies to allreduce + rmsnorm + quant before attn
     in the first Transformer block.
@@ -703,8 +701,7 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
 
 
 class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
-    """
-    This pattern replaces the allreduce + rms norm (with residual)
+    """This pattern replaces the allreduce + rms norm (with residual)
     + static fp8 quant with fused flashinfer implementation.
     Applies to o_proj + rmsnorm after attn + quant and
     mlp + rmsnorm + quant before attn.
@@ -786,8 +783,7 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
 
 
 class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
-    """
-    This pattern replaces the allreduce + rms norm (without residual)
+    """This pattern replaces the allreduce + rms norm (without residual)
     + static nvfp4 quant with fused flashinfer implementation.
     Applies to allreduce + rmsnorm + quant before attn
     in the first Transformer block.
@@ -883,8 +879,7 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
 
 
 class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
-    """
-    This pattern replaces the allreduce + rms norm (with residual)
+    """This pattern replaces the allreduce + rms norm (with residual)
     + static nvfp4 quant with fused flashinfer implementation.
     Applies to o_proj + rmsnorm after attn + quant and
     mlp + rmsnorm + quant before attn.

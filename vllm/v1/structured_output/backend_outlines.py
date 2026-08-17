@@ -283,7 +283,7 @@ def _prefix_needs_context(parsed) -> bool:
 
 
 def _check_unsupported(parsed) -> None:
-    """Check for regex features unsupported by regex-automata"""
+    """Check for regex features unsupported by regex-automata."""
     tokens = parsed.data if hasattr(parsed, "data") else parsed
     for ttype, tval in tokens:
         # backreference
@@ -310,8 +310,7 @@ def _check_unsupported(parsed) -> None:
 
 
 def validate_regex_is_buildable(pattern: str) -> None:
-    """
-    Validates that the input regex is not using unsupported features
+    """Validates that the input regex is not using unsupported features
     of the `regex-automata` crate (outlines_core regex engine) and has a
     universal start state.
     definition of universal start state used can be found at:

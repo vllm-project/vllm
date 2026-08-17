@@ -70,7 +70,8 @@ _MARKERS = sorted(_TML_VOCAB, key=len, reverse=True)
 def _tokenize(text: str) -> list[tuple[int, str]]:
     """Tokenize like the real stream: markers are atomic special tokens,
     plain text becomes one token per character (matching the mock
-    tokenizer's ``chr``-based decode)."""
+    tokenizer's ``chr``-based decode).
+    """
     tokens: list[tuple[int, str]] = []
     i = 0
     while i < len(text):
@@ -87,7 +88,8 @@ def _tokenize(text: str) -> list[tuple[int, str]]:
 
 def _stream(parser, request, text: str, chunk_size: int):
     """Stream production-shaped deltas: ``chunk_size`` tokens per delta,
-    with delta_token_ids covering every token (specials and text)."""
+    with delta_token_ids covering every token (specials and text).
+    """
     tokens = _tokenize(text)
     results = []
     previous_text = ""
@@ -119,7 +121,8 @@ def _stream(parser, request, text: str, chunk_size: int):
 def _stream_text_only(parser, request, text: str, chunk_size: int):
     """Stream text-only deltas (no token ids), chunked at arbitrary
     character boundaries — exercises the text-lexing fallback path,
-    including markers split across chunks."""
+    including markers split across chunks.
+    """
     results = []
     previous_text = ""
     for start in range(0, len(text), chunk_size):
@@ -170,7 +173,8 @@ def _stream_delegating(parser, request, text, chunk_size, prompt_token_ids):
     """Stream ``text`` through ``DelegatingParser.parse_delta``, ``chunk_size``
     tokens per delta; return ``(content, reasoning, ordered tool names,
     ordered tool arguments)``. Arguments arrive in fragments, so they are
-    concatenated per tool index."""
+    concatenated per tool index.
+    """
     tokens = _tokenize(text)
     content, reasoning = "", ""
     tools: dict[int, str] = {}
@@ -522,7 +526,8 @@ class TestToolCallFiltering:
     """Inkling equivalents of the generic tool-call-filtering replay tests
     (Inkling is excluded from those in test_replay.py: its structural
     role/kind tokens and shared block-end token don't fit the generic
-    reasoning/tool split model)."""
+    reasoning/tool split model).
+    """
 
     def test_skip_tool_parsing_round_trip(self, mock_tokenizer, mock_request):
         # First pass (reasoning adapter, skip_tool_parsing): reasoning is
@@ -820,7 +825,8 @@ class TestDelegatingTwoPass:
     ):
         """The optional function name between ``<|message_model|>`` and the
         content-kind marker is metadata: the buffered header must be
-        discarded on the way out, not flushed into content."""
+        discarded on the way out, not flushed into content.
+        """
         tools = [_function_tool()]
         mock_request.tools = tools
         content, _, names, args = _stream_delegating(
@@ -837,7 +843,8 @@ class TestDelegatingTwoPass:
     def test_content_state_tool_start_streaming(self, mock_tokenizer, mock_request):
         """Same opener reached from CONTENT rather than MESSAGE_HEADER: a
         text block closed with no ``<|message_model|>`` before the tool
-        block. Preceding text must reach content exactly once, unmarked."""
+        block. Preceding text must reach content exactly once, unmarked.
+        """
         tools = [_function_tool()]
         mock_request.tools = tools
         content, _, names, args = _stream_delegating(
@@ -859,7 +866,8 @@ def test_content_tool_start_emits_reasoning_end_in_reasoning_pass():
     boundary (#49876), but the header-flush path
     (MESSAGE_HEADER --END_MESSAGE--> CONTENT) reaches CONTENT without
     one, so a tool block opening from there relies on this transition
-    alone to hand off to the tool pass."""
+    alone to hand off to the tool pass.
+    """
     engine = StreamingParserEngine(inkling_config(), tokenizer=None)
     engine.skip_tool_parsing = True
     engine.reset(initial_state=ParserState.CONTENT)

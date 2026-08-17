@@ -110,8 +110,7 @@ def fused_moe_kernel_gptq_awq(
     use_int4_w4a16: tl.constexpr,
     use_int8_w8a16: tl.constexpr,
 ):
-    """
-    Implements the fused computation for a Mixture of Experts (MOE) using
+    """Implements the fused computation for a Mixture of Experts (MOE) using
     token and expert matrices.
 
     Key Parameters:
@@ -353,8 +352,7 @@ def fused_moe_kernel(
     # Tensor-descriptor path for the A gather and B load in the K-loop.
     USE_TD: tl.constexpr = False,
 ):
-    """
-    Implements the fused computation for a Mixture of Experts (MOE) using
+    """Implements the fused computation for a Mixture of Experts (MOE) using
     token and expert matrices.
 
     Key Parameters:
@@ -1109,15 +1107,13 @@ def get_moe_configs(
     block_n: int | None = None,
     block_k: int | None = None,
 ) -> dict[int, Any] | None:
-    """
-    Return optimized configurations for the fused MoE kernel.
+    """Return optimized configurations for the fused MoE kernel.
 
     The return value will be a dictionary that maps an irregular grid of
     batch sizes to configurations of the fused_moe kernel. To evaluate the
     kernel on a given batch size bs, the closest batch size in the grid should
     be picked and the associated configuration chosen to invoke the kernel.
     """
-
     # Avoid optimizing for the batch invariant case. Use default config
     if envs.VLLM_BATCH_INVARIANT:
         return None
@@ -1181,6 +1177,7 @@ def _ensure_block_size_k_divisible(
 
     Returns:
         A valid BLOCK_SIZE_K that divides size_k and is divisible by group_size.
+
     """
     # Fast path: already valid
     if size_k % block_size_k == 0 and block_size_k % group_size == 0:
@@ -1632,8 +1629,7 @@ def _get_config_quant_dtype(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
 ) -> None | torch.dtype | str:
-    """
-    Get the quantization type based on the quantization strategy flags.
+    """Get the quantization type based on the quantization strategy flags.
     We don't have a quant_config at this point so we need to work backwards.
     A return type of None means no quantization is required because the
     input is unquantized or has been quantized prior to calling

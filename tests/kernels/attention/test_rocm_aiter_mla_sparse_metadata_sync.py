@@ -108,7 +108,8 @@ def _make_mixed_common_metadata():
 
 def _patch_build_deps(monkeypatch, events=None):
     """Stub the aiter kernel, triton helper and CUDA sync so ``build()`` runs
-    on CPU."""
+    on CPU.
+    """
 
     def fake_generate_sparse_seqlen_triton(
         query_lens, seq_lens, cu_query_lens, topk_token, num_tokens, max_query_len
@@ -148,7 +149,8 @@ def test_build_populates_decode_only_split_fields(monkeypatch):
 
 def test_build_populates_mixed_split_fields(monkeypatch):
     """Mixed decode+prefill batch: split is reported, prefill fields stay
-    default because this impl always runs the MQA path."""
+    default because this impl always runs the MQA path.
+    """
     builder = _make_builder()
     _patch_build_deps(monkeypatch)
 

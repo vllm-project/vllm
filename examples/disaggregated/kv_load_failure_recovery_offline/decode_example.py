@@ -7,7 +7,7 @@ from vllm.config import KVTransferConfig
 
 
 def read_prompts():
-    """Read prompts from prefill_output.txt"""
+    """Read prompts from prefill_output.txt."""
     prompts = []
     try:
         with open("prefill_output.txt") as f:

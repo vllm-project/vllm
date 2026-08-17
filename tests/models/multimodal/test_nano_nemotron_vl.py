@@ -65,7 +65,8 @@ class _FakeTensor:
     """Sentinel stand-in for torch.Tensor in load_weights tests. Supports the
     .detach().clone() chain used by load_weights for buffered mm weights;
     both methods return self so identity (and the existing equality
-    assertions) are preserved through cloning."""
+    assertions) are preserved through cloning.
+    """
 
     def detach(self):
         return self
@@ -149,7 +150,8 @@ def _make_mm_items_with_video_bytes(
 
 def test_extract_audio_from_videos_passes_max_duration():
     """_extract_audio_from_videos must forward VLLM_MAX_AUDIO_DECODE_DURATION_S
-    to load_audio_pyav so decompression-bomb audio is rejected."""
+    to load_audio_pyav so decompression-bomb audio is rejected.
+    """
     dummy_audio = (np.zeros(16000, dtype=np.float32), 16000.0)
     mm_items = _make_mm_items_with_video_bytes(b"\x00" * 64)
 
@@ -166,7 +168,8 @@ def test_extract_audio_from_videos_passes_max_duration():
 
 def test_extract_audio_from_videos_rejects_oversized_audio():
     """When load_audio_pyav raises due to duration limit the video is
-    marked as having no audio instead of crashing the server."""
+    marked as having no audio instead of crashing the server.
+    """
     mm_items = _make_mm_items_with_video_bytes(b"\x00" * 64)
 
     processor = object.__new__(NanoNemotronVLMultiModalProcessor)

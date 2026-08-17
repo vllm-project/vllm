@@ -84,6 +84,7 @@ def get_attn_spec_kind(
 
     Returns:
         The ``KVCacheSpecKind`` the layer maps to.
+
     """
     from vllm.v1.kv_cache_interface import KVCacheSpecKind
 
@@ -114,7 +115,6 @@ def get_attn_backend(
     has_sliding_window: bool = False,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
-
     if kv_cache_dtype is not None:
         valid_cache_dtypes = get_args(CacheDType)
         assert kv_cache_dtype in valid_cache_dtypes, (

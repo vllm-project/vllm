@@ -36,7 +36,8 @@ class BaseModelLoader(ABC):
     @abstractmethod
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         """Load weights into a model. This standalone API allows
-        inplace weights loading for an already-initialized model"""
+        inplace weights loading for an already-initialized model
+        """
         raise NotImplementedError
 
     @instrument(span_name="Load model")

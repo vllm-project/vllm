@@ -64,6 +64,7 @@ class EncoderCacheManager:
             make space when needed.
         freed: List of mm_hash strings that were actually evicted since the
             last call to get_freed_mm_hashes(). This list is cleared on return.
+
     """
 
     @classmethod
@@ -113,6 +114,7 @@ class EncoderCacheManager:
 
         Returns:
             True if the encoder output for this input is already cached
+
         """
         mm_hash = request.mm_features[input_id].identifier
         # Not cached at all
@@ -162,6 +164,7 @@ class EncoderCacheManager:
 
         Note: This method does not allocate physical memory for the encoder
         output but only the state of EncoderCacheManager.
+
         """
         num_embeds = request.get_num_encoder_embeds(input_id)
 
@@ -198,8 +201,8 @@ class EncoderCacheManager:
 
         Note:
             This method assumes can_allocate() returned True for the same input.
-        """
 
+        """
         mm_hash = request.mm_features[input_id].identifier
         request_id = request.request_id
         if mm_hash not in self.cached:
@@ -222,7 +225,7 @@ class EncoderCacheManager:
         return self.request_cached_ids.get(request.request_id, set())
 
     def free_encoder_input(self, request: Request, input_id: int) -> None:
-        """Free the request's reference to the encoder input (`mm_data`)
+        """Free the request's reference to the encoder input (`mm_data`).
 
         When the reference set for the corresponding `mm_hash` becomes empty,
         the entry is appended to `freeable` and `num_freeable_slots` is
@@ -268,6 +271,7 @@ class EncoderCacheManager:
             call to be used by the scheduler to notify workers about which
             encoder outputs can be removed from their caches. The internal
             list is cleared after this call.
+
         """
         # An entry evicted early in the scheduling pass can be allocated again
         # later in the same pass. Keep its worker-side tensor in that case.
@@ -296,8 +300,8 @@ def compute_mm_encoder_budget(
             from the input sequence.
         - Space budget for encoder cache size, measured in number of tokens
             from the input sequence.
-    """
 
+    """
     if not mm_max_toks_per_item:
         logger.warning(
             "All non-text modalities supported by the model have been "

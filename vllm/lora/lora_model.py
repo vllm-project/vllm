@@ -39,9 +39,7 @@ _EXPERTS_SEPARATOR = ".experts."
 
 
 def _is_remote_expert_key(raw_name: str, spec: "MoEEPLoadSpec") -> bool:
-    """
-    Decide whether a checkpoint key belongs to a non-local expert.
-    """
+    """Decide whether a checkpoint key belongs to a non-local expert."""
     pos = raw_name.find(_EXPERTS_SEPARATOR)
     if pos < 0:
         return False
@@ -67,15 +65,14 @@ class LoRAModel:
         loras: dict[str, LoRALayerWeights],
         is_3d_lora_weight: bool = False,
     ) -> None:
-        """
-        Args:
-            lora_model_id: The integer id for the lora model.
-            rank: lora rank.
-            loras: module name -> weights for lora-replaced layers.
-            is_3d_lora_weight: Whether the on-disk MoE adapter is in the 3D
-                fused (gate_up_proj / down_proj) layout. Propagated from the
-                originating LoRARequest. Only consulted by the LoRA model
-                manager when enable_mixed_moe_lora_format is on.
+        """Args:
+        lora_model_id: The integer id for the lora model.
+        rank: lora rank.
+        loras: module name -> weights for lora-replaced layers.
+        is_3d_lora_weight: Whether the on-disk MoE adapter is in the 3D
+            fused (gate_up_proj / down_proj) layout. Propagated from the
+            originating LoRARequest. Only consulted by the LoRA model
+            manager when enable_mixed_moe_lora_format is on.
 
         """
         self.id = lora_model_id
@@ -90,7 +87,8 @@ class LoRAModel:
     def clone(self, lora_model_id: int) -> "LoRAModel":
         """Return a copy of the object with different ids.
 
-        Will share the underlying tensors."""
+        Will share the underlying tensors.
+        """
         return self.__class__(
             lora_model_id,
             rank=self.rank,
@@ -99,7 +97,7 @@ class LoRAModel:
         )
 
     def get_lora(self, module_name: str) -> LoRALayerWeights | None:
-        """Get LoRA for a given module by name"""
+        """Get LoRA for a given module by name."""
         return self.loras.get(module_name, None)
 
     def check_lora_name(self, lora_name: str) -> bool:
@@ -107,7 +105,7 @@ class LoRAModel:
 
     @staticmethod
     def _should_skip_module(module_name: str, skip_prefixes: list[str]) -> bool:
-        """Check if a module should be skipped based on skip prefixes"""
+        """Check if a module should be skipped based on skip prefixes."""
         for prefix in skip_prefixes:
             if f".{prefix}" in module_name or module_name.startswith(prefix):
                 return True
@@ -190,6 +188,12 @@ class LoRAModel:
                 a global counter.
             device: Device where the lora model is loaded.
             dtype: dtype of the lora model weights.
+            model_vocab_size: Vocab size of the base model, used to size the
+                embedding deltas.
+            weights_mapper: Optional mapper rewriting checkpoint weight names
+                to vLLM names.
+            tensorizer_config_dict: Optional tensorizer config used to load
+                the checkpoint via tensorizer instead of from disk.
             skip_prefixes: List of module name prefixes to skip during loading.
                 Models can define this to skip modules not used in inference
                 (e.g., MTP layers). Format: ["mtp."]
@@ -201,6 +205,7 @@ class LoRAModel:
 
         Returns:
             Loaded LoRA Model.
+
         """
         lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
         lora_bin_file_path = os.path.join(lora_dir, "adapter_model.bin")

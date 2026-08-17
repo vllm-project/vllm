@@ -191,7 +191,8 @@ def inkling_gate_select(
 
 class InklingGate(nn.Module):
     """Sigmoid gate with selection bias, log-sigmoid renorm after top-k, and
-    global scale (the served checkpoint's only configuration)."""
+    global scale (the served checkpoint's only configuration).
+    """
 
     def __init__(
         self,
@@ -243,7 +244,8 @@ class InklingGate(nn.Module):
         self, gating_output: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Full selection: (weights, ids) of [T, K + S]. The first K entries
-        are the routed top-k; the S trailing entries are the sink gammas."""
+        are the routed top-k; the S trailing entries are the sink gammas.
+        """
         return inkling_gate_select(
             gating_output,
             self.n_total_experts,
@@ -264,7 +266,8 @@ class InklingGate(nn.Module):
 def _inkling_moe_ep_size() -> int:
     """EP size the FusedMoE layer will run with (mirrors
     FusedMoEParallelConfig.make: experts shard over tp * dp * pcp when
-    expert parallelism is enabled)."""
+    expert parallelism is enabled).
+    """
     parallel_config = get_current_vllm_config().parallel_config
     if not parallel_config.enable_expert_parallel:
         return 1

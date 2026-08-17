@@ -51,7 +51,8 @@ class Medusa(nn.Module):
        truncated_vocab_size < vocab_size. To use this technique, one has to find
        the top-k most frequent tokens in target dataset and add that as a tensor
        in the draft checkpoint (using key token_map). Also, the draft config
-       needs to have truncated_vocab_size (=k) as an attribute."""
+       needs to have truncated_vocab_size (=k) as an attribute.
+    """
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config = vllm_config.speculative_config.draft_model_config.hf_config

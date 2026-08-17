@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Integration tests for MultiprocExecutor at the executor level.
+"""Integration tests for MultiprocExecutor at the executor level.
 This test directly tests the executor without going through the LLM interface,
 focusing on executor initialization, RPC calls, and distributed execution.
 """
@@ -330,8 +329,7 @@ def test_multiproc_executor_properties():
 
 @multi_gpu_test(num_gpus=4)
 def test_multiproc_executor_multi_node():
-    """
-    Test MultiprocExecutor with multi-node configuration.
+    """Test MultiprocExecutor with multi-node configuration.
     This simulates 2 nodes with TP=4:
     - Node 0 (rank 0): Uses GPUs 0,1 (CUDA_VISIBLE_DEVICES=0,1) with TP=2
     - Node 1 (rank 1): Uses GPUs 2,3 (CUDA_VISIBLE_DEVICES=2,3) with TP=2

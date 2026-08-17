@@ -393,6 +393,7 @@ class AutoAWQMarlinLinearMethod(LinearMethodBase):
 
     Args:
         quant_config: The AWQ Marlin quantization config.
+
     """
 
     _kernel_backends_being_used: set[str] = set()
@@ -719,7 +720,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
 
     def _setup_kernel(self, layer: RoutedExperts) -> None:
         """Build the FusedMoEKernel for this layer."""
-
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         self.moe_kernel = make_wna16_moe_kernel(
             moe_quant_config=self.moe_quant_config,
@@ -903,6 +903,7 @@ class AutoAWQLinearMethod(BaseAWQLinearMethod):
 
     Args:
         quant_config: The AWQ quantization config.
+
     """
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

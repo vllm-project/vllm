@@ -16,6 +16,7 @@ state traffic itself.
 Example:
     python benchmarks/kernels/benchmark_kimi_k3_kda_decode.py \
         --tokens 1 8 32 64 128 --heads 12
+
 """
 
 import argparse

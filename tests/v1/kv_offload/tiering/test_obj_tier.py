@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Mock-based unit tests for ObjectStoreSecondaryTierManager.
+"""Mock-based unit tests for ObjectStoreSecondaryTierManager.
 
 These tests replace the NIXL backend with an in-memory mock so they run
 without S3 credentials or a live object store. They verify the manager's
@@ -347,7 +346,8 @@ class TestMockObjTierBasic:
         the scheduler would re-issue the same doomed promotion every step for
         the life of the request. The mark is served from cache with no
         re-probe, so even though the mock object is still 'present' the SAME
-        request now resolves to MISS."""
+        request now resolves to MISS.
+        """
         ctx = ReqContext(req_id="obj-livelock")
         self.tier.submit_store(make_job(1, [key(1)], [0]))
         assert all(r.success for r in drain(self.tier))
@@ -651,7 +651,8 @@ class TestObjTierKVEvents:
     def test_mixed_job_results_emit_event_only_for_successful_job(self):
         """With a failed and a successful store job resolving in the same
         poll, exactly one event is emitted and its keys belong to the
-        successful job."""
+        successful job.
+        """
         original = self.agent.check_xfer_state
         self.agent.check_xfer_state = lambda h: "ERR" if h._id == 0 else original(h)
         self.tier.submit_store(make_job(1, [key(1)], [0]))  # handle 0: fails

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Set up this example by starting a vLLM OpenAI-compatible server with tool call
+"""Set up this example by starting a vLLM OpenAI-compatible server with tool call
 options enabled.
 Reasoning models can be used through the Responses API as seen here
 https://platform.openai.com/docs/api-reference/responses
@@ -17,8 +16,7 @@ from openai import OpenAI
 
 
 def get_weather(latitude: float, longitude: float) -> str:
-    """
-    Mock function to simulate getting weather data.
+    """Mock function to simulate getting weather data.
     In a real application, this would call an external weather API.
     """
     return f"Current temperature at ({latitude}, {longitude}) is 20°C."

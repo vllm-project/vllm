@@ -122,8 +122,8 @@ IS_DENSE = False
 
 def enable_norm_fusion(cfg: "VllmConfig") -> bool:
     """Enable if either RMS norm or quant FP8 custom op is active;
-    otherwise Inductor handles fusion."""
-
+    otherwise Inductor handles fusion.
+    """
     return (
         cfg.compilation_config.is_custom_op_enabled("rms_norm")
         or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
@@ -132,8 +132,7 @@ def enable_norm_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_act_fusion(cfg: "VllmConfig") -> bool:
-    """
-    Enable if either SiLU+Mul or quant FP8 custom op is active;
+    """Enable if either SiLU+Mul or quant FP8 custom op is active;
     otherwise Inductor handles fusion.
     Also enable for FP4 models as FP4 quant is always custom so Inductor cannot fuse it.
     """
@@ -185,7 +184,6 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
     """Enable if use_inductor_graph_partition is enabled."""
-
     return (
         cfg.compilation_config.use_inductor_graph_partition
         or not cfg.compilation_config.splitting_ops_contain_kv_cache_update()
@@ -194,7 +192,6 @@ def enable_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     """Enable if using AITER RMSNorm and hidden size is 2880 i.e. gpt-oss."""
-
     return (
         cfg.kernel_config.ir_op_priority.fused_add_rms_norm[0] == "aiter"
         and cfg.model_config is not None
@@ -421,8 +418,7 @@ class VllmConfig:
     """
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -696,8 +692,7 @@ class VllmConfig:
 
     @property
     def needs_dp_coordinator(self) -> bool:
-        """
-        Determine if the DPCoordinator process is needed.
+        """Determine if the DPCoordinator process is needed.
 
         The DPCoordinator is needed in two cases:
         1. For MoE models with DP > 1: to handle wave coordination
@@ -707,8 +702,8 @@ class VllmConfig:
 
         Returns:
             True if DPCoordinator process is needed, False otherwise.
-        """
 
+        """
         # For non-MoE models, only need coordinator in internal/hybrid LB mode
         # (for stats collection).
         return self.parallel_config.data_parallel_size > 1 and (
@@ -718,8 +713,7 @@ class VllmConfig:
         )
 
     def enable_trace_function_call_for_thread(self) -> None:
-        """
-        Set up function tracing for the current thread,
+        """Set up function tracing for the current thread,
         if enabled via the `VLLM_TRACE_FUNCTION` environment variable.
         """
         if envs.VLLM_TRACE_FUNCTION:
@@ -853,6 +847,7 @@ class VllmConfig:
             config_obj: Configuration object to update.
             key: Attribute name.
             value: Default value (static or callable).
+
         """
         if getattr(config_obj, key) is None:
             # Some config values are known before initialization and are
@@ -874,6 +869,7 @@ class VllmConfig:
 
         Args:
             defaults: Dictionary of default values to apply.
+
         """
 
         def apply_recursive(config_obj: Any, config_defaults: dict[str, Any]) -> None:
@@ -1034,7 +1030,6 @@ class VllmConfig:
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
-
         # To give each torch profile run a unique instance name.
         self.instance_id = f"{time.time_ns()}"
 
@@ -1820,8 +1815,7 @@ class VllmConfig:
         ]
 
     def _set_max_num_scheduled_tokens(self):
-        """
-        In most cases, the scheduler may schedule a batch with as many tokens as the
+        """In most cases, the scheduler may schedule a batch with as many tokens as the
         worker is configured to handle.
         """
         if self.speculative_config is not None:
@@ -1859,8 +1853,7 @@ class VllmConfig:
                 )
 
     def _set_cudagraph_sizes(self):
-        """
-        vLLM defines the default candidate list of batch sizes for CUDA graph
+        """VLLM defines the default candidate list of batch sizes for CUDA graph
         capture as:
 
         ```python
@@ -1902,8 +1895,8 @@ class VllmConfig:
             padded CUDA graph will be used.
             - If batch size > largest `cudagraph_capture_sizes`, cudagraph will
             not be used.
-        """
 
+        """
         if (
             self.model_config is not None
             and not self.model_config.enforce_eager
@@ -2034,9 +2027,7 @@ class VllmConfig:
         self.compilation_config.post_init_cudagraph_sizes()
 
     def _set_compile_ranges(self):
-        """
-        Set the compile ranges for the compilation config.
-        """
+        """Set the compile ranges for the compilation config."""
         compilation_config = self.compilation_config
         computed_compile_ranges_endpoints = []
 
@@ -2577,8 +2568,7 @@ _current_prefix: str | None = None
 def set_current_vllm_config(
     vllm_config: VllmConfig, check_compile=False, prefix: str | None = None
 ):
-    """
-    Temporarily set the current vLLM config.
+    """Temporarily set the current vLLM config.
     Used during model initialization.
     We save the current vLLM config in a global variable,
     so that all modules can access it, e.g. custom ops
@@ -2630,7 +2620,7 @@ def set_current_vllm_config(
 
 @lru_cache(maxsize=1)
 def get_cached_compilation_config():
-    """Cache config to avoid repeated calls to get_current_vllm_config()"""
+    """Cache config to avoid repeated calls to get_current_vllm_config()."""
     return get_current_vllm_config().compilation_config
 
 
@@ -2659,15 +2649,14 @@ def get_layers_from_vllm_config(
     layer_type: type[T],
     layer_names: Iterable[str] | None = None,
 ) -> dict[str, T]:
-    """
-    Get layers from the vLLM config.
+    """Get layers from the vLLM config.
 
     Args:
         vllm_config: The vLLM config.
         layer_type: The type of the layer to get.
         layer_names: The names of the layers to get. If None, return all layers.
-    """
 
+    """
     forward_context = vllm_config.compilation_config.static_forward_context
     if layer_names is None:
         layer_names = forward_context.keys()

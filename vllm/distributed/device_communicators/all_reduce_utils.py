@@ -110,8 +110,7 @@ NCCL_SYMM_MEM_ALL_REDUCE_CONFIG: dict[str, Any] = {
 
 
 def should_nccl_symm_mem_allreduce(world_size: int, input_tensor: torch.Tensor) -> bool:
-    """
-    Determine if NCCL symmetric memory allreduce should be used.
+    """Determine if NCCL symmetric memory allreduce should be used.
 
     Based on H100 and GB200 benchmarks, NCCL symm_mem is preferred for:
     - Small tensors (≤16K): Lower latency than custom_AR
@@ -148,7 +147,8 @@ def should_nccl_symm_mem_allreduce(world_size: int, input_tensor: torch.Tensor) 
 
 def should_nccl_symm_mem_ag_rs() -> bool:
     """Check whether NCCL symmetric memory should be used for
-    AllGather / ReduceScatter collectives."""
+    AllGather / ReduceScatter collectives.
+    """
     from vllm.distributed.device_communicators.pynccl_allocator import (
         is_symmetric_memory_enabled,
     )
@@ -335,7 +335,6 @@ _gpu_p2p_access_cache: dict[str, bool] | None = None
 
 def gpu_p2p_access_check(src: int, tgt: int) -> bool:
     """Check if GPU src can access GPU tgt."""
-
     # if the cache variable is already calculated,
     # read from the cache instead of checking it again
     global _gpu_p2p_access_cache

@@ -21,7 +21,8 @@ _FUSED_QKV_A_PROJ = MLAFuser.merged_name
 
 def _match(q_lora_rank: int | None) -> MLAFuser | None:
     """Match a meta `DeepseekV2Attention` directly (bypassing the per-class
-    `get_fuser` cache, so both q_lora variants of the same class are seen)."""
+    `get_fuser` cache, so both q_lora variants of the same class are seen).
+    """
     pytest.importorskip("transformers.models.deepseek_v2.modeling_deepseek_v2")
     from transformers.models.deepseek_v2.configuration_deepseek_v2 import (
         DeepseekV2Config,
@@ -76,7 +77,8 @@ def test_discovers_modules_with_q_lora():
 
 def test_q_lora_stacks_qkv_a_proj():
     """The MLA layer reads `q_a_proj` and `kv_a_proj_with_mqa` fused into one
-    down-projection, so both checkpoint weights must remap into it."""
+    down-projection, so both checkpoint weights must remap into it.
+    """
     fuser = _match(q_lora_rank=64)
     assert isinstance(fuser, MLAFuser)
     prefix = "model.layers.0.self_attn"
@@ -104,7 +106,8 @@ class _Norm(nn.Module):
 
 class RenamedMLA(nn.Module):
     """An MLA-shaped attention whose children have non-standard names, proving
-    discovery is by structure and not attribute name."""
+    discovery is by structure and not attribute name.
+    """
 
     def __init__(self):
         super().__init__()
@@ -131,7 +134,8 @@ class RenamedMLA(nn.Module):
 
 def test_discovers_modules_under_arbitrary_names():
     """Discovery is purely structural: `RenamedMLA` gives its children non-standard
-    names, and `match` still locates each projection by dataflow."""
+    names, and `match` still locates each projection by dataflow.
+    """
     with torch.device("meta"):
         module = RenamedMLA()
         fuser = MLAFuser.match(trace(module), module)

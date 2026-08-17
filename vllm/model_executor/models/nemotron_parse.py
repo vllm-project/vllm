@@ -62,8 +62,7 @@ logger = init_logger(__name__)
 
 
 class BartScaledWordEmbedding(VocabParallelEmbedding):
-    """
-    This module overrides VocabParallelEmbedding's
+    """This module overrides VocabParallelEmbedding's
     forward by multiplying with embeddings scale.
     """
 
@@ -138,12 +137,13 @@ class BartDecoderLayer(nn.Module):
         decoder_hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        r"""
-        Args:
+        r"""Args:
             decoder_hidden_states: torch.Tensor of *decoder* input embeddings.
             encoder_hidden_states: torch.Tensor of *encoder* input embeddings.
+
         Returns:
             Decoder layer output torch.Tensor
+
         """
         residual = decoder_hidden_states
 
@@ -218,12 +218,13 @@ class MBartDecoderLayer(BartDecoderLayer):
 
 
 class MBartDecoderNoPos(nn.Module):
-    """
-    Transformer decoder consisting of *config.decoder_layers* layers.
+    """Transformer decoder consisting of *config.decoder_layers* layers.
     Each layer is a [`BartDecoderLayer`]
+
     Args:
         config: BartConfig
         embed_tokens (nn.Embedding): output embedding
+
     """
 
     def __init__(
@@ -274,13 +275,13 @@ class MBartDecoderNoPos(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        r"""
-        Args:
+        r"""Args:
             decoder_input_ids: Indices of *decoder* input sequence tokens in the
                 vocabulary. Padding will be ignored by default should you provide it.
             encoder_hidden_states: Tensor of encoder output embeddings
         Returns:
             Decoder output torch.Tensor
+
         """
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(decoder_input_ids)
@@ -339,12 +340,11 @@ class MBartDecoderNoPos(nn.Module):
 
 
 class NemotronParsePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - c: Number of channels (3)
-        - h: Height
-        - w: Width
+    """Dimensions:
+    - b: Batch size
+    - c: Number of channels (3)
+    - h: Height
+    - w: Width
     """
 
     type: Literal["pixel_values"]
@@ -649,14 +649,15 @@ class NemotronParseForConditionalGeneration(nn.Module, SupportsMultiModal):
         encoder_outputs: list[torch.Tensor] | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        r"""
-        Args:
+        r"""Args:
             input_ids: torch.Tensor of *decoder* input token ids.
             positions: torch.Tensor of *decoder* position indices.
             encoder_outputs: List of encoder output tensors (vision embeddings).
                 During profiling, this may be None or empty.
+
         Returns:
             Output torch.Tensor
+
         """
         inputs_embeds = None
         if encoder_outputs:

@@ -83,7 +83,8 @@ def test_single_tool_call(tool_parser, mock_request):
 
 def test_malformed_function_end_does_not_drop_siblings(tool_parser, mock_request):
     """Regression for #46314: a malformed ``</function>`` with no closing ``>``
-    on the header must not discard the other, well-formed calls."""
+    on the header must not discard the other, well-formed calls.
+    """
     text = (
         f"{TOOL_CALL_START}\n<function=broken</function>\n{TOOL_CALL_END}"
         f"{TOOL_CALL_START}\n<function=get_weather>\n"
@@ -125,7 +126,8 @@ def test_reasoning_then_tool_call(parser):
 
 def test_streaming_think_end_and_tool_call_same_delta(parser):
     """``</seed:think>`` and ``<seed:tool_call>`` arriving in one delta must
-    not leak the terminal tokens into the reasoning text."""
+    not leak the terminal tokens into the reasoning text.
+    """
     reasoning, content = simulate_reasoning_streaming(
         parser,
         [

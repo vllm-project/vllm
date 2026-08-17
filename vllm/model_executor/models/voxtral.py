@@ -486,8 +486,7 @@ class VoxtralForConditionalGeneration(
         stt_config: SpeechToTextConfig,
         model_config: ModelConfig,
     ) -> int | None:
-        """
-        Map from audio duration to number of audio tokens produced by the ASR
+        """Map from audio duration to number of audio tokens produced by the ASR
         model, without running a forward pass.
         This is used for estimating the amount of processing for this audio.
         """
@@ -570,8 +569,7 @@ class VoxtralForConditionalGeneration(
     def maybe_update_quant_config(
         self, quant_config: QuantizationConfig
     ) -> QuantizationConfig:
-        """
-        Update quant config to so that ignored module and target module names
+        """Update quant config to so that ignored module and target module names
         match the vLLM model names.
         Right now this is specific for compressed-tensors format and
         load_format mistral.

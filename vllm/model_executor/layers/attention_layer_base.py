@@ -12,8 +12,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 
 class AttentionLayerBase(ABC):
-    """
-    Base class for attention-like layers (Attention, Mamba, etc.)
+    """Base class for attention-like layers (Attention, Mamba, etc.)
     that support the v1 engine.
 
     This provides a common interface for getting attention backends
@@ -38,8 +37,7 @@ class AttentionLayerBase(ABC):
 
     @abstractmethod
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        """
-        Get the KV cache spec for this layer.
+        """Get the KV cache spec for this layer.
         May be None if the layer does not need KV cache.
         """
         pass

@@ -53,6 +53,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         Returns:
             A tuple of (all_conversations, engine_prompts) on success — one
             entry per conversation — or an ErrorResponse on failure.
+
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Kimi-K2.5 Model Implementation for vLLM.
+"""Kimi-K2.5 Model Implementation for vLLM.
 
 Kimi-K2.5 extends Kimi-K2 with vision support.
 """
@@ -90,8 +89,7 @@ class MaxImageTokenMeta:
 
 
 class KimiK25MediaPixelInputs(TensorSchema):
-    """
-    Media input schema for K2-VL model.
+    """Media input schema for K2-VL model.
 
     Dimensions:
         - np: Number of patches (flattened from all media items)

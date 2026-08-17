@@ -96,7 +96,6 @@ class AttentionQuantPatternModel(torch.nn.Module):
 
     def build_attn_metadata(self, batch_size: int) -> AttentionMetadata:
         """Initialize attention metadata."""
-
         # TODO (Rohan138) reuse utils from vllm/v1/worker/gpu/attn_utils.py
 
         # Create common attn metadata
@@ -292,7 +291,7 @@ def test_attention_quant_pattern(
     dist_init,
     disable_vllm_compile_cache,
 ):
-    """Test AttentionStaticQuantPattern fusion pass"""
+    """Test AttentionStaticQuantPattern fusion pass."""
     if backend == AttentionBackendEnum.FLASHINFER and (
         not current_platform.is_device_capability((10, 0)) or not has_flashinfer()
     ):

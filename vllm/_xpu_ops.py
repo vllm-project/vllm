@@ -275,6 +275,7 @@ def _xpu_fp8_bmm_impl(
         This implementation centralizes access to
         ``torch.ops._xpu_C.fp8_bmm``. Both scales must be contiguous, while
         ``a`` and ``b`` may be non-contiguous views.
+
     """
     return torch.ops._xpu_C.fp8_bmm(a, b, out_dtype, a_scale, b_scale, bias)
 
@@ -419,6 +420,7 @@ def _xpu_deepseek_fused_indexer_q_rope_fp8_impl(
         index_weights_out: (T, H) float32 output, preallocated;
             = index_weights * q_scale * softmax_scale * head_scale (the
             per-(token, head) q_scale is folded in here). [written]
+
     """
     torch.ops._xpu_C.deepseek_fused_indexer_q_rope_fp8(
         index_q,
@@ -475,6 +477,7 @@ def _xpu_deepseek_fused_indexer_q_rope_mxfp4_impl(
         index_weights_out: (T, H) float32 output, preallocated;
             = index_weights * softmax_scale * head_scale (no q_scale folded;
             per-block scales live in index_q_scale). [written]
+
     """
     torch.ops._xpu_C.deepseek_fused_indexer_q_rope_mxfp4(
         index_q,

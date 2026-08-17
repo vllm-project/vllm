@@ -49,6 +49,8 @@ class XDRotaryEmbedding(DynamicNTKAlphaRotaryEmbedding):
                 [4, num_tokens] (P/W/H/T positions with multimodal inputs)
             query: [num_tokens, num_heads * head_size]
             key: [num_tokens, num_kv_heads * head_size]
+            offsets: Optional per-token position offsets added to positions.
+
         """
         assert positions.ndim == 2
         assert key is not None
@@ -100,6 +102,8 @@ class XDRotaryEmbedding(DynamicNTKAlphaRotaryEmbedding):
                 [4, num_tokens] (P/W/H/T positions with multimodal inputs)
             query: [num_tokens, num_heads * head_size]
             key: [num_tokens, num_kv_heads * head_size]
+            offsets: Optional per-token position offsets added to positions.
+
         """
         assert positions.ndim == 2
         assert key is not None

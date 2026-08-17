@@ -376,7 +376,8 @@ WEB_SEARCH_TOOL = WebSearchTool(type="web_search")
 
 class TestNonFunctionToolsSkipped:
     """Non-function tools (web_search, etc.) must be silently skipped
-    by the tool-schema utilities instead of raising TypeError."""
+    by the tool-schema utilities instead of raising TypeError.
+    """
 
     def test_find_tool_properties_skips_web_search(self):
         tools = [WEB_SEARCH_TOOL, FUNCTION_TOOL]

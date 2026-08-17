@@ -41,14 +41,15 @@ def segsum(x):
 
 
 def ssd_minimal_discrete(X, A, B, C, block_len, initial_states=None):
-    """
-    Arguments:
+    """Arguments:
         X: (batch, length, n_heads, d_head)
         A: (batch, length, n_heads)
         B: (batch, length, n_heads, d_state)
         C: (batch, length, n_heads, d_state)
+
     Return:
         Y: (batch, length, n_heads, d_head)
+
     """
     assert X.dtype == A.dtype == B.dtype == C.dtype
     assert X.shape[1] % block_len == 0

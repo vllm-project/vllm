@@ -425,7 +425,8 @@ def test_glu_identifies_down_projection():
 
     It is forced to `RowParallelLinear` in `update_attrs` so its sharded input
     matches the column-parallel merged gate/up; `None` when there is no such
-    projection to force (fusion of gate/up still applies)."""
+    projection to force (fusion of gate/up still applies).
+    """
     with torch.device("meta"):
         assert get_fuser(GLUMLP()).down_name == "down_proj"
         assert get_fuser(ReversedGLUMLP()).down_name == "down_proj"
@@ -495,7 +496,8 @@ def test_detects_and_rewrites_packed_qkv(kv_heads):
     """A single projection split into q/k/v must be re-sharded, not merged.
 
     Only the split sizes change: `QKVParallelLinear` loads the packed
-    checkpoint weight as-is, and shards q by heads while replicating k/v."""
+    checkpoint weight as-is, and shards q by heads while replicating k/v.
+    """
     with torch.device("meta"):
         meta = PackedQKVAttention(kv_heads=kv_heads)
     fuser = get_fuser(meta)
@@ -526,7 +528,8 @@ def test_detects_and_rewrites_packed_qkv(kv_heads):
 
 def test_per_head_split_is_not_packed_qkv():
     """The split must consume the whole projection, else its sizes are head
-    widths and re-sharding by them would be wrong."""
+    widths and re-sharding by them would be wrong.
+    """
     with torch.device("meta"):
         assert get_fuser(PerHeadSplitAttention()) is None
 
@@ -646,7 +649,8 @@ def test_act_and_mul_derived_from_module(default_vllm_config):
 
 def _wider_model_config(head_dim: int) -> SimpleNamespace:
     """A model whose global head size is twice `head_dim`, as a wider layer
-    elsewhere in a heterogeneous checkpoint would make it."""
+    elsewhere in a heterogeneous checkpoint would make it.
+    """
     return SimpleNamespace(
         model_config=SimpleNamespace(get_head_size=lambda: 2 * head_dim),
         quant_config=None,

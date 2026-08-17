@@ -31,6 +31,7 @@ def _ensure_tilelang_imported() -> None:
 
     Raises:
         ImportError: If TileLang is not installed.
+
     """
     global T, tilelang
 

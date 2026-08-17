@@ -71,7 +71,8 @@ class SparseNCCLTrainerInitInfo(TrainerInitInfo):
 
     Same rendezvous shape as the dense NCCL backend (the sender opens its
     endpoint as NCCL rank 0), but with no packed wire params: sparse transfers
-    are never packed. `backend` is the factory dispatch key."""
+    are never packed. `backend` is the factory dispatch key.
+    """
 
     backend: ClassVar[str] = "sparse_nccl"
 
@@ -116,8 +117,7 @@ class SparseNCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 class SparseNCCLWeightTransferEngine(
     WeightTransferEngine[NCCLWeightTransferInitInfo, SparseNCCLWeightTransferUpdateInfo]
 ):
-    """
-    Sparse weight transfer engine using NCCL.
+    """Sparse weight transfer engine using NCCL.
 
     Receives flat-index (indices, values) patches broadcast from the trainer
     (rank 0) and applies them in place to existing model parameters. Weights are
@@ -305,7 +305,8 @@ class SparseNCCLTrainerWeightTransferEngine(
     def send_weights(self, patches: Iterable[SparseWeightPatch] | None = None) -> None:
         """Broadcast this round's sparse patches. `patches` is the per-round
         payload (sparse deltas differ every round), so it is passed here rather
-        than fixed at init. Every patch must set `full_shape`."""
+        than fixed at init. Every patch must set `full_shape`.
+        """
         if not self.is_sender:
             return
 
@@ -385,7 +386,8 @@ class SparseNCCLTrainerWeightTransferEngine(
         rebuild or free the patch tensors as soon as `send_weights` returns
         rather than relying on same-stream ordering. See
         `NCCLTrainerWeightTransferEngine._post_send_sync` for why there is no
-        cross-rank barrier (and sparse is single-rank on the trainer anyway)."""
+        cross-rank barrier (and sparse is single-rank on the trainer anyway).
+        """
         if torch.cuda.is_available():
             torch.cuda.current_stream().synchronize()
 

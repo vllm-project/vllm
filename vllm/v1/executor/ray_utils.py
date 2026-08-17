@@ -55,7 +55,8 @@ try:
 
     class RayWorkerWrapper(WorkerWrapperBase):
         """Ray wrapper for vllm.worker.Worker, allowing Worker to be
-        lazily initialized after Ray sets CUDA_VISIBLE_DEVICES."""
+        lazily initialized after Ray sets CUDA_VISIBLE_DEVICES.
+        """
 
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **kwargs)
@@ -68,8 +69,7 @@ try:
         rpc_rank: int
 
         def adjust_rank(self, rank_mapping: dict[int, int]) -> None:
-            """
-            Adjust the rpc_rank based on the given mapping.
+            """Adjust the rpc_rank based on the given mapping.
             It is only used during the initialization of the executor,
             to adjust the rpc_rank of workers after we create all workers.
             """
@@ -366,8 +366,7 @@ def get_bundles_for_indices(
     bundle_indices: list[int],
     world_size: int,
 ) -> list[tuple[int, str, str]]:
-    """
-    Return GPU bundle indices paired with node IDs and node IPs for
+    """Return GPU bundle indices paired with node IDs and node IPs for
     explicit bundle indices specified via VLLM_RAY_BUNDLE_INDICES.
     """
     assert len(bundle_indices) == world_size, (
@@ -394,8 +393,7 @@ def get_bundles_for_indices(
 def get_bundles_sorted_by_node(
     placement_group: "PlacementGroup",
 ) -> list[tuple[int, str, str]]:
-    """
-    Return GPU bundle indices paired with node IDs and node IPs,
+    """Return GPU bundle indices paired with node IDs and node IPs,
     sorted driver-first.
 
     This utility has to be invoked from the driver node.
@@ -554,6 +552,7 @@ def initialize_ray_cluster(
             on the current (driver) node and pin the first PG bundle to it.
             Set to False for executors like RayExecutorV2 where all GPU work
             is delegated to remote Ray actors.
+
     """
     assert_ray_available()
     from vllm.platforms import current_platform

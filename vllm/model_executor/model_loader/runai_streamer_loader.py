@@ -19,8 +19,7 @@ from vllm.transformers_utils.runai_utils import is_runai_obj_uri, list_safetenso
 
 
 class RunaiModelStreamerLoader(BaseModelLoader):
-    """
-    Model loader that can load safetensors
+    """Model loader that can load safetensors
     files from local FS, S3, GCS, or Azure Blob Storage.
     """
 
@@ -82,8 +81,8 @@ class RunaiModelStreamerLoader(BaseModelLoader):
     ) -> list[str]:
         """Prepare weights for the model.
 
-        If the model is not local, it will be downloaded."""
-
+        If the model is not local, it will be downloaded.
+        """
         is_object_storage_path = is_runai_obj_uri(model_name_or_path)
         is_local = os.path.isdir(model_name_or_path)
         safetensors_pattern = "*.safetensors"
@@ -127,7 +126,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         )
 
     def download_model(self, model_config: ModelConfig) -> None:
-        """Download model if necessary"""
+        """Download model if necessary."""
         self._prepare_weights(model_config.model, model_config.revision)
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:

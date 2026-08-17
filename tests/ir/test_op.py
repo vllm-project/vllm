@@ -32,7 +32,7 @@ def custom_add_op(fake_vllm_ir):
 
     @_custom_add.register_impl("impl_b", inplace=True)
     def impl_b(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Computes x+y+20"""
+        """Computes x+y+20."""
         x.add_(y)
         x.add_(20)
         return x
@@ -99,7 +99,7 @@ def test_no_kw_only_args(fake_vllm_ir):
 class TestIrOpCustomAdd:
     # Registration invariants
     def test_decorated_object(self, custom_add_op):
-        """Make sure that referring directly to an op is correct"""
+        """Make sure that referring directly to an op is correct."""
         _custom_add = custom_add_op
         assert isinstance(_custom_add, IrOp)
         assert "_custom_add" in IrOp.registry

@@ -132,7 +132,8 @@ def test_eagle_step_slot_mapping_kernel_exceeds_max():
 
 def test_eagle_step_slot_mapping_kernel_cudagraph_padding():
     """Test that padding threads write PADDING_SLOT_ID when
-    input_batch_size > batch_size (cudagraph padding)."""
+    input_batch_size > batch_size (cudagraph padding).
+    """
     device = torch.device(DEVICE_TYPE)
     batch_size = 4
     input_batch_size = 8

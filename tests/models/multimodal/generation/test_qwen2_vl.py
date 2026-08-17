@@ -97,7 +97,7 @@ def batch_make_image_embeddings(
     processor,
     llm: VllmRunner,
 ) -> list[Qwen2VLPromptImageEmbeddingInput]:
-    """batched image embeddings for Qwen2-VL
+    """Batched image embeddings for Qwen2-VL.
 
     This will infer all images' embeddings in a single batch,
       and split the result according to input batches.
@@ -108,7 +108,6 @@ def batch_make_image_embeddings(
 
     returns: `list[Qwen2VLPromptImageEmbeddingInput]`
     """
-
     image_batches_: list[Any] = image_batches[:]
 
     # convert single-image batches to multiple-image batches
@@ -181,7 +180,7 @@ def batch_make_image_embeddings(
 def batch_make_video_embeddings(
     video_batches: PromptVideoInput, processor, llm: VllmRunner
 ) -> list[Qwen2VLPromptVideoEmbeddingInput]:
-    """batched video embeddings for Qwen2-VL
+    """Batched video embeddings for Qwen2-VL.
 
     A NDArray represents a single video's all frames.
 
@@ -192,7 +191,6 @@ def batch_make_video_embeddings(
       - Single-video batches: `list[NDArray]`
       - Multiple-video batches: `list[list[NDArray]]`
     """
-
     video_batches_: list[Any] = video_batches[:]
 
     for idx in range(len(video_batches_)):

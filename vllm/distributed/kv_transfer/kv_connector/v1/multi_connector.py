@@ -70,8 +70,7 @@ class MultiKVConnectorWorkerMetadata(KVConnectorWorkerMetadata):
 
 @dataclass
 class MultiKVConnectorStats(KVConnectorStats):
-    """
-    Maintain a dict of KVConnectorStats objects, one for each connector.
+    """Maintain a dict of KVConnectorStats objects, one for each connector.
     This is used to aggregate the stats from all connectors separately.
     """
 
@@ -126,8 +125,7 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
 
 
 class MultiConnector(KVConnectorBase_V1, SupportsHMA):
-    """
-    A wrapper for using multiple KVConnectors at the same time.
+    """A wrapper for using multiple KVConnectors at the same time.
 
     The current logic is:
     - Load KV from the first connector that advertises available tokens from
@@ -137,8 +135,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
-        """
-        MultiConnector requires PIECEWISE CUDA graph mode if any of its
+        """MultiConnector requires PIECEWISE CUDA graph mode if any of its
         child connectors require it.
         """
         connectors_config = extra_config.get("connectors", [])
@@ -460,8 +457,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             connector_output.kv_connector_worker_meta = multi_connector_worker_meta
 
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
-        """
-        Get the KVConnector handshake metadata from sub-connectors.
+        """Get the KVConnector handshake metadata from sub-connectors.
         Returns the first non-None metadata from sub-connectors.
         """
         for c in self._connectors:
@@ -473,8 +469,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def set_xfer_handshake_metadata(
         self, metadata: dict[int, KVConnectorHandshakeMetadata]
     ) -> None:
-        """
-        Set the KV connector handshake metadata for all sub-connectors.
+        """Set the KV connector handshake metadata for all sub-connectors.
         This is needed to start the NIXL listener thread for NixlConnector.
         """
         for c in self._connectors:
@@ -555,14 +550,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
-        """
-        Get the required KV cache layout for this connector.
+        """Get the required KV cache layout for this connector.
+
         Args:
             vllm_config (VllmConfig): the vllm config.
 
         Returns:
             str: the required KV cache layout. e.g. HND, or NHD.
             None if the connector does not require a specific layout.
+
         """
         assert vllm_config.kv_transfer_config is not None
         layouts: set[str] = set()

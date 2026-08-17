@@ -52,7 +52,6 @@ def to_cute_dynamic_m(
     mode is symbolic, so changing M within an Op's capacity reuses the same
     compiled kernel.
     """
-
     return to_cute(tensor, assumed_align).mark_compact_shape_dynamic(
         mode=mode,
         stride_order=tensor.dim_order(),
@@ -73,7 +72,6 @@ def load_global_u32x4(
     side-effecting prevents loop-invariant motion and common-subexpression
     elimination across polling iterations.
     """
-
     address = pointer.toint(loc=loc, ip=ip)
     opcode = "ld.volatile.global.v4.u32" if volatile else "ld.global.v4.u32"
     out = llvm.inline_asm(
@@ -106,7 +104,6 @@ def store_global_u32x4(
     ip=None,
 ) -> None:
     """Store four packed words to an ordinary or NVLS multicast global VA."""
-
     words = [packed[i].ir_value(loc=loc, ip=ip) for i in range(4)]
     opcode = "st.volatile.global.v4.u32" if volatile else "st.global.v4.u32"
     llvm.inline_asm(
@@ -171,7 +168,6 @@ def store_global_u32(
 @dsl_user_op
 def store_lamport_sentinel_128(pointer: cute.Pointer, *, loc=None, ip=None) -> None:
     """Reset one Lamport fragment to four FP32 negative-zero bit patterns."""
-
     address = pointer.toint(loc=loc, ip=ip)
     value = Uint32(NEG_ZERO_F32_BITS).ir_value(loc=loc, ip=ip)
     llvm.inline_asm(
@@ -192,7 +188,6 @@ def red_async_release_gpu_add_u32(
     pointer: cute.Pointer, value: Uint32, *, loc=None, ip=None
 ) -> None:
     """The exact SM100 arrival primitive used by upstream LamportFlags."""
-
     address = pointer.toint(loc=loc, ip=ip)
     llvm.inline_asm(
         None,
@@ -237,7 +232,6 @@ def map_shared_to_peer(
     ip=None,
 ) -> Int32:
     """Map a local shared-memory slot to the same slot in a peer CTA."""
-
     smem_address = smem_ptr.toint(loc=loc, ip=ip).ir_value()
     return Int32(
         llvm.inline_asm(
@@ -347,7 +341,6 @@ def sanitize_negative_zero_u32x2(packed):
 @cute.jit
 def sanitize_negative_zero(packed):
     """Turn real BF16 -0 into +0 so it cannot equal the empty sentinel."""
-
     result = cute.make_rmem_tensor(cute.make_layout((4,)), Uint32)
     for i in cutlass.range_constexpr(4):
         word = packed[i]
@@ -364,7 +357,6 @@ def sanitize_negative_zero(packed):
 @cute.jit
 def fragment_is_dirty(packed):
     """Bit-exact upstream sentinel check: one comparison per 32-bit word."""
-
     dirty = packed[0] == Uint32(NEG_ZERO_F32_BITS)
     for i in cutlass.range_constexpr(1, 4):
         dirty = dirty | (packed[i] == Uint32(NEG_ZERO_F32_BITS))
@@ -381,7 +373,6 @@ def warp_sum_specialized(
     last_warp_mask: cutlass.Constexpr[int],
 ) -> Float32:
     """Warp sum supporting a compile-time partial final warp."""
-
     if warp_idx == Int32(warps - 1) and cutlass.const_expr(last_warp_lanes < 32):
         for offset in cutlass.range_constexpr(16, 0, -1):
             # range_constexpr does not provide powers-of-two stepping.
@@ -416,7 +407,6 @@ def block_sum_specialized(
     last_warp_mask: cutlass.Constexpr[int],
 ) -> Float32:
     """Upstream-equivalent FP32 block reduction."""
-
     lane = cute.arch.lane_idx()
     warp_idx = cute.arch.warp_idx()
     value = warp_sum_specialized(

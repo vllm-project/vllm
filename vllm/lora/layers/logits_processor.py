@@ -18,8 +18,7 @@ from .base import BaseLayerWithLoRA
 
 
 class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
-    """
-    LoRA wrapper for LogitsProcessor, with extra logic to handle the
+    """LoRA wrapper for LogitsProcessor, with extra logic to handle the
     application of the LoRA adapter and added LoRA vocabulary.
 
     Args:
@@ -30,6 +29,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         sharded_to_full_mapping: index mapping from sharded vocab to full vocab
             received from base_layer.get_sharded_to_full_mapping(). If None,
             no reindexing will be done.
+
     """
 
     def __init__(

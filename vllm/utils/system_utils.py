@@ -60,8 +60,7 @@ def set_env_var(key: str, value: str) -> Iterator[None]:
 
 @contextlib.contextmanager
 def suppress_stdout():
-    """
-    Suppress stdout from C libraries at the file descriptor level.
+    """Suppress stdout from C libraries at the file descriptor level.
 
     Only suppresses stdout, not stderr, to preserve error messages.
     Suppression is disabled when VLLM_LOGGING_LEVEL is set to DEBUG.
@@ -70,6 +69,7 @@ def suppress_stdout():
         with suppress_stdout():
             # C library calls that would normally print to stdout
             torch.distributed.new_group(ranks, backend="gloo")
+
     """
     # Don't suppress if logging level is DEBUG
     if envs.VLLM_LOGGING_LEVEL == "DEBUG":
@@ -114,7 +114,6 @@ def unique_filepath(fn: Callable[[int], Path]) -> Path:
 
 def _sync_visible_devices_env_vars():
     """Sync HIP/CUDA visibility env vars before spawning (ROCm only)."""
-
     if not current_platform.is_rocm():
         return
 
@@ -254,11 +253,11 @@ def decorate_logs(
 
 
 def kill_process_tree(pid: int):
-    """
-    Kills all descendant processes of the given pid by sending SIGKILL.
+    """Kills all descendant processes of the given pid by sending SIGKILL.
 
     Args:
         pid (int): Process ID of the parent process
+
     """
     try:
         parent = psutil.Process(pid)

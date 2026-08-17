@@ -134,7 +134,6 @@ async def test_shutdown_on_engine_failure(tmp_path: Path):
     Starts a vLLM server, kills it to simulate a crash, then verifies that
     subsequent API calls fail appropriately.
     """
-
     port = get_open_port()
 
     # Redirect server output to a file rather than a pipe: nothing drains the

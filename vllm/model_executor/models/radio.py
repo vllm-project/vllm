@@ -223,6 +223,7 @@ class ViTPatchGenerator(nn.Module):
 
         Returns:
             Embedded patches with temporal compression applied.
+
         """
         assert self.temporal_patch_size > 1
         T = self.temporal_patch_size
@@ -580,7 +581,8 @@ class RadioInternVisionModel(nn.Module):
         self, imgs_sizes: list[tuple[int, int]], device: torch.device
     ) -> MaskMetadata:
         """Build mask metadata from image pixel sizes. Adds num_skip to each
-        sequence length (cls/register tokens) to match patch generator output."""
+        sequence length (cls/register tokens) to match patch generator output.
+        """
         patch_size = self.patch_generator.patch_size
         num_skip = self.patch_generator.num_skip
 
@@ -593,7 +595,8 @@ class RadioInternVisionModel(nn.Module):
     ) -> MaskMetadata:
         """Build mask metadata from actual sequence lengths (already including
         cls/register tokens, i.e. patch_count + num_skip per item).
-        Use inter_image_mask_metadata() when you only have imgs_sizes."""
+        Use inter_image_mask_metadata() when you only have imgs_sizes.
+        """
         assert len(seq_lens) > 0
         cu_seqlens = torch.tensor(
             list(accumulate(seq_lens, initial=0)), dtype=torch.int32, device=device

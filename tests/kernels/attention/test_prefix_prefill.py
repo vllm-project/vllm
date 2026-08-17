@@ -990,8 +990,7 @@ def test_qwen3_nonstandard_block_size(
     device: str,
     op: Callable,
 ) -> None:
-    """
-    A separate test function specifically added
+    """A separate test function specifically added
     for Qwen3-Next-80B (Block Size 544).
     """
     if not current_platform.is_rocm():

@@ -149,7 +149,6 @@ async def test_chat_completion_render_multi_turn(client):
 @pytest.mark.asyncio
 async def test_chat_completion_render_with_stream_true(client):
     """Render accepts stream params but still returns JSON (non-streamed)."""
-
     response = await client.post(
         "/v1/chat/completions/render",
         json={
@@ -268,7 +267,8 @@ async def test_chat_completion_render_with_sampling_params(client):
 @pytest.mark.asyncio
 async def test_completion_render_emits_token_offsets(client):
     """With return_token_offsets, /v1/completions/render returns per-token
-    (start, end) char offsets aligned with token_ids."""
+    (start, end) char offsets aligned with token_ids.
+    """
     prompt = "Hello, world."
     response = await client.post(
         "/v1/completions/render",
@@ -293,7 +293,8 @@ async def test_completion_render_emits_token_offsets(client):
 @pytest.mark.asyncio
 async def test_completion_render_default_no_token_offsets(client):
     """Without the flag, token_offsets must be null (existing responses
-    unchanged)."""
+    unchanged).
+    """
     response = await client.post(
         "/v1/completions/render",
         json={
@@ -310,7 +311,8 @@ async def test_completion_render_default_no_token_offsets(client):
 @pytest.mark.asyncio
 async def test_chat_render_emits_token_offsets(client):
     """With return_token_offsets, /v1/chat/completions/render returns
-    per-token offsets relative to the templated prompt string."""
+    per-token offsets relative to the templated prompt string.
+    """
     response = await client.post(
         "/v1/chat/completions/render",
         json={
@@ -448,7 +450,8 @@ async def test_chat_completion_render_assistant_tokens_mask_with_generation_tags
     client,
 ):
     """With a ``{% generation %}``-enabled template, the mask marks assistant
-    tokens and the masked tokens decode to the assistant content."""
+    tokens and the masked tokens decode to the assistant content.
+    """
     response = await client.post(
         "/v1/chat/completions/render",
         json={

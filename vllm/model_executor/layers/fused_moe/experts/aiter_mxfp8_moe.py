@@ -36,7 +36,8 @@ def is_aiter_mxfp8_moe_available() -> bool:
     nightly lacking #3811 would wrongly select FlyDSL instead of falling back to
     the native Triton dot_scaled path. #3811 added no probe-able public symbol,
     so detect the ``minimax_m3_mxfp8`` tuned config it shipped. Every check fails
-    closed (returns False -> triton dot_scaled), which is always safe."""
+    closed (returns False -> triton dot_scaled), which is always safe.
+    """
     if not (current_platform.is_rocm() and current_platform.supports_mx()):
         return False
     try:

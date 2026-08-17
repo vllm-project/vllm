@@ -19,7 +19,8 @@ def _base_payload() -> dict:
 
 def test_omitted_max_tokens_is_not_provided():
     """Body without ``max_tokens`` must surface as 'not provided' so the
-    server can apply its own default instead of the dataclass 16."""
+    server can apply its own default instead of the dataclass 16.
+    """
     req = GenerateRequest.model_validate(_base_payload())
     # SamplingParams' dataclass default leaks through the parsed instance —
     # this is exactly the bug the server-side defaulting works around.
@@ -29,7 +30,8 @@ def test_omitted_max_tokens_is_not_provided():
 
 def test_explicit_max_tokens_is_provided():
     """Even when the client picks the same value as the dataclass default,
-    it must register as explicitly set so the server won't override it."""
+    it must register as explicitly set so the server won't override it.
+    """
     payload = _base_payload()
     payload["sampling_params"] = {"max_tokens": 16}
     req = GenerateRequest.model_validate(payload)
@@ -61,7 +63,8 @@ def test_json_roundtrip_preserves_provided_keys():
 def test_internal_instance_construction_treats_all_as_provided():
     """When internal callers build ``GenerateRequest`` from a pre-resolved
     ``SamplingParams`` instance, every field is considered explicitly set
-    so server-side defaulting can't clobber values resolved upstream."""
+    so server-side defaulting can't clobber values resolved upstream.
+    """
     sp = SamplingParams(max_tokens=500, temperature=0.0)
     req = GenerateRequest(token_ids=[1, 2, 3], sampling_params=sp)
     assert req.is_sampling_param_provided("max_tokens")

@@ -69,7 +69,7 @@ class RayWorkerHandle:
     """run() ObjectRef used as a sentinel for health monitoring"""
 
     def run(self):
-        """Start the worker's busy loop"""
+        """Start the worker's busy loop."""
         self.run_ref = self.actor.run.remote()
 
 
@@ -172,8 +172,7 @@ class RayWorkerProc(WorkerProc):
     def _init_message_queues(
         self, input_shm_handle: Handle, vllm_config: VllmConfig
     ) -> None:
-        """
-        Workers on the same node as the executor use shared memory for
+        """Workers on the same node as the executor use shared memory for
         both the broadcast (input) MQ and the response MQ. Workers on
         different nodes use TCP (n_local_reader=0).
         """

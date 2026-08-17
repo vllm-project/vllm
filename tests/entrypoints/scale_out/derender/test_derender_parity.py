@@ -120,7 +120,8 @@ async def _disagg(
 
 def _tool_sig(response_choice: dict) -> list[tuple[str, dict]]:
     """[(name, json normalized args)] so key ordering / whitespace don't
-    cause false negatives."""
+    cause false negatives.
+    """
     return [
         (tc["function"]["name"], json.loads(tc["function"]["arguments"]))
         for tc in (response_choice["message"].get("tool_calls") or [])
@@ -142,7 +143,8 @@ async def _run_parity_case(
     client: httpx.AsyncClient, messages: list[dict], **extra
 ) -> tuple[dict, dict]:
     """Run the coupled request then feed its generated tokens into the
-    disaggregated derender endpoint. Returns (coupled, disagg)."""
+    disaggregated derender endpoint. Returns (coupled, disagg).
+    """
     coupled = await _coupled(client, messages, **extra)
     ch = coupled["choices"][0]
     chat_request = {"model": MODEL, "messages": messages, **extra}
@@ -202,7 +204,8 @@ async def test_parity_tool_call(client):
 @pytest.mark.asyncio
 async def test_parity_reasoning_and_tool_call(client):
     """Combined reasoning + tool call parity means the highest drift risk
-    since it exercises both parser branches on the same output."""
+    since it exercises both parser branches on the same output.
+    """
     messages = [{"role": "user", "content": "What's the weather in Paris?"}]
     coupled, disagg = await _run_parity_case(
         client,

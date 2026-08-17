@@ -21,8 +21,7 @@ from vllm.v1.worker.ubatching import (
 
 
 class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
-    """
-    Prepare/Finalize using DeepEP v2 ElasticBuffer (unified API).
+    """Prepare/Finalize using DeepEP v2 ElasticBuffer (unified API).
 
     Supports two modes controlled by the `use_cudagraph` constructor arg:
 

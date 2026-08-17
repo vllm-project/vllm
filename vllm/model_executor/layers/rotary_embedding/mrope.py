@@ -178,8 +178,12 @@ def triton_mrope(
             (T/H/W positions with multimodal inputs)
         mrope_section: [t, h, w]
         head_size: int
+        rotary_dim: Number of leading dimensions rotary is applied to.
+        mrope_interleaved: Whether the T/H/W sections are interleaved rather
+            than concatenated.
         is_neox_style: Whether rotary pairs use split-half (NeoX) or
             adjacent (GPT-J) layout.
+
     """
     n_row, n_q_head_head_dim = q.shape
     n_q_head = n_q_head_head_dim // head_size
@@ -313,6 +317,8 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
                 [3, num_tokens] (T/H/W positions with multimodal inputs)
             query: [num_tokens, num_heads * head_size]
             key: [num_tokens, num_kv_heads * head_size]
+            offsets: Optional per-token position offsets added to positions.
+
         """
         assert positions.ndim == 1 or positions.ndim == 2
         assert key is not None

@@ -16,8 +16,7 @@ from vllm.entrypoints.openai.engine.protocol import UsageInfo
 async def accumulate_streaming_response(
     stream_generator: AsyncGenerator[str, None],
 ) -> ChatCompletionResponse:
-    """
-    Accumulate streaming SSE chunks into a complete ChatCompletionResponse.
+    """Accumulate streaming SSE chunks into a complete ChatCompletionResponse.
 
     This helper parses the SSE format and builds up the complete response
     by combining all the delta chunks.

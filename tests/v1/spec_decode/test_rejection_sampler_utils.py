@@ -89,8 +89,7 @@ def _assert_distribution_match(
     label: str = "",
     min_expected: float = 5.0,
 ):
-    """
-    Assert sampled tokens match the target distribution via a
+    """Assert sampled tokens match the target distribution via a
     chi-squared goodness-of-fit test. This is done by computing
     observed vs expected token counts (target_probs * num_samples),
     then checking that the chi-squared statistic is below a conservative
@@ -151,8 +150,7 @@ def _assert_distribution_match(
 def test_stochastic_rejection_sample(
     num_speculative_steps: int, temperature: float, draft_logits_dtype: torch.dtype
 ):
-    """
-    Verify that rejection sampling produces the target distribution.
+    """Verify that rejection sampling produces the target distribution.
     This is done by simulating many independent trials of speculative
     decoding (from a fixed target and draft distribution). We then
     run rejection sample on all of the trials (requests), and verify
@@ -162,7 +160,6 @@ def test_stochastic_rejection_sample(
     Parametrized over the draft-logits dtype: storing them in the draft head's
     dtype must not bias the output distribution.
     """
-
     torch.manual_seed(42)
     device = "cuda"
     num_trials = 10 * VOCAB_SIZE
@@ -197,11 +194,9 @@ def test_stochastic_rejection_sample(
 
 @pytest.mark.parametrize("num_speculative_steps", [1, 3])
 def test_greedy_rejection_sample(num_speculative_steps: int):
-    """
-    Verify that greedy (temperature=0) always outputs the target argmax
+    """Verify that greedy (temperature=0) always outputs the target argmax
     at every accepted position.
     """
-
     torch.manual_seed(42)
     device = "cuda"
     num_trials = 10 * VOCAB_SIZE
@@ -249,8 +244,7 @@ def test_synthetic_rejection_sample(
     temperature: float,
     unconditional_rates: list[float],
 ):
-    """
-    Verify that synthetic rejection sampling produces the expected
+    """Verify that synthetic rejection sampling produces the expected
     per-position acceptance rates. The unconditional rate at position i
     is P(all draft steps 0..i accepted) = product(conditional_rates[0:i+1]).
     This is approximately mean(num accepted >= i + 1) over many trials.
@@ -503,14 +497,12 @@ def test_placeholder_blocks_later_draft_tokens(use_block_verification: bool):
 def test_block_verification_rejection_sample(
     num_speculative_steps: int, temperature: float, has_draft_logits: bool
 ):
-    """
-    Verify that block verification (Sun et al.) preserves the target
+    """Verify that block verification (Sun et al.) preserves the target
     distribution at every accepted position, for both the full draft-logits
     case and the one-hot (no draft logits) case. Block verification changes
     *which* prefix is accepted, but the marginal of every output position must
     still match the target distribution p(x).
     """
-
     torch.manual_seed(42)
     device = "cuda"
     num_trials = 10 * VOCAB_SIZE
@@ -547,12 +539,10 @@ def test_block_verification_rejection_sample(
 
 @pytest.mark.parametrize("num_speculative_steps", [3, 5])
 def test_block_verification_accepts_at_least_as_many(num_speculative_steps: int):
-    """
-    Block verification is designed to accept at least as long a prefix as
+    """Block verification is designed to accept at least as long a prefix as
     token verification in expectation. Verify the mean accepted length is no
     worse than the standard method on the same inputs.
     """
-
     torch.manual_seed(0)
     device = "cuda"
     num_trials = 20 * VOCAB_SIZE

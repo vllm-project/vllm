@@ -96,8 +96,7 @@ class PiecewiseBackend:
         compiled_runnables: dict[str, Callable[..., Any]] | None = None,
         submod_name: str = "",
     ):
-        """
-        The backend for piecewise compilation.
+        """The backend for piecewise compilation.
         It mainly handles the compilation of static shapes and
         dispatching based on runtime shape.
 

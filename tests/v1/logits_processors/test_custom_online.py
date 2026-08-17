@@ -77,7 +77,6 @@ def server(default_server_args, request, monkeypatch):
     (2) No --logits-processors cli arg; inject a dummy logits processor
     entrypoint
     """
-
     # Test that logitproc info is passed to workers
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
 
@@ -118,7 +117,7 @@ api_keyword_args = {
     [MODEL_NAME],
 )
 def test_custom_logitsprocs(server, model_name: str):
-    """Test custom logitsprocs when starting OpenAI server from CLI
+    """Test custom logitsprocs when starting OpenAI server from CLI.
 
     Launch vLLM OpenAI-compatible server, configured to load a custom logitproc
     that has a well-defined behavior (mask out all tokens except one
@@ -130,7 +129,6 @@ def test_custom_logitsprocs(server, model_name: str):
     Validate that requests which activate the custom logitproc, repeat the same
     token
     """
-
     import asyncio
 
     async def _async_main(srv, mn):
@@ -180,8 +178,7 @@ def test_custom_logitsprocs(server, model_name: str):
 async def test_invalid_custom_logitsproc_arg(
     client: openai.AsyncOpenAI, model_name: str
 ):
-    """Test that request with invalid custom logitsproc is rejected"""
-
+    """Test that request with invalid custom logitsproc is rejected."""
     prompt = "Hello, my name is"
     # Pass invalid (non-int) target_token value to dummy logits processor
     request_keyword_args: dict[str, Any] = {

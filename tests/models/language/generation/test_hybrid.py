@@ -163,8 +163,7 @@ def test_chunked_prefill_with_parallel_sampling(
     max_tokens: int,
     conv_state_layout: str,
 ) -> None:
-    """
-    Tests chunked prefill in conjunction with n > 1.
+    """Tests chunked prefill in conjunction with n > 1.
 
     In this case, prefill is populated with decoding tokens and
     we test that it doesn't fail.
@@ -198,8 +197,7 @@ def test_mamba_cache_cg_padding(
     max_tokens: int,
     conv_state_layout: str,
 ) -> None:
-    """
-    This test is for verifying that mamba cache is padded to CG captured
+    """This test is for verifying that mamba cache is padded to CG captured
     batch size. If it's not, a torch RuntimeError will be raised because
     tensor dimensions aren't compatible.
     """
@@ -233,8 +231,7 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     example_prompts,
     model: str,
 ) -> None:
-    """
-    This test is for verifying that the hybrid inner state management doesn't
+    """This test is for verifying that the hybrid inner state management doesn't
     collapse in case where the number of incoming requests and
     finished_requests_ids is larger than the maximum mamba block capacity.
 
@@ -260,8 +257,7 @@ def test_state_cleanup(
     example_prompts,
     model: str,
 ) -> None:
-    """
-    This test is for verifying that the Hybrid state is cleaned up between
+    """This test is for verifying that the Hybrid state is cleaned up between
     steps.
 
     If it's not cleaned, an error would be expected.

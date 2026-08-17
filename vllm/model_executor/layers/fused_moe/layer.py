@@ -161,6 +161,11 @@ def FusedMoEFactory(
     load_weights function in each model implementation.
 
     Args:
+        intermediate_pad: Padding added to the intermediate size, if any.
+        swiglu_alpha: Optional alpha parameter for the SwiGLU activation.
+        swiglu_beta: Optional beta parameter for the SwiGLU activation.
+
+    Args:
         num_experts: Number of experts in the model (global count)
         top_k: Number of experts selected for each token
         hidden_size: Input hidden state size of the transformer
@@ -215,6 +220,7 @@ def FusedMoEFactory(
 
     Returns:
         MoERunner: Configured MoE execution pipeline ready for forward passes
+
     """
     vllm_config = get_current_vllm_config()
 

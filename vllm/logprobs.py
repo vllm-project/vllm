@@ -17,6 +17,7 @@ class Logprob:
         logprob: The logprob of chosen token
         rank: The vocab rank of chosen token (>=1)
         decoded_token: The decoded chosen token index
+
     """
 
     logprob: float
@@ -29,8 +30,7 @@ LogprobsOnePosition = dict[int, Logprob]
 
 @dataclass
 class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
-    """
-    Flat logprobs of a request into multiple primitive type lists.
+    """Flat logprobs of a request into multiple primitive type lists.
 
     Compared to list[dict[int, Logprob]], this data structure reduced GC
     overhead significantly. As it flattened logprob information for
@@ -61,7 +61,7 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
     decoded_tokens: list[str | None] = field(default_factory=list)
 
     def append(self, logprobs_one_position: LogprobsOnePosition | None) -> None:
-        """Appends the container with logprobs for the next position"""
+        """Appends the container with logprobs for the next position."""
         self.start_indices.append(len(self.logprobs))
         if logprobs_one_position:
             for token_id, logprob in logprobs_one_position.items():
@@ -78,8 +78,7 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         ranks: itertools.chain[int],
         decoded_tokens: Iterable[str | None],
     ) -> None:
-        """
-        Appends logprobs for the next position without creating
+        """Appends logprobs for the next position without creating
         the intermediate logprob dictionary.
         """
         self.start_indices.append(len(self.logprobs))
@@ -93,12 +92,12 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         self.end_indices.append(len(self.logprobs))
 
     def extend(self, logprobs_multi_positions) -> None:
-        """Extends the container with logprobs for the next multiple positions"""
+        """Extends the container with logprobs for the next multiple positions."""
         for logprobs_one_position in logprobs_multi_positions:
             self.append(logprobs_one_position)
 
     def __len__(self) -> int:
-        """Gets number of positions stored in the container"""
+        """Gets number of positions stored in the container."""
         return len(self.start_indices)
 
     @overload
@@ -108,7 +107,7 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
     def __getitem__(self, s: slice, /) -> "FlatLogprobs": ...
 
     def __getitem__(self, index: int | slice):
-        """Extracts logprobs of a given position or slice"""
+        """Extracts logprobs of a given position or slice."""
         if isinstance(index, int):
             return {
                 self.token_ids[i]: Logprob(
@@ -144,8 +143,7 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         raise TypeError("Cannot insert logprobs to FlatLogprobs")
 
     def __iter__(self) -> Iterator[LogprobsOnePosition]:
-        """
-        Iterates the container and yields LogprobsOnePosition for
+        """Iterates the container and yields LogprobsOnePosition for
         each position.
         """
         for i in range(0, len(self.start_indices)):
@@ -160,7 +158,7 @@ SampleLogprobs = FlatLogprobs | list[LogprobsOnePosition]
 
 
 def create_prompt_logprobs(flat_logprobs: bool) -> PromptLogprobs:
-    """Creates a container to store prompt logprobs for a request"""
+    """Creates a container to store prompt logprobs for a request."""
     logprobs: PromptLogprobs = FlatLogprobs() if flat_logprobs else []
     # NOTE: logprob of first prompt token is None.
     logprobs.append(None)
@@ -168,7 +166,7 @@ def create_prompt_logprobs(flat_logprobs: bool) -> PromptLogprobs:
 
 
 def create_sample_logprobs(flat_logprobs: bool) -> SampleLogprobs:
-    """Creates a container to store decode logprobs for a request"""
+    """Creates a container to store decode logprobs for a request."""
     return FlatLogprobs() if flat_logprobs else []
 
 
@@ -180,7 +178,7 @@ def append_logprobs_for_next_position(
     rank: int,
     num_logprobs: int,
 ) -> None:
-    """Appends logprobs for the next position"""
+    """Appends logprobs for the next position."""
     if num_logprobs == -1:
         num_logprobs = len(logprobs)
     # We do not need a special case for the sampled token

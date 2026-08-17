@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-OCP MX quantization emulation for MoE.
+"""OCP MX quantization emulation for MoE.
 
 This file implements OCP MX (MXFP4/MXFP6) emulation for MoE in case the
 hardware used does not natively support OCP MX MoE.
@@ -36,8 +35,7 @@ logger = init_logger(__name__)
 
 
 class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
-    """
-    Extension of TritonExperts to support emulated OCP MX MoE experts.
+    """Extension of TritonExperts to support emulated OCP MX MoE experts.
 
     It may be used for OCP MX (MXFP4/MXFP6) models when the device does not
     have native support for these dtypes.
@@ -166,8 +164,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        """
-        Apply emulated quantized MoE computation.
+        """Apply emulated quantized MoE computation.
 
         This dequantizes the weights on the fly and calls TritonExperts.apply
         with activation quantization support.

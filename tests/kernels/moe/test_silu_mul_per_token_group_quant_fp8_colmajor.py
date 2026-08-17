@@ -18,11 +18,9 @@ GROUP_SIZE = 128
 
 
 def reference_quant(x: torch.Tensor, use_ue8m0: bool):
-    """
-    Reference triton quant kernel from,
+    """Reference triton quant kernel from,
     vllm.model_executor.layers.quantization.utils.fp8_utils
     """
-
     x_q = torch.empty_like(x, device=x.device, dtype=FLOAT8_DTYPE)
 
     # Allocate the scale tensor in column-major format.
@@ -71,7 +69,8 @@ def reference_with_clamp(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pre-clamp inputs (gate from above, up symmetric) at the input dtype to
     match the C++ compute() template, then run the standard silu_and_mul +
-    quant reference."""
+    quant reference.
+    """
     N_2 = x.size(1) // 2
     dtype = x.dtype
     gate = x[..., :N_2].to(torch.float32).clamp(max=clamp_limit).to(dtype)

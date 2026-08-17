@@ -59,7 +59,8 @@ class TestAutotuneDisabledKernel:
 
     def test_autotune_disabled_kernel_produces_valid_config(self):
         """Register a kernel with no configs (disabled), run autotune,
-        verify it produces a valid helion.Config."""
+        verify it produces a valid helion.Config.
+        """
         with dummy_kernel_registry(configs={}) as register:
             wrapper = register(
                 "autotune_test_kernel",

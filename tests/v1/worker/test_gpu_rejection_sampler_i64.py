@@ -34,7 +34,8 @@ def _run(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run rejection_sample on a batch of uniform k=2 requests, with the
     request under test at request index `roi_req` and draft-logits row
-    `req_state_idx`. Returns that request's (sampled, num_sampled)."""
+    `req_state_idx`. Returns that request's (sampled, num_sampled).
+    """
     num_logits = num_reqs * LOGITS_PER_REQ
     roi_row = roi_req * LOGITS_PER_REQ
 

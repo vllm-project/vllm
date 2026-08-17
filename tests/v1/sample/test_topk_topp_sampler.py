@@ -50,8 +50,7 @@ def _seed_default_generator(seed: int) -> None:
 
 @pytest.fixture(autouse=True)
 def reset_default_device():
-    """
-    Explicitly set the default device, which can affect subsequent tests.
+    """Explicitly set the default device, which can affect subsequent tests.
     Adding this fixture helps avoid this problem.
     """
     original_device = torch.get_default_device()
@@ -167,8 +166,7 @@ def test_topk_impl_equivalence():
     "interface differences between Python and FlashInfer implementations"
 )
 def test_flashinfer_sampler():
-    """
-    This test verifies that the FlashInfer top-k and top-p sampling
+    """This test verifies that the FlashInfer top-k and top-p sampling
     implementation produces the same results as the Python implementation.
 
     NOTE: FlashInfer did not directly expose an interface for fused top-k and
@@ -811,7 +809,8 @@ class TestFlashInferTopkToppRobustness:
 
     def _make_logits(self, pattern: str) -> torch.Tensor:
         """Build (BATCH, VOCAB) logits with `pattern` applied to row 0
-        (rows 1..B-1 stay clean so we can detect cross-row corruption)."""
+        (rows 1..B-1 stay clean so we can detect cross-row corruption).
+        """
         logits = (
             torch.randn(
                 self.BATCH,

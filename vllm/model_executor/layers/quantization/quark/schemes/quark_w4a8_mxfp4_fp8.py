@@ -31,8 +31,7 @@ OCP_MX_BLOCK_SIZE = 32
 
 
 class QuarkW4A8_MXFP4_FP8(QuarkScheme):
-    """
-    - Weights: MXFP4 with E8M0 scales per block of 32
+    """- Weights: MXFP4 with E8M0 scales per block of 32
     - Activations: FP8 E4M3 (static per-tensor quantization)
 
     Uses the AITER Triton kernel and falls back to emulation if AITER not available.

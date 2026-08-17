@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-DCP All-to-All communication backend for attention.
+"""DCP All-to-All communication backend for attention.
 
 Provides All-to-All (A2A) communication as an alternative to
 AllGather + ReduceScatter (AG+RS) for Decode Context Parallel (DCP).
@@ -39,8 +38,7 @@ def _lse_weighted_combine(
     return_lse: bool = False,
     is_lse_base_on_e: bool = True,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """
-    CPU reference implementation for LSE-weighted combination.
+    """CPU reference implementation for LSE-weighted combination.
 
     This is a pure PyTorch implementation used for testing and validation.
 
@@ -56,6 +54,7 @@ def _lse_weighted_combine(
 
     Returns:
         Combined output [B, H, D], and optionally global LSE [B, H]
+
     """
     N, B, H, D = outputs.shape
 
@@ -406,8 +405,7 @@ def dcp_a2a_lse_reduce(
     seq_lens: torch.Tensor | None = None,
     query_start_loc: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-    """
-    Combine partial attention outputs across DCP ranks using All-to-All.
+    """Combine partial attention outputs across DCP ranks using All-to-All.
 
     The output and LSE are packed into a single output-dtype buffer, sent
     with one All-to-All, then unpacked and combined with exact LSE weighting.
@@ -425,6 +423,7 @@ def dcp_a2a_lse_reduce(
     Returns:
         Combined output [B, H/N, D] (head-scattered)
         If return_lse=True, also returns global_lse [B, H/N]
+
     """
     world_size = cp_group.world_size
 

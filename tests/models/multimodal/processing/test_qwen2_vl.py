@@ -181,7 +181,6 @@ def test_mm_device_do_normalize(
     num_imgs: int,
 ):
     """Ensure that enable mm_device_do_normalize yields the correct result."""
-
     ctx = build_model_context(
         model_id,
         limit_mm_per_prompt={"image": num_imgs},

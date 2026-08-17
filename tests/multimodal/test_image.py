@@ -80,7 +80,8 @@ def test_l_mode_no_trns_to_rgb():
 
 def test_exif_transpose_normalizes_orientation():
     """Image with EXIF orientation 3 (180-degree rotation) should be
-    normalized so pixel data matches visual display."""
+    normalized so pixel data matches visual display.
+    """
     # Built synthetically because the existing assets are PNGs which
     # don't carry EXIF orientation metadata; we need a JPEG with an
     # injected EXIF orientation=3 tag.

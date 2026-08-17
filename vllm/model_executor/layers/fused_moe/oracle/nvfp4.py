@@ -168,11 +168,9 @@ def select_nvfp4_moe_backend(
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
 ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
-    """
-    Select the primary NvFP4 MoE backend
+    """Select the primary NvFP4 MoE backend
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-
     # NOTE: the kernels are selected in the following order.
     # FLASHINFER_B12X is intentionally excluded from auto-selection until
     # the upstream CUTLASS SM121 MMA op guard is resolved; use

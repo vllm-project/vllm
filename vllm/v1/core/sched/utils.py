@@ -30,11 +30,14 @@ def check_sequence_repetition(
     params: RepetitionDetectionParams,
 ) -> bool:
     """Check if a sequence of token IDs has a repetition pattern.
+
     Args:
         token_ids: List of token IDs
         params: Repetition detection parameters.
+
     Returns:
         True if a repetition pattern is found, False otherwise.
+
     """
     max_pattern_size = params.max_pattern_size
     min_pattern_size = params.min_pattern_size
@@ -77,6 +80,7 @@ def remove_all(lst: list, items_to_remove: set) -> list:
     Note:
         For single item removal, this modifies the original list in-place
         and returns it. For multiple items, it creates and returns a new list.
+
     """
     if not items_to_remove:
         return lst

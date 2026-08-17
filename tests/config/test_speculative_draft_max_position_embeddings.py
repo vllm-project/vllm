@@ -99,7 +99,8 @@ def test_independent_draft_model_keeps_its_own_limit(
     vllm_caplog: pytest.LogCaptureFixture,
 ):
     """An independent AR draft may genuinely have a smaller context than the
-    target; its max_position_embeddings must not be resized."""
+    target; its max_position_embeddings must not be resized.
+    """
     target_model_config = ModelConfig(
         AR_MODEL, hf_overrides={"max_position_embeddings": 8192}
     )

@@ -127,9 +127,7 @@ class StructuredOutputsParams:
             )
 
     def all_constraints_none(self) -> bool:
-        """
-        Returns True if all structured-output constraint fields are None.
-        """
+        """Returns True if all structured-output constraint fields are None."""
         return all(
             getattr(self, field) is None
             for field in (
@@ -143,9 +141,7 @@ class StructuredOutputsParams:
         )
 
     def all_non_structural_tag_constraints_none(self) -> bool:
-        """
-        Returns True if all structured-output constraint fields are None.
-        """
+        """Returns True if all structured-output constraint fields are None."""
         return all(
             getattr(self, field) is None
             for field in (
@@ -658,7 +654,7 @@ class SamplingParams(
         generation_config: dict[str, Any],
         eos_token_id: int | None = None,
     ) -> None:
-        """Update if there are non-default values from generation_config"""
+        """Update if there are non-default values from generation_config."""
         if not self.ignore_eos:
             self._eos_token_id = eos_token_id
 
@@ -759,7 +755,8 @@ class SamplingParams(
         """Number of sample logprobs to return per output token, or `None` if
         no sample logprobs were requested. Takes `logprob_token_ids` into
         account: when `logprobs` is unset but `logprob_token_ids` is set,
-        returns `len(logprob_token_ids)`."""
+        returns `len(logprob_token_ids)`.
+        """
         if self.logprobs is not None:
             return self.logprobs
         return len(self.logprob_token_ids) if self.logprob_token_ids else None

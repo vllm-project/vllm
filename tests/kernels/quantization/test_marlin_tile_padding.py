@@ -366,7 +366,8 @@ def test_gptq_marlin_padded_round_trip(shape, group_size):
 def test_fp8_block_marlin_padded_round_trip(shape):
     """Block-quantized FP8 (e.g. Nemotron NVFP4 checkpoints' FP8 layers):
     group_size=128 exercises the lcm K-alignment in marlin_padded_nk and the
-    weight_scale_inv group-wise scale padding."""
+    weight_scale_inv group-wise scale padding.
+    """
     size_n, size_k = shape
     block = 128
     dtype = torch.float16
@@ -416,7 +417,8 @@ def test_fp8_block_marlin_padded_round_trip(shape):
 @pytest.mark.parametrize("shape", [(200, 288), (4640, 512)])
 def test_mxfp8_marlin_padded_round_trip(shape):
     """MXFP8 exercises the e8m0 scale path, where padded 0.0 scales clamp to
-    2^-127 instead of zero and must still contribute nothing."""
+    2^-127 instead of zero and must still contribute nothing.
+    """
     size_n, size_k = shape
     group_size = 32
     # The e8m0-scale Marlin kernels are only instantiated for bf16 activations.
@@ -463,7 +465,8 @@ def test_mxfp8_marlin_padded_round_trip(shape):
 @pytest.mark.parametrize("shape", [(200, 512), (4640, 512)])
 def test_awq_zp_marlin_padded_round_trip(shape):
     """AWQ-style uint4 with runtime zero-points, padded the way
-    MarlinLinearKernel does: padded columns rely on (q=0 - zp=0) * scale=0."""
+    MarlinLinearKernel does: padded columns rely on (q=0 - zp=0) * scale=0.
+    """
     size_n, size_k = shape
     group_size = 128
     dtype = torch.float16
@@ -706,7 +709,8 @@ def test_check_moe_marlin_supports_layer_padding():
 @pytest.mark.parametrize("shape", [(96, 256, 8), (160, 512, 4)])
 def test_fp8_marlin_moe_padded_round_trip(shape, quant):
     """FP8 weight-only MoE: pad a tile-misaligned intermediate and check the
-    real prepare + fused_marlin_moe against the dequantized reference."""
+    real prepare + fused_marlin_moe against the dequantized reference.
+    """
     from tests.kernels.utils import torch_experts
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe import fused_topk
@@ -792,7 +796,8 @@ def test_fp8_marlin_moe_padded_round_trip(shape, quant):
 @pytest.mark.parametrize("shape", [(96, 256, 8), (160, 512, 4)])
 def test_mxfp8_marlin_moe_padded_round_trip(shape):
     """MXFP8 weight-only MoE round-trip at a tile-misaligned intermediate, with
-    unit e8m0 scales so the reference is the exact fp8 dequant."""
+    unit e8m0 scales so the reference is the exact fp8 dequant.
+    """
     from tests.kernels.utils import torch_experts
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe import fused_topk

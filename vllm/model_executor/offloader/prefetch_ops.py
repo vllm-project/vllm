@@ -29,6 +29,7 @@ def _wait_prefetch_impl(
         input_tensor: Input to the layer (e.g., hidden_states) - declared
             as mutated to create data dependency for torch.compile.
         layer_idx: Index of the layer to wait for.
+
     """
     get_offloader()._wait_for_layer(layer_idx)
 
@@ -57,6 +58,7 @@ def _start_prefetch_impl(
             prevent torch.compile from reordering this op before the
             computation that produces output_tensor.
         layer_idx: Index of the layer to prefetch.
+
     """
     get_offloader()._start_prefetch(layer_idx)
 

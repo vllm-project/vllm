@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
 
-"""
-Example online usage of Pooling API for ColQwen3 multi-vector retrieval.
+"""Example online usage of Pooling API for ColQwen3 multi-vector retrieval.
 
 ColQwen3 is a multi-modal late interaction model based on Qwen3-VL that
 produces per-token embeddings (320-dim, L2-normalized) for both text and

@@ -104,8 +104,8 @@ def _dequantize_fp8_ds_mla_entry(
     Args:
         simulate_sm100_e8m0_scales: If True, simulate the SM100 kernel's
             float -> e8m0 -> bf16 scale conversion path.
-    """
 
+    """
     # The first kv_lora_rank bytes store FP8 latent values with one scale per
     # 128 element tile written as float32 right after the latent payload.
     scales = cache_slice.view(torch.float32)[kv_lora_rank // 4 : kv_lora_rank // 4 + 4]
@@ -142,8 +142,8 @@ def _quantize_dequantize_fp8_ds_mla(
     Args:
         simulate_sm100_e8m0_scales: If True, simulate the SM100 kernel's
             float -> e8m0 -> bf16 scale conversion in dequantization.
-    """
 
+    """
     if kv_c.numel() == 0:
         return kv_c.clone(), k_pe.clone()
 
@@ -741,7 +741,8 @@ def test_triton_convert_rejects_req_id_longer_than_token_indices():
     req_id but the output is allocated like token_indices, so a full-batch
     req_id combined with an MQA-subset token_indices wrote past the end of
     the output buffer. The wrapper must reject the length mismatch instead
-    of corrupting memory."""
+    of corrupting memory.
+    """
     device = torch.device(DEVICE_TYPE)
     num_topk_tokens = 128
     block_size = 64
@@ -796,7 +797,8 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
     is active, forward_mqa only receives the leading decode tokens, but
     _forward_bf16_kv passed the full-batch req_id_per_token to the index
     conversion, making it write past the end of its output buffer. The call
-    site must slice req_id_per_token to the MQA tokens."""
+    site must slice req_id_per_token to the MQA tokens.
+    """
     device = torch.device(DEVICE_TYPE)
     num_topk_tokens = 128
     block_size = 64
@@ -870,7 +872,8 @@ def test_split_prefill_chunks(seq_lens, max_buf, expected):
 )
 def test_masked_mha_workspace_fits_single_request_boundary(max_query_len, expected):
     """A 32K prefill needs the default workspace exactly; shrinking it would
-    push a supported request onto MQA."""
+    push a supported request onto MQA.
+    """
     assert (
         _masked_mha_workspace_fits(
             batch_size=1,

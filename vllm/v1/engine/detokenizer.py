@@ -94,8 +94,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         self.output_text = ""
 
     def update(self, new_token_ids: list[int], stop_terminated: bool) -> str | None:
-        """
-        Update RequestState for the request_id by:
+        """Update RequestState for the request_id by:
             1) Detokenize the new token ids incrementally.
             2) Evaluate stop criteria.
 
@@ -148,8 +147,8 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
     def get_next_output_text(self, finished: bool, delta: bool) -> str:
         """If delta is True, only new text since the last call to
-        this method is returned"""
-
+        this method is returned
+        """
         # We return the full output text if the sequence is finished.
         buffer_length = 0 if finished else self.stop_buffer_length
         if not delta:

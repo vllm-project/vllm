@@ -59,7 +59,7 @@ class DeepGemmQuantScaleFMT(Enum):
 
     @classmethod
     def init_oracle_cache(cls) -> None:
-        """Initialize the oracle decision and store it in the class cache"""
+        """Initialize the oracle decision and store it in the class cache."""
         cached = getattr(cls, "_oracle_cache", None)
         if cached is not None:
             return
@@ -396,7 +396,7 @@ def mk_alignment_scope(value: int):
 
 
 def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
-    """Wrapper for DeepGEMM's get_mn_major_tma_aligned_tensor"""
+    """Wrapper for DeepGEMM's get_mn_major_tma_aligned_tensor."""
     _lazy_init()
     if _get_mn_major_tma_aligned_tensor_impl is None:
         return _missing()
@@ -538,6 +538,7 @@ def fp8_fp4_mqa_logits(
 
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
+
     """
     _lazy_init()
     if _fp8_fp4_mqa_logits_impl is None:
@@ -593,6 +594,7 @@ def get_paged_mqa_logits_metadata(
     Returns:
         Tensor of shape [slots + 1, 2] consumed by `fp8_fp4_paged_mqa_logits`
         to schedule work across SMs.
+
     """
     _lazy_init()
     if _get_paged_mqa_logits_metadata_impl is None:
@@ -644,6 +646,7 @@ def fp8_fp4_paged_mqa_logits(
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
+
     """
     _lazy_init()
     if _fp8_fp4_paged_mqa_logits_impl is None:
@@ -669,8 +672,7 @@ def tf32_hc_prenorm_gemm(
     sqrsum: torch.Tensor,
     num_split: int,
 ) -> torch.Tensor:
-    """
-    Perform the following computation:
+    """Perform the following computation:
         out = x.float() @ fn.T
         sqrsum = x.float().square().sum(-1)
 
@@ -737,7 +739,6 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
     and report `1 - sim`.  Once kernel accuracy improves this helper can be
     removed.
     """
-
     x, y = x.double(), y.double()
     denominator = (x * x + y * y).sum()
     sim = 2 * (x * y).sum() / denominator

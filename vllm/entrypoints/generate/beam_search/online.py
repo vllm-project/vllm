@@ -20,7 +20,7 @@ from .utils import BeamSearchSequence, create_sort_beams_key_function
 
 
 class BeamSearchOnlineMixin(ABC):
-    """online serving for beam search"""
+    """online serving for beam search."""
 
     renderer: BaseRenderer
     engine_client: EngineClient

@@ -30,12 +30,12 @@ def reference_mla_sparse_prefill(
     topk_length: torch.Tensor | None = None,
     attn_sink: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Returns:
+    """Returns:
     - o: [s_q, h_q, dv]
     - o_fp32: [s_q, h_q, dv]
     - max_logits: [s_q, h_q]
     - lse: [s_q, h_q]
+
     """
     s_q, h_q, d_qk = q.shape
     s_kv, _, _ = kv.shape

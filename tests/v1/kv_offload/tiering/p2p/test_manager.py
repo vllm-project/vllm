@@ -41,7 +41,8 @@ def _remote_prefiller_kv_params(
     kv_request_id: str = "req-1",
 ) -> dict:
     """Decoder-side kv_transfer_params: ``remote_prefiller`` sub-dict carries
-    kv_request_id + remote_host + remote_port."""
+    kv_request_id + remote_host + remote_port.
+    """
     return {
         "remote_prefiller": {
             "kv_request_id": kv_request_id,
@@ -57,7 +58,8 @@ def _remote_kv_source_kv_params(
     kv_request_id: str = "req-1",
 ) -> dict:
     """Symmetric-P2P consumer kv_transfer_params: ``remote_kv_source`` sub-dict has
-    the same shape as ``remote_prefiller`` (kv_request_id + remote_host + port)."""
+    the same shape as ``remote_prefiller`` (kv_request_id + remote_host + port).
+    """
     return {
         "remote_kv_source": {
             "kv_request_id": kv_request_id,
@@ -69,7 +71,8 @@ def _remote_kv_source_kv_params(
 
 def _remote_decoder_kv_params(kv_request_id: str = "req-1") -> dict:
     """Prefiller-side kv_transfer_params: ``remote_decoder`` sub-dict carries
-    kv_request_id only."""
+    kv_request_id only.
+    """
     return {"remote_decoder": {"kv_request_id": kv_request_id}}
 
 
@@ -215,7 +218,8 @@ class TestLookup:
     def test_lookup_returns_miss_without_prefill_key(self):
         """No ``remote_prefiller`` sub-dict means the request was not routed for
         remote prefill — local prefill should run instead, so lookup()
-        returns MISS even when a stale ``remote_decoder`` block is present."""
+        returns MISS even when a stale ``remote_decoder`` block is present.
+        """
         mgr = _make_manager()
         ctx = _req_context(kv_params=_remote_decoder_kv_params())
         assert mgr.lookup(b"key", ctx) is LookupResult.MISS
@@ -261,7 +265,8 @@ class TestServeExternalRequests:
     def test_flushes_failed_serve_ctxs_then_serves_each_session(self):
         """serve_external_requests releases the failed serves left by
         reaped sessions via parent.on_request_finished (clearing the
-        queue), then delegates to every live session with the same parent."""
+        queue), then delegates to every live session with the same parent.
+        """
         mgr = _make_manager()
         ctx = ReqContext(req_id="p2p:peer:req-1:lu1")
         mgr._failed_serve_ctxs = [ctx]
@@ -315,7 +320,8 @@ class TestSubmitStore:
     def test_no_binding_yet_parks_in_unbound_stores(self):
         """submit_store without a bound session buffers the batch keyed
         by kv_request_id; no session is pre-created (peer_id is unknown
-        to the producer at store time)."""
+        to the producer at store time).
+        """
         mgr = _make_manager()
         job = _job_metadata(
             job_id=1,
@@ -342,7 +348,8 @@ class TestSubmitStore:
     def test_routes_to_bound_session(self):
         """If a session has already received FetchMsg for this
         kv_request_id (so _kv_to_session is populated), submit_store
-        forwards directly to that session rather than re-buffering."""
+        forwards directly to that session rather than re-buffering.
+        """
         mgr = _make_manager()
         bound = _FakeSession(peer_id="10.0.0.1:8000", connected=True)
         mgr._kv_to_session["req-1"] = bound  # type: ignore[assignment]
@@ -365,7 +372,8 @@ class TestSubmitStore:
     def test_extra_top_level_keys_are_ignored(self):
         """Producer-side kv_transfer_params should not pre-create a
         session even when a stale caller still passes a top-level
-        ``remote_host``/``remote_port`` next to ``remote_decoder``."""
+        ``remote_host``/``remote_port`` next to ``remote_decoder``.
+        """
         mgr = _make_manager()
         params = _remote_decoder_kv_params()
         params["remote_host"] = "stale"
@@ -409,7 +417,8 @@ class TestSubmitLoad:
 
     def test_happy_path_with_active_session(self):
         """When the peer's session exists, submit_load forwards to
-        session.request_blocks and does NOT add a finished result yet."""
+        session.request_blocks and does NOT add a finished result yet.
+        """
         mgr = _make_manager()
         peer_id = "10.0.0.1:8000"
         existing = _FakeSession(peer_id=peer_id, connected=True)
@@ -429,7 +438,8 @@ class TestSubmitLoad:
     def test_missing_consumer_flag_fails(self):
         """Peer fields present but neither do_remote_prefill nor
         do_p2p_fetch is set — submit_load fails the job rather than
-        emit a stray FetchMsg."""
+        emit a stray FetchMsg.
+        """
         mgr = _make_manager()
         params = {
             "remote_host": "10.0.0.1",
@@ -473,7 +483,8 @@ class TestOnRequestFinished:
     def test_decoder_side_calls_session_finish_request(self):
         """Decoder-side finish (``remote_prefiller`` set) still routes via peer_id
         because the consumer addresses the producer it loaded from. The
-        session's finish_request cancels the client-role load."""
+        session's finish_request cancels the client-role load.
+        """
         mgr = _make_manager()
         peer_id = "10.0.0.1:8000"
         session = _FakeSession(peer_id=peer_id)
@@ -485,7 +496,8 @@ class TestOnRequestFinished:
     def test_p2p_consumer_side_calls_session_finish_request(self):
         """Symmetric-P2P consumer finish (``remote_kv_source`` set) routes via peer_id
         so the session drops any pending lookups (cancel_lookups) and
-        cancels any inbound load."""
+        cancels any inbound load.
+        """
         mgr = _make_manager()
         peer_id = "10.0.0.1:8000"
         session = _FakeSession(peer_id=peer_id)
@@ -496,7 +508,8 @@ class TestOnRequestFinished:
 
     def test_prefiller_bound_id_routes_via_kv_to_session(self):
         """Prefiller-side finish for an id whose session is already bound
-        (FetchMsg received) routes via _kv_to_session and pops the entry."""
+        (FetchMsg received) routes via _kv_to_session and pops the entry.
+        """
         mgr = _make_manager()
         bound = _FakeSession(peer_id="some-peer:1", connected=True)
         mgr._kv_to_session["req-1"] = bound  # type: ignore[assignment]
@@ -510,7 +523,8 @@ class TestOnRequestFinished:
         and no session binding is a no-op on `_unbound_stores`. The
         parked batches survive until a peer fetches them or the
         `_reap_unbound_stores` timeout fires — `on_request_finished`
-        must not evict them."""
+        must not evict them.
+        """
         from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
 
         mgr = _make_manager()
@@ -680,7 +694,8 @@ class TestGetFinished:
 
     def test_reap_fails_probes(self):
         """A reaped session's in-flight lookups land in _failed_req_ids so
-        the consumer's lookup() returns MISS instead of RETRY forever."""
+        the consumer's lookup() returns MISS instead of RETRY forever.
+        """
 
         class FakeData:
             def remove_remote_peer(self, pid):
@@ -715,7 +730,8 @@ class TestGetFinished:
     def test_unbound_store_reaped_after_timeout(self):
         """Unbound stores past _UNBOUND_STORE_TIMEOUT_S surface as failed
         and their kv_request_id lands in _failed_req_ids so a late
-        FetchMsg/lookup doesn't try to satisfy them."""
+        FetchMsg/lookup doesn't try to satisfy them.
+        """
         from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
 
         mgr = self._make()
@@ -737,7 +753,8 @@ class TestGetFinished:
 
     def test_submit_store_parks_unbound_batch(self):
         """submit_store on an unbound id appends a batch with a fresh
-        submitted_at stamp so the unbound-store sweep can age it out."""
+        submitted_at stamp so the unbound-store sweep can age it out.
+        """
         mgr = _make_manager()
         job = _job_metadata(
             job_id=1, kv_params=_remote_decoder_kv_params(kv_request_id="req-1")
@@ -759,18 +776,21 @@ class TestHasPendingWork:
     """has_pending_work() must always return True so the engine keeps
     ticking the offload pipeline — that's the only thread driving
     _control.poll() (incoming peer connects) and session.poll()
-    (incoming fetch messages on existing sessions)."""
+    (incoming fetch messages on existing sessions).
+    """
 
     def test_returns_true_unconditionally_to_keep_engine_ticking(self):
         """Even with no sessions and no jobs, has_pending_work() returns
         True so the engine keeps calling get_finished_jobs(), which is
-        what drives _control.poll() for inbound peer connects."""
+        what drives _control.poll() for inbound peer connects.
+        """
         mgr = _make_manager()
         assert mgr.has_pending_work() is True
 
     def test_returns_true_even_when_sessions_present(self):
         """The result is the same regardless of session state — there is
-        no 'idle' branch."""
+        no 'idle' branch.
+        """
         mgr = _make_manager()
         mgr._sessions["peer:1"] = _FakeSession(peer_id="peer:1")  # type: ignore[assignment]
         assert mgr.has_pending_work() is True
@@ -783,7 +803,8 @@ class TestHasPendingWork:
 
 class _ShutdownFakeData:
     """Fake DataTransport that records cancel/poll/close calls and
-    drives the wait-cancel loop with a scriptable `still` queue."""
+    drives the wait-cancel loop with a scriptable `still` queue.
+    """
 
     def __init__(self, still_queue: list[list[int]] | None = None) -> None:
         # Each list in still_queue is the set of ids the next
@@ -827,7 +848,8 @@ class _ShutdownFakeControl:
 class TestShutdownDrain:
     """shutdown() drains inflight transfers via cancel(mode='wait')
     before calling _data.close(), with a 3s deadline fallback to
-    cancel(mode='immediate')."""
+    cancel(mode='immediate').
+    """
 
     def _prep(
         self,
@@ -1177,7 +1199,8 @@ class _RecordingConn:
 
 class TestAcceptNewPeers:
     """A second inbound from an already-connected peer is rejected and the
-    new conn is closed; the existing session is left untouched."""
+    new conn is closed; the existing session is left untouched.
+    """
 
     def test_duplicate_connection_is_closed_and_existing_session_untouched(self):
         mgr = _make_manager()
@@ -1199,7 +1222,8 @@ class TestAcceptNewPeers:
         """An inbound conn from a peer with no existing session creates
         a fresh connected session and registers it under conn.peer_id.
         The prefiller has no pre-created pending session anymore — the
-        first signal of a peer's existence is its inbound connection."""
+        first signal of a peer's existence is its inbound connection.
+        """
 
         class FakeData:
             block_len = 4096
@@ -1246,7 +1270,8 @@ class TestAcceptNewPeers:
 
 class TestPollOnce:
     """_poll_once must drain control, accept new peers, poll every session,
-    surface results, and reap dead sessions — in that order."""
+    surface results, and reap dead sessions — in that order.
+    """
 
     def test_orchestrates_accept_poll_and_reap(self):
         mgr = _make_manager()
@@ -1302,7 +1327,8 @@ class TestPollOnce:
     def test_new_fetch_id_binds_and_replays_unbound_batches(self):
         """When session.poll() reports a kv_request_id whose FetchMsg
         arrived this tick, the manager binds it to that session and
-        replays every parked submit_store batch via add_stored_blocks."""
+        replays every parked submit_store batch via add_stored_blocks.
+        """
         from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
 
         mgr = _make_manager()
@@ -1336,7 +1362,8 @@ class TestPollOnce:
 
     def test_new_fetch_id_with_no_unbound_still_binds(self):
         """A FetchMsg for a kv_request_id with no parked batches still
-        records the binding so subsequent submit_stores route fast."""
+        records the binding so subsequent submit_stores route fast.
+        """
         mgr = _make_manager()
         peer = "10.0.0.1:8000"
         sess = _FakeSession(
@@ -1359,7 +1386,8 @@ class TestPollOnce:
 
     def test_failed_load_records_kv_request_id(self):
         """A LoadResult(success=False) from session.poll() must add its
-        kv_request_id to _failed_req_ids so future lookups return MISS."""
+        kv_request_id to _failed_req_ids so future lookups return MISS.
+        """
         mgr = _make_manager()
         peer = "10.0.0.1:8000"
         sess = _FakeSession(
@@ -1423,7 +1451,8 @@ class TestDrainJobs:
 
     def test_logs_warning_after_5s_then_completes(self, monkeypatch):
         """A session that stays inflight past 5s triggers the warning, and
-        once it clears the loop returns."""
+        once it clears the loop returns.
+        """
         mgr = _make_manager()
         mgr._control = _DrainCtrl()  # type: ignore[assignment]
         sess = _FakeSession(peer_id="peer:1")
@@ -1481,7 +1510,8 @@ class TestDrainJobs:
 class TestOnScheduleEnd:
     def test_is_noop(self):
         """on_schedule_end is a documented no-op; just confirm it doesn't
-        raise and doesn't mutate state."""
+        raise and doesn't mutate state.
+        """
         mgr = _make_manager()
         before_sessions = dict(mgr._sessions)
         before_jobs = list(mgr._finished_jobs)
@@ -1507,7 +1537,8 @@ class TestConnectionDeathMidTransfer:
     prefiller-side store no longer travels through the session at store
     time (it's parked in _unbound_stores keyed by kv_request_id), so its
     cleanup on connection death is via on_request_finished or the
-    unbound-store timeout — covered separately below."""
+    unbound-store timeout — covered separately below.
+    """
 
     def test_dead_connection_with_pending_work_surfaces_failures(self):
         mgr_a, mgr_b = _build_paired_managers()

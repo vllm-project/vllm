@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Benchmark hidden state extraction throughput.
+"""Benchmark hidden state extraction throughput.
 
 Measures two modes:
   1. Baseline: bulk inference with max_tokens=1, no extraction.
@@ -137,7 +136,8 @@ async def _client_loop(
     client_id: int,
 ):
     """A single async client: pulls prompts, submits to engine, consumes
-    hidden states as soon as each request finishes."""
+    hidden states as soon as each request finishes.
+    """
     loop = asyncio.get_event_loop()
     while True:
         item = await prompt_queue.get()

@@ -192,7 +192,8 @@ class TestToolResultContent:
         self, tool_result_content
     ) -> AnthropicMessagesRequest:
         """Build a request with assistant tool_use followed by user
-        tool_result."""
+        tool_result.
+        """
         return _make_request(
             [
                 {
@@ -277,7 +278,8 @@ class TestToolResultContent:
 
     def test_tool_result_with_text_and_image(self):
         """Mixed text+image tool_result: text in tool msg, image in user
-        msg."""
+        msg.
+        """
         request = self._make_tool_result_request(
             [
                 {"type": "text", "text": "Here is the screenshot"},
@@ -374,7 +376,8 @@ class TestToolResultContent:
 class TestAttributionHeaderStripping:
     def test_billing_header_stripped_from_system(self):
         """Claude Code's x-anthropic-billing-header block should be
-        stripped to preserve prefix caching."""
+        stripped to preserve prefix caching.
+        """
         request = _make_request(
             [{"role": "user", "content": "Hello"}],
             system=[
@@ -431,7 +434,7 @@ class TestThinkingBlockConversion:
     """
 
     def test_thinking_plus_text_in_assistant_message(self):
-        """thinking + text → reasoning field + plain-string content."""
+        """Thinking + text → reasoning field + plain-string content."""
         request = _make_request(
             [
                 {"role": "user", "content": "Write me some code."},
@@ -493,7 +496,7 @@ class TestThinkingBlockConversion:
         assert asst.get("content") is None
 
     def test_thinking_plus_tool_use_in_assistant_message(self):
-        """thinking + tool_use: reasoning field set, tool_calls populated."""
+        """Thinking + tool_use: reasoning field set, tool_calls populated."""
         request = _make_request(
             [
                 {"role": "user", "content": "What is 2+2?"},
@@ -1096,7 +1099,8 @@ class TestMessageStreamConverterToolUseContentBuffering:
     async def test_buffered_content_flushed_on_done_without_usage_chunk(self):
         """Content buffered during tool_use must be emitted even if the
         stream jumps straight from finish_reason to [DONE], skipping the
-        empty-choices usage chunk."""
+        empty-choices usage chunk.
+        """
 
         async def sse_input():
             yield _make_stream_chunk(
@@ -1200,7 +1204,8 @@ class TestStreamingCacheUsageSemantics:
     async def test_streaming_cache_fields_absent_then_populated(self):
         """First chunk lacks prompt_tokens_details (vLLM contract);
         message_start omits cache fields. The final chunk carries
-        prompt_tokens_details, so message_delta carries resolved values."""
+        prompt_tokens_details, so message_delta carries resolved values.
+        """
 
         async def sse_input():
             yield _make_stream_chunk(
@@ -1245,7 +1250,8 @@ class TestStreamingCacheUsageSemantics:
     @pytest.mark.asyncio
     async def test_streaming_no_cache_hit(self):
         """When the final chunk reports cached_tokens=0, message_delta carries
-        cache fields = 0 (cache miss); message_start still omits them."""
+        cache fields = 0 (cache miss); message_start still omits them.
+        """
 
         async def sse_input():
             yield _make_stream_chunk(
@@ -1286,7 +1292,8 @@ class TestStreamingCacheUsageSemantics:
     @pytest.mark.asyncio
     async def test_streaming_no_prompt_tokens_details_at_all(self):
         """If --enable-prompt-tokens-details is off, no chunk carries cache
-        info; both message_start and message_delta omit cache fields."""
+        info; both message_start and message_delta omit cache fields.
+        """
 
         async def sse_input():
             yield _make_stream_chunk(
@@ -1407,7 +1414,8 @@ class TestMessagesFullConverter:
 class TestCacheSalt:
     def test_cache_salt_passed_through(self):
         """cache_salt on the Anthropic request reaches the converted
-        ChatCompletionRequest so prefix-cache isolation works via /v1/messages."""
+        ChatCompletionRequest so prefix-cache isolation works via /v1/messages.
+        """
         request = _make_request(
             [{"role": "user", "content": "Hello"}],
             cache_salt="tenant-abc-secret-salt",
@@ -1489,7 +1497,8 @@ class TestClientErrorResponses:
     @staticmethod
     def _conversion_error() -> ValidationError:
         """A real pydantic ValidationError like the one ChatCompletionRequest
-        construction raises when Anthropic input violates the OpenAI schema."""
+        construction raises when Anthropic input violates the OpenAI schema.
+        """
 
         class _StubRequest(BaseModel):
             stop: Annotated[list[str], Field(max_length=4)] | None = None
@@ -1500,7 +1509,8 @@ class TestClientErrorResponses:
 
     def test_validation_error_returns_bad_request(self):
         """A pydantic ValidationError during Anthropic->OpenAI conversion is
-        surfaced as a 400 BadRequestError, not a 500."""
+        surfaced as a 400 BadRequestError, not a 500.
+        """
         handler = MagicMock(spec=AnthropicServingMessages)
         handler.create_messages.side_effect = self._conversion_error()
 

@@ -381,7 +381,8 @@ class MultiprocExecutor(Executor):
         ec_output_aggregator: ECOutputAggregator | None = None,
     ) -> Any:
         """Returns single result if unique_reply_rank and/or an output
-        aggregator is provided, otherwise list."""
+        aggregator is provided, otherwise list.
+        """
         assert self.rpc_broadcast_mq is not None, (
             "collective_rpc should not be called on follower node"
         )
@@ -448,7 +449,8 @@ class MultiprocExecutor(Executor):
     def _ensure_worker_termination(worker_procs: list[BaseProcess]):
         """Ensure that all worker processes are terminated. Assumes workers have
         received termination requests. Waits for processing, then sends
-        termination and kill signals if needed."""
+        termination and kill signals if needed.
+        """
 
         def wait_for_termination(procs, timeout):
             if not time:
@@ -497,7 +499,7 @@ class MultiprocExecutor(Executor):
                 p.kill()
 
     def shutdown(self):
-        """Properly shut down the executor and its workers"""
+        """Properly shut down the executor and its workers."""
         if not getattr(self, "shutting_down", False):
             worker_count = len(getattr(self, "workers", None) or [])
             logger.debug(
@@ -849,8 +851,8 @@ class WorkerProc:
     @staticmethod
     def worker_main(*args, **kwargs):
         """Worker initialization and execution loops.
-        This runs a background process"""
-
+        This runs a background process
+        """
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker
         # processes to terminate without error
@@ -1007,7 +1009,6 @@ class WorkerProc:
 
     def async_output_busy_loop(self):
         """Entrypoint for the thread which handles outputs asynchronously."""
-
         # set device to the worker device for the thread.
         # a thread will not inherit the context of the main thread.
         # when calling any cuda runtime functions, it will implicitly
@@ -1024,7 +1025,7 @@ class WorkerProc:
             self.enqueue_output(output)
 
     def worker_busy_loop(self):
-        """Main busy loop for Multiprocessing Workers"""
+        """Main busy loop for Multiprocessing Workers."""
         assert self.rpc_broadcast_mq is not None
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
@@ -1090,8 +1091,8 @@ class WorkerProc:
 def set_multiprocessing_worker_envs(local_world_size: int = 1):
     """Set up environment variables that should be used when there are workers
     in a multiprocessing environment. This should be called by the parent
-    process before worker processes are created"""
-
+    process before worker processes are created
+    """
     _maybe_force_spawn()
 
     if current_platform.is_cpu() or "OMP_NUM_THREADS" in os.environ:

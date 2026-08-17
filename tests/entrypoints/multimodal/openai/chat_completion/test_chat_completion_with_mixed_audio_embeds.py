@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 """E2E test for mixing `prompt_embeds` with `audio_embeds` in a single
-Chat Completions request."""
+Chat Completions request.
+"""
 
 import json
 

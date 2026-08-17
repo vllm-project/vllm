@@ -10,7 +10,8 @@ from vllm.model_executor.hw_agnostic.custom_op import CustomOp
 @CustomOp.register("rms_norm")
 class RMSNorm(CustomOp):
     """``x -> w * x / sqrt(E[x^2] + eps)``. With ``residual``, fuses
-    ``residual += x`` then RMSNorm and returns ``(normalized, residual)``."""
+    ``residual += x`` then RMSNorm and returns ``(normalized, residual)``.
+    """
 
     def __init__(
         self,

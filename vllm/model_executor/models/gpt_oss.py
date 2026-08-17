@@ -611,6 +611,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
 
             Returns:
                 Weight dtype string (e.g., "mxfp4", "fp8") or None if not available
+
             """
             if hasattr(self.layers[layer_id].mlp.experts._quant_method, "weight_dtype"):
                 return self.layers[layer_id].mlp.experts._quant_method.weight_dtype

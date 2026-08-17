@@ -23,7 +23,6 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 @pytest.fixture
 def mock_model_runner_with_input_batch():
     """Create a mock GPUModelRunner with a real InputBatch for e2e testing."""
-
     runner = Mock(spec=GPUModelRunner)
     runner.uses_mrope = False
     runner.requests = {}

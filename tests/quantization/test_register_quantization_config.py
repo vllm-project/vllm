@@ -43,7 +43,6 @@ class FakeQuantLinearMethod(UnquantizedLinearMethod):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Perform fake quantization before the linear layer."""
-
         # Calculate the scales dynamically
         max_val = torch.amax(x, dim=(0, -1), keepdims=True)
         min_val = torch.amin(x, dim=(0, -1), keepdims=True)
@@ -103,7 +102,6 @@ class CustomQuantConfig(QuantizationConfig):
 
 def test_register_quantization_config(caplog_vllm):
     """Test register custom quantization config."""
-
     # The quantization method `custom_quant` should be registered.
     assert get_quantization_config("custom_quant") == CustomQuantConfig
 

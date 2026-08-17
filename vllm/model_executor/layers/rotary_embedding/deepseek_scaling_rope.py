@@ -269,7 +269,6 @@ class DeepseekV4ScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         inverse: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """PyTorch-native implementation equivalent to forward()."""
-
         head_size = query.size(-1)
         query_rot = query[..., -self.rotary_dim :]
         key_rot = key[..., -self.rotary_dim :] if key is not None else None

@@ -314,6 +314,7 @@ class KimiRoutedOutputTransform(nn.Module):
             residual: Optional tensor of the up-projection's output shape to
                 accumulate into. It is consumed in the GEMM's beta-add
                 epilogue, so adding it costs no extra kernel.
+
         """
         if self.norm is not None:
             hidden_states = self.norm(hidden_states)
@@ -748,6 +749,7 @@ class KimiMoE(nn.Module):
             ``router_output`` holds the grouped top-k weights and ``topk_ids``
             the selected experts; otherwise ``router_output`` holds the raw gate
             logits and ``topk_ids`` is ``None``.
+
         """
 
         def _router(

@@ -54,7 +54,8 @@ class MoEActivation(Enum):
     @property
     def custom_op_name(self) -> str:
         """Maps to the CustomOp name of activations
-        in vllm/model_executor/layers/activation.py."""
+        in vllm/model_executor/layers/activation.py.
+        """
         return _CUSTOM_OP_NAMES[self]
 
     def without_mul(self) -> "MoEActivation":
@@ -113,6 +114,7 @@ def activation_without_mul(activation: str) -> str:
 
     Returns:
         The non-gated activation name (e.g., "silu_no_mul", "gelu_no_mul")
+
     """
     return MoEActivation.from_str(activation).without_mul().value
 

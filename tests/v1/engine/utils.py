@@ -54,6 +54,7 @@ def _create_random_top_logprob_test_vector(
 
     Returns:
       1D length-`num_logprobs` torch Tensor of float logprob values
+
     """
     return torch.rand(num_logprobs) * (upper - lower) + lower
 
@@ -79,6 +80,7 @@ def _create_random_top_logprob_test_matrix(
 
     Returns:
       2D num_tokens x num_logprobs torch Tensor of float logprob values
+
     """
     return torch.rand(*shape) * (upper - lower) + lower
 
@@ -90,7 +92,7 @@ def _create_random_top_token_test_vector(
     sampled_token_id: int,
     adjust_num_logprobs: bool = True,
 ) -> tuple[torch.Tensor, int]:
-    """Create a random vector of top logprob token indices
+    """Create a random vector of top logprob token indices.
 
     Use to create fake sample logprobs for testing. The sampled token
     ID must always be one of the top logprobs, which this dummy test
@@ -117,8 +119,8 @@ def _create_random_top_token_test_vector(
       sampled_token_rank: the rank of sampled_token_id in the vocab
                           vector when sorted in descending order by
                           logprob
-    """
 
+    """
     # Calculate the final number of logprobs required
     total_logprobs = num_logprobs + 1 if adjust_num_logprobs else num_logprobs
 
@@ -146,7 +148,7 @@ def _create_random_top_token_test_matrix(
     upper: int,
     tokens_list: list[int],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Create a random matrix of top logprob token indices
+    """Create a random matrix of top logprob token indices.
 
     Use to create fake prompt logprobs for testing.
 
@@ -164,6 +166,7 @@ def _create_random_top_token_test_matrix(
       - 2D num_tokens x num_logprobs+1 torch Tensor of token ids
       - 1D tensor of ranks of prompt tokens in their respective
         rows, or random values
+
     """
     num_elements = shape[0] * shape[1]
     choice_tensor = torch.randperm(upper - lower)[:num_elements] + lower
@@ -203,6 +206,7 @@ def decode_token(
 
     Returns:
       string representation of token
+
     """
     return tokenizer.convert_ids_to_tokens(tok_id)
 
@@ -212,7 +216,7 @@ def generate_dummy_sample_logprobs(
     num_logprobs: int,
     tokenizer: PythonBackend,
 ) -> list[tuple[list[int], list[float], int]]:
-    """Generate dummy sample logprobs
+    """Generate dummy sample logprobs.
 
     Generate a test data structure which imitates the list of sample logprobs
     which would be assembled in the engine core during decode phase.
@@ -222,13 +226,14 @@ def generate_dummy_sample_logprobs(
       num_logprobs: return `num_logprobs` or `num_logprobs+1` logprobs per token
       tokenizer: model tokenizer to use for detokenization
 
-    Returns
+    Returns:
       list of (top token ids vector, logprobs vector, sampled token rank)
       Python lists tuples; in each tuple the logprobs and top token ids
       vectors have the same length which is either `num_logprobs` or
       `num_logprobs+1`. Sampled token rank is the rank (index+1) of the
       sampled token within the vocab vector when sorted by logprob in
       descending order.
+
     """
     res = []
     for sampled_token_id in sampled_tokens_list:
@@ -261,7 +266,7 @@ def generate_dummy_prompt_logprobs_tensors(
     num_logprobs: int,
     tokenizer: PythonBackend,
 ) -> LogprobsTensors:
-    """Generate dummy prompt logprobs tensors
+    """Generate dummy prompt logprobs tensors.
 
     Generate a test data structure which imitates the torch Tensors of prompt
     logprobs which would be assembled in the engine core during chunked
@@ -272,10 +277,11 @@ def generate_dummy_prompt_logprobs_tensors(
       num_logprobs: return `num_logprobs` logprobs per token
       tokenizer: model tokenizer to use for detokenization
 
-    Returns
+    Returns:
       Single tuple of (logprobs matrix, top token ids matrix) torch Tensor,
       where both matrices have dimensions
       num_prompt_tokens x num_logprobs
+
     """
     # For now, assume the whole prompt is processed in one chunk; thus,
     # the number of non-`None` prompt logprobs is `len(prompt_tokens_list)-1`.
@@ -306,7 +312,7 @@ def generate_dummy_prompt_logprobs_tensors(
 
 @dataclass
 class DummyOutputProcessorTestVectors:
-    """Dummy test vectors for output processor tests"""
+    """Dummy test vectors for output processor tests."""
 
     tokenizer: GeneralTokenizerType
     vllm_config: EngineArgs

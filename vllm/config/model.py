@@ -399,8 +399,7 @@ class ModelConfig:
     mm_processor_device: InitVar[MMProcessorDevice | None] = None
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -913,7 +912,7 @@ class ModelConfig:
 
     @model_validator(mode="after")
     def validate_model_config_after(self: "ModelConfig") -> "ModelConfig":
-        """Called after __post_init__"""
+        """Called after __post_init__."""
         if not isinstance(self.tokenizer, str):
             raise ValueError(
                 f"tokenizer must be a string, got "
@@ -975,7 +974,8 @@ class ModelConfig:
 
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers modeling backend class will be used if
-        `model_impl` is set to `transformers` or `auto`."""
+        `model_impl` is set to `transformers` or `auto`.
+        """
         cls = "Transformers"
         # If 'hf_config is not hf_text_config' it's a nested config, i.e. multimodal
         cls += "MultiModal" if self.hf_config is not self.hf_text_config else ""
@@ -1052,8 +1052,8 @@ class ModelConfig:
         Args:
             model: Model name or path
             tokenizer: Tokenizer name or path
-        """
 
+        """
         # Skip if model_weights is already set (model already pulled)
         if self.model_weights:
             return
@@ -1603,9 +1603,7 @@ class ModelConfig:
             raise AssertionError(f"Unsupported block type: {block_type}")
 
     def get_mamba_chunk_size(self) -> int:
-        """
-        Returns the mamba chunk size if it exists
-        """
+        """Returns the mamba chunk size if it exists."""
         # used by e.g. Bamba, FalconH1, Granite
         chunk_size = getattr(self.hf_text_config, "mamba_chunk_size", None)
         if chunk_size is None:
@@ -1620,11 +1618,11 @@ class ModelConfig:
         return chunk_size
 
     def get_multimodal_config(self) -> MultiModalConfig:
-        """
-        Get the multimodal configuration of the model.
+        """Get the multimodal configuration of the model.
 
         Raises:
             ValueError: If the model is not multimodal.
+
         """
         if self.multimodal_config is None:
             raise ValueError("The model is not multimodal.")
@@ -1632,8 +1630,7 @@ class ModelConfig:
         return self.multimodal_config
 
     def try_get_generation_config(self) -> dict[str, Any]:
-        """
-        This method attempts to retrieve the non-default values of the
+        """This method attempts to retrieve the non-default values of the
         generation config for this model.
 
         The generation config can contain information about special tokens, as
@@ -1642,6 +1639,7 @@ class ModelConfig:
 
         Returns:
             A dictionary containing the non-default generation config.
+
         """
         if self.generation_config in {"auto", "vllm"}:
             config = try_get_generation_config(
@@ -1667,8 +1665,7 @@ class ModelConfig:
         return config.to_diff_dict()
 
     def get_diff_sampling_param(self) -> dict[str, Any]:
-        """
-        This method returns a dictionary containing the non-default sampling
+        """This method returns a dictionary containing the non-default sampling
         parameters with `override_generation_config` applied.
 
         The default sampling parameters are:
@@ -1680,6 +1677,7 @@ class ModelConfig:
 
         Returns:
             A dictionary containing the non-default sampling parameters.
+
         """
         src = self.generation_config
 
@@ -1811,8 +1809,7 @@ class ModelConfig:
 
     @property
     def score_type(self) -> ScoreType:
-        """
-        Scoring API handles score/rerank for:
+        """Scoring API handles score/rerank for:
 
         - "classify" task (score_type: cross-encoder models)
         - "embed" task (score_type: bi-encoder models)
@@ -1899,8 +1896,7 @@ class ModelConfig:
 
     @property
     def head_dtype(self) -> torch.dtype:
-        """
-        "head" refers to the last Linear layer(s) of an LLM,
+        """The "head" refers to the last Linear layer(s) of an LLM,
         such as the lm_head in a generation model,
         or the score or classifier in a classification model.
 
@@ -1911,7 +1907,6 @@ class ModelConfig:
           fp32, which is required for RL training-inference consistency
           (the trainer computes logits in fp32).
         """
-
         head_dtype = _get_head_dtype(
             config=self.hf_config, dtype=self.dtype, runner_type=self.runner_type
         )
@@ -2109,8 +2104,7 @@ class ModelConfig:
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):
-    """
-    If the input is a non-empty list, the first model_name in
+    """If the input is a non-empty list, the first model_name in
     `served_model_name` is taken.
     If the input is a non-empty string, it is used directly.
     For cases where the input is either an empty string or an

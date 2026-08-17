@@ -58,20 +58,20 @@ class BlockTable:
         cp_kv_cache_interleave_size: int,
         slot_mapping_mode: SlotMappingMode = SlotMappingMode.TOKEN_TO_KV_SLOT,
     ):
-        """
-        Args:
-            block_size: Block size used for KV cache memory allocation
-            max_num_reqs: Maximum number of concurrent requests supported.
-            max_num_blocks_per_req: Maximum number of blocks per request.
-            max_num_batched_tokens: Maximum number of tokens in a batch.
-            pin_memory: Whether to pin memory for faster GPU transfers.
-            device: Target device for the block table.
-            kernel_block_size: The block_size of underlying attention kernel.
-                Will be the same as `block_size` if `block_size` is supported
-                by the attention kernel.
-            slot_mapping_mode: How this cache group maps scheduled tokens to
-                cache slots. Mamba-like state caches do not use token slot
-                mappings and should use SlotMappingMode.NONE.
+        """Args:
+        block_size: Block size used for KV cache memory allocation
+        max_num_reqs: Maximum number of concurrent requests supported.
+        max_num_blocks_per_req: Maximum number of blocks per request.
+        max_num_batched_tokens: Maximum number of tokens in a batch.
+        pin_memory: Whether to pin memory for faster GPU transfers.
+        device: Target device for the block table.
+        kernel_block_size: The block_size of underlying attention kernel.
+            Will be the same as `block_size` if `block_size` is supported
+            by the attention kernel.
+        slot_mapping_mode: How this cache group maps scheduled tokens to
+            cache slots. Mamba-like state caches do not use token slot
+            mappings and should use SlotMappingMode.NONE.
+
         """
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
@@ -236,6 +236,7 @@ class BlockTable:
             # kv_manager_block_id 0 → kernel block id [0, 1]
             # kv_manager_block_id 1 → kernel block id [2, 3]
             # kv_manager_block_id 2 → kernel block id [4, 5]
+
         """
         if blocks_per_kv_block == 1:
             return kv_manager_block_ids

@@ -32,11 +32,13 @@ def test_should_include_usage_force_enables_continuous_usage(stream_options, exp
 class TestGetMaxTokens:
     """Tests for get_max_tokens() to ensure generation_config's max_tokens
     acts as a default when from model author, and as a ceiling when
-    explicitly set by the user."""
+    explicitly set by the user.
+    """
 
     def test_default_sampling_params_used_when_no_request_max_tokens(self):
         """When user doesn't specify max_tokens, generation_config default
-        should apply."""
+        should apply.
+        """
         result = get_max_tokens(
             max_model_len=24000,
             max_tokens=None,
@@ -47,7 +49,8 @@ class TestGetMaxTokens:
 
     def test_request_max_tokens_not_capped_by_default_sampling_params(self):
         """When user specifies max_tokens in request, model author's
-        generation_config max_tokens must NOT cap it (fixes #34005)."""
+        generation_config max_tokens must NOT cap it (fixes #34005).
+        """
         result = get_max_tokens(
             max_model_len=24000,
             max_tokens=5000,
@@ -90,7 +93,8 @@ class TestGetMaxTokens:
 
     def test_request_max_tokens_smaller_than_default(self):
         """When user explicitly requests fewer tokens than gen_config default,
-        that should be respected."""
+        that should be respected.
+        """
         result = get_max_tokens(
             max_model_len=24000,
             max_tokens=512,

@@ -212,7 +212,8 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
 
     def _pack_int_quantized_weight(self, layer: torch.nn.Module) -> None:
         """Normalize an int-quantized (plain int8) weight to the canonical
-        ``weight_packed`` int32 + ``weight_shape`` layout the MP kernels expect."""
+        ``weight_packed`` int32 + ``weight_shape`` layout the MP kernels expect.
+        """
         weight = layer.weight
         out_features, in_features = weight.shape
         packed = pack_to_int32(weight.data.contiguous(), self.num_bits)

@@ -35,8 +35,8 @@ class PendingRecv:
 def compute_need_sampled_mask(input_batch: InputBatch) -> np.ndarray | None:
     """Return a bool array of shape `[input_batch.num_reqs]` marking requests
     with outputs that might be needed in a subsequent (decode) step.
-    Returns None if no sampled outputs are needed in the requests' next step."""
-
+    Returns None if no sampled outputs are needed in the requests' next step.
+    """
     old_computed = input_batch.num_computed_tokens_np
     prefill_len = input_batch.prefill_len_np
     max_seq_len = input_batch.max_seq_len_np
@@ -125,7 +125,8 @@ class PPHandler:
 
     def receive(self, input_batch: InputBatch) -> bool:
         """Returns True iff sampled tokens need to be gathered from *all*
-        requests in the batch."""
+        requests in the batch.
+        """
         assert not self.is_last_rank
         need_sampled_mask = compute_need_sampled_mask(input_batch)
         if need_sampled_mask is None:

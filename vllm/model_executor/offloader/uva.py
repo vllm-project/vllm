@@ -32,6 +32,7 @@ class UVAOffloader(BaseOffloader):
         cpu_offload_max_bytes: Maximum bytes to offload to CPU.
         cpu_offload_params: Set of parameter name segments to selectively
             offload. If empty, all parameters are eligible up to the byte limit.
+
     """
 
     def __init__(

@@ -6,8 +6,7 @@ from transformers.configuration_utils import PretrainedConfig
 
 
 class Lfm2MoeConfig(PretrainedConfig):
-    r"""
-    This is the configuration class to store the configuration of a [`Lfm2MoeModel`]. It is used to instantiate a LFM2 Moe
+    r"""This is the configuration class to store the configuration of a [`Lfm2MoeModel`]. It is used to instantiate a LFM2 Moe
     model according to the specified arguments, defining the model architecture. Instantiating a configuration with the
     defaults will yield a similar configuration to that of the LFM2-8B-A1B model.
     e.g. [LiquidAI/LFM2-8B-A1B](https://huggingface.co/LiquidAI/LFM2-8B-A1B)
@@ -85,7 +84,9 @@ class Lfm2MoeConfig(PretrainedConfig):
 
     >>> # Accessing the model configuration
     >>> configuration = model.config
-    ```"""  # noqa: E501
+    ```
+
+    """  # noqa: E501
 
     model_type = "lfm2_moe"
     keys_to_ignore_at_inference = ["past_key_values"]

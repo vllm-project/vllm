@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Language Identification (LID) demo using the FireRedLID model on vLLM.
+"""Language Identification (LID) demo using the FireRedLID model on vLLM.
 
 FireRedLID is an audio encoder-decoder model that identifies the spoken
 language of an audio clip. Unlike ASR models that output full transcriptions,
@@ -49,8 +48,7 @@ def identify_language(
     client: OpenAI,
     model: str,
 ) -> str:
-    """
-    Send a single audio file to the vLLM transcription endpoint and return
+    """Send a single audio file to the vLLM transcription endpoint and return
     the detected language tag.
 
     FireRedLID re-uses the OpenAI-compatible ``/v1/audio/transcriptions``
@@ -72,8 +70,7 @@ def identify_language_raw(
     model: str,
     api_base: str,
 ) -> str:
-    """
-    Same as :func:`identify_language` but uses raw HTTP so that the demo
+    """Same as :func:`identify_language` but uses raw HTTP so that the demo
     works without the ``openai`` SDK (useful for quick debugging).
     """
     import requests
@@ -95,8 +92,7 @@ def identify_language_streaming(
     model: str,
     api_base: str,
 ) -> str:
-    """
-    Streaming variant – demonstrates the streaming transcription endpoint.
+    """Streaming variant – demonstrates the streaming transcription endpoint.
     For a 1-2 token output the stream finishes almost instantly, but this
     shows that the API path works end-to-end.
     """

@@ -480,7 +480,8 @@ def test_modelopt_fp8_pb_wo_checkpoint_setup(default_vllm_config, vllm_runner):
 
 def test_modelopt_nvfp4_config_dispatches_w4a4_method():
     """``quant_method="NVFP4"`` (W4A4 default) routes to the existing
-    ``ModelOptNvFp4LinearMethod``."""
+    ``ModelOptNvFp4LinearMethod``.
+    """
     from vllm.model_executor.layers.quantization.modelopt import (
         ModelOptNvFp4Config,
         ModelOptNvFp4LinearMethod,

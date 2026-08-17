@@ -29,6 +29,7 @@ def _build_test_case(seq_lens, block_size, seed=42):
     Returns:
         Tuple of (cache, block_table, workspace_starts_t, num_reqs,
                   total_tokens, expected_output).
+
     """
     torch.manual_seed(seed)
 
@@ -389,7 +390,8 @@ def test_cp_gather_fp8_with_sequence_starts(gather_seq_lens, seq_starts):
 )
 def test_cp_gather_fp8_large_seqlens(seq_lens, block_size):
     """Correctness test with large sequence lengths matching benchmark
-    scenarios (8K-128K prefill)."""
+    scenarios (8K-128K prefill).
+    """
     (
         cache,
         block_table,

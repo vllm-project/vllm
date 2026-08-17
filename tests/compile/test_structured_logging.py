@@ -60,6 +60,7 @@ class TraceStructuredCapture:
         Args:
             event_type: The event type to filter by (e.g., "artifact", "graph_dump")
             name_pattern: Regex pattern to match against the artifact name
+
         """
         regex = re.compile(name_pattern)
         return [

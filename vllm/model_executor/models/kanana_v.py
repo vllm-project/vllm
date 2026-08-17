@@ -46,11 +46,10 @@ logger = init_logger(__name__)
 
 
 class KananaVImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: The total number of patches over all images in the batch
-        - cps: Number of channels * patch_size * patch_size
-        - ni: Number of images
+    """Dimensions:
+    - np: The total number of patches over all images in the batch
+    - cps: Number of channels * patch_size * patch_size
+    - ni: Number of images
     """
 
     type: Literal["pixel_values"]

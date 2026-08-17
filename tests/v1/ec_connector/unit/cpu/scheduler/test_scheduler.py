@@ -116,7 +116,8 @@ def test_has_cache_item_false_when_not_consumer(monkeypatch):
 
 def test_connector_keys_on_identifier_not_mm_hash(monkeypatch):
     """The connector must key the encoder cache on feature.identifier (what
-    has_cache_item is called with), NOT feature.mm_hash."""
+    has_cache_item is called with), NOT feature.mm_hash.
+    """
     s = _make_scheduler(monkeypatch)
     req = _Request([_Feature("PROC_KEY", length=1, identifier="ENC_KEY")])
     s.update_state_after_alloc(req, 0)
@@ -176,7 +177,8 @@ def test_multiple_mm_items_per_request(monkeypatch):
 
 def test_load_returns_correct_block_ids(monkeypatch):
     """meta.loads must contain the same block IDs that meta.saves
-    allocated — verified through the public API only."""
+    allocated — verified through the public API only.
+    """
     s = _make_scheduler(monkeypatch)
     req = _Request([_Feature("a", length=2)])
 
@@ -208,7 +210,8 @@ def test_loads_only_serves_hashes_touched_this_step(monkeypatch):
 
 def test_repeated_reload_same_step_loads_once(monkeypatch):
     """The same mm_hash requested twice in one step must appear in
-    meta.loads exactly once."""
+    meta.loads exactly once.
+    """
     s = _make_scheduler(monkeypatch)
     _seed_cached(s, "a", n_blocks=2)
 
@@ -231,7 +234,8 @@ def test_load_not_emitted_for_uncached_entry(monkeypatch):
 def test_delayed_unpin_protects_blocks_during_worker_read(monkeypatch):
     """Blocks being loaded must not be evictable until the delayed unpin
     fires. Observable: a save that needs eviction cannot reclaim a
-    still-pinned loaded entry."""
+    still-pinned loaded entry.
+    """
     # 2 blocks, both occupied by "a" (ready).
     s = _make_scheduler(monkeypatch, num_blocks=2)
     _seed_cached(s, "a", n_blocks=2)
@@ -255,7 +259,8 @@ def test_delayed_unpin_protects_blocks_during_worker_read(monkeypatch):
 
 def test_delayed_unpin_depth_2(monkeypatch):
     """With max_concurrent_batches=2, loaded blocks stay pinned for 2 steps
-    after build. Observable via eviction failure."""
+    after build. Observable via eviction failure.
+    """
     s = _make_scheduler(monkeypatch, num_blocks=2, max_concurrent_batches=2)
     _seed_cached(s, "a", n_blocks=2)
 
@@ -283,7 +288,8 @@ def test_delayed_unpin_depth_2(monkeypatch):
 def test_shutdown_unpins_pending_loads(monkeypatch):
     """Shutdown must unpin entries still in _pending_loads (not yet drained
     to the unpin deque). Observable: after shutdown, the entry is evictable
-    (alloc can reclaim its blocks)."""
+    (alloc can reclaim its blocks).
+    """
     s = _make_scheduler(monkeypatch, num_blocks=2)
     _seed_cached(s, "a", n_blocks=2)
 
@@ -297,7 +303,8 @@ def test_shutdown_unpins_pending_loads(monkeypatch):
 
 def test_shutdown_unpins_deferred_unpin_queue(monkeypatch):
     """Shutdown must unpin entries queued in the deferred unpin deque
-    (already drained from _pending_loads but not yet expired)."""
+    (already drained from _pending_loads but not yet expired).
+    """
     s = _make_scheduler(monkeypatch, num_blocks=2, max_concurrent_batches=2)
     _seed_cached(s, "a", n_blocks=2)
 
@@ -313,7 +320,8 @@ def test_shutdown_unpins_deferred_unpin_queue(monkeypatch):
 
 def test_eviction_skips_entry_pinned_by_pending_load(monkeypatch):
     """A loaded entry still within the unpin delay window must survive
-    eviction attempts from new saves."""
+    eviction attempts from new saves.
+    """
     # 2 blocks: A occupies both, ready.
     s = _make_scheduler(monkeypatch, num_blocks=2)
     _seed_cached(s, "A", n_blocks=2)
@@ -333,7 +341,8 @@ def test_eviction_skips_entry_pinned_by_pending_load(monkeypatch):
 
 def test_region_full_skips_save_and_never_blocks(monkeypatch):
     """When the region is fully occupied by pinned entries, new saves are
-    silently skipped and ensure_cache_available never blocks."""
+    silently skipped and ensure_cache_available never blocks.
+    """
     s = _make_scheduler(monkeypatch, num_blocks=1)
     _seed_cached(s, "pinned", n_blocks=1)
     s._cache.pin("pinned")
@@ -372,7 +381,8 @@ def test_step_readiness_depth_2(monkeypatch):
 
 def test_producer_only_never_emits_loads(monkeypatch):
     """A producer-only scheduler must never populate meta.loads, even when
-    entries are ready."""
+    entries are ready.
+    """
     s = _make_scheduler(monkeypatch, is_consumer=False)
     req = _Request([_Feature("h1", length=1)])
 
@@ -415,7 +425,8 @@ def test_consumer_only_has_cache_item(monkeypatch):
 
 def test_save_not_emitted_for_already_cached_entry(monkeypatch):
     """An entry already in the cache (from a prior save) must not trigger
-    a second allocation or appear in meta.saves again."""
+    a second allocation or appear in meta.saves again.
+    """
     s = _make_scheduler(monkeypatch)
     req = _Request([_Feature("h1", length=1)])
 
@@ -436,7 +447,8 @@ def test_save_not_emitted_for_already_cached_entry(monkeypatch):
 
 def test_first_finish_marks_ready_immediately(monkeypatch):
     """When the originating request finishes, the save entry becomes ready
-    without waiting for the step-count delay."""
+    without waiting for the step-count delay.
+    """
     s = _make_scheduler(monkeypatch, max_concurrent_batches=5)
     req = _Request([_Feature("h1", length=1)], request_id="req_x")
 
@@ -452,7 +464,8 @@ def test_first_finish_marks_ready_immediately(monkeypatch):
 
 def test_first_finish_unpins_immediately(monkeypatch):
     """When the originating request finishes, the load entry is unpinned
-    without waiting for the step-count delay."""
+    without waiting for the step-count delay.
+    """
     s = _make_scheduler(monkeypatch, num_blocks=2, max_concurrent_batches=5)
     _seed_cached(s, "a", n_blocks=2)
 

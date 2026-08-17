@@ -616,9 +616,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_qkvz: torch.Tensor,
         mixed_ba: torch.Tensor,
     ):
-        """
-        Derives `query`, `key` and `value` tensors from `mixed_qkvzba`.
-        """
+        """Derives `query`, `key` and `value` tensors from `mixed_qkvzba`."""
         new_tensor_shape_qkvz = mixed_qkvz.size()[:-1] + (
             self.num_k_heads // self.tp_size,
             (
@@ -669,8 +667,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         mixed_ba: torch.Tensor,
         num_tokens: int,
     ):
-        """
-        Derives mixed_qkv, z, b, a from projected qkvz/ba for the GDN custom op.
+        """Derives mixed_qkv, z, b, a from projected qkvz/ba for the GDN custom op.
 
         For gqa_interleaved_layout (Qwen3-Next): unpack the interleaved
         [ng, (hk + hk + np/ng*hv + np/ng*hv)] layout into contiguous qkv.
@@ -841,7 +838,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         """ROCm forward using AITER Triton fused projection+attention when
-        available, otherwise falling back to the generic CUDA path."""
+        available, otherwise falling back to the generic CUDA path.
+        """
         if GDN_AITER_TRITON_AVAILABLE:
             num_tokens = hidden_states.size(0)
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
@@ -876,8 +874,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Forward pass with three parts:
+        """Forward pass with three parts:
         1. Input projection
         2. Core attention (custom op)
         3. Output projection
@@ -954,8 +951,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Forward pass with three parts:
+        """Forward pass with three parts:
         1. Input projection
         2. Core attention (custom op)
         3. Output projection
@@ -1198,6 +1194,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             z_out: **output** buffer for z        (num_tokens, num_heads,
                    head_dim); mutated in-place.
             core_attn_out: Pre-allocated output buffer for attention results.
+
         """
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
@@ -1255,6 +1252,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             b: beta gating vector                   (num_tokens, num_heads)
             a: alpha gating vector                  (num_tokens, num_heads)
             core_attn_out: Pre-allocated output buffer for attention results.
+
         """
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
@@ -1637,9 +1635,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out: torch.Tensor,
         attn_metadata: GDNAttentionMetadata,
     ):
-        """
-        Core attention computation with a packed non-spec decode fast path.
-        """
+        """Core attention computation with a packed non-spec decode fast path."""
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache
         # conv_state must be (..., dim, width-1) for the conv kernels.
@@ -2026,8 +2022,7 @@ def fused_gdn_gating(
     beta: float = 1.0,
     threshold: float = 20.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Fused computation of g and beta for Gated Delta Net.
+    """Fused computation of g and beta for Gated Delta Net.
     g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
     beta_output = b.sigmoid()
     TODO maybe use torch.compile to replace this triton kernel

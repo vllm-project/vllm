@@ -105,7 +105,7 @@ def get_memory_affinity(pid: int = 0) -> list[int]:
 
 
 def parse_id_list(raw_str: str) -> list[int]:
-    """Parses strings like '0-2,4,7-8' into [0, 1, 2, 4, 7, 8]"""
+    """Parses strings like '0-2,4,7-8' into [0, 1, 2, 4, 7, 8]."""
     result: list[int] = []
     if not raw_str:
         return result
@@ -206,7 +206,8 @@ def get_visible_memory_node() -> list[int]:
 def _synthesize_cpu_list() -> list[LogicalCPUInfo]:
     """Synthesize a flat CPU list: each logical CPU is its own core on
     NUMA node 0.  Used when lscpu output is unavailable or unparsable
-    (e.g. macOS, RISC-V)."""
+    (e.g. macOS, RISC-V).
+    """
     cpu_count = os.cpu_count()
     assert cpu_count
     return [LogicalCPUInfo(i, i, 0) for i in range(cpu_count)]

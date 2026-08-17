@@ -32,9 +32,7 @@ logger = init_logger(__name__)
 
 
 class LMCacheKVEvents(KVConnectorKVEvents):
-    """
-    Concrete implementation of KVConnectorKVEvents using KVEventAggregator.
-    """
+    """Concrete implementation of KVConnectorKVEvents using KVEventAggregator."""
 
     def __init__(self, num_workers: int) -> None:
         self._aggregator = KVEventAggregator(num_workers)
@@ -43,9 +41,7 @@ class LMCacheKVEvents(KVConnectorKVEvents):
         self._aggregator.add_events(events)
 
     def aggregate(self) -> "LMCacheKVEvents":
-        """
-        Aggregate KV events and retain only common events.
-        """
+        """Aggregate KV events and retain only common events."""
         common_events = self._aggregator.get_common_events()
         self._aggregator.clear_events()
         self._aggregator.add_events(common_events)
@@ -72,8 +68,7 @@ class LMCacheKVEvents(KVConnectorKVEvents):
 class LMCacheConnectorV1(KVConnectorBase_V1):
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
-        """
-        LMCache requires PIECEWISE CUDA graph mode when layerwise
+        """LMCache requires PIECEWISE CUDA graph mode when layerwise
         operations are enabled. The wait_for_layer_load and save_kv_layer
         methods perform actual async synchronization that cannot be
         captured in CUDA graphs.
@@ -118,12 +113,12 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     # Worker-side methods
     # ==============================
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        """
-        Initialize with the KV caches. Useful for pre-registering the
+        """Initialize with the KV caches. Useful for pre-registering the
         KV Caches in the KVConnector (e.g. for NIXL).
 
         Args:
             kv_caches: dictionary of layer names, kv cache
+
         """
         if hasattr(self._lmcache_engine, "register_kv_caches"):
             self._lmcache_engine.register_kv_caches(kv_caches)
@@ -134,8 +129,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             )
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs: Any) -> None:
-        """
-        Start loading the KV cache from the connector to vLLM's paged
+        """Start loading the KV cache from the connector to vLLM's paged
         KV buffer. This is called from the forward context before the
         forward pass to enable async loading during model execution.
 
@@ -151,8 +145,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         self._lmcache_engine.start_load_kv(forward_context, **kwargs)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        """
-        Block until the KV for a specific layer is loaded into vLLM's
+        """Block until the KV for a specific layer is loaded into vLLM's
         paged buffer. This is called from within attention layer to ensure
         async copying from start_load_kv is complete.
 
@@ -160,6 +153,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
 
         Args:
             layer_name: the name of that layer
+
         """
         self._lmcache_engine.wait_for_layer_load(layer_name)
 
@@ -170,8 +164,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         attn_metadata: AttentionMetadata,
         **kwargs: Any,
     ) -> None:
-        """
-        Start saving the a layer of KV cache from vLLM's paged buffer
+        """Start saving the a layer of KV cache from vLLM's paged buffer
         to the connector. This is called from within attention layer to
         enable async copying during execution.
 
@@ -181,14 +174,14 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
                 layer in vLLM.
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
+
         """
         self._lmcache_engine.save_kv_layer(
             layer_name, kv_layer, attn_metadata, **kwargs
         )
 
     def wait_for_save(self):
-        """
-        Block until all the save operations is done. This is called
+        """Block until all the save operations is done. This is called
         as the forward context exits to ensure that the async saving
         from save_kv_layer is complete before finishing the forward.
 
@@ -199,8 +192,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:
-        """
-        Notifies worker-side connector ids of requests that have
+        """Notifies worker-side connector ids of requests that have
         finished generating tokens.
 
         Returns:
@@ -209,16 +201,17 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             tuple of (sending/saving ids, recving/loading ids).
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
+
         """
         return self._lmcache_engine.get_finished(finished_req_ids)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
-        """
-        Get the set of block IDs that failed to load.
+        """Get the set of block IDs that failed to load.
 
         Returns:
             Set of block IDs that encountered load errors.
             Empty set if no load errors occurred.
+
         """
         method = getattr(self._lmcache_engine, "get_block_ids_with_load_errors", None)
         if callable(method):
@@ -228,10 +221,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         return set()
 
     def get_kv_connector_kv_cache_events(self) -> LMCacheKVEvents | None:
-        """
-        Get the KV connector kv cache events collected during the last interval.
-        """
-
+        """Get the KV connector kv cache events collected during the last interval."""
         events = self._lmcache_engine.get_kv_events()  # type: ignore [attr-defined]
         if not events:
             return None
@@ -261,8 +251,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
-        """
-        Get number of new tokens that can be loaded from the
+        """Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
 
         Args:
@@ -273,6 +262,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         Returns:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
+
         """
         return self._lmcache_engine.get_num_new_matched_tokens(
             request, num_computed_tokens
@@ -281,32 +271,30 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-        """
-        Update KVConnector state after block allocation.
-        """
+        """Update KVConnector state after block allocation."""
         self._lmcache_engine.update_state_after_alloc(request, num_external_tokens)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
-        """
-        Build the connector metadata for this step.
+        """Build the connector metadata for this step.
 
         This function should NOT modify fields in the scheduler_output.
         Also, calling this function will reset the state of the connector.
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
+
         """
         return self._lmcache_engine.build_connector_meta(scheduler_output)
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
-        """
-        Update KVConnector state from worker-side connectors output.
+        """Update KVConnector state from worker-side connectors output.
 
         Args:
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
+
         """
         # Get the KV events
         kv_cache_events = connector_output.kv_cache_events
@@ -327,8 +315,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """
-        Called when a request has finished, before its blocks are freed.
+        """Called when a request has finished, before its blocks are freed.
 
         Returns:
             True if the request is being saved/sent asynchronously and blocks
@@ -336,15 +323,16 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             get_finished().
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
+
         """
         return self._lmcache_engine.request_finished(request, block_ids)
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
-        """
-        Take the KV cache events from the connector.
+        """Take the KV cache events from the connector.
 
         Yields:
             New KV cache events since the last call.
+
         """
         if self._kv_cache_events is not None:
             self._kv_cache_events.aggregate()

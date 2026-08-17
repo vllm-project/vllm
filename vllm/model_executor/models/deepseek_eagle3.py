@@ -36,8 +36,7 @@ from .utils import (
 
 
 class DeepseekV2Eagle3DecoderLayer(nn.Module):
-    """
-    Eagle3 decoder layer for Deepseek that:
+    """Eagle3 decoder layer for Deepseek that:
     1. Always uses MLP (not MoE)
     2. First layer accepts concatenated embeds + hidden_states
     """

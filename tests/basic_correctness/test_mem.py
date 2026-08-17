@@ -18,8 +18,7 @@ DEVICE_TYPE = current_platform.device_type
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 def test_python_error():
-    """
-    Test if Python error occurs when there's low-level
+    """Test if Python error occurs when there's low-level
     error happening from the C++ side.
     """
     allocator = get_mem_allocator_instance()
@@ -78,7 +77,8 @@ def test_basic_cumem():
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
 def test_discard_tags():
     """Test that discard(tags) selectively frees GPU memory for specific
-    tags while keeping other tags mapped and usable."""
+    tags while keeping other tags mapped and usable.
+    """
     allocator = get_mem_allocator_instance()
 
     with allocator.use_memory_pool("weights"):

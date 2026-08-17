@@ -36,7 +36,7 @@ FailureCallback = Callable[[], None]
 
 
 class Executor(ABC):
-    """Abstract base class for vLLM executors."
+    """Abstract base class for vLLM executors.".
 
     An executor is responsible for executing the model on one device,
     or it can be a distributed executor that can execute the model on multiple devices.
@@ -139,8 +139,7 @@ class Executor(ABC):
             )
 
     def register_failure_callback(self, callback: FailureCallback):  # noqa: B027
-        """
-        Register a function to be called if the executor enters a permanent
+        """Register a function to be called if the executor enters a permanent
         failed state.
         """
         pass
@@ -160,8 +159,29 @@ class Executor(ABC):
         kwargs: dict | None = None,
         non_block: Literal[False] = False,
     ) -> list[_R]:
-        """
-        Execute an RPC call on all workers.
+        pass
+
+    @overload
+    def collective_rpc(
+        self,
+        method: str | Callable[[WorkerBase], _R],
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict | None = None,
+        non_block: Literal[True] = True,
+    ) -> Future[list[_R]]:
+        pass
+
+    @abstractmethod
+    def collective_rpc(
+        self,
+        method: str | Callable[[WorkerBase], _R],
+        timeout: float | None = None,
+        args: tuple = (),
+        kwargs: dict | None = None,
+        non_block: bool = False,
+    ) -> list[_R] | Future[list[_R]]:
+        """Execute an RPC call on all workers.
 
         Args:
             method: Name of the worker method to execute, or a callable that
@@ -183,24 +203,8 @@ class Executor(ABC):
         Note:
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
+
         """
-        pass
-
-    @overload
-    def collective_rpc(
-        self,
-        method: str | Callable[[WorkerBase], _R],
-        timeout: float | None = None,
-        args: tuple = (),
-        kwargs: dict | None = None,
-        non_block: Literal[True] = True,
-    ) -> Future[list[_R]]:
-        pass
-
-    @abstractmethod
-    def collective_rpc(
-        self, method, timeout=None, args=(), kwargs=None, non_block: bool = False
-    ):
         raise NotImplementedError
 
     def get_kv_connector_handshake_metadata(
@@ -272,7 +276,8 @@ class Executor(ABC):
     @abstractmethod
     def check_health(self) -> None:
         """Checks if the executor is healthy. If not, it should raise an
-        exception."""
+        exception.
+        """
         raise NotImplementedError
 
     def shutdown(self) -> None:
@@ -280,7 +285,7 @@ class Executor(ABC):
         self.collective_rpc("shutdown")
 
     def init_kv_output_aggregator(self, connector: "KVConnectorBase") -> None:
-        """Init KVOutputAggregator"""
+        """Init KVOutputAggregator."""
         self.kv_output_aggregator = KVOutputAggregator.from_connector(
             connector, self.parallel_config.world_size
         )
@@ -373,9 +378,7 @@ class Executor(ABC):
 
     @classmethod
     def supports_async_scheduling(cls) -> bool:
-        """
-        Whether the executor supports async scheduling.
-        """
+        """Whether the executor supports async scheduling."""
         return False
 
 

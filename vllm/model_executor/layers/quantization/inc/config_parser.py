@@ -74,7 +74,8 @@ class INCConfigParser:
 
         def is_explicitly_configured(name: str) -> bool:
             """Return True if *name* has an explicit entry in extra_config,
-            either via exact key match or via a regex pattern key."""
+            either via exact key match or via a regex pattern key.
+            """
             if not self._config.extra_config:
                 return False
             if name in self._config.extra_config:

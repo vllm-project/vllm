@@ -198,8 +198,7 @@ class CacheConfig:
     KV offloading is only activated when kv_offloading_size is set."""
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 

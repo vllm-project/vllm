@@ -29,7 +29,8 @@ def cuda_get_device_properties(
     device, names: Sequence[str], init_cuda=False
 ) -> tuple[Any, ...]:
     """Get specified CUDA device property values without initializing CUDA in
-    the current process."""
+    the current process.
+    """
     if init_cuda or cuda_is_initialized():
         props = torch.cuda.get_device_properties(device)
         return tuple(getattr(props, name) for name in names)

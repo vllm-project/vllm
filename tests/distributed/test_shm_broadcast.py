@@ -43,6 +43,7 @@ def distributed_run(fn, world_size, timeout=60):
         fn: Function to run in each process
         world_size: Number of processes to spawn
         timeout: Maximum time in seconds to wait for processes (default: 60)
+
     """
     number_of_processes = world_size
     processes = []
@@ -418,7 +419,8 @@ def test_tensor_broadcast():
 
 def _dumps_oob(obj) -> tuple[bytes, list]:
     """Pickle `obj` the same way `MessageQueue.enqueue` does: tensor
-    dispatch table + out-of-band buffers >= 1MiB."""
+    dispatch table + out-of-band buffers >= 1MiB.
+    """
     buffers = []
 
     def callback(buf: pickle.PickleBuffer) -> bool:
@@ -489,7 +491,8 @@ def test_tensor_pickle_roundtrip(case: str):
 @pytest.mark.parametrize("case", ["cuda", "requires_grad", "conj"])
 def test_reduce_tensor_fallback(case: str):
     """Tensors the zero-copy reducer can't safely alias must fall back to
-    torch's default reduction."""
+    torch's default reduction.
+    """
     if case == "cuda":
         if not torch.cuda.is_available():
             pytest.skip("requires CUDA")
@@ -634,11 +637,9 @@ def test_acquire_read_releases_slot_when_reader_raises():
 
 
 def test_warning_logs(caplog_vllm):
-    """
-    Test that warning logs are emitted at VLLM_RINGBUFFER_WARNING_INTERVAL intervals
+    """Test that warning logs are emitted at VLLM_RINGBUFFER_WARNING_INTERVAL intervals
     when indefinite=False, and are not emitted when indefinite=True.
     """
-
     # Patch the warning log interval to every 1 ms during reads
     with mock.patch(
         "vllm.distributed.device_communicators.shm_broadcast.VLLM_RINGBUFFER_WARNING_INTERVAL",
@@ -725,7 +726,8 @@ def test_remote_subscribe_addr_unique_concurrent_writers(
     Pre-fix, the writer probed a port with get_open_port() and bound it
     afterwards; pinning the probe to one free port makes every writer
     bind the same port and fail deterministically on that code path,
-    while the late-binding implementation never consults the probe."""
+    while the late-binding implementation never consults the probe.
+    """
     from vllm.distributed.device_communicators import shm_broadcast
 
     colliding_port = get_open_port()

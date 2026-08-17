@@ -28,7 +28,8 @@ def fake_hw_layernorm(monkeypatch):
     A `SimpleNamespace` stands in for the module: `importlib.import_module`
     returns it from `sys.modules` and `getattr` resolves `RMSNorm`, while its
     attributes are set at construction (no `ModuleType` attribute-set that mypy
-    rejects, no constant `setattr` that ruff rejects)."""
+    rejects, no constant `setattr` that ruff rejects).
+    """
     module = types.SimpleNamespace(RMSNorm=type("HwRMSNorm", (), {}))
     monkeypatch.setitem(sys.modules, HW_MODULE, module)
     return module
@@ -81,7 +82,8 @@ def test_act_and_mul_falls_back_for_unknown_activation(
 @pytest.fixture(scope="module")
 def tiny_llama_path(tmp_path_factory):
     """A randomly-initialized microscopic Llama saved to disk (with an ungated
-    tokenizer) so vLLM can load it like any local checkpoint."""
+    tokenizer) so vLLM can load it like any local checkpoint.
+    """
     from transformers import AutoTokenizer, LlamaConfig, LlamaForCausalLM
 
     tokenizer = AutoTokenizer.from_pretrained("hf-internal-testing/llama-tokenizer")

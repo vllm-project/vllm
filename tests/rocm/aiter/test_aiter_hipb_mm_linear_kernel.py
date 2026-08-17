@@ -304,7 +304,8 @@ def test_hipb_mm_kernel_forward_matches_raw_aiter_hipb_mm(enable_hipb_mm_kernel)
 
 def test_hipb_mm_kernel_forward_accuracy(enable_hipb_mm_kernel):
     """Kernel output should match a dequantized fp32 reference within
-    fp8 per-token / per-channel quantization noise."""
+    fp8 per-token / per-channel quantization noise.
+    """
     weight_shape = (512, 4096)  # (N, K)
     num_tokens = 32
     _check_bpreshuffle_runtime_support(weight_shape, num_tokens=num_tokens)

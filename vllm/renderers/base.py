@@ -235,8 +235,7 @@ class BaseRenderer(ABC, Generic[_T]):
         logger.info("%s warmup completed in %.3fs", log_prefix, elapsed)
 
     def warmup(self, chat_params: ChatParams) -> None:
-        """
-        Warm up this renderer to avoid first-request latency.
+        """Warm up this renderer to avoid first-request latency.
 
         For chat requests:
         - Jinja2 template compilation
@@ -284,7 +283,8 @@ class BaseRenderer(ABC, Generic[_T]):
 
     async def clear_mm_cache_async(self) -> None:
         """Serialize clear_mm_cache through the multimodal executor to avoid
-        races with concurrent process_inputs on the mm_processor_cache."""
+        races with concurrent process_inputs on the mm_processor_cache.
+        """
         await self._clear_mm_cache_async()
 
     def shutdown(self) -> None:
@@ -319,8 +319,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return self.tokenizer.eos_token_id
 
     def get_dec_start_token_id(self) -> int:
-        """
-        Obtain the decoder start token id employed by an encoder/decoder model,
+        """Obtain the decoder start token id employed by an encoder/decoder model,
         raising an error if it is not available.
         """
         dec_start_token_id = getattr(

@@ -231,7 +231,8 @@ def test_group_and_batch_mm_items_splits_shared_data_by_dtype():
 
 def test_encode_image_url_uncommon_format_has_valid_mimetype():
     """A format missing from mimetypes.types_map must still produce a
-    well-formed type/subtype media type, not a bare 'image'."""
+    well-formed type/subtype media type, not a bare 'image'.
+    """
     # ".tga" is not registered in mimetypes.types_map, so it exercises the
     # fallback path; Pillow can still encode it.
     url = encode_image_url(Image.new("RGB", (2, 2)), format="TGA")

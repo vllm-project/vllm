@@ -430,9 +430,7 @@ def test_completions():
 
 
 def test_completions_invalid_input():
-    """
-    Ensure that we fail when the input doesn't conform to the openai api.
-    """
+    """Ensure that we fail when the input doesn't conform to the openai api."""
     with (
         tempfile.NamedTemporaryFile("w") as input_file,
         tempfile.NamedTemporaryFile("r") as output_file,
@@ -523,9 +521,7 @@ def test_score(input_batch):
 
 
 def test_reasoning_parser():
-    """
-    Test that reasoning_parser parameter works correctly in run_batch.
-    """
+    """Test that reasoning_parser parameter works correctly in run_batch."""
     with (
         tempfile.NamedTemporaryFile("w") as input_file,
         tempfile.NamedTemporaryFile("r") as output_file,
@@ -688,8 +684,7 @@ def test_translation():
 
 
 def test_tool_calling():
-    """
-    Test that tool calling works correctly in run_batch.
+    """Test that tool calling works correctly in run_batch.
     Verifies that requests with tools return tool_calls in the response.
     """
     with (

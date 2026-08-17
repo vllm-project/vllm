@@ -32,8 +32,7 @@ from vllm.platforms import current_platform
 def test_eagle3_speculators_model(
     vllm_runner, example_prompts, model_path, monkeypatch
 ):
-    """
-    Test Eagle3 speculators models properly initialize speculative decoding.
+    """Test Eagle3 speculators models properly initialize speculative decoding.
 
     This test verifies:
     1. Eagle3 support is detected for the model

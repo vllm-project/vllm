@@ -62,7 +62,8 @@ def _gather(features, cached, *, num_scheduled, shift, num_computed=0):
 def test_draft_shift_uses_boundary_feature_when_cached():
     """The drafter's +1 look-ahead reaches the feature at offset ==
     processed_end; when it is already cached it is used for the look-ahead
-    position rather than ignored."""
+    position rather than ignored.
+    """
     f0 = _feature("h0", offset=0, length=8)
     f1 = _feature("h1", offset=8, length=8)  # starts exactly at processed_end
     mm_embeds, is_mm_embed = _gather([f0, f1], [f0, f1], num_scheduled=8, shift=1)
@@ -75,7 +76,8 @@ def test_draft_shift_uses_boundary_feature_when_cached():
 
 def test_draft_shift_tolerates_missing_boundary_feature():
     """When the +1 look-ahead feature past the processed boundary is not yet
-    encoded, fall back to the token embedding instead of raising."""
+    encoded, fall back to the token embedding instead of raising.
+    """
     f0 = _feature("h0", offset=0, length=8)
     f1 = _feature("h1", offset=8, length=8)  # boundary feature, not cached
     mm_embeds, is_mm_embed = _gather([f0, f1], [f0], num_scheduled=8, shift=1)
@@ -87,7 +89,8 @@ def test_draft_shift_tolerates_missing_boundary_feature():
 
 def test_draft_shift_raises_on_interior_miss():
     """A miss for a feature within the processed range (not the look-ahead
-    boundary) is a real invariant violation, even on the drafter path."""
+    boundary) is a real invariant violation, even on the drafter path.
+    """
     f0 = _feature("h0", offset=0, length=8)  # interior, within processed range
     with pytest.raises(RuntimeError, match="Encoder cache miss"):
         _gather([f0], [], num_scheduled=8, shift=1)

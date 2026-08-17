@@ -105,7 +105,8 @@ class TensorizerLoader(BaseModelLoader):
 
         Expects a vLLM-tensorized model. See the
         examples/features/tensorize_vllm_model.py example script
-        for serializing vLLM models."""
+        for serializing vLLM models.
+        """
         if is_vllm_tensorized(self.tensorizer_config):
             tensorizer_config = self._patch_tensorizer_config(model_config)
             deserialize_tensorizer_model(model, tensorizer_config)

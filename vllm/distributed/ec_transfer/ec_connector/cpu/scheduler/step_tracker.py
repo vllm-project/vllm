@@ -57,6 +57,7 @@ class StepTracker:
         Returns:
             List of mm_hashes to process. May contain duplicates if the
             same mm_hash was added multiple times (from different requests).
+
         """
         result: list[str] = []
 

@@ -341,7 +341,8 @@ class TestStreamingExtraction:
 
     def test_mtp_streaming_massive_chunk(self, parser, mock_request):
         """Simulates MTP predicting text, tool calls,
-        and trailing text all in a single chunk."""
+        and trailing text all in a single chunk.
+        """
         chunks = [
             "Sure! "
             '<|tools_prefix|>[{"get_weather": {"location": "London"}}]<|tools_suffix|>'
@@ -374,7 +375,8 @@ class TestStreamingExtraction:
 
     def test_mtp_streaming_skip_and_catch_up(self, parser, mock_request):
         """Simulates MTP chunks that jump over entire tools
-        (e.g., from middle of tool 1 to middle of tool 3)."""
+        (e.g., from middle of tool 1 to middle of tool 3).
+        """
         chunks = [
             '<|tools_prefix|>[{"t1": {"a": 1}',
             '}, {"t2": {"b": 2}}, {"t3": {"c": 3',
@@ -393,7 +395,8 @@ class TestStreamingExtraction:
 
     def test_vllm_streaming_character_by_character(self, parser, mock_request):
         """Simulates worst-case vLLM fragmentation where
-        chunks arrive character-by-character."""
+        chunks arrive character-by-character.
+        """
         text = (
             'Hi <|tools_prefix|>[{"get_weather": '
             '{"location": "London"}}]<|tools_suffix|> '
@@ -411,7 +414,8 @@ class TestStreamingExtraction:
 
     def test_vllm_streaming_empty_deltas(self, parser, mock_request):
         """Simulates vLLM stream producing empty string chunks
-        (e.g., hidden tokens or artifacts)."""
+        (e.g., hidden tokens or artifacts).
+        """
         chunks = [
             "Wait",
             "",

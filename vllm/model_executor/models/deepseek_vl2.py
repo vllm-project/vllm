@@ -65,13 +65,12 @@ _IMAGE_TOKEN = "<image>"
 
 
 class DeepseekVL2ImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bnp: Batch size * number of images * number of patches
-        - p: Number of patches
-        - c: Number of channels (3)
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - bnp: Batch size * number of images * number of patches
+    - p: Number of patches
+    - c: Number of channels (3)
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values"]
@@ -80,11 +79,10 @@ class DeepseekVL2ImagePixelInputs(TensorSchema):
 
 
 class DeepseekVL2VImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - f: Image feature size
-        - h: Hidden size (must match language model backbone)
+    """Dimensions:
+    - bn: Batch size * number of images
+    - f: Image feature size
+    - h: Hidden size (must match language model backbone)
     """
 
     type: Literal["image_embeds"]

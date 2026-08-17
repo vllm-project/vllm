@@ -114,7 +114,8 @@ class TestHandlerOverrideIntegration:
 
     def test_customer_script_functions_auto_loaded(self, monkeypatch, tmp_path):
         """Test customer scenario: script functions automatically override
-        framework defaults."""
+        framework defaults.
+        """
         try:
             from model_hosting_container_standards.sagemaker.config import (
                 SageMakerEnvVars,
@@ -175,7 +176,8 @@ async def custom_sagemaker_invocation_handler(request: Request):
 
     def test_customer_decorator_usage(self, monkeypatch, tmp_path):
         """Test customer scenario: using @custom_ping_handler and
-        @custom_invocation_handler decorators."""
+        @custom_invocation_handler decorators.
+        """
         try:
             from model_hosting_container_standards.sagemaker.config import (
                 SageMakerEnvVars,
@@ -231,7 +233,8 @@ async def my_invoke(request: Request):
 
     def test_handler_priority_order(self, monkeypatch, tmp_path):
         """Test priority: @custom_ping_handler/@custom_invocation_handler
-        decorators vs script functions."""
+        decorators vs script functions.
+        """
         try:
             from model_hosting_container_standards.sagemaker.config import (
                 SageMakerEnvVars,
@@ -304,7 +307,8 @@ async def custom_sagemaker_invocation_handler(request: Request):
 
     def test_environment_variable_script_loading(self, monkeypatch, tmp_path):
         """Test that environment variables correctly specify script location
-        and loading."""
+        and loading.
+        """
         try:
             from model_hosting_container_standards.sagemaker.config import (
                 SageMakerEnvVars,
@@ -416,7 +420,8 @@ async def custom_sagemaker_invocation_handler(request: Request):
 
     def test_handler_env_var_override(self, monkeypatch, tmp_path):
         """Test CUSTOM_FASTAPI_PING_HANDLER and CUSTOM_FASTAPI_INVOCATION_HANDLER
-        environment variable overrides."""
+        environment variable overrides.
+        """
         try:
             from model_hosting_container_standards.common.fastapi.config import (
                 FastAPIEnvVars,
@@ -510,7 +515,8 @@ async def custom_sagemaker_invocation_handler(request: Request):
 
     def test_env_var_priority_over_decorator_and_script(self, monkeypatch, tmp_path):
         """Test that environment variables have highest priority over decorators
-        and script functions for both ping and invocation handlers."""
+        and script functions for both ping and invocation handlers.
+        """
         try:
             from model_hosting_container_standards.common.fastapi.config import (
                 FastAPIEnvVars,

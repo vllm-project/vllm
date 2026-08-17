@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-An example demonstrates how to use tool calling with reasoning models 
+"""An example demonstrates how to use tool calling with reasoning models
 like QwQ-32B. The reasoning will not be parsed by the tool 
 calling process; only the final output will be parsed.
 

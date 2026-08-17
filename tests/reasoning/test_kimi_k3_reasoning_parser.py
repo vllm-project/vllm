@@ -276,7 +276,8 @@ def _reference_is_reasoning_end(input_ids: list[int]) -> bool:
 def test_is_reasoning_end_streaming_only_scans_the_step_window():
     """The decode-step check must not re-derive the answer from the whole
     sequence: an already-closed think block earlier in the sequence is the
-    engine's business (it latches `reasoning_ended`), not this call's."""
+    engine's business (it latches `reasoning_ended`), not this call's.
+    """
     parser = KimiK3ReasoningParser(DummyTokenizer())
     prompt = [*CLOSE_IDS, *OPEN_IDS, 9, 9, 9]
 
@@ -286,7 +287,8 @@ def test_is_reasoning_end_streaming_only_scans_the_step_window():
 
 def test_is_reasoning_end_streaming_detects_marker_across_step_boundary():
     """A 3-token marker can be split over decode steps; the check carries the
-    preceding len(marker)-1 tokens so the final token still completes it."""
+    preceding len(marker)-1 tokens so the final token still completes it.
+    """
     parser = KimiK3ReasoningParser(DummyTokenizer())
     history = [*OPEN_IDS, 5, *CLOSE_IDS[:2]]
 
@@ -297,7 +299,8 @@ def test_is_reasoning_end_streaming_detects_marker_across_step_boundary():
 def test_is_reasoning_end_streaming_reopened_block_is_not_ended():
     """Kimi K3 may close and immediately reopen the think channel inside one
     window (speculative decoding lands several tokens per step). The newest
-    marker wins, matching is_reasoning_end."""
+    marker wins, matching is_reasoning_end.
+    """
     parser = KimiK3ReasoningParser(DummyTokenizer())
     window = [*CLOSE_IDS, *OPEN_IDS]
 
@@ -324,7 +327,8 @@ def test_is_reasoning_end_streaming_thinking_disabled():
 def test_reasoning_end_matches_reference_over_marker_dense_sequences(seed):
     """Both the full-sequence check and the per-step check must agree with the
     two-scan reference, on sequences where the markers (which share the suffix
-    [2, 3]) collide and overlap constantly."""
+    [2, 3]) collide and overlap constantly.
+    """
     import random
 
     rnd = random.Random(seed)

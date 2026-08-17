@@ -109,7 +109,8 @@ logger = init_logger(__name__)
 def _text_config(config):
     """MuseGlimmer checkpoints may nest the text config under ``text_config``
     (multimodal ``MuseGlimmerConfig``) or expose it directly
-    (``MuseGlimmerTextConfig``)."""
+    (``MuseGlimmerTextConfig``).
+    """
     return getattr(config, "text_config", config)
 
 
@@ -473,7 +474,8 @@ class MuseGlimmerMultiModalProcessor(
 def _muse_glimmer_use_qk_norm(config) -> bool:
     """Whether QK-norm is applied. MuseGlimmer ALWAYS applies QK-norm; the modular HF
     ``text_config`` schema simply omits ``use_qk_norm`` (reads as ``None``).
-    Treat a missing/None flag as True — only an explicit ``False`` disables it."""
+    Treat a missing/None flag as True — only an explicit ``False`` disables it.
+    """
     val = getattr(config, "use_qk_norm", None)
     return True if val is None else bool(val)
 
@@ -481,7 +483,8 @@ def _muse_glimmer_use_qk_norm(config) -> bool:
 def _muse_glimmer_use_attn_output_gate(config) -> bool:
     """Whether the per-head sigmoid attention output gate is applied. MuseGlimmer ALWAYS
     applies it; the modular HF ``text_config`` omits ``use_attn_output_gate``
-    (reads as ``None``). Missing/None -> True; only explicit ``False`` disables."""
+    (reads as ``None``). Missing/None -> True; only explicit ``False`` disables.
+    """
     val = getattr(config, "use_attn_output_gate", None)
     return True if val is None else bool(val)
 

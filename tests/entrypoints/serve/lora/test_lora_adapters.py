@@ -245,7 +245,8 @@ async def test_multiple_lora_adapters(
     client: openai.AsyncOpenAI, tmp_path, qwen3_lora_files
 ):
     """Validate that many loras can be dynamically registered and inferenced
-    with concurrently"""
+    with concurrently
+    """
 
     # This test file configures the server with --max-cpu-loras=2 and this test
     # will concurrently load 10 adapters, so it should flex the LRU cache

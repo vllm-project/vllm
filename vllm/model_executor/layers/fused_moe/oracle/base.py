@@ -55,24 +55,28 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     @abstractmethod
     def backend_enum_cls(self) -> type[BackendT]:
         """Return the concrete `Enum` class enumerating this oracle's
-        backends (e.g. `UnquantizedMoeBackend`, `Fp8MoeBackend`)."""
+        backends (e.g. `UnquantizedMoeBackend`, `Fp8MoeBackend`).
+        """
 
     @abstractmethod
     def get_priority_backends(self, moe_config: FusedMoEConfig) -> list[BackendT]:
         """Return platform-appropriate backends in priority order for
-        this `moe_config`."""
+        this `moe_config`.
+        """
 
     @abstractmethod
     def backend_to_kernel_cls(
         self, backend: BackendT
     ) -> list[type[mk.FusedMoEExperts]]:
         """Map a backend enum value to its concrete `FusedMoEExperts`
-        subclasses, in selection priority order."""
+        subclasses, in selection priority order.
+        """
 
     @abstractmethod
     def map_backend(self, runner_backend: MoEBackend) -> BackendT:
         """Map a user-facing `MoEBackend` (from the runner config) to
-        this oracle's enum."""
+        this oracle's enum.
+        """
 
     @abstractmethod
     def select_backend(
@@ -104,7 +108,8 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEKernel:
         """Construct the `FusedMoEKernel` (Prepare/Finalize + Experts
-        combinator) for the chosen backend."""
+        combinator) for the chosen backend.
+        """
 
     def convert_to_kernel_format(
         self,

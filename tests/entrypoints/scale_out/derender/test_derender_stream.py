@@ -534,7 +534,6 @@ async def client(server):
 
 async def _render_chat(client) -> dict:
     """Render a minimal chat request and return the GenerateRequest dict."""
-
     resp = await client.post(
         "/v1/chat/completions/render",
         json={

@@ -15,6 +15,7 @@ Examples:
     python e2e_decode_speedup.py --model-id nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16
     python e2e_decode_speedup.py --dtype auto --buffer-len 16 \
         --model-id nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4   # B300 NVFP4
+
 """
 
 import argparse

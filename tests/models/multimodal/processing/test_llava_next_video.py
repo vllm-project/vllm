@@ -16,7 +16,8 @@ from ...utils import build_model_context
 class _StubModel:
     """Carries only the two attributes the token helpers read from
     `self`, so the real methods can be exercised without constructing
-    the full `nn.Module` (vision tower, language model, etc.)."""
+    the full `nn.Module` (vision tower, language model, etc.).
+    """
 
     patch_grid_length: int
     pooled_grid_length: int
@@ -34,7 +35,8 @@ get_num_mm_connector_tokens = (
 def test_num_mm_tokens_match_real_config(model_id):
     """The stored grid lengths must match what `__init__` derives from
     the real HF config, and the two helpers must invert each other's
-    frame-level scaling exactly."""
+    frame-level scaling exactly.
+    """
     ctx = build_model_context(model_id, limit_mm_per_prompt={"video": 1})
     config = ctx.model_config.hf_config
 

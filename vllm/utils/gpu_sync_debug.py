@@ -65,7 +65,8 @@ _sync_filter_head: tuple | None = None
 
 def _sync_warning_hook(message, category, filename, lineno, file=None, line=None):
     """Turn torch's sync warning into an error, but only on a thread that is
-    being checked and is outside any allow region."""
+    being checked and is outside any allow region.
+    """
     if _TORCH_SYNC_WARNING in str(message):
         mode = _checking.get()
         if mode is None or _allow_depth.get():

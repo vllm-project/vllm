@@ -483,7 +483,6 @@ class EngineCore:
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
-
         # TODO: The scheduler doesn't really need to know the
         # specific finish reason, TBD whether we propagate that
         # (i.e. client-aborted vs stop criteria met).
@@ -577,7 +576,8 @@ class EngineCore:
 
     def _should_throttle_prefills(self) -> bool:
         """Whether to defer new prefills this step (DP prefill balancing).
-        Overridden by the DP engine core; never throttles otherwise."""
+        Overridden by the DP engine core; never throttles otherwise.
+        """
         return False
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
@@ -586,7 +586,6 @@ class EngineCore:
         Returns tuple of outputs and a flag indicating whether the model
         was executed.
         """
-
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
@@ -637,7 +636,6 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
-
         batch_queue = self.batch_queue
         assert batch_queue is not None
 
@@ -875,8 +873,8 @@ class EngineCore:
                 - Level 2: Discard all GPU memory.
             mode: Pause mode - how to deal with any existing requests, see
                 documentation of pause_scheduler method.
-        """
 
+        """
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
         pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
@@ -907,6 +905,7 @@ class EngineCore:
 
         Args:
             tags: Tags to wake up. Use ["scheduling"] for level 0 wake up.
+
         """
         if tags is not None and "scheduling" in tags:
             # Remove "scheduling" from tags if there are other tags to process.
@@ -1134,8 +1133,7 @@ class EngineCoreProc(EngineCore):
         vllm_config: VllmConfig,
         client_handshake_address: str | None,
     ) -> Generator[EngineZmqAddresses, None, None]:
-        """
-        Perform startup handshakes.
+        """Perform startup handshakes.
 
         For DP=1 or offline mode, this is with the colocated front-end process.
 
@@ -1270,7 +1268,6 @@ class EngineCoreProc(EngineCore):
     @staticmethod
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
-
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
 
@@ -1400,7 +1397,6 @@ class EngineCoreProc(EngineCore):
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
-
         waited = False
         while not self.has_work() and self.is_running():
             # Notify callbacks waiting for engine to become idle.
@@ -1431,7 +1427,6 @@ class EngineCoreProc(EngineCore):
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
-
         # Step the engine core.
         outputs, model_executed = self.step_fn()
         # Put EngineCoreOutputs into the output queue.
@@ -1505,7 +1500,6 @@ class EngineCoreProc(EngineCore):
         self, request_type: EngineCoreRequestType, request: Any
     ) -> None:
         """Dispatch request from client."""
-
         if request_type == EngineCoreRequestType.WAKEUP:
             return
         elif request_type == EngineCoreRequestType.ADD:
@@ -1585,7 +1579,8 @@ class EngineCoreProc(EngineCore):
     @staticmethod
     def _convert_msgspec_args(method, args):
         """If a provided arg type doesn't match corresponding target method
-        arg type, try converting to msgspec object."""
+        arg type, try converting to msgspec object.
+        """
         if not args:
             return args
         arg_types = signature(method).parameters.values()
@@ -1601,7 +1596,6 @@ class EngineCoreProc(EngineCore):
 
     def _send_engine_dead(self):
         """Send EngineDead status to the EngineCoreClient."""
-
         # Put ENGINE_CORE_DEAD in the queue.
         self.output_queue.put_nowait(EngineCoreProc.ENGINE_CORE_DEAD)
 
@@ -1656,7 +1650,6 @@ class EngineCoreProc(EngineCore):
         ready_event: threading.Event,
     ):
         """Input socket IO thread."""
-
         # Msgpack serialization decoding with optional tensor IPC receiver.
         add_request_decoder = MsgpackDecoder(
             EngineCoreRequest, oob_tensor_provider=self.tensor_ipc_receiver
@@ -1755,7 +1748,6 @@ class EngineCoreProc(EngineCore):
         self, output_paths: list[str], coord_output_path: str | None, engine_index: int
     ):
         """Output socket IO thread."""
-
         # Msgpack serialization encoding.
         encoder = MsgpackEncoder()
         # Send buffers to reuse.
@@ -1962,7 +1954,8 @@ class EngineCoreProc(EngineCore):
 
 class DPEngineCoreProc(EngineCoreProc):
     """ZMQ-wrapper for running EngineCore in background process
-    in a data parallel context."""
+    in a data parallel context.
+    """
 
     def __init__(
         self,
@@ -2146,7 +2139,6 @@ class DPEngineCoreProc(EngineCoreProc):
     @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
-
         # Loop until process is sent a SIGINT or SIGTERM
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
@@ -2297,8 +2289,7 @@ class DPEngineCoreProc(EngineCoreProc):
     def _eep_send_engine_core_notification(
         self, notification_type: EEPNotificationType
     ):
-        """
-        Send notifications to EngineCoreClient, which can then forward
+        """Send notifications to EngineCoreClient, which can then forward
         the notifications to other engine core processes. It is used for:
         1) In scale down: removing core engines to notify EngineCoreClient
            so EngineCoreClient can release their ray placement groups;
@@ -2348,9 +2339,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
 
 class EngineCoreActorMixin:
-    """
-    Ray actor for running EngineCore in a data parallel context
-    """
+    """Ray actor for running EngineCore in a data parallel context."""
 
     def __init__(
         self,
@@ -2446,16 +2435,14 @@ class EngineCoreActorMixin:
         vllm_config: VllmConfig,
         client_handshake_address: str | None,
     ):
-        """
-        For Ray, we don't need to actually perform handshake.
+        """For Ray, we don't need to actually perform handshake.
         All addresses information is known before the actor creation.
         Therefore, we simply yield these addresses.
         """
         yield self.addresses
 
     def wait_for_init(self):
-        """
-        Wait until the engine core is initialized.
+        """Wait until the engine core is initialized.
 
         This is just an empty method. When ray.get() on this method
         (or any other method of the actor) returns, it is guaranteed
@@ -2464,9 +2451,7 @@ class EngineCoreActorMixin:
         pass
 
     def run(self):
-        """
-        Run the engine core busy loop.
-        """
+        """Run the engine core busy loop."""
         try:
             self.run_busy_loop()  # type: ignore[attr-defined]
         except SystemExit:

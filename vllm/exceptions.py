@@ -31,6 +31,7 @@ class VLLMValidationError(VLLMClientError):
         message: The error message describing the validation failure.
         parameter: Optional parameter name that failed validation.
         value: Optional value that was rejected during validation.
+
     """
 
     def __init__(
@@ -55,7 +56,7 @@ class VLLMValidationError(VLLMClientError):
 
 
 class VLLMNotFoundError(VLLMClientError):
-    """vLLM-specific NotFoundError"""
+    """vLLM-specific NotFoundError."""
 
     pass
 
@@ -68,6 +69,7 @@ class LoRAAdapterNotFoundError(VLLMNotFoundError):
 
     Attributes:
         message: The error message string describing the exception
+
     """
 
     message: str
@@ -95,6 +97,7 @@ class VLLMUnprocessableEntityError(VLLMClientError):
         message: The error message describing the unprocessable entity.
         parameter: Optional parameter name that failed validation.
         value: Optional value that was rejected during validation.
+
     """
 
     def __init__(

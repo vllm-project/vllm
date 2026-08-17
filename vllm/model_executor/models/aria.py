@@ -50,13 +50,12 @@ from .utils import (
 
 
 class AriaImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - b: Batch size
-        - n: Number of images
-        - c: Number of channels
-        - h: Height of each image
-        - w: Width of each image
+    """Dimensions:
+    - b: Batch size
+    - n: Number of images
+    - c: Number of channels
+    - h: Height of each image
+    - w: Width of each image
     """
 
     type: Literal["pixel_values"]
@@ -127,8 +126,7 @@ class AriaProjectorMLP(nn.Module):
 
 
 class AriaProjector(nn.Module):
-    """
-    A projection module with one cross attention layer and one FFN layer, which
+    """A projection module with one cross attention layer and one FFN layer, which
     projects ViT's outputs into MoE's inputs.
 
     Args:
@@ -137,6 +135,7 @@ class AriaProjector(nn.Module):
 
     Outputs:
         A tensor with the shape of (batch_size, query_number, output_dim)
+
     """
 
     def __init__(self, config: AriaConfig, prefix: str = "") -> None:
@@ -195,8 +194,7 @@ class AriaProjector(nn.Module):
 
 
 class AriaTextMoELayer(nn.Module):
-    """
-    Mixture of Experts (MoE) Layer for the AriaMoE model.
+    """Mixture of Experts (MoE) Layer for the AriaMoE model.
 
     This layer implements the MoE mechanism, which routes input tokens to
     different experts based on a routing algorithm, processes them through the
@@ -235,8 +233,7 @@ class AriaTextMoELayer(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass of the MoE Layer.
+        """Forward pass of the MoE Layer.
 
         Args:
             hidden_states: Input tensor of shape
@@ -244,16 +241,15 @@ class AriaTextMoELayer(nn.Module):
 
         Returns:
             torch.Tensor: Output tensor after passing through the MoE layer.
-        """
 
+        """
         router_output = torch.nn.functional.linear(hidden_states, self.router_weight)
 
         return self.experts(hidden_states, router_output)
 
 
 class AriaTextDecoderLayer(LlamaDecoderLayer):
-    """
-    Custom Decoder Layer for the AriaMoE model which modifies the standard
+    """Custom Decoder Layer for the AriaMoE model which modifies the standard
     `LlamaDecoderLayer` by replacing the traditional MLP with a Mixture of
     Experts (MoE) Layer.
     """
@@ -270,8 +266,7 @@ class AriaTextDecoderLayer(LlamaDecoderLayer):
 
 
 class AriaTextModel(LlamaModel, SupportsQuant):
-    """
-    Custom LlamaModel for the AriaMoE model which modifies the standard
+    """Custom LlamaModel for the AriaMoE model which modifies the standard
     LlamaModel by replacing the `LlamaDecoderLayer` with `MoEDecoderLayer`.
     """
 
@@ -385,8 +380,7 @@ class AriaMultiModalProcessor(BaseMultiModalProcessor[AriaProcessingInfo]):
     dummy_inputs=AriaDummyInputsBuilder,
 )
 class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
-    """
-    Aria model for conditional generation tasks.
+    """Aria model for conditional generation tasks.
 
     This model combines a vision tower, a multi-modal projector, and a language
     model to perform tasks that involve both image and text inputs.

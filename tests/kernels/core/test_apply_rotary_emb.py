@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for ApplyRotaryEmb CustomOp dispatch behavior.
+"""Tests for ApplyRotaryEmb CustomOp dispatch behavior.
 
 This test ensures that RotaryEmbedding classes correctly call the appropriate
 ApplyRotaryEmb methods based on the calling context:
@@ -194,8 +193,7 @@ def test_rotary_embedding_dispatch(
     test_case: RotaryEmbeddingTestCase,
     device: str,
 ):
-    """
-    Test that RotaryEmbedding classes dispatch to the correct ApplyRotaryEmb method.
+    """Test that RotaryEmbedding classes dispatch to the correct ApplyRotaryEmb method.
 
     - forward_native methods should call ApplyRotaryEmb.forward_native()
     - forward_cuda/forward methods should call ApplyRotaryEmb.forward()

@@ -453,6 +453,7 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
     Attributes:
         model: An instance of BertModel used for forward operations.
         _pooler: An instance of Pooler used for pooling operations.
+
     """
 
     is_pooling_model = True
@@ -568,8 +569,7 @@ class BertMLMHead(nn.Module):
 
 
 class SPLADESparsePooler(Pooler):
-    """
-    SPLADE sparse pooling:
+    """SPLADE sparse pooling:
     logits = mlm_head(hidden_states)
             -> log1p(relu(logits))
             -> (max|sum over L)
@@ -657,8 +657,7 @@ class SPLADESparsePooler(Pooler):
 
 @default_pooling_type(seq_pooling_type="CLS")
 class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
-    """
-    BertEmbeddingModel + SPLADE sparse embedding.
+    """BertEmbeddingModel + SPLADE sparse embedding.
     - Make logits by self.mlm_head
     - pooler: SPLADESparsePooler(mlm_head...)
     """
@@ -772,6 +771,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
     Attributes:
         model: An instance of BertModel used for forward operations.
         _pooler: An instance of Pooler used for pooling operations.
+
     """
 
     is_pooling_model = True

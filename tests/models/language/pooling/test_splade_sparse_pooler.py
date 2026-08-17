@@ -31,7 +31,8 @@ from vllm.v1.worker.gpu.states import RequestState
 @torch.inference_mode
 def test_splade_pooler_matches_reference_formula(B, T, H, V):
     """Ensure SPLADESparsePooler forward() matches the mathematical formula:
-    log1p(relu(logits)) -> max over sequence length (after masking)."""
+    log1p(relu(logits)) -> max over sequence length (after masking).
+    """
     torch.manual_seed(0)
 
     # Prepare [B] sequences of shape [T, H]

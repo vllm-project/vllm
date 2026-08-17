@@ -27,8 +27,7 @@ logger = init_logger(__name__)
 
 
 class FunctionGemmaToolParser(ToolParser):
-    """
-    Tool parser for Google's FunctionGemma model (google/functiongemma-270m-it).
+    """Tool parser for Google's FunctionGemma model (google/functiongemma-270m-it).
 
     Handles the FunctionGemma function call format:
     <start_function_call>call:func_name{param:<escape>value<escape>}<end_function_call>

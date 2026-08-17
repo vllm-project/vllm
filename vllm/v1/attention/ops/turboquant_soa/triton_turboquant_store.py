@@ -45,7 +45,8 @@ def _store_quantized_value(
     BLOCK_GRP: tl.constexpr,
 ):
     """Uniform quantization of values to VQB bits, pack, and store with
-    scale/zero in the per-block SoA metadata region (Opt#3 layout)."""
+    scale/zero in the per-block SoA metadata region (Opt#3 layout).
+    """
     if VQB == 3:
         val_vec = tl.load(Value_ptr + base + d_offs, mask=d_mask, other=0.0).to(
             tl.float32

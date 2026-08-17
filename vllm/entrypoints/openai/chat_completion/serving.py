@@ -199,8 +199,7 @@ class OpenAIServingChat(GenerateBaseServing):
         self,
         request: ChatCompletionRequest,
     ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
-        """
-        Validate the model and preprocess a chat completion request.
+        """Validate the model and preprocess a chat completion request.
 
         Delegates preprocessing logic to OnlineRenderer, adding the
         engine-aware checks (LoRA model validation, engine health).
@@ -208,6 +207,7 @@ class OpenAIServingChat(GenerateBaseServing):
         Returns:
             A tuple of (conversation, engine_inputs) on success,
             or an ErrorResponse on failure.
+
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -227,8 +227,7 @@ class OpenAIServingChat(GenerateBaseServing):
         request: ChatCompletionRequest,
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
-        """
-        Chat Completion API similar to OpenAI's API.
+        """Chat Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/chat/create
         for the API specification. This API mimics the OpenAI

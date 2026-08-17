@@ -3,8 +3,7 @@
 # Adapted from Qwen3-ForcedAligner inference:
 # https://github.com/QwenLM/Qwen3-ASR
 
-"""
-Online forced alignment example using Qwen3-ForcedAligner-0.6B.
+"""Online forced alignment example using Qwen3-ForcedAligner-0.6B.
 
 Forced alignment takes audio and reference text as input and produces
 word-level timestamps. The model predicts a time bin at each <timestamp>

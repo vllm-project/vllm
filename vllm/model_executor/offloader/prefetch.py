@@ -136,6 +136,7 @@ class PrefetchOffloader(BaseOffloader):
         num_in_group: Offload this many layers per group (last N of each group).
         prefetch_step: Number of layers to prefetch ahead.
         mode: Offload mode ("cpu" is currently supported).
+
     """
 
     def __init__(

@@ -69,7 +69,8 @@ _WS = " \t\r\n"
 
 def _scan_json_value(raw: str, start: int) -> int | None:
     """Return the end index (exclusive) of the JSON object starting at
-    ``raw[start]``, or ``None`` when the object is still unterminated."""
+    ``raw[start]``, or ``None`` when the object is still unterminated.
+    """
     depth = 0
     in_string = False
     escape = False

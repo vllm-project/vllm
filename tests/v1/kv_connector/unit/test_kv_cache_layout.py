@@ -9,7 +9,8 @@ from vllm.platforms import current_platform
 def test_mla_common_backend_rejects_cross_layer_kv_cache():
     """MLACommonBackend defaults to the identity permutation (layers dim
     first) so MLA backends whose decode kernels are not verified to honor
-    the cache's block-dim stride stay opted out of cross-layer KV cache."""
+    the cache's block-dim stride stay opted out of cross-layer KV cache.
+    """
     from vllm.model_executor.layers.attention.mla_attention import (
         MLACommonBackend,
     )
@@ -42,7 +43,8 @@ def test_mla_common_backend_rejects_cross_layer_kv_cache():
 def test_verified_mla_backends_support_cross_layer_kv_cache(backend_path):
     """Backends whose decode kernels honor the cache's block-dim stride opt
     in to the cross-layer layout with a non-identity permutation placing
-    num_blocks first in physical layout."""
+    num_blocks first in physical layout.
+    """
     module_path, name = backend_path.rsplit(".", 1)
     backend = getattr(
         pytest.importorskip(module_path, reason="backend deps unavailable"), name
@@ -60,7 +62,8 @@ def test_verified_mla_backends_support_cross_layer_kv_cache(backend_path):
 
 def test_deepseek_v32_indexer_rejects_cross_layer_kv_cache():
     """DeepseekV32Indexer returns identity permutation (layers dim first)
-    to signal cross-layer KV cache is unsupported."""
+    to signal cross-layer KV cache is unsupported.
+    """
     from vllm.v1.attention.backends.mla.indexer import (
         DeepseekV32IndexerBackend,
     )

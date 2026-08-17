@@ -70,8 +70,7 @@ class InputPreprocessor:
         prompt: str,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[int]:
-        """
-        Apply the model's tokenizer to a text prompt, returning the
+        """Apply the model's tokenizer to a text prompt, returning the
         corresponding token IDs.
         """
         renderer = self.renderer
@@ -96,8 +95,7 @@ class InputPreprocessor:
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInput:
-        """
-        Apply the model's multi-modal processor to a multi-modal prompt,
+        """Apply the model's multi-modal processor to a multi-modal prompt,
         returning the corresponding token IDs and metadata.
         """
         return self.renderer._process_multimodal(

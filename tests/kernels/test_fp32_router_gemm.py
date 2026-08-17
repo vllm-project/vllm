@@ -95,7 +95,8 @@ def test_topk_routing_consistency(num_tokens: int, hidden_dim: int, num_experts:
     """The gate feeds top-k expert selection: the kernel's top-8 must match
     an fp64 reference's top-8 per token (ties tolerated). This is the
     business-level correctness of the router — numeric error only matters
-    if it flips the argsort."""
+    if it flips the argsort.
+    """
     _requires_sm90()
     top_k = 8
     device = torch.device("cuda")

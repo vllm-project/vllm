@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Inference-only LLaVA-OneVision-2 (OV2) model for vLLM.
+"""Inference-only LLaVA-OneVision-2 (OV2) model for vLLM.
 
 Architecture notes:
 

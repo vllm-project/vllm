@@ -783,7 +783,8 @@ class SpecDecodeBaseProposer:
         block_size: int,
     ) -> torch.Tensor:
         """Update positions, slot mappings, and sequence metadata for the
-        next draft step. Returns the updated positions tensor."""
+        next draft step. Returns the updated positions tensor.
+        """
         positions_1d = positions[0] if self.uses_mrope else positions
         if self.uses_mrope:
             out_pos = self.mrope_positions[0, :batch_size]
@@ -1029,8 +1030,7 @@ class SpecDecodeBaseProposer:
         gpu_input_batch: InputBatch,
         num_scheduled_tokens: dict[str, int],
     ) -> torch.Tensor:
-        """
-        This function is used to prepare the inputs for speculative decoding.
+        """This function is used to prepare the inputs for speculative decoding.
         It calculates the next token ids for each request based on the sampled
         token ids from the CPU. If a request has no sampled token ids (e.g.,
         during the initial decoding steps), it falls back to using the request
@@ -1062,8 +1062,7 @@ class SpecDecodeBaseProposer:
         gpu_input_batch: InputBatch,
         discard_request_mask: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        This function is used to prepare the inputs for speculative decoding.
+        """This function is used to prepare the inputs for speculative decoding.
         It calculates the next token ids and the number of valid sampled tokens
         for each request, considering the "discarded" requests whose next token
         is not sampled and comes from `request.get_token_id()` instead. This is denoted
@@ -1113,8 +1112,7 @@ class SpecDecodeBaseProposer:
         spec_decode_metadata: SpecDecodeMetadata,
         valid_sampled_tokens_count: torch.Tensor,
     ) -> tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor]:
-        """
-        This function is used to prepare the inputs for speculative decoding
+        """This function is used to prepare the inputs for speculative decoding
         It updates the common_attn_metadata for speculative decoding,
         but does not consider the rejected tokens. Instead, all tokens
         are included as inputs to the speculator, with the rejected tokens
@@ -1175,8 +1173,7 @@ class SpecDecodeBaseProposer:
         sampled_token_ids: list[list[int]],
         num_draft_tokens: list[int],
     ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
-        """
-        This function is used to prepare the inputs for speculative decoding.
+        """This function is used to prepare the inputs for speculative decoding.
         It updates to the common_attn_metadata to account for the rejected
         tokens (and newly sampled tokens). It also returns the token indices
         of the tokens that should be fed to the speculator.
@@ -1320,8 +1317,7 @@ class SpecDecodeBaseProposer:
         return base
 
     def _get_model(self) -> nn.Module:
-        """
-        Default method to call get_model(). Can be overridden by subclasses which
+        """Default method to call get_model(). Can be overridden by subclasses which
         need to customize model loading.
         """
         from vllm.compilation.backends import set_model_tag
@@ -1428,8 +1424,7 @@ class SpecDecodeBaseProposer:
                 self.parallel_drafting_hidden_state_tensor.copy_(flat_mask)
 
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
-        """
-        Some draft models may not have their own embedding layers, and some may
+        """Some draft models may not have their own embedding layers, and some may
         have a duplicate copy of the target model's embedding layers. In these cases,
         we share the target model's embedding layers with the draft model to save
         memory.
@@ -1521,8 +1516,7 @@ class SpecDecodeBaseProposer:
             )
 
     def _maybe_share_lm_head(self, target_language_model: nn.Module) -> None:
-        """
-        Some draft models may not have their own LM head, and some may have a
+        """Some draft models may not have their own LM head, and some may have a
         duplicate copy of the target model's LM head. In these cases, we share
         the target model's LM head with the draft model to save memory.
         """
@@ -1686,8 +1680,7 @@ class SpecDecodeBaseProposer:
                 self.model(**kwargs)
 
     def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
-        """
-        Some eagle3 heads (e.g., nvidia/gpt-oss-120b-Eagle3-v2) do not use auxiliary
+        """Some eagle3 heads (e.g., nvidia/gpt-oss-120b-Eagle3-v2) do not use auxiliary
         hidden states and directly uses the last layer output just like eagle1.
         They might indicate this by setting "use_aux_hidden_state" to False
         inside the "eagle_config" dict of their hf_config.
@@ -1702,8 +1695,7 @@ class SpecDecodeBaseProposer:
         return use_aux_hidden_state
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
-        """
-        Validate that all drafting layers belong to the same KVCacheGroup.
+        """Validate that all drafting layers belong to the same KVCacheGroup.
         Need this assumption to ensure all drafting layers can use the
         same AttentionMetadata.
         May extend to multiple AttentionMetadata in the future.
@@ -1729,8 +1721,7 @@ class SpecDecodeBaseProposer:
         kv_cache_config: KVCacheConfig,
         kernel_block_sizes: list[int] | None = None,
     ) -> None:
-        """
-        Initialize AttentionGroups for draft layers using kv_cache_config.
+        """Initialize AttentionGroups for draft layers using kv_cache_config.
         Called from the model runner's initialize_metadata_builders.
         """
         all_attn_layers = get_layers_from_vllm_config(

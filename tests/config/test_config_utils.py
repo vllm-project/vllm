@@ -39,7 +39,7 @@ class DummyLogprobsMode(Enum):
 
 
 def test_hash_factors_deterministic():
-    """Test that hash_factors produces consistent SHA-256 hashes"""
+    """Test that hash_factors produces consistent SHA-256 hashes."""
     factors = {"a": 1, "b": "test"}
     hash1 = hash_factors(factors)
     hash2 = hash_factors(factors)

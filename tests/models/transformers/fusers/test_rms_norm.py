@@ -183,7 +183,8 @@ def test_weightless_norm_has_no_hidden_size(default_vllm_config):
 
 def test_fused_rms_norm_op_default_eps(default_vllm_config):
     """`torch.nn.RMSNorm` (a single `F.rms_norm` call) matches via the fast path;
-    its default `eps=None` resolves to `finfo(dtype).eps` in `fuse`."""
+    its default `eps=None` resolves to `finfo(dtype).eps` in `fuse`.
+    """
     from vllm.model_executor.layers.layernorm import RMSNorm as VLLMRMSNorm
 
     with torch.device("meta"):
@@ -199,7 +200,8 @@ def test_fused_rms_norm_op_default_eps(default_vllm_config):
 
 def test_eps_is_derived_per_instance(default_vllm_config):
     """Two instances of the same norm class with different eps must fuse to their
-    own eps: the type-cached fuser holds only structure, not this value."""
+    own eps: the type-cached fuser holds only structure, not this value.
+    """
     with torch.device("meta"):
         for eps in (1e-5, 1e-6):
             module = RMSNorm(16, eps=eps)
@@ -210,7 +212,8 @@ def test_eps_is_derived_per_instance(default_vllm_config):
 def test_fused_norm_is_gather_capable(default_vllm_config):
     """Every weighted fused norm is emitted gather-capable, so a norm on a head-sharded
     projection (OLMoE-style) self-corrects at runtime with no QKV-specific
-    plumbing. A full-width input skips the gather and equals a plain norm."""
+    plumbing. A full-width input skips the gather and equals a plain norm.
+    """
     from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
     from vllm.model_executor.models.transformers.fusers import rms_norm
 
@@ -232,7 +235,8 @@ def test_fused_norm_is_gather_capable(default_vllm_config):
 
 def test_gathered_norm_rejects_uneven_sharding(default_vllm_config):
     """A sharded input (narrower than the full-width weight) that does not tile
-    the weight evenly across ranks is rejected before any collective."""
+    the weight evenly across ranks is rejected before any collective.
+    """
     from vllm.model_executor.models.transformers.fusers import rms_norm
 
     norm = rms_norm.TPAwareRMSNorm(hidden_size=8, eps=1e-6)

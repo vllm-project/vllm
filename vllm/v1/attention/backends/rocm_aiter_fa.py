@@ -671,8 +671,7 @@ class AiterFlashAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         draft_index: int,
     ) -> AiterFlashAttentionMetadata:
-        """
-        Build attention metadata for draft model without CPU-GPU sync.
+        """Build attention metadata for draft model without CPU-GPU sync.
 
         During EAGLE drafting all requests are uniform decodes, so we can
         skip split_decodes_prefills_and_extends() and avoid all .cpu() /
@@ -1033,17 +1032,25 @@ class AiterFlashAttentionImpl(AttentionImpl):
         """Forward pass with AiterFlashAttention.
 
         Args:
+            layer: The attention layer, providing the q/k/v quantization scales.
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
                 [num_blocks, 2, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
+            output: Tensor that the attention result is written into.
+            output_scale: Scale for fused output quantization; not supported
+                by this backend.
+            output_block_scale: Block scale for fused output quantization;
+                not supported by this backend.
+
         Returns:
             shape = [num_tokens, num_heads * head_size]
         NOTE: FP8 quantization, flash-attn expect the size of
               {q,k,v}_descale to be (num_sequences, num_kv_heads).
               We use torch's .expand() to avoid duplicating values
+
         """
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(

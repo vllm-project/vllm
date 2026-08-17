@@ -52,8 +52,7 @@ def fused_rope_and_unified_kv_cache_update_impl(
     is_neox: bool,
     layer_name: LayerNameType,
 ) -> torch.Tensor:
-    """
-    This impl fetches the KV cache and slot mapping from the forward context,
+    """This impl fetches the KV cache and slot mapping from the forward context,
     then calls the layer impl's `AttentionImpl.do_rope_and_kv_cache_update` method.
     It also returns a dummy tensor, similar to `Attention.unified_kv_cache_update`,
     that is passed to unified_attention to signal a side effect and
@@ -98,8 +97,7 @@ direct_register_custom_op(
 
 
 class RopeStaticQQuantKVCachePattern:
-    """
-    Fuse rope + static Q fp8 quant while preserving explicit KV-cache update
+    """Fuse rope + static Q fp8 quant while preserving explicit KV-cache update
     dependency ordering.
     """
 
@@ -277,8 +275,7 @@ class RopeStaticQQuantKVCachePattern:
 
 
 class RopeReshapeKVCachePattern:
-    """
-    This pattern matches the following unfused inplace ops:
+    """This pattern matches the following unfused inplace ops:
       q, k = rotary_embedding(positions, q, k, head_size, cos_sin_cache, is_neox)
       kv_cache_dummy = unified_kv_cache_update(k, v, layer_name)
 
@@ -410,8 +407,7 @@ class RopeReshapeKVCachePattern:
 
 
 class RopeKVCacheFusionPass(VllmPatternMatcherPass):
-    """
-    This pass fuses the rotary embedding and KV cache update operations
+    """This pass fuses the rotary embedding and KV cache update operations
     into a single fused kernel if available.
 
     It uses the pattern matcher and matches each layer manually, as strings

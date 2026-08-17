@@ -124,7 +124,8 @@ def mock_request():
 
 class TestParseGemma4Args:
     """Values are returned as strings; type coercion to proper JSON types
-    happens at the engine layer."""
+    happens at the engine layer.
+    """
 
     def test_empty_string(self):
         assert _parse_gemma4_args("") == {}

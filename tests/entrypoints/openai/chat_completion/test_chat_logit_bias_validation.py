@@ -81,7 +81,8 @@ async def test_chat_logit_bias_invalid(client):
 @pytest.mark.asyncio
 async def test_chat_logit_bias_non_integer_key(client):
     """Test that a non-integer logit_bias key is rejected with a clean,
-    informative error instead of a raw 'invalid literal for int()' message."""
+    informative error instead of a raw 'invalid literal for int()' message.
+    """
     with pytest.raises(openai.BadRequestError) as excinfo:
         await client.chat.completions.create(
             model=MODEL_NAME,
@@ -101,7 +102,8 @@ async def test_chat_logit_bias_non_integer_key(client):
 @pytest.mark.asyncio
 async def test_chat_logit_bias_non_numeric_value(client):
     """Test that a non-numeric logit_bias value is rejected with a message
-    that names the specific offending token, not just a generic TypeError."""
+    that names the specific offending token, not just a generic TypeError.
+    """
     with pytest.raises(openai.BadRequestError) as excinfo:
         await client.chat.completions.create(
             model=MODEL_NAME,
@@ -120,7 +122,8 @@ async def test_chat_logit_bias_non_numeric_value(client):
 @pytest.mark.asyncio
 async def test_chat_logit_bias_multiple_non_integer_keys(client):
     """Test that ALL invalid logit_bias keys are reported together,
-    not just the first one encountered."""
+    not just the first one encountered.
+    """
     with pytest.raises(openai.BadRequestError) as excinfo:
         await client.chat.completions.create(
             model=MODEL_NAME,

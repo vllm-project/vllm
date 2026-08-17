@@ -227,11 +227,10 @@ class Phi4SiglipMultiModalProcessor(
 
 
 class Phi4SiglipImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of images
-        - d: Max number of patches (padded across images in the batch)
-        - fd: Features per patch (patch_size * patch_size * channels)
+    """Dimensions:
+    - bn: Batch size * number of images
+    - d: Max number of patches (padded across images in the batch)
+    - fd: Features per patch (patch_size * patch_size * channels)
     """
 
     type: Literal["pixel_values"] = "pixel_values"

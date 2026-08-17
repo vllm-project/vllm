@@ -24,7 +24,8 @@ def fast_tokenizer():
 def _make_base_renderer_with(tokenizer):
     """Build a minimal BaseRenderer subclass that exposes the tokenizer so we
     can call ``_tokenize_prompt`` directly. BaseRenderer is abstract because of
-    ``render_messages``; we just need a stub."""
+    ``render_messages``; we just need a stub.
+    """
     from vllm.renderers.base import BaseRenderer
 
     class _StubRenderer(BaseRenderer):
@@ -74,7 +75,8 @@ class TestTokenizePromptOffsets:
     def test_base_renderer_without_override_yields_no_offsets(self, fast_tokenizer):
         """A renderer that does not override ``_can_produce_offsets`` never
         emits offsets, even with a fast tokenizer and the flag set. This locks
-        in the base-default-False / subclass-override design."""
+        in the base-default-False / subclass-override design.
+        """
         from vllm.renderers.base import BaseRenderer
 
         class _BareRenderer(BaseRenderer):
@@ -108,7 +110,8 @@ class TestTokenizePromptOffsets:
 
     def test_slow_tokenizer_with_flag_no_offsets(self, fast_tokenizer):
         """Force is_fast=False to simulate a Slow tokenizer: the flag is set
-        but offsets must not be returned because it cannot produce them."""
+        but offsets must not be returned because it cannot produce them.
+        """
         from unittest.mock import PropertyMock, patch
 
         renderer = _make_base_renderer_with(fast_tokenizer)
@@ -127,7 +130,8 @@ class TestTokenizePromptOffsets:
     @pytest.mark.parametrize("mm_key", ["multi_modal_data", "multi_modal_uuids"])
     def test_multimodal_with_flag_no_offsets(self, fast_tokenizer, mm_key):
         """Offsets index the text prompt, which is meaningless once multimodal
-        data is interleaved, so they are suppressed when MM inputs are present."""
+        data is interleaved, so they are suppressed when MM inputs are present.
+        """
         renderer = _make_base_renderer_with(fast_tokenizer)
         params = TokenizeParams(max_total_tokens=None, return_token_offsets=True)
         prompt = {"prompt": "Hello.", mm_key: {"image": ["x"]}}
@@ -139,7 +143,8 @@ class TestTokenizePromptOffsets:
     @pytest.mark.asyncio
     async def test_tokenize_prompt_async_returns_offsets(self, fast_tokenizer):
         """The async path offloads the sync tokenizer; it must yield the same
-        offsets as the sync path."""
+        offsets as the sync path.
+        """
         renderer = _make_base_renderer_with(fast_tokenizer)
         params = TokenizeParams(max_total_tokens=None, return_token_offsets=True)
 

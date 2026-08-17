@@ -474,7 +474,8 @@ def test_fused_q_no_indexer(num_tokens: int):
 @pytest.mark.parametrize("has_indexer", [True, False])
 def test_fused_q_bf16_query(num_tokens: int, has_indexer: bool):
     """bf16-query path (FlashMLA sparse, SM90/SM100): only the RoPE'd q_pe is
-    produced (bf16, unquantized); ql_nope is consumed directly by the caller."""
+    produced (bf16, unquantized); ql_nope is consumed directly by the caller.
+    """
     torch.manual_seed(6)
     dev = "cuda"
     max_pos = 8192

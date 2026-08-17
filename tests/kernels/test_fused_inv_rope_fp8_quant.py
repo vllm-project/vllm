@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for the fused inverse RoPE + block-scaled FP8 quantization kernel.
+"""Unit tests for the fused inverse RoPE + block-scaled FP8 quantization kernel.
 
 Tests compare the fused kernel against a reference implementation built from
 the existing separate operations (inverse RoPE via rotate_neox + FP8 quant
@@ -132,6 +131,7 @@ def reference_inv_rope(
 
     Returns:
         o with inverse RoPE applied on the rope portion (bf16).
+
     """
     assert cos_sin_cache.dtype == torch.float32
     cos_sin = cos_sin_cache[positions]  # [T, rope_dim] fp32
@@ -164,6 +164,7 @@ def _ref_ue8m0_quant_block(x_f32: torch.Tensor) -> tuple[torch.Tensor, torch.Ten
     Returns:
         x_fp8: same shape, float8_e4m3fn
         scales: [...] float32, one scale per block
+
     """
     assert x_f32.shape[-1] == QUANT_GROUP_SIZE
     absmax = x_f32.abs().amax(dim=-1, keepdim=True).clamp(min=EPS)
@@ -193,6 +194,7 @@ def reference_inv_rope_fp8_quant(
     Returns:
         o_fp8: [T, G, D] FP8 with strides (D, T*D, 1)
         o_scale: [T, G, S] FP32 with strides (S, T*S, 1)
+
     """
     assert cos_sin_cache.dtype == torch.float32
     T, _H, head_dim = o.shape
@@ -332,7 +334,6 @@ def test_output_strides(num_tokens, num_heads, n_groups):
     - FP8: logical [T, G, D] backed by contiguous [G, T, D].
     - Scale: MN-major TMA-aligned (column-major: T-stride=1).
     """
-
     heads_per_group = num_heads // n_groups
     max_pos = 4096
     device = "cuda"
@@ -375,7 +376,8 @@ def test_output_strides(num_tokens, num_heads, n_groups):
 def test_per_group_contiguity(num_tokens):
     """FP8 per-group slices must be contiguous. Scale per-group slices
     are column-major (T-stride=1) — not row-major contiguous, which is
-    correct for TMA loads."""
+    correct for TMA loads.
+    """
     num_heads, n_groups = 64, 8
     heads_per_group = num_heads // n_groups
     max_pos = 4096
@@ -441,7 +443,8 @@ def test_scales_are_power_of_two():
 def test_nope_dims_unchanged():
     """Nope dimensions (first 448 per head) should only be quantized,
     not rotated. Verify by dequantizing and comparing against
-    quantize-only reference (no RoPE)."""
+    quantize-only reference (no RoPE).
+    """
     num_tokens, num_heads, n_groups = 16, 64, 8
     heads_per_group = num_heads // n_groups
     max_pos = 4096
@@ -831,8 +834,8 @@ def test_einsum_end_to_end(num_tokens, num_heads, n_groups):
 @torch.inference_mode()
 def test_with_real_deepseek_v4_rope(num_tokens, default_vllm_config):
     """Test with real DeepseekV4ScalingRotaryEmbedding (GPT-J style,
-    mscale=0, YaRN scaling) matching the production config."""
-
+    mscale=0, YaRN scaling) matching the production config.
+    """
     num_heads = 64
     n_groups = 8
     heads_per_group = num_heads // n_groups

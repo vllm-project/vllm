@@ -23,7 +23,7 @@ DTYPES = [torch.float32]
 
 
 def reference_lightning_attention(q, k, v, ed, block_size, kv_history):
-    """Reference implementation of lightning attention core algorithm
+    """Reference implementation of lightning attention core algorithm.
 
     The difference from the main implementation is that this processes
     each step sequentially, instead of using parallelized triton kernels
@@ -72,7 +72,7 @@ def reference_lightning_attention(q, k, v, ed, block_size, kv_history):
 
 
 def reference_linear_decode(q, k, v, kv_caches, slope_rate, slot_idx):
-    """Reference implementation: linear attention decode function"""
+    """Reference implementation: linear attention decode function."""
     B, H, _, D = q.shape
     output = torch.zeros(B, H * D, dtype=q.dtype, device=q.device)
 

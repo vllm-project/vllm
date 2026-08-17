@@ -42,6 +42,7 @@ def quantize_to_mxfp4(
     Returns:
         packed: [..., head_dim//2]  uint8   2 E2M1 nibbles/byte, low nibble = even index
         scales: [..., head_dim//32] uint8   1 ue8m0 byte
+
     """
     MXFP4_BLOCK_SIZE = 32
     orig_shape = x.shape

@@ -81,7 +81,8 @@ def test_no_plugins_loaded_when_allowlist_is_empty_string(
 ):
     """`VLLM_PLUGINS=""` parses to `[""]`, not `None` (see `vllm.envs`), so it
     must be treated as a (non strict) allowlist matching no plugin name, not
-    as "unset"."""
+    as "unset".
+    """
     monkeypatch.setenv("VLLM_PLUGINS", "")
 
     assert load_endpoint_plugins(("generate",)) == []
@@ -166,7 +167,8 @@ def test_attach_is_noop_when_nothing_discovered(monkeypatch: pytest.MonkeyPatch)
 async def test_init_state_is_noop_without_phase_a(monkeypatch: pytest.MonkeyPatch):
     """`init_app_state` callers that never ran `build_app` (e.g.
     `run_batch.py`, which builds a bare `State()`) must not crash just
-    because `state.endpoint_plugins` was never set."""
+    because `state.endpoint_plugins` was never set.
+    """
     from starlette.datastructures import State
 
     monkeypatch.setenv("VLLM_PLUGINS", "dummy_admin_endpoint_plugin")
@@ -184,7 +186,8 @@ async def test_render_server_attaches_endpoint_plugins_with_no_engine_client(
     """The CPU only render server has no `EngineClient` but a plugin eligible
     for the `render` task (`required_tasks` is `None` or includes `"render"`)
     still gets its routes attached at Phase A. Phase B passes `None` for
-    `engine_client` and it's up to the plugin to handle that."""
+    `engine_client` and it's up to the plugin to handle that.
+    """
     monkeypatch.setenv("VLLM_PLUGINS", "dummy_admin_endpoint_plugin")
 
     args = _build_args()
@@ -210,7 +213,8 @@ async def test_render_server_attaches_endpoint_plugins_with_no_engine_client(
 @pytest.mark.asyncio
 async def test_endpoint_plugin_end_to_end(monkeypatch: pytest.MonkeyPatch):
     """Phase A (attach) + Phase B (init) wired through `build_app` then
-    exercised with a real HTTP request against the worked example plugin."""
+    exercised with a real HTTP request against the worked example plugin.
+    """
     monkeypatch.setenv("VLLM_PLUGINS", "dummy_admin_endpoint_plugin")
 
     args = _build_args()

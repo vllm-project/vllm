@@ -512,8 +512,7 @@ class precompiled_wheel_utils:
         *,
         rocm: bool = False,
     ) -> tuple[list[dict], str]:
-        """
-        Fetches metadata for a specific variant of the precompiled wheel.
+        """Fetches metadata for a specific variant of the precompiled wheel.
 
         For non-ROCm, fetches vllm metadata.
 
@@ -591,7 +590,6 @@ class precompiled_wheel_utils:
     @staticmethod
     def detect_system_cuda_variant() -> str:
         """Auto-detect CUDA variant from torch, nvidia-smi, or env default."""
-
         # Map CUDA major version to hosted wheel variants on wheels.vllm.ai
         supported = {12: "cu129", 13: "cu130"}
 
@@ -726,7 +724,8 @@ class precompiled_wheel_utils:
         wheels: list[dict], repo_url: str, arch: str
     ) -> None:
         """Warn if installed torch differs from the custom ROCm build on
-        wheels.vllm.ai and suggest the correct install command."""
+        wheels.vllm.ai and suggest the correct install command.
+        """
         try:
             installed = torch.__version__
         except Exception:
@@ -886,8 +885,7 @@ class precompiled_wheel_utils:
 
     @staticmethod
     def determine_wheel_url() -> tuple[str, str | None]:
-        """
-        Try to determine the precompiled wheel URL or path to use.
+        """Try to determine the precompiled wheel URL or path to use.
         The order of preference is:
         1. user-specified wheel location (can be either local or remote, via
            VLLM_PRECOMPILED_WHEEL_LOCATION)

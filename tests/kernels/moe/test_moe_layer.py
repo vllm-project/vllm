@@ -223,8 +223,7 @@ def maybe_roundup_layer_hidden_size(
     act_dtype: torch.dtype,
     backend: str | None,
 ) -> int:
-    """
-    Given layer hidden size and MoE configurations, round up hidden_size
+    """Given layer hidden size and MoE configurations, round up hidden_size
     if necessary.
 
     Args:
@@ -236,6 +235,7 @@ def maybe_roundup_layer_hidden_size(
         Rounded up hidden_size if rounding up is required based on the configs
         and all2all backend.
         Original hidden size otherwise.
+
     """
     if backend == "deepep_high_throughput":
         from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
@@ -298,7 +298,8 @@ def tp_chunk_gate_up(
     device: torch.device | int | None = None,
 ) -> torch.Tensor:
     """TP-chunk a combined [gate; up] weight, splitting each half separately
-    so every rank gets a portion of both gate and up."""
+    so every rank gets a portion of both gate and up.
+    """
     half = w.shape[dim] // 2
     gate = chunk_by_rank(
         w.narrow(dim, 0, half), tp_rank, tp_size, dim=dim, device=device
@@ -856,6 +857,7 @@ def create_shared_experts_from_config(
 
     Returns:
         TestMLP instance or None if config is None
+
     """
     if shared_experts_config is None:
         return None
@@ -902,6 +904,7 @@ def setup_moe_test_data(
 
     Returns:
         MoETestData containing all test data and transforms
+
     """
     # For latent MoE: latent_size = k // 2
     latent_size = k // 2
@@ -1621,7 +1624,6 @@ def test_moe_layer_no_parallel(
     monkeypatch,
 ):
     """Test MoE layer without parallelism (dp_size=1, tp_size=1, use_ep=False)."""
-
     if os.environ.get("VLLM_LOGGING_LEVEL") is None:
         monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
 

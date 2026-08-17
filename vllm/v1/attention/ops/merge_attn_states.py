@@ -44,8 +44,8 @@ def merge_attn_states(
             are treated as having context.
         output_scale: Optional scalar tensor for FP8 static quantization.
             When provided, output must be FP8 dtype.
-    """
 
+    """
     # Both the CUDA and Triton kernels derive the suffix head stride from
     # prefix_output, so suffix_output must share the same head stride.
     assert prefix_output.stride(1) == suffix_output.stride(1), (

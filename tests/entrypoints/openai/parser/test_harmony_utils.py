@@ -169,7 +169,7 @@ class TestIsFunctionRecipientWithAllowedNames:
     """Tests for is_function_recipient with allowed_function_tool_names."""
 
     def test_prefixed_always_accepted(self):
-        """functions. prefix is always accepted regardless of allowed names."""
+        """Functions. prefix is always accepted regardless of allowed names."""
         fn_names = frozenset({"other_tool"})
         assert is_function_recipient("functions.get_weather", fn_names) is True
 
@@ -251,8 +251,7 @@ class TestExtractFunctionFromRecipient:
 
 
 class TestCommonParseInputToHarmonyMessage:
-    """
-    Tests for scenarios that are common to both Chat Completion
+    """Tests for scenarios that are common to both Chat Completion
     parse_chat_input_to_harmony_message and Responses API
     response_previous_input_to_harmony functions.
     """
@@ -323,7 +322,8 @@ class TestCommonParseInputToHarmonyMessage:
 
     def test_system_message(self, parse_function):
         """Test parsing system messages, which are parsed into developer messages
-        with DeveloperContent."""
+        with DeveloperContent.
+        """
         chat_msg = {
             "role": "system",
             "content": "You are a helpful assistant",
@@ -447,8 +447,7 @@ class TestCommonParseInputToHarmonyMessage:
 
 
 class TestParseChatInputToHarmonyMessage:
-    """
-    Tests for scenarios that are specific to the Chat Completion API
+    """Tests for scenarios that are specific to the Chat Completion API
     parse_chat_input_to_harmony_message function.
     """
 

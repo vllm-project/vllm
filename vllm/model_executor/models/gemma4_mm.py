@@ -127,8 +127,7 @@ def _get_max_soft_tokens(
 
 
 class Gemma4ImagePixelInputs(TensorSchema):
-    """
-    Pre-patchified image inputs from the Gemma4 image processor.
+    """Pre-patchified image inputs from the Gemma4 image processor.
 
     Dimensions:
         - bn: Batch size * number of images
@@ -154,11 +153,10 @@ class Gemma4ImagePixelInputs(TensorSchema):
 
 
 class Gemma4AudioInputs(TensorSchema):
-    """
-    Dimensions:
-        - bn: Batch size * number of audios
-        - s: Sequence length (MEL spectrogram frames)
-        - f: Number of features (MEL bins)
+    """Dimensions:
+    - bn: Batch size * number of audios
+    - s: Sequence length (MEL spectrogram frames)
+    - f: Number of features (MEL bins)
     """
 
     type: Literal["audio"] = "audio"
@@ -298,9 +296,12 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         for an image of the given dimensions, after padding is stripped.
 
         Args:
+            image_width: Width of the image in pixels.
+            image_height: Height of the image in pixels.
             max_soft_tokens: Override for the vision config's
                 ``default_output_length``.  When *None*, the value from
                 the model config is used.
+
         """
         vision_cfg = self.get_hf_config().vision_config
         patch_size = vision_cfg.patch_size
@@ -339,8 +340,12 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         produce after stripping padding.
 
         Args:
+            image_width: Width of the image in pixels.
+            image_height: Height of the image in pixels.
+            processor: The Gemma4 processor, when already constructed.
             max_soft_tokens: Override for the default token budget.
                 When *None*, falls back to the model config value.
+
         """
         if processor is None:
             processor = self.get_hf_processor()

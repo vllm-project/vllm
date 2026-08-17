@@ -66,13 +66,12 @@ def get_num_combined_frames(
 
 
 class HCXVisionImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - n: Number of images
-        - g: Number of grids
-        - c: Number of channels (3)
-        - h: Height
-        - w: Width
+    """Dimensions:
+    - n: Number of images
+    - g: Number of grids
+    - c: Number of channels (3)
+    - h: Height
+    - w: Width
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -86,14 +85,13 @@ HCXVisionImageInputs = HCXVisionImagePixelInputs
 
 
 class HCXVisionVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - n: Number of videos
-        - f: Number of frames
-        - g: Number of grids
-        - c: Number of channels (3)
-        - h: Height
-        - w: Width
+    """Dimensions:
+    - n: Number of videos
+    - f: Number of frames
+    - g: Number of grids
+    - c: Number of channels (3)
+    - h: Height
+    - w: Width
     """
 
     type: Literal["pixel_values_videos"] = "pixel_values_videos"
@@ -404,8 +402,7 @@ class HCXVisionMlp(nn.Module):
 
 
 class HCXVisionCAbstractor(nn.Module):
-    """
-    This module is based on C-Abstractor, whose license is under apache-2.0.
+    """This module is based on C-Abstractor, whose license is under apache-2.0.
     You can check the original code at
     https://github.com/khanrc/honeybee/blob/main/honeybee/projectors/projectors.py
     and we made necessary modifications.
@@ -567,8 +564,7 @@ class HCXVisionCAbstractor(nn.Module):
     dummy_inputs=HCXVisionDummyInputsBuilder,
 )
 class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
-    """
-    HyperCLOVAX-SEED Vision-Language Model (V1 architecture).
+    """HyperCLOVAX-SEED Vision-Language Model (V1 architecture).
 
     Supports:
     - HyperCLOVAX-SEED-Vision-Instruct-3B

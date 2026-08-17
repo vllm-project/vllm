@@ -322,6 +322,7 @@ class GPT2ForSequenceClassification(nn.Module, SupportsCrossEncoding):
         transformer: An instance of GPT2Model used for forward operations.
         score: A layer for calculating logits.
         _pooler: An instance of Pooler used for pooling operations.
+
     """
 
     is_pooling_model = True

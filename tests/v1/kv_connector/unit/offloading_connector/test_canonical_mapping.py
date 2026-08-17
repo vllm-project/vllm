@@ -77,7 +77,8 @@ def _split_hnd_cache(spec) -> torch.Tensor:
 
 def _packed_nhd_cache(spec) -> torch.Tensor:
     """Logical (num_blocks, heads, block_size, 2 * head_size) over an NHD
-    physical layout — the FlashAttention/FlashInfer/Triton/Flex form."""
+    physical layout — the FlashAttention/FlashInfer/Triton/Flex form.
+    """
     return torch.zeros(
         NUM_BLOCKS,
         spec.block_size,

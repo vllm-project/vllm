@@ -62,6 +62,10 @@ def load_audio_pyav(
     Args:
         path: A :class:`~io.BytesIO` buffer, a filesystem
             :class:`~pathlib.Path`, or a string path.
+        sr: Target sample rate, or None to keep the native rate.
+        mono: Whether to average the channels down to mono.
+        max_decode_bytes: If set, abort decoding once this many bytes have
+            been read from the source.
         max_duration_s: If set, abort decoding once the accumulated
             sample count exceeds this many seconds of audio.  Prevents
             decompression-bomb attacks where a small compressed file
@@ -70,6 +74,7 @@ def load_audio_pyav(
     Returns:
         ``(waveform, sample_rate)`` where *waveform* is a 1-D float32
         NumPy array and *sample_rate* is the native sample rate in Hz.
+
     """
     native_sr = None
     try:
@@ -179,7 +184,7 @@ def load_audio_soundfile(
     max_duration_s: float | None = None,
     max_decode_bytes: int | None = None,
 ) -> tuple[np.ndarray, int]:
-    """Load audio via soundfile"""
+    """Load audio via soundfile."""
     with soundfile.SoundFile(path) as f:
         native_sr = f.samplerate
         if max_duration_s is not None:

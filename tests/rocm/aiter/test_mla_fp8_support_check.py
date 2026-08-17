@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for AITER MLA FP8 support detection.
+"""Unit tests for AITER MLA FP8 support detection.
 
 These tests verify that the _check_aiter_mla_fp8_support() function
 correctly handles various error conditions without crashing.

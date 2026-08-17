@@ -118,6 +118,7 @@ def _resolve_fi_ar_backend() -> tuple[str, bool]:
         is True only when ``auto`` selects mnnvl for a single node, so that
         workspace creation can fall back to trtllm on single-node topologies
         without NVSwitch multicast support (where mnnvl is unavailable).
+
     """
     backend = envs.VLLM_FLASHINFER_ALLREDUCE_BACKEND
     if backend != "auto":
@@ -146,8 +147,7 @@ def get_fi_ar_workspace(
     dtype: torch.dtype,
     group: ProcessGroup,
 ):
-    """
-    Return the allreduce workspace for non-quant patterns, initializing if needed.
+    """Return the allreduce workspace for non-quant patterns, initializing if needed.
 
     Used by AllReduceFusionPass (non-quant patterns) and FlashInferAllReduce
     for standalone allreduce. Backend is controlled by
@@ -204,8 +204,7 @@ def get_fi_ar_quant_workspace(
     dtype: torch.dtype,
     group: ProcessGroup,
 ):
-    """
-    Return the allreduce workspace for quant patterns, initializing if needed.
+    """Return the allreduce workspace for quant patterns, initializing if needed.
 
     Backend is controlled by VLLM_FLASHINFER_ALLREDUCE_BACKEND env var, matching
     non-quant fusion. With ``auto`` this prefers mnnvl and falls back to trtllm

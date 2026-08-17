@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ruff: noqa: E501
-"""
-Example of using ColQwen3 late interaction model for reranking and scoring.
+"""Example of using ColQwen3 late interaction model for reranking and scoring.
 
 ColQwen3 is a multi-modal ColBERT-style model based on Qwen3-VL.
 It produces per-token embeddings and uses MaxSim scoring for retrieval

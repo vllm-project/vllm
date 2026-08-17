@@ -517,19 +517,22 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
 
     def _compute_visual_tokens(
         self,
-        image_size,
+        image_size: ImageSize,
         max_slice_nums: int | None = None,
         downsample_mode: str | None = None,
     ) -> tuple[list[int], int, int]:
         """Compute grid, source_image_visual_tokens and patch_visual_tokens.
 
         Args:
+            image_size: Size of the source image.
+            max_slice_nums: Maximum number of slices, or None for the default.
             downsample_mode: ``"16x"`` (default, full merge) or ``"4x"``
                 (skip vit_merger, 4x more visual tokens).
 
         Returns:
             (grids, source_image_visual_tokens, patch_visual_tokens)
             grids is [0, 0] when no slicing occurs.
+
         """
         image_processor = self.get_image_processor()
         if max_slice_nums is None:
@@ -842,7 +845,8 @@ class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
 
 class MiniCPMV4_6DownsampleMLP(nn.Module):
     """Match HF (transformers v5.7+) parameter naming: pre_norm/linear_1/
-    act/linear_2 (instead of pre_norm + Sequential(mlp.0/mlp.2))."""
+    act/linear_2 (instead of pre_norm + Sequential(mlp.0/mlp.2)).
+    """
 
     def __init__(
         self,
@@ -893,10 +897,10 @@ class MiniCPMV4_6Merger(nn.Module):
         hidden_states: torch.Tensor,
         tgt_sizes: torch.Tensor,
     ) -> list[torch.Tensor]:
-        """
-        Args:
-            hidden_states: (B, max_patches, D) padded batch.
-            tgt_sizes: (B, 2) actual (H, W) per sample.
+        """Args:
+        hidden_states: (B, max_patches, D) padded batch.
+        tgt_sizes: (B, 2) actual (H, W) per sample.
+
         """
         m1, m2 = self.merge_kernel_size
         results = []

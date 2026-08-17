@@ -78,8 +78,7 @@ def attach_router(app: FastAPI):
 
         @router.post("/abort_requests")
         async def abort_requests(raw_request: Request):
-            """
-            Abort one or more requests. To be used in a
+            """Abort one or more requests. To be used in a
             Disaggregated Everything setup.
             """
             try:

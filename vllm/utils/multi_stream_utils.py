@@ -41,6 +41,7 @@ def maybe_execute_in_parallel(
 
     Returns:
         Tuple of (fn0_result, fn1_result).
+
     """
     if aux_stream is not None:
         from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
@@ -100,6 +101,7 @@ def execute_in_parallel(
     Returns:
         Tuple of (default_result, aux_results) where aux_results[i] is the
         result of aux_fns[i] (or None when skipped).
+
     """
     aux_results: list[Any]
     if aux_streams is None or not enable:

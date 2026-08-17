@@ -108,9 +108,7 @@ class CpuPlatform(Platform):
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
-        """
-        Set the device for the current platform.
-        """
+        """Set the device for the current platform."""
         torch.cpu.set_device(device)
 
     @classmethod
@@ -371,8 +369,7 @@ class CpuPlatform(Platform):
 
     @classmethod
     def discover_numa_topology(cls) -> list[list[int]]:
-        """
-        Discover NUMA topology and keep the last physical core of each numa
+        """Discover NUMA topology and keep the last physical core of each numa
         into one core group list for nixl start_kv_load()
         """
         SYS_NODE = "/sys/devices/system/node"
@@ -433,9 +430,7 @@ class CpuPlatform(Platform):
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        """
-        Get device specific communicator class for distributed communication.
-        """
+        """Get device specific communicator class for distributed communication."""
         return "vllm.distributed.device_communicators.cpu_communicator.CpuCommunicator"  # noqa
 
     @classmethod
@@ -495,9 +490,7 @@ class CpuPlatform(Platform):
         kv_cache: torch.Tensor,
         indices: torch.Tensor,
     ) -> None:
-        """
-        Rewrite the kv cache shape for the current platform.
-        """
+        """Rewrite the kv cache shape for the current platform."""
         # Import lazily: cpu_attn pulls in _custom_ops, which needs a fully
         # initialized vllm.platforms (avoid circular import while CpuPlatform loads).
         from vllm._custom_ops import cpu_attn_reshape_and_cache

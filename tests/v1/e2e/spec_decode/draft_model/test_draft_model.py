@@ -167,7 +167,8 @@ def test_draft_model_tensor_parallelism(vllm_runner):
 @multi_gpu_only(num_gpus=2)
 def test_draft_model_engine_args_tensor_parallelism():
     """Ensure the vllm_config for the draft model is created correctly,
-    and independently of the target model (quantization, TP, etc.)"""
+    and independently of the target model (quantization, TP, etc.)
+    """
     engine_args = EngineArgs(
         model="Qwen/Qwen3-1.7B-FP8",  # <<< tgt quantized
         tensor_parallel_size=2,
@@ -198,7 +199,8 @@ def test_draft_model_engine_args_tensor_parallelism():
 
 def _apply_draft_moe_backend(vllm_config: VllmConfig) -> VllmConfig:
     """Replicate SpecDecodeBaseProposer._create_draft_vllm_config logic
-    so we can test it without instantiating a full proposer."""
+    so we can test it without instantiating a full proposer.
+    """
     spec_cfg = vllm_config.speculative_config
     if spec_cfg.moe_backend is not None:
         return replace(
@@ -223,7 +225,8 @@ def _platform_moe_backend(monkeypatch: pytest.MonkeyPatch) -> MoEBackend:
 
 def test_draft_model_moe_backend_override(monkeypatch: pytest.MonkeyPatch):
     """When moe_backend is set in speculative_config, the draft VllmConfig
-    should use it while the target keeps its own setting."""
+    should use it while the target keeps its own setting.
+    """
     target_moe_backend = _platform_moe_backend(monkeypatch)
     engine_args = EngineArgs(
         model="Qwen/Qwen3-1.7B",
@@ -248,7 +251,8 @@ def test_draft_model_moe_backend_override(monkeypatch: pytest.MonkeyPatch):
 
 def test_draft_model_moe_backend_inherits_target(monkeypatch: pytest.MonkeyPatch):
     """When moe_backend is not set in speculative_config, the draft should
-    inherit the target's moe_backend."""
+    inherit the target's moe_backend.
+    """
     target_moe_backend = _platform_moe_backend(monkeypatch)
     engine_args = EngineArgs(
         model="Qwen/Qwen3-1.7B",
@@ -271,7 +275,8 @@ def test_draft_model_moe_backend_inherits_target(monkeypatch: pytest.MonkeyPatch
 
 def test_draft_model_moe_backend_default_auto():
     """When neither target nor draft set moe_backend explicitly, both should
-    default to 'auto'."""
+    default to 'auto'.
+    """
     engine_args = EngineArgs(
         model="Qwen/Qwen3-1.7B",
         tensor_parallel_size=1,
@@ -292,8 +297,8 @@ def test_draft_model_moe_backend_default_auto():
 
 def test_draft_model_engine_args_rejects_invalid_tp_argname():
     """The user should pass "draft_tensor_parallel_size" rather than
-    "tensor_parallel_size". We enforce this with validation."""
-
+    "tensor_parallel_size". We enforce this with validation.
+    """
     engine_args = EngineArgs(
         model="Qwen/Qwen3-1.7B",
         tensor_parallel_size=1,
@@ -310,7 +315,8 @@ def test_draft_model_engine_args_rejects_invalid_tp_argname():
 
 def assert_draft_model_correctness(args: ArgsTest, vllm_runner):
     """Compare the outputs using and not using speculative decoding.
-    In the greedy decoding case, the outputs must match EXACTLY."""
+    In the greedy decoding case, the outputs must match EXACTLY.
+    """
     test_prompts: list[Messages] = get_messages(
         dataset=args.dataset, n=args.num_prompts
     )

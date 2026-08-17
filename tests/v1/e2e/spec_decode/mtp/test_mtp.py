@@ -54,8 +54,7 @@ def test_mtp_correctness(
     expected_accuracy_threshold: float,
     vllm_runner,
 ):
-    """
-    Compare the outputs of a original LLM and a speculative LLM
+    """Compare the outputs of a original LLM and a speculative LLM
     which should be the same when using MTP speculative decoding. Due to some variance
     in the engine, it is possible for some outputs to differ, so we expect that at least
     6/10 output tokens match exactly, and that the GSM8k accuracy is above a precomputed

@@ -39,8 +39,7 @@ def eagle_step_slot_mapping_metadata_kernel(
     PAD_ID: tl.constexpr,
     batch_size,
 ):
-    """
-    Fused kernel for EAGLE autoregressive step: updates positions, slot mapping,
+    """Fused kernel for EAGLE autoregressive step: updates positions, slot mapping,
     and sequence lengths in a single kernel to reduce launch overhead.
 
     Launched with input_batch_size threads. Threads with req_idx >= batch_size
@@ -95,8 +94,7 @@ def eagle_step_update_slot_mapping_and_metadata(
     out_slot_mapping: torch.Tensor,
     input_batch_size: int | None = None,
 ) -> None:
-    """
-    Fused update of slot mapping and metadata for one EAGLE autoregressive step.
+    """Fused update of slot mapping and metadata for one EAGLE autoregressive step.
     Updates seq_lens in place. Writes to out_clamped_positions and out_slot_mapping.
 
     When input_batch_size > batch_size, threads beyond batch_size write
@@ -112,6 +110,7 @@ def eagle_step_update_slot_mapping_and_metadata(
         out_slot_mapping: [input_batch_size] output buffer for slot mapping
         input_batch_size: total batch size including cudagraph padding;
             defaults to batch_size (no padding)
+
     """
     batch_size = positions_1d.shape[0]
     if input_batch_size is None:
@@ -142,8 +141,7 @@ def eagle_prepare_inputs_padded_kernel(
     num_rejected_tokens_gpu_ptr,  # [num_reqs] (output)
     num_reqs,  # tl.int32
 ):
-    """
-    Fused kernel for Eagle prepare_input_padded. This kernel computes the
+    """Fused kernel for Eagle prepare_input_padded. This kernel computes the
     token index to sample for each request, taking into account the number
     of draft tokens and the number of valid sampled tokens (which is one more than
     the number of accepted tokens).
@@ -188,8 +186,7 @@ def eagle_prepare_next_token_padded_kernel(
     stride_sampled_token_ids,  # tl.int32 (stride for dim 0)
     BLOCK_SIZE_TOKENS: tl.constexpr,  # Power-of-2 >= num_sampled_tokens_per_req
 ):
-    """
-    Fused kernel for Eagle prepare_next_token_ids_padded. This kernel computes the
+    """Fused kernel for Eagle prepare_next_token_ids_padded. This kernel computes the
     number of valid (1 + accepted) tokens for each request, and the corresponding
     "next" token id to sample from during speculative decoding. This is the
     "last accepted token" from the sampled tokens, or the backup token if no
@@ -276,8 +273,7 @@ def extend_all_queries_by_N(
     arange: torch.Tensor,
     new_slot_mapping: torch.Tensor,
 ) -> CommonAttentionMetadata:
-    """
-    Creates a new CommonAttentionMetadata with all query lengths increased by N.
+    """Creates a new CommonAttentionMetadata with all query lengths increased by N.
     Also all seq lens are increased by N.
     This is useful e.g. in speculative decoding with parallel drafting, where we
     extend each sequence by N tokens and predict all tokens in one pass.
@@ -328,8 +324,7 @@ def copy_and_expand_eagle_inputs_kernel(
     shift_input_ids,  # tl.bool
     BLOCK_SIZE_TOKENS: tl.constexpr,  # Blocks along token dim to handle prefills
 ):
-    """
-    Copy and expand inputs from the target model to the drafting buffers for Eagle
+    """Copy and expand inputs from the target model to the drafting buffers for Eagle
     speculative decoding. This kernel handles padding slots and parallel drafting
     tokens, if enabled.
     """
@@ -481,8 +476,7 @@ def copy_and_expand_dflash_inputs_kernel(
     BLOCK_SIZE: tl.constexpr,
     HAS_NUM_REJECTED: tl.constexpr = False,
 ):
-    """
-    Fused kernel for DFlash first-pass input setup.
+    """Fused kernel for DFlash first-pass input setup.
 
     Per request, this kernel:
       1. Copies context positions from target_positions to
@@ -597,5 +591,6 @@ def update_num_computed_tokens_for_batch_change(
 
 def unconditional_to_conditional_rates(rates: list[float]) -> list[float]:
     """Convert per-position unconditional rates to per-position conditional
-    rates for the early-terminating rejection loop (c_i = p_i / p_{i-1})."""
+    rates for the early-terminating rejection loop (c_i = p_i / p_{i-1}).
+    """
     return [p / q if q > 0.0 else 0.0 for p, q in zip(rates, [1.0, *rates[:-1]])]

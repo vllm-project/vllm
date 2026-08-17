@@ -48,6 +48,7 @@ def compute_retention_mask(
         Flat bool tensor of shape `(T*H*W/merge^2,)`, True for retained
         tokens. The True count equals `compute_retained_tokens_count` so
         placeholders sized at prompt-processing time match exactly.
+
     """
     T, H, W = map(int, video_size_thw)
     rows = H // spatial_merge_size

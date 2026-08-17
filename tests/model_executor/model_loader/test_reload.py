@@ -332,7 +332,8 @@ def _random_g_idx(generator):
 def test_marlin_post_load_preserves_runtime_tensor_addresses(monkeypatch, dist_init):
     """Marlin workspace and act-order sort indices must be recomputed into
     the same storage when weights are reloaded (RL weight sync), so device
-    addresses captured by CUDA graphs remain valid."""
+    addresses captured by CUDA graphs remain valid.
+    """
     from vllm.model_executor.layers.quantization.utils import marlin_utils
 
     _stub_marlin_ops(monkeypatch)
@@ -365,7 +366,8 @@ def test_marlin_post_load_preserves_runtime_tensor_addresses(monkeypatch, dist_i
 @pytest.mark.parametrize("variant", ["fp8", "mxfp8", "nvfp4"])
 def test_marlin_prepare_layer_preserves_workspace_address(monkeypatch, variant):
     """The Marlin fallback prepare_* functions rerun on weight reload and must
-    reuse the workspace storage whose address captured CUDA graphs hold."""
+    reuse the workspace storage whose address captured CUDA graphs hold.
+    """
     from vllm import _custom_ops as ops
     from vllm.model_executor.layers.quantization.utils import (
         marlin_utils,
@@ -443,7 +445,8 @@ def test_marlin_prepare_layer_preserves_workspace_address(monkeypatch, variant):
 
 def test_marlin_make_workspace_new_rejects_incompatible_existing(monkeypatch):
     """An incompatible existing workspace means the address captured by CUDA
-    graphs is already unusable; allocating a replacement would hide that."""
+    graphs is already unusable; allocating a replacement would hide that.
+    """
     from vllm.model_executor.layers.quantization.utils import marlin_utils
 
     monkeypatch.setattr(marlin_utils, "num_compute_units", lambda _: 4)
@@ -466,7 +469,8 @@ def test_marlin_act_order_layerwise_reload_accounting(monkeypatch, dist_init):
     loaded from checkpoints. Registering it as a Parameter must not count it
     toward `load_numel_total`: reload restores the construction-time tensor
     set before sizing, so act-order layers still process during streaming
-    instead of deferring (and buffering weights) until finalization."""
+    instead of deferring (and buffering weights) until finalization.
+    """
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizeMethodBase,
     )
@@ -686,7 +690,8 @@ class _RecordingQuantMethod(QuantizeMethodBase):
 class _LateBiasLayer(torch.nn.Module):
     """Mimics an online-quantized linear: `weight` is created on meta by
     `create_weights()`, which wraps the loaders, and the linear base registers
-    `bias` afterwards."""
+    `bias` afterwards.
+    """
 
     def __init__(self, quant_method):
         super().__init__()

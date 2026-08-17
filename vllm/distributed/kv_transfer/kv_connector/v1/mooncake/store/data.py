@@ -202,6 +202,7 @@ class ChunkedTokenDatabase:
 
         Returns:
             (addr_list, size_list, block_id)
+
         """
         addr_lists, size_lists, chunk_block_ids = self.prepare_values(
             ((start, end),), block_ids
@@ -217,6 +218,7 @@ class ChunkedTokenDatabase:
 
         Returns:
             (addr_lists, size_lists, chunk_block_ids), one entry per chunk.
+
         """
         if not chunks:
             return [], [], []
@@ -279,6 +281,7 @@ class ChunkedTokenDatabase:
                 ``mask_num``. False entries are skipped before hash access.
             put_step: Stride for distributing chunks across ranks.
             put_step_rank: ``chunk_id % put_step`` value this rank stores.
+
         """
         assert put_step > 0
         if not block_hashes:

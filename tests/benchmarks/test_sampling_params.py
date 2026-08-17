@@ -10,7 +10,8 @@ from vllm.tokenizers import TokenizerLike
 
 class _FakeTokenizer(TokenizerLike):
     """Minimal tokenizer implementing the TokenizerLike protocol
-    for testing get_sampling_params."""
+    for testing get_sampling_params.
+    """
 
     def __init__(self, vocab_size: int = 1000, num_special_tokens: int = 0) -> None:
         self._vocab_size = vocab_size
@@ -171,7 +172,8 @@ class TestGetSamplingParams:
 
     def test_output_low_clamped_to_one(self):
         """Even with a high ratio that would push output_low to 0,
-        the function clamps it to 1."""
+        the function clamps it to 1.
+        """
         rng = np.random.default_rng(0)
         # output_len=1, ratio=0.99 → floor(1*0.01)=0, should clamp to 1
         _, output_lens, _ = get_sampling_params(
@@ -233,7 +235,8 @@ class TestGetSamplingParams:
 
     def test_input_len_zero_with_special_tokens(self):
         """input_len < num_special_tokens → real_input_len = 0, which is fine
-        (range [0, 0])."""
+        (range [0, 0]).
+        """
         rng = np.random.default_rng(0)
         input_lens, _, _ = get_sampling_params(
             rng, 5, 0.0, 5, 50, self._tok(num_special=10)

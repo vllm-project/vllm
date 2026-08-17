@@ -435,8 +435,7 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Perform early validation and setup for hybrid attention/mamba models.
+        """Perform early validation and setup for hybrid attention/mamba models.
 
         Block size alignment with mamba page sizes is handled later by
         Platform.update_block_size_for_backend(), which runs after model
@@ -444,6 +443,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
 
         Args:
             vllm_config: vLLM Config
+
         """
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
@@ -589,12 +589,12 @@ class LlamaNemotronVLConfig(VerifyAndUpdateConfig):
 class MambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
-        """
-        Enable FULL_AND_PIECEWISE cuda graph mode by default (required
+        """Enable FULL_AND_PIECEWISE cuda graph mode by default (required
         to get good performance for mamba layers in V1).
 
         Args:
             vllm_config: vLLM Config
+
         """
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config

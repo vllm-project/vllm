@@ -74,7 +74,8 @@ class TransformersMoERunner(MoERunner):
     ) -> torch.Tensor:
         """In Transformers `experts.forward` will have this signature.
 
-        We discard any extra kwargs because we cannot use them here."""
+        We discard any extra kwargs because we cannot use them here.
+        """
         # Note: we need to forward through a custom op so the topk_ids
         # can be transferred without interfering with cudagraphs.
         return torch.ops.vllm.transformers_moe_forward(
@@ -353,7 +354,8 @@ class MoEMixin(MixtureOfExperts):
                             moe_state: TransformersMoEState,
                         ):
                             """Return `topk_weights` from `gating_output` and the
-                            `topk_ids` we stored in the layer earlier."""
+                            `topk_ids` we stored in the layer earlier.
+                            """
                             topk_weights = gating_output
                             topk_ids = moe_state.topk_ids
                             assert topk_ids is not None

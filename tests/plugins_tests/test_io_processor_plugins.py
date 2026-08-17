@@ -38,7 +38,8 @@ def my_plugin_entry_points():
     """Patch importlib.metadata.entry_points to expose a single 'my_plugin'
     entry point backed by DummyIOProcessor, exercising the full plugin-loading
     code path: entry_points → plugin.load() → func() →
-    resolve_obj_by_qualname → IOProcessor.__init__."""
+    resolve_obj_by_qualname → IOProcessor.__init__.
+    """
     qualname = f"{DummyIOProcessor.__module__}.{DummyIOProcessor.__qualname__}"
     ep = MagicMock()
     ep.name = "my_plugin"

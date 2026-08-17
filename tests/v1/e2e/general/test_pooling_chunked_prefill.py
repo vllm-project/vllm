@@ -71,7 +71,6 @@ def retrieve_chunks(self):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
 def test_pooling_chunked_prefill(vllm_runner, monkeypatch):
     """Test chunked prefill for pooling models with LastPool."""
-
     with monkeypatch.context() as m:
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
         model_id = "Qwen/Qwen3-Embedding-0.6B"
@@ -124,7 +123,6 @@ def test_pooling_chunked_prefill(vllm_runner, monkeypatch):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
 def test_pooling_prefix_cache(vllm_runner, monkeypatch):
     """Test chunked prefill for pooling models with LastPool."""
-
     verses = prompt.split("\n\n")
 
     with monkeypatch.context() as m:

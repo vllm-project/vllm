@@ -54,7 +54,8 @@ SEEDS = [0]
 # For test
 def torch_w8a8_block_int8_moe(a, w1, w2, w1_s, w2_s, score, topk, block_shape):
     """This function performs fused moe with block-wise quantization using
-    native torch."""
+    native torch.
+    """
     B, D = a.shape
     a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
     out = torch.zeros(B * topk, w2.shape[1], dtype=a.dtype, device=a.device)
@@ -97,7 +98,8 @@ def setup_cuda():
 @torch.inference_mode()
 def test_w8a8_block_int8_fused_moe(M, N, K, E, topk, block_size, dtype, seed):
     """Tests the fused_moe kernel with W8A8 INT8 block quantization against a
-    native torch reference."""
+    native torch reference.
+    """
     torch.manual_seed(seed)
 
     a = torch.randn((M, K), dtype=dtype) / 10

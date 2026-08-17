@@ -197,7 +197,6 @@ def create_vllm_config(
     hf_config_override: dict | None = None,
 ) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults."""
-
     model_config = ModelConfig(
         model=model_name,
         tokenizer=model_name,

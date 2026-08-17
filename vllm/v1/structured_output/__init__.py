@@ -457,6 +457,7 @@ class StructuredOutputManager:
             final index when no single token triggers the detection (e.g.
             a multi-token marker only recognized on the full delta), which
             conservatively treats the whole step as reasoning content.
+
         """
         prefix = list(itertools.islice(all_token_ids, start))
         for idx in range(start, len(all_token_ids)):
@@ -479,6 +480,7 @@ class StructuredOutputManager:
         Returns:
             The suffix of ``new_token_ids`` that follows the reasoning-end
             marker. Steps fully after the boundary are returned unchanged.
+
         """
         structured_req = request.structured_output_request
         if structured_req is None:

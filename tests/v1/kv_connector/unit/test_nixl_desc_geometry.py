@@ -22,7 +22,8 @@ from .utils import create_vllm_config
 
 class _RecordingNixl:
     """Minimal NIXL wrapper stand-in that records descriptor lists and
-    prepared transfers so tests can resolve desc ids to byte ranges."""
+    prepared transfers so tests can resolve desc ids to byte ranges.
+    """
 
     def __init__(self, *args, **kwargs):
         self.dlists: dict[int, np.ndarray] = {}
@@ -240,7 +241,8 @@ def _make_remote_meta(
 
 def _owned_byte_ranges(worker, group_logical_ids):
     """Byte ranges owned by a request: for each HMA region tensor, every
-    logical block id of every group maps to one unified page."""
+    logical block id of every group maps to one unified page.
+    """
     unified_page = worker._test_unified_page
     bases = [t.data_ptr() for t in worker._test_tensors]
     owned = []
@@ -278,7 +280,8 @@ def test_hetero_ppl_multi_read_writes_stay_within_request_blocks():
     (kernel 4, ppl=3) vs remote (P, TP2) logical blocks of 8 tokens (ppl=2),
     equal kernel pages, tp_ratio=-2 multi-read with replicated MLA and
     TP-sharded KDA state. Every local descriptor of the request's reads must
-    stay within its own blocks."""
+    stay within its own blocks.
+    """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
     )
@@ -346,7 +349,8 @@ def _resolve(
     """Resolve a desc id to (region, kind, token_start) where kind is 'attn'
     (desc-page sized, sub-block-aligned, in the request's attention blocks)
     or 'mamba'. token_start is the request-relative token offset, so local
-    and remote are comparable even when their kernel blocks differ in size."""
+    and remote are comparable even when their kernel blocks differ in size.
+    """
     addr, length, _ = (int(x) for x in desc_arr[int(idx)])
     for region, base in enumerate(bases):
         off = addr - base
@@ -541,7 +545,8 @@ def _run_hetero_case(
 def test_hetero_ppl_token_alignment_sweep(local_block, remote_block, num_tokens):
     """Sweep prompt lengths across block-boundary residues for several
     hetero-ppl geometries; assert neighbor-safety, token alignment, and
-    coverage of every transferred kernel block."""
+    coverage of every transferred kernel block.
+    """
     _run_hetero_case(
         local_block, kernel=4, remote_block=remote_block, num_tokens=num_tokens
     )
@@ -560,7 +565,8 @@ def test_hetero_ppl_with_block_size_ratio(num_tokens):
     2). The transfer is clipped at remote sub-block granularity by the
     pairing and front-trimmed by _apply_prefix_caching, so the
     untransferred tail can span both a partial block and whole blocks —
-    the case each of the two former zeroing paths handled only half of."""
+    the case each of the two former zeroing paths handled only half of.
+    """
     _run_hetero_case(
         local_block=24,
         kernel=8,
@@ -609,7 +615,8 @@ def test_mla_hybrid_large_ppl_geometry(num_tokens):
     """KimiLinear-scale MLA-hybrid geometry (TP8 prefill -> TP1 decode):
     decode (local) logical block 5760 / kernel 64 (ppl=90), prefill
     (remote) logical block 768 (ppl=12), tp_ratio=-8 multi-read with
-    replicated MLA and 8-way TP-sharded KDA state."""
+    replicated MLA and 8-way TP-sharded KDA state.
+    """
     _run_hetero_case(
         local_block=5760,
         kernel=64,
@@ -623,7 +630,8 @@ def test_mla_hybrid_large_ppl_geometry(num_tokens):
 def test_mismatched_mla_kernel_page_rejected_for_mla_hybrid():
     """The MLA per-token page is TP-independent, so kernel block lengths
     differing by anything other than the block-size ratio must fail the
-    handshake loudly rather than transfer at mismatched geometry."""
+    handshake loudly rather than transfer at mismatched geometry.
+    """
     worker = _make_mla_hybrid_worker(
         local_block_size=12, kernel_block_size=4, num_logical_blocks=8
     )

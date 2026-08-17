@@ -625,7 +625,8 @@ def test_aiter_fusion_rmsnorm_gated_quant_no_gdn_layers(
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Verify that without GDN layers in static_forward_context,
-    the gated pattern is not registered and no matches occur."""
+    the gated pattern is not registered and no matches occur.
+    """
     group_shape = GroupShape(1, 128)
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=dtype),

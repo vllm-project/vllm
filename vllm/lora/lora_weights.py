@@ -162,7 +162,6 @@ class PackedLoRALayerWeights(LoRALayerWeights):
 
         If LoRA is None, it signifies that the submodule does not have a LoRA.
         """
-
         first_lora = next(lora for lora in loras if lora is not None)
         assert first_lora is not None
         rank = first_lora.rank

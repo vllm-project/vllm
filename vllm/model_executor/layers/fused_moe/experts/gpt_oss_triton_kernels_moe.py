@@ -502,8 +502,7 @@ def pack_bitmatrix(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
 ):
-    """
-    Packs topk_ids into a bitmatrix.
+    """Packs topk_ids into a bitmatrix.
     code reference:
     https://github.com/triton-lang/triton/blob/dd1bbc52b34d202dfe5ffea1e04fb16166c5c04e/python/triton_kernels/bench/distributed.py#L264
     """
@@ -918,8 +917,7 @@ class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
         w2: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> tuple[int, int, int, int, int]:
-        """
-        Extract the MoE problem size from the given tensor arguments:
+        """Extract the MoE problem size from the given tensor arguments:
         - a: The hidden states, input to the MoE layer.
         - w1: The first set of expert weights.
         - w2: The second set of expert weights.
@@ -1044,8 +1042,7 @@ class OAITritonExperts(BaseOAITritonExperts):
 
 
 class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
-    """
-    A Triton based MoE expert class that operates on expert standard
+    """A Triton based MoE expert class that operates on expert standard
     format and explicitly keeps the activation and reduction (moe_sum) steps
     unfused from the matmul_ogs kernel. This exposes injection points
     for activation and moe_sum.

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-This script contains:
+"""This script contains:
 1. test lora with speculative decoding for batch inference
 """
 
@@ -58,8 +57,7 @@ def test_batch_inference_correctness(
     model_setup: tuple[str, str, str, str, int],
     vllm_runner,
 ):
-    """
-    Compare the outputs of a LLM with only Lora and a LLM with both SD and Lora.
+    """Compare the outputs of a LLM with only Lora and a LLM with both SD and Lora.
     Should be the same and no failure when doing batch inference.
     model_setup: (method, model_name, spec_model_name, lora_path, tp_size)
     """

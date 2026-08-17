@@ -164,7 +164,8 @@ class TestMambaPlanSplitHandles:
 
     def test_hetero_block_size_splits(self):
         """With a block-size ratio, single-source FA sub-block descs pass
-        through whole; SSM descs are unexpanded and split per source."""
+        through whole; SSM descs are unexpanded and split per source.
+        """
         plan = TPMapping(
             source_ranks_per_group=((0,), (0, 1)),
             all_source_ranks=(0, 1),
@@ -199,7 +200,8 @@ class TestMambaPlanSplitHandles:
 
     def test_hetero_block_size_head_sharded_asserts(self):
         """Head-sharded FA reads (multiple FA sources) are incompatible with
-        a block-size mismatch and must fail loudly."""
+        a block-size mismatch and must fail loudly.
+        """
         plan = TPMapping(
             source_ranks_per_group=((0, 1), (0, 1)),
             all_source_ranks=(0, 1),

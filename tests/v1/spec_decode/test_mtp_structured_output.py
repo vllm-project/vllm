@@ -313,7 +313,7 @@ def test_should_advance_records_reasoning_end_index():
 
 
 def test_trim_reasoning_for_advance():
-    """trim drops the marker and everything before it; later steps and
+    """Trim drops the marker and everything before it; later steps and
     requests without a recorded boundary pass through unchanged.
     """
     tokenizer, manager, request, prompt, marker = _setup_boundary_request("xgrammar")

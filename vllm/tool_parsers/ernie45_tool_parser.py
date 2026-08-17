@@ -29,8 +29,7 @@ logger = init_logger(__name__)
 
 class Ernie45ToolParser(ToolParser):
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
-        """
-        Ernie thinking model format:
+        """Ernie thinking model format:
         abc\n</think>\n\n\n<tool_call>\ndef\n</tool_call>\n
         """
         super().__init__(tokenizer, tools)

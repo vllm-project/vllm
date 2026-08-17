@@ -120,7 +120,7 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int, block_size: int):
 
 
 def test_flashinfer_mla_decode_workspace_supports_autotune():
-    """vLLM's FlashInfer MLA decode workspace must be int8 for autotuning.
+    """VLLM's FlashInfer MLA decode workspace must be int8 for autotuning.
 
     Model Runner V2's warmup autotunes ``trtllm_batch_decode_mla``, which makes
     the FlashInfer autotuner enumerate the CuteDSL tactic. That tactic asserts

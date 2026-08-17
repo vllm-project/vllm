@@ -57,8 +57,7 @@ else:
 
 
 class ModalityDataItems(ABC, Generic[_T, _I]):
-    """
-    Represents data items for a modality in
+    """Represents data items for a modality in
     [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems].
     """
 
@@ -150,6 +149,7 @@ def validate_embedding_ndim(
         tensor: The tensor to validate.
         modality: The modality name for error messages (e.g., "image", "audio").
         index: Optional index for list items, included in error messages.
+
     """
     if tensor.ndim < 2 or tensor.ndim > 3:
         idx_str = f" [{index}]" if index is not None else ""
@@ -163,8 +163,7 @@ def validate_embedding_ndim(
 class EmbeddingItems(
     ModalityDataItems[torch.Tensor | list[torch.Tensor], torch.Tensor]
 ):
-    """
-    Base class for data items that are expressed as a batched embedding tensor,
+    """Base class for data items that are expressed as a batched embedding tensor,
     or a list of embedding tensors (one per item).
     """
 
@@ -250,8 +249,7 @@ class EmbeddingItems(
 class DictEmbeddingItems(
     ModalityDataItems[Mapping[str, torch.Tensor], Mapping[str, torch.Tensor]]
 ):
-    """
-    Base class for data items that are expressed as a dictionary of tensors.
+    """Base class for data items that are expressed as a dictionary of tensors.
 
     Usually, the dictionary keys correspond to the outputs of HF processor.
     """
@@ -267,18 +265,18 @@ class DictEmbeddingItems(
         ],
         optional_fields: Set[str] = frozenset(),
     ) -> None:
-        """
-        Args:
-            data: The dictionary of tensors for this modality.
-            modality: The modality these items belong to.
-            required_fields: Fields `data` must contain.
-            fields_factory: Builds the field config from the data.
-            optional_fields: Fields `data` may omit. Which fields these are is
-                the caller's decision -- see
-                `MultiModalDataParser.embedding_field_sets`, where a deployment
-                that receives embeddings through an EC connector makes the
-                embeddings optional. They still need a field config, since they
-                are used whenever they *are* supplied.
+        """Args:
+        data: The dictionary of tensors for this modality.
+        modality: The modality these items belong to.
+        required_fields: Fields `data` must contain.
+        fields_factory: Builds the field config from the data.
+        optional_fields: Fields `data` may omit. Which fields these are is
+            the caller's decision -- see
+            `MultiModalDataParser.embedding_field_sets`, where a deployment
+            that receives embeddings through an EC connector makes the
+            embeddings optional. They still need a field config, since they
+            are used whenever they *are* supplied.
+
         """
         from transformers.feature_extraction_utils import BatchFeature
 
@@ -470,14 +468,12 @@ _D = TypeVar("_D", bound=ModalityDataItems[Any, Any])
 
 
 class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
-    """
-    A normalized [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
+    """A normalized [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
     such that each entry corresponds to a list.
     """
 
     def select(self, modalities: Set[str]):
-        """
-        Construct a new `MultiModalDataItems` instance containing only the
+        """Construct a new `MultiModalDataItems` instance containing only the
         selected modalities.
         """
         return MultiModalDataItems(
@@ -485,8 +481,7 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
         )
 
     def get_count(self, modality: str, *, strict: bool = True) -> int:
-        """
-        Get the number of data items belonging to a modality.
+        """Get the number of data items belonging to a modality.
 
         If `strict=False`, return `0` instead of raising [`KeyError`][]
         even if the modality is not found.
@@ -512,8 +507,7 @@ class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
         modality: str,
         typ: type[_D] | tuple[type[_D], ...],
     ) -> _D:
-        """
-        Get the data items belonging to a modality,
+        """Get the data items belonging to a modality,
         requiring that they belong to a certain type.
         """
         if modality not in self:
@@ -540,8 +534,7 @@ ModalityDataParser: TypeAlias = Callable[
 
 
 class MultiModalDataParser:
-    """
-    Parses [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
+    """Parses [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
     into [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems].
 
     Args:
@@ -558,6 +551,7 @@ class MultiModalDataParser:
             absent from the request because an encode/prefill/decode encoder
             instance publishes them through an EC connector instead. Derived by
             `BaseProcessingInfo.embeds_from_ec_connector`.
+
     """
 
     embedding_fields: Mapping[str, Mapping[str, EmbeddingFieldRole]] = {}

@@ -100,8 +100,7 @@ class ObservabilityConfig:
         )
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 
@@ -145,7 +144,8 @@ class ObservabilityConfig:
         cls, value: list[DetailedTraceModules] | None
     ) -> list[DetailedTraceModules] | None:
         """Handle the legacy case where users might provide a comma-separated
-        string instead of a list of strings."""
+        string instead of a list of strings.
+        """
         if value is not None and len(value) == 1 and "," in value[0]:
             value = cast(list[DetailedTraceModules], value[0].split(","))
         return value

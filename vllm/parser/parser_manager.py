@@ -17,8 +17,7 @@ logger = init_logger(__name__)
 
 
 class ParserManager:
-    """
-    Provides a unified Parser from the reasoning and tool parser registries.
+    """Provides a unified Parser from the reasoning and tool parser registries.
 
     Parser engine adapters backed by the same engine are collapsed back into
     that engine. Other parser pairs are composed through ``DelegatingParser``.
@@ -102,8 +101,7 @@ class ParserManager:
         model_name: str | None = None,
         is_harmony: bool = False,
     ) -> type[Parser] | None:
-        """
-        Get a Parser that handles both reasoning and tool parsing.
+        """Get a Parser that handles both reasoning and tool parsing.
 
         Reuses a shared parser engine when possible, otherwise composes the
         individual parsers into a ``DelegatingParser`` subclass.
@@ -118,6 +116,7 @@ class ParserManager:
 
         Returns:
             A Parser class, or None if neither parser is specified.
+
         """
         if not tool_parser_name and not reasoning_parser_name:
             return None

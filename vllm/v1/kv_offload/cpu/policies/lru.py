@@ -10,8 +10,7 @@ from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 
 
 class LRUCachePolicy(CachePolicy):
-    """
-    LRU Caching policy that keeps a dedicated evictable list for fast eviction.
+    """LRU Caching policy that keeps a dedicated evictable list for fast eviction.
     A use is indicated by,
      - First time the key is added (store).
      - Load job completion

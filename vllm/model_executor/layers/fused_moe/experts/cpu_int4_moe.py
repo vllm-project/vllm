@@ -172,6 +172,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
             0 = SwiGLU_Gu (SiLU(g)*u)
             1 = SwiGLU_Ug (SiLU(u)*g)
             2 = SiLU
+
         """
         if activation == MoEActivation.SWIGLUSTEP:
             return 0
@@ -217,6 +218,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
 
         Returns:
             Output tensor after MoE computation
+
         """
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             select_experts,

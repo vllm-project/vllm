@@ -39,9 +39,9 @@ class LogitsProcessor(PluggableLayer):
         logits_as_input: bool = False,
         soft_cap: float | None = None,
     ) -> None:
-        """
-        Args:
-            scale: A scaling factor to apply to the logits.
+        """Args:
+        scale: A scaling factor to apply to the logits.
+
         """
         super().__init__()
         self.scale = scale

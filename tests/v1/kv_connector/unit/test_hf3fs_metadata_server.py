@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for HF3FS metadata server data structures and allocation logic:
-  - RankFileMetadata : page allocation / release primitives
-  - KeyMetadata      : per-key rank-page tracking and completion detection
-  - GlobalMetadataState : coordinated allocation with cache-hit semantics
+"""Tests for HF3FS metadata server data structures and allocation logic:
+- RankFileMetadata : page allocation / release primitives
+- KeyMetadata      : per-key rank-page tracking and completion detection
+- GlobalMetadataState : coordinated allocation with cache-hit semantics
 """
 
 import pytest

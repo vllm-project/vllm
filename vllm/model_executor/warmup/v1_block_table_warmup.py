@@ -14,7 +14,6 @@ _SLOT_MAPPING_WARMUP_TOKENS = 8
 
 def warm_v1_block_table_kernels(runner: "GPUModelRunner") -> None:
     """JIT-compile ``_compute_slot_mapping_kernel`` for the real block tables."""
-
     device = runner.device
     block_table = runner.input_batch.block_table
     num_tokens = min(

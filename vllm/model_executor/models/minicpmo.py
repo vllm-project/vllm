@@ -121,13 +121,12 @@ if os.getenv("USE_FLAGOS") == "1":
 
 
 class MiniCPMOAudioFeatureInputs(TensorSchema):
-    """
-    Dimensions:
-        - bns: Batch size * number of audios * number of slices
-        - bn: Batch size * number of audios
-        - c: Number of channels
-        - l: Length
-        - s: Number of slices
+    """Dimensions:
+    - bns: Batch size * number of audios * number of slices
+    - bn: Batch size * number of audios
+    - c: Number of channels
+    - l: Length
+    - s: Number of slices
     """
 
     type: Literal["audio_features"] = "audio_features"
@@ -153,8 +152,7 @@ class MiniCPMOAudioFeatureInputs(TensorSchema):
 
 
 class MiniCPMOAudioEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - bn: Batch size * number of audios
         - s: Number of slices
         - h: Hidden size (must match language model backbone)
@@ -952,8 +950,7 @@ _MINICPMO_SUPPORT_VERSION = {
     dummy_inputs=MiniCPMODummyInputsBuilder,
 )
 class MiniCPMO(MiniCPMOBaseModel, MiniCPMV2_6):
-    """
-    MiniCPM-O model with audio support.
+    """MiniCPM-O model with audio support.
     Different versions use different LLM backbones:
     - Version 2.6: Uses Qwen2
     - Version 4.5: Uses Qwen3

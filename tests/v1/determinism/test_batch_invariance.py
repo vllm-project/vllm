@@ -32,8 +32,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     backend,
     rms_norm_impl,
 ):
-    """
-    Ensures that the same request (the 'needle' prompt) yields identical output
+    """Ensures that the same request (the 'needle' prompt) yields identical output
     whether run alone (bs=1) or mixed into a larger batch (e.g., bs=64),
     using the high-level v1 LLM() API only (no manual batching).
 
@@ -52,6 +51,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
       to produce a more random-sounding phrase, yet remain deterministic by
       seed.
     - Keep max_tokens and max_model_len bounded for speed and memory use.
+
     """
     # Not all batch-invariant kernels are registered on XPU yet
     # (e.g. attention, custom ops), so e2e determinism is not guaranteed.
@@ -406,8 +406,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     BACKENDS,
 )
 def test_simple_generation(backend):
-    """
-    Simple test that runs the model with a basic prompt and prints the output.
+    """Simple test that runs the model with a basic prompt and prints the output.
     Useful for quick smoke testing and debugging.
     """
     model = TEST_MODEL
@@ -458,8 +457,7 @@ def test_simple_generation(backend):
 def test_logprobs_without_batch_invariance_should_fail(
     backend, monkeypatch: pytest.MonkeyPatch
 ):
-    """
-    This test is the inverse of test_logprobs_bitwise_batch_invariance_bs1_vs_bsN.
+    """This test is the inverse of test_logprobs_bitwise_batch_invariance_bs1_vs_bsN.
     It DISABLES batch invariance mode and expects to see non-deterministic behavior
     between BS=1 and BS=N runs. This demonstrates that batch invariance is actually
     doing something useful.
@@ -671,8 +669,7 @@ def test_logprobs_without_batch_invariance_should_fail(
 def test_decode_logprobs_match_prefill_logprobs(
     backend,
 ):
-    """
-    Test that verifies decode logprobs match prefill logprobs.
+    """Test that verifies decode logprobs match prefill logprobs.
 
     For each decoded token at position i:
     1. Run decode to generate N tokens and collect their logprobs
@@ -938,8 +935,7 @@ def LLM_with_max_seqs(
     attention_config: dict | None = None,
     kernel_config: dict | None = None,
 ) -> LLM:
-    """
-    Helper to construct an LLM with a specific max_num_seqs (batch-size limit)
+    """Helper to construct an LLM with a specific max_num_seqs (batch-size limit)
     using the high-level v1 LLM API, while constraining memory usage.
     """
     extra_kwargs: dict = {}

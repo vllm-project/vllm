@@ -91,6 +91,9 @@ class LoRAModelManager:
                 in a single batch.
             vocab_size: the vocab size of the model.
             lora_config: the LoRA configuration.
+            device: the device the LoRA tensors are placed on.
+            vllm_config: the vLLM config for this engine.
+
         """
         self.model: SupportsLoRAModel = model
         self.supported_lora_modules = get_supported_lora_modules(self.model)
@@ -714,6 +717,7 @@ class LoRAModelManager:
 
         Returns:
             True if LoRA should be applied to this module, False otherwise.
+
         """
         if not is_supported_lora_module(module_name, self.supported_lora_modules):
             return False
@@ -724,9 +728,7 @@ class LoRAModelManager:
         )
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
-        """
-        Determine whether this module supports LoRA and which wrapper to use.
-        """
+        """Determine whether this module supports LoRA and which wrapper to use."""
         # For language model (early return)
         if not self.supports_mm:
             return self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY]
@@ -1111,9 +1113,7 @@ class LoRAModelManager:
         return new_module_names[start:end]
 
     def _build_moe_ep_load_spec(self) -> MoEEPLoadSpec | None:
-        """
-        Per-rank slicing metadata for 2D RoutedEXperts LoRA modules.
-        """
+        """Per-rank slicing metadata for 2D RoutedEXperts LoRA modules."""
         if not self._use_ep or not self._is_moe:
             return None
         module = next(

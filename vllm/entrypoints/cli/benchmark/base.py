@@ -22,5 +22,6 @@ class BenchmarkSubcommandBase(CLISubcommand):
 
         Args:
             args: The arguments to the command.
+
         """
         raise NotImplementedError

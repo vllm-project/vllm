@@ -280,7 +280,8 @@ def test_layer_norm_rows_per_block(
 @torch.inference_mode()
 def test_strided_input(dtype: torch.dtype) -> None:
     """Test that the kernel handles non-contiguous (strided)
-    inputs correctly."""
+    inputs correctly.
+    """
     set_random_seed(42)
     device = torch.device(DEVICE)
     num_tokens = 128

@@ -101,7 +101,8 @@ def test_flash_attn_supports_quant_output_unknown_device():
 
 def test_flash_attn_prefill_backend_signature_accepts_fused_kwargs():
     """run_prefill_new_tokens must accept out/output_scale so the direct
-    (non-**kwargs) call in forward_mha type- and runtime-checks."""
+    (non-**kwargs) call in forward_mha type- and runtime-checks.
+    """
     import inspect
 
     params = inspect.signature(
@@ -117,7 +118,8 @@ def test_flash_attn_prefill_backend_signature_accepts_fused_kwargs():
 
 def test_mla_impl_forward_mha_accepts_output_scale():
     """The abstract MLA impl forward_mha must carry output_scale so every
-    override (and the unconditional forward_impl call) stays compatible."""
+    override (and the unconditional forward_impl call) stays compatible.
+    """
     import inspect
 
     from vllm.v1.attention.backend import MLAAttentionImpl
@@ -144,7 +146,8 @@ _FUSED_FP8_SKIP = _fused_fp8_skip_reason()
 def test_fa4_fused_fp8_output_matches_post_quant(default_vllm_config):
     """FA4's fused FP8 write (output_scale, flash-attention#135) must match the
     bf16-attention + standalone static-FP8-quant path it replaces, since
-    production uses the same output_scale for both."""
+    production uses the same output_scale for both.
+    """
     from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
     from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
     from vllm.platforms import current_platform
