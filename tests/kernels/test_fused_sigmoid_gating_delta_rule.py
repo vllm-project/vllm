@@ -16,14 +16,17 @@ DEVICE = current_platform.device_type
 
 
 def _bf16_l2norm(value: torch.Tensor) -> torch.Tensor:
-    inverse_norm = torch.rsqrt((value * value).sum(dim=-1, keepdim=True) + 1e-6)
-    return value * inverse_norm
-
-
-def _promoted_l2norm(value: torch.Tensor) -> torch.Tensor:
+    """FLA-style l2norm: fp32 accumulate, single downcast to the input dtype."""
     value_f32 = value.float()
     inverse_norm = torch.rsqrt((value_f32 * value_f32).sum(dim=-1, keepdim=True) + 1e-6)
-    return value_f32 * inverse_norm
+    return (value_f32 * inverse_norm).to(value.dtype)
+
+
+def _stepwise_bf16_l2norm(value: torch.Tensor) -> torch.Tensor:
+    """Pure-input-dtype l2norm: every elementwise op rounds through the input
+    dtype, matching the pure-PyTorch Transformers fallback instead of FLA."""
+    inverse_norm = torch.rsqrt((value * value).sum(dim=-1, keepdim=True) + 1e-6)
+    return value * inverse_norm
 
 
 def _relative_l2(actual: torch.Tensor, expected: torch.Tensor) -> float:
@@ -35,8 +38,9 @@ def _relative_l2(actual: torch.Tensor, expected: torch.Tensor) -> float:
     ).item()
 
 
-def test_fused_sigmoid_gating_uses_bf16_semantics() -> None:
-    """The fused decode update is closer to the input-dtype reference."""
+def test_fused_sigmoid_gating_uses_fp32_accumulate_semantics() -> None:
+    """The fused decode update's l2norm matches fp32-accumulate (FLA-style)
+    semantics more closely than step-wise bf16-rounded accumulation."""
     torch.set_default_device(DEVICE)
     set_random_seed(51779)
     B, T, H, HV, K, V = 4, 1, 2, 4, 128, 32
@@ -64,19 +68,19 @@ def test_fused_sigmoid_gating_uses_bf16_semantics() -> None:
         use_qk_l2norm_in_kernel=False,
     )
 
-    promoted_out, promoted_state = fused_recurrent_gated_delta_rule(
-        q=_promoted_l2norm(q),
-        k=_promoted_l2norm(k),
+    stepwise_out, stepwise_state = fused_recurrent_gated_delta_rule(
+        q=_stepwise_bf16_l2norm(q),
+        k=_stepwise_bf16_l2norm(k),
         v=v,
         g=g,
-        beta=b.float().sigmoid().unsqueeze(1),
+        beta=beta,
         initial_state=initial_state.clone(),
         ssm_state_indices=state_indices,
         use_qk_l2norm_in_kernel=False,
     )
-    promoted_errors = (
-        _relative_l2(promoted_out.to(reference_out.dtype), reference_out),
-        _relative_l2(promoted_state[state_indices], reference_state[state_indices]),
+    stepwise_errors = (
+        _relative_l2(stepwise_out, reference_out),
+        _relative_l2(stepwise_state[state_indices], reference_state[state_indices]),
     )
 
     out, state = fused_sigmoid_gating_delta_rule_update(
@@ -91,13 +95,13 @@ def test_fused_sigmoid_gating_uses_bf16_semantics() -> None:
         ssm_state_indices=state_indices,
         use_qk_l2norm_in_kernel=True,
     )
-    bf16_errors = (
+    fp32_accumulate_errors = (
         _relative_l2(out, reference_out),
         _relative_l2(state[state_indices], reference_state[state_indices]),
     )
 
-    assert bf16_errors[0] < promoted_errors[0]
-    assert bf16_errors[1] < promoted_errors[1]
+    assert fp32_accumulate_errors[0] < stepwise_errors[0]
+    assert fp32_accumulate_errors[1] < stepwise_errors[1]
 
 
 @pytest.mark.parametrize("tp_size", [1])

@@ -33,10 +33,7 @@ def _round_to_bf16(x):
 @triton.jit
 def l2norm_bf16(x, eps: tl.constexpr, axis: tl.constexpr):
     x_f32 = x.to(tl.float32)
-    square = _round_to_bf16(x_f32 * x_f32)
-    square_sum = _round_to_bf16(tl.sum(square, axis=axis, keep_dims=True))
-    norm_square = _round_to_bf16(square_sum + eps)
-    inverse_norm = _round_to_bf16(tl.rsqrt(norm_square))
+    inverse_norm = tl.rsqrt(tl.sum(x_f32 * x_f32, axis=axis, keep_dims=True) + eps)
     return _round_to_bf16(x_f32 * inverse_norm)
 
 

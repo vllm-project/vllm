@@ -65,6 +65,15 @@ def reference_post_conv(
 
 
 def _bf16_l2norm(value: torch.Tensor) -> torch.Tensor:
+    """FLA-style l2norm: fp32 accumulate, single downcast to the input dtype."""
+    value_f32 = value.float()
+    inverse_norm = torch.rsqrt((value_f32 * value_f32).sum(dim=-1, keepdim=True) + 1e-6)
+    return (value_f32 * inverse_norm).to(value.dtype)
+
+
+def _stepwise_bf16_l2norm(value: torch.Tensor) -> torch.Tensor:
+    """Pure-input-dtype l2norm: every elementwise op rounds through the input
+    dtype, matching the pure-PyTorch Transformers fallback instead of FLA."""
     inverse_norm = torch.rsqrt((value * value).sum(dim=-1, keepdim=True) + 1e-6)
     return value * inverse_norm
 
@@ -153,8 +162,9 @@ def test_fused_post_conv_correctness(H, HV, K, V, L, apply_l2norm, output_g_exp,
     torch.testing.assert_close(fused_beta, ref_beta, atol=1e-4, rtol=1e-4)
 
 
-def test_fused_post_conv_uses_bf16_semantics():
-    """BF16 normalization and sigmoid retain input-dtype semantics."""
+def test_fused_post_conv_uses_fp32_accumulate_semantics():
+    """L2-norm matches fp32-accumulate (FLA-style) semantics, not step-wise
+    bf16-rounded accumulation."""
     torch.manual_seed(51779)
     device = "cuda"
     L, H, HV, K, V = 64, 16, 32, 128, 128
@@ -181,12 +191,12 @@ def test_fused_post_conv_uses_bf16_semantics():
     raw_k = raw_k.view(L, H, K)
 
     for actual, raw in ((q, raw_q), (k, raw_k)):
-        bf16_reference = _bf16_l2norm(raw)
-        promoted_reference = F.normalize(raw.float(), p=2, dim=-1, eps=1e-6).to(
-            raw.dtype
+        fp32_accumulate_reference = _bf16_l2norm(raw)
+        stepwise_bf16_reference = _stepwise_bf16_l2norm(raw)
+        assert not torch.equal(fp32_accumulate_reference, stepwise_bf16_reference)
+        torch.testing.assert_close(
+            actual, fp32_accumulate_reference, rtol=0.0, atol=0.0
         )
-        assert not torch.equal(bf16_reference, promoted_reference)
-        torch.testing.assert_close(actual, bf16_reference, rtol=0.0, atol=0.0)
 
     torch.testing.assert_close(beta, b.sigmoid().float(), rtol=0.0, atol=0.0)
 
