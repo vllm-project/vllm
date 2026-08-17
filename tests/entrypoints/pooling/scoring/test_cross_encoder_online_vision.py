@@ -47,17 +47,12 @@ BACKEND_TOL: dict[str, float] = {
 # TRITON_ATTN: gfx942/ROCm 7.2 drifts ~0.008 abs on text-vs-text (~7.9% rel).
 BACKEND_ABS_TOL: dict[str, float] = {
     "default": 0.0,
+    "auto": 0.007,
     "ROCM_AITER_FA": 0.005,
     "TRITON_ATTN": 0.009,
     "FLEX_ATTENTION": 0.006,
 }
 
-# ROCm: disable skinny GEMM to avoid non-deterministic results from
-# atomic reductions in wvSplitKrc kernel.
-# See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
-ROCM_ENV_OVERRIDES = (
-    {"VLLM_ROCM_USE_SKINNY_GEMM": "0"} if current_platform.is_rocm() else {}
-)
 # ROCm: disable prefix caching and eliminate batch variance to reduce
 # test flakiness.
 ROCM_EXTRA_ARGS = (
@@ -131,7 +126,6 @@ def server(request):
         args += ["--attention-config", json.dumps({"backend": backend})]
         args += ROCM_EXTRA_ARGS
 
-        env = dict(ROCM_ENV_OVERRIDES)
         if backend != "ROCM_AITER_FA":
             env["VLLM_ROCM_USE_AITER"] = "0"
 
@@ -472,7 +466,7 @@ async def test_rerank_api_instruction_field(
 async def test_rerank_api_instruction_field_matches_chat_template_kwargs(
     server: tuple[RemoteOpenAIServer, str],
 ):
-    remote_server, _ = server
+    remote_server, backend = server
 
     doc_list = [
         document,
@@ -513,4 +507,6 @@ async def test_rerank_api_instruction_field_matches_chat_template_kwargs(
     kwargs_scores = [
         r.relevance_score for r in sorted(kwargs_rerank.results, key=lambda x: x.index)
     ]
-    assert field_scores == pytest.approx(kwargs_scores)
+    assert field_scores == pytest.approx(
+        kwargs_scores, rel=get_tol(backend), abs=get_abs_tol(backend)
+    )

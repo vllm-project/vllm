@@ -33,12 +33,13 @@ from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 logger = init_logger(__name__)
 
 
 def has_nixl() -> bool:
-    """Whether the optional NIXL / RIXL package is available."""
+    """Whether the optional NIXL package is available."""
     return nixl_utils.NixlWrapper is not None
 
 
@@ -222,10 +223,11 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
 
         # Wait for all D2H copies to finish
         # before issuing gloo batch_isend_irecv operations.
-        if self._cuda_stream is not None:
-            self._cuda_stream.synchronize()
-        else:
-            torch.cuda.current_stream().synchronize()
+        with gpu_sync_allowed():
+            if self._cuda_stream is not None:
+                self._cuda_stream.synchronize()
+            else:
+                torch.cuda.current_stream().synchronize()
 
         reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:
@@ -266,7 +268,7 @@ class NixlEplbCommunicator(EplbCommunicator):
         assert expert_buffer, "NixlEplbCommunicator requires non-empty expert_buffer."
         nixl_wrapper_cls = nixl_utils.NixlWrapper
         if nixl_wrapper_cls is None:
-            raise RuntimeError("NIXL/ RIXL is unavailable.")
+            raise RuntimeError("NIXL is unavailable.")
 
         self._cpu_group = cpu_group
         self._world_size = cpu_group.size()

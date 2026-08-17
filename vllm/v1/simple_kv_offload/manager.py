@@ -75,23 +75,27 @@ class SimpleCPUOffloadScheduler:
         scheduler_block_size: int,
         hash_block_size: int,
         lazy_offload: bool = False,
+        disk_capacity_bytes: int = 0,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
+        # When disk mode is active, the offload pool size is disk-based.
+        offload_capacity = (
+            disk_capacity_bytes if disk_capacity_bytes > 0 else cpu_capacity_bytes
+        )
         self.enable_kv_cache_events = (
             vllm_config.kv_events_config is not None
             and vllm_config.kv_events_config.enable_kv_cache_events
         )
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-        pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
-        self.cp_world_size = dcp_world_size * pcp_world_size
+        self.cp_world_size = dcp_world_size
         self.block_size = scheduler_block_size
         self.hash_block_size = hash_block_size
         assert self.block_size % self.hash_block_size == 0
         # Derive a CPU KVCacheConfig from the GPU config and build a coordinator
         assert kv_cache_config is not None
         self.cpu_kv_cache_config = self._derive_cpu_config(
-            kv_cache_config, cpu_capacity_bytes
+            kv_cache_config, offload_capacity
         )
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
         # Find the full attention kv group for prefix cache matching.
@@ -112,27 +116,29 @@ class SimpleCPUOffloadScheduler:
         assert self.block_size % self.fa_block_size == 0
 
         logger.info(
-            "SimpleCPUOffloadScheduler: Allocating %d CPU blocks (%.2f GB, mode=%s)",
+            "SimpleCPUOffloadScheduler: Allocating %d offload blocks "
+            "(%.2f GB, mode=%s, backend=%s)",
             self.num_cpu_blocks,
-            cpu_capacity_bytes / (1024**3),
+            offload_capacity / (1024**3),
             "lazy" if lazy_offload else "eager",
+            "disk" if disk_capacity_bytes > 0 else "cpu",
         )
 
-        # TODO (yifan): maybe need to enable kv_cache_events and metrics_collector here.
+        spec_config = vllm_config.speculative_config
+        use_eagle = spec_config is not None and spec_config.use_eagle()
         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
             kv_cache_config=self.cpu_kv_cache_config,
             max_model_len=vllm_config.model_config.max_model_len,
             max_in_flight_tokens=vllm_config.max_in_flight_tokens,
-            use_eagle=False,
+            use_eagle=use_eagle,
             enable_caching=True,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
+            pcp_world_size=1,
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
         )
         self.cpu_block_pool: BlockPool = self.cpu_coordinator.block_pool
-
         # GPU block pool reference - bound after scheduler builds kv_cache_manager
         self._gpu_block_pool: BlockPool | None = None
 
@@ -262,7 +268,7 @@ class SimpleCPUOffloadScheduler:
         max_hit_len = request.num_tokens - 1 - num_computed_tokens
         if max_hit_len <= 0:
             return 0, False
-        cpu_hit_blocks, hit_length = self.cpu_coordinator.find_longest_cache_hit(
+        cpu_hit_blocks, hit_length, _ = self.cpu_coordinator.find_longest_cache_hit(
             remaining_hashes, max_hit_len
         )
 
@@ -354,7 +360,7 @@ class SimpleCPUOffloadScheduler:
             )
             assert num_external_tokens % g_block_size == 0, (
                 f"num_external_tokens={num_external_tokens} not aligned to "
-                f"group {g} effective block_size={g_block_size}"
+                f"group {g} block_size={g_block_size}"
             )
             n_take_g = num_external_tokens // g_block_size
             cpu_hit_blocks.append(cpu_hit_blocks_full[g][:n_take_g])

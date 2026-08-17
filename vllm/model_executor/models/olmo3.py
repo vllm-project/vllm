@@ -137,11 +137,9 @@ class Olmo3Attention(nn.Module):
         )
 
         # Rotary embeddings. Rope scaling is only applied on full attention layers.
-        if sliding_window is None:
-            rope_parameters = self.config.rope_parameters
-        else:
-            rope_theta = self.config.rope_parameters["rope_theta"]
-            rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
+        rope_parameters = self.config.rope_parameters
+        attn_type = "full_attention" if sliding_window is None else "sliding_attention"
+        rope_parameters = rope_parameters.get(attn_type, rope_parameters)
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=self.max_position_embeddings,
@@ -371,15 +369,14 @@ class Olmo3ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self.model = Olmo3Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=vllm_config.quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
         if config.tie_word_embeddings:
-            self.lm_head = self.model.embed_tokens
-        else:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=vllm_config.quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors

@@ -36,6 +36,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         global_ranks: list[int] | None = None,
         global_world_size: int | None = None,
         tcp_store_group: StatelessProcessGroup | None = None,
+        use_all2all: bool = False,
     ):
         super().__init__(
             cpu_group,
@@ -44,6 +45,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             unique_name,
             global_ranks,
             global_world_size,
+            use_all2all=use_all2all,
         )
         if "tp" not in unique_name:
             # custom allreduce or torch symm mem can be used only by tp
@@ -338,16 +340,53 @@ class CudaCommunicator(DeviceCommunicatorBase):
             torch.distributed.all_reduce(out, group=self.device_group)
         return out
 
+    def custom_all_gather(self, input_: torch.Tensor) -> torch.Tensor | None:
+        ca_comm = self.ca_comm
+        if ca_comm is None:
+            return None
+        return ca_comm.custom_all_gather(input_.contiguous())
+
+    def custom_reduce_scatter(self, input_: torch.Tensor) -> torch.Tensor | None:
+        ca_comm = self.ca_comm
+        if ca_comm is None:
+            return None
+        return ca_comm.custom_reduce_scatter(input_.contiguous())
+
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         # Route uniform dim-0 all-gathers through NVLS symmetric memory when
         # enabled (mirrors reduce_scatter); otherwise fall back to the
-        # base-class ring all-gather. Sequence parallelism's gather-before-GEMM
-        # uses dim=0 with tp-aligned (uniform) shards.
+        # PyNccl/base-class all-gather. Sequence parallelism's
+        # gather-before-GEMM uses dim=0 with tp-aligned (uniform) shards.
         if dim < 0:
             dim += input_.dim()
         if dim == 0 and should_nccl_symm_mem_ag_rs():
             return self._all_gather_symm_mem(input_.contiguous())
-        return super().all_gather(input_, dim)
+
+        pynccl_comm = self.pynccl_comm
+        if pynccl_comm is None or pynccl_comm.disabled:
+            return super().all_gather(input_, dim)
+
+        # On ROCm, the base-class all_gather (all_gather_into_tensor) is faster
+        # than the manual pynccl + torch.empty + movedim + reshape path below,
+        # which adds a per-call output allocation and (for dim != 0) an extra
+        # copy on every step. This is on the hot path for TP forward passes, so
+        # keep ROCm on the base-class collective to avoid a decode regression.
+        if current_platform.is_rocm():
+            return super().all_gather(input_, dim)
+
+        input_size = input_.size()
+        output_size = (input_size[0] * self.world_size,) + input_size[1:]
+        output_tensor = torch.empty(
+            output_size, dtype=input_.dtype, device=input_.device
+        )
+        pynccl_comm.all_gather(output_tensor, input_.contiguous())
+        output_tensor = output_tensor.reshape((self.world_size,) + input_size)
+        output_tensor = output_tensor.movedim(0, dim)
+        return output_tensor.reshape(
+            input_size[:dim]
+            + (self.world_size * input_size[dim],)
+            + input_size[dim + 1 :]
+        )
 
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
@@ -545,6 +584,22 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
             self.all2all_manager = None  # type: ignore[assignment]
+
+    def checkpoint_prepare(self) -> None:
+        # Only FlashInfer all-reduce and FlashInfer all2all are supported for now.
+        from .flashinfer_all_reduce import checkpoint_prepare_fi_ar_workspaces
+
+        checkpoint_prepare_fi_ar_workspaces(self.cpu_group)
+        if self.all2all_manager is not None:
+            self.all2all_manager.checkpoint_prepare()
+
+    def checkpoint_restore(self) -> None:
+        # Only FlashInfer all-reduce and FlashInfer all2all are supported for now.
+        from .flashinfer_all_reduce import checkpoint_restore_fi_ar_workspaces
+
+        checkpoint_restore_fi_ar_workspaces(self.cpu_group)
+        if self.all2all_manager is not None:
+            self.all2all_manager.checkpoint_restore()
 
     def all_gatherv(
         self,
