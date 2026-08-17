@@ -721,7 +721,9 @@ RUN python3 -m pip install uv
 # or apt repository is available.
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ -n "${CUDA_TOOLKIT_PYPI_VERSION}" ]; then \
-        uv pip install --system \
+        apt-get update -y \
+        && apt-get install -y --no-install-recommends gcc g++ \
+        && uv pip install --system \
             "cuda-toolkit[nvcc,cuobjdump,cudart,nvrtc,curand,cublas]==${CUDA_TOOLKIT_PYPI_VERSION}" \
         && CUDA_PYPI_ROOT=$(python3 -c \
             'import nvidia; from pathlib import Path; print(Path(next(iter(nvidia.__path__))) / "cu13")') \

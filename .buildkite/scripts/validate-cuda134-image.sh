@@ -28,6 +28,18 @@ print(torch.__version__, torch.version.cuda)
 print(torchvision.__version__, torchaudio.__version__)
 ' "${expected_arch}"
 
+docker run --rm --entrypoint bash "${image_ref}" -c '
+set -euo pipefail
+tmp_dir=$(mktemp -d)
+trap '\''rm -rf "${tmp_dir}"'\'' EXIT
+printf "%s\n" "int main(void) { return 0; }" > "${tmp_dir}/smoke.c"
+printf "%s\n" "int main() { return 0; }" > "${tmp_dir}/smoke.cc"
+gcc "${tmp_dir}/smoke.c" -o "${tmp_dir}/smoke-c"
+g++ "${tmp_dir}/smoke.cc" -o "${tmp_dir}/smoke-cxx"
+"${tmp_dir}/smoke-c"
+"${tmp_dir}/smoke-cxx"
+'
+
 docker run --rm --entrypoint /usr/local/cuda/bin/nvcc "${image_ref}" \
   --version | grep 'release 13.4'
 docker run --rm --entrypoint /usr/local/cuda/bin/ptxas "${image_ref}" \
