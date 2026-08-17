@@ -122,6 +122,23 @@ When batch invariance is enabled, vLLM:
 !!! note
     Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
 
+## Limitations
+
+Prefix caching is only partially covered by batch invariance. A request whose
+prefix is already cached prefills just the tokens after the last cached block,
+while the same request on a cold cache prefills the whole prompt in one pass.
+The two paths can select different GEMM tilings, so their outputs may differ
+even at `temperature=0`.
+
+vLLM disables prefix caching automatically for the `FLASHINFER` and
+`TRITON_MLA` backends when `VLLM_BATCH_INVARIANT=1`. Other backends keep it
+enabled, and cold vs warm divergence has still been reported against
+`FLASH_ATTN` in
+[issue #40896](https://github.com/vllm-project/vllm/issues/40896). Pass
+`--no-enable-prefix-caching` when you need bitwise reproducible results on
+those backends. Progress is tracked in
+[issue #27433](https://github.com/vllm-project/vllm/issues/27433).
+
 ## Future Improvements
 
 The batch invariance feature is under active development. Planned improvements include:
