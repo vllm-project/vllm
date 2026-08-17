@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkNVFP4,
     QuarkOCP_MX,
     QuarkScheme,
+    QuarkW4A16Int4,
     QuarkW4A8_MXFP4_FP8,
     QuarkW8A8Fp8,
     QuarkW8A8Fp8PerBlock,
@@ -38,8 +39,10 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
 )
 from vllm.model_executor.layers.quantization.quark.utils import (
     deep_compare,
+    parse_w4a16_int4_weight_config,
     should_ignore_layer,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 
@@ -53,7 +56,6 @@ logger = init_logger(__name__)
 # model_type values that use dynamic MXFP4 re-quantization for
 # OCP MX fp4 Quark checkpoints
 _DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3", "deepseek_v32"})
-
 
 class QuarkConfig(QuantizationConfig):
     def __init__(
@@ -138,8 +140,10 @@ class QuarkConfig(QuantizationConfig):
         quant_config_with_hf_to_vllm_mapper: dict[str, Any] = {}
 
         for k, v in self.quant_config.items():
-            if isinstance(v, list):
+            if isinstance(v, list) and all(isinstance(item, str) for item in v):
                 quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_list(v)
+            elif isinstance(v, list):
+                quant_config_with_hf_to_vllm_mapper[k] = v
             elif isinstance(v, dict):
                 quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_dict(v)
             else:
@@ -168,7 +172,7 @@ class QuarkConfig(QuantizationConfig):
             if (
                 "self_attn" not in prefix  # only quantize attention projections
                 or not getattr(self, "dynamic_mxfp4_quant", False)
-                or not isinstance(layer, LinearBase)  # Ignore other methods
+                or not isinstance(layer, (LinearBase, ParallelLMHead))
             ):
                 return UnquantizedLinearMethod()
 
@@ -179,7 +183,7 @@ class QuarkConfig(QuantizationConfig):
             )
             layer.scheme = scheme
             return QuarkLinearMethod(self)
-        if isinstance(layer, LinearBase):
+        if isinstance(layer, (LinearBase, ParallelLMHead)):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
             layer.scheme = scheme
             return QuarkLinearMethod(self)
@@ -408,6 +412,18 @@ class QuarkConfig(QuantizationConfig):
         # Both symmetric and asymmetric input quantization supported.
         # Only symmetric weight quantization supported.
         return is_int8_dtype and is_tensor and is_weight_symmetric and is_static
+
+    def _is_w4a16_int4(
+        self,
+        weight_quant: dict[str, Any] | None,
+        input_quant: dict[str, Any] | None,
+    ) -> bool:
+        if weight_quant is None:
+            return False
+
+        is_int4 = weight_quant.get("dtype") in ("int4", "uint4")
+        is_packed = self.pack_method in ("order", "reorder")
+        return is_int4 and is_packed
 
     def _is_w4a8_mxfp4_fp8(
         self,
@@ -661,6 +677,15 @@ class QuarkConfig(QuantizationConfig):
                 qscheme=weight_qscheme,
                 is_static_input_scheme=True,
                 input_symmetric=input_config.get("symmetric"),
+            )
+        elif self._is_w4a16_int4(weight_config, input_config):
+            group_size, is_symmetric = parse_w4a16_int4_weight_config(weight_config)
+            return QuarkW4A16Int4(
+                group_size=group_size,
+                pack_method=self.pack_method,
+                is_symmetric=is_symmetric,
+                weight_config=weight_config,
+                input_config=input_config,
             )
         elif self._is_w4a8_mxfp4_fp8(weight_config, input_config):
             is_w4a8_supported = self._check_scheme_supported(
