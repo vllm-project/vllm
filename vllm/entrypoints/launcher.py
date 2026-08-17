@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
 import signal
 import socket
+from collections.abc import Generator
 from functools import partial
 from typing import Any
 
@@ -12,15 +14,27 @@ from fastapi import FastAPI
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.constants import (
+from vllm.entrypoints.serve.utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
-from vllm.entrypoints.ssl import SSLCertRefresher
+from vllm.entrypoints.serve.utils.ssl import SSLCertRefresher
 from vllm.logger import init_logger
 from vllm.utils.network_utils import find_process_using_port
 
 logger = init_logger(__name__)
+
+
+class NoSignalServer(uvicorn.Server):
+    """Uvicorn server that never installs its own SIGINT/SIGTERM handlers.
+
+    Callers register their own handlers on the event loop for graceful
+    shutdown; uvicorn's would race with and override them (see #49668).
+    """
+
+    @contextlib.contextmanager
+    def capture_signals(self) -> Generator[None, None, None]:
+        yield
 
 
 async def serve_http(
@@ -73,7 +87,7 @@ async def serve_http(
     config.h11_max_incomplete_event_size = h11_max_incomplete_event_size
     config.h11_max_header_count = h11_max_header_count
     config.load()
-    server = uvicorn.Server(config)
+    server = NoSignalServer(config)
     app.state.server = server
 
     loop = asyncio.get_running_loop()
@@ -95,6 +109,9 @@ async def serve_http(
     shutdown_event = asyncio.Event()
 
     def signal_handler() -> None:
+        if shutdown_event.is_set():
+            return
+        logger.info_once("[shutdown] API server: shutdown triggered")
         shutdown_event.set()
 
     async def dummy_shutdown() -> None:
@@ -108,12 +125,21 @@ async def serve_http(
 
         engine_client = app.state.engine_client
         timeout = engine_client.vllm_config.shutdown_timeout
+        mode = "abort" if timeout == 0 else "drain"
+
+        logger.info(
+            "[shutdown] API server: stopping engine client mode=%s timeout=%ss",
+            mode,
+            timeout,
+        )
 
         await loop.run_in_executor(
             None, partial(engine_client.shutdown, timeout=timeout)
         )
+        logger.info_once("[shutdown] API server: engine client stopped")
 
         server.should_exit = True
+        logger.info_once("[shutdown] API server: signalling HTTP server shutdown")
         server_task.cancel()
         watchdog_task.cancel()
         if ssl_cert_refresher:
@@ -134,7 +160,7 @@ async def serve_http(
                 process,
                 " ".join(process.cmdline()),
             )
-        logger.info("Shutting down FastAPI HTTP server.")
+        logger.info_once("[shutdown] API server: shutting down FastAPI HTTP server")
         return server.shutdown()
     finally:
         shutdown_task.cancel()

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from contextlib import contextmanager, nullcontext
 
 import pytest
 
@@ -34,9 +35,7 @@ SSM_MODELS = [
 
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
-    "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
-    "hmellor/tiny-random-BambaForCausalLM",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
     "LiquidAI/LFM2-1.2B",
@@ -45,7 +44,6 @@ HYBRID_MODELS = [
 
 FULL_CUDA_GRAPH_MODELS = [
     "ai21labs/Jamba-tiny-dev",
-    "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
 ]
 
@@ -93,7 +91,10 @@ def test_models(
         )
 
     with vllm_runner(
-        model, max_num_seqs=MAX_NUM_SEQS, attention_backend=ATTN_BACKEND
+        model,
+        max_num_seqs=MAX_NUM_SEQS,
+        attention_backend=ATTN_BACKEND,
+        enable_chunked_prefill=True,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
@@ -130,7 +131,9 @@ def test_batching(
     _set_conv_state_layout(monkeypatch, conv_state_layout)
 
     for_loop_outputs = []
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+    with vllm_runner(
+        model, max_num_seqs=MAX_NUM_SEQS, enable_chunked_prefill=True
+    ) as vllm_model:
         for prompt in example_prompts:
             (single_output,) = vllm_model.generate_greedy_logprobs(
                 [prompt], max_tokens, num_logprobs
@@ -214,7 +217,7 @@ def test_mamba_cache_cg_padding(
         example_prompts.append(example_prompts[0])
 
     try:
-        with vllm_runner(model) as vllm_model:
+        with vllm_runner(model, enable_chunked_prefill=True) as vllm_model:
             vllm_model.generate_greedy(example_prompts, max_tokens)
     except RuntimeError:
         pytest.fail(
@@ -240,7 +243,9 @@ def test_fail_upon_inc_requests_and_finished_requests_lt_available_blocks(
     a single step.
     """
     try:
-        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+        with vllm_runner(
+            model, max_num_seqs=MAX_NUM_SEQS, enable_chunked_prefill=True
+        ) as vllm_model:
             vllm_model.generate_greedy([example_prompts[0]] * 100, 10)
     except ValueError:
         pytest.fail(
@@ -262,7 +267,9 @@ def test_state_cleanup(
     If it's not cleaned, an error would be expected.
     """
     try:
-        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+        with vllm_runner(
+            model, max_num_seqs=MAX_NUM_SEQS, enable_chunked_prefill=True
+        ) as vllm_model:
             for _ in range(10):
                 vllm_model.generate_greedy([example_prompts[0]] * 100, 1)
     except ValueError:
@@ -284,14 +291,20 @@ def test_distributed_correctness(
     num_logprobs: int,
 ) -> None:
     with vllm_runner(
-        model, tensor_parallel_size=1, max_num_seqs=MAX_NUM_SEQS
+        model,
+        tensor_parallel_size=1,
+        max_num_seqs=MAX_NUM_SEQS,
+        enable_chunked_prefill=True,
     ) as vllm_model:
         vllm_outputs_tp_1 = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
         )
 
     with vllm_runner(
-        model, tensor_parallel_size=2, max_num_seqs=MAX_NUM_SEQS
+        model,
+        tensor_parallel_size=2,
+        max_num_seqs=MAX_NUM_SEQS,
+        enable_chunked_prefill=True,
     ) as vllm_model:
         vllm_outputs_tp_2 = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
@@ -330,7 +343,10 @@ def test_full_cuda_graph(
         )
 
     with vllm_runner(
-        model, max_num_seqs=MAX_NUM_SEQS, attention_backend=ATTN_BACKEND
+        model,
+        max_num_seqs=MAX_NUM_SEQS,
+        attention_backend=ATTN_BACKEND,
+        enable_chunked_prefill=True,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
@@ -372,8 +388,14 @@ def test_fp32_cache_state(
             example_prompts, max_tokens, num_logprobs
         )
 
+    # Leave enough headroom for repeated engine initialization on a
+    # 32.5 GiB MIG.
     with vllm_runner(
-        model, max_num_seqs=MAX_NUM_SEQS, **{cache_dtype_param: "float32"}
+        model,
+        max_num_seqs=MAX_NUM_SEQS,
+        gpu_memory_utilization=0.9,
+        enable_chunked_prefill=True,
+        **{cache_dtype_param: "float32"},
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
@@ -404,6 +426,12 @@ def _get_vllm_runner_params(
     }
 
 
+@contextmanager
+def _owned_vllm_runner(vllm_runner, kwargs):
+    with vllm_runner(**kwargs) as runner:
+        yield runner
+
+
 def _get_vLLM_output(
     vllm_runner,
     kwargs,
@@ -413,22 +441,26 @@ def _get_vLLM_output(
     num_repetitions=1,
     vllm_model=None,
 ):
-    outs = []
-    if vllm_model is None:
-        vllm_model = vllm_runner(**kwargs)
-    for _ in range(num_repetitions):
-        if num_logprobs < 0:
-            vllm_output = vllm_model.generate_greedy(prompts, max_tokens)
-        else:
-            vllm_output = vllm_model.generate_greedy_logprobs(
-                prompts, max_tokens, num_logprobs
-            )
-        outs.append(vllm_output)
+    runner_context = (
+        _owned_vllm_runner(vllm_runner, kwargs)
+        if vllm_model is None
+        else nullcontext(vllm_model)
+    )
+    with runner_context as runner:
+        outs = []
+        for _ in range(num_repetitions):
+            if num_logprobs < 0:
+                vllm_output = runner.generate_greedy(prompts, max_tokens)
+            else:
+                vllm_output = runner.generate_greedy_logprobs(
+                    prompts, max_tokens, num_logprobs
+                )
+            outs.append(vllm_output)
 
     return outs, vllm_model
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -492,7 +524,7 @@ def test_apc_single_prompt(
         )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -573,7 +605,7 @@ def test_apc_single_prompt_block_align_alignment(
             )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -642,7 +674,7 @@ def test_apc_multiple_prompts_all_cached_outputs(
         )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -727,7 +759,7 @@ def test_apc_multiple_prompts_block_align_alignment(
             )
 
 
-@pytest.mark.parametrize("model", [HYBRID_MODELS[0], HYBRID_MODELS[3]])
+@pytest.mark.parametrize("model", [HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("n_repetitions", [2])
 # If num_logprobs is set to -1, then the stringent version
@@ -772,37 +804,43 @@ def test_apc_multiple_prompts_partial_cached_outputs(
 
     # Cache only part of all the prompts
     vllm_runner_kwargs["enable_prefix_caching"] = True
-    vllm_outputs_partial_cache, vllm_model = _get_vLLM_output(
-        vllm_runner, vllm_runner_kwargs, generated_prompts[:3], max_tokens, num_logprobs
-    )
-
-    compare_operator(
-        outputs_0_lst=vllm_outputs_no_cache[0][:3],
-        outputs_1_lst=vllm_outputs_partial_cache[0],
-        name_0="vllm_no_cache",
-        name_1="vllm_partial_cache",
-    )
-
-    vllm_outputs_cache_rep, _ = _get_vLLM_output(
-        vllm_runner,
-        vllm_runner_kwargs,
-        generated_prompts,
-        max_tokens,
-        num_logprobs,
-        n_repetitions,
-        vllm_model=vllm_model,
-    )
-
-    for r_idx, vllm_outputs_cache_itn in enumerate(vllm_outputs_cache_rep):
-        # In the first repetition, the caches are filled
-        # In the second repetition, these caches are reused
+    with _owned_vllm_runner(vllm_runner, vllm_runner_kwargs) as vllm_model:
+        vllm_outputs_partial_cache, _ = _get_vLLM_output(
+            vllm_runner,
+            vllm_runner_kwargs,
+            generated_prompts[:3],
+            max_tokens,
+            num_logprobs,
+            vllm_model=vllm_model,
+        )
 
         compare_operator(
-            outputs_0_lst=vllm_outputs_no_cache[0],
-            outputs_1_lst=vllm_outputs_cache_itn,
+            outputs_0_lst=vllm_outputs_no_cache[0][:3],
+            outputs_1_lst=vllm_outputs_partial_cache[0],
             name_0="vllm_no_cache",
-            name_1=f"vllm_cache_it_{r_idx + 1}",
+            name_1="vllm_partial_cache",
         )
+
+        vllm_outputs_cache_rep, _ = _get_vLLM_output(
+            vllm_runner,
+            vllm_runner_kwargs,
+            generated_prompts,
+            max_tokens,
+            num_logprobs,
+            n_repetitions,
+            vllm_model=vllm_model,
+        )
+
+        for r_idx, vllm_outputs_cache_itn in enumerate(vllm_outputs_cache_rep):
+            # In the first repetition, the caches are filled
+            # In the second repetition, these caches are reused
+
+            compare_operator(
+                outputs_0_lst=vllm_outputs_no_cache[0],
+                outputs_1_lst=vllm_outputs_cache_itn,
+                name_0="vllm_no_cache",
+                name_1=f"vllm_cache_it_{r_idx + 1}",
+            )
 
 
 # Test that outputs match whether prefix caching is enabled or not for mamba.

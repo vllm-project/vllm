@@ -88,7 +88,7 @@ If compilation fails for a multimodal model:
 
 1. **Disable and test**: First verify the model works without compilation:
    ```bash
-   VLLM_TORCH_COMPILE_LEVEL=0 vllm serve <model> --compilation-config='{"compile_mm_encoder":"false"}'
+   vllm serve <model> --compilation-config='{"mode":0,"compile_mm_encoder":"false"}'
    ```
 
 2. **Check logs**: Enable debug logging to see compilation details:
