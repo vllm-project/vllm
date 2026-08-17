@@ -252,6 +252,14 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             if recv_expert_num_tokens
             else None
         )
+        if self.use_cudagraph:
+            # Carry the per-rank prefix sum so SiTU can skip padding rows.
+            if expert_tokens_meta is None:
+                expert_tokens_meta = mk.ExpertTokensMetadata(
+                    expert_num_tokens=None,
+                    expert_num_tokens_cpu=None,
+                )
+            expert_tokens_meta.psum_recv_per_rank = psum_recv_per_rank
 
         if not quant_config.is_block_quantized and not defer_input_quant:
             expert_x_scale = None
