@@ -39,7 +39,7 @@ th {
 | flashinfer_nvlink_one_sided | standard | nvfp4,bf16,mxfp8 | G,A,T | N | N | [`FlashInferNVLinkOneSidedPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_one_sided.FlashInferNVLinkOneSidedPrepareAndFinalize] |
 | deepep_v2 | standard | fp8 | G,A,T | Y | Y | [`DeepEPV2PrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2.DeepEPV2PrepareAndFinalize] |
 | nixl_ep | batched | fp8 | G,A,T | Y | Y | [`NixlEPPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.nixl_ep.NixlEPPrepareAndFinalize] |
-| mori | standard | fp8 | G,A,T | Y | Y | [`MoriPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.mori.MoriPrepareAndFinalize] |
+| mori | standard | fp8 | G,A,T | N | Y | [`MoriPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.mori.MoriPrepareAndFinalize] |
 | allgather_reducescatter | standard | all<sup>1</sup> | G,A,T | N | <sup>6</sup> | [`MoEPrepareAndFinalizeNaiveDPEPModular`][vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep.MoEPrepareAndFinalizeNaiveDPEPModular] |
 | (no dispatch)<sup>5</sup> | standard | all<sup>1</sup> | G,A,T | N | <sup>6</sup> | [`MoEPrepareAndFinalizeNoDPEPModular`][vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep.MoEPrepareAndFinalizeNoDPEPModular] |
 | (batched no-op)<sup>5</sup> | batched | all<sup>1</sup> | G,A,T | N | <sup>6</sup> | [`BatchedPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.batched.BatchedPrepareAndFinalize] |
