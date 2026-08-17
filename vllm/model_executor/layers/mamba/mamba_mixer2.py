@@ -734,11 +734,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 if self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
                     ring_start = self._replayssm_ring_start
                     prev_num_accepted = self._replayssm_prev_num_accepted
-                else:
-                    ring_start = prev_num_accepted = None
             else:
                 x_cache = dt_cache = B_cache = None
-                ring_start = prev_num_accepted = None
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
