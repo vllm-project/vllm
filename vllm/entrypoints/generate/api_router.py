@@ -120,6 +120,8 @@ async def init_generate_state(
             enable_per_request_metrics=args.enable_per_request_metrics,
             enable_log_outputs=args.enable_log_outputs,
             default_chat_template_kwargs=default_chat_template_kwargs,
+            supported_reasoning_efforts=args.supported_reasoning_efforts,
+            reasoning_effort_rounding=args.reasoning_effort_rounding,
         )
         if "generate" in supported_tasks
         else None
@@ -145,6 +147,8 @@ async def init_generate_state(
         enable_log_outputs=args.enable_log_outputs,
         enable_log_deltas=args.enable_log_deltas,
         enable_per_request_metrics=args.enable_per_request_metrics,
+        supported_reasoning_efforts=args.supported_reasoning_efforts,
+        reasoning_effort_rounding=args.reasoning_effort_rounding,
     )
     state.openai_serving_chat = (
         OpenAIServingChat(**_chat_kwargs) if "generate" in supported_tasks else None
@@ -188,6 +192,8 @@ async def init_generate_state(
             enable_log_deltas=args.enable_log_deltas,
             default_chat_template_kwargs=default_chat_template_kwargs,
             disabled_thinking_effort=args.anthropic_disabled_thinking_effort,
+            supported_reasoning_efforts=args.supported_reasoning_efforts,
+            reasoning_effort_rounding=args.reasoning_effort_rounding,
         )
         if "generate" in supported_tasks
         else None
