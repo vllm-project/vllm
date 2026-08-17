@@ -249,6 +249,7 @@ async def test_completion_streaming_prediction_token_details():
 
     usage = [chunk["usage"] for chunk in chunks if chunk.get("usage")][-1]
     assert usage["completion_tokens_details"] == {
+        "reasoning_tokens": 0,
         "accepted_prediction_tokens": 3,
         "rejected_prediction_tokens": 2,
     }
