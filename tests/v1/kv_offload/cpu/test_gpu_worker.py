@@ -18,6 +18,7 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
     GPULoadStoreSpec,
+    TransferResult,
 )
 from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
@@ -612,3 +613,72 @@ def test_transfer_multi_group(
                 )
 
     worker.shutdown()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="stream ordering test requires a CUDA-like platform",
+)
+@torch.inference_mode()
+def test_load_waits_for_pending_compute_stream_writes(default_vllm_config) -> None:
+    """A CPU load must land after pending writes to its GPU destination."""
+    device = DEVICES[0]
+    page_size_bytes = 128 * 1024
+    num_blocks = 64
+    loaded_blocks = list(range(32))
+    sentinel = 0x5A
+
+    gpu_tensor = torch.zeros(
+        (num_blocks, page_size_bytes), dtype=torch.int8, device=device
+    )
+    loaded_block_ids = torch.tensor(loaded_blocks, dtype=torch.long, device=device)
+    worker = CPUOffloadingWorker(
+        kv_caches=CanonicalKVCaches(
+            tensors=[
+                CanonicalKVCacheTensor(
+                    tensor=gpu_tensor, page_size_bytes=page_size_bytes
+                )
+            ],
+            group_data_refs=[
+                [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page_size_bytes)]
+            ],
+        ),
+        blocks_per_chunk=1,
+        num_cpu_blocks=num_blocks,
+    )
+    worker._load_handler.src_tensors[0].fill_(sentinel)
+    expected = torch.full((page_size_bytes,), sentinel, dtype=torch.int8)
+
+    try:
+        for trial in range(3):
+            gpu_tensor.fill_(0x11)
+            torch.accelerator.synchronize()
+
+            # Model a delayed zero of a freshly allocated KV block. Without a
+            # compute-stream dependency, the DMA can finish during the sleep
+            # and this later fill wipes out the loaded cache contents.
+            torch.cuda._sleep(50_000_000)
+            gpu_tensor.index_fill_(0, loaded_block_ids, 0)
+
+            assert worker.submit_load(
+                trial + 1,
+                CPULoadStoreSpec(loaded_blocks),
+                GPULoadStoreSpec(
+                    loaded_blocks,
+                    group_sizes=(len(loaded_blocks),),
+                    block_indices=(0,),
+                ),
+            )
+            deadline = time.time() + 10
+            finished: list[TransferResult] = []
+            while time.time() < deadline and not finished:
+                finished = worker.get_finished()
+                if not finished:
+                    time.sleep(0.001)
+            assert finished and finished[0].success, f"load {trial} did not finish"
+
+            torch.accelerator.synchronize()
+            for block_id in loaded_blocks:
+                torch.testing.assert_close(gpu_tensor[block_id].cpu(), expected)
+    finally:
+        worker.shutdown()
