@@ -20,6 +20,7 @@ steps:
   - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/weight_loading
   commands:
   - >-

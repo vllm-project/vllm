@@ -19,6 +19,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/multimodal
   commands:
   - >-
@@ -44,6 +45,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/multimodal
   commands:
   - >-
@@ -69,6 +71,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/multimodal
   commands:
   - >-
@@ -95,6 +98,7 @@ steps:
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/multimodal
   commands:
   - >-
@@ -121,6 +125,7 @@ steps:
   - pytest -v -s models/multimodal/processing/test_tensor_schema.py
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/multimodal
   - tests/models/registry.py
   commands:
@@ -168,6 +173,7 @@ steps:
   - pytest -v -s models/multimodal/test_mapping.py
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/multimodal/generation
   - tests/models/multimodal/test_mapping.py
   commands:
@@ -176,7 +182,7 @@ steps:
     'cd tests &&
     pytest -v -s models/multimodal/generation -m not core_model --ignore models/multimodal/generation/test_common.py || true &&
     pytest -v -s models/multimodal/test_mapping.py || true'
-- label: Multi-Modal Models (Extended Generation 2)
+- label: Multi-Modal Models (PPL)
   device: intel_gpu
   optional: true
   working_dir: .
@@ -189,15 +195,39 @@ steps:
     label: debug
     gpu: 1+
   _raw_old_commands:
-  - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
+  - pytest -v -s models/multimodal/generation_ppl_test/
   source_file_dependencies:
   - vllm/
+  - tests/models/multimodal/generation_ppl_test/
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pytest -v -s models/multimodal/generation_ppl_test/ || true'
+- label: Multi-Modal Models (Extended Generation 2) %N
+  device: intel_gpu
+  parallelism: 4
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  source_file_dependencies:
+  - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/multimodal/generation
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/multimodal/generation/test_common.py -m split(group=0) and not core_model || true'
+    pytest -v -s models/multimodal/generation/test_common.py -m split(group=0) and not core_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: Multi-Modal Models (Extended Generation 3)
   device: intel_gpu
   optional: true
@@ -214,6 +244,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/multimodal/generation
   commands:
   - >-
@@ -236,6 +267,7 @@ steps:
   - pytest -v -s models/multimodal/pooling -m 'not core_model'
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/multimodal/pooling
   commands:
   - >-
