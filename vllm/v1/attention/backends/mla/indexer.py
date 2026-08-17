@@ -526,15 +526,59 @@ class DeepseekV32IndexerMetadata:
     prefill: DeepseekV32IndexerPrefillMetadata | None = None
 
 
+def compute_kpool_tail_slot_mapping(
+    slot_mapping: torch.Tensor,
+    block_table: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    positions: torch.Tensor,
+    num_actual_tokens: int,
+    num_reqs: int,
+    kpool: int,
+) -> torch.Tensor:
+    """Circular tail slots: every token of request r lands in r's own block.
+
+    The generic per-group slot kernel maps ``pos -> bt[req][pos // bs] * bs +
+    pos % bs`` (``_compute_slot_mappings_kernel``). The tail group's block
+    table only ever has its FIRST column written -- ``KpoolTailManager``
+    allocates exactly one block per request and never grows -- so for any
+    token at ``pos >= kpool`` that kernel reads a zero column and the slot
+    collapses onto physical tail block 0. All concurrently running requests
+    then share one ``kpool``-slot ring and corrupt each other's pool
+    compression (seed / stash / completion all target block 0). This maps
+    ``slot = own_block * kpool + pos % kpool`` instead, which is the layout
+    the tail kernels and ``KpoolTailManager`` are designed around.
+
+    Pure torch (no Triton, no device sync): the indexer op consumes the tail
+    slot mapping on its eager break, so the returned tensor need not be the
+    persistent ``BlockTables`` buffer.
+    """
+    out = slot_mapping.clone()
+    if num_actual_tokens == 0:
+        return out
+    device = slot_mapping.device
+    tokens = torch.arange(num_actual_tokens, device=device)
+    # searchsorted(right=True): token i in [qsl[r], qsl[r+1]) -> request r.
+    req = torch.searchsorted(query_start_loc, tokens, right=True) - 1
+    req = req.clamp_(min=0, max=num_reqs - 1)
+    own_block = block_table[:num_reqs, 0].index_select(0, req).to(torch.int64)
+    pos = positions[:num_actual_tokens].to(torch.int64)
+    out[:num_actual_tokens] = own_block * kpool + torch.remainder(pos, kpool)
+    return out
+
+
 class KpoolTailMetadataBuilder(AttentionMetadataBuilder):
     """Lean metadata builder for the kpool tail cache.
 
     The tail is storage-only (no attention / MQA-logits), so it skips the
     DeepseekV32 indexer builder's DeepGEMM paged-MQA path -- which requires
     ``block_kv in {32,64}`` and asserts on the tail's ``block_size == kpool``.
-    It exports only the group's token-granular ``slot_mapping`` (already built
-    per-group by ``build_attn_metadata``) plus the prefill/decode counts; the
-    indexer op reads ``attn_metadata[tail_prefix].slot_mapping``.
+    It exports only the group's token-granular ``slot_mapping`` plus the
+    prefill/decode counts; the indexer op reads
+    ``attn_metadata[tail_prefix].slot_mapping``. The slot mapping is
+    recomputed with the circular per-request layout (see
+    :func:`compute_kpool_tail_slot_mapping`) instead of reusing the generic
+    per-group kernel output, which cannot express a 1-block-per-request
+    circular buffer.
     """
 
     _cudagraph_support = AttentionCGSupport.ALWAYS
@@ -550,7 +594,7 @@ class KpoolTailMetadataBuilder(AttentionMetadataBuilder):
     ):
         # No indexer-builder buffers (expanded_block_table / scheduler_metadata /
         # compressed_slot_mapping) -- the tail is storage-only and exports only
-        # slot_mapping, which is already built per-group by build_attn_metadata.
+        # slot_mapping, which is rebuilt per step from the group's block table.
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
     def build(
@@ -562,10 +606,24 @@ class KpoolTailMetadataBuilder(AttentionMetadataBuilder):
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(common_attn_metadata)
         )
+        slot_mapping = common_attn_metadata.slot_mapping
+        positions = common_attn_metadata.positions
+        if positions is not None:
+            # Circular per-request layout; the generic kernel output collapses
+            # onto tail block 0 for pos >= kpool (see compute_... docstring).
+            slot_mapping = compute_kpool_tail_slot_mapping(
+                slot_mapping,
+                common_attn_metadata.block_table_tensor,
+                common_attn_metadata.query_start_loc,
+                positions,
+                common_attn_metadata.num_actual_tokens,
+                common_attn_metadata.num_reqs,
+                self.kv_cache_spec.block_size,
+            )
         return DeepseekV32IndexerMetadata(
             seq_lens=common_attn_metadata.seq_lens,
             max_seq_len=common_attn_metadata.max_seq_len,
-            slot_mapping=common_attn_metadata.slot_mapping,
+            slot_mapping=slot_mapping,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
