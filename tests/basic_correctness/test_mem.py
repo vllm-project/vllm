@@ -76,7 +76,7 @@ def test_basic_cumem():
 
 
 @create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
-def test_release_kv_cache_memory():
+def test_release_kv_cache_memory_then_sleep():
     kv_cache_memory_bytes = 256 * 1024 * 1024
     llm = LLM(
         "Qwen/Qwen3-0.6B",
@@ -98,7 +98,8 @@ def test_release_kv_cache_memory():
     assert freed_bytes >= kv_cache_memory_bytes * 0.99
     assert llm.llm_engine.is_sleeping()
 
-    llm.wake_up(tags=["kv_cache"])
+    llm.sleep(level=1)
+    llm.wake_up()
     assert not llm.llm_engine.is_sleeping()
     output2 = llm.generate(prompt, sampling_params)
 
