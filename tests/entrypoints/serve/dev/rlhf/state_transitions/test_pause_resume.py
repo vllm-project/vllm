@@ -3,6 +3,8 @@
 """End-to-end tests for the vLLM RL pause/resume lifecycle."""
 
 import json
+import os
+from unittest.mock import patch
 import threading
 from dataclasses import dataclass, field
 from typing import Any
@@ -20,15 +22,25 @@ from tests.entrypoints.serve.dev.rlhf.conftest import (
 )
 
 
+@pytest.fixture(scope="module", params=[False, True], ids=["MRV1", "MRV2"])
+def use_v2(request):
+    return request.param
+
+
 @pytest.fixture(scope="module")
-def server_url():
-    with server(
-        extra_args=[
-            "--enable-prefix-caching",
-            "--enable-prompt-tokens-details",
-        ]
-    ) as url:
-        yield url
+def server_url(use_v2):
+    env_vars = {
+        "VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2 else "0",
+    }
+
+    with patch.dict(os.environ, env_vars):
+        with server(
+            extra_args=[
+                "--enable-prefix-caching",
+                "--enable-prompt-tokens-details",
+            ]
+        ) as url:
+            yield url
 
 
 @pytest.fixture(autouse=True)
