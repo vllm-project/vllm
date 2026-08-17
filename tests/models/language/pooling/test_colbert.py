@@ -212,14 +212,13 @@ def colbert_extra_kwargs(colbert_spec):
     return colbert_spec["extra_kwargs"]
 
 
-def test_colbert_token_embed(
+@pytest.fixture(scope="module")
+def colbert_model(
     vllm_runner,
     colbert_model_name,
-    colbert_dim,
     colbert_max_model_len,
     colbert_extra_kwargs,
 ):
-    """Test that ColBERT model produces token embeddings."""
     with vllm_runner(
         colbert_model_name,
         runner="pooling",
@@ -228,112 +227,84 @@ def test_colbert_token_embed(
         enforce_eager=True,
         **colbert_extra_kwargs,
     ) as vllm_model:
-        outputs = vllm_model.token_embed([TEXTS_1[0]])
+        yield vllm_model
 
-        assert len(outputs) == 1
-        emb = torch.as_tensor(outputs[0])
-        assert emb.dim() == 2
-        assert emb.shape[1] == colbert_dim
-        assert emb.shape[0] > 1
+
+def test_colbert_token_embed(
+    colbert_model,
+    colbert_dim,
+):
+    """Test that ColBERT model produces token embeddings."""
+    outputs = colbert_model.token_embed([TEXTS_1[0]])
+
+    assert len(outputs) == 1
+    emb = torch.as_tensor(outputs[0])
+    assert emb.dim() == 2
+    assert emb.shape[1] == colbert_dim
+    assert emb.shape[0] > 1
 
 
 def test_colbert_late_interaction_1_to_1(
-    vllm_runner,
-    colbert_model_name,
-    colbert_max_model_len,
-    colbert_extra_kwargs,
+    colbert_model,
 ):
     """Test ColBERT late interaction scoring with 1:1 query-document pair."""
-    with vllm_runner(
-        colbert_model_name,
-        runner="pooling",
-        dtype=DTYPE,
-        max_model_len=colbert_max_model_len,
-        enforce_eager=True,
-        **colbert_extra_kwargs,
-    ) as vllm_model:
-        q_outputs = vllm_model.token_embed([TEXTS_1[0]])
-        d_outputs = vllm_model.token_embed([TEXTS_2[0]])
+    q_outputs = colbert_model.token_embed([TEXTS_1[0]])
+    d_outputs = colbert_model.token_embed([TEXTS_2[0]])
 
-        q_emb = torch.as_tensor(q_outputs[0])
-        d_emb = torch.as_tensor(d_outputs[0])
+    q_emb = torch.as_tensor(q_outputs[0])
+    d_emb = torch.as_tensor(d_outputs[0])
 
-        manual_score = compute_maxsim_score(q_emb, d_emb).item()
+    manual_score = compute_maxsim_score(q_emb, d_emb).item()
 
-        vllm_scores = vllm_model.score(TEXTS_1[0], TEXTS_2[0])
+    vllm_scores = colbert_model.score(TEXTS_1[0], TEXTS_2[0])
 
-        assert len(vllm_scores) == 1
-        assert vllm_scores[0] == pytest.approx(manual_score, rel=0.01)
+    assert len(vllm_scores) == 1
+    assert vllm_scores[0] == pytest.approx(manual_score, rel=0.01)
 
 
 def test_colbert_late_interaction_1_to_N(
-    vllm_runner,
-    colbert_model_name,
-    colbert_max_model_len,
-    colbert_extra_kwargs,
+    colbert_model,
 ):
     """Test ColBERT late interaction scoring with 1:N query-documents."""
-    with vllm_runner(
-        colbert_model_name,
-        runner="pooling",
-        dtype=DTYPE,
-        max_model_len=colbert_max_model_len,
-        enforce_eager=True,
-        **colbert_extra_kwargs,
-    ) as vllm_model:
-        q_outputs = vllm_model.token_embed([TEXTS_1[0]])
-        d_outputs = vllm_model.token_embed(TEXTS_2)
+    q_outputs = colbert_model.token_embed([TEXTS_1[0]])
+    d_outputs = colbert_model.token_embed(TEXTS_2)
 
-        q_emb = torch.as_tensor(q_outputs[0])
+    q_emb = torch.as_tensor(q_outputs[0])
 
-        manual_scores = []
-        for d_out in d_outputs:
-            d_emb = torch.as_tensor(d_out)
-            manual_scores.append(compute_maxsim_score(q_emb, d_emb).item())
+    manual_scores = []
+    for d_out in d_outputs:
+        d_emb = torch.as_tensor(d_out)
+        manual_scores.append(compute_maxsim_score(q_emb, d_emb).item())
 
-        vllm_scores = vllm_model.score(TEXTS_1[0], TEXTS_2)
+    vllm_scores = colbert_model.score(TEXTS_1[0], TEXTS_2)
 
-        assert len(vllm_scores) == 2
-        for i in range(2):
-            assert vllm_scores[i] == pytest.approx(manual_scores[i], rel=0.01)
+    assert len(vllm_scores) == 2
+    for i in range(2):
+        assert vllm_scores[i] == pytest.approx(manual_scores[i], rel=0.01)
 
 
 def test_colbert_late_interaction_N_to_N(
-    vllm_runner,
-    colbert_model_name,
-    colbert_max_model_len,
-    colbert_extra_kwargs,
+    colbert_model,
 ):
     """Test ColBERT late interaction scoring with N:N query-documents."""
-    with vllm_runner(
-        colbert_model_name,
-        runner="pooling",
-        dtype=DTYPE,
-        max_model_len=colbert_max_model_len,
-        enforce_eager=True,
-        **colbert_extra_kwargs,
-    ) as vllm_model:
-        q_outputs = vllm_model.token_embed(TEXTS_1)
-        d_outputs = vllm_model.token_embed(TEXTS_2)
+    q_outputs = colbert_model.token_embed(TEXTS_1)
+    d_outputs = colbert_model.token_embed(TEXTS_2)
 
-        manual_scores = []
-        for q_out, d_out in zip(q_outputs, d_outputs):
-            q_emb = torch.as_tensor(q_out)
-            d_emb = torch.as_tensor(d_out)
-            manual_scores.append(compute_maxsim_score(q_emb, d_emb).item())
+    manual_scores = []
+    for q_out, d_out in zip(q_outputs, d_outputs):
+        q_emb = torch.as_tensor(q_out)
+        d_emb = torch.as_tensor(d_out)
+        manual_scores.append(compute_maxsim_score(q_emb, d_emb).item())
 
-        vllm_scores = vllm_model.score(TEXTS_1, TEXTS_2)
+    vllm_scores = colbert_model.score(TEXTS_1, TEXTS_2)
 
-        assert len(vllm_scores) == 2
-        for i in range(2):
-            assert vllm_scores[i] == pytest.approx(manual_scores[i], rel=0.01)
+    assert len(vllm_scores) == 2
+    for i in range(2):
+        assert vllm_scores[i] == pytest.approx(manual_scores[i], rel=0.01)
 
 
 def test_colbert_relevance_ordering(
-    vllm_runner,
-    colbert_model_name,
-    colbert_max_model_len,
-    colbert_extra_kwargs,
+    colbert_model,
 ):
     """Test that ColBERT scores relevant documents higher than irrelevant."""
     query = "What is machine learning?"
@@ -343,40 +314,19 @@ def test_colbert_relevance_ordering(
         "Deep learning uses neural networks.",
     ]
 
-    with vllm_runner(
-        colbert_model_name,
-        runner="pooling",
-        dtype=DTYPE,
-        max_model_len=colbert_max_model_len,
-        enforce_eager=True,
-        **colbert_extra_kwargs,
-    ) as vllm_model:
-        scores = vllm_model.score(query, documents)
+    scores = colbert_model.score(query, documents)
 
-        assert len(scores) == 3
-        assert scores[0] > scores[1], "ML doc should score higher than Python doc"
-        assert scores[2] > scores[1], "DL doc should score higher than Python doc"
+    assert len(scores) == 3
+    assert scores[0] > scores[1], "ML doc should score higher than Python doc"
+    assert scores[2] > scores[1], "DL doc should score higher than Python doc"
 
 
 def test_colbert_embed_not_supported(
-    vllm_runner,
-    colbert_model_name,
-    colbert_max_model_len,
-    colbert_extra_kwargs,
+    colbert_model,
 ):
-    """Test that ColBERT model does not support 'embed' task."""
-    with (
-        vllm_runner(
-            colbert_model_name,
-            runner="pooling",
-            dtype=DTYPE,
-            max_model_len=colbert_max_model_len,
-            enforce_eager=True,
-            **colbert_extra_kwargs,
-        ) as vllm_model,
-        pytest.raises(ValueError, match="Embedding API is not supported"),
-    ):
-        vllm_model.embed([TEXTS_1[0]])
+    """Test that ColBERT model does not support the embed task."""
+    with pytest.raises(ValueError, match="Embedding API is not supported"):
+        colbert_model.embed([TEXTS_1[0]])
 
 
 @pytest.mark.parametrize(
