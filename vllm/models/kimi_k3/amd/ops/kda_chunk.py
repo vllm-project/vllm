@@ -67,6 +67,7 @@ def fused_kda_prologue(
     conv_state: torch.Tensor | None = None,
     conv_state_indices: torch.Tensor | None = None,
     conv_has_initial_state: torch.Tensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
 ) -> dict[str, torch.Tensor]:
     """Run the whole chunk-path prologue in one launch.
 
@@ -81,7 +82,8 @@ def fused_kda_prologue(
     # projection and carry its row stride. The kernel reads both with an
     # explicit per-token stride, so neither is copied here.
     _, t_total, num_heads, _ = q.shape
-    chunk_indices = prepare_chunk_indices(cu_seqlens, CHUNK_SIZE).to(torch.int32)
+    if chunk_indices is None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, CHUNK_SIZE).to(torch.int32)
     num_chunks = chunk_indices.shape[0]
     dev = q.device
 
@@ -197,6 +199,7 @@ def fused_kda_chunk(
     cu_seqlens: torch.Tensor,
     initial_state: torch.Tensor | None,
     output_final_state: bool,
+    chunk_offsets: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Run the chunk recurrence and the output projection in one launch.
 
@@ -218,7 +221,8 @@ def fused_kda_chunk(
             device=u.device,
         )
     cu_seqlens = cu_seqlens.to(torch.int32)
-    chunk_offsets = prepare_chunk_offsets(cu_seqlens, CHUNK_SIZE).to(torch.int32)
+    if chunk_offsets is None:
+        chunk_offsets = prepare_chunk_offsets(cu_seqlens, CHUNK_SIZE).to(torch.int32)
 
     # The chunk walk is serial in chunks. Splitting each sequence into `groups`
     # stretches that run in parallel costs a second pass and a scan, and only

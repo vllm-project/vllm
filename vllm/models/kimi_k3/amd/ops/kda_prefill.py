@@ -35,6 +35,8 @@ def chunk_kda_prefill(
     lower_bound: float | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
+    chunk_offsets: torch.Tensor | None = None,
     use_fused_chunk: bool = False,
     out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -83,6 +85,7 @@ def chunk_kda_prefill(
             scale=scale,
             lower_bound=lower_bound,
             cu_seqlens=cu_seqlens,
+            chunk_indices=chunk_indices,
         )
         return fused_kda_chunk(
             qg=ws["qg"],
@@ -97,6 +100,7 @@ def chunk_kda_prefill(
             cu_seqlens=cu_seqlens,
             initial_state=initial_state,
             output_final_state=output_final_state,
+            chunk_offsets=chunk_offsets,
         )
 
     o, final_state = chunk_kda_with_fused_gate(
@@ -113,6 +117,8 @@ def chunk_kda_prefill(
         lower_bound=lower_bound,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        chunk_offsets=chunk_offsets,
     )
     if out is not None and o.data_ptr() != out.data_ptr():
         out.copy_(o)
