@@ -13,6 +13,8 @@ ARG AITER_BRANCH="v0.1.19"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.1.0"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
+ARG MOONCAKE_BRANCH="df508641d76be20803349bf715d3bfc5205a7b58" # Commit for rocm wheel support
+ARG MOONCAKE_REPO="https://github.com/kvcache-ai/Mooncake.git"
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
@@ -271,6 +273,43 @@ RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 
 
 ###
+### Build Mooncake
+###
+FROM base AS build_mooncake
+ARG MOONCAKE_BRANCH
+ARG MOONCAKE_REPO
+ARG USE_SCCACHE
+RUN git clone ${MOONCAKE_REPO} mooncake
+RUN cd mooncake \
+    && git checkout ${MOONCAKE_BRANCH} \
+    && git submodule update --init --recursive \
+    && bash dependencies.sh -y
+ENV PATH=/usr/local/go/bin:${PATH}
+# dependencies.sh brings in patchelf 0.14.3, which corrupts RPATH entries when
+# auditwheel rewrites them: the wheel then cannot resolve its own vendored
+# libraries and importing mooncake fails outside this build stage.
+RUN pip install -U 'patchelf>=0.17'
+# PLATFORM_TAG=auto because the base image's gcc-13 libstdc++ puts GLIBCXX_3.4.32
+# in the wheel, which the manylinux_2_35 policy the script would otherwise pick
+# rejects.
+RUN cd mooncake \
+    && if [ "$USE_SCCACHE" = "1" ]; then export HIP_CLANG_PATH=/opt/sccache-wrappers; fi \
+    && cmake -G Ninja -B build \
+        -DUSE_HIP=ON -DUSE_CUDA=OFF -DWITH_EP=OFF \
+        -DUSE_HTTP=ON -DUSE_ETCD=ON -DSTORE_USE_ETCD=ON \
+        -DBUILD_UNIT_TESTS=OFF -DCMAKE_BUILD_TYPE=Release \
+        -DPython3_EXECUTABLE=$(which python3) \
+    && cmake --build build -j"$(nproc)" \
+    && cmake --install build \
+    && export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/usr/local/lib" \
+    && HIP_BUILD=1 PYTHON_VERSION=${PYTHON_VERSION} OUTPUT_DIR=dist \
+        PLATFORM_TAG=auto \
+        ./scripts/build_wheel.sh \
+    && ls /app/mooncake/mooncake-wheel/dist/*.whl
+RUN mkdir -p /app/install && cp /app/mooncake/mooncake-wheel/dist/*.whl /app/install
+
+
+###
 ### Final Build
 ###
 
@@ -312,6 +351,8 @@ RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_mooncake,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 
 FROM base AS final
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
@@ -332,6 +373,8 @@ ARG AITER_BRANCH
 ARG AITER_REPO
 ARG MORI_BRANCH
 ARG MORI_REPO
+ARG MOONCAKE_BRANCH
+ARG MOONCAKE_REPO
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "TRITON_BRANCH: ${TRITON_BRANCH}" >> /app/versions.txt \
     && echo "TRITON_REPO: ${TRITON_REPO}" >> /app/versions.txt \
@@ -346,4 +389,6 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
     && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt \
     && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
-    && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt
+    && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt \
+    && echo "MOONCAKE_BRANCH: ${MOONCAKE_BRANCH}" >> /app/versions.txt \
+    && echo "MOONCAKE_REPO: ${MOONCAKE_REPO}" >> /app/versions.txt
