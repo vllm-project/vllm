@@ -825,7 +825,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Cosmos3EdgeForConditionalGeneration": _HfExamplesInfo(
         "nvidia/Cosmos3-Edge",
         max_model_len=4096,
-        is_available_online=False,
+        min_transformers_version="5.15",
+        use_original_num_layers=True,
+        hf_overrides={
+            "text_config": {
+                "num_hidden_layers": 2,
+                "hybrid_override_pattern": "*-",
+            }
+        },
     ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",
@@ -840,8 +847,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "deepseek-ai/DeepSeek-OCR-2",
     ),
     "Dots3NoteForCausalLM": _HfExamplesInfo(
-        "rednote-hilab/dots3.note",
-        trust_remote_code=True,
+        "dots-studio/dots3-note-prev",
         is_available_online=False,
     ),
     "UnlimitedOCRForCausalLM": _HfExamplesInfo(
@@ -1192,6 +1198,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         # required by current PrefixLM implementation
         max_num_batched_tokens=31872,
     ),
+    "MuseGlimmerForConditionalGeneration": _HfExamplesInfo(
+        "meta-models/Muse-Glimmer-30B",
+    ),
+    "MuseGlimmerForCausalLM": _HfExamplesInfo(
+        "meta-models/Muse-Glimmer-30B",
+    ),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
     "Llama_Nemotron_Nano_VL": _HfExamplesInfo(
         "nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1",
@@ -1489,6 +1501,18 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_num_seqs=32,
         min_transformers_version="4.56.3",  # Required for Qwen3Next
     ),
+    "MuseGlimmerAssistantModel": _HfExamplesInfo(
+        "meta-models/Muse-Glimmer-30B",
+        speculative_model="meta-models/Muse-Glimmer-30B-assistant",
+        max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
+        max_num_seqs=32,
+    ),
+    "DFlashMuseGlimmerAssistantModel": _HfExamplesInfo(
+        "meta-models/Muse-Glimmer-30B",
+        speculative_model="meta-models/Muse-Glimmer-30B-assistant",
+        max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
+        max_num_seqs=32,
+    ),
     # [DSpark]
     "DSparkDraftModel": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Pro-DSpark",
@@ -1656,9 +1680,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     "Dots3NoteMTPModel": _HfExamplesInfo(
-        "rednote-hilab/dots3.note",
-        speculative_model="rednote-hilab/dots3.note",
-        trust_remote_code=True,
+        "dots-studio/dots3-note-prev",
+        speculative_model="dots-studio/dots3-note-prev",
         is_available_online=False,
     ),
     "Gemma4MTPModel": _HfExamplesInfo(
