@@ -99,3 +99,58 @@ steps:
     'pip install vllm-gguf-plugin \>= 0.0.2 || true &&
     cd tests &&
     pytest -v -s plugins_tests/gguf || true'
+- label: BitsAndBytes Plugin
+  device: intel_gpu
+  timeout_in_minutes: 30
+  optional: true
+  soft_fail: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 1+
+  _raw_old_commands:
+  - unset VLLM_GPU_SYNC_CHECK
+  - pip install "vllm-bnb-plugin >= 0.0.1"
+  - pytest -v -s plugins_tests/bitsandbytes -m 'not distributed'
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization
+  - tests/plugins_tests/bitsandbytes
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pip install vllm-bnb-plugin \>= 0.0.1 || true &&
+    cd tests &&
+    pytest -v -s plugins_tests/bitsandbytes -m not distributed || true'
+- label: BitsAndBytes Plugin (2 GPUs)
+  device: intel_gpu
+  timeout_in_minutes: 15
+  num_devices: 2
+  optional: true
+  soft_fail: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: debug
+    gpu: 2+
+  _raw_old_commands:
+  - unset VLLM_GPU_SYNC_CHECK
+  - pip install "vllm-bnb-plugin >= 0.0.1"
+  - pytest -v -s plugins_tests/bitsandbytes -m 'distributed(num_gpus=2)'
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization
+  - tests/plugins_tests/bitsandbytes
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pip install vllm-bnb-plugin \>= 0.0.1 || true &&
+    cd tests &&
+    pytest -v -s plugins_tests/bitsandbytes -m distributed(num_gpus=2) || true'
