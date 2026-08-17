@@ -105,7 +105,7 @@ ENV UV_INDEX_STRATEGY=first-match
 RUN --mount=type=cache,target=/root/.cache/uv \
     rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
     microdnf install --nodocs -y \
-    libomp libicu tar autoconf automake libtool findutils openssl numactl numactl-devel \
+    libomp libicu tar autoconf automake libtool findutils openssl openblas-devel numactl numactl-devel \
     pkgconfig xsimd gcc-toolset-14 libsndfile \
     libtiff libjpeg openjpeg2 zlib zeromq \
     freetype lcms2 libwebp tcl tk utf8proc \
