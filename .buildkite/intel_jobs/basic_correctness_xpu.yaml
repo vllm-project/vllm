@@ -21,6 +21,7 @@ steps:
   - pytest -v -s basic_correctness/test_cpu_offload.py
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/basic_correctness/test_basic_correctness
   - tests/basic_correctness/test_cpu_offload
   - tests/basic_correctness/test_mem.py
