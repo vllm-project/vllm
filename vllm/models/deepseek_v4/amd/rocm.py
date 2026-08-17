@@ -507,7 +507,9 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         positions: torch.Tensor,
         o_padded: torch.Tensor,
     ) -> None:
-        if self.aux_stream_list is None or not torch.cuda.is_current_stream_capturing():
+        capturing = torch.cuda.is_current_stream_capturing()
+        profile_run = not isinstance(get_forward_context().attn_metadata, dict)
+        if self.aux_stream_list is None or (not capturing and not profile_run):
             # Serial fallback: clear the streams so the base path (input-GEMM
             # fan-out + overlap) runs fully sequentially — eager multi-stream
             # hangs on HIP. Restored afterwards for the capture-time fork.
@@ -517,9 +519,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 return super()._attn_pipeline(hidden_states, positions, o_padded)
             finally:
                 self.aux_stream_list = saved_streams
-        # CSA multi-stream fires only while capturing: eager multi-stream
-        # accumulates launches across layers and is racy on HIP. Eager /
-        # replay falls back to the serial base path.
+        # CSA multi-stream fires only while capturing, plus once during the
+        # profile run: serving-time eager multi-stream accumulates launches
+        # across layers and is racy on HIP, and the profile-run fork warms the
+        # aux streams' hipBLAS handles (their lazy workspace allocation during
+        # capture would fail with hipErrorStreamCaptureUnsupported).
         # Skip the base input-GEMM/rmsnorm prologue — the fork in
         # _prepare_and_attn covers the input GEMMs and the compressor chains.
         # Dispatching through _prepare_and_attn_fn keeps the whole overlap
@@ -558,13 +562,16 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 positions,
                 o_padded,
             )
-        if not torch.cuda.is_current_stream_capturing():
+        if not torch.cuda.is_current_stream_capturing() and isinstance(
+            get_forward_context().attn_metadata, dict
+        ):
             # Sentinel dispatch reached outside capture (MRV1 eager
             # sub-segment at capture time, or its piecewise replay): the
             # prologue was skipped, so re-run the full serial base pipeline
             # with the streams cleared (eager multi-stream hangs on HIP).
             # The breakable wrapper runs the nested dispatch directly once
-            # capturing is cleared — no recursion.
+            # capturing is cleared — no recursion. The profile run is excluded:
+            # it must fork to warm the aux streams' hipBLAS handles.
             saved_streams = self.aux_stream_list
             self.aux_stream_list = None
             try:
