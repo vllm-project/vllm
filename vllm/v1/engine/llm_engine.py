@@ -91,6 +91,7 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
+        self.paged_shm_server = maybe_start_paged_shm_server(self.model_config)
         self.renderer = renderer = renderer_from_config(self.vllm_config)
 
         # Convert EngineInput --> EngineCoreRequest.
@@ -103,8 +104,6 @@ class LLMEngine:
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
         )
-
-        self.paged_shm_server = maybe_start_paged_shm_server(self.model_config)
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(

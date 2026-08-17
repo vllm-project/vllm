@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
 import time
-import weakref
 from collections.abc import Collection
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 
 import numpy as np
 import torch
@@ -58,11 +57,7 @@ class EncoderRunner:
             max_num_tokens, hidden_size, dtype=dtype, device=device
         )
 
-        self._resources = ExitStack()
-        self._finalizer = weakref.finalize(self, self._resources.close)
         self._pshm_tensor_ipc = PagedShmTensorIPC(vllm_config.model_config, pin=True)
-        self._pshm_tensor_ipc.connect()
-        self._resources.callback(self._pshm_tensor_ipc.shutdown)
 
     def prepare_mm_inputs(
         self, scheduled_encoder_inputs: dict[str, list[int]]

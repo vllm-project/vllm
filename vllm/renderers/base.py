@@ -2,11 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import time
-import weakref
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
+from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
 
@@ -81,10 +79,6 @@ class BaseRenderer(ABC, Generic[_T]):
         self.model_config = config.model_config
         self.api_process_rank = config.parallel_config._api_process_rank
 
-        self._resources = ExitStack()
-        self._resources.callback(logger.debug, "[shutdown] BaseRenderer")
-        self._finalizer = weakref.finalize(self, self._resources.close)
-
         self.tokenizer = tokenizer
 
         # Thread pool executor for blocking tokenizer operations.  The
@@ -92,15 +86,12 @@ class BaseRenderer(ABC, Generic[_T]):
         # so it is safe to run tokenization and MM preprocessing concurrently.
         pool_workers = config.model_config.renderer_num_workers
         self._executor = ThreadPoolExecutor(max_workers=pool_workers)
-        self._resources.callback(self._executor.shutdown, wait=False)
 
         # Separate single-worker executor so tokenization never queues behind
         # MM preprocessing; must stay single-worker per #38418 (P0/P1 order).
-        self._mm_executor = ThreadPoolExecutor(max_workers=1)
-        self._resources.callback(self._mm_executor.shutdown, wait=False)
+        self._mm_executor: Executor = ThreadPoolExecutor(max_workers=1)
 
         self._pshm_tensor_ipc = PagedShmTensorIPC(self.config.model_config)
-        self._resources.callback(self._pshm_tensor_ipc.shutdown)
 
         # Offload tokenization to the thread pool. The sync
         # ``_tokenize_prompt`` already encapsulates the unified ``__call__``
@@ -145,7 +136,6 @@ class BaseRenderer(ABC, Generic[_T]):
 
             if mm_processor_cache:
                 self._mm_cache_stats = MultiModalCacheStats()
-                self._resources.callback(mm_processor_cache.close)
 
             # A second processor with its own processor-only cache.
             # Used by the tokenize endpoint so that tokenize-only
@@ -296,15 +286,23 @@ class BaseRenderer(ABC, Generic[_T]):
                 finally:
                     self._clear_processor_cache(self._readonly_mm_processor)
 
-        self._pshm_tensor_ipc.connect()
-
     async def clear_mm_cache_async(self) -> None:
         """Serialize clear_mm_cache through the multimodal executor to avoid
         races with concurrent process_inputs on the mm_processor_cache."""
         await self._clear_mm_cache_async()
 
     def shutdown(self) -> None:
-        self._resources.close()
+        mm_processor_cache = self.mm_processor_cache
+        if mm_processor_cache is not None:
+            mm_processor_cache.close()
+
+        if executor := getattr(self, "_executor", None):
+            executor.shutdown(wait=False)
+
+        if (
+            mm_executor := getattr(self, "_mm_executor", None)
+        ) is not None and mm_executor is not executor:
+            mm_executor.shutdown(wait=False)
 
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:
