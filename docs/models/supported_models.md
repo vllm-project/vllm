@@ -289,6 +289,21 @@ os.environ["http_proxy"] = "http://your.proxy.server:port"
 os.environ["https_proxy"] = "http://your.proxy.server:port"
 ```
 
+### MatrixHub
+
+[MatrixHub](https://github.com/matrixhub-ai/matrixhub) is a self-hosted model registry and distribution layer that caches models from upstream hubs and serves them over a Hugging Face-compatible API inside your own network.
+
+Since the API is Hugging Face-compatible, you only need to point `HF_ENDPOINT` at your MatrixHub instance:
+
+```shell
+export HF_ENDPOINT="http://<your-matrixhub-address>"
+vllm serve Qwen/Qwen3-0.6B
+```
+
+vLLM then downloads model weights from MatrixHub over the internal network instead of the public Hugging Face Hub, which is useful for air-gapped clusters and for avoiding repeated downloads across nodes.
+
+See the [MatrixHub guide for vLLM](https://matrixhub.ai/docs/guides/use-with-vllm/) for an end-to-end walkthrough, including Docker and Kubernetes deployment examples.
+
 ### ModelScope
 
 To use models from [ModelScope](https://www.modelscope.cn) instead of Hugging Face Hub, set an environment variable:
