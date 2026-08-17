@@ -182,6 +182,7 @@ def run_cutlass_moe_fp8(
             padded_M,
             N,
             K,
+            local_E * padded_M <= 64,
         )
 
         w1_scale = w1_scale.reshape(w1_scale.size(0), -1)
@@ -1150,7 +1151,6 @@ def run_cutlass_moe_w4a8_fp8(
     activation_config: ApplyMoEActivationConfig | None = None,
 ):
     a1q = hidden_states
-    M = a1q.size(0)
     local_E = w1.size(0)
     device = a1q.device
     _, K, N_packed = w2.shape
@@ -1167,12 +1167,8 @@ def run_cutlass_moe_w4a8_fp8(
     assert w1_chan_scale.dtype == torch.float32
     assert w2_chan_scale.dtype == torch.float32
     assert w1.size(0) == w2.size(0), "Weights expert number mismatch"
-    assert a1q_scale is not None
     assert a2_scale is None
     assert out_dtype in [torch.bfloat16], f"Invalid output dtype: {out_dtype}"
-    if expert_map is not None:
-        assert expert_num_tokens is None
-    assert not use_batched_format, "batched format not supported yet"
     assert group_size == 128, f"Only group size 128 supported but got {group_size=}"
 
     assert global_num_experts != -1
@@ -1181,35 +1177,86 @@ def run_cutlass_moe_w4a8_fp8(
     )
 
     topk = topk_ids.size(1)
-    a1q_perm = _resize_cache(workspace2.view(dtype=torch.float8_e4m3fn), (M * topk, K))
-    mm1_out = _resize_cache(workspace13, (M * topk, N * 2))
-    act_out = _resize_cache(workspace2, (M * topk, N))
-    # original workspace are based on input hidden_states dtype (bf16)
-    quant_out = _resize_cache(
-        workspace13.view(dtype=torch.float8_e4m3fn), (M * topk, N)
-    )
-    mm2_out = _resize_cache(workspace2, (M * topk, K))
-
     problem_sizes1 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
     problem_sizes2 = torch.empty((local_E, 3), dtype=torch.int32, device=device)
 
-    num_expert = global_num_experts if expert_map is None else expert_map.size(0)
-    # permuted a1q reuses workspace2
-    a1q, a1q_scale, expert_first_token_offset, inv_perm, _ = moe_permute(
-        a1q,
-        a1q_scale,
-        topk_ids,
-        num_expert,
-        local_E,
-        expert_map,
-        permuted_hidden_states=a1q_perm,
-        scratch=permute_scratch,
-    )
-    # for RS gemm SwapAB is always enabled (swap logical M, N in the problem shape).
-    ops.get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
-        expert_first_token_offset, problem_sizes1, problem_sizes2, N, K, True
-    )
-    expert_offsets = expert_first_token_offset[:-1]
+    if use_batched_format:
+        assert expert_num_tokens is not None
+        assert expert_num_tokens.shape == (local_E,)
+        assert expert_num_tokens.dtype == torch.int32
+        assert expert_num_tokens.is_cuda
+        assert expert_num_tokens.is_contiguous()
+        assert a1q.dim() == 3
+        assert a1q.shape[0] == local_E
+        assert a1q.shape[2] == K
+        assert a1q.dtype == torch.float8_e4m3fn
+        assert a1q.is_contiguous()
+        assert a1q_scale is not None
+        assert a1q_scale.shape == (*a1q.shape[:2], 1)
+        assert a1q_scale.dtype == torch.float32
+        assert a1q_scale.is_contiguous()
+
+        padded_m = a1q.size(1)
+        assert output.shape == (local_E, padded_m, K)
+        assert output.is_contiguous()
+        mm1_out = _resize_cache(workspace13, (local_E * padded_m, N * 2))
+        act_out = _resize_cache(workspace2, (local_E * padded_m, N))
+        quant_out = _resize_cache(
+            workspace13.view(dtype=torch.float8_e4m3fn),
+            (local_E * padded_m, N),
+        )
+        mm2_out = _resize_cache(workspace2, (local_E * padded_m, K))
+
+        expert_offsets = torch.empty((local_E,), dtype=torch.int32, device=device)
+        ops.get_cutlass_batched_moe_mm_data(
+            expert_offsets,
+            problem_sizes1,
+            problem_sizes2,
+            expert_num_tokens,
+            local_E,
+            padded_m,
+            N,
+            K,
+            True,
+        )
+        a1q = a1q.reshape(local_E * padded_m, K)
+        a1q_scale = a1q_scale.reshape(local_E * padded_m, 1)
+        expert_offsets = expert_offsets.to(torch.int64)
+    else:
+        assert expert_num_tokens is None
+        assert a1q_scale is not None
+        M = a1q.size(0)
+        a1q_perm = _resize_cache(
+            workspace2.view(dtype=torch.float8_e4m3fn), (M * topk, K)
+        )
+        mm1_out = _resize_cache(workspace13, (M * topk, N * 2))
+        act_out = _resize_cache(workspace2, (M * topk, N))
+        quant_out = _resize_cache(
+            workspace13.view(dtype=torch.float8_e4m3fn), (M * topk, N)
+        )
+        mm2_out = _resize_cache(workspace2, (M * topk, K))
+
+        num_expert = global_num_experts if expert_map is None else expert_map.size(0)
+        a1q, a1q_scale, expert_first_token_offset, inv_perm, _ = moe_permute(
+            a1q,
+            a1q_scale,
+            topk_ids,
+            num_expert,
+            local_E,
+            expert_map,
+            permuted_hidden_states=a1q_perm,
+            scratch=permute_scratch,
+        )
+        # W4A8 grouped GEMM always swaps logical M and N.
+        ops.get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
+            expert_first_token_offset,
+            problem_sizes1,
+            problem_sizes2,
+            N,
+            K,
+            True,
+        )
+        expert_offsets = expert_first_token_offset[:-1]
 
     ops.cutlass_w4a8_moe_mm(
         mm1_out,
@@ -1254,15 +1301,19 @@ def run_cutlass_moe_w4a8_fp8(
         s_strides2,
     )
 
-    # for non-chunking mode the output is resized from workspace13
-    # so we need to make sure mm2_out uses workspace2.
-    moe_unpermute(
-        out=output,
-        permuted_hidden_states=mm2_out,
-        topk_weights=topk_weights,
-        inv_permuted_idx=inv_perm,
-        expert_first_token_offset=expert_first_token_offset,
-    )
+    if use_batched_format:
+        output.copy_(
+            mm2_out.reshape(local_E, padded_m, K),
+            non_blocking=True,
+        )
+    else:
+        moe_unpermute(
+            out=output,
+            permuted_hidden_states=mm2_out,
+            topk_weights=topk_weights,
+            inv_permuted_idx=inv_perm,
+            expert_first_token_offset=expert_first_token_offset,
+        )
 
 
 class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
@@ -1273,8 +1324,15 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
         b_strides1: torch.Tensor,
         b_strides2: torch.Tensor,
         group_size: int,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
     ):
-        super().__init__(moe_config=moe_config, quant_config=quant_config)
+        super().__init__(
+            moe_config=moe_config,
+            quant_config=quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=num_dispatchers,
+        )
 
         e = moe_config.num_local_experts
         n = moe_config.intermediate_size_per_partition
@@ -1406,12 +1464,14 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
         assert self.w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert self.w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
 
-        expert_num_tokens = None
-
         use_batched_format = (
             self.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
         )
-        assert not use_batched_format, "batched format not supported"
+        expert_num_tokens = (
+            expert_tokens_meta.expert_num_tokens
+            if use_batched_format and expert_tokens_meta is not None
+            else None
+        )
 
         in_dtype = hidden_states.dtype
 
@@ -1450,3 +1510,49 @@ class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
             self._get_permute_scratch(),
             activation_config=self.activation_config,
         )
+
+
+class CutlassBatchedExpertsW4A8Fp8(CutlassExpertsW4A8Fp8):
+    """Batched CUTLASS W4A8 experts for DeepEP low-latency dispatch."""
+
+    @staticmethod
+    def activation_format() -> mk.FusedMoEActivationFormat:
+        return mk.FusedMoEActivationFormat.BatchedExperts
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return moe_parallel_config.use_deepep_ll_kernels
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        return TopKWeightAndReduceDelegate()
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        max_num_tokens = self.max_num_tokens
+        num_dispatchers = self.num_dispatchers
+        assert max_num_tokens is not None
+        assert num_dispatchers is not None
+
+        experts_per_worker = self.moe_config.num_local_experts
+        padded_m = max_num_tokens * num_dispatchers
+        activation_out_dim = self.adjust_N_for_activation(N, activation)
+        workspace13 = (experts_per_worker, padded_m, max(N, K))
+        workspace2 = (
+            experts_per_worker,
+            padded_m,
+            max(activation_out_dim, K),
+        )
+        output = (experts_per_worker, padded_m, K)
+        return workspace13, workspace2, output
+
+    def _get_permute_scratch(self) -> MoEPermuteScratch | None:
+        return None

@@ -313,20 +313,20 @@ void get_cutlass_batched_moe_mm_data_caller(
     torch::stable::Tensor& problem_sizes2,
     const torch::stable::Tensor& expert_num_tokens,
     const int64_t num_local_experts, const int64_t padded_m, const int64_t n,
-    const int64_t k) {
+    const int64_t k, const bool swap_ab) {
   const torch::stable::accelerator::DeviceGuard device_guard(
       expert_offsets.get_device_index());
   auto stream = get_current_cuda_stream(expert_offsets.get_device_index());
 
-  if (num_local_experts * padded_m > SWAP_AB_THRESHOLD) {
-    compute_batched_moe_data<false><<<1, num_local_experts, 0, stream>>>(
+  if (swap_ab) {
+    compute_batched_moe_data<true><<<1, num_local_experts, 0, stream>>>(
         static_cast<int32_t*>(expert_offsets.data_ptr()),
         static_cast<int32_t*>(problem_sizes1.data_ptr()),
         static_cast<int32_t*>(problem_sizes2.data_ptr()),
         static_cast<const int32_t*>(expert_num_tokens.data_ptr()), padded_m, n,
         k);
   } else {
-    compute_batched_moe_data<true><<<1, num_local_experts, 0, stream>>>(
+    compute_batched_moe_data<false><<<1, num_local_experts, 0, stream>>>(
         static_cast<int32_t*>(expert_offsets.data_ptr()),
         static_cast<int32_t*>(problem_sizes1.data_ptr()),
         static_cast<int32_t*>(problem_sizes2.data_ptr()),

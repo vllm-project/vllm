@@ -3,6 +3,7 @@
 import copy
 import dataclasses
 from math import prod
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -29,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
+    CutlassBatchedExpertsW4A8Fp8,
     CutlassExpertsFp4,
     CutlassExpertsFp8,
     CutlassExpertsMxfp4,
@@ -36,7 +38,19 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     run_cutlass_moe_fp8,
 )
 from vllm.model_executor.layers.fused_moe.oracle import nvfp4 as nvfp4_oracle
+from vllm.model_executor.layers.fused_moe.oracle.w4a8 import (
+    W4A8MoeBackend,
+    make_w4a8_moe_quant_config,
+    select_w4a8_moe_backend,
+)
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate,
+)
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTokenSym,
+    kInt4Static,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -129,6 +143,119 @@ def test_nvfp4_clamp_allows_shared_activation_backends(
     )
 
     assert selected == expected
+
+
+def make_w4a8_deepep_ll_config():
+    config = make_dummy_moe_config(
+        num_experts=8,
+        num_local_experts=1,
+        experts_per_token=2,
+        hidden_dim=2048,
+        intermediate_size=1024,
+        max_num_tokens=16,
+    )
+    config.moe_parallel_config = dataclasses.replace(
+        config.moe_parallel_config,
+        dp_size=8,
+        ep_size=8,
+        use_ep=True,
+        all2all_backend="deepep_low_latency",
+    )
+    return config
+
+
+def make_w4a8_quant_config():
+    return make_w4a8_moe_quant_config(
+        w1_scale=torch.empty((1, 1), dtype=torch.float8_e4m3fn),
+        w2_scale=torch.empty((1, 1), dtype=torch.float8_e4m3fn),
+        g1_alphas=torch.empty((1, 2048), dtype=torch.float32),
+        g2_alphas=torch.empty((1, 2048), dtype=torch.float32),
+    )
+
+
+def test_cutlass_w4a8_selects_batched_experts_for_deepep_ll():
+    config = make_w4a8_deepep_ll_config()
+    with patch.object(
+        CutlassExpertsW4A8Fp8,
+        "_supports_current_device",
+        return_value=True,
+    ):
+        backend, experts_cls = select_w4a8_moe_backend(config)
+
+    assert backend is W4A8MoeBackend.CUTLASS
+    assert experts_cls is CutlassBatchedExpertsW4A8Fp8
+
+
+def test_cutlass_w4a8_batched_workspace_contract():
+    config = make_w4a8_deepep_ll_config()
+    config.device = "cpu"
+    experts = CutlassBatchedExpertsW4A8Fp8(
+        moe_config=config,
+        quant_config=make_w4a8_quant_config(),
+        b_strides1=torch.empty(1, dtype=torch.int64),
+        b_strides2=torch.empty(1, dtype=torch.int64),
+        group_size=128,
+        max_num_tokens=16,
+        num_dispatchers=8,
+    )
+
+    assert isinstance(
+        experts.finalize_weight_and_reduce_impl(),
+        TopKWeightAndReduceDelegate,
+    )
+    assert not experts.expects_unquantized_inputs
+    assert experts._get_permute_scratch() is None
+    assert experts.workspace_shapes(
+        M=16,
+        N=2048,
+        K=2048,
+        topk=2,
+        global_num_experts=8,
+        local_num_experts=1,
+        expert_tokens_meta=None,
+        activation=MoEActivation.SILU,
+    ) == (
+        (1, 128, 2048),
+        (1, 128, 2048),
+        (1, 128, 2048),
+    )
+
+
+def test_cutlass_w4a8_batched_support_is_deepep_ll_only():
+    config = make_w4a8_deepep_ll_config()
+    with patch.object(
+        CutlassExpertsW4A8Fp8,
+        "_supports_current_device",
+        return_value=True,
+    ):
+        supported, reason = CutlassBatchedExpertsW4A8Fp8.is_supported_config(
+            CutlassBatchedExpertsW4A8Fp8,
+            config,
+            kInt4Static,
+            kFp8DynamicTokenSym,
+            mk.FusedMoEActivationFormat.BatchedExperts,
+        )
+    assert supported
+    assert reason is None
+
+    config.moe_parallel_config = dataclasses.replace(
+        config.moe_parallel_config,
+        all2all_backend="nixl_ep",
+    )
+    with patch.object(
+        CutlassExpertsW4A8Fp8,
+        "_supports_current_device",
+        return_value=True,
+    ):
+        supported, reason = CutlassBatchedExpertsW4A8Fp8.is_supported_config(
+            CutlassBatchedExpertsW4A8Fp8,
+            config,
+            kInt4Static,
+            kFp8DynamicTokenSym,
+            mk.FusedMoEActivationFormat.BatchedExperts,
+        )
+    assert not supported
+    assert reason is not None
 
 
 @dataclasses.dataclass
