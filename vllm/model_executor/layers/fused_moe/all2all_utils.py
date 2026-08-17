@@ -6,6 +6,7 @@ from typing import Any
 import torch
 
 from vllm.config import get_current_vllm_config
+from vllm.config import parallel as parallel_config
 from vllm.distributed import (
     get_ep_group,
 )
@@ -20,6 +21,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     BatchedPrepareAndFinalize,
+    MoEPrepareFinalizeFactory,
     make_moe_prepare_and_finalize_naive_dp_ep,
     make_moe_prepare_and_finalize_no_dp_ep,
 )
@@ -38,6 +40,34 @@ from vllm.utils.import_utils import (
 )
 
 logger = init_logger(__name__)
+
+_PREPARE_FINALIZE_FACTORIES: dict[str, type[MoEPrepareFinalizeFactory]] = {}
+
+
+def register_moe_prepare_finalize_factory(
+    factory: type[MoEPrepareFinalizeFactory],
+) -> type[MoEPrepareFinalizeFactory]:
+    """Register a MoE Prepare/Finalize factory.
+
+    Args:
+        factory: Factory class to register.
+
+    Raises:
+        ValueError: If its backend name is empty or already registered.
+    """
+    backend_name = factory.backend_name
+    if not backend_name:
+        raise ValueError("MoE all2all backend name must not be empty")
+    previous = _PREPARE_FINALIZE_FACTORIES.get(backend_name)
+    if previous is not None and previous is not factory:
+        raise ValueError(
+            f"MoE Prepare/Finalize backend {backend_name!r} is already registered"
+        )
+    _PREPARE_FINALIZE_FACTORIES[backend_name] = factory
+    if factory.supports_sequence_parallel:
+        parallel_config.SEQUENCE_PARALLEL_MOE_BACKENDS.add(backend_name)
+    return factory
+
 
 if current_platform.is_cuda_alike():
     if has_deep_ep():
@@ -153,6 +183,19 @@ def maybe_make_prepare_finalize(
             return make_moe_prepare_and_finalize_no_dp_ep(use_monolithic)
 
     all2all_manager = get_ep_all2all_manager(eep_stage)
+    registered_prepare_finalize_factory = _PREPARE_FINALIZE_FACTORIES.get(
+        moe.moe_parallel_config.all2all_backend
+    )
+    if registered_prepare_finalize_factory is not None:
+        return registered_prepare_finalize_factory.create(
+            moe=moe,
+            quant_config=quant_config,
+            routing_tables=routing_tables,
+            allow_new_interface=allow_new_interface,
+            use_monolithic=use_monolithic,
+            eep_stage=eep_stage,
+            all2all_manager=all2all_manager,
+        )
 
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
 
