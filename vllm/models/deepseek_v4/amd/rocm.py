@@ -502,13 +502,16 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         positions: torch.Tensor,
         o_padded: torch.Tensor,
     ) -> None:
-        if self.aux_stream_list is None:
+        if self.aux_stream_list is None or not torch.cuda.is_current_stream_capturing():
             return super()._attn_pipeline(hidden_states, positions, o_padded)
-        # CSA multi-stream: skip the base input-GEMM/rmsnorm prologue — the
-        # fork in _prepare_and_attn covers the input GEMMs and the compressor
-        # chains. Dispatching through _prepare_and_attn_fn keeps the whole
-        # overlap inside the eager-break region (required by MRV1 piecewise
-        # graphs); the skipped projection outputs are None sentinels.
+        # CSA multi-stream fires only while capturing: eager multi-stream
+        # accumulates launches across layers and is racy on HIP. Eager /
+        # replay falls back to the serial base path.
+        # Skip the base input-GEMM/rmsnorm prologue — the fork in
+        # _prepare_and_attn covers the input GEMMs and the compressor chains.
+        # Dispatching through _prepare_and_attn_fn keeps the whole overlap
+        # inside the eager-break region (required by MRV1 piecewise graphs);
+        # the skipped projection outputs are None sentinels.
         self._prepare_and_attn_fn(
             hidden_states,
             None,
@@ -531,7 +534,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         positions: torch.Tensor,
         o_padded: torch.Tensor,
     ) -> None:
-        if self.aux_stream_list is None:
+        if self.aux_stream_list is None or qr is not None:
             return super()._prepare_and_attn(
                 hidden_states,
                 qr,
@@ -542,6 +545,13 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 positions,
                 o_padded,
             )
+        if not torch.cuda.is_current_stream_capturing():
+            # Sentinel dispatch reached outside capture (MRV1 eager
+            # sub-segment at capture time, or its piecewise replay): the
+            # prologue was skipped, so re-run the full serial base pipeline.
+            # The breakable wrapper runs the nested dispatch directly once
+            # capturing is cleared — no recursion.
+            return super()._attn_pipeline(hidden_states, positions, o_padded)
 
         # CSA multi-stream: fork before the input GEMMs and join after the
         # compressor chains. Each stream runs a self-contained chain straight
