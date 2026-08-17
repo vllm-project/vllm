@@ -9,8 +9,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
 )
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.utils.flashinfer import nvfp4_block_scale_interleave
+from vllm.model_executor.layers.fused_moe.utils import (
+    moe_kernel_quantize_input,
+    restore_dispatched_scale_layout,
+)
 
 
 def _quantize_and_setup_dispatch(
@@ -57,14 +59,11 @@ def _unwrap_scale_and_prepare_for_moe(
     quant_config: FusedMoEQuantConfig,
 ) -> torch.Tensor:
     assert scales is not None and len(scales) == 1
-    a1q_scale = scales[0]
     # Apply swizzling after a2a if the MoE kernel needs it.
-    if quant_config.quant_dtype == "nvfp4" and quant_config.is_scale_swizzled:
-        assert a1q_scale is not None
-        if a1q_scale.element_size() == 1:
-            a1q_scale = a1q_scale.view(torch.uint8)
-        a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
-
+    a1q_scale = restore_dispatched_scale_layout(
+        scales[0], quant_config.quant_dtype, quant_config.is_scale_swizzled
+    )
+    assert a1q_scale is not None
     return a1q_scale
 
 
