@@ -495,6 +495,11 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             # the compressor sequentially via the base _prepare_and_attn() HCA
             # path.
             self.aux_stream_list = None
+        else:
+            # The ROCm path never uses the indexer-inner overlap: the fork
+            # path calls forward_q directly, and the serial fallback must not
+            # fire it eagerly (eager multi-stream hangs on HIP).
+            self.indexer.aux_stream = None
 
     def _attn_pipeline(
         self,
@@ -503,7 +508,15 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         o_padded: torch.Tensor,
     ) -> None:
         if self.aux_stream_list is None or not torch.cuda.is_current_stream_capturing():
-            return super()._attn_pipeline(hidden_states, positions, o_padded)
+            # Serial fallback: clear the streams so the base path (input-GEMM
+            # fan-out + overlap) runs fully sequentially — eager multi-stream
+            # hangs on HIP. Restored afterwards for the capture-time fork.
+            saved_streams = self.aux_stream_list
+            self.aux_stream_list = None
+            try:
+                return super()._attn_pipeline(hidden_states, positions, o_padded)
+            finally:
+                self.aux_stream_list = saved_streams
         # CSA multi-stream fires only while capturing: eager multi-stream
         # accumulates launches across layers and is racy on HIP. Eager /
         # replay falls back to the serial base path.
@@ -548,10 +561,16 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         if not torch.cuda.is_current_stream_capturing():
             # Sentinel dispatch reached outside capture (MRV1 eager
             # sub-segment at capture time, or its piecewise replay): the
-            # prologue was skipped, so re-run the full serial base pipeline.
+            # prologue was skipped, so re-run the full serial base pipeline
+            # with the streams cleared (eager multi-stream hangs on HIP).
             # The breakable wrapper runs the nested dispatch directly once
             # capturing is cleared — no recursion.
-            return super()._attn_pipeline(hidden_states, positions, o_padded)
+            saved_streams = self.aux_stream_list
+            self.aux_stream_list = None
+            try:
+                return super()._attn_pipeline(hidden_states, positions, o_padded)
+            finally:
+                self.aux_stream_list = saved_streams
 
         # CSA multi-stream: fork before the input GEMMs and join after the
         # compressor chains. Each stream runs a self-contained chain straight
