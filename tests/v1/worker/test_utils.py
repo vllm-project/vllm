@@ -82,16 +82,17 @@ def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):
 
 def test_hisparse_runtime_invalidates_only_scheduled_request_states():
     runtime = object.__new__(hisparse_runtime_module.HiSparseRuntime)
-    runtime._host_cache = torch.empty(1)
     runtime.device = torch.device("cpu")
-    runtime.device_global_indices = torch.tensor(
-        [[6, 7, 8], [6, 9, 10], [6, 11, 12]], dtype=torch.int32
+    runtime.index_group = SimpleNamespace(
+        device_global_indices=torch.tensor(
+            [[6, 7, 8], [6, 9, 10], [6, 11, 12]], dtype=torch.int32
+        )
     )
 
     runtime.invalidate_slots(torch.tensor([6]), torch.tensor([1]))
 
     torch.testing.assert_close(
-        runtime.device_global_indices,
+        runtime.index_group.device_global_indices,
         torch.tensor([[6, 7, 8], [-1, 9, 10], [6, 11, 12]], dtype=torch.int32),
     )
 
@@ -150,16 +151,14 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
     second_leader = make_cache_handle(True)
     second_follower = make_cache_handle(False)
 
-    assert first_follower.runtime.leader is first_leader.runtime
-    assert second_follower.runtime.leader is second_leader.runtime
-    assert first_follower.runtime._plan is first_leader.runtime._plan
-    assert second_follower.runtime._plan is second_leader.runtime._plan
-    assert first_leader.runtime._plan is not second_leader.runtime._plan
+    assert first_follower.runtime.index_group is first_leader.runtime.index_group
+    assert second_follower.runtime.index_group is second_leader.runtime.index_group
+    assert first_leader.runtime.index_group is not second_leader.runtime.index_group
+    assert first_leader.runtime.index_group.leader is first_leader.runtime
+    assert second_leader.runtime.index_group.leader is second_leader.runtime
     assert len(plans) == len(streams) == 2
-    assert first_follower.runtime.device_global_indices is None
-    assert first_follower.runtime.lru_slots is None
-    assert second_follower.runtime.device_global_indices is None
-    assert second_follower.runtime.lru_slots is None
+    assert not first_follower.runtime.is_group_leader
+    assert not second_follower.runtime.is_group_leader
 
 
 def test_hisparse_worker_invalidates_only_index_group_leaders(monkeypatch):

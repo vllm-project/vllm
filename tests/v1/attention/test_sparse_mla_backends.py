@@ -1421,13 +1421,12 @@ def fallback_swap_in(
     Writes resolved slots into ``hot_indices`` in place. Misses are always
     served from the runtime's host pool.
     """
-    assert runtime._host_cache is not None
     num_tokens, _ = global_indices.shape
     hot_indices.fill_(-1)
 
     global_cpu = global_indices.cpu().tolist()
-    dgi_cpu = runtime.device_global_indices[:num_tokens].cpu().tolist()
-    lru_cpu = runtime.lru_slots[:num_tokens].cpu().tolist()
+    dgi_cpu = runtime.index_group.device_global_indices[:num_tokens].cpu().tolist()
+    lru_cpu = runtime.index_group.lru_slots[:num_tokens].cpu().tolist()
 
     miss_src: list[int] = []
     miss_dst: list[int] = []
@@ -1463,17 +1462,16 @@ def fallback_swap_in(
 
         lru_cpu[row] = evictables[len(misses) :] + miss_slots + hit_slots
 
-    runtime.device_global_indices[:num_tokens] = torch.tensor(
+    runtime.index_group.device_global_indices[:num_tokens] = torch.tensor(
         dgi_cpu, dtype=torch.int32, device=runtime.device
     )
-    runtime.lru_slots[:num_tokens] = torch.tensor(
+    runtime.index_group.lru_slots[:num_tokens] = torch.tensor(
         lru_cpu, dtype=torch.int16, device=runtime.device
     )
     if miss_src:
-        assert runtime.hot is not None
         src_cpu = torch.tensor(miss_src, dtype=torch.long)
         dst = torch.tensor(miss_dst, dtype=torch.long, device=runtime.device)
-        rows = runtime._host_cache[src_cpu].to(runtime.device)
+        rows = runtime.host_cache[src_cpu].to(runtime.device)
         runtime.hot.cache.view(-1, runtime.row_width).index_copy_(0, dst, rows)
 
 
@@ -1485,6 +1483,7 @@ def _make_hisparse_runtime(
     row_width: int = 8,
     block_size: int = 64,
     max_swap_rows: int | None = None,
+    index_group: hisparse_runtime.HiSparseIndexGroup | None = None,
 ) -> HiSparseRuntime:
     runtime = HiSparseRuntime(
         config=ResolvedHiSparseConfig(
@@ -1497,6 +1496,7 @@ def _make_hisparse_runtime(
         kv_dtype=torch.float32,
         device=DEVICE_TYPE,
         max_swap_rows=max_swap_rows,
+        index_group=index_group,
     )
     blocks_per_request = cdiv(runtime.region_stride, block_size)
     # Leave one extra physical block for resident-tier tests. HMA group layouts
@@ -1545,8 +1545,6 @@ def _make_hisparse_cache_handle(
 
 
 def _hisparse_hot_slot(runtime: HiSparseRuntime, row: int, logical: int) -> int:
-    assert runtime.hot is not None
-    assert runtime.hot_block_table is not None
     block_size = runtime.hot.cache.shape[1]
     block = runtime.hot_block_table[row, logical // block_size]
     return int(block.item()) * block_size + logical % block_size
@@ -1578,9 +1576,8 @@ def test_hisparse_uses_graph_stable_request_state_mapping():
     )
     torch.accelerator.synchronize()
 
-    assert runtime.device_global_indices is not None
-    assert (runtime.device_global_indices[0] == -1).all()
-    assert (runtime.device_global_indices[1] == 0).any()
+    assert (runtime.index_group.device_global_indices[0] == -1).all()
+    assert (runtime.index_group.device_global_indices[1] == 0).any()
 
 
 def test_hisparse_resident_rows_bypass_hot_lru():
@@ -1593,7 +1590,6 @@ def test_hisparse_resident_rows_bypass_hot_lru():
         row_width=row_width,
         block_size=block_size,
     )
-    assert cache_handle.runtime.hot is not None
     raw = cache_handle.runtime.hot.cache.view(torch.int8)
     resident_table = torch.tensor([[1]], dtype=torch.int32, device=device)
     resident_slots = torch.tensor([block_size], dtype=torch.int64, device=device)
@@ -1613,8 +1609,7 @@ def test_hisparse_resident_rows_bypass_hot_lru():
     source_table = torch.tensor([[0]], dtype=torch.int32, device=device)
     request_ids = torch.zeros(1, dtype=torch.int32, device=device)
     topk = torch.tensor([[1, 2, 3, 4]], dtype=torch.int32, device=device)
-    assert cache_handle.runtime.lru_slots is not None
-    lru_before = cache_handle.runtime.lru_slots.clone()
+    lru_before = cache_handle.runtime.index_group.lru_slots.clone()
 
     cache_handle.fully_resident = True
     resident_cache, resident_indices = cache_handle.resolve_topk(
@@ -1639,7 +1634,7 @@ def test_hisparse_resident_rows_bypass_hot_lru():
 
     expected_indices = topk + block_size
     torch.testing.assert_close(indices, expected_indices)
-    torch.testing.assert_close(cache_handle.runtime.lru_slots, lru_before)
+    torch.testing.assert_close(cache_handle.runtime.index_group.lru_slots, lru_before)
     torch.testing.assert_close(
         cache.view(-1, row_width)[indices.to(torch.long)],
         host.view(-1, row_width)[topk.cpu().to(torch.long)].to(device),
@@ -1714,13 +1709,16 @@ def test_hisparse_kernel_matches_fallback():
 
         torch.testing.assert_close(idx_k, idx_f, rtol=0, atol=0)
         torch.testing.assert_close(
-            kernel_c.device_global_indices,
-            fallback_c.device_global_indices,
+            kernel_c.index_group.device_global_indices,
+            fallback_c.index_group.device_global_indices,
             rtol=0,
             atol=0,
         )
         torch.testing.assert_close(
-            kernel_c.lru_slots, fallback_c.lru_slots, rtol=0, atol=0
+            kernel_c.index_group.lru_slots,
+            fallback_c.index_group.lru_slots,
+            rtol=0,
+            atol=0,
         )
         torch.testing.assert_close(kernel_c.hot.cache, fallback_c.hot.cache)
 
@@ -1757,13 +1755,17 @@ def test_hisparse_apply_multi_step_plan_matches_independent():
         (num_blocks, block_size, row_width), dtype=torch.float32
     ).pin_memory()
 
-    def make() -> HiSparseRuntime:
+    def make(
+        index_group: hisparse_runtime.HiSparseIndexGroup | None = None,
+    ) -> HiSparseRuntime:
         runtime = _make_hisparse_runtime(
             top_k=top_k,
-            device_buffer_size=buf,
             max_num_reqs=num_reqs,
+            device_buffer_size=buf,
             row_width=row_width,
+            block_size=block_size,
             max_swap_rows=2 * num_reqs,
+            index_group=index_group,
         )
         runtime.bind_source_cache(kv_pool)
         return runtime
@@ -1774,8 +1776,9 @@ def test_hisparse_apply_multi_step_plan_matches_independent():
     )
     req_ids = torch.arange(num_reqs, dtype=torch.int32, device=device)
     seq_len = blocks_per_req * block_size
-    producer, shared, indep = make(), make(), make()
-    shared.join_group(producer)
+    producer = make()
+    shared = make(producer.index_group)
+    indep = make()
     for _ in range(8):
         for step in range(2):
             topk = torch.stack(
@@ -1823,7 +1826,6 @@ def test_hisparse_prefill_writes_resident_and_host_rows():
         row_width=row_width,
         block_size=block_size,
     )
-    assert cache_handle.runtime.hot is not None
     resident_slots = torch.tensor([4, 5, -1], dtype=torch.int64, device=device)
     cache_handle.bind_cache(
         cache_handle.runtime.hot.cache.view(torch.int8),
@@ -1898,7 +1900,7 @@ def test_hisparse_remaps_strided_hma_rows_for_attention():
 
     assert runtime.hot.attention_cache is not None
     assert runtime.hot.attention_cache.is_contiguous()
-    physical_indices = runtime._plan.hot_indices[0]
+    physical_indices = runtime.index_group.plan.hot_indices[0]
     expected = (
         physical_indices // block_size * (stride_elements // row_width)
         + physical_indices % block_size
@@ -2193,7 +2195,6 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     flat_pool = kv_pool.reshape(-1, row_width)
 
     cache_handle = _make_hisparse_cache_handle(block_size=block_size)
-    assert cache_handle.runtime.hot is not None
     cache_handle.runtime.eager_host_mirror = True
 
     block_table = torch.tensor([[2, 0, 4]], dtype=torch.int32, device=device)
@@ -2444,7 +2445,7 @@ def test_hisparse_mixed_batch_bf16_row_split(
         )
     assert impl.hisparse_cache is not None
     cache_handle = impl.hisparse_cache
-    assert cache_handle.runtime._plan.hot_indices.shape[0] == (
+    assert cache_handle.runtime.index_group.plan.hot_indices.shape[0] == (
         2 * cache_handle.runtime.max_num_reqs
     )
     blocks_per_request = cdiv(cache_handle.runtime.region_stride, block_size)

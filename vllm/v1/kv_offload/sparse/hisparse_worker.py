@@ -92,7 +92,7 @@ class HiSparseWorker:
         self.dst_gpu = torch.empty(capacity, dtype=torch.int32, device=device)
         self.cache_handles = cache_handles
         self.leader_runtimes = [
-            cache.runtime for cache in cache_handles if cache.runtime.leader is None
+            cache.runtime for cache in cache_handles if cache.runtime.is_group_leader
         ]
         self.request_state_indices = torch.full(
             (max_num_reqs,), -1, dtype=torch.int32, device=device
@@ -549,7 +549,7 @@ def init_hisparse_worker(
             )
             resident = cache_handle.view
             hot = cache_handle.runtime.hot
-            assert resident is not None and hot is not None
+            assert resident is not None
             if (
                 resident.cache.untyped_storage().data_ptr()
                 != hot.cache.untyped_storage().data_ptr()
