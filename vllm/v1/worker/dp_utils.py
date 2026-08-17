@@ -93,15 +93,17 @@ def _run_ar(
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
     device, group = _get_device_and_group(parallel_config)
-    multinode_profiling = profiler_sync is not None
     # Populate this rank's contribution on CPU to reduce GPU syncs.
-    # Row 4 (profiler start request) is only added under VLLM_ENABLE_MULTINODE_PROFILING.
-    tensor_cpu = torch.zeros(5 if multinode_profiling else 4, dp_size, dtype=torch.int32)
+    # Row 4 (profiler start request) is only added under
+    # VLLM_ENABLE_MULTINODE_PROFILING.
+    tensor_cpu = torch.zeros(
+        5 if profiler_sync is not None else 4, dp_size, dtype=torch.int32
+    )
     tensor_cpu[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor_cpu[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor_cpu[2][dp_rank] = 1 if should_ubatch else 0
     tensor_cpu[3][dp_rank] = cudagraph_mode
-    if multinode_profiling:
+    if profiler_sync is not None:
         tensor_cpu[4][dp_rank] = 1 if profiler_sync._pending else 0
     tensor = tensor_cpu.to(device, non_blocking=True)
     dist.all_reduce(tensor, group=group)
@@ -201,8 +203,7 @@ def _synchronize_dp_ranks(
         else gpu_sync_allowed()
     ):
         # Latch the OR-reduced profiler start request across ranks.
-        multinode_profiling = profiler_sync is not None
-        if multinode_profiling:
+        if profiler_sync is not None:
             consensus = bool(tensor[4].any().item())
             # Only logs during a profiling window, so it can't spam serving.
             if profiler_sync._pending or consensus:
