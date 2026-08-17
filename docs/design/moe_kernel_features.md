@@ -37,6 +37,12 @@ th {
 | deepep_low_latency | batched | fp8 | G(128),A,T<sup>3</sup> | Y | Y | [`DeepEPLLPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll.DeepEPLLPrepareAndFinalize] |
 | flashinfer_nvlink_two_sided | standard | nvfp4,fp8 | G,A,T | N | N | [`FlashInferNVLinkTwoSidedPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided.FlashInferNVLinkTwoSidedPrepareAndFinalize] |
 | flashinfer_nvlink_one_sided | standard | nvfp4,bf16,mxfp8 | G,A,T | N | N | [`FlashInferNVLinkOneSidedPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_one_sided.FlashInferNVLinkOneSidedPrepareAndFinalize] |
+| deepep_v2 | standard | fp8 | G,A,T | Y | Y | [`DeepEPV2PrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_v2.DeepEPV2PrepareAndFinalize] |
+| nixl_ep | batched | fp8 | G,A,T | Y | Y | [`NixlEPPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.nixl_ep.NixlEPPrepareAndFinalize] |
+| mori | standard | fp8 | G,A,T | Y | Y | [`MoriPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.mori.MoriPrepareAndFinalize] |
+| allgather_reducescatter | standard | all<sup>1</sup> | G,A,T | N | <sup>6</sup> | [`MoEPrepareAndFinalizeNaiveDPEPModular`][vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep.MoEPrepareAndFinalizeNaiveDPEPModular] |
+| (no dispatch)<sup>5</sup> | standard | all<sup>1</sup> | G,A,T | N | <sup>6</sup> | [`MoEPrepareAndFinalizeNoDPEPModular`][vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep.MoEPrepareAndFinalizeNoDPEPModular] |
+| (batched no-op)<sup>5</sup> | batched | all<sup>1</sup> | G,A,T | N | <sup>6</sup> | [`BatchedPrepareAndFinalize`][vllm.model_executor.layers.fused_moe.prepare_finalize.batched.BatchedPrepareAndFinalize] |
 
 !!! info "Table key"
     1. All types: mxfp4, nvfp4, int4, int8, fp8
@@ -53,14 +59,25 @@ th {
     - A - Per activation token
     - T - Per tensor
 
-Modular kernels are supported by the following `FusedMoEMethodBase` classes.
+Modular kernels are supported by the following `FusedMoEMethodBase` classes (non-exhaustive — new quantization methods are added regularly):
 
-- [`ModelOptFp8MoEMethod`][vllm.model_executor.layers.quantization.modelopt.ModelOptFp8MoEMethod]
-- [`Fp8MoEMethod`][vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod]
-- [`CompressedTensorsW4A4Nvfp4MoEMethod`][vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_nvfp4.CompressedTensorsW4A4Nvfp4MoEMethod]
-- [`CompressedTensorsW8A8Fp8MoEMethod`][vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8.CompressedTensorsW8A8Fp8MoEMethod]
-- [`GptOssMxfp4MoEMethod`][vllm.model_executor.layers.quantization.mxfp4.GptOssMxfp4MoEMethod]
 - [`UnquantizedFusedMoEMethod`][vllm.model_executor.layers.fused_moe.UnquantizedFusedMoEMethod]
+- [`Fp8MoEMethod`][vllm.model_executor.layers.quantization.fp8.Fp8MoEMethod]
+- [`CompressedTensorsW8A8Fp8MoEMethod`][vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8.CompressedTensorsW8A8Fp8MoEMethod]
+- [`CompressedTensorsW4A4Nvfp4MoEMethod`][vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_nvfp4.CompressedTensorsW4A4Nvfp4MoEMethod]
+- [`CompressedTensorsW4A4Mxfp4MoEMethod`][vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod]
+- [`CompressedTensorsW8A8Int8MoEMethod`][vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_int8.CompressedTensorsW8A8Int8MoEMethod]
+- [`CompressedTensorsW8A8Mxfp8MoEMethod`][vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_mxfp8.CompressedTensorsW8A8Mxfp8MoEMethod]
+- [`CompressedTensorsWNA16MoEMethod`][vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16.CompressedTensorsWNA16MoEMethod]
+- [`CompressedTensorsW4A8Fp8MoEMethod`][vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a8_fp8.CompressedTensorsW4A8Fp8MoEMethod]
+- [`CompressedTensorsW4A8Int8MoEMethod`][vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a8_int8.CompressedTensorsW4A8Int8MoEMethod]
+- [`HummingMoEMethod`][vllm.model_executor.layers.quantization.humming.HummingMoEMethod]
+- [`MoeWNA16Method`][vllm.model_executor.layers.quantization.moe_wna16.MoeWNA16Method]
+- [`AutoGPTQMoEMethod`][vllm.model_executor.layers.quantization.auto_gptq.AutoGPTQMoEMethod]
+- Online quantization methods: `Fp8PerTensorOnlineMoEMethod`, `Fp8PerBlockOnlineMoEMethod`, `Mxfp4OnlineMoEMethod`, `Mxfp8OnlineMoEMethod`, `Nvfp4OnlineMoEMethod`, `Int8OnlineMoEMethod`
+- Quark methods: `QuarkW8A8Fp8MoEMethod`, `QuarkW8A8Int8MoEMethod`, `QuarkW4A8Fp8MoEMethod`, `QuarkOCP_MX_MoEMethod`, `QuarkNvfp4MoEMethod`
+
+Kernel selection for each method is handled by the oracle system under [`fused_moe/oracle/`](../../vllm/model_executor/layers/fused_moe/oracle/).
 
 ## Fused Experts Kernels
 
@@ -90,9 +107,25 @@ To be used with a particular `FusedMoEPrepareAndFinalizeModular` subclass, MoE k
 | marlin | standard,</br>batched | <sup>3</sup> / N/A | <sup>3</sup> / N/A | silu,</br>swigluoai | Y | Y | [`fused_marlin_moe`][vllm.model_executor.layers.fused_moe.experts.marlin_moe.fused_marlin_moe],</br>[`MarlinExperts`][vllm.model_executor.layers.fused_moe.experts.marlin_moe.MarlinExperts],</br>[`BatchedMarlinExperts`][vllm.model_executor.layers.fused_moe.experts.marlin_moe.BatchedMarlinExperts] |
 | trtllm | standard | mxfp4,</br>nvfp4 | G(16),G(32) | <sup>5</sup> | N | Y | [`TrtLlmMxfp4ExpertsMonolithic`][vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe.TrtLlmMxfp4ExpertsMonolithic],</br>[`TrtLlmMxfp4ExpertsModular`][vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe.TrtLlmMxfp4ExpertsModular],</br>[`TrtLlmNvFp4ExpertsMonolithic`][vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe.TrtLlmNvFp4ExpertsMonolithic],</br>[`TrtLlmNvfp4ExpertsModular`][vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe.TrtLlmNvFp4ExpertsModular] |
 | hpc | standard | fp8 | G(128),T | silu | Y | Y | [`HPCExperts`][vllm.model_executor.layers.fused_moe.hpc_moe.HPCExperts] |
-| rocm aiter moe | standard | mxfp4,</br>fp8 | G(32),G(128),A,T | silu, gelu,</br>swigluoai | Y | N | `rocm_aiter_fused_experts`,</br>`AiterExperts` |
+| rocm aiter moe | standard | mxfp4,</br>fp8 | G(32),G(128),A,T | silu, gelu,</br>swigluoai | Y | Y | [`AiterExperts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.AiterExperts] |
 | cpu_moe | standard | N/A | N/A | silu, gelu,</br>gelu_tanh,</br>swigluoai | Y | N | [`X86CPUUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.cpu_moe.X86CPUUnquantizedExperts],</br>[`ArmCPUUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.cpu_moe.ArmCPUUnquantizedExperts],</br>[`CPUUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.cpu_moe.CPUUnquantizedExperts] |
 | naive batched<sup>4</sup> | batched | int8,</br>fp8 | G,A,T | silu, gelu | <sup>6</sup> | Y | [`NaiveBatchedExperts`][vllm.model_executor.layers.fused_moe.experts.fused_batched_moe.NaiveBatchedExperts] |
+| trtllm fp8 | standard | fp8 | T | <sup>5</sup> | N | Y | [`TrtLlmFp8ExpertsModular`][vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe.TrtLlmFp8ExpertsModular],</br>[`TrtLlmFp8ExpertsMonolithic`][vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe.TrtLlmFp8ExpertsMonolithic] |
+| trtllm bf16 | standard | N/A | N/A | <sup>5</sup> | N | Y | [`TrtLlmBf16ExpertsModular`][vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsModular],</br>[`TrtLlmBf16ExpertsMonolithic`][vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsMonolithic] |
+| trtllm mxint4 | standard | mxint4 | G | <sup>5</sup> | N | N | [`TrtLlmMxint4ExpertsMonolithic`][vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe.TrtLlmMxint4ExpertsMonolithic] |
+| trtllm lora | standard | N/A | N/A | <sup>5</sup> | N | Y | [`TrtLlmBf16LoRAExperts`][vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe.TrtLlmBf16LoRAExperts] |
+| deep gemm fp4 | standard | nvfp4 | G | silu, gelu | <sup>6</sup> | Y | [`DeepGemmFP4Experts`][vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe.DeepGemmFP4Experts] |
+| cutlass mxfp4 | standard | mxfp4 | G | silu | Y | Y | [`CutlassExpertsMxfp4`][vllm.model_executor.layers.fused_moe.experts.cutlass_moe.CutlassExpertsMxfp4] |
+| cutlass w4a8fp8 | standard | fp8,int4 | A,T | silu | Y | Y | [`CutlassExpertsW4A8Fp8`][vllm.model_executor.layers.fused_moe.experts.cutlass_moe.CutlassExpertsW4A8Fp8] |
+| flashinfer cutedsl | standard,</br>batched | fp8 | G,A,T | <sup>5</sup> | N | Y | [`FlashInferCuteDSLExperts`][vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_moe.FlashInferCuteDSLExperts],</br>[`FlashInferCuteDSLBatchedExperts`][vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe.FlashInferCuteDSLBatchedExperts] |
+| flashinfer b12x | standard | fp8 | T | <sup>5</sup> | N | Y | [`FlashInferB12xExperts`][vllm.model_executor.layers.fused_moe.experts.flashinfer_b12x_moe.FlashInferB12xExperts] |
+| humming | standard,</br>batched | fp8 | G,A,T | silu, gelu | Y | Y | [`HummingIndexedExperts`][vllm.model_executor.layers.fused_moe.experts.fused_humming_moe.HummingIndexedExperts],</br>[`HummingGroupedExperts`][vllm.model_executor.layers.fused_moe.experts.fused_humming_moe.HummingGroupedExperts],</br>[`BatchedHummingGroupedExperts`][vllm.model_executor.layers.fused_moe.experts.fused_humming_moe.BatchedHummingGroupedExperts] |
+| triton wna16 | standard | int4,int8 | G | silu, gelu | Y | Y | [`TritonWNA16Experts`][vllm.model_executor.layers.fused_moe.experts.triton_moe.TritonWNA16Experts] |
+| triton-or-deepgemm | standard | fp8 | G(128),A,T | silu, gelu | <sup>6</sup> | Y | [`TritonOrDeepGemmExperts`][vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe.TritonOrDeepGemmExperts] |
+| triton-or-cutlass | standard | fp8 | A,T | silu, gelu | <sup>6</sup> | Y | [`TritonOrCutlassExperts`][vllm.model_executor.layers.fused_moe.experts.triton_cutlass_moe.TritonOrCutlassExperts] |
+| aiter mxfp8 | standard | mxfp8 | G | silu, gelu | Y | Y | [`AiterMxfp8Experts`][vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe.AiterMxfp8Experts] |
+| aiter w4a8/w4a16 | standard | int4,fp8 | G | silu | Y | N | [`AiterW4A8ExpertsMonolithic`][vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe.AiterW4A8ExpertsMonolithic],</br>[`AiterW4A16ExpertsMonolithic`][vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe.AiterW4A16ExpertsMonolithic] |
+| xpu | standard | fp8,mxfp8,</br>mxfp4,int4 | G,A,T | silu, gelu | Y | Y | [`XPUExperts`][vllm.model_executor.layers.fused_moe.experts.xpu_moe.XPUExperts],</br>[`XPUExpertsFp8`][vllm.model_executor.layers.fused_moe.experts.xpu_moe.XPUExpertsFp8], etc. |
 
 !!! info "Table key"
     1. All types: mxfp4, nvfp4, int4, int8, fp8
@@ -108,6 +141,11 @@ The following table shows "families" of modular kernels that are intended to wor
 
 | backend | `FusedMoEPrepareAndFinalizeModular` subclasses | `FusedMoEExpertsModular` subclasses |
 | ------- | ---------------------------------------------- | ----------------------------------- |
-| deepep_high_throughput | `DeepEPHTPrepareAndFinalize` | `DeepGemmExperts`,</br>`TritonExperts`,</br>`TritonOrDeepGemmExperts`,</br>`CutlassExpertsFp8`, </br>`MarlinExperts` |
-| deepep_low_latency | `DeepEPLLPrepareAndFinalize` | `BatchedDeepGemmExperts`,</br>`BatchedTritonExperts`,</br>`CutlassBatchedExpertsFp8`,</br>`BatchedMarlinExperts` |
-| flashinfer | `FlashInferCutlassMoEPrepareAndFinalize` | `FlashInferExperts` |
+| deepep_high_throughput | `DeepEPHTPrepareAndFinalize` | `DeepGemmExperts`,</br>`TritonExperts`,</br>`TritonOrDeepGemmExperts`,</br>`CutlassExpertsFp8`,</br>`MarlinExperts`,</br>`HummingIndexedExperts`,</br>`HummingGroupedExperts` |
+| deepep_low_latency | `DeepEPLLPrepareAndFinalize` | `BatchedDeepGemmExperts`,</br>`BatchedTritonExperts`,</br>`CutlassBatchedExpertsFp8`,</br>`BatchedMarlinExperts`,</br>`BatchedHummingGroupedExperts` |
+| deepep_v2 | `DeepEPV2PrepareAndFinalize` | `DeepGemmExperts`,</br>`TritonExperts`,</br>`TritonOrDeepGemmExperts` |
+| nixl_ep | `NixlEPPrepareAndFinalize` | `BatchedDeepGemmExperts`,</br>`BatchedTritonExperts` |
+| mori | `MoriPrepareAndFinalize` | `DeepGemmExperts`,</br>`TritonExperts` |
+| allgather_reducescatter | `MoEPrepareAndFinalizeNaiveDPEPModular` | `TritonExperts`,</br>`DeepGemmExperts` |
+| flashinfer | `FlashInferNVLinkTwoSidedPrepareAndFinalize`,</br>`FlashInferNVLinkOneSidedPrepareAndFinalize` | `FlashInferExperts`,</br>`FlashInferCuteDSLExperts`,</br>`FlashInferB12xExperts` |
+| (no dispatch) | `MoEPrepareAndFinalizeNoDPEPModular` | (any standard-format experts) |

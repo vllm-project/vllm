@@ -2,7 +2,7 @@
 
 ## Introduction
 
-FusedMoEModularKernel is implemented [here](../../vllm/model_executor/layers/fused_moe/modular_kernel.py)
+The MoE kernel framework is implemented in [`modular_kernel.py`](../../vllm/model_executor/layers/fused_moe/modular_kernel.py). The top-level class is `FusedMoEKernel`, which wraps either a `FusedMoEKernelModularImpl` (for modular kernels) or a `FusedMoEKernelMonolithicImpl` (for monolithic kernels that handle routing internally).
 
 Based on the format of the input activations, fused MoE implementations are broadly classified into 2 types.
 
@@ -32,9 +32,28 @@ As can be seen from the diagrams, there are a lot of operations and there can be
 
 The rest of the document will focus on the Contiguous / Non-Batched case. Extrapolating to the Batched case should be straight-forward.
 
+## Class Hierarchy
+
+The kernel framework uses two parallel hierarchies — one for prepare/finalize (dispatch/combine) and one for experts (the actual computation):
+
+```text
+FusedMoEPrepareAndFinalize (ABC)
+  ├── FusedMoEPrepareAndFinalizeModular  (topk_ids/weights interface)
+  └── FusedMoEPrepareAndFinalizeMonolithic  (router_logits interface)
+
+FusedMoEExperts (ABC)
+  ├── FusedMoEExpertsModular  (receives pre-routed tokens)
+  └── FusedMoEExpertsMonolithic  (handles routing internally)
+
+FusedMoEKernel  (top-level wrapper)
+  └── impl: FusedMoEKernelModularImpl | FusedMoEKernelMonolithicImpl
+```
+
+`FusedMoEExperts` is the common base for both modular and monolithic experts. It provides the oracle/support-checking system via `is_supported_config()` — a static method that checks quantization type, activation format, platform capabilities, and other constraints to determine whether a particular experts class can handle a given deployment configuration.
+
 ## ModularKernel Components
 
-FusedMoEModularKernel splits the fused MoE operation into 3 parts,
+`FusedMoEKernelModularImpl` splits the fused MoE operation into 3 parts:
 
 1. TopKWeightAndReduce
 2. FusedMoEPrepareAndFinalizeModular
@@ -47,15 +66,15 @@ The TopK Weight Application and Reduction components happen right after the Unpe
 Please find the implementations of TopKWeightAndReduce [here](../../vllm/model_executor/layers/fused_moe/topk_weight_and_reduce.py).
 
 `FusedMoEPrepareAndFinalizeModular::finalize()` method accepts a `TopKWeightAndReduce` argument that is invoked inside the method.
-The `FusedMoEModularKernel` acts as a bridge between the `FusedMoEExpertsModular` and `FusedMoEPrepareAndFinalize` implementations to determine where the TopK Weight Application and Reduction happens.
+The `FusedMoEKernelModularImpl` acts as a bridge between the `FusedMoEExpertsModular` and `FusedMoEPrepareAndFinalize` implementations to determine where the TopK Weight Application and Reduction happens.
 
-* `FusedMoEExpertsModular::finalize_weight_and_reduce_impl` method returns `TopKWeightAndReduceNoOp` if the `FusedMoEExpertsModular` implementation does the weight application and reduction itself.
+* `FusedMoEExpertsModular::finalize_weight_and_reduce_impl` method returns `TopKWeightAndReduceNoOP` if the `FusedMoEExpertsModular` implementation does the weight application and reduction itself.
 * `FusedMoEExpertsModular::finalize_weight_and_reduce_impl` method returns `TopKWeightAndReduceContiguous` / `TopKWeightAndReduceNaiveBatched` / `TopKWeightAndReduceDelegate` if the `FusedMoEExpertsModular` implementation needs the `FusedMoEPrepareAndFinalizeModular::finalize()` to do the weight application and reduction.
 
 ### FusedMoEPrepareAndFinalizeModular
 
-The `FusedMoEPrepareAndFinalizeModular` abstract class exposes `prepare`, `prepare_no_receive`  and `finalize` functions.
-The `prepare` function is responsible for input activation Quantization and All2All Dispatch. If implemented, The `prepare_no_receive` is like `prepare` except it does not wait to receive results from other workers.  Instead it returns a "receiver" callback that must be invoked to wait for the final results of worker. It is not required that this method is supported by all `FusedMoEPrepareAndFinalizeModular` classes, but if it is available, it can be used to interleave work with the initial all to all communication, e.g. interleaving shared experts with fused experts.  The `finalize` function is responsible for invoking the All2All Combine. Additionally the `finalize` function may or may not do the TopK weight application and reduction (Please refer to the TopKWeightAndReduce section)
+The `FusedMoEPrepareAndFinalizeModular` abstract class (inheriting from `FusedMoEPrepareAndFinalize`) exposes `prepare`, `prepare_async`, `finalize`, and `finalize_async` functions.
+The `prepare` function is responsible for input activation Quantization and All2All Dispatch. If `supports_async()` returns True, the class also implements `prepare_async` and `finalize_async`. `prepare_async` is like `prepare` except it does not wait to receive results from other workers — instead it returns a "receiver" callback that must be invoked to wait for the final results. This can be used to interleave work with the initial all-to-all communication, e.g. overlapping shared experts with fused experts via DBO (Dual Batch Overlap). `finalize_async` similarly allows overlapping the combine step with shared expert computation. The `finalize` function is responsible for invoking the All2All Combine. Additionally the `finalize` function may or may not do the TopK weight application and reduction (Please refer to the TopKWeightAndReduce section).
 
 ![FusedMoEPrepareAndFinalizeModular Blocks](../assets/design/fused_moe_modular_kernel/prepare_and_finalize_blocks.png)
 
@@ -65,6 +84,7 @@ The `FusedMoEExpertsModular` class is where the crux of the MoE operations happe
 
 * apply()
 * workspace_shapes()
+* workspace_dtype()
 * finalize_weight_and_reduce_impl()
 
 #### apply()
@@ -81,7 +101,7 @@ The `apply` method is where the implementations perform
 
 #### workspace_shapes()
 
-The core fused MoE implementation performs a series of operations. It would be inefficient to create output memory for each of these operations separately. To that effect, implementations are required to declare 2 workspace shapes, the workspace datatype and the fused MoE output shape as outputs of the workspace_shapes() method. This information is used to allocate the workspace tensors and the output tensor in `FusedMoEModularKernel::forward()` and passed on to the `FusedMoEExpertsModular::apply()` method. The workspaces could then be used as intermediate buffers in the fused MoE implementation.
+The core fused MoE implementation performs a series of operations. It would be inefficient to create output memory for each of these operations separately. To that effect, implementations are required to declare 2 workspace shapes and the fused MoE output shape as outputs of the `workspace_shapes()` method, and the workspace dtype via the separate `workspace_dtype()` method. This information is used to allocate the workspace tensors and the output tensor in `FusedMoEKernelModularImpl` and passed on to the `FusedMoEExpertsModular::apply()` method. The workspaces could then be used as intermediate buffers in the fused MoE implementation.
 
 #### finalize_weight_and_reduce_impl()
 
@@ -90,13 +110,25 @@ It is sometimes efficient to perform TopK weight application and Reduction insid
 
 ![FusedMoEExpertsModular Blocks](../assets/design/fused_moe_modular_kernel/fused_experts_blocks.png)
 
-### FusedMoEModularKernel
+### FusedMoEKernel
 
-`FusedMoEModularKernel` is composed of the `FusedMoEPrepareAndFinalizeModular` and `FusedMoEExpertsModular` objects.
-`FusedMoEModularKernel` pseudocode/sketch,
+`FusedMoEKernel` is the top-level wrapper that composes a `FusedMoEPrepareAndFinalize` and a `FusedMoEExperts`. Based on whether both components are modular or monolithic, it creates either a `FusedMoEKernelModularImpl` or `FusedMoEKernelMonolithicImpl`.
+
+`FusedMoEKernelModularImpl` pseudocode/sketch:
 
 ```py
-class FusedMoEModularKernel:
+class FusedMoEKernel:
+    def __init__(self,
+                 prepare_finalize: FusedMoEPrepareAndFinalize,
+                 fused_experts: FusedMoEExperts):
+        # Creates FusedMoEKernelModularImpl or FusedMoEKernelMonolithicImpl
+        # based on the types of prepare_finalize and fused_experts.
+        if modular:
+            self.impl = FusedMoEKernelModularImpl(prepare_finalize, fused_experts)
+        else:
+            self.impl = FusedMoEKernelMonolithicImpl(prepare_finalize, fused_experts)
+
+class FusedMoEKernelModularImpl:
     def __init__(self,
                  prepare_finalize: FusedMoEPrepareAndFinalizeModular,
                  fused_experts: FusedMoEExpertsModular):
@@ -104,24 +136,26 @@ class FusedMoEModularKernel:
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
 
-    def forward(self, DP_A):
+    def apply(self, hidden_states, w1, w2, topk_weights, topk_ids, ...):
 
-        Aq, A_scale, _, _, _ = self.prepare_finalize.prepare(DP_A, ...)
+        Aq, A_scale, _, _, _ = self.prepare_finalize.prepare(hidden_states, ...)
 
-        workspace13_shape, workspace2_shape, _, _ = self.fused_experts.workspace_shapes(...)
+        workspace13_shape, workspace2_shape, output_shape = \
+            self.fused_experts.workspace_shapes(...)
 
         # allocate workspaces
-        workspace_13 = torch.empty(workspace13_shape, ...)
-        workspace_2 = torch.empty(workspace2_shape, ...)
+        workspace_dtype = self.fused_experts.workspace_dtype(...)
+        workspace_13 = torch.empty(workspace13_shape, dtype=workspace_dtype, ...)
+        workspace_2 = torch.empty(workspace2_shape, dtype=workspace_dtype, ...)
 
         # execute fused_experts
         fe_out = self.fused_experts.apply(Aq, A_scale, workspace13, workspace2, ...)
 
-        # war_impl is an object of type TopKWeightAndReduceNoOp if the fused_experts implementations
-        # performs the TopK Weight Application and Reduction.
+        # war_impl is TopKWeightAndReduceNoOP if the fused_experts implementation
+        # performs the TopK Weight Application and Reduction itself.
         war_impl = self.fused_experts.finalize_weight_and_reduce_impl()
 
-        output = self.prepare_finalize.finalize(fe_out, war_impl,...)
+        output = self.prepare_finalize.finalize(fe_out, war_impl, ...)
 
         return output
 ```
@@ -145,9 +179,11 @@ This section describes the significance of the various functions exposed by the 
 
 `FusedMoEPrepareAndFinalizeModular::prepare()`: The prepare method implements the Quantization and All2All Dispatch. Typically the Dispatch function from the relevant All2All Manager is invoked.
 
-`FusedMoEPrepareAndFinalizeModular::has_prepare_no_receive()`: Indicates whether or not this subclass implements `prepare_no_receive`. Defaults to False.
+`FusedMoEPrepareAndFinalize::supports_async()`: Indicates whether or not this subclass implements `prepare_async` and `finalize_async`. Defaults to False.
 
-`FusedMoEPrepareAndFinalizeModular::prepare_no_receive()`: The prepare_no_receive method implements the Quantization and All2All Dispatch. It does not wait for the result of the dispatch operation but instead returns a thunk that can be invoked to wait for the final results. Typically the Dispatch function from the relevant All2All Manager is invoked.
+`FusedMoEPrepareAndFinalizeModular::prepare_async()`: The prepare_async method implements the Quantization and All2All Dispatch. It does not wait for the result of the dispatch operation but instead returns a thunk that can be invoked to wait for the final results. Typically the Dispatch function from the relevant All2All Manager is invoked.
+
+`FusedMoEPrepareAndFinalizeModular::finalize_async()`: Like `finalize` but allows overlapping the combine step with other work (e.g. shared expert computation).
 
 `FusedMoEPrepareAndFinalizeModular::finalize()`: Maybe perform TopK Weight Application and Reduction and All2All Combine. Typically the Combine function from the relevant All2AllManager is invoked.
 
@@ -165,53 +201,34 @@ We suggest picking an already existing `FusedMoEPrepareAndFinalizeModular` imple
 
 FusedMoEExpertsModular performs the core of the fused MoE operations. The various functions exposed by the abstract class and their significance is as follows,
 
-`FusedMoEExpertsModular::activation_formats()`: Return the supported Input and Output activation formats. i.e. Contiguous / Batched format.
+`FusedMoEExperts::activation_format()`: A static method returning the activation format (Standard or BatchedExperts) for the `apply` method.
 
-`FusedMoEExpertsModular::supports_expert_map()`: Return True if the implementation supports expert map.
+`FusedMoEExperts::is_supported_config()`: A static method used by the oracle system to determine whether a particular experts class can handle a given deployment configuration. Checks quantization type, activation format, platform capabilities, and other constraints.
 
 `FusedMoEExpertsModular::workspace_shapes()` /
 `FusedMoEExpertsModular::finalize_weight_and_reduce_impl` /
 `FusedMoEExpertsModular::apply`: Refer to `FusedMoEExpertsModular` section above.
 
-### FusedMoEModularKernel Initialization
+### FusedMoEKernel Initialization — The Oracle System
 
-`FusedMoEMethodBase` class has 3 methods that are collectively responsible in creating the `FusedMoEModularKernel` object. They are,
+Kernel selection has been refactored into an **oracle** system under [`fused_moe/oracle/`](../../vllm/model_executor/layers/fused_moe/oracle/). Each quantization type has its own oracle module (e.g., `fp8.py`, `nvfp4.py`, `unquantized.py`, `int8.py`, `mxfp4.py`, `mxfp8.py`, `int_wna16.py`, `w4a8.py`, `w4a8_int8.py`).
 
-* maybe_make_prepare_finalize,
-* select_gemm_impl, and
-* init_prepare_finalize
+All oracles inherit from `MoEKernelOracle` (in `oracle/base.py`), which defines:
 
-#### maybe_make_prepare_finalize
+* `get_priority_backends(moe_config)` — returns platform-appropriate backends in priority order
+* `backend_to_kernel_cls(backend)` — maps a backend enum to its concrete `FusedMoEExperts` subclasses
+* `select_backend(moe_config, ...)` — selects the best backend for a given configuration
+* `make_kernel(moe_config, ...)` — constructs the `FusedMoEKernel` object
 
-The `maybe_make_prepare_finalize` method is responsible for constructing an instance of `FusedMoEPrepareAndFinalizeModular` when appropriate based on the current all2all backend, e.g. when EP + DP is enabled.  The base class method currently constructs all the `FusedMoEPrepareAndFinalizeModular` objects for the EP+DP case.  Derived classes can override this method to construct prepare/finalize objects for different scenarios, e.g. `ModelOptNvFp4FusedMoE` can construct a `FlashInferCutlassMoEPrepareAndFinalize` for the EP+TP case.
-Please refer to the implementations in,
+Each `FusedMoEExperts` subclass declares its capabilities via the static `is_supported_config()` method. The oracle iterates through backends in priority order, finds a compatible experts class, pairs it with the appropriate `FusedMoEPrepareAndFinalize`, and constructs the `FusedMoEKernel`.
 
-* `ModelOptNvFp4FusedMoE`
-
-#### select_gemm_impl
-
-The `select_gemm_impl` method is undefined in the base class. It is the responsibility of the derived class to implement a method that constructs a valid/appropriate `FusedMoEExpertsModular` object.
-Please refer to the implementations in,
-
-* `UnquantizedFusedMoEMethod`
-* `CompressedTensorsW8A8Fp8MoEMethod`
-* `CompressedTensorsW8A8Fp8MoECutlassMethod`
-* `Fp8MoEMethod`
-* `ModelOptNvFp4FusedMoE`
-derived classes.
-
-#### init_prepare_finalize
-
-Based on the input and env settings, the `init_prepare_finalize` method creates the appropriate `FusedMoEPrepareAndFinalizeModular` object. The method then queries `select_gemm_impl` for the appropriate `FusedMoEExpertsModular` object and builds the `FusedMoEModularKernel` object
-
-Please take a look at [init_prepare_finalize](https://github.com/vllm-project/vllm/blob/1cbf951ba272c230823b947631065b826409fa62/vllm/model_executor/layers/fused_moe/layer.py#L188).
-**Important**: The `FusedMoEMethodBase` derived classes use the `FusedMoEMethodBase::fused_experts` object in their `apply` methods. When settings permit the construction of a valid `FusedMoEModularKernel` object, we override `FusedMoEMethodBase::fused_experts` with it. This essentially makes the derived classes agnostic to what fused MoE implementation is used.
+The resulting `FusedMoEKernel` is stored on `FusedMoEMethodBase.moe_kernel`. The `FusedMoEMethodBase.apply()` and `apply_monolithic()` methods delegate to the kernel.
 
 ### How To Unit Test
 
 We have `FusedMoEModularKernel` unit tests at [test_modular_kernel_combinations.py](../../tests/kernels/moe/test_modular_kernel_combinations.py).
 
-The unit test iterates through all combinations of `FusedMoEPrepareAndFinalizeModular` and `FusedMoEPremuteExpertsUnpermute` types and if they are
+The unit test iterates through all combinations of `FusedMoEPrepareAndFinalizeModular` and `FusedMoEExpertsModular` types and if they are
 compatible, runs some correctness tests.
 If you are adding some `FusedMoEPrepareAndFinalizeModular` / `FusedMoEExpertsModular` implementations,
 
@@ -232,7 +249,7 @@ with incompatible types, the script will error.
 ### How To Profile
 
 Please take a look at [profile_modular_kernel.py](../../tests/kernels/moe/modular_kernel_tools/profile_modular_kernel.py)
-The script can be used to generate Torch traces for a single `FusedMoEModularKernel::forward()` call for any compatible
+The script can be used to generate Torch traces for a single `FusedMoEKernel::apply()` call for any compatible
 `FusedMoEPrepareAndFinalizeModular` and `FusedMoEExpertsModular` types.
 Example: `python3 -m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel --pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts`
 
