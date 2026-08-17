@@ -418,7 +418,16 @@ class LoRAModelManager:
             if isinstance(module, PPMissingLayer):
                 continue
 
-            if not self._match_target_modules(module_name, module):
+            target_modules = self.lora_config.target_modules
+            is_configured_target = target_modules is not None and is_in_target_modules(
+                module_name,
+                target_modules,
+                self.packed_modules_mapping,
+            )
+            if (
+                not self._match_target_modules(module_name, module)
+                and not is_configured_target
+            ):
                 continue
 
             punica_wrapper = self._get_punica_wrapper(module_name)

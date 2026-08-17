@@ -32,6 +32,7 @@ from vllm.lora.layers import (
     RowParallelLinearWithShardedLoRA,
     VocabParallelEmbeddingWithLoRA,
 )
+from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -265,6 +266,7 @@ def is_supported_lora_module(
             LinearBase,
             MoERunner,
             VocabParallelEmbedding,
+            maybe_get_oot_by_class(VocabParallelEmbedding),
             BaseLayerWithLoRA,
         ),
     )
