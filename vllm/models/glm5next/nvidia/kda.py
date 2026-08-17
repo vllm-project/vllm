@@ -15,7 +15,6 @@ the decorated ``_forward``.
 """
 
 import torch
-from einops import rearrange
 from torch import nn
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -50,7 +49,6 @@ from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import (
     FusedRMSNormGated,
     chunk_kda_with_fused_gate,
-    fused_kda_gate,
     fused_recurrent_kda,
 )
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
@@ -315,6 +313,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             else:
                 self.kda_safe_gate = False
                 self.kda_lower_bound = -5.0
+        # Process-global conv-state layout, resolved once here instead of on
+        # every _forward call (it reads an env-derived flag each time).
+        self._conv_state_dim_first = is_conv_state_dim_first()
 
     def forward(
         self,
@@ -334,13 +335,18 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             dim=-1,
         )
 
-        beta = _cast_sigmoid(beta_raw)
-        beta = beta.unsqueeze(0)
+        # Beta stays raw (bf16) here: the recurrent kernel sigmoids it in fp32
+        # at load (SIGMOID_BETA), and only the chunked prefill path needs the
+        # pre-computed fp32 sigmoid — computed lazily in _forward. Pure decode
+        # / spec-verify steps then skip the _cast_sigmoid kernel and its fp32
+        # intermediate entirely.
+        beta = beta_raw.unsqueeze(0)
         g1 = self.f_b_proj(f_a)[0]
-        g1 = rearrange(g1, "n (h d) -> 1 n h d", d=self.head_dim)
+        g1 = g1.reshape(1, -1, self.local_num_heads, self.head_dim)
 
         g_proj_states = self.g_b_proj(g_a)[0]
-        g2 = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
+        # Must stay 3D: rms_norm_gated reads H from g.shape[-2].
+        g2 = g_proj_states.reshape(-1, self.local_num_heads, self.head_dim)
 
         core_attn_out = torch.empty(
             (1, num_tokens, self.local_num_heads, self.head_dim),
@@ -361,7 +367,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
         core_attn_out = self.o_norm(core_attn_out, g2)
-        core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
+        core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
         return self.o_proj(core_attn_out)[0]
 
     @eager_break_during_capture
@@ -400,10 +406,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # KDA gate variant: GLM5-Next checkpoints with
         # linear_attn_config["safe_gate"]=True use the bounded gate
         # y=lower_bound*sigmoid(exp(A)*(g+g_bias)) instead of the default
-        # unbounded y=-exp(A)*softplus(g+g_bias). Set by Glm5NextLinearAttention;
-        # absent (False, softplus) for Kimi K2 and other GDN models.
-        safe_gate = getattr(self, "kda_safe_gate", False)
-        lower_bound = getattr(self, "kda_lower_bound", -5.0)
+        # unbounded y=-exp(A)*softplus(g+g_bias). Both attrs are always set
+        # in __init__ (this class is GLM5Next-only).
+        safe_gate = self.kda_safe_gate
+        lower_bound = self.kda_lower_bound
         constant_caches = self.kv_cache
 
         qkv_proj_states = qkv_proj_states[:num_actual_tokens]
@@ -413,7 +419,8 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         (conv_state, recurrent_state) = constant_caches
         # conv_state must be (..., dim, width-1) for the conv kernels.
         # DS layout stores it that way directly; SD layout needs a transpose.
-        if not is_conv_state_dim_first():
+        # Layout is process-global and resolved once at init (see __init__).
+        if not self._conv_state_dim_first:
             conv_state = conv_state.transpose(-1, -2)
 
         # One merged short-conv over q|k|v instead of three separate calls. The
@@ -512,42 +519,55 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 conv_bias,
                 activation="silu",
                 conv_state_indices=decode_conv_indices,
-                validate_data=True,
             )
             q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
 
         def _rearr(x):
-            return rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim)
+            return x.reshape(1, -1, self.local_num_heads, self.head_dim)
 
         # --- core attention: spec (draft-verify) path ---
         core_attn_out_spec = None
+        # In a pure spec-verify step (no non-spec tokens) the recurrent kernel
+        # can write straight into the layer output buffer, skipping the
+        # fresh allocation + copy below. Mixed steps must scatter via
+        # spec_token_indx, so they keep the kernel-managed output.
+        spec_out = (
+            core_attn_out[0, :num_actual_tokens].unsqueeze(0)
+            if non_spec_token_indx is None or non_spec_token_indx.numel() == 0
+            else None
+        )
         if use_spec:
             assert spec_state_indices_tensor is not None
             assert num_accepted_tokens is not None
             assert spec_query_start_loc is not None
-            g_spec = fused_kda_gate(
-                rearrange(g1_spec, "1 n h d -> n (h d)"),
-                self.A_log,
-                self.head_dim,
-                g_bias=self.dt_bias,
-                safe_gate=safe_gate,
-                lower_bound=lower_bound,
-            ).unsqueeze(0)
+            # Gate computed inside the recurrent kernel (COMPUTE_GATE) from
+            # raw g1 — replicates fused_kda_gate's arithmetic bit-for-bit and
+            # skips its launch + fp32 [n, H, D] intermediate per layer.
             core_attn_out_spec, _ = fused_recurrent_kda(
                 q=_rearr(q_spec),
                 k=_rearr(k_spec),
                 v=_rearr(v_spec),
-                g=g_spec,
+                g=g1_spec,
                 beta=beta_spec,
                 initial_state=recurrent_state,
                 use_qk_l2norm_in_kernel=True,
                 cu_seqlens=spec_query_start_loc[: num_spec_decodes + 1],
                 ssm_state_indices=spec_state_indices_tensor,
                 num_accepted_tokens=num_accepted_tokens,
+                out=spec_out,
+                sigmoid_beta=True,
+                a_log=self.A_log,
+                g_bias=self.dt_bias,
+                compute_gate=True,
+                lower_bound=lower_bound,
             )
 
         # --- core attention: non-spec path (prefill or plain decode) ---
         core_attn_out_non_spec = None
+        # Only the plain-decode recurrent kernel can write straight into the
+        # layer output buffer; the chunked prefill kernel cannot, so this
+        # stays None there and the merge copy below runs as before.
+        ns_out = None
         if attn_metadata_narrowed.num_prefills > 0:
             assert q_ns is not None
             assert non_spec_state_indices_tensor is not None
@@ -563,7 +583,9 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 k=_rearr(k_ns),
                 v=_rearr(v_ns),
                 raw_g=g1_ns,
-                beta=beta_ns,
+                # Chunk path wants the pre-sigmoided fp32 beta (its kernels
+                # don't sigmoid); beta_ns is raw bf16 from forward.
+                beta=_cast_sigmoid(beta_ns.squeeze(0)).unsqueeze(0),
                 A_log=self.A_log,
                 g_bias=self.dt_bias,
                 initial_state=initial_state,
@@ -582,19 +604,17 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         elif attn_metadata_narrowed.num_decodes > 0:
             assert non_spec_query_start_loc is not None
             assert non_spec_state_indices_tensor is not None
-            g_ns = fused_kda_gate(
-                rearrange(g1_ns, "1 n h d -> n (h d)"),
-                self.A_log,
-                self.head_dim,
-                g_bias=self.dt_bias,
-                safe_gate=safe_gate,
-                lower_bound=lower_bound,
-            ).unsqueeze(0)
+            # Plain decode step (no spec tokens): token order is dense, so the
+            # kernel can write straight into the layer output buffer. A mixed
+            # step scatters non-spec output via non_spec_token_indx instead.
+            # Gate computed in-kernel (COMPUTE_GATE), beta sigmoided in-kernel.
+            if not use_spec:
+                ns_out = spec_out
             core_attn_out_non_spec, _ = fused_recurrent_kda(
                 q=_rearr(q_ns),
                 k=_rearr(k_ns),
                 v=_rearr(v_ns),
-                g=g_ns,
+                g=g1_ns,
                 beta=beta_ns,
                 initial_state=recurrent_state,
                 use_qk_l2norm_in_kernel=True,
@@ -602,6 +622,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                     : attn_metadata_narrowed.num_decodes + 1
                 ],
                 ssm_state_indices=non_spec_state_indices_tensor,
+                out=ns_out,
+                sigmoid_beta=True,
+                a_log=self.A_log,
+                g_bias=self.dt_bias,
+                compute_gate=True,
+                lower_bound=lower_bound,
             )
 
         # --- merge spec / non-spec outputs back into token order ---
@@ -617,9 +643,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             core_attn_out[0, :num_actual_tokens] = merged.squeeze(0)
         elif use_spec:
             assert core_attn_out_spec is not None
-            core_attn_out[0, :num_actual_tokens] = core_attn_out_spec.squeeze(0)
+            if spec_out is None:
+                core_attn_out[0, :num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             assert core_attn_out_non_spec is not None
-            core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
-                0, :num_actual_tokens
-            ]
+            if ns_out is None:
+                core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
+                    0, :num_actual_tokens
+                ]
