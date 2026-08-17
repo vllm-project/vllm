@@ -24,12 +24,14 @@ from vllm.multimodal.video import (
     Molmo2VideoBackend,
     PyNvVideoCodecDecoderSlot,
     PyNvVideoCodecVideoBackend,
+    PyNvVideoCodecVideoBackendMixin,
     Qwen2VLVideoBackend,
     Qwen3VLVideoBackend,
     VideoBackend,
     VideoLoader,
     VideoSourceMetadata,
     VideoTargetMetadata,
+    _pynv_decoder_pool,
     get_video_loader_backend_for_processor,
 )
 from vllm.platforms import current_platform
@@ -45,6 +47,27 @@ assert ASSETS_DIR.exists()
 NUM_FRAMES = 10
 FAKE_OUTPUT_1 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
 FAKE_OUTPUT_2 = np.random.rand(NUM_FRAMES, 1280, 720, 3)
+
+
+@contextmanager
+def _fresh_decoder_pool():
+    """Reset module-level decoder pool for isolated test runs."""
+    pool = _pynv_decoder_pool
+    old_slots = pool.slots
+    old_active = pool.active
+    old_cond = pool.cond
+    old_max = pool.max_slots
+    pool.slots = []
+    pool.active = 0
+    pool.cond = threading.Condition()
+    pool.max_slots = None
+    try:
+        yield pool
+    finally:
+        pool.slots = old_slots
+        pool.active = old_active
+        pool.cond = old_cond
+        pool.max_slots = old_max
 
 
 @VIDEO_LOADER_REGISTRY.register("test_video_loader_1")
@@ -206,16 +229,7 @@ def test_pynvvideocodec_corrupted_videos_raise_value_error():
     corrupted_video = (ASSETS_DIR / "corrupted.mp4").read_bytes()
     malformed_video = corrupted_video[:128]
 
-    old_slots = PyNvVideoCodecVideoBackend._decoder_slots
-    old_active_slots = PyNvVideoCodecVideoBackend._active_decoder_slots
-    old_cond = PyNvVideoCodecVideoBackend._decoder_slot_cond
-    old_max_slots = PyNvVideoCodecVideoBackend._max_decoder_slots
-    try:
-        PyNvVideoCodecVideoBackend._decoder_slots = []
-        PyNvVideoCodecVideoBackend._active_decoder_slots = 0
-        PyNvVideoCodecVideoBackend._decoder_slot_cond = threading.Condition()
-        PyNvVideoCodecVideoBackend._max_decoder_slots = None
-
+    with _fresh_decoder_pool():
         loader = VIDEO_LOADER_REGISTRY.load(PYNVVIDEOCODEC_VIDEO_BACKEND)
         with pytest.raises(
             ValueError,
@@ -247,11 +261,6 @@ def test_pynvvideocodec_corrupted_videos_raise_value_error():
             hw_decoders=1,
         )
         assert frames.shape[0] == 1
-    finally:
-        PyNvVideoCodecVideoBackend._decoder_slots = old_slots
-        PyNvVideoCodecVideoBackend._active_decoder_slots = old_active_slots
-        PyNvVideoCodecVideoBackend._decoder_slot_cond = old_cond
-        PyNvVideoCodecVideoBackend._max_decoder_slots = old_max_slots
 
 
 @pytest.mark.parametrize("hw_decoders", [1, 3])
@@ -263,15 +272,7 @@ def test_pynvvideocodec_decoder_slots_are_bounded(
         pass
 
     create_count = 0
-    old_slots = PyNvVideoCodecVideoBackend._decoder_slots
-    old_active_slots = PyNvVideoCodecVideoBackend._active_decoder_slots
-    old_cond = PyNvVideoCodecVideoBackend._decoder_slot_cond
-    old_max_slots = PyNvVideoCodecVideoBackend._max_decoder_slots
-    try:
-        PyNvVideoCodecVideoBackend._decoder_slots = []
-        PyNvVideoCodecVideoBackend._active_decoder_slots = 0
-        PyNvVideoCodecVideoBackend._decoder_slot_cond = threading.Condition()
-        PyNvVideoCodecVideoBackend._max_decoder_slots = None
+    with _fresh_decoder_pool():
         PyNvVideoCodecVideoBackend._configure_decoder_slots(hw_decoders)
 
         def fake_create_slot(cls):
@@ -309,17 +310,12 @@ def test_pynvvideocodec_decoder_slots_are_bounded(
 
         assert seen_slots[0] in retained_slots
         assert create_count == hw_decoders
-    finally:
-        PyNvVideoCodecVideoBackend._decoder_slots = old_slots
-        PyNvVideoCodecVideoBackend._active_decoder_slots = old_active_slots
-        PyNvVideoCodecVideoBackend._decoder_slot_cond = old_cond
-        PyNvVideoCodecVideoBackend._max_decoder_slots = old_max_slots
 
 
 def test_pynvvideocodec_decoder_slots_are_configured_once(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    monkeypatch.setattr(PyNvVideoCodecVideoBackend, "_max_decoder_slots", None)
+    monkeypatch.setattr(_pynv_decoder_pool, "max_slots", None)
 
     PyNvVideoCodecVideoBackend._configure_decoder_slots(2)
     PyNvVideoCodecVideoBackend._configure_decoder_slots(2)
@@ -358,15 +354,16 @@ def test_pynvvideocodec_failed_rebuild_invalidates_decoder_slot():
             assert slot.source_path is None
             raise RuntimeError("construct failed")
 
-    old_slots = PyNvVideoCodecVideoBackend._decoder_slots
-    old_active_slots = PyNvVideoCodecVideoBackend._active_decoder_slots
-    old_cond = PyNvVideoCodecVideoBackend._decoder_slot_cond
-    old_max_slots = PyNvVideoCodecVideoBackend._max_decoder_slots
+    pool = _pynv_decoder_pool
+    old_slots = pool.slots
+    old_active = pool.active
+    old_cond = pool.cond
+    old_max = pool.max_slots
     try:
-        PyNvVideoCodecVideoBackend._decoder_slots = [slot]
-        PyNvVideoCodecVideoBackend._active_decoder_slots = 1
-        PyNvVideoCodecVideoBackend._decoder_slot_cond = threading.Condition()
-        PyNvVideoCodecVideoBackend._max_decoder_slots = 1
+        pool.slots = [slot]
+        pool.active = 1
+        pool.cond = threading.Condition()
+        pool.max_slots = 1
 
         with (
             pytest.raises(RuntimeError, match="construct failed"),
@@ -386,12 +383,12 @@ def test_pynvvideocodec_failed_rebuild_invalidates_decoder_slot():
         assert old_decoder.poisoned
         assert slot.decoder is None
         assert slot.source_path is None
-        assert PyNvVideoCodecVideoBackend._decoder_slots == [slot]
+        assert pool.slots == [slot]
     finally:
-        PyNvVideoCodecVideoBackend._decoder_slots = old_slots
-        PyNvVideoCodecVideoBackend._active_decoder_slots = old_active_slots
-        PyNvVideoCodecVideoBackend._decoder_slot_cond = old_cond
-        PyNvVideoCodecVideoBackend._max_decoder_slots = old_max_slots
+        pool.slots = old_slots
+        pool.active = old_active
+        pool.cond = old_cond
+        pool.max_slots = old_max
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
@@ -405,15 +402,15 @@ def test_pynvvideocodec_h200_recovers_after_unsupported_8k():
     valid_video = create_long_gop_video(num_frames=2, width=64, height=64)
     unsupported_video = (ASSETS_DIR / "unsupported_8k_h264.mp4").read_bytes()
 
-    old_slots = PyNvVideoCodecVideoBackend._decoder_slots
-    old_active_slots = PyNvVideoCodecVideoBackend._active_decoder_slots
-    old_cond = PyNvVideoCodecVideoBackend._decoder_slot_cond
-    old_max_slots = PyNvVideoCodecVideoBackend._max_decoder_slots
+    old_slots = _pynv_decoder_pool.slots
+    old_active = _pynv_decoder_pool.active
+    old_cond = _pynv_decoder_pool.cond
+    old_max = _pynv_decoder_pool.max_slots
     try:
-        PyNvVideoCodecVideoBackend._decoder_slots = []
-        PyNvVideoCodecVideoBackend._active_decoder_slots = 0
-        PyNvVideoCodecVideoBackend._decoder_slot_cond = threading.Condition()
-        PyNvVideoCodecVideoBackend._max_decoder_slots = None
+        _pynv_decoder_pool.slots = []
+        _pynv_decoder_pool.active = 0
+        _pynv_decoder_pool.cond = threading.Condition()
+        _pynv_decoder_pool.max_slots = None
 
         loader = VIDEO_LOADER_REGISTRY.load(PYNVVIDEOCODEC_VIDEO_BACKEND)
         frames_before, _ = loader.load_bytes(
@@ -443,12 +440,66 @@ def test_pynvvideocodec_h200_recovers_after_unsupported_8k():
 
         assert frames_after.shape == frames_before.shape
     finally:
-        for slot in PyNvVideoCodecVideoBackend._decoder_slots:
+        for slot in _pynv_decoder_pool.slots:
             slot.invalidate()
-        PyNvVideoCodecVideoBackend._decoder_slots = old_slots
-        PyNvVideoCodecVideoBackend._active_decoder_slots = old_active_slots
-        PyNvVideoCodecVideoBackend._decoder_slot_cond = old_cond
-        PyNvVideoCodecVideoBackend._max_decoder_slots = old_max_slots
+        _pynv_decoder_pool.slots = old_slots
+        _pynv_decoder_pool.active = old_active
+        _pynv_decoder_pool.cond = old_cond
+        _pynv_decoder_pool.max_slots = old_max
+
+
+def test_pynvvideocodec_cross_subclass_shares_single_pool():
+    """Regression test for GHSA-j682-9xp5-rrf3.
+
+    Multiple subclasses of PyNvVideoCodecVideoBackendMixin must share the
+    same process-wide decoder slot limit rather than getting independent
+    counters via ClassVar shadowing.
+    """
+
+    class FakeSlot:
+        pass
+
+    create_count = 0
+
+    def fake_create_slot(cls):
+        nonlocal create_count
+        create_count += 1
+        return FakeSlot()
+
+    with _fresh_decoder_pool() as pool:
+        pool.max_slots = 2
+
+        orig_create = PyNvVideoCodecVideoBackendMixin._create_decoder_slot
+        PyNvVideoCodecVideoBackendMixin._create_decoder_slot = classmethod(
+            fake_create_slot
+        )
+        try:
+            with ExitStack() as stack:
+                stack.enter_context(VideoBackend._borrow_decoder_slot())
+                stack.enter_context(Qwen3VLVideoBackend._borrow_decoder_slot())
+                assert pool.active == 2
+
+                blocked = threading.Event()
+                acquired = threading.Event()
+
+                def try_borrow():
+                    blocked.set()
+                    with Qwen2VLVideoBackend._borrow_decoder_slot():
+                        acquired.set()
+
+                t = threading.Thread(target=try_borrow)
+                t.start()
+                blocked.wait(timeout=2.0)
+                assert not acquired.wait(timeout=0.3)
+
+            assert acquired.wait(timeout=2.0)
+            t.join(timeout=2.0)
+            assert not t.is_alive()
+
+            assert create_count == 2
+            assert len(pool.slots) == 2
+        finally:
+            PyNvVideoCodecVideoBackendMixin._create_decoder_slot = orig_create
 
 
 @pytest.mark.parametrize("hw_decoders", [0, -1, 1.5, True, "2"])
