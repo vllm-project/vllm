@@ -995,7 +995,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 #   tensor
                 assert state_indices_tensor_p is not None
                 ssm_state[state_indices_tensor_p] = varlen_states
-                if ring_start is not None:
+                if ring_start is not None and self._updates_replayssm_trackers:
                     assert prev_num_accepted is not None
                     reset_replayssm_ring_trackers(
                         ring_start,
@@ -1097,6 +1097,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         dt_cache,
                         ring_start,
                         prev_num_accepted,
+                        logical_window=self.replayssm_buffer_len,
                         D=D_d,
                         dt_bias=dt_bias,
                         dt_softplus=True,
@@ -1184,14 +1185,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         if self.use_replayssm:
             assert self.replayssm_buffer_len is not None
-            ring_buffer_len = self.replayssm_buffer_len
-            if self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
-                ring_buffer_len += 1
             return MambaStateShapeCalculator.append_replayssm_ring(
-                base_shape,
-                self.n_groups,
-                tp_world_size,
-                ring_buffer_len,
+                base_shapes=base_shape,
+                n_groups=self.n_groups,
+                tp_world_size=tp_world_size,
+                logical_window=self.replayssm_buffer_len,
+                backend=self.mamba_config.backend,
+                num_speculative_tokens=self.num_spec,
             )
         return base_shape
 

@@ -46,8 +46,8 @@ class MambaConfig:
     numerical stability for long sequences."""
     stochastic_rounding_philox_rounds: int = 0
     """Number of Philox PRNG rounds for stochastic rounding random number
-    generation. 0 uses the Triton default. Higher values improve randomness
-    quality at the cost of compute."""
+    generation. 0 uses the backend default (10 rounds for FlashInfer). Higher
+    values improve randomness quality at the cost of compute."""
 
     ssu_algorithm: MambaSSUAlgorithm | None = None
     """Selective state update algorithm to use with the FlashInfer backend.
