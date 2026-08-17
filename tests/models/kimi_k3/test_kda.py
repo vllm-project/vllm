@@ -30,9 +30,15 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
     fused_recurrent_kda_fwd,
     fused_recurrent_kda_packed_decode,
 )
+from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 
-DEVICE = "cuda"
+DEVICE = current_platform.device_type
+
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="The KDA kernels require a CUDA-alike or XPU device.",
+)
 
 # The AMD and NVIDIA copies of the KDA kernels are vendored separately and are
 # free to diverge, so the shared-semantics tests below run against both.
