@@ -15,16 +15,15 @@ from typing import Any
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.launchers.app_state import build_app, init_app_state
-from vllm.entrypoints.launchers.launcher import serve_http, setup_server
-from vllm.entrypoints.serve.utils.server_utils import (
-    get_uvicorn_log_config,
-)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tool_parsers import ToolParserManager
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.system_utils import decorate_logs
+
+from ..app_state import build_app, init_app_state
+from ..launcher import serve_http, setup_server
+from ..utils.uvicorn_utils import get_uvicorn_log_config
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 

@@ -18,11 +18,6 @@ from vllm.entrypoints.serve.utils.api_utils import (
     log_non_default_args,
     log_version_and_model,
 )
-from vllm.entrypoints.serve.utils.constants import (
-    H11_MAX_HEADER_COUNT_DEFAULT,
-    H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
-)
-from vllm.entrypoints.launchers.ssl import SSLCertRefresher
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tool_parsers import ToolParserManager
@@ -30,6 +25,12 @@ from vllm.tracing import instrument
 from vllm.utils.network_utils import find_process_using_port, is_valid_ipv6_address
 from vllm.utils.system_utils import set_ulimit
 from vllm.version import __version__ as VLLM_VERSION
+
+from .ssl import SSLCertRefresher
+from .utils.constants import (
+    H11_MAX_HEADER_COUNT_DEFAULT,
+    H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
+)
 
 logger = init_logger(__name__)
 

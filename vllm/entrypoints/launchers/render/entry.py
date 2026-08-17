@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import asyncio
 import signal
@@ -6,11 +8,11 @@ from argparse import Namespace
 
 from vllm import AsyncEngineArgs, envs
 from vllm.config import VllmConfig
-from vllm.entrypoints.launchers.app_state import build_app
-from vllm.entrypoints.serve.utils.server_utils import get_uvicorn_log_config
 from vllm.logger import init_logger
 
+from ..app_state import build_app
 from ..launcher import serve_http, setup_server
+from ..utils.uvicorn_utils import get_uvicorn_log_config
 from .app_state import init_render_app_state
 
 logger = init_logger("vllm.entrypoints.launchers.render.entry")

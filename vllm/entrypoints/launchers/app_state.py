@@ -10,7 +10,6 @@ from starlette.datastructures import State
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
-from vllm.entrypoints.launchers.api_server.routers import register_api_routers
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
@@ -19,7 +18,6 @@ from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_boot
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import process_lora_modules
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.entrypoints.serve.utils.server_utils import lifespan
 from vllm.plugins.endpoint_plugins.interface import (
     attach_endpoint_plugins,
     init_endpoint_plugins_state,
@@ -27,6 +25,9 @@ from vllm.plugins.endpoint_plugins.interface import (
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tasks import FALLBACK_SUPPORTED_TASKS, POOLING_TASKS, SupportedTask
+
+from .api_server.routers import register_api_routers
+from .utils.server_utils import lifespan
 
 
 async def init_app_state(
