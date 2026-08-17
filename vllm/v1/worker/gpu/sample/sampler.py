@@ -55,6 +55,7 @@ class Sampler:
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
         self.thinking_budget_state = ThinkingBudgetState(req_states, reasoning_config)
         self.trace_replay_state = TraceReplayState(req_states)
+        self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
         self.use_flashinfer = (
@@ -71,6 +72,22 @@ class Sampler:
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         self.thinking_budget_state.add_request(req_idx, sampling_params)
         self.trace_replay_state.add_request(req_idx, sampling_params)
+
+        states = self.sampling_states
+        temperature = states.temperature.np[req_idx]
+        self.needs_logits_processing[req_idx] = (
+            self.logit_bias_state.use_logit_bias[req_idx]
+            or self.penalties_state.use_penalty[req_idx]
+            or self.bad_words_state.num_bad_words.np[req_idx] > 0
+            or (
+                self.thinking_budget_state.enabled
+                and self.thinking_budget_state.use_thinking_budget[req_idx]
+            )
+            or (temperature != 0.0 and temperature != 1.0)
+            or states.min_p.np[req_idx] != 0.0
+            or states.top_k.np[req_idx] != states.vocab_size
+            or states.top_p.np[req_idx] != 1.0
+        )
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
@@ -186,7 +203,7 @@ class Sampler:
         expanded_local_pos: torch.Tensor,
         skip_top_k_top_p: bool = False,
     ) -> torch.Tensor:
-        if not self._requires_logits_processing(idx_mapping_np):
+        if not np.any(self.needs_logits_processing[idx_mapping_np]):
             return logits
 
         # Copy logits to a new FP32 tensor.
@@ -241,24 +258,6 @@ class Sampler:
         return self.sampling_states.apply_top_k_top_p(
             logits, expanded_idx_mapping, idx_mapping_np
         )
-
-    def _requires_logits_processing(self, idx_mapping_np: np.ndarray) -> bool:
-        if np.any(self.logit_bias_state.use_logit_bias[idx_mapping_np]):
-            return True
-        if np.any(self.penalties_state.use_penalty[idx_mapping_np]):
-            return True
-        if np.any(self.bad_words_state.num_bad_words.np[idx_mapping_np] > 0):
-            return True
-
-        states = self.sampling_states
-        temperatures = states.temperature.np[idx_mapping_np]
-        if np.any((temperatures != 0.0) & (temperatures != 1.0)):
-            return True
-        if np.any(states.min_p.np[idx_mapping_np] != 0.0):
-            return True
-        if np.any(states.top_k.np[idx_mapping_np] != states.vocab_size):
-            return True
-        return bool(np.any(states.top_p.np[idx_mapping_np] != 1.0))
 
     def sample(
         self,

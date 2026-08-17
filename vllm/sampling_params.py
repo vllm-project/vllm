@@ -1154,7 +1154,7 @@ class SamplingParams(
             try:
                 validate_xgrammar_grammar(self)
                 self.structured_outputs._backend = "xgrammar"
-            except ValueError:
+            except VLLMValidationError:
                 # The request either failed validation
                 # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar.
@@ -1165,7 +1165,12 @@ class SamplingParams(
                 so_params = self.structured_outputs
                 if not skip_guidance and so_params.json:
                     if isinstance(so_params.json, str):
-                        schema = json_mod.loads(so_params.json)
+                        try:
+                            schema = json_mod.loads(so_params.json)
+                        except json_mod.JSONDecodeError as e:
+                            raise VLLMValidationError(
+                                "Invalid JSON grammar specification."
+                            ) from e
                     else:
                         schema = so_params.json
                     skip_guidance = has_guidance_unsupported_json_features(schema)
