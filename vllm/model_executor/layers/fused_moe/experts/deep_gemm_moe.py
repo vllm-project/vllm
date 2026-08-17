@@ -21,6 +21,8 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    ds4_silu_mul_quant_fp8,
+    is_ds4_alignment_quant_enabled,
     per_token_group_quant_fp8,
     per_token_group_quant_fp8_packed_for_deepgemm,
     silu_mul_per_token_group_quant_fp8_colmajor,
@@ -244,6 +246,29 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
             MoEActivation.SILU,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         )
+
+        if (
+            is_ds4_alignment_quant_enabled()
+            and activation == MoEActivation.SILU
+            and self.gemm1_clamp_limit is None
+            and self.gemm1_alpha == 1.0
+            and self.gemm1_beta == 0.0
+        ):
+            if scale_fmt not in (
+                DeepGemmQuantScaleFMT.FLOAT32,
+                DeepGemmQuantScaleFMT.UE8M0,
+            ):
+                raise RuntimeError(
+                    "DS4 alignment kernel supports FLOAT32 or packed UE8M0 "
+                    f"scales, got {scale_fmt}"
+                )
+            return ds4_silu_mul_quant_fp8(
+                input,
+                output_q=output,
+                use_ue8m0=scale_fmt == DeepGemmQuantScaleFMT.UE8M0,
+                masked_m=None,
+                group_size=block_k,
+            )
 
         # 1. DeepGemm UE8M0: fused gate+mul+clamp+quant+pack
         if scale_fmt == DeepGemmQuantScaleFMT.UE8M0:

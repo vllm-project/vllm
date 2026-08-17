@@ -19,6 +19,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    ds4_silu_mul_quant_fp8,
+    is_ds4_alignment_quant_enabled,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     get_fp8_min_max,
@@ -238,6 +242,22 @@ def persistent_masked_m_silu_mul_quant(
     assert H % 8 == 0, "H must be divisible by 8"
     assert group_size == 128, "H must be divisible by 8"
     assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E
+
+    if is_ds4_alignment_quant_enabled():
+        if quant_scale_fmt not in (
+            DeepGemmQuantScaleFMT.FLOAT32,
+            DeepGemmQuantScaleFMT.UE8M0,
+        ):
+            raise RuntimeError(
+                "DS4 alignment kernel supports FLOAT32 or packed UE8M0 scales, "
+                f"got {quant_scale_fmt}"
+            )
+        return ds4_silu_mul_quant_fp8(
+            y,
+            use_ue8m0=quant_scale_fmt == DeepGemmQuantScaleFMT.UE8M0,
+            masked_m=tokens_per_expert,
+            group_size=group_size,
+        )
 
     tokens_per_expert = tokens_per_expert.to(device=y.device, dtype=torch.int32)
 

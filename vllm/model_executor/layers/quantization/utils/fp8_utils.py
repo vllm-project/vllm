@@ -6,6 +6,7 @@ import functools
 import json
 import os
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -37,6 +38,87 @@ from vllm.utils.deep_gemm import (
 from vllm.utils.platform_utils import get_device_name_as_file_name
 
 logger = init_logger(__name__)
+
+
+@functools.cache
+def _load_ds4_alignment_library(path: str) -> None:
+    library = Path(path).expanduser().resolve()
+    if not library.is_file():
+        raise RuntimeError(f"DS4 alignment kernel library does not exist: {library}")
+    torch.ops.load_library(str(library))
+
+
+def is_ds4_alignment_quant_enabled() -> bool:
+    return bool(os.environ.get("VLLM_DS4_ALIGNMENT_KERNEL_LIB"))
+
+
+def ds4_silu_mul_quant_fp8(
+    input: torch.Tensor,
+    *,
+    use_ue8m0: bool,
+    masked_m: torch.Tensor | None,
+    output_q: torch.Tensor | None = None,
+    group_size: int = 128,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run Slime's dual-layout SiLU*up + per-token FP8 quant kernel."""
+    path = os.environ.get("VLLM_DS4_ALIGNMENT_KERNEL_LIB")
+    if not path:
+        raise RuntimeError("VLLM_DS4_ALIGNMENT_KERNEL_LIB is not set")
+    _load_ds4_alignment_library(path)
+
+    if input.ndim not in (2, 3) or input.shape[-1] % (2 * group_size):
+        raise ValueError(f"invalid DS4 activation shape: {tuple(input.shape)}")
+    if not input.is_contiguous() or input.dtype != torch.bfloat16:
+        raise ValueError("DS4 alignment activation input must be contiguous BF16")
+
+    hidden = input.shape[-1] // 2
+    groups = hidden // group_size
+    if output_q is None:
+        output_q = torch.empty(
+            (*input.shape[:-1], hidden),
+            device=input.device,
+            dtype=torch.float8_e4m3fn,
+        )
+
+    if masked_m is None:
+        if input.ndim != 2:
+            raise ValueError("contiguous DS4 alignment input must be 2D")
+        tokens = input.shape[0]
+        packed_groups = (groups + 3) // 4 if use_ue8m0 else groups
+        output_s = torch.empty_strided(
+            (tokens, packed_groups),
+            (1, tokens),
+            device=input.device,
+            dtype=torch.int32 if use_ue8m0 else torch.float32,
+        )
+    else:
+        if input.ndim != 3:
+            raise ValueError("masked DS4 alignment input must be 3D")
+        experts, tokens = input.shape[:2]
+        if masked_m.shape != (experts,) or masked_m.dtype != torch.int32:
+            raise ValueError("masked_m must be int32 with one count per expert")
+        packed_groups = (groups + 3) // 4 if use_ue8m0 else groups
+        output_s = torch.empty_strided(
+            (experts, tokens, packed_groups),
+            (tokens * packed_groups, 1, tokens),
+            device=input.device,
+            dtype=torch.int32 if use_ue8m0 else torch.float32,
+        )
+    output_s.zero_()
+
+    torch.ops.ds4_alignment.per_token_group_quant_8bit_v2(
+        input,
+        output_q,
+        output_s,
+        group_size,
+        1e-10,
+        -448.0,
+        448.0,
+        use_ue8m0,
+        True,
+        masked_m,
+    )
+    return output_q, output_s
 
 
 def is_fp8(x: torch.dtype | torch.Tensor) -> bool:
