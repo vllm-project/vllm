@@ -28,6 +28,7 @@ class Task:
     """
 
     key: OffloadKey
+    path: str
     offset: int
 
 
