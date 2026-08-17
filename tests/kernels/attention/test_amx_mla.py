@@ -22,6 +22,7 @@ from vllm import _custom_ops as ops  # noqa: E402
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 from vllm.v1.attention.backends.mla.amx_mla import (  # noqa: E402
     AMXMLAImpl,
+    _compute_num_kv_splits,
     _expand_block_table,
 )
 
@@ -134,7 +135,6 @@ def test_decode_attention_cpu_matches_reference(seq_lens):
     attn_logits = torch.zeros(
         num_seqs, num_heads, 4, KV_LORA_RANK + 1, dtype=torch.float32
     )
-    loc = torch.zeros(num_seqs, dtype=torch.int64)
     ops.cpu_mla_decode(
         q,
         kv_cache_flat,
@@ -142,7 +142,7 @@ def test_decode_attention_cpu_matches_reference(seq_lens):
         o,
         None,
         None,
-        loc,
+        None,
         attn_logits,
         req_to_token,
         req_pool_indices,
@@ -288,7 +288,11 @@ class _FakePrefillMetadata:
     ):
         self.block_table = block_table
         self.cpu_seq_lens = cpu_seq_lens
-        self.query_start_loc_i64 = query_start_loc.to(torch.int64)
+        query_start_loc_i64 = query_start_loc.to(torch.int64)
+        extend_seq_lens = query_start_loc_i64[1:] - query_start_loc_i64[:-1]
+        self.extend_seq_lens = extend_seq_lens
+        self.extend_start_loc = query_start_loc_i64[:-1]
+        self.max_len_extend = int(extend_seq_lens.max().item())
         self.req_to_token = req_to_token
         self.req_pool_indices = req_pool_indices
 
@@ -299,6 +303,9 @@ class _FakeDecodeMetadata:
         self.seq_lens_i64 = seq_lens.to(torch.int64)
         self.req_to_token = req_to_token
         self.req_pool_indices = req_pool_indices
+        self.num_kv_splits = _compute_num_kv_splits(
+            int(seq_lens.max().item()), current_platform.num_compute_units()
+        )
 
 
 class _FakeAttnMetadata:

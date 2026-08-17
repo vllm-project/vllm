@@ -1595,7 +1595,7 @@ void decode_attention_cpu(
     at::Tensor& output,
     const std::optional<at::Tensor>& key,
     const std::optional<at::Tensor>& value,
-    at::Tensor& loc,
+    const std::optional<at::Tensor>& loc,
     at::Tensor& attn_logits,
     at::Tensor& req_to_token,
     at::Tensor& req_pool_indices,
@@ -1612,7 +1612,6 @@ void decode_attention_cpu(
   CHECK_DIM(3, query);
   CHECK_DIM(3, k_buffer);
   CHECK_DIM(3, v_buffer);
-  CHECK_DIM(1, loc);
 
   int64_t num_seqs = seq_lens.size(0);
   int64_t max_num_reqs = req_to_token.size(0);
@@ -1680,7 +1679,10 @@ void decode_attention_cpu(
     AT_DISPATCH_INDEX_TYPES(index_dtype, "decode_attention_indices", [&] {
       if (key.has_value()) {
         TORCH_CHECK(value.has_value(), "key and value should have values at the same time")
-        CHECK_EQ(loc.numel(), num_seqs);
+        TORCH_CHECK(loc.has_value(), "loc must be given when key/value are given")
+        auto loc_tensor = loc.value();
+        CHECK_DIM(1, loc_tensor);
+        CHECK_EQ(loc_tensor.numel(), num_seqs);
         auto key_tensor = key.value();
         auto value_tensor = value.value();
         // for MLA, key and value shares the same storage and value could be non-contiguous
@@ -1699,7 +1701,7 @@ void decode_attention_cpu(
             (scalar_t*)v_buffer_data,
             key_tensor.data_ptr<scalar_t>(),
             value_tensor.data_ptr<scalar_t>(),
-            loc.data_ptr<int64_t>(),
+            loc_tensor.data_ptr<int64_t>(),
             num_seqs,
             num_heads_kv,
             head_size,

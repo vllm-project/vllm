@@ -133,6 +133,9 @@ class AMXMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
                 dtype=torch.int64,
                 device=decode.block_table.device,
             )
+            decode.num_kv_splits = _compute_num_kv_splits(  # type: ignore[attr-defined]
+                attn_metadata.max_seq_len, current_platform.num_compute_units()
+            )
         if attn_metadata.prefill is not None:
             # cpu_seq_lens: total per-request context length (prefix + new
             # tokens), the one thing the extend kernel needs that isn't
@@ -151,9 +154,11 @@ class AMXMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
                 dtype=torch.int64,
                 device=prefill.block_table.device,
             )
-            prefill.query_start_loc_i64 = prefill.query_start_loc.to(  # type: ignore[attr-defined]
-                torch.int64
-            )
+            query_start_loc_i64 = prefill.query_start_loc.to(torch.int64)
+            extend_seq_lens = query_start_loc_i64[1:] - query_start_loc_i64[:-1]
+            prefill.extend_seq_lens = extend_seq_lens  # type: ignore[attr-defined]
+            prefill.extend_start_loc = query_start_loc_i64[:-1]  # type: ignore[attr-defined]
+            prefill.max_len_extend = int(extend_seq_lens.max().item())  # type: ignore[attr-defined]
         return attn_metadata
 
 
@@ -271,9 +276,7 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         req_to_token = attn_metadata.decode.req_to_token  # type: ignore[attr-defined]
         req_pool_indices = attn_metadata.decode.req_pool_indices  # type: ignore[attr-defined]
 
-        num_kv_splits = _compute_num_kv_splits(
-            attn_metadata.max_seq_len, current_platform.num_compute_units()
-        )
+        num_kv_splits = attn_metadata.decode.num_kv_splits  # type: ignore[attr-defined]
         o = torch.zeros(
             num_tokens,
             self.num_heads,
@@ -289,7 +292,6 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
             dtype=torch.float32,
             device=q.device,
         )
-        loc = torch.zeros(num_tokens, dtype=torch.int64, device=q.device)
 
         ops.cpu_mla_decode(
             q,
@@ -298,7 +300,8 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
             o,
             None,
             None,
-            loc,
+            None,  # loc: only meaningful when key/value are given; we
+            # already wrote the new K/V via do_kv_cache_update before this.
             attn_logits,
             req_to_token,
             req_pool_indices,
@@ -353,10 +356,9 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         req_pool_indices = prefill.req_pool_indices  # type: ignore[attr-defined]
 
         seq_lens = prefill.cpu_seq_lens  # type: ignore[attr-defined]
-        query_start_loc = prefill.query_start_loc_i64  # type: ignore[attr-defined]
-        extend_seq_lens = query_start_loc[1:] - query_start_loc[:-1]
-        extend_start_loc = query_start_loc[:-1]
-        max_len_extend = int(extend_seq_lens.max().item())
+        extend_seq_lens = prefill.extend_seq_lens  # type: ignore[attr-defined]
+        extend_start_loc = prefill.extend_start_loc  # type: ignore[attr-defined]
+        max_len_extend = prefill.max_len_extend  # type: ignore[attr-defined]
 
         # k_extend/v_extend: the new tokens' own latent K/V, aliased in one
         # 576-wide buffer (v_extend is a view of k_extend's first

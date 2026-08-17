@@ -3944,7 +3944,7 @@ def cpu_mla_decode(
     output: torch.Tensor,
     key: torch.Tensor | None,
     value: torch.Tensor | None,
-    loc: torch.Tensor,
+    loc: torch.Tensor | None,
     attn_logits: torch.Tensor,
     req_to_token: torch.Tensor,
     req_pool_indices: torch.Tensor,

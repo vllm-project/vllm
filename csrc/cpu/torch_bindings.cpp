@@ -92,14 +92,17 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2,
                              at::ScalarType out_dtype, bool is_vnni);
 
 // Adapted from sglang: MLA CPU kernels (AMX-only)
-void decode_attention_cpu(
-    at::Tensor& query, at::Tensor& k_buffer, at::Tensor& v_buffer,
-    at::Tensor& output, const std::optional<at::Tensor>& key,
-    const std::optional<at::Tensor>& value, at::Tensor& loc,
-    at::Tensor& attn_logits, at::Tensor& req_to_token,
-    at::Tensor& req_pool_indices, at::Tensor& seq_lens, double sm_scale,
-    double logit_cap, bool is_cross_attn, int64_t sliding_window_size,
-    std::optional<at::Tensor> encoder_lens, std::optional<at::Tensor> sinks);
+void decode_attention_cpu(at::Tensor& query, at::Tensor& k_buffer,
+                          at::Tensor& v_buffer, at::Tensor& output,
+                          const std::optional<at::Tensor>& key,
+                          const std::optional<at::Tensor>& value,
+                          const std::optional<at::Tensor>& loc,
+                          at::Tensor& attn_logits, at::Tensor& req_to_token,
+                          at::Tensor& req_pool_indices, at::Tensor& seq_lens,
+                          double sm_scale, double logit_cap, bool is_cross_attn,
+                          int64_t sliding_window_size,
+                          std::optional<at::Tensor> encoder_lens,
+                          std::optional<at::Tensor> sinks);
 
 void extend_attention_cpu(
     at::Tensor& q_extend, const std::optional<at::Tensor>& k_extend,
@@ -566,7 +569,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Adapted from sglang: MLA CPU kernels (AMX-only, DeepSeek V2/V3/R1)
   ops.def(
       "decode_attention_cpu(Tensor query, Tensor k_buffer, Tensor v_buffer, "
-      "Tensor(a!) output, Tensor? key, Tensor? value, Tensor loc, Tensor "
+      "Tensor(a!) output, Tensor? key, Tensor? value, Tensor? loc, Tensor "
       "attn_logits, Tensor req_to_token, Tensor req_pool_indices, Tensor "
       "seq_lens, float sm_scale, float logit_cap, bool is_cross_attn, int "
       "sliding_window_size, Tensor? encoder_lens, Tensor? sinks) -> ()");
