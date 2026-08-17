@@ -26,6 +26,8 @@ identity has to live in the payload. Producers that publish after model load
 need `VLLM_WORKER_NOTIFICATION_POLL_INTERVAL`; nothing else prompts a gather.
 """
 
+import threading
+from collections import deque
 from typing import Any
 
 import msgspec
@@ -59,27 +61,33 @@ EngineNotification = CustomNotification
 
 MAX_BUFFERED_NOTIFICATIONS = 1024
 
-_worker_notifications: list[EngineNotification] = []
+_worker_notifications: deque[EngineNotification] = deque(
+    maxlen=MAX_BUFFERED_NOTIFICATIONS
+)
+_worker_notifications_lock = threading.Lock()
 
 
 def publish_worker_notification(notification: EngineNotification) -> None:
-    """Queue a notification from inside the worker process."""
-    if len(_worker_notifications) >= MAX_BUFFERED_NOTIFICATIONS:
-        logger.warning_once(
-            "Worker notification buffer is full (%d); dropping the oldest "
-            "notification. Set VLLM_WORKER_NOTIFICATION_POLL_INTERVAL so the "
-            "engine drains the buffer.",
-            MAX_BUFFERED_NOTIFICATIONS,
-        )
-        del _worker_notifications[0]
-    _worker_notifications.append(notification)
+    """Queue a notification from inside the worker process.
+
+    Safe to call from any thread; producers such as transfer callbacks
+    publish concurrently with the engine's drain."""
+    with _worker_notifications_lock:
+        if len(_worker_notifications) == MAX_BUFFERED_NOTIFICATIONS:
+            logger.warning_once(
+                "Worker notification buffer is full (%d); dropping the oldest "
+                "notification. Set VLLM_WORKER_NOTIFICATION_POLL_INTERVAL so "
+                "the engine drains the buffer.",
+                MAX_BUFFERED_NOTIFICATIONS,
+            )
+        _worker_notifications.append(notification)
 
 
 def take_worker_notifications() -> list[EngineNotification] | None:
     """Drain what this worker process queued since the last call."""
-    global _worker_notifications
-    if not _worker_notifications:
-        return None
-    pending = _worker_notifications
-    _worker_notifications = []
-    return pending
+    with _worker_notifications_lock:
+        if not _worker_notifications:
+            return None
+        pending = list(_worker_notifications)
+        _worker_notifications.clear()
+        return pending
