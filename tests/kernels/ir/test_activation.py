@@ -66,19 +66,23 @@ def test_gelu_and_mul_sparse_triton_second_seed():
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only provider")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("intermediate_size", [1, 31, 128])
-def test_gelu_and_mul_sparse_triton_small_sizes(intermediate_size: int):
+def test_gelu_and_mul_sparse_triton_small_sizes(
+    dtype: torch.dtype, intermediate_size: int
+):
     torch.manual_seed(0)
     torch.set_default_device("cuda")
     args = ir.ops.gelu_and_mul_sparse.generate_inputs(
         num_tokens=5,
         hidden_size=intermediate_size,
-        dtype=torch.bfloat16,
+        dtype=dtype,
     )
 
     actual = ir.ops.gelu_and_mul_sparse.impls["triton"].impl_fn(*clone_args(args))
     expected = gelu_and_mul_sparse_native(*clone_args(args))
     assert_close(ir.ops.gelu_and_mul_sparse, actual, expected)
+    assert torch.equal(actual == 0, expected == 0)
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only provider")

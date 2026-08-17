@@ -33,6 +33,7 @@ def _gelu_and_mul_sparse_kernel(
     mean = tl.sum(gate, axis=0) / d
     centered = tl.where(mask, gate - mean, 0.0)
     variance = tl.sum(centered * centered, axis=0) / d
+    # Match the input-dtype rounding at each native PyTorch op boundary.
     mean = mean.to(input_dtype).to(tl.float32)
     std = tl.sqrt(variance).to(input_dtype).to(tl.float32)
     scaled_std = (std * std_multiplier).to(input_dtype).to(tl.float32)
@@ -82,13 +83,15 @@ def _gelu_and_mul_sparse_triton_op(x: Tensor, std_multiplier: float) -> Tensor:
     def grid(meta):
         return (n_rows,)
 
+    block_size = triton.next_power_of_2(d)
+    num_warps = min(max(block_size // 256, 1), 8)
     wrap_triton(_gelu_and_mul_sparse_kernel)[grid](
         x,
         output,
         d=d,
         std_multiplier=std_multiplier,
-        BLOCK_SIZE=triton.next_power_of_2(d),
-        num_warps=8,
+        BLOCK_SIZE=block_size,
+        num_warps=num_warps,
     )
     return output
 
