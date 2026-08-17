@@ -10,7 +10,6 @@ from logging import Logger
 from string import Template
 from typing import Any
 
-import regex as re
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -309,28 +308,18 @@ def process_lora_modules(
     return lora_modules
 
 
-def sanitize_message(message: str) -> str:
-    """Strip memory addresses, tracebacks, and file paths from error messages."""
-    message = re.sub(r" at 0x[0-9a-f]+>", ">", message)
-    message = re.sub(r'\n?\s*File "[^"]+", line \d+, in \S+(\n\s+.*)?', "", message)
-    message = re.sub(
-        r"/(?:home|usr|opt|var|tmp|root|lib|mnt|srv)(?:/[\w.\-]+)+", "<path>", message
-    )
-    message = re.sub(r"(?:/[\w\-]+)+/[\w\-]+\.\w+", "<path>", message)
-    return message.strip()
-
-
 def log_version_and_model(lgr: Logger, version: str, model_name: str) -> None:
     if envs.VLLM_DISABLE_LOG_LOGO or (formatter := current_formatter_type(lgr)) is None:
         message = "vLLM server version %s, serving model %s"
     else:
         logo_template = Template(
-            "\n       ${b}█     █     █▄   ▄█${r}\n"
-            " ${o}▄▄${r} ${b}▄█${r} ${b}█     █     █ ▀▄▀ █${r}  version ${b}%s${r}\n"
-            "  ${o}█${r}${b}▄█▀${r} ${b}█     █     █     █${r}  model   ${b}%s${r}\n"
-            "   ${b}▀▀${r}  ${b}▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀${r}\n"
+            "\n       ${w}█     █     █▄   ▄█${r}\n"
+            " ${o}▄▄${r} ${b}▄█${r} ${w}█     █     █ ▀▄▀ █${r}  version ${w}%s${r}\n"
+            "  ${o}█${r}${b}▄█▀${r} ${w}█     █     █     █${r}  model   ${w}%s${r}\n"
+            "   ${b}▀▀${r}  ${w}▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀${r}\n"
         )
         colors = {
+            "w": "\033[1m",  # bold, default foreground
             "o": "\033[93m",  # orange
             "b": "\033[94m",  # blue
             "r": "\033[0m",  # reset

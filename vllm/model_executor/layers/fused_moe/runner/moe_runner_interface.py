@@ -36,17 +36,13 @@ class MoERunnerInterface(PluggableLayer, ABC):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
     @property
     @abstractmethod
     def shared_experts(self) -> SharedExperts | None:
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def is_internal_router(self) -> bool:
         raise NotImplementedError
 
     @property
@@ -61,13 +57,9 @@ class MoERunnerInterface(PluggableLayer, ABC):
 
     ########################################################################
     #
-    # FusedMoE layer methods
+    # FusedMoEFactory layer methods
     #
     ########################################################################
-
-    @abstractmethod
-    def maybe_init_modular_kernel(self) -> None:
-        raise NotImplementedError
 
     @property
     @abstractmethod

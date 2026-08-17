@@ -141,13 +141,32 @@ class BaseFrontendArgs:
     """Enable the `/tokenizer_info` endpoint. May expose chat
     templates and other tokenizer configuration."""
     enable_log_outputs: bool = False
-    """If set to True, log model outputs (generations).
-    Requires `--enable-log-requests`. As with `--enable-log-requests`,
-    information is only logged at INFO level at maximum."""
+    """If set to True, log model outputs (generations). Requires
+    `--enable-log-requests`. Output text and finish reasons are logged at INFO,
+    while output token IDs are logged at DEBUG."""
     enable_log_deltas: bool = True
     """If set to False, output deltas will not be logged. Relevant only if 
     --enable-log-outputs is set.
     """
+    cohere_is_reasoning_model: bool = True
+    """Cohere ``/cohere/v2/chat`` only. Whether the served model is a
+    reasoning Command-family model. When True (default), the assistant's
+    chain-of-thought is surfaced as a ``thinking`` content block (or
+    ``content-*`` events on the stream). When False, reasoning is
+    surfaced as Cohere's ``tool_plan`` field (or ``tool-plan-delta``
+    events) whenever the model emits tool calls, matching older non-
+    reasoning Command models. Has no effect on the non-Cohere
+    endpoints."""
+    cohere_format: str = "cmd4"
+    """Cohere ``--tokenizer-mode cohere`` only. Which Cohere prompt
+    format to render: ``cmd4`` (current Command A+ models; default) or
+    ``cmd3`` (earlier Cmd-A and Cmd-A reasoning models). Selecting the
+    wrong format silently produces a prompt the model wasn't trained
+    on, which most commonly manifests as the model emitting text but no
+    citations / tool calls / thinking blocks. Equivalent to passing
+    ``--default-chat-template-kwargs '{"cohere_format": "..."}'`` -- any
+    explicit request-level ``chat_template_kwargs.cohere_format`` takes
+    priority."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False
@@ -263,7 +282,15 @@ class FrontendArgs(BaseFrontendArgs):
     """Allowed headers."""
     api_key: list[str] | None = None
     """If provided, the server will require one of these keys to be presented in
-    the header."""
+    the header.
+
+    Warning: this only authenticates endpoints under the `/v1`, `/v2`, and
+    `/inference` path prefixes. Other endpoints on the same server, including
+    `/invocations` (which exposes the same inference capabilities as `/v1`),
+    remain unauthenticated. Do not rely on `--api-key` alone to secure vLLM;
+    see
+    https://docs.vllm.ai/en/latest/usage/security.html#api-key-authentication-limitations
+    for what it does and does not protect."""
     ssl_keyfile: str | None = None
     """The file path to the SSL key file."""
     ssl_certfile: str | None = None
