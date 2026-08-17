@@ -195,12 +195,13 @@ steps:
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt
 
-- label: LM Eval Humming f16 (A100 - TEMPORARY)
+- label: LM Eval Humming f16 (A100 - TEMPORARY) %N
   key: lm-eval-humming-f16-a100
   timeout_in_minutes: 75
   device: a100
   optional: true
   num_devices: 1
+  parallelism: 3
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
   - vllm/model_executor/layers/quantization/utils/humming_utils.py
@@ -208,7 +209,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/oracle/
   - vllm/model_executor/kernels/linear/
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/humming/config-a100-shard-$$BUILDKITE_PARALLEL_JOB.txt
 
 - label: LM Eval Humming Act int8 (A100 - TEMPORARY)
   key: lm-eval-humming-act-a100
