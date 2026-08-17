@@ -112,7 +112,6 @@ QUANT_ALGOS = [
     # MIXED_PRECISION,
     "MIXED_PRECISION",
 ]
-KV_CACHE_QUANT_ALGOS = ["FP8", "NVFP4"]
 
 
 class ModelOptKVCacheMethod(BaseKVCacheMethod):

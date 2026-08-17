@@ -29,6 +29,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import destroy_distributed_environment, destroy_model_parallel
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
+from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.parallel_state import (
     get_dcp_group,
@@ -46,8 +47,12 @@ from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils import numa_utils
 from vllm.utils.network_utils import (
+    aiter_requires_tcp_store,
+    get_distributed_init_method,
     get_file_store_init_method,
     get_ip,
+    get_loopback_ip,
+    get_open_port,
 )
 from vllm.utils.ompmultiprocessing import OMPProcessManager
 from vllm.utils.system_utils import (
@@ -125,9 +130,17 @@ class MultiprocExecutor(Executor):
             f"_parallel_size ({pcp_size}). "
         )
 
-        set_multiprocessing_worker_envs(self.local_world_size)
+        num_local_procs = self.local_world_size * max(
+            1, self.parallel_config.data_parallel_size_local
+        )
+        set_multiprocessing_worker_envs(num_local_procs)
 
-        distributed_init_method = get_file_store_init_method()
+        if aiter_requires_tcp_store():
+            distributed_init_method = get_distributed_init_method(
+                get_loopback_ip(), get_open_port()
+            )
+        else:
+            distributed_init_method = get_file_store_init_method()
         self.rpc_broadcast_mq: MessageQueue | None = None
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
@@ -334,6 +347,7 @@ class MultiprocExecutor(Executor):
             non_block=non_block,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
             kv_output_aggregator=self.kv_output_aggregator,
+            ec_output_aggregator=self.ec_output_aggregator,
         )
 
     def sample_tokens(  # type: ignore[override]
@@ -346,6 +360,7 @@ class MultiprocExecutor(Executor):
             non_block=non_block,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
             kv_output_aggregator=self.kv_output_aggregator,
+            ec_output_aggregator=self.ec_output_aggregator,
         )
 
     def execute_dummy_batch(self) -> None:
@@ -366,9 +381,10 @@ class MultiprocExecutor(Executor):
         non_block: bool = False,
         unique_reply_rank: int | None = None,
         kv_output_aggregator: KVOutputAggregator | None = None,
+        ec_output_aggregator: ECOutputAggregator | None = None,
     ) -> Any:
-        """Returns single result if unique_reply_rank and/or kv_output_aggregator
-        is provided, otherwise list."""
+        """Returns single result if unique_reply_rank and/or an output
+        aggregator is provided, otherwise list."""
         assert self.rpc_broadcast_mq is not None, (
             "collective_rpc should not be called on follower node"
         )
@@ -378,11 +394,21 @@ class MultiprocExecutor(Executor):
         deadline = None if timeout is None else time.monotonic() + timeout
         kwargs = kwargs or {}
 
-        if kv_output_aggregator is not None:
+        aggregators = [a for a in (kv_output_aggregator, ec_output_aggregator) if a]
+        aggregate: Callable[[Any], Any]
+        if aggregators:
             output_rank = None
-            aggregate: Callable[[Any], Any] = partial(
-                kv_output_aggregator.aggregate, output_rank=unique_reply_rank or 0
-            )
+
+            def _aggregate(outputs: Any) -> Any:
+                # Each aggregator merges its own connector's output onto
+                # outputs[output_rank] in place and returns it, so chaining is safe.
+                rank = unique_reply_rank or 0
+                result = outputs[rank]
+                for a in aggregators:
+                    result = a.aggregate(outputs, output_rank=rank)
+                return result
+
+            aggregate = _aggregate
         else:
             output_rank = unique_reply_rank
             aggregate = lambda x: x
