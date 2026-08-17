@@ -411,8 +411,9 @@ steps:
 
 - label: Python-only Installation # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
