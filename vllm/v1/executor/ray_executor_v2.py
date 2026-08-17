@@ -367,6 +367,11 @@ class RayExecutorV2(MultiprocExecutor):
         wt_cfg = self.vllm_config.weight_transfer_config
         extra_actor_options: dict[str, object] = {}
         if wt_cfg is not None and wt_cfg.backend == "sharded_rdt":
+            from vllm.distributed.weight_transfer.sharded_rdt_common import (
+                check_ray_rdt_version,
+            )
+
+            check_ray_rdt_version()
             extra_actor_options["enable_tensor_transport"] = True
 
         for bundle_idx in range(self.world_size):

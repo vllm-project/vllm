@@ -47,6 +47,7 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     ALLOWED_OPS,
     arena_alloc_bytes,
+    check_ray_rdt_version,
 )
 from vllm.logger import init_logger
 
@@ -93,8 +94,8 @@ class ShardedRDTTrainerInitInfo(TrainerInitInfo):
     backend: ClassVar[str] = "sharded_rdt"
 
     num_consumers: int
-    """Total inference-worker (consumer) count across the whole fleet (TP*DP),
-    for the M:N block assignment / free ref-count."""
+    """Total inference-worker (consumer) count across the whole fleet
+    (DP*TP*PP*PCP), for the M:N block assignment / free ref-count."""
     trainer_actor_namespace: str | None = None
     """Ray namespace the engine spawns its serve actors in. The inference
     workers (which run in their own EngineCore subprocess with its own
@@ -899,6 +900,10 @@ class ShardedRDTTrainerWeightTransferEngine(
     def _spawn_server(self, served_names: list[str]) -> None:
         import ray
         from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+        # The trainer is usually a separate install from the workers, so it gets
+        # its own check rather than trusting the consumer side's.
+        check_ray_rdt_version()
 
         ii = self._init_info
         self._server_name = f"vllm_rdt_producer_{uuid.uuid4().hex[:12]}_rk{ii.rank}"

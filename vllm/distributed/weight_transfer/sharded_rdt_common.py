@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared pieces of the sharded-RDT backend: the op-chain allowlist and arena
-sizing, which both sides derive from here so the two cannot drift, plus
-``RdtRouter`` — consumer-only, since routing is a consumer decision.
+"""Shared pieces of the sharded-RDT backend: the op-chain allowlist, arena
+sizing and the minimum Ray version, plus ``RdtRouter`` — consumer-only, since
+routing is a consumer decision.
 
 The gather-group partition itself is ``base.layerwise_groups``: it defines what a
 group index means for any ``WeightSource``, not just this transport.
@@ -41,6 +41,40 @@ SUPPORTED_OPS: dict[Callable, str] = {
 }
 
 ALLOWED_OPS = frozenset(SUPPORTED_OPS.values())
+
+# Ray Direct Transport landed in halves: the actor opt-in
+# ``enable_tensor_transport`` in 2.49, and ``ray.experimental``'s
+# ``register_nixl_memory`` / ``set_target_for_ref`` — which this transport calls
+# directly — in 2.55. The floor is the tested version rather than the earliest
+# one that could import; 2.55 has never been run against.
+RDT_MIN_RAY_VERSION = "2.56.0"
+
+
+def check_ray_rdt_version() -> None:
+    """Refuse an installed Ray older than the one this backend is tested on.
+
+    vLLM does not depend on Ray, so there is no pin to carry this. Without the
+    check the failure is an opaque option-validation error out of
+    ``.options(enable_tensor_transport=True)`` (below 2.49) or an ImportError
+    raised deep in the first pull, long after init reported success (below 2.55).
+
+    Raises:
+        ValueError: the installed Ray predates ``RDT_MIN_RAY_VERSION``.
+    """
+    import importlib.metadata
+
+    from packaging import version
+
+    required = version.parse(RDT_MIN_RAY_VERSION)
+    current = version.parse(importlib.metadata.version("ray"))
+    if current < required:
+        raise ValueError(
+            f"The 'sharded_rdt' weight transfer backend requires Ray "
+            f">= {required}, the version it is tested against; Ray Direct "
+            f"Transport (ray.experimental.register_nixl_memory / "
+            f"set_target_for_ref) needs at least 2.55. Found {current}. "
+            f"Run `pip install -U 'ray>={required}'`."
+        )
 
 
 def assign_producer_indices(

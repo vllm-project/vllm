@@ -65,6 +65,7 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.distributed.weight_transfer.sharded_rdt_common import (
     RdtRouter,
     arena_alloc_bytes,
+    check_ray_rdt_version,
 )
 from vllm.distributed.weight_transfer.sharded_rdt_lazy import (
     BakeSink,
@@ -380,6 +381,9 @@ class ShardedRDTWeightTransferEngine(
                 "wrong expert slots. Disable EPLB or use another weight-transfer "
                 "backend."
             )
+        # The worker is often a different install from whatever spawned it, so
+        # check here too and not only where the actor options are set.
+        check_ray_rdt_version()
         self._configure_ring(init_info)
         self._resolve_producers(init_info)
 
@@ -584,13 +588,11 @@ class ShardedRDTWeightTransferEngine(
     def _num_consumers(self) -> int:
         """Total inference-worker count. Prefers the driver-supplied
         ``init_info.num_consumers`` (authoritative -- the driver knows the whole
-        fleet); else infers ``data_parallel_size * tensor_parallel_size``, correct
-        for the supported serving modes (dense via TP, MoE via DP+EP) and wrong
-        only for DP-over-dense, which vLLM itself rejects."""
+        fleet); else ``world_size_across_dp``, the same stride
+        ``_global_worker_index`` indexes with, so the two agree at any pp."""
         if self._num_consumers_override > 0:
             return self._num_consumers_override
-        pc = self.parallel_config
-        return pc.data_parallel_size * pc.tensor_parallel_size
+        return self.parallel_config.world_size_across_dp
 
     def start_weight_update(self) -> None:
         """Put the model's params on meta so layerwise reload streams them in
