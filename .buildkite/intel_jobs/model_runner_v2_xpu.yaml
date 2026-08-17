@@ -91,7 +91,7 @@ steps:
   _raw_old_commands:
   - set -x
   - export VLLM_USE_V2_MODEL_RUNNER=1
-  - pytest -v -s distributed/test_pipeline_parallel.py -k "not ray and not Jamba"
+  - pytest -v -s distributed/test_pipeline_parallel.py -k "not ray"
   - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
   - pytest -v -s v1/distributed/test_pp_dp_v2.py
   source_file_dependencies:
@@ -105,7 +105,7 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_USE_V2_MODEL_RUNNER=1 || true &&
     cd tests &&
-    pytest -v -s distributed/test_pipeline_parallel.py -k not ray and not Jamba || true &&
+    pytest -v -s distributed/test_pipeline_parallel.py -k not ray || true &&
     pytest -v -s distributed/test_pp_cudagraph.py -k not ray || true &&
     pytest -v -s v1/distributed/test_pp_dp_v2.py || true'
 - label: Model Runner V2 Spec Decode
@@ -128,11 +128,13 @@ steps:
   - pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py
   - pytest -v -s v1/e2e/spec_decode/eagle/
   - pytest -v -s v1/e2e/spec_decode/speculators/
+  - pytest -v -s 'v1/e2e/spec_decode/mtp/test_mtp.py::test_mtp_correctness[qwen3_5-hybrid]'
   source_file_dependencies:
   - vllm/v1/worker/gpu/
   - vllm/v1/worker/gpu_worker.py
   - tests/v1/spec_decode/test_max_len.py
   - tests/v1/spec_decode/test_rejection_sampler_utils.py
+  - tests/v1/spec_decode/test_synthetic_rejection_sampler_utils.py
   - tests/v1/e2e/spec_decode/
   commands:
   - >-
@@ -143,4 +145,5 @@ steps:
     pytest -v -s v1/spec_decode/test_rejection_sampler_utils.py || true &&
     pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py || true &&
     pytest -v -s v1/e2e/spec_decode/eagle/ || true &&
-    pytest -v -s v1/e2e/spec_decode/speculators/ || true'
+    pytest -v -s v1/e2e/spec_decode/speculators/ || true &&
+    pytest -v -s "v1/e2e/spec_decode/mtp/test_mtp.py::test_mtp_correctness[qwen3_5-hybrid]" || true'
