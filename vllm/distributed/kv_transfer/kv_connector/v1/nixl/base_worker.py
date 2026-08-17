@@ -73,6 +73,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.network_utils import make_zmq_path
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
@@ -102,6 +103,11 @@ logger = init_logger(__name__)
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
 
+    # Transfer mode included in the NIXL compatibility hash so that a push
+    # (WRITE) connector and a pull (READ) connector never handshake together.
+    # Overridden by NixlPushConnectorWorker.
+    _TRANSFER_MODE: str = "pull"
+
     def _compute_desc_ids(
         self,
         block_ids: BlockIds,
@@ -123,13 +129,16 @@ class NixlBaseConnectorWorker:
         num_blocks = dst_num_blocks
         if block_size_ratio is not None:
             num_blocks = int(num_blocks * block_size_ratio)
+        num_regions = self.num_regions or len(self.block_len_per_layer)
         if region_num_blocks is None:
-            region_num_blocks = [num_blocks] * self.num_regions
+            region_num_blocks = [num_blocks] * num_regions
         elif block_size_ratio is not None:
             region_num_blocks = [
                 int(count * block_size_ratio) for count in region_num_blocks
             ]
-        assert len(region_num_blocks) == self.num_regions
+        if region_num_blocks:
+            num_regions = len(region_num_blocks)
+        assert len(region_num_blocks) == num_regions
         region_offsets = np.cumsum([0, *region_num_blocks[:-1]])
         num_fa_descs = sum(region_num_blocks)
 
@@ -137,7 +146,9 @@ class NixlBaseConnectorWorker:
         if num_ssm_regions == 0:
             if region_group_ids is None:
                 region_group_ids = self.region_group_ids
-            assert len(region_group_ids) == self.num_regions
+            if not region_group_ids and num_regions == 1:
+                region_group_ids = [0]
+            assert len(region_group_ids) == num_regions
             region_group_ids_array = np.asarray(region_group_ids)
             region_num_blocks_array = np.asarray(region_num_blocks)
             if np.unique(region_group_ids_array).size == 1:
@@ -1041,6 +1052,7 @@ class NixlBaseConnectorWorker:
             self.vllm_config,
             self.backend_name,
             self.transfer_topo.cross_layers_blocks,
+            transfer_mode=self._TRANSFER_MODE,
         )
 
         total_size = storage.nbytes()
@@ -1135,7 +1147,10 @@ class NixlBaseConnectorWorker:
             is_mamba=self._has_mamba,
         )
         self.compat_hash = compute_nixl_compatibility_hash(
-            self.vllm_config, self.backend_name, self.transfer_topo.cross_layers_blocks
+            self.vllm_config,
+            self.backend_name,
+            self.transfer_topo.cross_layers_blocks,
+            transfer_mode=self._TRANSFER_MODE,
         )
 
         if self.use_host_buffer:
@@ -1614,7 +1629,7 @@ class NixlBaseConnectorWorker:
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
             replicated = self._is_region_replicated(i)
             region_split_ratio = (
-                1 if region_split_ratios is None else region_split_ratios[i]
+                1 if not region_split_ratios else region_split_ratios[i]
             )
             if region_split_ratio > 1:
                 assert replicated and block_size_ratio == 1
@@ -1867,22 +1882,31 @@ class NixlBaseConnectorWorker:
         block_size_ratio = transfer_topo.block_size_ratio(nixl_agent_meta.block_size)
 
         if engine_id not in self.dst_num_blocks:
+            num_remote_regions = len(nixl_agent_meta.kv_caches_base_addr)
             self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
             self.dst_region_num_blocks[engine_id] = (
                 nixl_agent_meta.region_num_blocks
-                or [nixl_agent_meta.num_blocks] * self.num_regions
+                or [nixl_agent_meta.num_blocks] * num_remote_regions
             )
-            remote_region_group_ids = (
-                nixl_agent_meta.region_group_ids or self.region_group_ids
+            remote_region_group_ids = nixl_agent_meta.region_group_ids or (
+                self.region_group_ids
+                if len(self.region_group_ids) == num_remote_regions
+                else [0] * num_remote_regions
             )
             self.dst_region_group_ids[engine_id] = remote_region_group_ids
             remote_region_block_sizes = (
-                nixl_agent_meta.region_block_sizes or self.region_block_sizes
+                nixl_agent_meta.region_block_sizes
+                or [nixl_agent_meta.block_size] * num_remote_regions
             )
             self.dst_region_block_sizes[engine_id] = remote_region_block_sizes
+            local_region_block_sizes = (
+                self.region_block_sizes
+                if len(self.region_block_sizes) == num_remote_regions
+                else [self.block_size] * num_remote_regions
+            )
             split_ratios = []
             for local_size, remote_size in zip(
-                self.region_block_sizes,
+                local_region_block_sizes,
                 remote_region_block_sizes,
                 strict=True,
             ):
@@ -2203,14 +2227,16 @@ class NixlBaseConnectorWorker:
 
         local_block_ids = meta.local_physical_block_ids
         # TODO (NickLucche) D2H<>H2D ops could benefit from coalescing io across groups
-        for group_block_ids in local_block_ids:
-            self.copy_blocks(
-                self.host_xfer_buffers,
-                self.device_kv_caches,
-                group_block_ids,
-                group_block_ids,
-                "h2d",
-            )
+        # The h2d block copies below are intentionally synchronous.
+        with gpu_sync_allowed():
+            for group_block_ids in local_block_ids:
+                self.copy_blocks(
+                    self.host_xfer_buffers,
+                    self.device_kv_caches,
+                    group_block_ids,
+                    group_block_ids,
+                    "h2d",
+                )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "synced recved kv of request[%s] to device kv buffer,"
@@ -2224,26 +2250,28 @@ class NixlBaseConnectorWorker:
         assert self.use_host_buffer
         assert self.copy_blocks is not None
 
-        for req_id, meta in metadata.reqs_to_save.items():
-            meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
-                meta.local_block_ids, self._physical_blocks_per_logical_kv_block
-            )
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "save_load_kv for request[%s] to host xfer buffer."
-                    "local_block_ids: %s. ",
-                    req_id,
-                    ",".join(map(str, meta.local_physical_block_ids)),
+        # The d2h block copies below are intentionally synchronous.
+        with gpu_sync_allowed():
+            for req_id, meta in metadata.reqs_to_save.items():
+                meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
+                    meta.local_block_ids, self._physical_blocks_per_logical_kv_block
                 )
-            # blocking
-            for group_block_ids in meta.local_physical_block_ids:
-                self.copy_blocks(
-                    self.device_kv_caches,
-                    self.host_xfer_buffers,
-                    group_block_ids,
-                    group_block_ids,
-                    "d2h",
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "save_load_kv for request[%s] to host xfer buffer."
+                        "local_block_ids: %s. ",
+                        req_id,
+                        ",".join(map(str, meta.local_physical_block_ids)),
+                    )
+                # blocking
+                for group_block_ids in meta.local_physical_block_ids:
+                    self.copy_blocks(
+                        self.device_kv_caches,
+                        self.host_xfer_buffers,
+                        group_block_ids,
+                        group_block_ids,
+                        "d2h",
+                    )
 
     @cached_property
     def _attention_kv_caches(self) -> list[torch.Tensor]:

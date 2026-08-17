@@ -671,13 +671,38 @@ def _pynvvc_frames_to_nhwc(frames: torch.Tensor) -> torch.Tensor:
     return frames.contiguous()
 
 
+class _PyNvDecoderPool:
+    """Process-wide singleton managing PyNvVideoCodec decoder slot state.
+
+    Prevents subclass counter shadowing (GHSA-j682-9xp5-rrf3) by storing
+    all mutable pool state in a single module-level instance rather than
+    in ClassVar attributes that get shadowed by Python's augmented
+    assignment semantics on subclasses.
+    """
+
+    def __init__(self) -> None:
+        self.slots: list[PyNvVideoCodecDecoderSlot] = []
+        self.active: int = 0
+        self.cond: threading.Condition = threading.Condition()
+        self.max_slots: int | None = None
+
+    def configure(self, hw_decoders: int) -> None:
+        with self.cond:
+            if self.max_slots is None:
+                self.max_slots = hw_decoders
+            elif self.max_slots != hw_decoders:
+                raise RuntimeError(
+                    "PyNvVideoCodec decoder count is already configured as "
+                    f"{self.max_slots}, got {hw_decoders}"
+                )
+
+
+_pynv_decoder_pool = _PyNvDecoderPool()
+
+
 class PyNvVideoCodecVideoBackendMixin:
     """PyNvVideoCodec utilities for GPU-backed frame decode."""
 
-    _decoder_slots: ClassVar[list[PyNvVideoCodecDecoderSlot]] = []
-    _active_decoder_slots: ClassVar[int] = 0
-    _decoder_slot_cond: ClassVar[threading.Condition] = threading.Condition()
-    _max_decoder_slots: ClassVar[int | None] = None
     _DEVICE_INDEX: ClassVar[int] = 0
 
     @classmethod
@@ -704,14 +729,7 @@ class PyNvVideoCodecVideoBackendMixin:
     @classmethod
     def _configure_decoder_slots(cls, hw_decoders: object) -> None:
         hw_decoders = validate_pynvvideocodec_hw_decoders(hw_decoders)
-        with cls._decoder_slot_cond:
-            if cls._max_decoder_slots is None:
-                cls._max_decoder_slots = hw_decoders
-            elif cls._max_decoder_slots != hw_decoders:
-                raise RuntimeError(
-                    "PyNvVideoCodec decoder count is already configured as "
-                    f"{cls._max_decoder_slots}, got {hw_decoders}"
-                )
+        _pynv_decoder_pool.configure(hw_decoders)
 
     @staticmethod
     @contextmanager
@@ -729,28 +747,28 @@ class PyNvVideoCodecVideoBackendMixin:
     @classmethod
     @contextmanager
     def _borrow_decoder_slot(cls):
+        pool = _pynv_decoder_pool
         create_slot = False
-        with cls._decoder_slot_cond:
-            max_decoder_slots = cls._max_decoder_slots
-            if max_decoder_slots is None:
+        with pool.cond:
+            if pool.max_slots is None:
                 raise RuntimeError("PyNvVideoCodec decoder slots are not configured")
             while True:
-                if cls._decoder_slots:
-                    slot = cls._decoder_slots.pop()
+                if pool.slots:
+                    slot = pool.slots.pop()
                     break
-                if cls._active_decoder_slots < max_decoder_slots:
-                    cls._active_decoder_slots += 1
+                if pool.active < pool.max_slots:
+                    pool.active += 1
                     create_slot = True
                     break
-                cls._decoder_slot_cond.wait()
+                pool.cond.wait()
 
         if create_slot:
             try:
                 slot = cls._create_decoder_slot()
             except Exception:
-                with cls._decoder_slot_cond:
-                    cls._active_decoder_slots -= 1
-                    cls._decoder_slot_cond.notify()
+                with pool.cond:
+                    pool.active -= 1
+                    pool.cond.notify()
                 raise
 
         borrow_succeeded = False
@@ -760,9 +778,9 @@ class PyNvVideoCodecVideoBackendMixin:
         finally:
             if not borrow_succeeded:
                 slot.invalidate()
-            with cls._decoder_slot_cond:
-                cls._decoder_slots.append(slot)
-                cls._decoder_slot_cond.notify()
+            with pool.cond:
+                pool.slots.append(slot)
+                pool.cond.notify()
 
     @staticmethod
     def _metadata_value(metadata, *names: str, default=None):

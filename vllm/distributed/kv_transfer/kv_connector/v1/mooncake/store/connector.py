@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    KVConnectorWorkerMetadata,
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -37,6 +38,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -201,12 +203,24 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             request, blocks, num_external_tokens
         )
 
+    def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.bind_gpu_block_pool(gpu_block_pool)
+
+    def has_pending_push_work(self) -> bool:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.has_pending_push_work()
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
+
+    def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
+        assert self.connector_worker is not None
+        return self.connector_worker.build_connector_worker_meta()
 
     def request_finished(
         self,
@@ -220,8 +234,9 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         request: Request,
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        assert self.connector_scheduler is not None
-        return self.connector_scheduler.request_finished(request, block_ids)
+        # An in-flight store job holds its own reference on the blocks it reads,
+        # so a finishing request never has to defer freeing them.
+        return False, None
 
     def reset_cache(self) -> bool | None:
         """Reset the external Mooncake store on prefix-cache reset.
@@ -241,6 +256,9 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return None
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.update_connector_output(connector_output)
+
         kv_cache_events = connector_output.kv_cache_events
         if not kv_cache_events or not isinstance(
             kv_cache_events, MooncakeStoreKVEvents

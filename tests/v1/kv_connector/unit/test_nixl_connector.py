@@ -434,6 +434,9 @@ def test_kv_transfer_handshake(dist_init):
             )
         )
         assert delay
+        # Pull connector advertises its transfer mode in kv_transfer_params so
+        # an external router can distinguish it from a push producer.
+        assert kv_connector_metadata["transfer_mode"] == "pull"
 
         # Decode connector will be able to create handshake with the prefill connector.
         decode_connector = NixlConnector(
@@ -519,7 +522,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         slot_size_bytes = 4096
         self.slot_size_per_layer = [slot_size_bytes]
         self.block_len_per_layer = [slot_size_bytes * self.block_size]
-        self.num_blocks = 1
+        self.num_blocks = self.kv_cache_config.num_blocks
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
         assert expected_engine_id == self.REMOTE_ENGINE_ID
@@ -549,7 +552,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                     agent_metadata=FakeNixlWrapper.AGENT_METADATA,
                     kv_caches_base_addr=[0],
                     device_id=remote_tp_rank,
-                    num_blocks=1,
+                    num_blocks=self.num_blocks,
                     block_lens=remote_block_lens,
                     # `self.kv_cache_layout` is only forced to HND when vllm engine
                     # is started. We mock HND here.
@@ -634,7 +637,7 @@ class TestNixlHandshake:
         request_id = "req_id"
 
         # Test worker role in decode server.
-        kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=2)
+        kv_cache_config = make_kv_cache_config(block_size=16, num_blocks=10)
         connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
         connector.connector_worker = FakeNixlConnectorWorker(
             vllm_config,
@@ -1163,6 +1166,8 @@ class TestNixlHandshake:
             device_id=0,
             num_blocks=1,
             block_lens=[remote_block_len],
+            region_num_blocks=None,
+            region_strides=None,
         )
 
         assert worker._build_fa_remote(plan, meta, block_size_ratio=1).tolist() == [
@@ -1399,9 +1404,9 @@ def test_kv_connector_stats(default_vllm_config, dist_init):
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
         request_id=request_id,
-        local_block_ids=([1, 2, 3],),
+        local_block_ids=([0],),
         kv_transfer_params={
-            "remote_block_ids": ([4, 5, 6],),
+            "remote_block_ids": ([0],),
             "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
             "remote_request_id": f"prefill-{request_id}",
             "remote_host": "localhost",
@@ -1446,6 +1451,10 @@ def test_kv_connector_stats(default_vllm_config, dist_init):
     assert stats_after_reset is None
 
 
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
 def test_reqs_to_send_deadline_rebased_to_worker_clock(default_vllm_config, dist_init):
     """reqs_to_send deadlines are stamped with the scheduler process's
     perf_counter, whose epoch differs across processes and (by boot-time
@@ -1842,6 +1851,7 @@ def test_mixed_memory_local_descriptors_split_by_memory_type():
     worker._has_mamba = False
     worker._mixed_mem_types = True
     worker.region_mem_types = ["DRAM", "VRAM"]
+    worker.region_num_blocks = [2, 2]
     worker._desc_is_dram_by_block_size = {}
     worker._desc_pos_by_block_size = {}
     worker._dram_src_handles_by_block_size = {}
@@ -3147,6 +3157,42 @@ def test_speculative_attention_backend_not_in_compatibility_hash():
     remote_hash = compute_nixl_compatibility_hash(remote_config, "FLASH_ATTN", False)
 
     assert local_hash == remote_hash
+
+
+@pytest.mark.skip_global_cleanup
+def test_transfer_mode_changes_compatibility_hash():
+    # push (WRITE) and pull (READ) connectors use incompatible transfer
+    # protocols, so their compatibility hashes must differ; identical modes
+    # must match. The default mode is pull.
+    config = create_vllm_config()
+
+    pull_hash = compute_nixl_compatibility_hash(
+        config, "FLASH_ATTN", False, transfer_mode="pull"
+    )
+    push_hash = compute_nixl_compatibility_hash(
+        config, "FLASH_ATTN", False, transfer_mode="push"
+    )
+
+    assert pull_hash != push_hash
+    assert pull_hash == compute_nixl_compatibility_hash(
+        config, "FLASH_ATTN", False, transfer_mode="pull"
+    )
+    assert compute_nixl_compatibility_hash(config, "FLASH_ATTN", False) == pull_hash
+
+
+@pytest.mark.skip_global_cleanup
+def test_scheduler_advertises_transfer_mode():
+    # Each scheduler advertises its transfer mode in kv_transfer_params so an
+    # external router can route pull (READ) vs push (WRITE) producers.
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
+        NixlPullConnectorScheduler,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_scheduler import (
+        NixlPushConnectorScheduler,
+    )
+
+    assert NixlPullConnectorScheduler._TRANSFER_MODE == "pull"
+    assert NixlPushConnectorScheduler._TRANSFER_MODE == "push"
 
 
 @pytest.mark.parametrize(

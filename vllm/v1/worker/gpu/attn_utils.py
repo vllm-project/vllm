@@ -90,8 +90,12 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 spec = replace(
                     spec,
                     indexes_kv_by_block_stride=indexes,
+                )
+                spec = backend.customize_spec(spec)
+                spec = replace(
+                    spec,
                     supported_kernel_block_sizes=tuple(
-                        backend.get_supported_kernel_block_sizes()
+                        backend.get_supported_kernel_block_sizes_for_config(vllm_config)
                     ),
                 )
             kv_cache_spec[layer_name] = spec
@@ -203,6 +207,22 @@ def init_attn_backend(
         min_cg_support=min_cg_support, min_cg_attn_backend=min_cg_attn_backend
     )
     return attn_groups, attn_cg_support_info, kernel_block_sizes
+
+
+def get_query_lens_mismatch_unsupported_backend(
+    attn_groups: list[list[AttentionGroup]],
+) -> str | None:
+    """Name the first backend needing the CPU query lengths to be exact, if any.
+
+    The attention selector already excludes these when adaptive verification is
+    enabled, but models that hard-wire their backend never consult it. See
+    AttentionBackend.supports_device_cpu_query_lens_mismatch().
+    """
+    for groups in attn_groups:
+        for group in groups:
+            if not group.backend.supports_device_cpu_query_lens_mismatch():
+                return group.backend.__name__
+    return None
 
 
 def _allocate_kv_cache(

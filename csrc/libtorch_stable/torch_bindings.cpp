@@ -467,6 +467,13 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "int cache_block_size, Tensor? position_ids=None, "
       "Tensor? cos_sin_cache=None) -> ()");
   ops.def(
+      "fused_kimi_k3_mla_kv_concat(Tensor k_nope, Tensor k_pe, Tensor! k_out) "
+      "-> ()");
+  ops.def(
+      "fused_kimi_k3_mla_kv_concat_quant_fp8("
+      "Tensor k_nope, Tensor k_pe, Tensor v, Tensor! k_fp8, Tensor! v_fp8) "
+      "-> ()");
+  ops.def(
       "fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert("
       "Tensor q, Tensor k_nope, Tensor k_pe, Tensor kv_c_normed, Tensor v, "
       "Tensor! q_fp8, Tensor! k_fp8, Tensor! v_fp8, Tensor! k_cache, "
@@ -525,6 +532,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor state_indices, Tensor! state, Tensor! out, "
       "float? lower_bound=None, Tensor? output_gate=None, "
       "Tensor? norm_weight=None, float norm_eps=1e-5) -> ()");
+#endif
+
+#ifdef VLLM_ENABLE_FUSED_GDN_DECODE
+  ops.def(
+      "fused_gdn_decode_post_conv_mtp("
+      "Tensor mixed_qkv, Tensor a, Tensor b, Tensor A_log, Tensor dt_bias, "
+      "Tensor state_indices, Tensor cu_seqlens, Tensor num_accepted_tokens, "
+      "Tensor! state, Tensor output_gate, Tensor norm_weight, Tensor! out, "
+      "float scale, float norm_eps=1e-5) -> ()");
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES
@@ -769,6 +785,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&fused_kimi_k3_mla_key_concat_kv_cache_insert));
   ops.impl("fused_kimi_k3_mla_key_concat_ds_mla_insert",
            TORCH_BOX(&fused_kimi_k3_mla_key_concat_ds_mla_insert));
+  ops.impl("fused_kimi_k3_mla_kv_concat",
+           TORCH_BOX(&fused_kimi_k3_mla_kv_concat));
+  ops.impl("fused_kimi_k3_mla_kv_concat_quant_fp8",
+           TORCH_BOX(&fused_kimi_k3_mla_kv_concat_quant_fp8));
   ops.impl("fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert",
            TORCH_BOX(&fused_kimi_k3_mla_qkv_quant_kv_cache_fp8_insert));
   ops.impl("fused_kimi_k3_mla_decode_q_concat_kv_cache_insert",
@@ -784,6 +804,11 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&fused_minimax_m3_qknorm_rope_kv_insert));
 #ifdef VLLM_ENABLE_FUSED_KDA_DECODE
   ops.impl("fused_kda_decode", TORCH_BOX(&fused_kda_decode));
+#endif
+
+#ifdef VLLM_ENABLE_FUSED_GDN_DECODE
+  ops.impl("fused_gdn_decode_post_conv_mtp",
+           TORCH_BOX(&fused_gdn_decode_post_conv_mtp));
 #endif
 
 #ifdef VLLM_ENABLE_KIMI_K3_ATTN_RES

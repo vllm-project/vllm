@@ -173,7 +173,7 @@ def test_dp_padding_preserves_local_kv_residency(monkeypatch):
     )
 
     def add_peer_rank(tensor, group):
-        tensor[:, 1] = torch.tensor([3, CUDAGraphMode.FULL.value, 1])
+        tensor[:, 1] = torch.tensor([3, CUDAGraphMode.FULL.value, 1, -1])
 
     monkeypatch.setattr(dp_utils.dist, "all_reduce", add_peer_rank)
     synced, num_tokens_across_dp = dp_utils.sync_cudagraph_and_dp_padding(
