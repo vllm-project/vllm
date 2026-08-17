@@ -114,6 +114,7 @@ class EncoderDecoderModelState(ModelState):
         for_capture: bool = False,
         ubatch_idx: int = 0,
     ) -> dict[str, Any]:
+        assert ubatch_idx == 0, "ubatch_idx should be 0."
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
             num_tokens = input_batch.num_tokens_after_padding

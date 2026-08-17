@@ -164,7 +164,9 @@ class EncoderOnlyModelState(DefaultModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
     ) -> dict[str, Any]:
+        assert ubatch_idx == 0, "ubatch_idx should be 0."
         attn_metadata = super().prepare_attn(
             input_batch,
             cudagraph_mode,
