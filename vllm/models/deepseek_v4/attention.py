@@ -56,6 +56,7 @@ from vllm.utils.multi_stream_utils import (
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV4IndexerBackend,
+    dsa_indexer_uses_fp4,
     get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
@@ -298,6 +299,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 eager_scratch_pool=eager_scratch_pool,
             )
 
+        self._prepare_and_attn_fn = self._prepare_and_attn
+        if not vllm_config.use_v2_model_runner:
+            # MRV1's piecewise capture only tolerates the wide eager region: with
+            # the narrow one the attention input preparation stays in the captured
+            # graph and MRV1 produces garbage (#51430).
+            self._prepare_and_attn_fn = self._prepare_and_attn_eager
+
         # Will be None on ROCm for now.
         self.aux_stream_list = aux_stream_list
         # [0]: GEMM start / post-GEMM event0. [1..3]: GEMM done events;
@@ -379,6 +387,64 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             self.eps,
         )
 
+        self._prepare_and_attn_fn(
+            hidden_states,
+            qr,
+            kv,
+            kv_score,
+            indexer_kv_score,
+            indexer_weights,
+            positions,
+            o_padded,
+        )
+        o = o_padded[:, : self.n_local_heads, :]
+
+        # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
+        return self._o_proj(o, positions)
+
+    @eager_break_during_capture
+    def _prepare_and_attn_eager(
+        self,
+        hidden_states: torch.Tensor,
+        qr: torch.Tensor,
+        kv: torch.Tensor,
+        kv_score: torch.Tensor,
+        indexer_kv_score: torch.Tensor,
+        indexer_weights: torch.Tensor,
+        positions: torch.Tensor,
+        o_padded: torch.Tensor,
+    ) -> None:
+        """Wide eager region: the whole of ``_prepare_and_attn`` runs eagerly.
+
+        The nested ``_sparse_indexer_and_attn`` break runs inline, since
+        ``add_eager`` clears ``_capturing`` before invoking this.
+        """
+        self._prepare_and_attn(
+            hidden_states,
+            qr,
+            kv,
+            kv_score,
+            indexer_kv_score,
+            indexer_weights,
+            positions,
+            o_padded,
+        )
+
+    def _prepare_and_attn(
+        self,
+        hidden_states: torch.Tensor,
+        qr: torch.Tensor,
+        kv: torch.Tensor,
+        kv_score: torch.Tensor,
+        indexer_kv_score: torch.Tensor,
+        indexer_weights: torch.Tensor,
+        positions: torch.Tensor,
+        o_padded: torch.Tensor,
+    ) -> None:
+        """Attention input preparation followed by the sparse indexer and MLA.
+
+        Only the latter runs in the eager break.
+        """
         attn_metadata = get_forward_context().attn_metadata
         indexer = self.indexer
         compressor = self.compressor
@@ -438,10 +504,13 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             positions,
             o_padded,
         )
-        o = o_padded[:, : self.n_local_heads, :]
 
-        # Inverse-RoPE + wo_a + wo_b output projection (platform-specific).
-        return self._o_proj(o, positions)
+    def _fused_wqa_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # Override point: the ROCm layer preshuffles this weight in place, so
+        # it cannot go through fused_wqa_wkv directly.
+        # MergedColumnParallelLinear returns (output, bias); bias is None.
+        qr_kv, _ = self.fused_wqa_wkv(hidden_states)
+        return qr_kv
 
     def _run_parallel_input_projections(
         self, hidden_states: torch.Tensor
@@ -494,7 +563,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             aux_fns[2] = indexer_compressor_kv_score
 
         qr_kv, (kv_score, indexer_weights, indexer_kv_score) = execute_in_parallel(
-            lambda: self.fused_wqa_wkv(hidden_states)[0],
+            lambda: self._fused_wqa_wkv_gemm(hidden_states),
             aux_fns,
             self.ln_events[0],
             self.ln_events[1:4],
@@ -663,6 +732,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             alignment=576 if uses_fp8_ds_mla_layout else 512,
             model_version="deepseek_v4",
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+            # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per token;
+            # head_size stays semantic (512).
+            state_content_bytes=584 if uses_fp8_ds_mla_layout else None,
         )
 
 
@@ -734,7 +806,7 @@ class DeepseekV4Indexer(nn.Module):
         self.q_lora_rank = q_lora_rank  # 1536
         self.compress_ratio = compress_ratio
         self.eager_scratch_pool = eager_scratch_pool
-        self.use_fp4_kv = self.vllm_config.attention_config.use_fp4_indexer_cache
+        self.use_fp4_kv = dsa_indexer_uses_fp4(vllm_config)
         logger.info_once(
             "Using %s indexer cache for Lightning Indexer.",
             "MXFP4" if self.use_fp4_kv else "FP8",
@@ -834,7 +906,10 @@ class DeepseekV4Indexer(nn.Module):
         attn_metadata = get_forward_context().attn_metadata
         if isinstance(attn_metadata, dict):
             indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
-            if indexer_metadata.max_seq_len // self.compress_ratio <= self.topk_tokens:
+            if (
+                indexer_metadata.max_seq_len // self.compress_ratio <= self.topk_tokens
+                and not torch.cuda.is_current_stream_capturing()
+            ):
                 # candidates num smaller than topk, every candidate is selected
                 # but we still need to build k cache
                 compressor(compressed_kv_score, positions, rotary_emb)
