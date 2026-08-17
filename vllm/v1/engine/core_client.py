@@ -371,6 +371,7 @@ class InprocClient(EngineCoreClient):
         # otherwise. The callback must not reference self, or self would stay
         # reachable and the finalizer would never run.
         self._finalizer = weakref.finalize(self, self.engine_core.shutdown)
+        self.engine_core.gather_worker_notifications()
 
     def get_output(self) -> EngineCoreOutputs:
         outputs, model_executed = self.engine_core.step_fn()
