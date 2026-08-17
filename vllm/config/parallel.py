@@ -140,8 +140,8 @@ class ParallelConfig:
     """Local rank of the data parallel group, set only in SPMD mode."""
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
-    data_parallel_rpc_port: int = 29550
-    """Port for data parallel messaging."""
+    data_parallel_rpc_port: int = Field(default=29550, ge=1, le=65535)
+    """Fixed port for data parallel messaging, shared by all nodes."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
     data_parallel_backend: DataParallelBackend = "mp"
