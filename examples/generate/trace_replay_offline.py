@@ -10,15 +10,21 @@ outputs — logprobs, token ranks, text decoding — are computed faithfully
 from the real logit distribution for that token.
 
 How it works:
-  1. Set ``SamplingParams.trace_decode_token_ids`` to the list of decode
+  1. Start the engine with ``--enable-trace-replay`` (or
+     ``LLM(..., enable_trace_replay=True)``).
+  2. Set ``SamplingParams.trace_decode_token_ids`` to the list of decode
      token IDs you want to force.
-  2. The engine will output exactly those tokens and stop; ``max_tokens``
-     is ignored.  EOS tokens inside the trace sequence do **not** halt
-     generation early.
+  3. The engine will output exactly those tokens and stop.  ``max_tokens``
+     is overwritten with the trace length, and the trace is truncated if it
+     does not fit within ``max_model_len``.  EOS tokens inside the trace
+     sequence do **not** halt generation early.
 
-Incompatible features (fall back to normal sampling with a warning):
-  * Speculative decoding
-  * n > 1
+Requires model runner V2.  Requests are rejected with ``ValueError`` when
+combined with any of:
+  * n > 1                     * Speculative decoding
+  * prompt_logprobs           * Structured outputs
+  * repetition_detection      * thinking_token_budget
+  * bad_words
 
 Typical use-cases:
   * Reproduce exact outputs from a previous run for benchmarking.
@@ -47,6 +53,7 @@ def build_llm(args: argparse.Namespace) -> LLM:
         "enforce_eager": args.enforce_eager,
         "gpu_memory_utilization": args.gpu_memory_utilization,
         "max_num_seqs": args.max_num_seqs,
+        "enable_trace_replay": True,
     }
     if args.max_model_len is not None:
         llm_kwargs["max_model_len"] = args.max_model_len
