@@ -11,10 +11,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_tying import (
-    maybe_retie_word_embeddings,
-    maybe_tie_word_embeddings,
-)
+from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
 
 VOCAB_SIZE = 16
 HIDDEN_SIZE = 4
@@ -48,33 +45,6 @@ def make_model_config(untied_by_checkpoint=False):
         model="dummy-model",
         word_embeddings_untied_by_checkpoint=untied_by_checkpoint,
     )
-
-
-@pytest.mark.cpu_test
-@pytest.mark.usefixtures("dist_init")
-def test_tie_when_checkpoint_has_no_lm_head():
-    """An lm_head absent from the checkpoint is tied rather than left unloaded."""
-    model = UntiedModel()
-    loaded_weights = {"language_model.model.embed_tokens.weight"}
-
-    maybe_tie_word_embeddings(model, make_model_config(), loaded_weights)
-
-    assert model.lm_head.weight is model.embed_tokens.weight
-    assert "language_model.lm_head.weight" in loaded_weights
-
-
-@pytest.mark.cpu_test
-@pytest.mark.usefixtures("dist_init")
-def test_no_tie_when_checkpoint_has_lm_head():
-    model = UntiedModel()
-    loaded_weights = {
-        "language_model.model.embed_tokens.weight",
-        "language_model.lm_head.weight",
-    }
-
-    maybe_tie_word_embeddings(model, make_model_config(), loaded_weights)
-
-    assert model.lm_head.weight is not model.embed_tokens.weight
 
 
 @pytest.mark.cpu_test

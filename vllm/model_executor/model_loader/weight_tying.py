@@ -70,35 +70,6 @@ def _get_untied_lm_head(model: nn.Module) -> _UntiedLMHead | None:
     return _UntiedLMHead(name, lm_head, embed_tokens)
 
 
-def maybe_tie_word_embeddings(
-    model: nn.Module, model_config: ModelConfig, loaded_weights: set[str]
-) -> None:
-    """Tie the word embeddings if the checkpoint has no `lm_head` to load.
-
-    A config claiming the word embeddings are untied, against a checkpoint that only
-    contains the input embeddings, would otherwise leave the `lm_head` uninitialized.
-    """
-    if (untied := _get_untied_lm_head(model)) is None:
-        return
-    if untied.weight_name in loaded_weights:
-        return
-    # The input embeddings must have been loaded, otherwise neither weight comes
-    # from this checkpoint (as is the case for draft models, which share both
-    # with their target model).
-    if not any(name.endswith("embed_tokens.weight") for name in loaded_weights):
-        return
-
-    logger.warning(
-        "The config for %s says the word embeddings are untied, but the "
-        "checkpoint contains no %s. The word embeddings will be tied instead. "
-        "Set `tie_word_embeddings=True` in the config to silence this warning.",
-        model_config.model,
-        untied.weight_name,
-    )
-    untied.tie(model)
-    loaded_weights.add(untied.weight_name)
-
-
 def maybe_retie_word_embeddings(model: nn.Module, model_config: ModelConfig) -> None:
     """Re-tie word embeddings that
     [ModelConfig.maybe_untie_word_embeddings][vllm.config.ModelConfig.maybe_untie_word_embeddings]
