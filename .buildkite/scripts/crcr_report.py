@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Post one CRCR nightly callback per Buildkite job.
 
 Separated from crcr-report.sh because the payload needs real JSON encoding: job
@@ -24,7 +27,6 @@ import json
 import sys
 import urllib.error
 import urllib.request
-
 
 # Buildkite job states -> the conclusion vocabulary HUD already stores for
 # GitHub Actions callbacks, so nightly rows aggregate with the rest.
