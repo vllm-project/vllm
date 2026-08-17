@@ -151,8 +151,6 @@ def _run_multimodal_text_query_image_docs_test(
         _make_image_mm_param(red_image),
         _make_image_mm_param(blue_image),
     ]
-    attention_backend = "FLASH_ATTN" if current_platform.is_cuda() else None
-
     scores = vllm_model.llm.score(query, image_docs)
 
     assert len(scores) == 2
@@ -231,6 +229,7 @@ def test_colpali_v2_multimodal_text_query_image_docs(
     dtype: str,
 ) -> None:
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    attention_backend = "FLASH_ATTN" if current_platform.is_cuda() else None
     with vllm_runner(
         model,
         runner="pooling",
