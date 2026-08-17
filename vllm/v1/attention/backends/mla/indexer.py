@@ -40,6 +40,28 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
 
+# The DSA indexer K cache is always quantized; "auto" means fp8 (V3.2 layout)
+# and mxfp4 is the opt-in Blackwell path.
+DSA_INDEXER_KV_DTYPES = ("fp8", "mxfp4")
+
+
+def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
+    """Whether the DeepSeek sparse indexer should use the MXFP4 K cache."""
+    kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype("fp8")
+    if kv_dtype not in DSA_INDEXER_KV_DTYPES:
+        raise ValueError(
+            f"indexer_kv_dtype={kv_dtype!r} is not supported by the DeepSeek "
+            f"sparse indexer (expected one of {DSA_INDEXER_KV_DTYPES})."
+        )
+    use_fp4 = kv_dtype == "mxfp4"
+    if use_fp4 and not current_platform.is_device_capability_family(100):
+        raise ValueError(
+            "indexer_kv_dtype='mxfp4' requires Blackwell datacenter GPUs "
+            "(sm_10x, e.g. B200/GB200); sm_120 (consumer Blackwell) and "
+            "earlier architectures are not supported."
+        )
+    return use_fp4
+
 
 @triton.jit
 def _prepare_uniform_decode_kernel(
@@ -57,9 +79,12 @@ def _prepare_uniform_decode_kernel(
     req_id = idx // max_decode_len
     local_idx = idx % max_decode_len
 
-    # Compute number of KVs attended to by this token.
+    # Compute number of KVs attended to by this token. Padding requests have
+    # seq_len == 0, which would otherwise make the first token of each padded
+    # request negative (e.g. next_n=2 gives 0-2+0+1 = -1). Downstream kernels
+    # read these as uint32, turning -1 into ~4e9.
     seq_len = tl.load(seq_lens_ptr + req_id)
-    per_token_seq_len = seq_len - max_decode_len + local_idx + 1
+    per_token_seq_len = tl.maximum(seq_len - max_decode_len + local_idx + 1, 0)
     tl.store(decode_seq_lens_ptr + idx, per_token_seq_len)
 
     # Copy block table row.
@@ -523,18 +548,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if self.vllm_config.speculative_config
             else 0
         )
-        self.use_fp4_indexer_cache = (
-            self.vllm_config.attention_config.use_fp4_indexer_cache
-        )
-
-        assert (
-            current_platform.is_device_capability_family(100)
-            or not self.use_fp4_indexer_cache
-        ), (
-            "use_fp4_indexer_cache requires Blackwell datacenter GPUs "
-            "(sm_10x, e.g. B200/GB200); sm_120 (consumer Blackwell) and "
-            "earlier architectures are not supported."
-        )
+        self.use_fp4_indexer_cache = dsa_indexer_uses_fp4(self.vllm_config)
 
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
@@ -543,7 +557,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.supports_varlen = _supports_varlen_paged_mqa_logits()
         logger.info_once(
             "DSA indexer decode path: use_flattening=%s supports_varlen=%s "
-            "(next_n=%d, use_fp4_indexer_cache=%s)",
+            "(next_n=%d, use_fp4_cache=%s)",
             self.use_flattening,
             self.supports_varlen,
             next_n,
@@ -748,12 +762,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 seq_lens_buffer = self.decode_seq_lens_buffer[
                     : num_decodes * max_decode_len
                 ].view(num_decodes, max_decode_len)
+                # Clamp at 0: padding requests have seq_len == 0, which would
+                # otherwise make token 0 negative (next_n=2 gives 0-2+1+0 = -1).
+                # Downstream kernels read these as uint32, turning -1 into ~4e9.
                 seq_lens_buffer[:] = (
                     seq_lens.unsqueeze(1)
                     - max_decode_len
                     + 1
                     + self.offsets_buffer[:max_decode_len]
-                )
+                ).clamp_(min=0)
                 seq_lens = seq_lens_buffer
             return seq_lens, block_table, decode_lens, num_decodes, requires_padding
 

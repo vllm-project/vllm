@@ -1111,7 +1111,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         if self.is_k3_situ_aiter_a8w4:
             # The checkpoint declares dynamic MXFP4 activations. This explicit
             # opt-in keeps its packed MXFP4 weights/scales but quantizes SiTU
-            # activations to FP8 in AITER's native SiTUv2 A8W4 kernels.
+            # activations to MXFP8 in AITER's native SiTUv2 A8W4 kernels.
             self.mxfp4_backend = Mxfp4MoeBackend.AITER_MXFP4_BF16
             self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
         elif self.ocp_mx_scheme == "w_mxfp4":
@@ -1163,7 +1163,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             logger.warning_once(
                 "Kimi-K3 Quark checkpoint declares dynamic MXFP4 activations; "
                 "VLLM_ROCM_USE_AITER_MOE_SITUV2_A8W4=1 explicitly overrides "
-                "routed-MoE activations to FP8 and uses native AITER SiTUv2 "
+                "routed-MoE activations to MXFP8 and uses native AITER SiTUv2 "
                 "A8W4 with MXFP4 weights."
             )
 
