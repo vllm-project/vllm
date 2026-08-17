@@ -107,6 +107,33 @@ curl -X POST 'http://localhost:8000/collective_rpc' -H 'Content-Type: applicatio
 curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 ```
 
+#### Automatic idle sleep
+
+Instead of orchestrating sleep and wake-up externally, the server can manage
+them automatically. With `--sleep-idle-ttl`, the engine is put to sleep after
+the configured number of seconds without inference requests, and woken up
+automatically when the next inference request arrives (the request is held
+until wake-up completes, then served normally).
+
+```bash
+vllm serve Qwen/Qwen3-0.6B \
+  --enable-sleep-mode \
+  --sleep-idle-ttl 300 \
+  --sleep-idle-level 1
+```
+
+- `--sleep-idle-ttl` — idle seconds before the engine is put to sleep
+  (disabled by default). In-flight requests are always drained first.
+- `--sleep-idle-level` — sleep level to use (`1` or `2`, default `1`).
+  Waking up from level 2 reloads the model weights from the model source,
+  which makes the first request slower than waking from level 1.
+
+Only inference requests (e.g. `/v1/*` completions, embeddings, scoring)
+reset the idle timer and trigger wake-up; health probes and `/metrics` do
+not, so liveness checks won't keep the engine awake. Engines put to sleep
+manually via the `/sleep` endpoint are never woken automatically. This
+feature is not supported with more than one API server process.
+
 #### HTTP endpoints
 
 - `POST /sleep?level=1` — Put the model to sleep (`level=1`).
