@@ -728,6 +728,12 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
 
     sf_block_size = 32  # mxfp4 block size
 
+    is_gfx1250 = False
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx1250
+
+        is_gfx1250 = on_gfx1250()
+
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             convert_to_humming_moe_kernel_format,
@@ -981,12 +987,46 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             )
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
-        from vllm._aiter_ops import rocm_aiter_ops
-
         if w13_bias is not None:
             w13_bias = w13_bias.data.to(torch.float32)
         if w2_bias is not None:
             w2_bias = w2_bias.data.to(torch.float32)
+
+        fp4_dtype = torch.float4_e2m1fn_x2
+        e8m0_dtype = torch.float8_e8m0fnu
+
+        if is_gfx1250:
+            from aiter.ops.shuffle import moe_shuffle_scale, moe_shuffle_weight
+
+            w13_raw = w13_weight.data.view(fp4_dtype)
+            w2_raw = w2_weight.data.view(fp4_dtype)
+            w13_scale_raw = w13_weight_scale.data.view(e8m0_dtype)
+            w2_scale_raw = w2_weight_scale.data.view(e8m0_dtype)
+            w13_scale_raw = w13_scale_raw.view(-1, w13_scale_raw.shape[-1])
+            w2_scale_raw = w2_scale_raw.view(-1, w2_scale_raw.shape[-1])
+
+            w13 = moe_shuffle_weight(
+                w13_raw, num_experts,
+                is_guinterleave=True, gate_up=True,
+            )
+            w2 = moe_shuffle_weight(
+                w2_raw, num_experts,
+                is_guinterleave=False, gate_up=False,
+            )
+            w13_scale = moe_shuffle_scale(
+                w13_scale_raw, num_experts,
+                is_guinterleave=True, gate_up=True,
+            )
+            w2_scale = moe_shuffle_scale(
+                w2_scale_raw, num_experts,
+                is_guinterleave=False, gate_up=False,
+            )
+            w13.is_shuffled = True
+            w2.is_shuffled = True
+
+            return (w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
+
+        from vllm._aiter_ops import rocm_aiter_ops
 
         # e8m0_shuffle on weight scales (GFX950 swizzle layout)
         from aiter.utility.fp4_utils import e8m0_shuffle
@@ -1002,10 +1042,8 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         )
 
         # View as native FP4 dtype
-        fp4_dtype = getattr(torch, "float4_e2m1fn_x2", None)
-        if fp4_dtype is not None:
-            w13_weight.data = w13_weight.data.view(fp4_dtype)
-            w2_weight.data = w2_weight.data.view(fp4_dtype)
+        w13_weight.data = w13_weight.data.view(fp4_dtype)
+        w2_weight.data = w2_weight.data.view(fp4_dtype)
 
         # Shuffle weights for AITER CK kernel
         shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
@@ -1460,6 +1498,10 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         )
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_BF16 and is_gfx1250:
+        import os
+
+        os.environ["AITER_BF16_FP8_MOE_BOUND"] = "0"
+
         from aiter.ops.shuffle import moe_shuffle_scale, moe_shuffle_weight
 
         fp4_dtype = torch.float4_e2m1fn_x2
