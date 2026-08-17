@@ -73,7 +73,7 @@ def test_startup_plan_apply_gate(plan_env):
         maybe_apply_startup_plan(refused)
         assert refused.cache_config.kv_cache_memory_bytes is None
 
-    # An explicit --kv-cache-memory is never overridden.
+    # An explicit --kv-cache-memory-bytes is never overridden.
     explicit = _plan_worker(kv_bytes=7 * GiB_bytes)
     maybe_apply_startup_plan(explicit)
     assert explicit.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes

@@ -1874,8 +1874,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # vLLM (if any). If no JSON matches, it uses a hard-coded heuristic.
     "VLLM_TUNED_CONFIG_FOLDER": lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
     # Opt-in persistence of the startup plan. When enabled, each worker
-    # saves the memory-profiling result (the suggested --kv-cache-memory value
-    # and the free-memory baseline) under VLLM_CACHE_ROOT/startup_plan/,
+    # saves the memory-profiling result (the suggested --kv-cache-memory-bytes
+    # value and the free-memory baseline) under VLLM_CACHE_ROOT/startup_plan/,
     # keyed by a hardware+config fingerprint, and later boots auto-apply it
     # -- skipping memory profiling -- when the fingerprint matches and
     # current free memory >= the recorded baseline.
@@ -1987,7 +1987,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NCCL_INCLUDE_PATH": lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
     # GC debug config
     # - VLLM_GC_DEBUG=0: disable GC debugger
-    # - VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elpased times
+    # - VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elapsed times
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
