@@ -2322,14 +2322,13 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_shutdown_retains_registered_memory_until_cancellation_is_safe(
+def test_shutdown_retains_registered_memory_while_host_staging_drains(
     default_vllm_config, dist_init
 ):
-    """A timed-out transfer must not block shutdown or expose its memory.
+    """A timed-out staged read must not block shutdown or expose its memory.
 
-    NIXL may be unable to cancel a posted operation immediately. Cleanup must
-    return while retaining the registered tensors, then release them once the
-    operation becomes terminal.
+    Host staging owns posted NIXL reads whose buffers cannot be deregistered
+    until cancellation succeeds or the operation becomes terminal.
     """
     vllm_config = create_vllm_config()
     worker = NixlConnectorWorker(
@@ -2337,45 +2336,28 @@ def test_shutdown_retains_registered_memory_until_cancellation_is_safe(
         vllm_config.kv_transfer_config.engine_id,
         make_kv_cache_config(block_size=16),
     )
-    transfer_active = threading.Event()
-    transfer_active.set()
-    worker._recving_transfers = {"req": [123]}
+    staging_active = threading.Event()
+    staging_active.set()
+    stager = MagicMock()
+    stager.poll_shutdown.side_effect = lambda cancel: not staging_active.is_set()
+    worker._host_stager = stager
     worker._registered_descs = ["desc"]
     worker.device_kv_caches = {"cache": MagicMock()}
 
-    def check_xfer_state(handle):
-        return "PROC" if transfer_active.is_set() else "DONE"
-
-    def release_xfer_handle(handle):
-        if transfer_active.is_set():
-            raise RuntimeError("transfer cannot be cancelled yet")
-
-    with (
-        patch.object(
-            worker.nixl_wrapper,
-            "check_xfer_state",
-            side_effect=check_xfer_state,
-        ),
-        patch.object(
-            worker.nixl_wrapper,
-            "release_xfer_handle",
-            side_effect=release_xfer_handle,
-        ),
-        patch.object(worker.nixl_wrapper, "deregister_memory") as deregister,
-    ):
+    with patch.object(worker.nixl_wrapper, "deregister_memory") as deregister:
         worker.shutdown(drain_timeout=0)
 
-        reaper = worker._shutdown_reaper_thread
+        reaper = worker._host_staging_shutdown_thread
         assert reaper is not None and reaper.is_alive()
+        stager.begin_shutdown.assert_called_once_with()
         assert worker._registered_descs == ["desc"]
         assert worker.device_kv_caches
         deregister.assert_not_called()
 
-        transfer_active.clear()
+        staging_active.clear()
         reaper.join(timeout=1)
 
         assert not reaper.is_alive()
-        assert worker._shutdown_complete
         assert not worker._registered_descs
         assert not worker.device_kv_caches
         deregister.assert_called_once_with("desc")

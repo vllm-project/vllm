@@ -102,8 +102,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_SHUTDOWN_DRAIN_TIMEOUT_S = 2.0
-_SHUTDOWN_POLL_INTERVAL_S = 0.001
+_HOST_STAGING_SHUTDOWN_TIMEOUT_S = 2.0
+_HOST_STAGING_SHUTDOWN_POLL_INTERVAL_S = 0.001
 
 
 class NixlBaseConnectorWorker:
@@ -313,9 +313,7 @@ class NixlBaseConnectorWorker:
 
         # Config.
         self.vllm_config = vllm_config
-        self._shutdown_started = False
-        self._shutdown_complete = False
-        self._shutdown_reaper_thread: threading.Thread | None = None
+        self._host_staging_shutdown_thread: threading.Thread | None = None
         # mypy will complain on re-assignment otherwise.
         self.block_size: int = cast(int, vllm_config.cache_config.block_size)
 
@@ -3203,44 +3201,14 @@ class NixlBaseConnectorWorker:
         with contextlib.suppress(Exception):
             self.shutdown(drain_timeout=0)
 
-    def _poll_shutdown_transfers(
-        self,
-        transfers: dict[ReqId, list[TransferHandle]],
-        cancel: bool,
-    ) -> bool:
-        for req_id, handles in tuple(transfers.items()):
-            remaining = []
-            for handle in handles:
-                try:
-                    state = self.nixl_wrapper.check_xfer_state(handle)
-                except Exception:
-                    state = "PROC"
-                if state == "PROC" and not cancel:
-                    remaining.append(handle)
-                    continue
-                try:
-                    self.nixl_wrapper.release_xfer_handle(handle)
-                except Exception:
-                    remaining.append(handle)
-            if remaining:
-                transfers[req_id] = remaining
-            else:
-                del transfers[req_id]
-        return not transfers
-
-    def _poll_shutdown_work(self, cancel: bool) -> bool:
-        transfers_done = self._poll_shutdown_transfers(self._recving_transfers, cancel)
-        stagers_done = True
+    def _poll_host_staging_shutdown(self, cancel: bool) -> bool:
+        done = True
         for stager in (self._host_stager, self._hisparse_host_stager):
             if stager is not None:
-                stagers_done &= stager.poll_shutdown(cancel)
-        with self._handshake_lock:
-            handshakes_done = not self._handshake_futures
-        return transfers_done and stagers_done and handshakes_done
+                done &= stager.poll_shutdown(cancel)
+        return done
 
     def _finish_shutdown(self) -> None:
-        if self._shutdown_complete:
-            return
         self._recving_transfers.clear()
         try:
             for handle in self.src_xfer_handles_by_block_size.values():
@@ -3272,48 +3240,50 @@ class NixlBaseConnectorWorker:
             # model_runner.shutdown()).
             self.device_kv_caches = {}
             self.host_xfer_buffers = {}
-        self._shutdown_complete = True
-        self._shutdown_reaper_thread = None
+        self._host_staging_shutdown_thread = None
 
-    def _reap_shutdown_work(self) -> None:
-        while not self._poll_shutdown_work(cancel=True):
-            time.sleep(_SHUTDOWN_POLL_INTERVAL_S)
+    def _reap_host_staging_shutdown(self) -> None:
+        while not self._poll_host_staging_shutdown(cancel=True):
+            time.sleep(_HOST_STAGING_SHUTDOWN_POLL_INTERVAL_S)
         self._finish_shutdown()
-        logger.info("Deferred NIXL shutdown cleanup completed.")
+        logger.info("Deferred NIXL host-staging cleanup completed.")
 
     def shutdown(self, drain_timeout: float | None = None) -> None:
-        """Stop new work and bound the wait for active NIXL operations."""
+        """Stop new work and bound the wait for host-staged reads."""
         if not hasattr(self, "_handshake_initiation_executor"):
             return
-        if self._shutdown_started:
+        if self._host_staging_shutdown_thread is not None:
             return
-        self._shutdown_started = True
         if drain_timeout is None:
-            drain_timeout = _SHUTDOWN_DRAIN_TIMEOUT_S
+            drain_timeout = _HOST_STAGING_SHUTDOWN_TIMEOUT_S
         self._handshake_initiation_executor.shutdown(wait=False, cancel_futures=True)
+        for handles in self._recving_transfers.values():
+            for handle in handles:
+                self.nixl_wrapper.release_xfer_handle(handle)
+        self._recving_transfers.clear()
         for stager in (self._host_stager, self._hisparse_host_stager):
             if stager is not None:
                 stager.begin_shutdown()
 
         deadline = time.monotonic() + drain_timeout
-        drained = self._poll_shutdown_work(cancel=False)
+        drained = self._poll_host_staging_shutdown(cancel=False)
         while not drained and time.monotonic() < deadline:
-            time.sleep(_SHUTDOWN_POLL_INTERVAL_S)
-            drained = self._poll_shutdown_work(cancel=False)
+            time.sleep(_HOST_STAGING_SHUTDOWN_POLL_INTERVAL_S)
+            drained = self._poll_host_staging_shutdown(cancel=False)
         if not drained:
-            drained = self._poll_shutdown_work(cancel=True)
+            drained = self._poll_host_staging_shutdown(cancel=True)
         if drained:
             self._finish_shutdown()
             return
 
         logger.warning(
-            "NIXL shutdown drain timed out after %.1fs; retaining registered "
-            "memory until active operations become terminal.",
+            "NIXL host-staging shutdown timed out after %.1fs; retaining "
+            "registered memory until active operations become terminal.",
             drain_timeout,
         )
-        self._shutdown_reaper_thread = threading.Thread(
-            target=self._reap_shutdown_work,
+        self._host_staging_shutdown_thread = threading.Thread(
+            target=self._reap_host_staging_shutdown,
             daemon=True,
-            name="nixl-shutdown-reaper",
+            name="nixl-host-staging-shutdown",
         )
-        self._shutdown_reaper_thread.start()
+        self._host_staging_shutdown_thread.start()
