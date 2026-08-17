@@ -262,6 +262,17 @@ def test_gemma4_adjust_request(generic_tokenizer):
     assert result is request
 
 
+def test_gemma4_template_default_disables_thinking(generic_tokenizer):
+    output = (
+        "<|channel>thought\n1st thought<channel|>1st content<turn|>\n"
+        "<|turn>user\nThanks<|turn>model\n"
+    )
+    output_tokens = gemma4_encode_output(generic_tokenizer, output)
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser: ReasoningParser = parser_cls(generic_tokenizer)
+    assert parser.is_reasoning_end(output_tokens)
+
+
 def test_gemma4_previous_turn_reasoning_is_reasoning_end(generic_tokenizer):
     output = (
         "<|channel>thought\n1st thought<channel|>1st content<turn|>\n"
@@ -269,7 +280,8 @@ def test_gemma4_previous_turn_reasoning_is_reasoning_end(generic_tokenizer):
     )
     output_tokens = gemma4_encode_output(generic_tokenizer, output)
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
-        generic_tokenizer
+        generic_tokenizer,
+        chat_template_kwargs={"enable_thinking": True},
     )
     is_reasoning_end = parser.is_reasoning_end(output_tokens)
     assert not is_reasoning_end
