@@ -262,6 +262,23 @@ def has_flashinfer_cutedsl() -> bool:
 
 
 @functools.cache
+def has_flashinfer_cutedsl_gemm_allreduce() -> bool:
+    """Return whether FlashInfer exposes the SM100 GEMM-AR kernel."""
+    if not has_flashinfer_cutedsl():
+        return False
+    module = _get_submodule("flashinfer.cute_dsl.gemm_allreduce_two_shot")
+    return module is not None and hasattr(module, "PersistentDenseGemmKernel")
+
+
+def get_flashinfer_cutedsl_gemm_allreduce() -> Any:
+    """Return FlashInfer's SM100 persistent GEMM-AR kernel class."""
+    module = _get_submodule("flashinfer.cute_dsl.gemm_allreduce_two_shot")
+    if module is None or not hasattr(module, "PersistentDenseGemmKernel"):
+        return _missing()
+    return module.PersistentDenseGemmKernel
+
+
+@functools.cache
 def has_flashinfer_trtllm_fused_moe() -> bool:
     """Return `True` if FlashInfer TRTLLM fused MoE is available."""
     if not has_flashinfer_moe():
@@ -1067,6 +1084,8 @@ __all__ = [
     "has_flashinfer_nvlink_one_sided",
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
+    "has_flashinfer_cutedsl_gemm_allreduce",
+    "get_flashinfer_cutedsl_gemm_allreduce",
     "has_flashinfer_cutedsl_moe_nvfp4",
     "has_flashinfer_b12x_moe",
     "has_flashinfer_b12x_gemm",

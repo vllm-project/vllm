@@ -101,6 +101,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 
 logger = init_logger(__name__)
+_FUSED_GEMM_AR_MIN_TOKENS = 256
 
 # Below this many tokens, overlap the g_proj GEMM on the aux stream with the
 # attention front-end (the GEMM is small and launch-bound, so the overlap
@@ -135,6 +136,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         use_rope: bool = False,
         non_causal_multi_token_decode: bool = False,
         run_gemm_rs: bool = False,
+        use_cutedsl_fused_gemm_ar: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -279,6 +281,25 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             if not self.run_gemm_rs:
                 logger.warning_once(
                     "GEMM-RS is disabled for %s due to an incompatible projection.",
+                    prefix,
+                )
+        self.cutedsl_fused_gemm_ar = None
+        if use_cutedsl_fused_gemm_ar:
+            from vllm.model_executor.kernels.linear.cute_dsl.gemm_allreduce import (
+                make_cutedsl_fused_gemm_ar,
+            )
+
+            self.cutedsl_fused_gemm_ar = make_cutedsl_fused_gemm_ar(
+                self.o_proj,
+                max_M=(
+                    get_current_vllm_config()
+                    .scheduler_config.max_num_batched_tokens
+                ),
+            )
+            if self.cutedsl_fused_gemm_ar is None:
+                logger.warning_once(
+                    "Fused GEMM-AR is disabled for %s due to an incompatible "
+                    "projection.",
                     prefix,
                 )
 
@@ -560,6 +581,13 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             gemm_rs = get_gemm_rs()
             if gemm_rs.should_run(attn_out):
                 return gemm_rs(attn_out, self.o_proj.weight)
+
+        if (
+            self.cutedsl_fused_gemm_ar is not None
+            and attn_out.shape[0] >= _FUSED_GEMM_AR_MIN_TOKENS
+            and self.cutedsl_fused_gemm_ar.should_run(attn_out)
+        ):
+            return self.cutedsl_fused_gemm_ar(attn_out)
 
         return self.o_proj(attn_out)[0]
 

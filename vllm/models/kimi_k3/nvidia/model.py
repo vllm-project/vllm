@@ -189,6 +189,33 @@ def maybe_init_gemm_rs(vllm_config: VllmConfig, use_sequence_parallel: bool) -> 
     return True
 
 
+def should_use_fused_gemm_ar(
+    vllm_config: VllmConfig, use_sequence_parallel: bool
+) -> bool:
+    if not envs.VLLM_USE_FLASHINFER_GEMM_ALLREDUCE:
+        return False
+
+    parallel_config = vllm_config.parallel_config
+    tp_size = parallel_config.tensor_parallel_size
+    enabled = (
+        not use_sequence_parallel
+        and not parallel_config.use_ubatching
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and tp_size > 1
+        and torch.distributed.get_world_size() == tp_size
+    )
+    if enabled:
+        from vllm.utils.flashinfer import has_flashinfer_cutedsl_gemm_allreduce
+
+        enabled = has_flashinfer_cutedsl_gemm_allreduce()
+
+    logger.info_once(
+        "CuTe DSL fused GEMM-AR is %s.", "enabled" if enabled else "disabled"
+    )
+    return enabled
+
+
 class KimiMLP(nn.Module):
     """Dense / shared-expert MLP, optionally TP-sharded under sequence parallel.
 
@@ -836,6 +863,7 @@ class KimiDecoderLayer(nn.Module):
         prefix: str = "",
         aux_stream: torch.cuda.Stream | None = None,
         run_gemm_rs: bool = False,
+        use_fused_gemm_ar: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -871,6 +899,7 @@ class KimiDecoderLayer(nn.Module):
                     vllm_config,
                     prefix=f"{prefix}.self_attn",
                     run_gemm_rs=run_gemm_rs,
+                    use_cutedsl_fused_gemm_ar=use_fused_gemm_ar,
                 )
                 self._self_attn_writes_output = False
             else:
@@ -908,6 +937,7 @@ class KimiDecoderLayer(nn.Module):
                 prefix=f"{prefix}.self_attn",
                 aux_stream=aux_stream,
                 run_gemm_rs=run_gemm_rs,
+                use_cutedsl_fused_gemm_ar=use_fused_gemm_ar,
             )
             self._self_attn_writes_output = False
 
@@ -1118,6 +1148,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         # GEMM-RS uses NCCL symmetric-memory multicast, which requires all TP
         # ranks to belong to one NVLink domain.
         self.run_gemm_rs = maybe_init_gemm_rs(vllm_config, self.use_sequence_parallel)
+        self.use_fused_gemm_ar = should_use_fused_gemm_ar(
+            vllm_config, self.use_sequence_parallel
+        )
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -1140,6 +1173,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 prefix,
                 aux_stream=aux_stream,
                 run_gemm_rs=self.run_gemm_rs,
+                use_fused_gemm_ar=self.use_fused_gemm_ar,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(

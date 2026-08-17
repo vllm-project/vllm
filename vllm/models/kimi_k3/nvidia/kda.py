@@ -51,6 +51,7 @@ from vllm.v1.worker.workspace import current_workspace_manager
 logger = init_logger(__name__)
 
 _KDA_GATE_LOGBOUND_MIN = -5.0
+_FUSED_GEMM_AR_MIN_TOKENS = 256
 
 
 def a_log_weight_loader(
@@ -320,6 +321,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         vllm_config: VllmConfig,
         prefix: str = "",
         run_gemm_rs: bool = False,
+        use_cutedsl_fused_gemm_ar: bool = False,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
         self.use_recoverssm = self.cache_config.use_kda_recoverssm
@@ -501,6 +503,22 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     "GEMM-RS is disabled for %s due to an incompatible projection.",
                     prefix,
                 )
+        self.cutedsl_fused_gemm_ar = None
+        if use_cutedsl_fused_gemm_ar:
+            from vllm.model_executor.kernels.linear.cute_dsl.gemm_allreduce import (
+                make_cutedsl_fused_gemm_ar,
+            )
+
+            self.cutedsl_fused_gemm_ar = make_cutedsl_fused_gemm_ar(
+                self.o_proj,
+                max_M=vllm_config.scheduler_config.max_num_batched_tokens,
+            )
+            if self.cutedsl_fused_gemm_ar is None:
+                logger.warning_once(
+                    "Fused GEMM-AR is disabled for %s due to an incompatible "
+                    "projection.",
+                    prefix,
+                )
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -547,6 +565,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             gemm_rs = get_gemm_rs()
             if gemm_rs.should_run(core_attn_out):
                 return gemm_rs(core_attn_out, self.o_proj.weight)
+        if (
+            self.cutedsl_fused_gemm_ar is not None
+            and core_attn_out.shape[0] >= _FUSED_GEMM_AR_MIN_TOKENS
+            and self.cutedsl_fused_gemm_ar.should_run(core_attn_out)
+        ):
+            return self.cutedsl_fused_gemm_ar(core_attn_out)
         return self.o_proj(core_attn_out)[0]
 
     @eager_break_during_capture
