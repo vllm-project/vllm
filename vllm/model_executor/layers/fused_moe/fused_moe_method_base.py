@@ -45,6 +45,14 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             self.moe_kernel is not None and self.moe_kernel.can_overlap_shared_experts
         )
 
+    @property
+    def supports_packed_fused_shared_experts(self) -> bool:
+        return (
+            self.moe_kernel is not None
+            and not self.moe_kernel.is_monolithic
+            and self.moe_kernel.fused_experts.supports_packed_fused_shared_experts()
+        )
+
     @abstractmethod
     def create_weights(
         self,

@@ -57,12 +57,29 @@ class TrtLlmFp8ExpertsBase:
             activation_key,
             activation_format,
         )
-        if not supported or moe_config.num_experts <= 2048:
+        if not supported:
             return supported, reason
-        return False, (
-            "FlashInfer TRTLLM routing supports at most 2048 experts, "
-            f"but got {moe_config.num_experts}"
+        kernel_num_experts = moe_config.num_experts
+        can_pad_fused_shared_experts = (
+            moe_config.num_fused_shared_experts > 0
+            and not cls.is_monolithic()
+            and (weight_key, activation_key)
+            == (kFp8Static128BlockSym, kFp8Dynamic128Sym)
         )
+        if can_pad_fused_shared_experts:
+            kernel_num_experts += moe_config.num_fused_shared_experts
+            kernel_num_experts = (kernel_num_experts + 3) // 4 * 4
+        if kernel_num_experts > 2048:
+            return False, (
+                "FlashInfer TRTLLM routing supports at most 2048 experts, "
+                f"but got {kernel_num_experts}"
+            )
+        if kernel_num_experts % 4 != 0:
+            return False, (
+                "FlashInfer TRTLLM routing requires the expert count to be "
+                f"divisible by 4, but got {kernel_num_experts}"
+            )
+        return True, None
 
     def __init__(
         self,
@@ -176,6 +193,10 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
+    @staticmethod
+    def supports_packed_fused_shared_experts() -> bool:
+        return True
+
     def moe_problem_size(
         self,
         a1: torch.Tensor,
@@ -236,8 +257,23 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
         import flashinfer
         from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
 
-        # Pack topk ids and weights into format expected by the kernel.
-        packed_topk_ids = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
+        num_packed_shared_experts = 0
+        if (
+            self.moe_config.num_fused_shared_experts > 0
+            and topk_ids.size(1) == self.topk
+        ):
+            num_packed_shared_experts = self.moe_config.num_fused_shared_experts
+
+        # Pack topk ids and weights into the format expected by the kernel.
+        # When routing deferred the always-on shared slots, synthesize them in
+        # this same kernel instead of materializing and concatenating tensors.
+        packed_topk_ids = trtllm_moe_pack_topk_ids_weights(
+            topk_ids,
+            topk_weights,
+            num_fused_shared_experts=num_packed_shared_experts,
+            first_shared_expert_id=self.moe_config.num_experts,
+            fused_shared_expert_weight=self.moe_config.fused_shared_expert_weight,
+        )
 
         assert a1q_scale is not None
 
@@ -253,6 +289,13 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             weight_layout = WeightLayout.BlockMajorK
             hidden_states_scale = a1q_scale.t().contiguous()
 
+        kernel_num_experts = global_num_experts
+        kernel_local_num_experts = self.local_num_experts
+        if self.moe_config.num_fused_shared_experts > 0:
+            assert self.ep_rank == 0
+            kernel_num_experts = w1.shape[0]
+            kernel_local_num_experts = w1.shape[0]
+
         flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(
             topk_ids=packed_topk_ids,
             routing_bias=None,
@@ -265,13 +308,13 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale,
-            num_experts=global_num_experts,
-            top_k=topk_ids.size(1),
+            num_experts=kernel_num_experts,
+            top_k=packed_topk_ids.size(1),
             n_group=None,
             topk_group=None,
             intermediate_size=self.intermediate_size_per_partition,
             local_expert_offset=self.ep_rank * self.local_num_experts,
-            local_num_experts=self.local_num_experts,
+            local_num_experts=kernel_local_num_experts,
             routed_scaling_factor=None,
             routing_method_type=1,  # not used
             use_shuffled_weight=use_shuffled_weight,

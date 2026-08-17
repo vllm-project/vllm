@@ -6,11 +6,14 @@ Run `pytest tests/quantization/test_fp8.py --forked`.
 """
 
 import logging
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import regex as re
 import torch
 
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
 from vllm.config.model import ModelConfig
@@ -21,6 +24,13 @@ from vllm.model_executor.layers.attention.attention import (
     set_default_quant_scales,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
+from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
+    TrtLlmFp8ExpertsBase,
+    TrtLlmFp8ExpertsModular,
+)
+from vllm.model_executor.layers.fused_moe.utils import (
+    trtllm_moe_pack_topk_ids_weights,
+)
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     Fp8KVCacheMethod,
@@ -30,6 +40,13 @@ from vllm.model_executor.layers.quantization.fp8 import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
+)
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    prepare_fp8_moe_layer_for_fi,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
@@ -45,6 +62,252 @@ MODELS = [
         marks=pytest.mark.skip(reason="Checkpoint removed from HF."),
     ),
 ]
+
+
+def test_fp8_moe_modular_apply_includes_fused_shared_experts():
+    method = object.__new__(Fp8MoEMethod)
+    method.moe_kernel = Mock(is_monolithic=False)
+    layer = Mock(
+        kernel_global_num_experts=257,
+        global_num_experts=256,
+        activation=Mock(),
+        expert_map=None,
+        apply_router_weight_on_input=False,
+    )
+    layer.w13_weight = torch.empty(257, 1, 1)
+    layer.w2_weight = torch.empty(257, 1, 1)
+
+    method.apply(
+        layer=layer,
+        x=torch.empty(1, 1),
+        topk_weights=torch.empty(1, 9),
+        topk_ids=torch.empty(1, 9, dtype=torch.int32),
+        shared_experts=None,
+        shared_experts_input=None,
+    )
+
+    assert method.moe_kernel.apply.call_args.kwargs["global_num_experts"] == 257
+
+
+@pytest.mark.parametrize(
+    (
+        "num_experts",
+        "num_fused_shared_experts",
+        "is_monolithic",
+        "expected_reason",
+    ),
+    [
+        (256, 0, False, None),
+        (256, 1, False, None),
+        (2048, 1, False, "at most 2048"),
+    ],
+)
+def test_trtllm_fp8_moe_validates_kernel_expert_count(
+    monkeypatch,
+    num_experts,
+    num_fused_shared_experts,
+    is_monolithic,
+    expected_reason,
+):
+    monkeypatch.setattr(
+        mk.FusedMoEExperts,
+        "is_supported_config",
+        staticmethod(lambda *args: (True, None)),
+    )
+    moe_config = Mock(
+        num_experts=num_experts,
+        num_fused_shared_experts=num_fused_shared_experts,
+    )
+    experts_cls = Mock(
+        is_monolithic=Mock(return_value=is_monolithic),
+    )
+
+    supported, reason = TrtLlmFp8ExpertsBase.is_supported_config(
+        experts_cls,
+        moe_config,
+        kFp8Static128BlockSym,
+        kFp8Dynamic128Sym,
+        Mock(),
+    )
+
+    assert supported is (expected_reason is None)
+    if expected_reason is not None:
+        assert reason is not None
+        assert expected_reason in reason
+
+
+def test_flashinfer_trtllm_pads_fused_shared_expert_rows(monkeypatch):
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.utils.flashinfer_utils."
+        "_shuffle_deepseek_fp8_moe_weights",
+        lambda w13, w2: (w13, w2),
+    )
+    layer = SimpleNamespace(
+        moe_config=SimpleNamespace(
+            is_act_and_mul=True,
+            num_fused_shared_experts=1,
+        ),
+        weight_block_size=[128, 128],
+        activation=SimpleNamespace(is_gated=True),
+        quant_method=SimpleNamespace(is_monolithic=False),
+    )
+    w13 = torch.full((257, 256, 128), 2, dtype=torch.float8_e4m3fn)
+    w2 = torch.full((257, 128, 128), 3, dtype=torch.float8_e4m3fn)
+    w13_scale = torch.full((257, 2, 1), 4.0)
+    w2_scale = torch.full((257, 1, 1), 5.0)
+
+    padded = prepare_fp8_moe_layer_for_fi(
+        layer,
+        w13,
+        w2,
+        w13_scale,
+        None,
+        w2_scale,
+        None,
+        is_trtllm=True,
+    )
+
+    padded_w13, padded_w2, padded_w13_scale, padded_w2_scale = padded
+    assert padded_w13.shape[0] == 260
+    assert padded_w2.shape[0] == 260
+    assert padded_w13_scale.shape[0] == 260
+    assert padded_w2_scale.shape[0] == 260
+    assert not padded_w13[257:].float().count_nonzero()
+    assert not padded_w2[257:].float().count_nonzero()
+    assert (padded_w13_scale[257:] == 1).all()
+    assert (padded_w2_scale[257:] == 1).all()
+
+
+def test_trtllm_fp8_modular_uses_padded_fused_expert_count(monkeypatch):
+    experts = object.__new__(TrtLlmFp8ExpertsModular)
+    experts.intermediate_size_per_partition = 128
+    experts.local_num_experts = 257
+    experts.ep_rank = 0
+    experts.topk = 8
+    experts.moe_config = Mock(
+        num_experts=256,
+        num_fused_shared_experts=1,
+        fused_shared_expert_weight=1.0,
+        max_num_tokens=1,
+        dp_size=1,
+    )
+    experts.quant_config = Mock(
+        block_shape=[128, 128],
+        w1_scale=torch.empty(1),
+        w2_scale=torch.empty(1),
+    )
+    experts.gemm1_alpha = None
+    experts.gemm1_beta = None
+    experts.gemm1_clamp_limit = None
+
+    pack = Mock(return_value=torch.empty(1, 9, dtype=torch.int32))
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe."
+        "trtllm_moe_pack_topk_ids_weights",
+        pack,
+    )
+    import flashinfer
+
+    kernel = Mock()
+    monkeypatch.setattr(
+        flashinfer.fused_moe,
+        "trtllm_fp8_block_scale_routed_moe",
+        kernel,
+    )
+    experts.apply(
+        output=torch.empty(1, 128),
+        hidden_states=torch.empty(1, 128),
+        w1=torch.empty(260, 1, 1),
+        w2=torch.empty(260, 1, 1),
+        topk_weights=torch.empty(1, 8),
+        topk_ids=torch.empty(1, 8, dtype=torch.int32),
+        activation=mk.MoEActivation.SILU,
+        global_num_experts=257,
+        expert_map=None,
+        a1q_scale=torch.empty(1, 1),
+        a2_scale=None,
+        workspace13=torch.empty(0),
+        workspace2=torch.empty(0),
+        expert_tokens_meta=None,
+        apply_router_weight_on_input=False,
+    )
+
+    assert kernel.call_args.kwargs["num_experts"] == 260
+    assert kernel.call_args.kwargs["local_num_experts"] == 260
+    assert kernel.call_args.kwargs["top_k"] == 9
+    assert pack.call_args.kwargs == {
+        "num_fused_shared_experts": 1,
+        "first_shared_expert_id": 256,
+        "fused_shared_expert_weight": 1.0,
+    }
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_trtllm_pack_appends_fused_shared_experts() -> None:
+    routed_ids = torch.tensor([[3, 1], [0, 2]], dtype=torch.int32, device="cuda")
+    routed_weights = torch.tensor(
+        [[0.75, 0.25], [0.625, 0.375]], dtype=torch.float32, device="cuda"
+    )
+    shared_ids = torch.tensor([[4], [4]], dtype=torch.int32, device="cuda")
+    shared_weights = torch.full((2, 1), 0.5, dtype=torch.float32, device="cuda")
+
+    expected = trtllm_moe_pack_topk_ids_weights(
+        torch.cat((routed_ids, shared_ids), dim=1),
+        torch.cat((routed_weights, shared_weights), dim=1),
+    )
+    actual = trtllm_moe_pack_topk_ids_weights(
+        routed_ids,
+        routed_weights,
+        num_fused_shared_experts=1,
+        first_shared_expert_id=4,
+        fused_shared_expert_weight=0.5,
+    )
+
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize(
+    ("native_fused_shared_experts", "expected"),
+    [(False, False), (True, True)],
+)
+def test_monolithic_kernel_must_handle_fused_shared_experts_natively(
+    native_fused_shared_experts,
+    expected,
+):
+    experts_cls = Mock(
+        _supports_current_device=Mock(return_value=True),
+        _supports_activation=Mock(return_value=True),
+        _supports_quant_scheme=Mock(return_value=True),
+        _supports_parallel_config=Mock(return_value=True),
+        _supports_routing_method=Mock(return_value=True),
+        _supports_router_logits_dtype=Mock(return_value=True),
+        _supports_shape=Mock(return_value=True),
+        activation_format=Mock(return_value=mk.FusedMoEActivationFormat.Standard),
+        is_monolithic=Mock(return_value=True),
+        supports_native_fused_shared_experts=Mock(
+            return_value=native_fused_shared_experts
+        ),
+    )
+    moe_config = Mock(
+        is_act_and_mul=True,
+        activation=Mock(),
+        moe_parallel_config=Mock(),
+        routing_method=Mock(),
+        router_logits_dtype=torch.float32,
+        hidden_dim=128,
+        is_lora_enabled=False,
+        num_fused_shared_experts=1,
+    )
+
+    supported, _ = mk.FusedMoEExperts.is_supported_config(
+        experts_cls,
+        moe_config,
+        None,
+        None,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+
+    assert supported is expected
 
 
 @pytest.mark.skipif(
