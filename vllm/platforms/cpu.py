@@ -93,13 +93,13 @@ class CpuPlatform(Platform):
                 and torch.cpu._is_amx_tile_supported()
             )
             if amx_available and selected_backend != AttentionBackendEnum.CPU_MLA:
-                # Prefer the AMX-optimized backend when available, unless the
-                # user explicitly asked for the generic reference backend.
+                # Prefer AMX when available, unless CPU_MLA was explicitly requested.
                 if (
                     selected_backend
                     and selected_backend != AttentionBackendEnum.AMX_MLA
                 ):
                     logger.info("Cannot use %s backend on CPU.", selected_backend)
+                logger.info_once("Using %s backend.", AttentionBackendEnum.AMX_MLA.name)
                 return AttentionBackendEnum.AMX_MLA.get_path()
             # Reference MLA implementation on CPU. Performance is not the
             # goal here; the backend simply wires the CPU decode kernel
@@ -111,6 +111,7 @@ class CpuPlatform(Platform):
                 AttentionBackendEnum.AMX_MLA,
             ):
                 logger.info("Cannot use %s backend on CPU.", selected_backend)
+            logger.info_once("Using %s backend.", AttentionBackendEnum.CPU_MLA.name)
             return AttentionBackendEnum.CPU_MLA.get_path()
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
@@ -149,11 +150,9 @@ class CpuPlatform(Platform):
         # The CPU MLA decode kernel only compiles with block_size=16 today
         # (see csrc/cpu/mla_decode.cpp). If the model uses MLA we override
         # the default block size regardless of user preference to avoid a
-        # runtime kernel dispatch failure. The AMX MLA backend has no such
-        # constraint (it prefers a multiple of 32, like the dense backend),
-        # so it's excluded from this override -- mirroring the same
-        # AMX-available-and-not-explicitly-overridden condition
-        # get_attn_backend_cls uses to pick between the two backends.
+        # runtime kernel dispatch failure. AMX MLA has no such constraint
+        # (same AMX-available condition as get_attn_backend_cls), so it's
+        # excluded from this override.
         cpu_mla_enabled = model_config is not None and getattr(
             model_config, "use_mla", False
         )

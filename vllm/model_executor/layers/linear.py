@@ -199,12 +199,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
         if current_platform.is_cpu():
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
-            # Layers whose raw weight is read directly after loading (not
-            # just consumed via forward()) opt out of having it freed here --
-            # e.g. DeepSeek-style MLA's kv_b_proj, read by
-            # MLAAttention.process_weights_after_loading to derive the
-            # absorbed W_UK/W_UV matrices. See mla_attention.py's
-            # `_cpu_keep_raw_weight` usage.
+            # Layers that read their raw weight after loading (e.g. MLA's
+            # kv_b_proj) opt out via `_cpu_keep_raw_weight`.
             remove_weight = not getattr(layer, "_cpu_keep_raw_weight", False)
             dispatch_cpu_unquantized_gemm(layer, remove_weight=remove_weight)
 

@@ -156,12 +156,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         q_c = None
         kv_lora = None
 
-        # Optional AMX-CPU fused path (proj+RMSNorm+RoPE in one kernel; see
-        # CPUMLAImpl.fused_qkv_rope). Duck-typed and additive: only taken
-        # when the impl declares support and none of the features it doesn't
-        # handle (DCP query replication, sparse indexer top-k, llama4
-        # scaling) are in play for this batch; every other backend/config
-        # falls through to the unfused sequence below unchanged.
+        # Optional fused proj+RMSNorm+RoPE path (see AMXMLAImpl.fused_qkv_rope),
+        # duck-typed so unsupported backends/configs fall through unchanged.
         fused = None
         if (
             llama_4_scaling is None

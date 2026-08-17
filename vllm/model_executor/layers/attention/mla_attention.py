@@ -422,16 +422,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
         self.kv_b_proj = kv_b_proj
-        # On CPU, UnquantizedLinearMethod.process_weights_after_loading packs
-        # every plain Linear layer's weight for fast GEMM and then frees the
-        # raw tensor (dispatch_cpu_unquantized_gemm(..., remove_weight=True))
-        # -- correct for layers invoked via forward(), but kv_b_proj's raw
-        # weight is what this class's own process_weights_after_loading
-        # (below) reads to derive W_UK/W_UV; freeing it first would corrupt
-        # that read. Opt kv_b_proj out of the removal (packing still happens
-        # for any GPU-side chunked-prefill recompute path that does call
-        # kv_b_proj.forward(); only the CPU-only "free the raw tensor" step
-        # is skipped).
+        # CPU's Linear packing frees the raw weight after loading, but
+        # process_weights_after_loading (below) still needs to read it. Opt
+        # out of the removal for this layer.
         kv_b_proj._cpu_keep_raw_weight = True
         self.dcp_q_replicate = dcp_q_replicate
         self.W_UK_T_dcp_qrep: torch.Tensor | None = None
@@ -1033,12 +1026,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         return output_padded
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        # Mirrors Attention.process_weights_after_loading's delegating call
-        # (attention.py), which MLAAttention was missing -- lets per-backend
-        # impls (e.g. AMXMLAImpl) hook the existing, currently-unused-by-MLA
-        # AttentionImplBase.process_weights_after_loading base method to do
-        # their own ahead-of-time weight packing. No-op for every backend
-        # that doesn't override it.
+        # Let per-backend impls do their own weight packing first (no-op
+        # unless overridden), mirroring Attention.process_weights_after_loading.
         self.impl.process_weights_after_loading(act_dtype)
 
         # we currently do not have quantized bmm's which are needed for
