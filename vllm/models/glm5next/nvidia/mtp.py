@@ -101,28 +101,24 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
             self.enorm.variance_epsilon,
         )
         hidden_states = self.eh_proj(eh_input)
-        # mtp_block returns (hidden_states=residual+mlp, residual=post-attn,
-        # post=None, comb=None); the latter three are unused here (final norm is
-        # applied below without a second residual-add). post/comb are None on the
-        # non-mHC / MTP path.
-        hidden_states, _, _, _ = self.mtp_block(
-            positions=positions, hidden_states=hidden_states, residual=None
-        )
-        # mtp_block (Glm5NextDecoderLayer) already returns the post-MLP residual
-        # stream (hidden_states = residual + mlp). Glm5NextMoE all-reduces its
+        # mtp_block returns the UNsummed post-MLP hidden + the residual stream;
+        # the fused_add_rms_norm below adds them and applies the final RMSNorm
+        # in one kernel (was: separate bf16 add inside the layer + plain norm —
+        # the deepseek_mtp reference pattern). Glm5NextMoE all-reduces its
         # output internally — the main model feeds that straight into a plain
-        # final RMSNorm with no interposing collective — so no extra all-reduce
-        # is needed here. An explicit one would only scale by tp_size and be
-        # cancelled by shared_head's leading RMSNorm (scale-invariant); it is
-        # omitted to match the deepseek_mtp reference. shared_head applies that
-        # final RMSNorm exactly once; passing `residual` would call
-        # fused_add_rms_norm and double-count the post-attention residual.
+        # final RMSNorm with no interposing collective — so no extra
+        # all-reduce is needed here. An explicit one would only scale by
+        # tp_size and be cancelled by this leading RMSNorm (scale-invariant);
+        # it is omitted to match the deepseek_mtp reference.
         # Return the post-norm hidden
         # for both the draft-logits path (compute_logits applies the LM head
         # only) and the recycled previous_hidden_states. Post-norm recycle
         # matches deepseek_mtp.py (PR #45895); model_returns_tuple() is True for
         # Glm5NextMTPModel so the proposer unpacks the tuple.
-        hidden_states = self.shared_head(hidden_states)
+        hidden_states, residual, _, _ = self.mtp_block(
+            positions=positions, hidden_states=hidden_states, residual=None
+        )
+        hidden_states, _ = self.shared_head.norm(hidden_states, residual=residual)
         return hidden_states, hidden_states
 
 
@@ -148,6 +144,9 @@ class Glm5NextMultiTokenPredictor(nn.Module):
             config.hidden_size,
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
+        # Plain list for the per-propose lookup: ModuleDict[str(...)] builds a
+        # string and hashes it on every draft step.
+        self._mtp_layers = list(self.layers.values())
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def set_skip_topk(self, skip: bool):
@@ -180,7 +179,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         current_step_idx = spec_step_idx % self.num_mtp_layers
-        return self.layers[str(self.mtp_start_layer_idx + current_step_idx)](
+        return self._mtp_layers[current_step_idx](
             input_ids,
             positions,
             previous_hidden_states,

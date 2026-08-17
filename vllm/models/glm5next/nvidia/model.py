@@ -425,6 +425,12 @@ class Glm5NextDecoderLayer(nn.Module):
                 attn_output, residual=residual
             )
             hidden_states = self.mlp(hidden_states)
+            if self.is_mtp_layer:
+                # Return the unsummed pair: the MTP caller feeds it straight
+                # into shared_head's fused_add_rms_norm (one kernel instead of
+                # a separate residual-add + norm). The sum itself is unchanged
+                # (fp32-accumulated inside the fused kernel).
+                return hidden_states, residual, None, None
             hidden_states = residual + hidden_states
             return hidden_states, residual, None, None
 
