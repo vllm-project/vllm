@@ -205,16 +205,23 @@ def _layout_from_name(layout_name: str) -> KVCacheLayout:
         ) from None
 
 
-def _merge_layout_preferences(
-    supported_layouts_lists: Sequence[Sequence[KVCacheLayout]],
+def get_supported_kv_cache_layouts(
+    backends: Iterable[type[AttentionBackend]],
 ) -> list[KVCacheLayout]:
-    """Layouts every list supports, ordered by first-preference votes.
+    """Layouts every one of the worker's backends supports, most preferred first.
 
-    Identical lists (the common homogeneous case) merge to themselves, keeping
-    their order. Otherwise each list is most-preferred-first: the layout the
-    most lists put first wins, ties keeping the enum order. An empty
-    intersection is a hard error.
+    Every backend declares the layouts its kernels support, most preferred first
+    (``supported_kv_cache_layouts``), or None when any layout works; workers where
+    nothing declares follow the default preference. Identical declarations keep
+    their order; otherwise the layout the most backends put first wins, ties
+    keeping the enum order. An empty intersection is a hard error.
     """
+    supported_layouts_lists: list[Sequence[KVCacheLayout]] = [
+        layouts
+        for backend in backends
+        if (layouts := backend.supported_kv_cache_layouts()) is not None
+    ] or [_DEFAULT_LAYOUT_PREFERENCE]
+
     first = supported_layouts_lists[0]
     if all(layouts == first for layouts in supported_layouts_lists[1:]):
         return list(first)
@@ -234,25 +241,6 @@ def _merge_layout_preferences(
             f"{list(map(_layout_names, supported_layouts_lists))}."
         )
     return candidates
-
-
-def get_supported_kv_cache_layouts(
-    backends: Iterable[type[AttentionBackend]],
-) -> list[KVCacheLayout]:
-    """Layouts every one of the worker's backends supports, most preferred first.
-
-    Every backend declares the layouts its kernels support, most preferred first
-    (``supported_kv_cache_layouts``), or None when any layout works; workers where
-    nothing declares follow the default preference.
-    """
-    supported_layouts_lists: list[Sequence[KVCacheLayout]] = [
-        layouts
-        for backend in backends
-        if (layouts := backend.supported_kv_cache_layouts()) is not None
-    ]
-    return _merge_layout_preferences(
-        supported_layouts_lists or [_DEFAULT_LAYOUT_PREFERENCE]
-    )
 
 
 def publish_kv_cache_layout_to_current_process(
