@@ -6,7 +6,6 @@ import multiprocessing as mp
 import weakref
 from collections.abc import Callable
 from dataclasses import asdict
-from multiprocessing.synchronize import Event
 
 import zmq
 
@@ -28,6 +27,7 @@ from .constant import (
     OPEN_WRITE,
     PIN,
     POLL_INTERVAL,
+    SHUTDOWN,
     UNPIN,
 )
 from .manager import PagedShmManager
@@ -137,7 +137,7 @@ class PagedShmServer:
         self._resources.close()
 
 
-def _zmq_server(size: int, block_size: int, conn, stop_event: Event):
+def _zmq_server(size: int, block_size: int, conn):
     context = zmq.Context()
     socket = None
     server = None
@@ -149,6 +149,7 @@ def _zmq_server(size: int, block_size: int, conn, stop_event: Event):
         # Bind to an available IPC path
         address = get_open_zmq_ipc_path()
         socket = context.socket(zmq.ROUTER)
+        socket.setsockopt(zmq.LINGER, 0)
         socket.bind(address)
 
         # Notify parent process of the address
@@ -174,7 +175,7 @@ def _zmq_server(size: int, block_size: int, conn, stop_event: Event):
 
         logger.info("PagedShmServer started at %s", address)
 
-        while not stop_event.is_set():
+        while True:
             try:
                 socks = dict(poller.poll(POLL_INTERVAL))
             except (zmq.ZMQError, KeyboardInterrupt, EOFError):
@@ -215,6 +216,15 @@ def _zmq_server(size: int, block_size: int, conn, stop_event: Event):
                 except zmq.ZMQError as e:
                     # Client may have gone away – this is not a server error
                     logger.debug("Failed to send response to %s: %s", frames[0], e)
+
+            # ------------------------------------------------------------------
+            # Handle SHUTDOWN command before entering the normal dispatch table
+            # ------------------------------------------------------------------
+            if command == SHUTDOWN:
+                logger.info("Received SHUTDOWN command from %s, exiting", identity)
+                response_frames = [identity, EMPTY, OK, b"shutting down"]
+                _send_response(socket, response_frames)
+                break
 
             # Dispatch command
             handler_info = handlers.get(command)
@@ -269,16 +279,14 @@ class PagedShmServerProc:
     def __init__(self, size: int, block_size: int):
         ctx = mp.get_context("spawn")
         parent_conn, child_conn = ctx.Pipe()
-        stop_event = ctx.Event()
 
         proc = ctx.Process(
             target=_zmq_server,
-            args=(size, block_size, child_conn, stop_event),
+            args=(size, block_size, child_conn),
         )
 
         self.proc = proc
         self.address = ""
-        self.stop_event = stop_event
         self.parent_conn = parent_conn
         self._finalizer = weakref.finalize(self, self.shutdown)
 
@@ -287,9 +295,30 @@ class PagedShmServerProc:
         self.address = self.parent_conn.recv()
         self.parent_conn.close()
 
-    def shutdown(self):
-        self.stop_event.set()
-        self.proc.join(timeout=5)
+    def shutdown(self, timeout: float = 5.0):
+        """Gracefully stop the server process.
+
+        Sends a SHUTDOWN command over ZMQ to wake up the poller immediately.
+        If the process does not exit within the timeout, it is terminated.
+        """
+        if self.proc.is_alive() and self.address:
+            # Attempt graceful shutdown via ZMQ SHUTDOWN command
+            try:
+                ctx = zmq.Context()
+                sock = ctx.socket(zmq.DEALER)
+                sock.setsockopt(zmq.LINGER, 0)
+                sock.setsockopt(zmq.SNDTIMEO, 1000)  # ms
+                sock.connect(self.address)
+                sock.send(SHUTDOWN)
+                sock.close()
+                ctx.term()
+            except Exception as e:
+                logger.debug("Failed to send SHUTDOWN command: %s", e)
+
+        # Wait for the process to exit gracefully
+        self.proc.join(timeout)
+
+        # If still alive after timeout, terminate forcefully
         if self.proc.is_alive():
             self.proc.terminate()
             self.proc.join()
