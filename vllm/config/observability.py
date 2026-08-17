@@ -76,6 +76,19 @@ class ObservabilityConfig:
     This includes number of context/generation requests and tokens
     and the elapsed cpu time for the iteration."""
 
+    forward_pass_metrics_port: int = Field(default=0, ge=0, le=65535)
+    """Base TCP port for native per-iteration forward-pass metrics.
+    ``0`` disables collection and publishing. Data-parallel rank ``N`` binds
+    to ``PORT + N``."""
+
+    forward_pass_metrics_worker_id: str = ""
+    """Worker identifier stamped onto forward-pass metrics. Defaults to the
+    generated vLLM instance ID when unset."""
+
+    forward_pass_metrics_max_queue_size: int = Field(default=10_000, gt=0)
+    """Maximum number of forward-pass metrics waiting for background ZMQ
+    publication. New samples are dropped instead of blocking when full."""
+
     jit_monitor_mode: Literal["warn", "error"] = "warn"
     """How to handle post-warmup JIT compilation events."""
 

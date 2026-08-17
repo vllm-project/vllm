@@ -214,6 +214,31 @@ def test_jit_monitor_verbose_arg():
     assert EngineArgs(model="test", jit_monitor_verbose=True).jit_monitor_verbose
 
 
+@pytest.mark.skip_global_cleanup
+def test_forward_pass_metrics_args(monkeypatch):
+    from vllm.platforms.cpu import CpuPlatform
+
+    monkeypatch.setattr("vllm.platforms._current_platform", CpuPlatform())
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--forward-pass-metrics-port",
+            "20380",
+            "--forward-pass-metrics-worker-id",
+            "worker-0",
+            "--forward-pass-metrics-max-queue-size",
+            "512",
+        ]
+    )
+
+    engine_args = EngineArgs.from_cli_args(args)
+    observability_config = engine_args.create_observability_config()
+
+    assert observability_config.forward_pass_metrics_port == 20380
+    assert observability_config.forward_pass_metrics_worker_id == "worker-0"
+    assert observability_config.forward_pass_metrics_max_queue_size == 512
+
+
 @pytest.mark.parametrize("mode", ["warn", "error"])
 def test_jit_monitor_mode_arg(mode):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())

@@ -359,6 +359,10 @@ class ModelRunnerOutput:
     # ``None`` when ``return_sampling_mask`` is off.
     sampling_masks: SamplingMaskLists | None = None
 
+    # Completed CUDA timings may arrive a few outputs after their originating
+    # scheduler iteration. EngineCore associates them by iteration_id.
+    forward_pass_timing_samples: tuple[tuple[int, float], ...] = ()
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,
