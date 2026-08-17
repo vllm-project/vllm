@@ -41,6 +41,7 @@ from vllm.config import (
     DeviceConfig,
     DiffusionConfig,
     ECTransferConfig,
+    EncoderCacheManagerConfig,
     EPLBConfig,
     FaultToleranceConfig,
     KernelConfig,
@@ -425,6 +426,7 @@ class EngineArgs:
 
     model: str = ModelConfig.model
     enable_return_routed_experts: bool = ModelConfig.enable_return_routed_experts
+    return_sampling_mask: bool = ModelConfig.return_sampling_mask
     model_weights: str = ModelConfig.model_weights
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
     tokenizer: str | None = ModelConfig.tokenizer
@@ -519,6 +521,9 @@ class EngineArgs:
     enable_prefix_caching: bool | None = None
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
+    )
+    prefix_cache_retention_interval: int | None = get_field(
+        CacheConfig, "prefix_cache_retention_interval"
     )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
@@ -686,6 +691,9 @@ class EngineArgs:
     kv_events_config: KVEventsConfig | None = None
 
     ec_transfer_config: ECTransferConfig | None = None
+    ec_manager_config: EncoderCacheManagerConfig = get_field(
+        VllmConfig, "ec_manager_config"
+    )
     reasoning_config: ReasoningConfig = get_field(VllmConfig, "reasoning_config")
 
     generation_config: str = ModelConfig.generation_config
@@ -695,7 +703,6 @@ class EngineArgs:
         ModelConfig, "override_generation_config"
     )
     model_impl: str = ModelConfig.model_impl
-    override_attention_dtype: str | None = ModelConfig.override_attention_dtype
     attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
 
     kv_cache_dtype_skip_layers: list[str] = get_field(
@@ -766,6 +773,8 @@ class EngineArgs:
             self.mamba_config = MambaConfig(**self.mamba_config)
         if isinstance(self.kernel_config, dict):
             self.kernel_config = KernelConfig(**self.kernel_config)
+        if isinstance(self.ec_manager_config, dict):
+            self.ec_manager_config = EncoderCacheManagerConfig(**self.ec_manager_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
         if isinstance(self.weight_transfer_config, dict):
@@ -868,6 +877,10 @@ class EngineArgs:
             "--enable-return-routed-experts",
             **model_kwargs["enable_return_routed_experts"],
         )
+        model_group.add_argument(
+            "--return-sampling-mask",
+            **model_kwargs["return_sampling_mask"],
+        )
         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode", **model_kwargs["logprobs_mode"])
         model_group.add_argument("--use-fp64-gumbel", **model_kwargs["use_fp64_gumbel"])
@@ -906,9 +919,6 @@ class EngineArgs:
             "--enable-cumem-allocator", **model_kwargs["enable_cumem_allocator"]
         )
         model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
-        model_group.add_argument(
-            "--override-attention-dtype", **model_kwargs["override_attention_dtype"]
-        )
         model_group.add_argument(
             "--logits-processors", **model_kwargs["logits_processors"]
         )
@@ -1216,6 +1226,10 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
+        )
+        cache_group.add_argument(
+            "--prefix-cache-retention-interval",
+            **cache_kwargs["prefix_cache_retention_interval"],
         )
         cache_group.add_argument(
             "--kv-cache-dtype-skip-layers", **cache_kwargs["kv_cache_dtype_skip_layers"]
@@ -1626,6 +1640,9 @@ class EngineArgs:
             "--ec-transfer-config", **vllm_kwargs["ec_transfer_config"]
         )
         vllm_group.add_argument(
+            "--ec-manager-config", **vllm_kwargs["ec_manager_config"]
+        )
+        vllm_group.add_argument(
             "--compilation-config", "-cc", **vllm_kwargs["compilation_config"]
         )
         vllm_group.add_argument(
@@ -1739,6 +1756,7 @@ class EngineArgs:
             allow_deprecated_quantization=self.allow_deprecated_quantization,
             enforce_eager=self.enforce_eager,
             enable_return_routed_experts=self.enable_return_routed_experts,
+            return_sampling_mask=self.return_sampling_mask,
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
             use_fp64_gumbel=self.use_fp64_gumbel,
@@ -1772,7 +1790,6 @@ class EngineArgs:
             enable_sleep_mode=self.enable_sleep_mode,
             enable_cumem_allocator=self.enable_cumem_allocator,
             model_impl=self.model_impl,
-            override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             video_pruning_method=self.video_pruning_method,
@@ -1991,6 +2008,7 @@ class EngineArgs:
             sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
+            prefix_cache_retention_interval=self.prefix_cache_retention_interval,
             kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
@@ -2143,7 +2161,7 @@ class EngineArgs:
         elif self.data_parallel_size_local is not None:
             data_parallel_size_local = self.data_parallel_size_local
 
-            if self.data_parallel_start_rank and not headless:
+            if self.data_parallel_start_rank is not None and not headless:
                 # Infer hybrid LB mode.
                 self.data_parallel_hybrid_lb = True
 
@@ -2162,7 +2180,9 @@ class EngineArgs:
                 self.data_parallel_hybrid_lb = False
 
             self.data_parallel_rank = (
-                self.data_parallel_start_rank or inferred_data_parallel_rank
+                self.data_parallel_start_rank
+                if self.data_parallel_start_rank is not None
+                else inferred_data_parallel_rank
             )
             if self.nnodes > 1:
                 logger.info(
@@ -2506,6 +2526,7 @@ class EngineArgs:
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
+            ec_manager_config=self.ec_manager_config,
             reasoning_config=self.reasoning_config,
             profiler_config=self.profiler_config,
             additional_config=self.additional_config,

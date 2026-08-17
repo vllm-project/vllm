@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 import vllm.envs
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
@@ -276,7 +277,7 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     """Validate that the request is supported by structured output.
 
-    Raises ValueError if the request is not supported.
+    Raises VLLMValidationError if the request is not supported.
     """
     if sampling_params.structured_outputs is None:
         return
@@ -284,13 +285,21 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
     so_params = sampling_params.structured_outputs
 
     if so_params.regex:
+        # A NUL byte is never meaningful in a regex pattern and is not handled
+        # by xgrammar's native regex converter. Reject it here, before the
+        # pattern reaches that native code; the try/except below does not cover
+        # this case.
+        if "\x00" in so_params.regex:
+            raise ValueError(
+                "structured_outputs.regex must not contain a NUL character ('\\x00')"
+            )
         try:
             compile_regex_with_timeout(
                 xgr.Grammar.from_regex,
                 so_params.regex,
             )
         except Exception as err:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Failed to transform regex into a grammar: {err}"
             ) from err
 
@@ -299,7 +308,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
         try:
             xgr.Grammar.from_ebnf(choice_grammar)
         except Exception as err:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Failed to transform choices into a grammar: {err}"
             ) from err
         so_params.choice = None
@@ -311,19 +320,19 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             try:
                 schema = json.loads(so_params.json)
             except json.JSONDecodeError as e:
-                raise ValueError("Invalid JSON grammar specification.") from e
+                raise VLLMValidationError("Invalid JSON grammar specification.") from e
         else:
             schema = so_params.json
 
         if has_xgrammar_unsupported_json_features(schema):
-            raise ValueError(
+            raise VLLMValidationError(
                 "The provided JSON schema contains features not supported by xgrammar."
             )
 
         try:
             xgr.Grammar.from_json_schema(schema)
         except Exception as err:
-            raise ValueError(
+            raise VLLMValidationError(
                 f"Failed to transform json schema into a grammar: {err}"
             ) from err
         return
@@ -334,7 +343,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             try:
                 so_params.grammar = convert_lark_to_ebnf(so_params.grammar)
             except ValueError as e:
-                raise ValueError(
+                raise VLLMValidationError(
                     "Failed to convert the grammar from Lark to EBNF. "
                 ) from e
 
@@ -343,7 +352,7 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             # parse the grammar, but we aren't compiling it.
             xgr.Grammar.from_ebnf(so_params.grammar)
         except Exception as e:
-            raise ValueError("Invalid grammar specification.") from e
+            raise VLLMValidationError("Invalid grammar specification.") from e
         return
 
     if so_params.structural_tag:
@@ -364,4 +373,4 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
             else:
                 xgr.Grammar.from_structural_tag(so_params.structural_tag)
         except Exception as e:
-            raise ValueError("Invalid structural tag specification.") from e
+            raise VLLMValidationError("Invalid structural tag specification.") from e

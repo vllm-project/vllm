@@ -398,7 +398,7 @@ RUN apt-get -y update && apt-get -y install autoconf libtool pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system meson meson-python pybind11 pyyaml types-PyYAML \
+    uv pip install --system meson meson-python pyyaml types-PyYAML \
         auditwheel build patchelf pytest tomlkit "setuptools>=80.9.0"
 
 RUN --mount=type=cache,target=/root/.cache/ccache \
@@ -892,6 +892,9 @@ COPY --from=export_vllm /vllm_v1 /usr/local/lib/python${PYTHON_VERSION}/dist-pac
 
 # Hide source under src/ so it won't shadow the installed package in tests.
 RUN mkdir src && mv vllm src/vllm
+
+# Catch GPU<->CPU syncs in execute_model/sample_tokens during tests.
+ENV VLLM_GPU_SYNC_CHECK=error
 
 # -----------------------
 # Final vLLM image
