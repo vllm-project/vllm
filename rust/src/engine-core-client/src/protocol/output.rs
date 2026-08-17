@@ -123,6 +123,8 @@ pub struct EngineCoreOutput {
     /// frontend grows one.
     #[serde(default)]
     pub mm_cache_miss_hashes: Option<Vec<String>>,
+    #[serde(default)]
+    pub new_sampling_mask: Option<OpaqueValue>,
 }
 
 impl EngineCoreOutput {
@@ -440,6 +442,7 @@ mod tests {
                             routed_experts: None,
                             num_nans_in_logits: 0,
                             mm_cache_miss_hashes: None,
+                            new_sampling_mask: None,
                         },
                     ],
                     scheduler_stats: None,
