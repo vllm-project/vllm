@@ -19,6 +19,7 @@ steps:
   - pytest -v -s models/language -m 'core_model and (not slow_test)'
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/language
   commands:
   - >-
@@ -65,11 +66,12 @@ steps:
     label: debug
     gpu: 1+
   _raw_old_commands:
-  - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
-  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
+  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/language/generation
   commands:
   - >-
@@ -91,22 +93,21 @@ steps:
     label: debug
     gpu: 1+
   _raw_old_commands:
-  - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
-  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
+  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview'
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/language/generation
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'uv pip install --no-build-isolation git+https://github.com/state-spaces/mamba@v2.3.0 || true &&
-    uv pip install --no-build-isolation git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0 || true &&
-    cd tests &&
+    'cd tests &&
     pytest -v -s models/language/generation -m hybrid_model -k granite-4.0-tiny-preview || true'
 - label: Language Models Test (Extended Generation)
   device: intel_gpu
-  timeout_in_minutes: 65
+  timeout_in_minutes: 80
   optional: true
   working_dir: .
   no_plugin: true
@@ -118,18 +119,17 @@ steps:
     label: debug
     gpu: 1+
   _raw_old_commands:
-  - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
-  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
+  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/language/generation
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'uv pip install --no-build-isolation git+https://github.com/state-spaces/mamba@v2.3.0 || true &&
-    uv pip install --no-build-isolation git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0 || true &&
-    cd tests &&
+    'cd tests &&
     pytest -v -s models/language/generation -m (not core_model) and (not hybrid_model) || true'
 - label: Language Models Test (PPL)
   device: intel_gpu
@@ -148,15 +148,17 @@ steps:
   - pytest -v -s models/language/generation_ppl_test
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/language/generation_ppl_test
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
     pytest -v -s models/language/generation_ppl_test || true'
-- label: Language Models Test (Extended Pooling)
+- label: Language Models Test (Extended Pooling) %N
   device: intel_gpu
   timeout_in_minutes: 120
+  parallelism: 4
   optional: true
   working_dir: .
   no_plugin: true
@@ -168,15 +170,16 @@ steps:
     label: debug
     gpu: 1+
   _raw_old_commands:
-  - pytest -v -s models/language/pooling -m 'not core_model'
+  - pytest -v -s models/language/pooling -m 'not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/language/pooling
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests &&
-    pytest -v -s models/language/pooling -m not core_model || true'
+    pytest -v -s models/language/pooling -m not core_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB || true'
 - label: Language Models Test (MTEB)
   device: intel_gpu
   timeout_in_minutes: 68
@@ -194,6 +197,7 @@ steps:
   - pytest -v -s models/language/pooling_mteb_test
   source_file_dependencies:
   - vllm/
+  - '!vllm/distributed/kv_transfer/'
   - tests/models/language/pooling_mteb_test
   commands:
   - >-

@@ -70,6 +70,7 @@ steps:
   - pytest -v -s distributed/test_elastic_ep.py
   source_file_dependencies:
   - vllm/distributed/
+  - '!vllm/distributed/kv_transfer/'
   - vllm/engine/
   - vllm/executor/
   - vllm/compilation/

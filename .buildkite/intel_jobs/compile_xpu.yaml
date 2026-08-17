@@ -2,10 +2,11 @@ group: Compile XPU
 depends_on:
   - image-build-xpu
 steps:
-- label: Sequence Parallel Correctness Tests (2 GPUs)
+- label: Sequence Parallel Correctness Tests (2xB200)
   device: intel_gpu
-  timeout_in_minutes: 80
+  timeout_in_minutes: 45
   num_devices: 2
+  optional: true
   working_dir: .
   no_plugin: true
   env:
@@ -18,18 +19,12 @@ steps:
   _raw_old_commands:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
-  source_file_dependencies:
-  - vllm/model_executor/layers/
-  - vllm/compilation/
-  - vllm/v1/worker/
-  - vllm/v1/cudagraph_dispatcher.py
-  - tests/compile/correctness_e2e/test_sequence_parallel.py
   commands:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'export VLLM_TEST_CLEAN_GPU_MEMORY=1 || true &&
     pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py || true'
-- label: AsyncTP Correctness Tests (2xH100)
+- label: AsyncTP Correctness Tests (2xB200)
   device: intel_gpu
   timeout_in_minutes: 30
   num_devices: 2
@@ -94,7 +89,6 @@ steps:
   - pytest -v -s tests/compile/passes/test_mla_attn_quant_fusion.py
   - pytest -v -s tests/compile/passes/test_silu_mul_quant_fusion.py
   - pytest -v -s tests/compile/passes/distributed/test_fusion_all_reduce.py
-  - pytest -v -s tests/compile/fullgraph/test_full_graph.py::test_fp8_kv_scale_compile
   source_file_dependencies:
   - csrc/quantization/fp4/
   - vllm/model_executor/layers/quantization/
@@ -114,8 +108,7 @@ steps:
     'pytest -v -s tests/compile/passes/test_fusion_attn.py -k FLASHINFER || true &&
     pytest -v -s tests/compile/passes/test_mla_attn_quant_fusion.py || true &&
     pytest -v -s tests/compile/passes/test_silu_mul_quant_fusion.py || true &&
-    pytest -v -s tests/compile/passes/distributed/test_fusion_all_reduce.py || true &&
-    pytest -v -s tests/compile/fullgraph/test_full_graph.py::test_fp8_kv_scale_compile || true'
+    pytest -v -s tests/compile/passes/distributed/test_fusion_all_reduce.py || true'
 - label: Fusion E2E Quick (H100)
   device: intel_gpu
   timeout_in_minutes: 25
