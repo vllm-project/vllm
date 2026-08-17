@@ -233,77 +233,27 @@ MoERunner.forward()
 
 ### 6. Configuration Classes (`config.py`)
 
-All MoE configuration dataclasses and enums live in `config.py`.
+All MoE configuration dataclasses and enums live in `config.py`. There are four main types, each serving a distinct role in the system.
 
 #### 6a. `RoutingMethodType`
 
-**Role**: IntEnum describing the routing algorithm used by the router. Passed to monolithic kernels (e.g. FlashInfer TRTLLM) so they can select specialized routing implementations internally.
+An IntEnum that maps scoring functions (softmax, sigmoid, etc.) and routing strategies (top-k, grouped top-k, etc.) to kernel-level routing identifiers. Monolithic kernels (e.g. FlashInfer TRTLLM) use this to select specialized internal routing implementations. The helper `get_routing_method_type()` derives the correct value from model parameters.
 
-**Values**: `Default` (Softmax→TopK), `Renormalize` (TopK→Softmax), `DeepSeekV3` (Sigmoid+Bias→GroupedTopK), `Llama4` (Top1→Sigmoid), `RenormalizeNaive` (Softmax→TopK→Renormalize), `TopK` (TopK only), `SigmoidRenorm` (Sigmoid→TopK→Renormalize), `MiniMax2` (Sigmoid+Bias→TopK→ScaledSumNormalize), `Sigmoid` (Sigmoid→TopK), `DeepseekV4` (SqrtSoftplus+Bias→Normalize), `Custom`, `Simulated`, `Unspecified`.
+#### 6b. `FusedMoEQuantConfig` and `FusedMoEQuantDesc`
 
-The helper function `get_routing_method_type()` maps model parameters (`scoring_func`, `top_k`, `renormalize`, `num_expert_group`, `has_e_score_bias`) to the appropriate enum value.
+The MoE forward pass consists of two GEMMs: GEMM1 (gate+up projection) and GEMM2 (down projection). `FusedMoEQuantConfig` bundles quantization parameters for all four tensors in this pipeline: activations and weights for each GEMM (`_a1`, `_w1`, `_a2`, `_w2`). Each is described by a `FusedMoEQuantDesc` — a dataclass carrying the quantized dtype, quantization granularity (`GroupShape`), scales, zero points, and biases for that tensor.
 
-#### 6b. `FusedMoEQuantDesc`
+This two-level structure exists because different quantization schemes vary independently per tensor — e.g., activations may use per-token quantization while weights use per-channel, or GEMM1 may use different block shapes than GEMM2. `FusedMoEQuantConfig` is constructed by the oracle's `make_quant_config` function or by `FusedMoEMethodBase.get_fused_moe_quant_config()`, and is passed to `FusedMoEExperts` constructors. It is only used with modular kernels; non-modular methods set it to `None`.
 
-**Role**: Dataclass describing the quantization of a single tensor (one activation or one weight matrix).
+#### 6c. `FusedMoEParallelConfig`
 
-**Key fields**:
+Encodes all parallelism dimensions (TP, DP, EP, PCP, SP sizes and ranks) and the all2all backend selection. Provides computed properties that check which communication backend is active (e.g., `use_deepep_ht_kernels`, `use_mori_kernels`).
 
-- `dtype: torch.dtype | str | None` — the quantized type (`None` means unquantized)
-- `shape: GroupShape | None` — quantization granularity: `PER_TENSOR` (-1,-1), `PER_TOKEN` (1,-1), or block shape like `(128, 128)`
-- `scale: torch.Tensor | PrecisionConfig | None` — quantization scales
-- `alpha_or_gscale: torch.Tensor | None` — per-channel scales or global scales (NVFP4, W4A8)
-- `zp: torch.Tensor | None` — zero points (INT4/INT8)
-- `bias: torch.Tensor | None` — biases (GPT Triton MoE)
+When EP is enabled, TP is "collapsed" into EP — each device owns a full subset of experts rather than a shard of every expert. The `make()` factory method computes this flattening.
 
-#### 6c. `FusedMoEQuantConfig`
+#### 6d. `FusedMoEConfig`
 
-**Role**: Dataclass bundling the quantization parameters for a complete fused MoE operation. Contains four `FusedMoEQuantDesc` instances — one for each tensor in the two-GEMM MoE pipeline:
-
-- `_a1` — first activation (input to GEMM1)
-- `_w1` — first weight (gate+up projection)
-- `_a2` — second activation (intermediate, input to GEMM2)
-- `_w2` — second weight (down projection)
-
-Each `FusedMoEMethodBase` subclass implements `get_fused_moe_quant_config()` to construct this from loaded weights. The oracle's `make_quant_config` function also builds these during kernel construction.
-
-**Key convenience properties**: `quant_dtype`, `weight_quant_dtype`, `is_quantized`, `per_act_token_quant`, `per_out_ch_quant`, `block_shape`, `a1_scale`, `a2_scale`, `w1_scale`, `w2_scale`, `w1_zp`, `w1_bias`, `w1_precision`, `w2_precision`.
-
-**Additional fields**: `is_scale_swizzled`, `gemm1_alpha`/`gemm1_beta`/`gemm1_clamp_limit` (MXFP4 TRTLLM SwiGLU clamping), `mx_alignment`.
-
-**Usage**: `FusedMoEQuantConfig` is only used with modular kernels — it is passed to `FusedMoEExperts` constructors. Non-modular MoE methods can set it to `None`.
-
-#### 6d. `FusedMoEParallelConfig`
-
-**Role**: Dataclass encoding all parallelism dimensions and backend selection.
-
-**Key fields**: `tp_size/rank`, `dp_size/rank`, `ep_size/rank`, `pcp_size/rank`, `sp_size`, `use_ep`, `all2all_backend`, `enable_eplb`.
-
-**Computed properties**: `use_all2all_kernels`, `use_deepep_ht_kernels`, `use_deepep_ll_kernels`, `use_deepep_v2_kernels`, `use_fi_nvl_two_sided_kernels`, `use_fi_nvl_one_sided_kernels`, `use_ag_rs_all2all_kernels`, `use_mori_kernels`, `use_nixl_ep_kernels`, `use_batched_activation_format`, `needs_round_robin_routing_tables`, `is_sequence_parallel`.
-
-**Notable behavior**: When EP is enabled, TP is "collapsed" into EP — each device owns a full subset of experts rather than a shard of every expert. The `make()` factory method computes this flattening.
-
-#### 6e. `FusedMoEConfig`
-
-**Role**: Central dataclass carrying all MoE layer configuration. Created once by the factory and shared by `MoERunner`, `RoutedExperts`, and other components.
-
-**Key fields**:
-
-- `num_experts`, `experts_per_token` (top_k), `hidden_dim`, `intermediate_size`
-- `num_local_experts`, `num_logical_experts` (for EPLB)
-- `activation: MoEActivation` (silu, gelu, situglu, etc. with gated/ungated distinction)
-- `in_dtype`, `router_logits_dtype`
-- `moe_parallel_config: FusedMoEParallelConfig` (all parallelism settings)
-- `routing_method: RoutingMethodType`
-- `device: torch.device | str`
-- `hidden_dim_unpadded`, `intermediate_size_per_partition_unpadded`, `intermediate_pad` (padding/alignment)
-- `moe_backend: MoEBackend` (kernel selection)
-- `max_num_tokens`, `has_bias`, `is_lora_enabled`
-- `skip_final_all_reduce`, `defer_moe_finalize` (reduction/finalization control)
-- `swiglu_limit`, `swiglu_alpha`, `swiglu_beta` (SwiGLU clamp parameters)
-- `activation_situ_beta`, `activation_situ_linear_beta` (SituGLU parameters)
-- `max_capture_size` (CUDA graph capture)
-- Computed: `intermediate_size_per_partition`, `rocm_aiter_fmoe_enabled`, `aiter_fmoe_shared_expert_enabled`
+Central dataclass carrying all MoE layer configuration. Created once by the factory and shared by `MoERunner`, `RoutedExperts`, and other components. Contains the core MoE dimensions (`num_experts`, `experts_per_token`, `hidden_dim`, `intermediate_size`), activation function, input dtype, the embedded `FusedMoEParallelConfig`, `RoutingMethodType`, and kernel selection (`moe_backend`). Also carries flags for features like deferred finalization, final all-reduce skipping, and LoRA support.
 
 ### 7. `ExpertMapManager` (`expert_map_manager.py`)
 
