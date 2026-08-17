@@ -327,7 +327,7 @@ def test_pynvvideocodec_backend_accounts_raw_decoded_frames(
     frames, metadata = loader.load_bytes(b"fake video", num_frames=4)
 
     assert frames.shape == (4, 20, 10, 3)
-    assert pool.acquired == [4 * 20 * 10 * 3]
+    assert pool.acquired == [3 * 4 * 20 * 10 * 3]
     assert decoder_cache_sizes == [PYNVVIDEOCODEC_DECODER_CACHE_SIZE]
     assert metadata["video_backend"] == PYNVVIDEOCODEC_VIDEO_BACKEND
     assert metadata["frames_indices"] == [0, 3, 6, 9]
@@ -407,7 +407,7 @@ def test_pynvvideocodec_codec_uses_dynamic_sampling_strategy(
 
     assert frames.shape == (2, 20, 10, 3)
     assert decoded_indices == [[0, 9]]
-    assert pool.acquired == [2 * 20 * 10 * 3]
+    assert pool.acquired == [3 * 2 * 20 * 10 * 3]
     assert metadata["video_backend"] == f"{PYNVVIDEOCODEC_VIDEO_BACKEND}_dynamic"
     assert metadata["frames_indices"] == [0, 9]
 
