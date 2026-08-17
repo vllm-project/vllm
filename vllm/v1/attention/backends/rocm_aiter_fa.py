@@ -773,9 +773,9 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        # The AITER kernels have only been exercised with the packed cache
-        # contiguous in (B, H, N, 2*hs), head-major within the block.
-        return (KVCacheLayout.LBHNC,)
+        # K and V are taken as transposed views of the packed page rather than
+        # copied, so the head dim can sit on either side of the block dim.
+        return (KVCacheLayout.LBHNC, KVCacheLayout.LHBNC)
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:

@@ -370,6 +370,7 @@ class AttentionBackend(ABC):
             KVCacheLayout.BLNHC,
             KVCacheLayout.BLHNC,
             KVCacheLayout.BHLNC,
+            KVCacheLayout.LHBNC,
         )
 
     @classmethod

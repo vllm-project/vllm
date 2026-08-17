@@ -264,9 +264,6 @@ class RocmAttentionBackend(AttentionBackend):
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
         # The native HIP kernels hardcode group-contiguous block addressing, so
         # the K and V groups must span all blocks (H outermost within the layer).
-        # TODO(ROCm): models mixing ROCM_ATTN with TRITON_ATTN (e.g. sink layers)
-        # fail at startup since TRITON_ATTN does not declare LHBNC support; opt
-        # TRITON_ATTN in once validated on AMD.
         return (KVCacheLayout.LHBNC,)
 
     @staticmethod

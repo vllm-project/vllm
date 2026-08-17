@@ -91,9 +91,10 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        # The AITER kernels have only been exercised with the packed cache
-        # contiguous in (B, H, N, 2*hs), head-major within the block.
-        return (KVCacheLayout.LBHNC,)
+        # K and V come out of the content dim as transposed views rather than
+        # copies, so the head dim may sit on either side of the block dim, but
+        # the layer must stay outermost.
+        return (KVCacheLayout.LBHNC, KVCacheLayout.LHBNC)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
