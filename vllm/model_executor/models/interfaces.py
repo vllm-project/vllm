@@ -75,6 +75,12 @@ MambaStateShapes: TypeAlias = (
     | tuple[tuple[int, int, int]]
     | tuple[tuple[int, int], tuple[int, int]]
     | tuple[tuple[int, int], tuple[int, int, int]]
+    | tuple[
+        tuple[int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+        tuple[int, int, int],
+    ]
 )
 
 
@@ -1099,8 +1105,8 @@ def supports_mamba_prefix_caching(
 
 @runtime_checkable
 class SupportsReplaySSM(Protocol):
-    """The interface for models whose Mamba2 layers support ReplaySSM cached
-    standard decode.
+    """The interface for models whose recurrent layers support ReplaySSM
+    cached decode.
 
     This is currently experimental.
     """
