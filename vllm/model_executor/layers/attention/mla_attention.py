@@ -1472,6 +1472,7 @@ class MLACommonPrefillMetadata:
 
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
+    query_start_loc_cpu: torch.Tensor
     max_query_len: int
     chunked_context: ChunkedContextMetadata | None = None
     q_data_type: torch.dtype | None = None
@@ -2335,6 +2336,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             prefill_metadata = MLACommonPrefillMetadata(
                 block_table=block_table_tensor[reqs_start:, ...],
                 query_start_loc=prefill_query_start_loc,
+                query_start_loc_cpu=prefill_query_start_loc_cpu,
                 max_query_len=max_query_len,
                 chunked_context=chunked_context_metadata,
                 output_dtype=self.model_config.dtype,

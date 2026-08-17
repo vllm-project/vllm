@@ -139,7 +139,7 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         prefill_metadata: "MLACommonPrefillMetadata",
     ) -> None:
         global_hyperparameters = self._resolve_global_hyperparameters()
-        qo_indptr = prefill_metadata.query_start_loc
+        qo_indptr = prefill_metadata.query_start_loc_cpu
         has_context = prefill_metadata.chunked_context is not None
         if self._prefill_main is None:
             self._prefill_main = BatchPrefillWithRaggedKVCacheWrapper(
