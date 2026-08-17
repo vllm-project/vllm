@@ -130,7 +130,10 @@ class MultiprocExecutor(Executor):
             f"_parallel_size ({pcp_size}). "
         )
 
-        set_multiprocessing_worker_envs(self.local_world_size)
+        num_local_procs = self.local_world_size * max(
+            1, self.parallel_config.data_parallel_size_local
+        )
+        set_multiprocessing_worker_envs(num_local_procs)
 
         if aiter_requires_tcp_store():
             distributed_init_method = get_distributed_init_method(
