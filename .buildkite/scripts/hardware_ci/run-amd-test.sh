@@ -69,6 +69,19 @@ fi
 export BUILDKIT_PROGRESS TERM FORCE_COLOR CLICOLOR_FORCE PY_COLORS PYTEST_ADDOPTS PYTEST_TIMEOUT ROCM_DOCKER_TTY
 export PYTHONFAULTHANDLER
 
+# Opted-in presubmit jobs start from the cache. Retries and scheduled jobs run
+# online so a fresh job can refresh it.
+hf_client_offline=
+if [[ "${VLLM_CI_HF_OFFLINE_RETRY:-0}" == "1" ]]; then
+  hf_client_offline=0
+  if [[ "${BUILDKITE_RETRY_COUNT:-0}" == "0" \
+    && "${BUILDKITE_BRANCH:-}" != "main" \
+    && "${NIGHTLY:-0}" != "1" \
+    && "${TORCH_NIGHTLY:-0}" != "1" ]]; then
+    hf_client_offline=1
+  fi
+fi
+
 # Export Python path for commands that run directly on the host. Containerized
 # tests set this to /vllm-workspace below so spawned Python processes do not
 # depend on their current working directory.
@@ -83,9 +96,29 @@ report_docker_usage() {
   docker system df || true
 }
 
+log_hf_client_mode() {
+  case "${hf_client_offline}" in
+    1)
+      echo "--- :package: Hugging Face clients: cache-only first Buildkite attempt"
+      ;;
+    0)
+      echo "--- :globe_with_meridians: Hugging Face clients: online"
+      ;;
+  esac
+}
+
+apply_hf_client_mode() {
+  if [[ "${hf_client_offline}" == "1" ]]; then
+    export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 HF_DATASETS_OFFLINE=1
+  elif [[ "${hf_client_offline}" == "0" ]]; then
+    unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE HF_DATASETS_OFFLINE
+  fi
+}
+
 clear_ci_orchestration_env() {
   unset -v \
     VLLM_TEST_GROUP_NAME \
+    VLLM_CI_HF_OFFLINE_RETRY \
     VLLM_CI_REQUIRE_PERSISTENT_HF_CACHE \
     VLLM_CI_ARTIFACT_STEP \
     VLLM_TEST_CACHE \
@@ -744,11 +777,13 @@ collect_rocm_failure_diagnostics() {
   echo "Unauthenticated outer-runner network reachability diagnostics" \
     | tee -a "${diagnostics_path}"
   if command -v curl >/dev/null 2>&1; then
-    run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" curl -q \
-      --silent --location --proto '=https' --proto-redir '=https' \
-      --max-redirs 3 --output /dev/null --connect-timeout 2 --max-time 4 \
-      --write-out 'target=huggingface http_code=%{http_code} dns_done_s=%{time_namelookup} connect_done_s=%{time_connect} tls_done_s=%{time_appconnect} first_byte_s=%{time_starttransfer} total_s=%{time_total}\n' \
-      https://huggingface.co/api/models/gpt2
+    if [[ "${hf_client_offline}" != "1" ]]; then
+      run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" curl -q \
+        --silent --location --proto '=https' --proto-redir '=https' \
+        --max-redirs 3 --output /dev/null --connect-timeout 2 --max-time 4 \
+        --write-out 'target=huggingface http_code=%{http_code} dns_done_s=%{time_namelookup} connect_done_s=%{time_connect} tls_done_s=%{time_appconnect} first_byte_s=%{time_starttransfer} total_s=%{time_total}\n' \
+        https://huggingface.co/api/models/gpt2
+    fi
     run_amd_diagnostic "${diagnostics_path}" "${probe_deadline}" curl -q \
       --silent --location --proto '=https' --proto-redir '=https' \
       --max-redirs 3 --output /dev/null --connect-timeout 2 --max-time 4 \
@@ -1022,6 +1057,8 @@ if is_native_runtime; then
   run_native_preflight || exit 1
   # Keep AMD CI orchestration variables out of vLLM's runtime environment.
   clear_ci_orchestration_env
+  apply_hf_client_mode
+  log_hf_client_mode
   /bin/bash -o pipefail -c "${commands}"
   handle_pytest_exit "$?"
 fi
@@ -1228,6 +1265,15 @@ if is_multi_node "$commands"; then
   fi
 else
   echo "--- Single-node job"
+  hf_client_container_args=()
+  if [[ -n "${hf_client_offline}" ]]; then
+    hf_client_container_args=(
+      -e "HF_HUB_OFFLINE=${hf_client_offline}"
+      -e "TRANSFORMERS_OFFLINE=${hf_client_offline}"
+      -e "HF_DATASETS_OFFLINE=${hf_client_offline}"
+    )
+  fi
+  log_hf_client_mode
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker_run_terminal_args=(-i)
   if [[ "${ROCM_DOCKER_TTY}" == "1" ]]; then
@@ -1285,6 +1331,7 @@ else
     -e "XDG_CACHE_HOME=${CONTAINER_CACHE_ROOT}/xdg" \
     -e "PYTORCH_ROCM_ARCH=" \
     "${standalone_merge_base_env[@]}" \
+    "${hf_client_container_args[@]}" \
     --name "${container_name}" \
     "${image_name}" \
     /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}"
