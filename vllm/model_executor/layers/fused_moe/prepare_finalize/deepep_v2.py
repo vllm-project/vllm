@@ -262,11 +262,6 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         if recv_topk_weights is not None and recv_topk_weights.ndim == 1:
             recv_topk_weights = recv_topk_weights.unsqueeze(1)
 
-        expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
-            recv_expert_num_tokens,
-            device=expert_x.device,
-        )
-
         if quantize_before_dispatch(quant_config, defer_input_quant):
             if quant_config.quant_dtype == "mxfp8" and expert_x_scale is not None:
                 expert_x_scale = unpack_mxfp8_scale(
