@@ -86,6 +86,8 @@ def make_request(
     mm_hashes: list[str] | None = None,
     cache_salt: str | None = None,
     prompt_embeds: torch.Tensor | None = None,
+    salt_regions: tuple[tuple[int, str], ...] | None = None,
+    salt_regions_required: bool = False,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -110,6 +112,8 @@ def make_request(
         pooling_params=None,
         lora_request=None,
         cache_salt=cache_salt,
+        salt_regions=salt_regions,
+        salt_regions_required=salt_regions_required,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
         prompt_embeds=prompt_embeds,
     )
@@ -546,9 +550,9 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # salt is added for the first token
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 1, 0)
-    assert extra_keys == ("salt",)
+    assert extra_keys == (("cache_salt", "salt"),)
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 10, 0)
-    assert extra_keys == ("salt",)
+    assert extra_keys == (("cache_salt", "salt"),)
 
     # no salt added for other tokens
     extra_keys, _ = generate_block_hash_extra_keys(request, 1, 2, 0)
@@ -569,8 +573,74 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request_mm, 0, 5, 0)
-    assert extra_keys == (("hash1", 0), "salt")
+    assert extra_keys == (("hash1", 0), ("cache_salt", "salt"))
     assert next_mm_idx == 1
+
+
+def test_cache_salt_regions_preserve_boundaries():
+    map_at_zero = make_request("map", list(range(9)), salt_regions=((0, "root"),))
+    flat = make_request("flat", list(range(9)), cache_salt="root")
+    request = make_request(
+        "regions", list(range(9)), salt_regions=((1, "org"), (1, "user"))
+    )
+
+    assert map_at_zero.block_hashes == flat.block_hashes
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
+    assert extra_keys == (
+        ("cache_salt", (1, "org")),
+        ("cache_salt", (1, "user")),
+    )
+
+
+@pytest.mark.parametrize(
+    ("regions", "expected"),
+    [
+        (((3, "org-a"), (6, "user-x")), (True, True, True)),
+        (((3, "org-a"), (6, "user-y")), (True, True, False)),
+        (((3, "org-b"), (6, "user-x")), (True, False, False)),
+    ],
+)
+def test_cache_salt_regions_three_tier_matrix(regions, expected):
+    tokens = list(range(9))
+    reference = make_request(
+        "reference", tokens, salt_regions=((3, "org-a"), (6, "user-x"))
+    )
+    candidate = make_request("candidate", tokens, salt_regions=regions)
+    equality = tuple(
+        a == b
+        for a, b in zip(reference.block_hashes, candidate.block_hashes, strict=True)
+    )
+    assert equality == expected
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"salt_regions": ((0, ""),)},
+        {"salt_regions": ((-1, "salt"),)},
+        {"salt_regions": ((6, "salt"),)},
+        {"salt_regions": ((3, "a"), (2, "b"))},
+        {"cache_salt": "flat", "salt_regions": ((0, "region"),)},
+        {"salt_regions_required": True},
+    ],
+)
+def test_cache_salt_regions_reject_invalid(kwargs):
+    with pytest.raises(ValueError):
+        make_request("invalid", list(range(6)), **kwargs)
+
+
+def test_cache_salt_domain_does_not_collide_with_lora_name():
+    salt_request = make_request("salt", list(range(3)), cache_salt="shared")
+    lora_request = make_request("lora", list(range(3)))
+    lora_request.lora_request = LoRARequest(
+        lora_name="shared", lora_int_id=1, lora_path="/path/to/lora"
+    )
+
+    salt_keys, _ = generate_block_hash_extra_keys(salt_request, 0, 3, 0)
+    lora_keys, _ = generate_block_hash_extra_keys(lora_request, 0, 3, 0)
+    assert salt_keys == (("cache_salt", "shared"),)
+    assert lora_keys == ("shared",)
+    assert salt_keys != lora_keys
 
 
 def test_generate_block_hash_extra_keys_prompt_embeds():

@@ -557,8 +557,17 @@ def generate_block_hash_extra_keys(
         request, start_token_idx, end_token_idx, start_mm_idx
     )
     lora_extra_keys: list[str] = _gen_lora_extra_hash_keys(request)
-    cache_salt_keys: list[str] = (
-        [request.cache_salt] if (start_token_idx == 0 and request.cache_salt) else []
+    cache_salt_keys: list[tuple[str, Any]] = (
+        [("cache_salt", request.cache_salt)]
+        if start_token_idx == 0 and request.cache_salt
+        else [
+            (
+                "cache_salt",
+                salt if offset == start_token_idx else (offset - start_token_idx, salt),
+            )
+            for offset, salt in request.salt_regions or ()
+            if start_token_idx <= offset < end_token_idx
+        ]
     )
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx

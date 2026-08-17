@@ -70,6 +70,8 @@ class Request:
         mm_features: list[MultiModalFeatureSpec] | None = None,
         lora_request: "LoRARequest | None" = None,
         cache_salt: str | None = None,
+        salt_regions: tuple[tuple[int, str], ...] | None = None,
+        salt_regions_required: bool = False,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
@@ -173,6 +175,26 @@ class Request:
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
+        if cache_salt is not None and salt_regions is not None:
+            raise ValueError("cache_salt and salt_regions are mutually exclusive")
+        if salt_regions_required and not salt_regions:
+            raise ValueError("salt_regions are required but missing")
+        if salt_regions and (
+            any(
+                type(offset) is not int
+                or not 0 <= offset < self.num_prompt_tokens
+                or not isinstance(salt, str)
+                or not salt
+                for offset, salt in salt_regions
+            )
+            or any(
+                a[0] > b[0]
+                for a, b in zip(salt_regions, salt_regions[1:], strict=False)
+            )
+        ):
+            raise ValueError("salt_regions must be sorted and contain valid entries")
+        self.salt_regions = salt_regions
+        self.salt_regions_required = salt_regions_required
 
         # Multi-modal related
         self.mm_features = mm_features or []
