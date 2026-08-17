@@ -1298,6 +1298,7 @@ def get_default_config(
     topk: int,
     dtype: str | None,
     block_shape: list[int] | None = None,
+    m_is_per_expert: bool = False,
 ) -> dict[str, int]:
     if envs.VLLM_BATCH_INVARIANT:
         return {
@@ -1324,6 +1325,8 @@ def get_default_config(
         # swap-AB kernel keeps it efficient on Hopper down to the smallest
         # batches, so prefer N=64 through low batch sizes. CUDA only (validated
         # on NVIDIA); ROCm keeps its prior tile/pipeline sizes.
+        # Batched (3-D) callers pass per-expert M, so they keep the raw-M
+        # threshold rather than applying the topk/E scaling a second time.
         if current_platform.is_rocm():
             block_n = block_shape[0]
             num_stages = num_stages_rocm
@@ -1337,7 +1340,18 @@ def get_default_config(
             block_n = block_shape[0]
             num_stages = 3
         config = {
-            "BLOCK_SIZE_M": 16 if M <= 64 else 64,
+            "BLOCK_SIZE_M": (
+                16
+                if (
+                    M <= 64
+                    or (
+                        not current_platform.is_rocm()
+                        and not m_is_per_expert
+                        and M * topk < 16 * E
+                    )
+                )
+                else 64
+            ),
             "BLOCK_SIZE_N": block_n,
             "BLOCK_SIZE_K": block_shape[1],
             "GROUP_SIZE_M": 1 if M <= 16 else 32,
@@ -1420,6 +1434,7 @@ def try_get_optimal_moe_config(
     dtype: str | None,
     M: int,
     block_shape: list[int] | None = None,
+    m_is_per_expert: bool = False,
 ) -> dict[str, int]:
     from vllm.model_executor.layers.fused_moe import get_config
 
@@ -1441,7 +1456,9 @@ def try_get_optimal_moe_config(
             config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
         else:
             # Else use the default config
-            config = get_default_config(M, E, N, w1_shape[2], top_k, dtype, block_shape)
+            config = get_default_config(
+                M, E, N, w1_shape[2], top_k, dtype, block_shape, m_is_per_expert
+            )
     return config
 
 
