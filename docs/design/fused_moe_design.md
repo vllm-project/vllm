@@ -1,4 +1,4 @@
-# MoE Layer Architecture Design Document
+# Fused MoE Layer Architecture Design Document
 
 ## Overview
 
@@ -9,7 +9,7 @@ The vLLM Mixture of Experts (MoE) subsystem lives under `vllm/model_executor/lay
 ```text
 Model (e.g. Mixtral, DeepSeek)
   │
-  │  calls FusedMoEFactory(...) factory   ──────────────────────────────────┐
+  │  calls FusedMoEFactory(...) factory   ───────────────────────────┐
   │                                                                  │
   ▼                                                                  │
 MoERunner (nn.Module, is the return value)                           │
@@ -23,12 +23,12 @@ MoERunner (nn.Module, is the return value)                           │
   ├── routed_scaling_factor: float?                                  │
   ├── enable_dbo: bool                                               │
   ├── layer_name: str                                                │
-  └── moe_config: FusedMoEConfig     ◄── created by factory         │
+  └── moe_config: FusedMoEConfig     ◄── created by factory          │
                                                                      │
 RoutedExperts (nn.Module)                                            │
   ├── quant_method: FusedMoEMethodBase  (owns expert weight params)  │
   ├── expert_map_manager: ExpertMapManager                           │
-  ├── moe_config: FusedMoEConfig                                    │
+  ├── moe_config: FusedMoEConfig                                     │
   └── [w13_weight, w2_weight, scales, ...] (registered parameters)   │
                                                                      │
 FusedMoERouter (ABC, not nn.Module)                                  │
@@ -159,9 +159,61 @@ forward()
 - Supports DBO by maintaining per-ubatch output buffers.
 - The underlying shared expert layer is a standard `nn.Module` (e.g., another `MLP` layer) provided by the model.
 
-### 6. `FusedMoEConfig` (`config.py`)
+### 6. Configuration Classes (`config.py`)
 
-**Role**: Central dataclass carrying all MoE configuration. Created once by the factory and shared by `MoERunner`, `RoutedExperts`, and other components.
+All MoE configuration dataclasses and enums live in `config.py`.
+
+#### 6a. `RoutingMethodType`
+
+**Role**: IntEnum describing the routing algorithm used by the router. Passed to monolithic kernels (e.g. FlashInfer TRTLLM) so they can select specialized routing implementations internally.
+
+**Values**: `Default` (Softmax→TopK), `Renormalize` (TopK→Softmax), `DeepSeekV3` (Sigmoid+Bias→GroupedTopK), `Llama4` (Top1→Sigmoid), `RenormalizeNaive` (Softmax→TopK→Renormalize), `TopK` (TopK only), `SigmoidRenorm` (Sigmoid→TopK→Renormalize), `MiniMax2` (Sigmoid+Bias→TopK→ScaledSumNormalize), `Sigmoid` (Sigmoid→TopK), `DeepseekV4` (SqrtSoftplus+Bias→Normalize), `Custom`, `Simulated`, `Unspecified`.
+
+The helper function `get_routing_method_type()` maps model parameters (`scoring_func`, `top_k`, `renormalize`, `num_expert_group`, `has_e_score_bias`) to the appropriate enum value.
+
+#### 6b. `FusedMoEQuantDesc`
+
+**Role**: Dataclass describing the quantization of a single tensor (one activation or one weight matrix).
+
+**Key fields**:
+
+- `dtype: torch.dtype | str | None` — the quantized type (`None` means unquantized)
+- `shape: GroupShape | None` — quantization granularity: `PER_TENSOR` (-1,-1), `PER_TOKEN` (1,-1), or block shape like `(128, 128)`
+- `scale: torch.Tensor | PrecisionConfig | None` — quantization scales
+- `alpha_or_gscale: torch.Tensor | None` — per-channel scales or global scales (NVFP4, W4A8)
+- `zp: torch.Tensor | None` — zero points (INT4/INT8)
+- `bias: torch.Tensor | None` — biases (GPT Triton MoE)
+
+#### 6c. `FusedMoEQuantConfig`
+
+**Role**: Dataclass bundling the quantization parameters for a complete fused MoE operation. Contains four `FusedMoEQuantDesc` instances — one for each tensor in the two-GEMM MoE pipeline:
+
+- `_a1` — first activation (input to GEMM1)
+- `_w1` — first weight (gate+up projection)
+- `_a2` — second activation (intermediate, input to GEMM2)
+- `_w2` — second weight (down projection)
+
+Each `FusedMoEMethodBase` subclass implements `get_fused_moe_quant_config()` to construct this from loaded weights. The oracle's `make_quant_config` function also builds these during kernel construction.
+
+**Key convenience properties**: `quant_dtype`, `weight_quant_dtype`, `is_quantized`, `per_act_token_quant`, `per_out_ch_quant`, `block_shape`, `a1_scale`, `a2_scale`, `w1_scale`, `w2_scale`, `w1_zp`, `w1_bias`, `w1_precision`, `w2_precision`.
+
+**Additional fields**: `is_scale_swizzled`, `gemm1_alpha`/`gemm1_beta`/`gemm1_clamp_limit` (MXFP4 TRTLLM SwiGLU clamping), `mx_alignment`.
+
+**Usage**: `FusedMoEQuantConfig` is only used with modular kernels — it is passed to `FusedMoEExperts` constructors and consumed by `fused_experts`, `cutlass_moe`, `rocm_aiter_fused_experts`, and `triton_kernel_moe_forward`. Non-modular MoE methods can set it to `None`.
+
+#### 6d. `FusedMoEParallelConfig`
+
+**Role**: Dataclass encoding all parallelism dimensions and backend selection.
+
+**Key fields**: `tp_size/rank`, `dp_size/rank`, `ep_size/rank`, `pcp_size/rank`, `sp_size`, `use_ep`, `all2all_backend`, `enable_eplb`.
+
+**Computed properties**: `use_all2all_kernels`, `use_deepep_ht_kernels`, `use_deepep_ll_kernels`, `use_deepep_v2_kernels`, `use_fi_nvl_two_sided_kernels`, `use_fi_nvl_one_sided_kernels`, `use_ag_rs_all2all_kernels`, `use_mori_kernels`, `use_nixl_ep_kernels`, `use_batched_activation_format`, `needs_round_robin_routing_tables`, `is_sequence_parallel`.
+
+**Notable behavior**: When EP is enabled, TP is "collapsed" into EP — each device owns a full subset of experts rather than a shard of every expert. The `make()` factory method computes this flattening.
+
+#### 6e. `FusedMoEConfig`
+
+**Role**: Central dataclass carrying all MoE layer configuration. Created once by the factory and shared by `MoERunner`, `RoutedExperts`, and other components.
 
 **Key fields**:
 
@@ -181,17 +233,7 @@ forward()
 - `max_capture_size` (CUDA graph capture)
 - Computed: `intermediate_size_per_partition`, `rocm_aiter_fmoe_enabled`, `aiter_fmoe_shared_expert_enabled`
 
-### 7. `FusedMoEParallelConfig` (`config.py`)
-
-**Role**: Dataclass encoding all parallelism dimensions and backend selection.
-
-**Key fields**: `tp_size/rank`, `dp_size/rank`, `ep_size/rank`, `pcp_size/rank`, `sp_size`, `use_ep`, `all2all_backend`, `enable_eplb`.
-
-**Computed properties**: `use_all2all_kernels`, `use_deepep_ht_kernels`, `use_deepep_ll_kernels`, `use_deepep_v2_kernels`, `use_fi_nvl_two_sided_kernels`, `use_fi_nvl_one_sided_kernels`, `use_ag_rs_all2all_kernels`, `use_mori_kernels`, `use_nixl_ep_kernels`, `use_batched_activation_format`, `needs_round_robin_routing_tables`, `is_sequence_parallel`.
-
-**Notable behavior**: When EP is enabled, TP is "collapsed" into EP — each device owns a full subset of experts rather than a shard of every expert. The `make()` factory method computes this flattening.
-
-### 8. `ExpertMapManager` (`expert_map_manager.py`)
+### 7. `ExpertMapManager` (`expert_map_manager.py`)
 
 **Role**: Manages the mapping between global expert IDs and local (per-rank) expert IDs for Expert Parallelism.
 
@@ -203,7 +245,7 @@ forward()
 - `local_num_experts`: How many experts this rank owns
 - `placement_strategy`: "linear" (contiguous blocks) or "round_robin" (interleaved)
 
-### 9. `FusedMoEMethodBase` (not shown in detail)
+### 8. `FusedMoEMethodBase` (`fused_moe_method_base.py`)
 
 **Role**: Strategy pattern for quantization-specific expert execution. Each quantization scheme (FP8, INT8, INT4, NVFP4, MXFP4, unquantized, etc.) provides a subclass that knows how to:
 
@@ -217,7 +259,7 @@ forward()
 - **Modular**: Router selects experts first → `apply(layer, x, topk_weights, topk_ids)`. Used by Triton, CUTLASS, and most backends.
 - **Monolithic**: Kernel handles routing internally → `apply_monolithic(layer, x, router_logits)`. Used by FlashInfer TRTLLM and some specialized backends.
 
-### 10. MoE Kernel Oracle (`oracle/`)
+### 9. MoE Kernel Oracle (`oracle/`)
 
 **Role**: Each quantization type has an oracle that selects the best MoE kernel backend for a given (model, hardware, deployment-config) tuple. Oracles live under `fused_moe/oracle/` — one module per quantization type: `unquantized.py`, `fp8.py`, `nvfp4.py`, `mxfp4.py`, `mxfp8.py`, `int8.py`, `int_wna16.py`, `w4a8.py`, `w4a8_int8.py`.
 
