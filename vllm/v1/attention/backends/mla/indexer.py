@@ -474,6 +474,13 @@ _BUILD_PREFILL_CHUNK_METADATA_KERNEL = BuildPrefillChunkMetadataKernel()
 @dataclass
 class DeepseekV32IndexerPrefillMetadata:
     chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
+    # Host-side max prefill seq len (== max token position + 1 across the
+    # step's prefill tokens; exact for prefill rows per the assert in build()).
+    # Lets the indexer layer's short-sequence check branch without the
+    # device sync a positions.max().item() would cost on every layer.
+    # -1 = unknown (other construction sites): the layer falls back to the
+    # device-side check.
+    max_prefill_seq_len: int = -1
 
 
 @dataclass
@@ -1074,7 +1081,19 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
                     chunks.append(metadata)
-            prefill_metadata = DeepseekV32IndexerPrefillMetadata(chunks)
+            prefill_metadata = DeepseekV32IndexerPrefillMetadata(
+                chunks,
+                max_prefill_seq_len=(
+                    # Uncompressed (token-granular) to match `positions`.
+                    # seq_lens_cpu is exact for the prefill rows here, and the
+                    # step's prefill tokens always include each request's last
+                    # token (position seq_len-1), so this equals
+                    # positions[prefill_slice].max() + 1.
+                    int(seq_lens_cpu[num_decodes:].max().item())
+                    if num_prefills > 0
+                    else 0
+                ),
+            )
 
         decode_metadata = None
         if num_decodes > 0:

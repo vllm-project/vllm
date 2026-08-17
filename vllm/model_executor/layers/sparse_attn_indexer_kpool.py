@@ -18,6 +18,7 @@ from vllm.models.glm5next.nvidia.ops.kpool_compress import (
     expand_pools_to_tokens,
     kpool_compress_and_write_cache,
     kpool_decode_update_and_maybe_write_cache_batched,
+    kpool_seed_tail_cache,
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -67,77 +68,94 @@ def _kpool_compress_insert(
 
     ``slot_mapping`` is pool-granular (compress_ratio == kpool on the spec):
     only the *last* token of each complete pool carries a valid (>=0) slot;
-    intra-pool tokens are -1. We locate every pool completion, gather its
-    ``kpool`` tokens, and run the softmax-weighted-sum + Hadamard + fp8 + write
-    kernel. Assumes pool-aligned chunk starts (same invariant as sglang).
+    intra-pool tokens are -1. Every position is treated as a pool-completion
+    candidate and non-completions are masked off inside the kernel. Compacting
+    the valid rows first (``torch.nonzero`` + boolean-mask gather + an
+    ``ok.all()`` check) costs two device syncs on the eager prefill path and
+    buys nothing numerically. Assumes pool-aligned chunk starts (same
+    invariant as sglang).
     """
-    valid = slot_mapping >= 0
-    valid_pos = torch.nonzero(valid).squeeze(-1)  # positions of pool completions
-    n_pools = valid_pos.numel()
-    if n_pools == 0:
+    n = slot_mapping.shape[0]
+    # No pool can complete in a batch smaller than one pool; also keeps the
+    # clamped gather indices below in bounds.
+    if n < kpool:
         return
-    pool_starts = valid_pos - (kpool - 1)  # first token of each pool
+    pos = torch.arange(n, device=k.device)
+    valid = slot_mapping >= 0
     # Drop pools whose start falls before the batch (leading padding); their
     # gate/k data is undefined anyway.
-    ok = pool_starts >= 0
-    if not bool(ok.all()):
-        valid_pos = valid_pos[ok]
-        pool_starts = pool_starts[ok]
-        n_pools = valid_pos.numel()
-        if n_pools == 0:
-            return
+    write_mask = valid & (pos >= kpool - 1)
     offs = torch.arange(kpool, device=k.device)
-    idx = pool_starts[:, None] + offs[None, :]  # [n_pools, kpool]
-    slot_k = k[idx]  # [n_pools, kpool, head_dim]
-    slot_score = gate_score[idx]  # [n_pools, kpool, head_dim]
-    loc = slot_mapping[valid_pos].to(torch.int64)  # [n_pools] pool slots
+    idx = (pos - (kpool - 1)).clamp_min(0)[:, None] + offs[None, :]
     kpool_compress_and_write_cache(
         kv_cache,
-        slot_k,
-        slot_score,
+        k[idx],  # [n, kpool, head_dim]
+        gate_score[idx],
         ape,
-        loc,
+        slot_mapping.to(torch.int64),
         pool_size=kpool,
         head_dim=head_dim,
+        write_mask=write_mask,
         round_scale=round_scale,
         write_cache=True,
         return_compressed=False,
     )
 
 
-def _scatter_decode_tokens_by_request(
-    tokens: torch.Tensor,
+def _build_decode_scatter_indices(
     decode_lens: torch.Tensor,
     num_requests: int,
-    lmax: int,
-    pad_value,
-) -> torch.Tensor:
-    """Group ``[N, ...]`` decode tokens into a padded ``[num_requests, lmax, ...]``
-    layout: request ``r``'s tokens at row ``r`` in order; short requests padded.
+    n: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-token (request id, intra-request index) for a non-uniform decode
+    batch, with ``n == decode_lens.sum()`` as a host int (avoids a
+    device sync and keeps both repeat_interleaves sync-free).
 
-    ``N == decode_lens.sum()``. Unlike ``pack_seq_triton`` this is dtype-agnostic
-    (needed for the int32 slot/pos tensors) — it builds the request / intra-index
-    on device and scatters. Used only for the rare non-uniform
-    (``requires_padding``) decode batch; uniform batches use a zero-copy reshape.
+    Shared by every ``_scatter_decode_tokens_by_request`` call in a step:
+    building it per call would repeat the same repeat_interleave/cumsum chain
+    up to 5x per layer on the eager decode break.
     """
-    device = tokens.device
+    device = decode_lens.device
     dl = decode_lens.to(torch.int64)
     req_id = torch.repeat_interleave(
-        torch.arange(num_requests, device=device, dtype=torch.int64), dl
+        torch.arange(num_requests, device=device, dtype=torch.int64),
+        dl,
+        output_size=n,
     )
     req_starts = torch.cumsum(
         torch.cat([torch.zeros(1, device=device, dtype=torch.int64), dl[:-1]]),
         dim=0,
     )
-    # Broadcast the per-request start offsets to per-token (length N == dl.sum())
-    # so each token's intra-request index subtracts its own request's start.
-    starts = torch.repeat_interleave(req_starts, dl)
-    intra = torch.arange(tokens.shape[0], device=device, dtype=torch.int64) - starts
+    # Broadcast the per-request start offsets to per-token (length n ==
+    # dl.sum()) so each token's intra-request index subtracts its own
+    # request's start.
+    starts = torch.repeat_interleave(req_starts, dl, output_size=n)
+    intra = torch.arange(n, device=device, dtype=torch.int64) - starts
+    return req_id, intra
+
+
+def _scatter_decode_tokens_by_request(
+    tokens: torch.Tensor,
+    pad_value,
+    num_requests: int,
+    lmax: int,
+    scatter_indices: tuple[torch.Tensor, torch.Tensor],
+) -> torch.Tensor:
+    """Group ``[N, ...]`` decode tokens into a padded ``[num_requests, lmax, ...]``
+    layout: request ``r``'s tokens at row ``r`` in order; short requests padded.
+
+    Unlike ``pack_seq_triton`` this is dtype-agnostic (needed for the int32
+    slot/pos tensors) — it scatters with the shared per-step indices from
+    ``_build_decode_scatter_indices``. Used only for the non-uniform
+    (``requires_padding``) decode batch; uniform batches use a zero-copy
+    reshape.
+    """
+    req_id, intra = scatter_indices
     out = torch.full(
         (num_requests, lmax, *tokens.shape[1:]),
         pad_value,
         dtype=tokens.dtype,
-        device=device,
+        device=tokens.device,
     )
     out[req_id, intra] = tokens
     return out
@@ -348,36 +366,24 @@ def sparse_attn_indexer_kpool(
                     tail_meta = attn_metadata.get(_resolve_layer_name(tail_prefix))
                     if tail_meta is not None:
                         assert isinstance(tail_meta, DeepseekV32IndexerMetadata)
-                        tslot = tail_meta.slot_mapping[prefill_slice]
-                        # Each request owns exactly one tail block
-                        # (KpoolTailSpec allocates 1 block/req), so the block id
-                        # identifies the request -- more robust than comparing
-                        # positions, which can be accidentally contiguous across
-                        # two requests. Token i is among its request's last
-                        # kpool tokens iff the token kpool ahead belongs to a
-                        # different request (or is past the batch): sentinel -2
-                        # differs from every real block and from the -1 that an
-                        # invalid slot floor-divides to.
-                        tblock = tslot // index_kpool
-                        ahead = torch.full_like(tblock, -2)
-                        n_tail_tok = tblock.shape[0]
-                        if n_tail_tok > index_kpool:
-                            ahead[: n_tail_tok - index_kpool] = tblock[index_kpool:]
-                        valid = (tslot >= 0) & (ahead != tblock)
-                        if bool(valid.any()):
-                            tslot_v = tslot[valid].to(torch.int64)
-                            block_ids = tslot_v // index_kpool
-                            offsets = tslot_v % index_kpool
-                            # Within one request the kept tokens are its last
-                            # <= kpool consecutive positions, so pos % kpool is
-                            # distinct across them: no duplicate destinations,
-                            # hence a deterministic scatter.
-                            tail_kv_cache[block_ids, 0, offsets, :] = k[prefill_slice][
-                                valid
-                            ]
-                            tail_kv_cache[block_ids, 1, offsets, :] = gate_score[
-                                prefill_slice
-                            ][valid]
+                        # Seed each request's trailing <= kpool raw K + gate
+                        # into the paged tail ring with one kernel. The old
+                        # scatter chain (block-id compare + nonzero/boolean
+                        # gathers + 2 indexed writes) cost ~12 elementwise ops
+                        # and 4 device syncs per layer; the kernel derives the
+                        # same per-request tail membership in-kernel: token i
+                        # is in its request's tail iff the token kpool ahead
+                        # maps to a different tail block (1 block/req) or is
+                        # past the batch. Writes are one-per-token to distinct
+                        # pos % kpool offsets, so the result is identical.
+                        kpool_seed_tail_cache(
+                            tail_kv_cache,
+                            k[prefill_slice],
+                            gate_score[prefill_slice],
+                            tail_meta.slot_mapping[prefill_slice],
+                            index_kpool,
+                            head_dim,
+                        )
         else:
             # standard: per-token fp8 quant + scatter (all tokens).
             assert scale_fmt is not None
@@ -404,12 +410,24 @@ def sparse_attn_indexer_kpool(
         # already written above; this only fills the topk buffer. Real
         # sparsity only kicks in for contexts > topk_tokens.
         n_prefill_sf = num_tokens - num_decode_tokens
-        short_prefill = (
-            n_prefill_sf > 0
-            and positions is not None
-            and int(positions[num_decode_tokens:num_tokens].max().item()) + 1
-            <= topk_tokens
-        )
+        # Host-side short-prefill predicate: max_prefill_seq_len is computed
+        # in the metadata builder (exact for prefill rows) and equals
+        # positions[prefill_slice].max() + 1, so this replaces a
+        # positions.max().item() device sync per layer. -1 (unknown metadata)
+        # falls back to the device-side check.
+        if prefill_metadata.max_prefill_seq_len >= 0:
+            short_prefill = (
+                n_prefill_sf > 0
+                and positions is not None
+                and prefill_metadata.max_prefill_seq_len <= topk_tokens
+            )
+        else:
+            short_prefill = (
+                n_prefill_sf > 0
+                and positions is not None
+                and int(positions[num_decode_tokens:num_tokens].max().item()) + 1
+                <= topk_tokens
+            )
         if short_prefill:
             # short_prefill is only True when positions is not None (above),
             # but narrow explicitly for the indexer below.
@@ -598,30 +616,34 @@ def sparse_attn_indexer_kpool(
                 # Non-uniform decode_lens (mixed plain-decode + spec-verify, or
                 # a variable MTP-verify batch): scatter actual tokens into a
                 # padded [B, lmax] layout. int32 tensors can't go through
-                # pack_seq_triton (float/uint8 only).
+                # pack_seq_triton (float/uint8 only). The scatter indices are
+                # shared by all five scatters below (and the tail slot one).
+                scatter_idx = _build_decode_scatter_indices(
+                    group_lens, num_requests, num_decode_tokens
+                )
                 dec_k = _scatter_decode_tokens_by_request(
-                    k[:num_decode_tokens], group_lens, num_requests, lmax, 0
+                    k[:num_decode_tokens], 0, num_requests, lmax, scatter_idx
                 )
                 dec_gate = _scatter_decode_tokens_by_request(
                     gate_score[:num_decode_tokens],
-                    group_lens,
+                    0,
                     num_requests,
                     lmax,
-                    0,
+                    scatter_idx,
                 )
                 dec_slot = _scatter_decode_tokens_by_request(
                     slot_mapping[:num_decode_tokens],
-                    group_lens,
+                    -1,
                     num_requests,
                     lmax,
-                    -1,
+                    scatter_idx,
                 )
                 dec_pos = _scatter_decode_tokens_by_request(
                     positions[:num_decode_tokens].to(torch.int32),
-                    group_lens,
+                    -1,
                     num_requests,
                     lmax,
-                    -1,
+                    scatter_idx,
                 )
             else:
                 next_n = num_decode_tokens // num_requests
@@ -646,10 +668,10 @@ def sparse_attn_indexer_kpool(
             elif not use_uniform:
                 dec_tail_slot = _scatter_decode_tokens_by_request(
                     tail_meta.slot_mapping[:num_decode_tokens],
-                    group_lens,
+                    -1,
                     num_requests,
                     lmax,
-                    -1,
+                    scatter_idx,
                 )
             else:
                 dec_tail_slot = tail_meta.slot_mapping[:num_decode_tokens].view(shape2)

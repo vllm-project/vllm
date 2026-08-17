@@ -346,6 +346,81 @@ def kpool_compress_and_write_cache(
 
 
 # ---------------------------------------------------------------------------
+# kpool_seed_tail_cache : prefill step
+# Persist each request's trailing (<= pool_size) raw K + gate score into the
+# paged tail ring, replacing the nonzero/boolean-mask scatter chain (which
+# cost ~12 elementwise ops + 4 device syncs per layer on the eager prefill
+# path). One program per prefill token; most exit after two loads.
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _kpool_tail_seed_kernel(
+    key_ptr,
+    score_ptr,
+    tslot_ptr,
+    tail_ptr,
+    n_tokens,
+    HEAD_DIM: tl.constexpr,
+    KPOOL: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    """Copy token ``i``'s raw K + gate into its request's tail block.
+
+    Token ``i`` is among its request's last KPOOL tokens iff the token KPOOL
+    ahead belongs to a different tail block (or is past the batch / padding,
+    slot < 0). ``tslot = block * KPOOL + pos % KPOOL``; the destination is
+    ``tail[block, {0:K, 1:score}, pos % KPOOL, :]``.
+    """
+    i = tl.program_id(0)
+    t = tl.load(tslot_ptr + i).to(tl.int64)
+    if t < 0:
+        return
+    blk = t // KPOOL  # t >= 0 here, so trunc == floor
+    ahead = tl.load(tslot_ptr + i + KPOOL, mask=i + KPOOL < n_tokens, other=-1).to(
+        tl.int64
+    )
+    # Match the torch semantics exactly: a negative ahead slot floors to a
+    # block id that differs from every real block -> token is in the tail.
+    # Only divide non-negative slots (Triton int div truncates, torch floors).
+    if ahead >= 0 and ahead // KPOOL == blk:
+        return
+    offs = tl.arange(0, BLOCK_D)
+    m = offs < HEAD_DIM
+    base = (blk * 2 * KPOOL + t % KPOOL) * HEAD_DIM
+    k = tl.load(key_ptr + i * HEAD_DIM + offs, mask=m)
+    s = tl.load(score_ptr + i * HEAD_DIM + offs, mask=m)
+    tl.store(tail_ptr + base + offs, k, mask=m)
+    tl.store(tail_ptr + base + KPOOL * HEAD_DIM + offs, s, mask=m)
+
+
+def kpool_seed_tail_cache(
+    tail_kv_cache: torch.Tensor,
+    key: torch.Tensor,
+    gate_score: torch.Tensor,
+    tslot: torch.Tensor,
+    kpool: int,
+    head_dim: int = INDEX_HEAD_DIM,
+) -> None:
+    """Seed the paged tail cache from a prefill batch (see the kernel)."""
+    assert tail_kv_cache.dtype == torch.bfloat16
+    assert key.dtype == torch.bfloat16
+    n = tslot.shape[0]
+    if n == 0:
+        return
+    _kpool_tail_seed_kernel[(n,)](
+        key,
+        gate_score,
+        tslot,
+        tail_kv_cache,
+        n,
+        HEAD_DIM=head_dim,
+        KPOOL=kpool,
+        BLOCK_D=triton.next_power_of_2(head_dim),
+    )
+
+
+# ---------------------------------------------------------------------------
 # kpool_decode_update_and_maybe_write_cache_batched : decode step
 # Append each request's verify tokens to its per-request tail ring; when a pool
 # fills (pos % pool_size == pool_size-1), compress and write at the pool slot.
