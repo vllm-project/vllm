@@ -241,6 +241,22 @@ class TestToolResultContent:
         assert len(tool_msg) == 1
         assert tool_msg[0]["content"] == "line 1\nline 2"
 
+    def test_tool_result_tool_reference_becomes_text(self):
+        """A tool_reference item must be converted to a template-safe text
+        item, not passed through raw (which trips strict Jinja chat templates
+        and crashes the request). Regression for #52489."""
+        request = self._make_tool_result_request(
+            [
+                {"type": "text", "text": "done"},
+                {"type": "tool_reference", "tool_name": "search_web"},
+            ]
+        )
+        result = _convert(request)
+
+        tool_msg = [m for m in result.messages if m["role"] == "tool"]
+        assert len(tool_msg) == 1
+        assert tool_msg[0]["content"] == "done\n[tool reference: search_web]"
+
     def test_tool_result_with_image(self):
         """Image in tool_result should produce a follow-up user message."""
         request = self._make_tool_result_request(
