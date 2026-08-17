@@ -603,7 +603,7 @@ class MultiModalDataParser:
         *,
         target_sr: float | None = None,
         target_channels: int | None = None,
-        audio_resample_method: Literal["pyav", "scipy", "soxr"] = "pyav",
+        audio_resample_method: Literal["pyav", "scipy", "soxr", "torchaudio"] = "pyav",
         video_needs_metadata: bool = False,
         expected_hidden_size: int | None = None,
         embeds_from_ec_connector: bool = False,
