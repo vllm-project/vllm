@@ -331,6 +331,11 @@ class AttentionBackend(ABC):
             return False
 
     @classmethod
+    def supports_non_causal_dcp(cls) -> bool:
+        builder_cls = cls.get_builder_cls()
+        return bool(getattr(builder_cls, "supports_non_causal_multi_token_dcp", False))
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """Check if backend supports a given attention type.
 
@@ -378,6 +383,7 @@ class AttentionBackend(ABC):
         use_kv_connector: bool = False,
         use_pcp: bool = False,
         use_adaptive_verification: bool = False,
+        use_dcp: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -414,6 +420,8 @@ class AttentionBackend(ABC):
             invalid_reasons.append("sliding window not supported")
         if use_non_causal and not cls.supports_non_causal():
             invalid_reasons.append("non-causal attention not supported")
+        if use_mla and use_non_causal and use_dcp and not cls.supports_non_causal_dcp():
+            invalid_reasons.append("non-causal MLA attention with DCP not supported")
         if use_batch_invariant and not cls.supports_batch_invariance():
             invalid_reasons.append("batch invariance not supported")
         if use_kv_connector and not cls.supports_kv_connector():

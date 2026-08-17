@@ -17,7 +17,14 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _run_prepare(*, target_positions: list[int], block_table_values: list[int]):
+def _run_prepare(
+    *,
+    target_positions: list[int],
+    block_table_values: list[int],
+    cp_rank: int = 0,
+    cp_size: int = 1,
+    cp_interleave: int = 1,
+):
     device = torch.device("cuda")
     max_num_reqs = 4
     max_num_tokens = 16
@@ -86,6 +93,9 @@ def _run_prepare(*, target_positions: list[int], block_table_values: list[int]):
         input_seeds,
         block_table,
         4,
+        cp_rank,
+        cp_size,
+        cp_interleave,
         123,
         num_speculative_steps,
         num_speculative_steps,
@@ -129,6 +139,20 @@ def test_prepare_dflash_inputs_excludes_rejected_context_suffix():
     assert out.sample_idx_mapping[:3].tolist() == [2, 2, 2]
     assert out.temperature[2].item() == 1.0
     assert out.seeds[2].item() == 17
+
+
+def test_prepare_dflash_inputs_excludes_rejected_context_suffix_with_dcp():
+    out = _run_prepare(
+        target_positions=[10, 11, 12, 13],
+        block_table_values=[0, 7, 8, 9],
+        cp_rank=1,
+        cp_size=2,
+        cp_interleave=2,
+    )
+
+    assert out.context_positions[:4].tolist() == [10, 11, 0, 0]
+    assert out.context_slot_mapping[:4].tolist() == [28, 29, PAD_SLOT_ID, PAD_SLOT_ID]
+    assert out.query_slot_mapping[:3].tolist() == [PAD_SLOT_ID, PAD_SLOT_ID, 30]
 
 
 def test_prepare_dflash_inputs_never_writes_the_null_block():
