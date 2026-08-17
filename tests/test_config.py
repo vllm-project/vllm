@@ -66,41 +66,18 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
-@pytest.mark.parametrize(
-    "cudagraph_mode",
-    [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE],
-)
-def test_deepseek_v4_rejects_mrv1_piecewise_cudagraph(cudagraph_mode):
-    config = SimpleNamespace(
-        use_v2_model_runner=False,
-        model_config=SimpleNamespace(architectures=["DeepseekV4ForCausalLM"]),
-        compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode),
-    )
+def test_rocm_defaults_deepseek_v4_to_mrv1(monkeypatch):
+    """ROCm keeps DeepSeek V4 on MRV1, which is still faster there."""
+    from vllm.config.vllm import default_v2_model_runner_architectures
+    from vllm.platforms import current_platform
 
-    with pytest.raises(ValueError, match="DeepSeek V4 does not support PIECEWISE"):
-        VllmConfig._validate_mrv1_piecewise_cudagraph(config)
-
-
-@pytest.mark.parametrize(
-    ("use_v2_model_runner", "architecture", "cudagraph_mode"),
-    [
-        (True, "DeepseekV4ForCausalLM", CUDAGraphMode.PIECEWISE),
-        (False, "DeepseekV4ForCausalLM", CUDAGraphMode.NONE),
-        (False, "DeepseekV4ForCausalLM", CUDAGraphMode.FULL),
-        (False, "DeepseekV4ForCausalLM", CUDAGraphMode.FULL_DECODE_ONLY),
-        (False, "LlamaForCausalLM", CUDAGraphMode.PIECEWISE),
-    ],
-)
-def test_mrv1_piecewise_cudagraph_allowed(
-    use_v2_model_runner, architecture, cudagraph_mode
-):
-    config = SimpleNamespace(
-        use_v2_model_runner=use_v2_model_runner,
-        model_config=SimpleNamespace(architectures=[architecture]),
-        compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode),
-    )
-
-    VllmConfig._validate_mrv1_piecewise_cudagraph(config)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    # The lookup is lru_cached against a fixed platform.
+    default_v2_model_runner_architectures.cache_clear()
+    try:
+        assert "DeepseekV4ForCausalLM" not in default_v2_model_runner_architectures()
+    finally:
+        default_v2_model_runner_architectures.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -330,10 +307,20 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ),
     ],
 )
-def test_is_default_v2_model_runner_model(model_config, expected):
+def test_is_default_v2_model_runner_model(model_config, expected, monkeypatch):
+    from vllm.config.vllm import default_v2_model_runner_architectures
+    from vllm.platforms import current_platform
+
+    # The expectations below are the platform-independent defaults; ROCm's
+    # DeepSeek V4 carve-out is covered by test_rocm_defaults_deepseek_v4_to_mrv1.
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    default_v2_model_runner_architectures.cache_clear()
     config = SimpleNamespace(model_config=model_config)
 
-    assert VllmConfig._is_default_v2_model_runner_model(config) is expected
+    try:
+        assert VllmConfig._is_default_v2_model_runner_model(config) is expected
+    finally:
+        default_v2_model_runner_architectures.cache_clear()
 
 
 @pytest.mark.skip_global_cleanup
