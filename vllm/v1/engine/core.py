@@ -619,6 +619,7 @@ class EngineCore:
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
+        self._maybe_gather_worker_notifications()
         # When using async scheduling we can't get draft token ids in advance,
         # so we update draft token ids in the worker process and don't
         # need to update draft token ids here.
@@ -762,17 +763,21 @@ class EngineCore:
     def gather_worker_notifications(self) -> None:
         """Collect and publish every rank's notifications; an rpc round trip,
         so callers own the cadence."""
-        try:
-            per_rank = self.model_executor.collective_rpc("take_notifications")
-        except Exception:
-            # Workers without the method (out-of-tree platforms) land here.
-            logger.warning_once(
-                "Could not gather worker notifications; events published in "
-                "workers will not reach the frontend."
-            )
-            return
-        if notifications := [n for rank in per_rank or () for n in rank or ()]:
+        per_rank = self.model_executor.collective_rpc("take_notifications")
+        if notifications := [n for rank in per_rank for n in rank]:
             self._publish_notifications(notifications)
+
+    def _maybe_gather_worker_notifications(self) -> None:
+        """Poll workers on an interval, between steps so the rpc cannot
+        stall a rank mid-forward."""
+        interval = envs.VLLM_WORKER_NOTIFICATION_POLL_INTERVAL
+        if not interval:
+            return
+        now = time.monotonic()
+        if now - self._last_notification_gather < interval:
+            return
+        self._last_notification_gather = now
+        self.gather_worker_notifications()
 
     def _process_aborts_queue(self):
         if not self.aborts_queue.empty():
@@ -1418,24 +1423,11 @@ class EngineCoreProc(EngineCore):
             self._process_input_queue()
             # Publish request counts before and after GPU step to ensure freshness.
             self._maybe_publish_request_counts()
-            self._maybe_gather_worker_notifications()
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
             self._maybe_publish_request_counts()
 
         raise SystemExit
-
-    def _maybe_gather_worker_notifications(self) -> None:
-        """Poll workers on an interval, between steps so the rpc cannot
-        stall a rank mid-forward."""
-        interval = envs.VLLM_WORKER_NOTIFICATION_POLL_INTERVAL
-        if not interval:
-            return
-        now = time.monotonic()
-        if now - self._last_notification_gather < interval:
-            return
-        self._last_notification_gather = now
-        self.gather_worker_notifications()
 
     def _maybe_publish_request_counts(self):
         if not self.publish_dp_lb_stats:
@@ -1466,9 +1458,13 @@ class EngineCoreProc(EngineCore):
                     waited = True
             block = self.process_input_queue_block
             try:
-                req = self.input_queue.get(block=block)
+                poll_interval = envs.VLLM_WORKER_NOTIFICATION_POLL_INTERVAL
+                req = self.input_queue.get(block=block, timeout=poll_interval or None)
                 self._handle_client_request(*req)
             except queue.Empty:
+                if block:
+                    self._maybe_gather_worker_notifications()
+                    continue
                 break
             if not block:
                 break
@@ -2214,7 +2210,6 @@ class DPEngineCoreProc(EngineCoreProc):
             self._process_input_queue()
             # Publish request counts before and after GPU step to ensure freshness.
             self._maybe_publish_request_counts()
-            self._maybe_gather_worker_notifications()
 
             if self.eep_scaling_state is not None:
                 state = self.eep_scaling_state

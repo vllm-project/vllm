@@ -315,6 +315,7 @@ class InprocClient(EngineCoreClient):
 
     def __init__(self, *args, **kwargs):
         self.engine_core = EngineCore(*args, **kwargs)
+        self.engine_core.gather_worker_notifications()
 
     def get_output(self) -> EngineCoreOutputs:
         outputs, model_executed = self.engine_core.step_fn()
