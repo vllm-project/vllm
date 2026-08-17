@@ -1095,6 +1095,11 @@ def _make_fake_kv_cache_manager():
 
     manager = object.__new__(KVCacheManager)
     manager.coordinator = MagicMock()
+    manager.kv_cache_config = MagicMock()
+    manager.kv_cache_config.kv_cache_groups = (
+        MagicMock(block_pool_id=0),
+        MagicMock(block_pool_id=1),
+    )
     manager.coordinator.single_type_managers = (
         _FakeSingleTypeManager(True, 16, [10, 11, 12, 13, 14, 15]),  # attention
         _FakeSingleTypeManager(False, 16, [20, 21, 22, 23, 24, 25]),  # mamba
@@ -1109,7 +1114,18 @@ def test_zeroing_block_ids_cover_only_loaded_attention_blocks():
     manager = _make_fake_kv_cache_manager()
 
     # Tokens [0, 16) are locally cached; the load covers tokens [16, 56).
-    assert manager.get_zeroing_block_ids_in_range("req-1", 16, 56) == [11, 12, 13]
+    assert manager.get_zeroing_block_ids_in_range("req-1", 16, 56) == {0: [11, 12, 13]}
+
+
+@pytest.mark.cpu_test
+def test_new_zeroing_blocks_preserve_allocator_pool_identity():
+    """Equal numeric IDs from independent pools must remain distinguishable."""
+    manager = _make_fake_kv_cache_manager()
+    first, second = manager.coordinator.single_type_managers
+    first.new_block_ids = [5]
+    second.new_block_ids = [5]
+
+    assert manager.take_new_block_ids() == {0: [5], 1: [5]}
 
 
 @pytest.mark.cpu_test
@@ -1119,14 +1135,14 @@ def test_scheduler_filters_connector_loaded_blocks_from_zeroing():
 
     class FakeKVCacheManager:
         def take_new_block_ids(self):
-            return [9, 10, 11, 12]
+            return {0: [9, 10, 11, 12], 1: [10]}
 
     scheduler = object.__new__(Scheduler)
     scheduler.needs_kv_cache_zeroing = True
     scheduler.kv_cache_manager = FakeKVCacheManager()
-    scheduler._skip_zero_block_ids = {10, 12}
+    scheduler._skip_zero_block_ids = {0: {10, 12}}
 
-    assert scheduler._get_new_block_ids_to_zero() == [9, 11]
+    assert scheduler._get_new_block_ids_to_zero() == {0: [9, 11], 1: [10]}
     assert not scheduler._skip_zero_block_ids
 
 
@@ -1154,8 +1170,8 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
 
     # Attention blocks covering tokens >= 48 are re-recorded for zeroing
     # and flow into the next step's zero list; Mamba blocks are not.
-    scheduler._skip_zero_block_ids = set()
-    assert scheduler._get_new_block_ids_to_zero() == [13, 14, 15]
+    scheduler._skip_zero_block_ids = {}
+    assert scheduler._get_new_block_ids_to_zero() == {0: [13, 14, 15]}
 
 
 @pytest.mark.cpu_test
@@ -2013,6 +2029,168 @@ def test_host_stager_preserves_custom_destinations_and_mirrors():
     assert [entry[3].tolist() for entry in queued] == [[0, 800], [900]]
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("has_queued_chunk", [False, True])
+def test_host_stager_read_failure_reaches_terminal_state(has_queued_chunk):
+    """A terminal NIXL error must fail even when another chunk was queued."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import numpy as np
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
+        HostReadStager,
+        _ReqState,
+    )
+
+    pool = SimpleNamespace(free_slots=[])
+    slot = SimpleNamespace(pool=pool)
+    queued = []
+    if has_queued_chunk:
+        queued.append((np.array([2]),) * 4 + (7, 16))
+    state = _ReqState(
+        queued=queued,
+        reading=[(1, slot, np.array([0]), np.array([2]), np.array([0]))],
+    )
+    stager = object.__new__(HostReadStager)
+    stager._reqs = {"request": state}
+    stager.nixl_wrapper = MagicMock()
+    stager.nixl_wrapper.check_xfer_state.return_value = "ERR"
+
+    done, failed = stager.advance()
+
+    assert not done
+    assert failed == {"request"}
+    assert "request" not in stager.active_req_ids
+    assert pool.free_slots == [slot]
+
+
+@pytest.mark.cpu_test
+def test_host_stager_abort_drains_read_before_reusing_slot():
+    """Aborting a posted read must not return its slot while NIXL says PROC."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import numpy as np
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
+        HostReadStager,
+        _ReqState,
+    )
+
+    pool = SimpleNamespace(free_slots=[])
+    slot = SimpleNamespace(pool=pool)
+    state = _ReqState(reading=[(1, slot, np.array([0]), np.array([2]), np.array([0]))])
+    stager = object.__new__(HostReadStager)
+    stager._reqs = {"request": state}
+    stager.nixl_wrapper = MagicMock()
+    stager.nixl_wrapper.check_xfer_state.side_effect = ["PROC", "DONE"]
+
+    stager.abort("request")
+    assert stager.advance() == (set(), set())
+    assert pool.free_slots == []
+    assert stager.advance() == (set(), set())
+    assert pool.free_slots == [slot]
+    assert not stager.active_req_ids
+
+
+@pytest.mark.cpu_test
+def test_host_stager_copy_failure_waits_for_recorded_event():
+    """A partial CUDA enqueue failure must keep its slot until the stream drains."""
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import numpy as np
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
+        HostReadStager,
+        _ReqState,
+    )
+
+    pool = SimpleNamespace(free_slots=[])
+    event = MagicMock()
+    event.query.side_effect = [False, True]
+    slot = SimpleNamespace(pool=pool, event=event)
+    state = _ReqState(reading=[(1, slot, np.array([0]), np.array([2]), np.array([0]))])
+    stager = object.__new__(HostReadStager)
+    stager._reqs = {"request": state}
+    stager.nixl_wrapper = MagicMock()
+    stager.nixl_wrapper.check_xfer_state.return_value = "DONE"
+    stager._start_copy = MagicMock(side_effect=RuntimeError("copy failed"))
+
+    assert stager.advance() == (set(), set())
+    assert pool.free_slots == []
+    assert stager.advance() == (set(), {"request"})
+    assert pool.free_slots == [slot]
+
+
+@pytest.mark.cpu_test
+def test_staged_failure_without_sibling_transfer_is_reported():
+    """A staging-only failure must not wait for a nonexistent NIXL sibling."""
+    import threading
+    from collections import defaultdict
+    from unittest.mock import MagicMock
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._host_stager = MagicMock()
+    worker._host_stager.advance.return_value = (set(), {"request"})
+    worker._hisparse_host_stager = None
+    worker._recving_transfers = defaultdict(list)
+    worker._failed_recv_lock = threading.Lock()
+    worker._failed_recv_pending = set()
+    worker._pending_recv_notifs = {}
+    worker._report_failed_recv = MagicMock()
+    worker._log_failure = MagicMock()
+    worker.xfer_stats = MagicMock()
+
+    assert worker._advance_host_staging() == set()
+    worker._report_failed_recv.assert_called_once_with("request")
+
+
+@pytest.mark.cpu_test
+def test_hma_request_failure_cannot_follow_receive_success_path():
+    """Request identity must fail closed when HMA block IDs are ambiguous."""
+    from unittest.mock import MagicMock
+
+    from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm.v1.request import RequestStatus
+
+    request = MagicMock()
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    request.num_computed_tokens = 128
+    scheduler = object.__new__(Scheduler)
+    scheduler.requests = {"request": request}
+    scheduler.failed_recving_kv_req_ids = set()
+    scheduler.recompute_kv_load_failures = True
+
+    assert not scheduler._handle_failed_recving({"request"})
+
+    assert request.num_computed_tokens == 0
+    assert scheduler.failed_recving_kv_req_ids == {"request"}
+
+
+@pytest.mark.cpu_test
+def test_hma_request_failure_honors_fail_policy():
+    """An HMA receive error must fail the request under the default policy."""
+    from unittest.mock import MagicMock
+
+    from vllm.v1.core.sched.scheduler import Scheduler
+    from vllm.v1.request import RequestStatus
+
+    request = MagicMock(status=RequestStatus.WAITING_FOR_REMOTE_KVS)
+    scheduler = object.__new__(Scheduler)
+    scheduler.requests = {"request": request}
+    scheduler.failed_recving_kv_req_ids = set()
+    scheduler.recompute_kv_load_failures = False
+
+    assert scheduler._handle_failed_recving({"request"}) == {"request"}
+    assert not scheduler.failed_recving_kv_req_ids
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_host_stager_copies_to_host_and_gpu_mirror():
     """A completed staged page must reach both final tiers before its event."""
@@ -2121,6 +2299,7 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     # 12-token logical blocks over the 4-token MLA kernel block.
     assert worker._physical_blocks_per_logical_kv_block == 3
     assert worker.block_size == 4 and worker.num_blocks == 12
+    assert worker.region_block_sizes == [4, 4]
     # Both shared tensors are dual-purpose: their FA view is MLA even though
     # a KDA layer registered them first.
     assert worker._region_is_mla == [True, True]

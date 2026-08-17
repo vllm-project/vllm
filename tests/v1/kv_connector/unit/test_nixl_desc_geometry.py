@@ -458,6 +458,16 @@ def _make_remote_meta(
     )
 
 
+def _register_remote_agents(worker, metadata, tp_size):
+    """Mirror the async handshake callback that publishes prepared agents."""
+    worker._remote_agents[metadata.engine_id] = {
+        (0, rank): worker.add_remote_agent(
+            metadata, remote_tp_rank=rank, remote_tp_size=tp_size
+        )
+        for rank in range(tp_size)
+    }
+
+
 def _owned_byte_ranges(worker, group_logical_ids):
     """Byte ranges owned by a request: for each HMA region tensor, every
     logical block id of every group maps to one unified page."""
@@ -515,8 +525,7 @@ def test_hetero_ppl_multi_read_writes_stay_within_request_blocks():
         remote_num_logical=12,
         remote_ssm_sizes=(24, 32),
     )
-    for rank in (0, 1):
-        worker.add_remote_agent(meta_r, remote_tp_rank=rank, remote_tp_size=2)
+    _register_remote_agents(worker, meta_r, 2)
 
     # Request B: 17 matched tokens. Local: 2 logical blocks (24 tok
     # capacity); remote: 16 prefilled tokens -> 2 remote logical blocks.
@@ -532,7 +541,7 @@ def test_hetero_ppl_multi_read_writes_stay_within_request_blocks():
             "remote_block_ids": remote_ids,
             "remote_engine_id": "remote-engine",
             "remote_request_id": "prefill-req-b",
-            "remote_host": "localhost",
+            "remote_host": "remote-host",
             "remote_port": 1234,
             "tp_size": 2,
         },
@@ -615,8 +624,7 @@ def _run_hetero_case(
         remote_num_logical=max(2 * n_remote + 4, 8),
         remote_ssm_sizes=(48 // tp_size, 64 // tp_size),
     )
-    for rank in range(tp_size):
-        worker.add_remote_agent(meta_r, remote_tp_rank=rank, remote_tp_size=tp_size)
+    _register_remote_agents(worker, meta_r, tp_size)
 
     # Sparse ids so neighbors exist between the request's blocks.
     local_attn = [2 * i + 1 for i in range(n_local)]
@@ -632,7 +640,7 @@ def _run_hetero_case(
             "remote_block_ids": remote_ids,
             "remote_engine_id": "remote-engine",
             "remote_request_id": "prefill-req-b",
-            "remote_host": "localhost",
+            "remote_host": "remote-host",
             "remote_port": 1234,
             "tp_size": tp_size,
         },

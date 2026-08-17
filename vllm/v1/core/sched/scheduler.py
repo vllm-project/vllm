@@ -325,7 +325,7 @@ class Scheduler(SchedulerInterface):
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
         # Blocks that async KV loads will overwrite this step, skipped from
         # zeroing since the zeroing could race the out-of-band write.
-        self._skip_zero_block_ids: set[int] = set()
+        self._skip_zero_block_ids: dict[int, set[int]] = {}
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
@@ -1137,13 +1137,17 @@ class Scheduler(SchedulerInterface):
                     if self.needs_kv_cache_zeroing:
                         # Skip zeroing of the blocks the async load will
                         # overwrite; the zeroing could race the write.
-                        self._skip_zero_block_ids.update(
-                            self.kv_cache_manager.get_zeroing_block_ids_in_range(
-                                request.request_id,
-                                num_new_local_computed_tokens,
-                                num_computed_tokens,
+                        for (
+                            pool_id,
+                            block_ids,
+                        ) in self.kv_cache_manager.get_zeroing_block_ids_in_range(
+                            request.request_id,
+                            num_new_local_computed_tokens,
+                            num_computed_tokens,
+                        ).items():
+                            self._skip_zero_block_ids.setdefault(pool_id, set()).update(
+                                block_ids
                             )
-                        )
                     continue
 
                 self.running.append(request)
@@ -1353,19 +1357,19 @@ class Scheduler(SchedulerInterface):
     ) -> KVConnectorMetadata:
         return connector.build_connector_meta(scheduler_output)
 
-    def _get_new_block_ids_to_zero(self) -> list[int] | None:
+    def _get_new_block_ids_to_zero(self) -> dict[int, list[int]] | None:
         # Drain new attention block ids every step so the manager-side list
         # does not grow unbounded; only kv-cache zeroing consumes them.
         new_block_ids_to_zero = self.kv_cache_manager.take_new_block_ids()
         if not self.needs_kv_cache_zeroing:
             return None
 
-        if self._skip_zero_block_ids:
-            skip = self._skip_zero_block_ids
-            new_block_ids_to_zero = [b for b in new_block_ids_to_zero if b not in skip]
-            skip.clear()
+        for pool_id, skip in self._skip_zero_block_ids.items():
+            if block_ids := new_block_ids_to_zero.get(pool_id):
+                new_block_ids_to_zero[pool_id] = [b for b in block_ids if b not in skip]
+        self._skip_zero_block_ids.clear()
 
-        return new_block_ids_to_zero or None
+        return {k: v for k, v in new_block_ids_to_zero.items() if v} or None
 
     def _preempt_request(
         self, request: Request, timestamp: float, drop_stale_output: bool = False
@@ -1792,14 +1796,20 @@ class Scheduler(SchedulerInterface):
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
 
-        failed_kv_load_req_ids = None
+        failed_kv_load_req_ids: set[str] = set()
+        if kv_connector_output and kv_connector_output.failed_recving:
+            failed_kv_load_req_ids.update(
+                self._handle_failed_recving(kv_connector_output.failed_recving)
+            )
         if kv_connector_output and kv_connector_output.invalid_block_ids:
             # These blocks contain externally computed tokens that failed to
             # load. Identify affected requests and adjust their computed token
             # count to trigger recomputation of the invalid blocks.
-            failed_kv_load_req_ids = self._handle_invalid_blocks(
-                kv_connector_output.invalid_block_ids,
-                num_scheduled_tokens,
+            failed_kv_load_req_ids.update(
+                self._handle_invalid_blocks(
+                    kv_connector_output.invalid_block_ids,
+                    num_scheduled_tokens,
+                )
             )
 
         # Persist per-step routed experts into the scheduler-side slot
@@ -2999,6 +3009,21 @@ class Scheduler(SchedulerInterface):
                 affected_req_ids.add(request.request_id)
 
         return affected_req_ids, total_affected_tokens, blocks_to_evict
+
+    def _handle_failed_recving(self, failed_req_ids: set[str]) -> set[str]:
+        """Fail closed for layouts whose block IDs are not globally unique."""
+        affected_req_ids: set[str] = set()
+        for req_id in failed_req_ids:
+            request = self.requests.get(req_id)
+            if (
+                request is not None
+                and request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+            ):
+                affected_req_ids.add(req_id)
+                if self.recompute_kv_load_failures:
+                    request.num_computed_tokens = 0
+                    self.failed_recving_kv_req_ids.add(req_id)
+        return set() if self.recompute_kv_load_failures else affected_req_ids
 
     def _handle_invalid_blocks(
         self, invalid_block_ids: set[int], num_scheduled_tokens: dict[str, int]

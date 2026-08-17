@@ -468,6 +468,42 @@ def test_kv_transfer_handshake(dist_init):
         scheduler_connector.shutdown()
 
 
+@pytest.mark.cpu_test
+def test_pp_remote_metadata_slices_region_block_counts():
+    """PP region slicing must keep every per-region metadata list aligned."""
+    worker = object.__new__(NixlConnectorWorker)
+    worker._remote_agents = {}
+    worker.block_len_per_layer = [10, 20]
+    worker.pp_size = 2
+    worker._remote_region_offset = 2
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.register_remote_engine.side_effect = RuntimeError("stop")
+    metadata = NixlAgentMetadata(
+        engine_id="remote",
+        agent_metadata=b"agent",
+        kv_caches_base_addr=[1, 2, 3, 4],
+        device_id=0,
+        num_blocks=16,
+        block_lens=[10, 20, 30, 40],
+        kv_cache_layout="HND",
+        block_size=16,
+        ssm_sizes=(0, 0),
+        attn_backend_name="FLASH_ATTN",
+        physical_blocks_per_logical_kv_block=1,
+        region_strides=[100, 200, 300, 400],
+        region_num_blocks=[5, 6, 7, 8],
+        region_group_ids=[0, 0, 1, 1],
+        region_block_sizes=[16, 16, 32, 32],
+        region_names=["a", "b", "c", "d"],
+    )
+
+    with pytest.raises(RuntimeError, match="stop"):
+        worker.add_remote_agent(metadata)
+
+    assert metadata.kv_caches_base_addr == [3, 4]
+    assert metadata.region_num_blocks == [7, 8]
+
+
 class FakeNixlConnectorWorker(NixlConnectorWorker):
     REMOTE_ENGINE_ID = "remote_engine"
 

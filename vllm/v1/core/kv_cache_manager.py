@@ -1030,26 +1030,40 @@ class KVCacheManager:
             truncated.append(list(group_blocks[:num_blocks]))
         return self.create_kv_cache_blocks(tuple(truncated))
 
-    def take_new_block_ids(self) -> list[int]:
-        """Drain and return new attention block IDs for zeroing."""
-        ids: list[int] = []
-        for mgr in self.coordinator.single_type_managers:
-            ids.extend(mgr.take_new_block_ids())
-        return ids
+    def take_new_block_ids(self) -> dict[int, list[int]]:
+        """Drain new attention block IDs, preserving their allocator pool."""
+        ids_by_pool: dict[int, list[int]] = {}
+        for group, mgr in zip(
+            self.kv_cache_config.kv_cache_groups,
+            self.coordinator.single_type_managers,
+            strict=True,
+        ):
+            ids = mgr.take_new_block_ids()
+            if ids:
+                assert group.block_pool_id is not None
+                ids_by_pool.setdefault(group.block_pool_id, []).extend(ids)
+        return ids_by_pool
 
     def get_zeroing_block_ids_in_range(
         self, request_id: str, start_token: int, end_token: int
-    ) -> list[int]:
+    ) -> dict[int, list[int]]:
         """The request's block ids covering [start_token, end_token), from
         the groups whose new blocks are zeroed by the worker."""
-        ids: list[int] = []
-        for mgr in self.coordinator.single_type_managers:
+        ids_by_pool: dict[int, list[int]] = {}
+        for group, mgr in zip(
+            self.kv_cache_config.kv_cache_groups,
+            self.coordinator.single_type_managers,
+            strict=True,
+        ):
             if mgr.records_new_block_ids:
+                assert group.block_pool_id is not None
                 start_idx = start_token // mgr.block_size
                 end_idx = cdiv(end_token, mgr.block_size)
                 blocks = mgr.req_to_blocks[request_id]
-                ids.extend(blk.block_id for blk in blocks[start_idx:end_idx])
-        return ids
+                ids_by_pool.setdefault(group.block_pool_id, []).extend(
+                    blk.block_id for blk in blocks[start_idx:end_idx]
+                )
+        return ids_by_pool
 
     def record_blocks_for_zeroing(self, request_id: str, start_token: int) -> None:
         """Re-record the request's blocks from start_token onwards for

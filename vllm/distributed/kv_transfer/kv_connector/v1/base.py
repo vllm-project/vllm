@@ -421,6 +421,10 @@ class KVConnectorBase_V1(ABC):
         """
         return set()
 
+    def get_failed_recving(self) -> set[str]:
+        """Get request IDs whose receive operation failed."""
+        return set()
+
     def shutdown(self):
         """
         Shutdown the connector. This is called when the worker process

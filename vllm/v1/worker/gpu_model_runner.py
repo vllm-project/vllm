@@ -1196,19 +1196,30 @@ class GPUModelRunner(
 
         Called from gpu_worker.py outside the CuMem pool context.
         """
-        self._kv_block_zeroer = KVBlockZeroer(
-            self.device,
-            attn_groups_iter=self._kv_cache_spec_attn_group_iterator(),
-            kernel_block_sizes=self._kernel_block_sizes,
-            cache_dtype=self.cache_config.cache_dtype,
-            runner_only_attn_layers=self.runner_only_attn_layers,
-            static_forward_context=self.compilation_config.static_forward_context,
-        )
+        self._kv_block_zeroers = {
+            pool_id: KVBlockZeroer(
+                self.device,
+                attn_groups_iter=self._kv_cache_spec_attn_group_iterator(),
+                kernel_block_sizes=self._kernel_block_sizes,
+                cache_dtype=self.cache_config.cache_dtype,
+                runner_only_attn_layers=self.runner_only_attn_layers,
+                static_forward_context=self.compilation_config.static_forward_context,
+                zeroing_group_ids={
+                    group_id
+                    for group_id, group in enumerate(
+                        self.kv_cache_config.kv_cache_groups
+                    )
+                    if group.block_pool_id == pool_id
+                },
+            )
+            for pool_id in self.kv_cache_config.zeroing_block_pool_ids
+        }
 
-    def _zero_block_ids(self, block_ids: list[int]) -> None:
+    def _zero_block_ids(self, block_ids_by_pool: dict[int, list[int]]) -> None:
         """Zero the KV cache memory for the given block IDs."""
-        if hasattr(self, "_kv_block_zeroer"):
-            self._kv_block_zeroer.zero_block_ids(block_ids)
+        if hasattr(self, "_kv_block_zeroers"):
+            for pool_id, block_ids in block_ids_by_pool.items():
+                self._kv_block_zeroers[pool_id].zero_block_ids(block_ids)
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:

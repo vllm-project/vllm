@@ -101,6 +101,7 @@ class ActiveKVConnector(KVConnector):
             self.kv_connector.get_finished(finished_req_ids)
         )
         output.invalid_block_ids = self.kv_connector.get_block_ids_with_load_errors()
+        output.failed_recving = self.kv_connector.get_failed_recving()
         output.kv_connector_stats = self.kv_connector.get_kv_connector_stats()
         output.kv_cache_events = self.kv_connector.get_kv_connector_kv_cache_events()
         output.kv_connector_worker_meta = (

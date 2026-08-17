@@ -554,6 +554,7 @@ class NixlBaseConnectorWorker:
         # every sibling transfer is terminal and its blocks are safe to reuse.
         self._failed_recv_pending: set[ReqId] = set()
         self._failed_recv_reported: set[ReqId] = set()
+        self._last_failed_recv_reqs: set[ReqId] = set()
         self._failed_recv_lock = threading.Lock()
 
         # Handshake metadata of this worker for NIXL transfers.
@@ -1264,6 +1265,11 @@ class NixlBaseConnectorWorker:
                 # overlay storage while retaining independent block tables.
                 idx = seen_regions[region_key]
                 self._region_is_mla[idx] |= is_mla_region
+                if is_mla_region:
+                    self.region_block_sizes[idx] = (
+                        layer_spec.block_size
+                        // self._physical_blocks_per_logical_kv_block
+                    )
                 logger.debug("Skipping %s because it's already seen", layer_name)
                 continue
             logger.debug(
@@ -1275,7 +1281,12 @@ class NixlBaseConnectorWorker:
             self.block_len_per_layer.append(region_block_len)
             self.region_strides.append(region_stride)
             self.region_group_ids.append(group_index)
-            self.region_block_sizes.append(group.kv_cache_spec.block_size)
+            region_block_size = (
+                layer_spec.block_size
+                if isinstance(layer_spec, MambaSpec)
+                else layer_spec.block_size // self._physical_blocks_per_logical_kv_block
+            )
+            self.region_block_sizes.append(region_block_size)
             self.region_names.append(transfer_layer_name(layer_name))
             self.region_num_blocks.append(num_blocks)
             self._region_is_mla.append(is_mla_region)
@@ -1846,6 +1857,10 @@ class NixlBaseConnectorWorker:
                 ]
             if nixl_agent_meta.region_names is not None:
                 nixl_agent_meta.region_names = nixl_agent_meta.region_names[start:end]
+            if nixl_agent_meta.region_num_blocks is not None:
+                nixl_agent_meta.region_num_blocks = nixl_agent_meta.region_num_blocks[
+                    start:end
+                ]
 
         ### Register remote engine in TransferTopology (idempotent).
         assert self.transfer_topo is not None
@@ -1894,9 +1909,10 @@ class NixlBaseConnectorWorker:
                 else [0] * num_remote_regions
             )
             self.dst_region_group_ids[engine_id] = remote_region_group_ids
-            remote_region_block_sizes = (
-                nixl_agent_meta.region_block_sizes
-                or [nixl_agent_meta.block_size] * num_remote_regions
+            remote_region_block_sizes = nixl_agent_meta.region_block_sizes or (
+                self.region_block_sizes
+                if len(self.region_block_sizes) == num_remote_regions
+                else [nixl_agent_meta.block_size] * num_remote_regions
             )
             self.dst_region_block_sizes[engine_id] = remote_region_block_sizes
             local_region_block_sizes = (
@@ -2426,6 +2442,7 @@ class NixlBaseConnectorWorker:
         # Add failed requests to done_recving for scheduler tracking
         # (blocks are already marked invalid, scheduler will handle recompute)
         done_recving.update(failed_recv_reqs)
+        self._last_failed_recv_reqs = failed_recv_reqs
 
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
@@ -2668,9 +2685,29 @@ class NixlBaseConnectorWorker:
                 )
                 self.xfer_stats.record_failed_transfer()
                 with self._failed_recv_lock:
-                    self._failed_recv_pending.add(req_id)
+                    has_sibling_transfers = bool(self._recving_transfers.get(req_id))
+                    if has_sibling_transfers:
+                        self._failed_recv_pending.add(req_id)
+                if not has_sibling_transfers:
+                    self._report_failed_recv(req_id)
                 self._pending_recv_notifs.pop(req_id, None)
+        with self._failed_recv_lock:
+            drained_failures = {
+                req_id
+                for req_id in self._failed_recv_pending
+                if not self._recving_transfers.get(req_id)
+                and not self._is_staging_active(req_id)
+            }
+            self._failed_recv_pending.difference_update(drained_failures)
+        for req_id in drained_failures:
+            self._report_failed_recv(req_id)
         return all_done
+
+    def _is_staging_active(self, req_id: str) -> bool:
+        return any(
+            stager is not None and req_id in stager.active_req_ids
+            for stager in (self._host_stager, self._hisparse_host_stager)
+        )
 
     def _pop_done_transfers(
         self, transfers: dict[str, list[int]], *, is_recv: bool
@@ -2771,6 +2808,14 @@ class NixlBaseConnectorWorker:
 
     def _report_failed_recv(self, req_id: str) -> None:
         """Report a failed recv exactly once and invalidate its blocks."""
+        if self._host_stager is not None:
+            self._host_stager.abort(req_id)
+        if self._hisparse_host_stager is not None:
+            self._hisparse_host_stager.abort(req_id)
+        if self._is_staging_active(req_id):
+            with self._failed_recv_lock:
+                self._failed_recv_pending.add(req_id)
+            return
         with self._failed_recv_lock:
             if req_id in self._failed_recv_reported:
                 return
@@ -2781,10 +2826,6 @@ class NixlBaseConnectorWorker:
             self._invalid_block_ids.put(set(meta.local_block_ids[0]))
         self._failed_recv_reqs.put(req_id)
         self._pending_recv_notifs.pop(req_id, None)
-        if self._host_stager is not None:
-            self._host_stager.abort(req_id)
-        if self._hisparse_host_stager is not None:
-            self._hisparse_host_stager.abort(req_id)
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
         """
@@ -3078,6 +3119,11 @@ class NixlBaseConnectorWorker:
                 break
         return result
 
+    def get_failed_recving(self) -> set[str]:
+        failed = self._last_failed_recv_reqs
+        self._last_failed_recv_reqs = set()
+        return failed
+
     def _evict_stale_engines(self) -> None:
         """Scan for and evict remote engines that have exceeded their TTL.
 
@@ -3150,24 +3196,32 @@ class NixlBaseConnectorWorker:
         if not hasattr(self, "_handshake_initiation_executor"):
             # error happens during init, no need to shutdown
             return
-        self._handshake_initiation_executor.shutdown(wait=False, cancel_futures=True)
-        # Handle releases can fail against a dead peer (e.g. releasing an
-        # in-flight PROC handle after the prefill side was killed). Teardown
-        # must still reach the MR deregister and the reference clears below,
-        # so tolerate and log per-stage failures instead of aborting.
-        try:
-            for handles in self._recving_transfers.values():
+        self._handshake_initiation_executor.shutdown(wait=True, cancel_futures=True)
+        # Posted reads cannot be cancelled. Keep their memory registered until
+        # every handle is terminal, then release it before tearing down MRs.
+        while self._recving_transfers:
+            for req_id, handles in tuple(self._recving_transfers.items()):
+                in_progress = []
                 for handle in handles:
-                    self.nixl_wrapper.release_xfer_handle(handle)
-        except Exception:
-            logger.exception("NIXL transfer-handle release failed at shutdown.")
+                    try:
+                        if self.nixl_wrapper.check_xfer_state(handle) == "PROC":
+                            in_progress.append(handle)
+                            continue
+                    except Exception:
+                        logger.exception("NIXL transfer polling failed at shutdown.")
+                    with contextlib.suppress(Exception):
+                        self.nixl_wrapper.release_xfer_handle(handle)
+                if in_progress:
+                    self._recving_transfers[req_id] = in_progress
+                else:
+                    del self._recving_transfers[req_id]
+            if self._recving_transfers:
+                time.sleep(0.001)
         self._recving_transfers.clear()
         if self._host_stager is not None:
-            for req_id in list(self._host_stager.active_req_ids):
-                self._host_stager.abort(req_id)
+            self._host_stager.shutdown()
         if self._hisparse_host_stager is not None:
-            for req_id in list(self._hisparse_host_stager.active_req_ids):
-                self._hisparse_host_stager.abort(req_id)
+            self._hisparse_host_stager.shutdown()
         try:
             for handle in self.src_xfer_handles_by_block_size.values():
                 self.nixl_wrapper.release_dlist_handle(handle)

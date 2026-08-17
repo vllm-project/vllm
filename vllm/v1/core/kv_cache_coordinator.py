@@ -407,6 +407,8 @@ class KVCacheCoordinator(ABC):
         ):
             if not group.enable_prefix_caching:
                 continue
+            if manager is self.hisparse_coordinator.host_manager:
+                continue
             manager.cache_blocks(
                 request,
                 num_tokens_to_cache,
@@ -414,6 +416,11 @@ class KVCacheCoordinator(ABC):
             )
         self.hisparse_coordinator.plan_prefix_materialization(
             request.request_id, num_tokens_to_cache
+        )
+        self.hisparse_coordinator.cache_host_blocks_when_ready(
+            request,
+            num_tokens_to_cache,
+            self.retention_interval,
         )
 
     def free(self, request_id: str) -> None:
@@ -834,6 +841,8 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         ):
             if not group.enable_prefix_caching:
                 continue
+            if manager is self.hisparse_coordinator.host_manager:
+                continue
             num_tokens_to_cache = cached_num_computed_tokens
             # EAGLE groups match one block past each aligned boundary and drop
             # it, so make that lookahead block eligible to be cached.
@@ -862,6 +871,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             )
         self.hisparse_coordinator.plan_prefix_materialization(
             request.request_id, cached_num_computed_tokens
+        )
+        self.hisparse_coordinator.cache_host_blocks_when_ready(
+            request,
+            cached_num_computed_tokens,
+            self.retention_interval,
         )
 
     def find_longest_cache_hit(

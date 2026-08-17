@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -140,6 +141,7 @@ class _ReqState:
     )
     copying: list[_Slot] = field(default_factory=list)
     failed: bool = False
+    aborted: bool = False
 
 
 class HostReadStager:
@@ -185,6 +187,7 @@ class HostReadStager:
         }
         self._copy_stream = torch.cuda.Stream(device=device)
         self._reqs: dict[str, _ReqState] = {}
+        self._closed = False
 
         logger.info(
             "NIXL host read staging enabled: %.2f GiB device staging across "
@@ -254,6 +257,8 @@ class HostReadStager:
         if not set(np.unique(copy_kinds)) <= supported_copy_kinds:
             raise ValueError("host staging received an unsupported CUDA copy kind")
         state = self._reqs.setdefault(req_id, _ReqState())
+        if state.aborted:
+            raise RuntimeError(f"host staging request {req_id!r} is draining")
         lengths = desc_lens
         for length, pool in self._pools.items():
             mask = lengths == length
@@ -292,15 +297,21 @@ class HostReadStager:
                 continue
             slot = pool.free_slots.pop()
             stage_ids = slot.desc_ids[: len(remote_ids)]
+            handle = None
             try:
                 handle = self.nixl_wrapper.make_prepped_xfer(
                     "READ", pool.handle, stage_ids, remote_handle, remote_ids
                 )
                 self.nixl_wrapper.transfer(handle)
             except Exception:
-                pool.free_slots.append(slot)
                 state.failed = True
                 state.queued = []
+                if handle is None:
+                    pool.free_slots.append(slot)
+                else:
+                    state.reading.append(
+                        (handle, slot, dst_addrs, copy_kinds, mirror_addrs)
+                    )
                 raise
             state.reading.append((handle, slot, dst_addrs, copy_kinds, mirror_addrs))
         state.queued = remaining
@@ -316,39 +327,43 @@ class HostReadStager:
         stream = self._copy_stream
         pool = slot.pool
         with torch.cuda.stream(stream):
-            for j, dst_addr in enumerate(dst_addrs):
-                src_addr = int(pool.stage_ptrs[slot.desc_ids[j]])
-                rc = self._cudart.cudaMemcpyAsync(
-                    ctypes.c_void_p(int(dst_addr)),
-                    ctypes.c_void_p(src_addr),
-                    ctypes.c_size_t(pool.desc_len),
-                    ctypes.c_int(int(copy_kinds[j])),
-                    ctypes.c_void_p(stream.cuda_stream),
-                )
-                if rc != 0:
-                    raise RuntimeError(
-                        f"cudaMemcpyAsync failed staging host KV read: rc={rc}"
-                    )
-                mirror_addr = int(mirror_addrs[j])
-                if mirror_addr:
+            try:
+                for j, dst_addr in enumerate(dst_addrs):
+                    src_addr = int(pool.stage_ptrs[slot.desc_ids[j]])
                     rc = self._cudart.cudaMemcpyAsync(
-                        ctypes.c_void_p(mirror_addr),
+                        ctypes.c_void_p(int(dst_addr)),
                         ctypes.c_void_p(src_addr),
                         ctypes.c_size_t(pool.desc_len),
-                        ctypes.c_int(_CUDA_MEMCPY_DEVICE_TO_DEVICE),
+                        ctypes.c_int(int(copy_kinds[j])),
                         ctypes.c_void_p(stream.cuda_stream),
                     )
                     if rc != 0:
                         raise RuntimeError(
-                            f"cudaMemcpyAsync failed mirroring staged KV: rc={rc}"
+                            f"cudaMemcpyAsync failed staging host KV read: rc={rc}"
                         )
-            slot.event.record(stream)
+                    mirror_addr = int(mirror_addrs[j])
+                    if mirror_addr:
+                        rc = self._cudart.cudaMemcpyAsync(
+                            ctypes.c_void_p(mirror_addr),
+                            ctypes.c_void_p(src_addr),
+                            ctypes.c_size_t(pool.desc_len),
+                            ctypes.c_int(_CUDA_MEMCPY_DEVICE_TO_DEVICE),
+                            ctypes.c_void_p(stream.cuda_stream),
+                        )
+                        if rc != 0:
+                            raise RuntimeError(
+                                f"cudaMemcpyAsync failed mirroring staged KV: rc={rc}"
+                            )
+            finally:
+                slot.event.record(stream)
 
     def advance(self) -> tuple[set[str], set[str]]:
         """Drive the pipeline. Returns (fully staged req_ids, failed req_ids)."""
         done: set[str] = set()
         failed: set[str] = set()
         for req_id, state in list(self._reqs.items()):
+            if state.failed or state.aborted:
+                state.queued.clear()
             still_reading = []
             for handle, slot, dst_addrs, copy_kinds, mirror_addrs in state.reading:
                 try:
@@ -364,6 +379,10 @@ class HostReadStager:
                     self.nixl_wrapper.release_xfer_handle(handle)
                 if xfer_state != "DONE":
                     state.failed = True
+                    state.queued.clear()
+                    slot.pool.free_slots.append(slot)
+                    continue
+                if state.failed or state.aborted:
                     slot.pool.free_slots.append(slot)
                     continue
                 try:
@@ -371,7 +390,8 @@ class HostReadStager:
                 except Exception:
                     logger.exception("host KV staging copy failed for %s", req_id)
                     state.failed = True
-                    slot.pool.free_slots.append(slot)
+                    state.queued.clear()
+                    state.copying.append(slot)
                     continue
                 state.copying.append(slot)
             state.reading = still_reading
@@ -384,25 +404,39 @@ class HostReadStager:
                     still_copying.append(slot)
             state.copying = still_copying
 
-            if not state.failed:
+            if not state.failed and not state.aborted:
                 try:
                     self._pump(state)
                 except Exception:
                     logger.exception("host KV staging read failed for %s", req_id)
                     state.failed = True
+                    state.queued.clear()
 
             if not state.reading and not state.copying and not state.queued:
                 self._reqs.pop(req_id, None)
-                (failed if state.failed else done).add(req_id)
+                if not state.aborted:
+                    (failed if state.failed else done).add(req_id)
         return done, failed
 
     def abort(self, req_id: str) -> None:
-        state = self._reqs.pop(req_id, None)
+        state = self._reqs.get(req_id)
         if state is None:
             return
-        for handle, slot, *_ in state.reading:
-            with contextlib.suppress(Exception):
-                self.nixl_wrapper.release_xfer_handle(handle)
-            slot.pool.free_slots.append(slot)
-        for slot in state.copying:
-            slot.pool.free_slots.append(slot)
+        state.aborted = True
+        state.queued.clear()
+
+    def shutdown(self) -> None:
+        """Drain active operations before releasing registered staging memory."""
+        if self._closed:
+            return
+        for req_id in tuple(self._reqs):
+            self.abort(req_id)
+        while self._reqs:
+            self.advance()
+            if self._reqs:
+                time.sleep(0.001)
+        self._copy_stream.synchronize()
+        for pool in self._pools.values():
+            self.nixl_wrapper.release_dlist_handle(pool.handle)
+            self.nixl_wrapper.deregister_memory(pool.reg_descs)
+        self._closed = True

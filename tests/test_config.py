@@ -143,6 +143,26 @@ def test_hisparse_rejects_decode_context_parallelism():
         )
 
 
+def test_hisparse_rejects_pipeline_parallelism():
+    with pytest.raises(ValueError, match="pipeline parallelism"):
+        VllmConfig(
+            attention_config=AttentionConfig(
+                hisparse_config=HiSparseConfig(host_pool_gib=1.0)
+            ),
+            parallel_config=ParallelConfig(pipeline_parallel_size=2),
+        )
+
+
+def test_hisparse_rejects_rocm(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    with pytest.raises(ValueError, match="ROCm is not supported"):
+        VllmConfig(
+            attention_config=AttentionConfig(
+                hisparse_config=HiSparseConfig(host_pool_gib=1.0)
+            )
+        )
+
+
 def test_rocm_defaults_deepseek_v4_to_mrv1(monkeypatch):
     """ROCm keeps DeepSeek V4 on MRV1, which is still faster there."""
     from vllm.config.vllm import default_v2_model_runner_architectures

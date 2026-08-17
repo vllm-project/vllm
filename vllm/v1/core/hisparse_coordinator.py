@@ -23,6 +23,7 @@ from vllm.v1.kv_offload.sparse.base import (
     SparseKVOffloadCommand,
     SparseKVPageTransfer,
 )
+from vllm.v1.request import Request
 
 
 @dataclass
@@ -36,6 +37,13 @@ class _PendingSpill:
     worker_completions: int = 0
     enqueue_applied: bool = False
     resident_released: bool = False
+
+
+@dataclass
+class _PendingPublication:
+    request: Request
+    num_computed_tokens: int
+    retention_interval: int | None
 
 
 class HiSparseCoordinator:
@@ -135,6 +143,7 @@ class HiSparseCoordinator:
         self.host_valid_pages: dict[str, set[int]] = {}
         self.indexer_ready_req_ids: set[str] = set()
         self.transition_target_pages: dict[str, int] = {}
+        self.pending_publications: dict[str, _PendingPublication] = {}
         self.next_spill_id = 0
 
     def require_hot_if_needed(
@@ -350,6 +359,34 @@ class HiSparseCoordinator:
                 after_forward=True,
             )
 
+    def cache_host_blocks_when_ready(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        retention_interval: int | None,
+    ) -> None:
+        """Publish host-source hashes only after their pages are durable."""
+        manager = self.host_manager
+        if manager is None:
+            return
+        num_pages = (
+            num_computed_tokens // manager.block_size * self.pages_per_host_block
+        )
+        valid_pages = self.host_valid_pages.get(request.request_id, set())
+        if all(page_idx in valid_pages for page_idx in range(num_pages)):
+            manager.cache_blocks(
+                request,
+                num_computed_tokens,
+                retention_interval=retention_interval,
+            )
+            self.pending_publications.pop(request.request_id, None)
+            return
+        self.pending_publications[request.request_id] = _PendingPublication(
+            request=request,
+            num_computed_tokens=num_computed_tokens,
+            retention_interval=retention_interval,
+        )
+
     def complete_host_import(self, request_id: str, num_computed_tokens: int) -> None:
         """Publish externally populated host pages after connector completion."""
         if not self.resident_managers:
@@ -511,8 +548,6 @@ class HiSparseCoordinator:
         table_changed = False
         for manager, block in zip(self.resident_managers, pending.resident_blocks):
             current = manager.get_resident_page(request_id, page_idx)
-            if current is block and not pending.enqueue_applied:
-                self.host_valid_pages.setdefault(request_id, set()).add(page_idx)
             if current is block and pending.release_after:
                 released = manager.release_resident_page(
                     request_id,
@@ -539,9 +574,18 @@ class HiSparseCoordinator:
         for pending in completed:
             self.pending_spills.pop(pending.transfer_id, None)
             self.pending_pages.pop(pending.page, None)
+            request_id, page_idx = pending.page
+            self.host_valid_pages.setdefault(request_id, set()).add(page_idx)
             assert self.host_manager is not None
             self.host_manager.block_pool.free_blocks([pending.host_block])
+        for request_id, publication in tuple(self.pending_publications.items()):
+            self.cache_host_blocks_when_ready(
+                publication.request,
+                publication.num_computed_tokens,
+                publication.retention_interval,
+            )
 
     def free(self, request_id: str) -> None:
         self.host_valid_pages.pop(request_id, None)
         self.indexer_ready_req_ids.discard(request_id)
+        self.pending_publications.pop(request_id, None)

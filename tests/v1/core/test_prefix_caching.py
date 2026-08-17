@@ -596,7 +596,19 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
     assert len(spills) == 1
     assert spills[0].after_forward
     spill_counts = {spills[0].transfer_id: 1}
-    manager.hisparse_coordinator.update_spills(spill_counts, spill_counts)
+    duplicate = make_request(
+        "duplicate", list(range(2 * block_size)), block_size, sha256
+    )
+    _, num_computed, _ = manager.get_computed_blocks(duplicate)
+    assert num_computed == 0
+
+    manager.hisparse_coordinator.update_spills(spill_counts, {})
+    _, num_computed, _ = manager.get_computed_blocks(duplicate)
+    assert num_computed == 0
+
+    manager.hisparse_coordinator.update_spills({}, spill_counts)
+    _, num_computed, _ = manager.get_computed_blocks(duplicate)
+    assert num_computed == block_size
     blocks = manager.get_block_ids(request.request_id)
     assert len(blocks[2]) == 1
     assert blocks[3] == []

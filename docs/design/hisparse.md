@@ -135,7 +135,7 @@ coordinates. Request identity and logical page state remain in the scheduler.
 
 ## Hot lookup and LRU
 
-The NVIDIA and AMD path keeps replacement entirely on the accelerator:
+The NVIDIA CUDA path keeps replacement entirely on the accelerator:
 
 ```text
 top-K logical positions
@@ -150,9 +150,9 @@ hot row? ──────── yes ──► existing hot physical row + upda
 choose GPU LRU victim ──► copy pinned host row ──► hot physical row
 ```
 
-The abstraction does not require another platform to use this GPU LRU. A
-platform-specific worker may implement its own host/hot policy behind the same
-command, output, and cache-resolution boundaries.
+ROCm is not currently supported because the fused HiSparse cache operations are
+implemented only by CUDA kernels. A future platform-specific worker may provide
+the same command, output, and cache-resolution boundaries.
 
 ## Main classes
 
