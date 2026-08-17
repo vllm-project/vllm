@@ -113,6 +113,57 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
+def _replayssm_config(
+    *,
+    backend: MambaBackendEnum,
+    use_v2_model_runner: bool = False,
+    ssu_algorithm: str | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        cache_config=SimpleNamespace(
+            use_replayssm=True,
+            mamba_cache_mode="none",
+        ),
+        model_config=None,
+        num_speculative_tokens=0,
+        mamba_config=SimpleNamespace(
+            backend=backend,
+            ssu_algorithm=ssu_algorithm,
+        ),
+        use_v2_model_runner=use_v2_model_runner,
+        kv_transfer_config=None,
+    )
+
+
+def test_v2_replayssm_requires_flashinfer():
+    config = _replayssm_config(
+        backend=MambaBackendEnum.TRITON,
+        use_v2_model_runner=True,
+    )
+
+    with pytest.raises(ValueError, match="Triton ReplaySSM does not support"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+
+
+def test_v2_flashinfer_replayssm_is_supported():
+    config = _replayssm_config(
+        backend=MambaBackendEnum.FLASHINFER,
+        use_v2_model_runner=True,
+    )
+
+    assert VllmConfig.validate_mamba_cached_kernel(config) is config
+
+
+def test_replayssm_rejects_plain_ssu_algorithm_override():
+    config = _replayssm_config(
+        backend=MambaBackendEnum.FLASHINFER,
+        ssu_algorithm="auto",
+    )
+
+    with pytest.raises(ValueError, match="plain FlashInfer SSU tactic"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+
+
 def test_rocm_defaults_deepseek_v4_to_mrv1(monkeypatch):
     """ROCm keeps DeepSeek V4 on MRV1, which is still faster there."""
     from vllm.config.vllm import default_v2_model_runner_architectures

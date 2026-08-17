@@ -206,13 +206,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             )
             self.decode_replayssm_scratch = None
         elif self.use_flashinfer_replayssm:
-            from flashinfer.mamba.checkpointing_ssu import (
-                allocate_checkpointing_ssu_scratch,
+            from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+                allocate_flashinfer_replayssm_scratch,
             )
 
             self.decode_bc_pre_scratch = None
             nheads = kv_cache_spec.shapes[2][0]
-            self.decode_replayssm_scratch = allocate_checkpointing_ssu_scratch(
+            self.decode_replayssm_scratch = allocate_flashinfer_replayssm_scratch(
                 batch_size=scheduler_config.max_num_seqs,
                 num_heads=nheads,
                 num_predicted_tokens=1,

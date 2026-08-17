@@ -2582,6 +2582,11 @@ class VllmConfig:
             )
         if self.num_speculative_tokens > 0:
             raise ValueError("--use-replayssm does not support speculative decoding")
+        if self.mamba_config.ssu_algorithm is not None:
+            raise ValueError(
+                "--mamba-ssu-algorithm selects a plain FlashInfer SSU tactic "
+                "and is not compatible with ReplaySSM"
+            )
         if self.mamba_config.backend not in (
             MambaBackendEnum.TRITON,
             MambaBackendEnum.FLASHINFER,
@@ -2597,6 +2602,15 @@ class VllmConfig:
             raise ValueError(
                 "FlashInfer ReplaySSM does not support "
                 "--mamba-cache-mode align yet; use none"
+            )
+        if (
+            self.use_v2_model_runner
+            and self.mamba_config.backend == MambaBackendEnum.TRITON
+        ):
+            raise ValueError(
+                "Triton ReplaySSM does not support Model Runner V2 because it "
+                "requires V1 CPU decode-position metadata; use "
+                "--mamba-backend flashinfer or Model Runner V1"
             )
         if (
             self.kv_transfer_config is not None
