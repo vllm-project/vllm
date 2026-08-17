@@ -12,8 +12,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.kernels.linear import (
-    _POSSIBLE_MXFP4_KERNELS,
-    AiterA16Wfp4LinearKernel,
     AiterMxfp4LinearKernel,
     EmulationMxfp4LinearKernel,
     FlashInferMxFp4LinearKernel,
@@ -22,7 +20,6 @@ from vllm.model_executor.kernels.linear import (
     MxFp4LinearKernel,
     MxFp4LinearLayerConfig,
     XPUMxFp4LinearKernel,
-    _filter_kernels_by_backend,
     init_mxfp4_linear_kernel,
     register_linear_kernel,
 )
@@ -44,7 +41,6 @@ _TRUE_W4A4_KERNELS = [
     FlashInferMxFp4LinearKernel,
     XPUMxFp4LinearKernel,
     AiterMxfp4LinearKernel,
-    AiterA16Wfp4LinearKernel,
 ]
 
 # Weight-only (A16) kernels: they never quantize activations. They still accept
@@ -233,69 +229,6 @@ def test_aiter_kernel_is_supported_requires_native_mx_support():
         is_supported, reason = AiterMxfp4LinearKernel.is_supported()
     assert not is_supported
     assert reason
-
-
-def test_rocm_kernel_priority_keeps_native_aiter_first():
-    kernels = _POSSIBLE_MXFP4_KERNELS[PlatformEnum.ROCM]
-    assert kernels == [
-        AiterMxfp4LinearKernel,
-        AiterA16Wfp4LinearKernel,
-        EmulationMxfp4LinearKernel,
-    ]
-
-
-def test_mxfp4_backend_filtering_preserves_explicit_emulation():
-    kernels = _POSSIBLE_MXFP4_KERNELS[PlatformEnum.ROCM]
-    assert _filter_kernels_by_backend("aiter", kernels) == [
-        AiterMxfp4LinearKernel,
-        AiterA16Wfp4LinearKernel,
-    ]
-    assert _filter_kernels_by_backend("emulation", kernels) == [
-        EmulationMxfp4LinearKernel
-    ]
-
-
-@patch("vllm.model_executor.kernels.linear.current_platform")
-def test_auto_selects_a16wfp4_after_native_aiter_rejects(platform_mock):
-    platform_mock._enum = PlatformEnum.ROCM
-    with (
-        patch(
-            "vllm.model_executor.kernels.linear._get_linear_backend",
-            return_value="auto",
-        ),
-        patch.object(
-            AiterMxfp4LinearKernel,
-            "is_supported",
-            return_value=(False, "native unavailable"),
-        ),
-        patch.object(
-            AiterA16Wfp4LinearKernel,
-            "is_supported",
-            return_value=(True, None),
-        ),
-    ):
-        kernel = init_mxfp4_linear_kernel(activation_quant_key=kMxfp4Dynamic)
-
-    assert isinstance(kernel, AiterA16Wfp4LinearKernel)
-
-
-@patch("vllm.model_executor.kernels.linear.current_platform")
-def test_explicit_emulation_does_not_select_aiter_hybrid(platform_mock):
-    platform_mock._enum = PlatformEnum.ROCM
-    with (
-        patch(
-            "vllm.model_executor.kernels.linear._get_linear_backend",
-            return_value="emulation",
-        ),
-        patch(
-            "vllm.model_executor.kernels.linear.mxfp4.emulation."
-            "current_platform.supports_mx",
-            return_value=True,
-        ),
-    ):
-        kernel = init_mxfp4_linear_kernel(activation_quant_key=kMxfp4Dynamic)
-
-    assert isinstance(kernel, EmulationMxfp4LinearKernel)
 
 
 class OOTMxFp4LinearKernel(MxFp4LinearKernel):
