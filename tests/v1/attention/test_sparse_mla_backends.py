@@ -875,7 +875,7 @@ def test_masked_mha_workspace_fits_single_request_boundary(max_query_len, expect
         _masked_mha_workspace_fits(
             batch_size=1,
             max_query_len=max_query_len,
-            context_chunk_max_seq_lens=None,
+            max_context_chunk_seq_len=0,
             workspace_numel=GLOBAL_TOPK_MASK_MAX_BYTES // torch.int32.itemsize,
         )
         is expected
@@ -884,7 +884,7 @@ def test_masked_mha_workspace_fits_single_request_boundary(max_query_len, expect
 
 def test_masked_mha_workspace_fits_accounts_for_batch_and_context():
     """Request count and context chunk length are independent multipliers."""
-    base = dict(batch_size=2, max_query_len=2048, context_chunk_max_seq_lens=[2048])
+    base = dict(batch_size=2, max_query_len=2048, max_context_chunk_seq_len=2048)
     exact = math.prod(_topk_mask_shape(2, 2048, 2048))
 
     assert _masked_mha_workspace_fits(**base, workspace_numel=exact)
@@ -892,7 +892,7 @@ def test_masked_mha_workspace_fits_accounts_for_batch_and_context():
         **{**base, "batch_size": 3}, workspace_numel=exact
     )
     assert not _masked_mha_workspace_fits(
-        **{**base, "context_chunk_max_seq_lens": [4096]}, workspace_numel=exact
+        **{**base, "max_context_chunk_seq_len": 4096}, workspace_numel=exact
     )
 
 
@@ -1250,32 +1250,36 @@ def test_split_indexer_prefill_chunks_single_request_overflow():
     assert out == expected
 
 
-def test_triton_convert_returns_valid_counts():
+# 384 is not a power of two, so it counts via the tiled atomic accumulation
+# rather than the single-tile path 128 takes.
+@pytest.mark.parametrize("num_topk_tokens", [128, 384])
+def test_triton_convert_returns_valid_counts(num_topk_tokens: int):
     """Test that return_valid_counts correctly counts non-negative indices."""
     device = torch.device(DEVICE_TYPE)
     num_tokens = 8
     num_requests = 2
     max_blocks_per_req = 10
     block_size = 64
-    num_topk_tokens = 128
 
     req_id = torch.tensor([0, 0, 0, 0, 1, 1, 1, 1], dtype=torch.int32, device=device)
     block_table = torch.arange(
         num_requests * max_blocks_per_req, dtype=torch.int32, device=device
     ).view(num_requests, max_blocks_per_req)
 
-    # Create token indices with varying numbers of valid entries
-    # Token 0: 64 valid, 64 invalid (-1)
-    # Token 1: 32 valid, 96 invalid
-    # Token 2: 128 valid (all)
-    # Token 3: 1 valid, 127 invalid
-    # etc.
+    # Create token indices with varying numbers of valid entries: half the row,
+    # a quarter of it, the whole row, then a single valid entry -- twice over.
     token_indices = torch.full(
         (num_tokens, num_topk_tokens), -1, dtype=torch.int32, device=device
     )
+    valid_counts_per_token = [
+        num_topk_tokens // 2,
+        num_topk_tokens // 4,
+        num_topk_tokens,
+        1,
+    ] * 2
     expected_valid = []
     for i in range(num_tokens):
-        num_valid = [64, 32, 128, 1, 64, 32, 128, 1][i]
+        num_valid = valid_counts_per_token[i]
         token_indices[i, :num_valid] = torch.arange(
             num_valid, dtype=torch.int32, device=device
         ) % (block_size * max_blocks_per_req)

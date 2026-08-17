@@ -47,7 +47,7 @@ pub async fn get_world_size(
     let ws = client.world_size();
 
     let world_size = if params.include_dp {
-        let dp = client.data_parallel_size();
+        let dp = state.data_parallel_size() as u64;
         ws * dp
     } else {
         ws
