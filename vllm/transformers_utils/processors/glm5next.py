@@ -83,14 +83,20 @@ def smart_resize(
     ``h_factor`` / ``w_factor`` carry ``patch_expand_factor`` (unlike Qwen-VL's
     single ``factor``); ``t_factor`` is ``temporal_patch_size``. For a still
     image ``t = t_factor = temporal_patch_size`` so ``t_bar = temporal_patch_size``.
-    """
-    if max_pixels < 0:
-        h_bar = math.ceil(h / h_factor) * h_factor
-        w_bar = math.ceil(w / w_factor) * w_factor
-        return h_bar, w_bar
 
+    Sides shorter than the spatial factor are first upscaled to the factor, and
+    the shrink branch clamps to at least one factor -- without the clamp a slim
+    side floors to 0 once ``t`` (frame count) eats into the pixel budget.
+    """
+    if t < t_factor:
+        raise ValueError(f"t:{t} must be >= temporal_factor:{t_factor}")
     if h == 0 or w == 0:
         raise ValueError(f"something wrong with shape, h or w is 0, got {h}, {w}")
+
+    if h < h_factor or w < w_factor:
+        scale = max(h_factor / h, w_factor / w)
+        h = int(h * scale)
+        w = int(w * scale)
 
     if max(h, w) / min(h, w) > 200:
         raise ValueError(
@@ -104,8 +110,8 @@ def smart_resize(
 
     if t_bar * h_bar * w_bar > max_pixels:
         beta = math.sqrt((t * h * w) / max_pixels)
-        h_bar = math.floor(h / beta / h_factor) * h_factor
-        w_bar = math.floor(w / beta / w_factor) * w_factor
+        h_bar = max(h_factor, math.floor(h / beta / h_factor) * h_factor)
+        w_bar = max(w_factor, math.floor(w / beta / w_factor) * w_factor)
     elif t_bar * h_bar * w_bar < min_pixels:
         beta = math.sqrt(min_pixels / (t * h * w))
         h_bar = math.ceil(h * beta / h_factor) * h_factor
@@ -292,9 +298,7 @@ class Glm5NextImageProcessorFast(BaseImageProcessorFast):
         patch_expand_factor = (images_kwargs or {}).get(
             "patch_expand_factor", self.patch_expand_factor
         )
-        size = (images_kwargs or {}).get(
-            "size", {"shortest_edge": 112 * 112, "longest_edge": 28 * 28 * 15000}
-        )
+        size = (images_kwargs or {}).get("size", self.size)
         resized_height, resized_width = smart_resize(
             t=self.temporal_patch_size,
             h=height,
@@ -388,7 +392,7 @@ class Glm5NextVideoProcessor(BaseVideoProcessor):
         max_duration = 2400
         effective_duration = min(duration, max_duration)
         target_fps = kwargs.get("target_fps")
-        if not target_fps:
+        if target_fps is None:
             if effective_duration <= 30:
                 target_fps = dynamic_fps_thres[30]
             elif effective_duration <= 300:
@@ -473,6 +477,8 @@ class Glm5NextVideoProcessor(BaseVideoProcessor):
         grouped_videos, grouped_videos_index = group_videos_by_shape(videos)
         resized_videos_grouped = {}
         for shape, stacked_videos in grouped_videos.items():
+            if do_convert_rgb:
+                stacked_videos = self.convert_to_rgb(stacked_videos)
             b, t_len, c, h, w = stacked_videos.shape
             num_frames, height, width = t_len, h, w
             if do_resize:
@@ -515,9 +521,9 @@ class Glm5NextVideoProcessor(BaseVideoProcessor):
             )
             patches = stacked_videos
 
-            if patches.shape[1] % temporal_patch_size != 0:
-                repeats = patches[:, -1:].repeat(1, temporal_patch_size - 1, 1, 1, 1)
-                patches = torch.cat([patches, repeats], dim=1)
+            if pad := -patches.shape[1] % temporal_patch_size:
+                repeats = patches[:, -1:].expand(-1, pad, -1, -1, -1)
+                patches = torch.cat((patches, repeats), dim=1)
             batch_size, grid_t, channel = patches.shape[:3]
             grid_t = grid_t // temporal_patch_size
             grid_h, grid_w = resized_height // patch_size, resized_width // patch_size
