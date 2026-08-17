@@ -1049,7 +1049,7 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
       input.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
   static constexpr int THREADS = 256;
-  static constexpr int GROUP_STAGES = 3;   // warp-per-group cp.async depth
+  static constexpr int GROUP_STAGES = 4;   // warp-per-group cp.async depth
   static constexpr int BLOCKS_PER_SM = 8;  // matches kernel __launch_bounds__
   static constexpr int SM_COUNT = 132;     // H200 (GH100, 132 SMs)
   // Fixed persistent grid so the kernel's grid stride is a compile-time
