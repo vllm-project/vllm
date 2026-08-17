@@ -164,13 +164,6 @@ class DeepseekV32IndexerBackend(AttentionBackend):
     def get_name() -> str:
         return "DEEPSEEK_V32_INDEXER"
 
-    @classmethod
-    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        # The indexer cache overlays the MLA latent cache with a different page
-        # size, so every group must agree on which bytes belong to a block: the
-        # layer dim has to sit inside the block dim.
-        return (KVCacheLayout.BLHNC, KVCacheLayout.BLNHC)
-
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [1, MultipleOf(16)] if current_platform.is_rocm() else [64]
@@ -188,6 +181,14 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V4_INDEXER"
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # DeepSeek-V4 packs the indexer pages beside the MLA latent pages inside
+        # each block, so the layer dim must sit inside the block dim. V3.2-family
+        # models instead keep dense per-layer caches: their sparse kernels index
+        # rows as block_id * block_size, which only layer-compact layouts satisfy.
+        return (KVCacheLayout.BLHNC, KVCacheLayout.BLNHC)
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:

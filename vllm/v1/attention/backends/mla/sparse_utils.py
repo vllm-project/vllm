@@ -20,7 +20,6 @@ def _convert_req_index_to_global_index_kernel(
     # shapes (compile-time where possible)
     max_num_blocks_per_req: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
-    BLOCK_STRIDE_ROWS: tl.constexpr,
     BLOCK_N: tl.constexpr,  # tile width along columns
     HAS_PREFILL: tl.constexpr,
     COUNT_VALID: tl.constexpr,  # whether to count valid indices
@@ -87,9 +86,7 @@ def _convert_req_index_to_global_index_kernel(
     bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
     is_invalid_tok |= ~valid_block | is_remote
     base = tl.load(bt_ptr, mask=valid_block & ~is_prefill & ~is_remote, other=0)
-    # Row pitch between physical blocks: BLOCK_SIZE for tight caches, larger
-    # when other layers' pages share the block stride (overlaid layouts).
-    out_val = base * BLOCK_STRIDE_ROWS + inblock_off
+    out_val = base * BLOCK_SIZE + inblock_off
 
     # Override with prefill output if prefill is enabled
     if HAS_PREFILL:
@@ -159,7 +156,6 @@ def triton_convert_req_index_to_global_index(
     block_table: torch.Tensor,  # int32 [num_requests, max_num_blocks_per_req]
     token_indices: torch.Tensor,  # int32 [num_tokens, NUM_TOPK_TOKENS]
     BLOCK_SIZE: int = 64,
-    BLOCK_STRIDE_ROWS: int | None = None,
     NUM_TOPK_TOKENS: int = 2048,
     BLOCK_N: int = 128,  # tile width along columns
     HAS_PREFILL_WORKSPACE: bool = False,
@@ -208,9 +204,6 @@ def triton_convert_req_index_to_global_index(
         assert prefill_workspace_request_ids.dtype == torch.int32
         assert prefill_workspace_starts.dtype == torch.int32
 
-    if BLOCK_STRIDE_ROWS is None:
-        BLOCK_STRIDE_ROWS = BLOCK_SIZE
-
     num_tokens = req_id.shape[0]
     max_num_blocks_per_req = block_table.shape[1]
 
@@ -256,7 +249,6 @@ def triton_convert_req_index_to_global_index(
         # shapes / constexprs
         max_num_blocks_per_req,
         BLOCK_SIZE,
-        BLOCK_STRIDE_ROWS,
         block_n,
         HAS_PREFILL_WORKSPACE,
         return_valid_counts,
@@ -373,7 +365,6 @@ def triton_filter_and_convert_dcp_index(
         None,
         max_num_blocks_per_req,
         BLOCK_SIZE,
-        BLOCK_SIZE,  # dense caches on the DCP path
         block_n,
         False,  # HAS_PREFILL
         count_valid,

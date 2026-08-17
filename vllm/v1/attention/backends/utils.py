@@ -195,9 +195,10 @@ def resolve_kv_cache_layout(
 
     Every backend declares the layouts its kernels support, most preferred first
     (``supported_kv_cache_layouts``); the resolver picks the most often preferred
-    layout from the intersection of those sets. An explicit
-    ``VLLM_KV_CACHE_LAYOUT`` must be in the intersection or resolution fails; the
-    connector's preference is used when compatible and silently dropped otherwise.
+    layout from the intersection of those sets. An explicit ``VLLM_KV_CACHE_LAYOUT``
+    must be satisfiable within the intersection or resolution fails, with the legacy
+    ``NHD``/``HND`` names constraining only the in-block order; the connector's
+    preference is used when compatible and silently dropped otherwise.
     An empty intersection is a hard error naming each backend's supported set.
 
     The layout is published on ``cache_config.kv_cache_layout`` and in a
@@ -208,7 +209,11 @@ def resolve_kv_cache_layout(
         return _layout_from_name(_KV_CACHE_LAYOUT_OVERRIDE)
 
     # SSM backends get a single-head, single-state page, so every layout is the
-    # same bytes to them and they never declare support for any of them.
+    # same bytes to them and they never declare support for any of them. Hybrid
+    # models do exclude hoisted-head layouts: mamba pages overlay attention pages,
+    # and hoisting the head dim outside the block dim scatters the attention bytes
+    # of a block that mamba addresses as one contiguous page.
+    has_ssm = any(backend.is_ssm() for backend in backends)
     backends = [backend for backend in backends if not backend.is_ssm()]
 
     supported_sets = {
@@ -225,6 +230,7 @@ def resolve_kv_cache_layout(
             layout
             for layout in canonical
             if all(layout in supported for supported in supported_sets.values())
+            and not (has_ssm and layout.heads_outside_blocks)
         ),
         key=lambda layout: sum(s.index(layout) for s in narrowed),
     )
@@ -241,6 +247,14 @@ def resolve_kv_cache_layout(
 
     if (requested := envs.VLLM_KV_CACHE_LAYOUT) is not None:
         layout = _layout_from_name(requested)
+        if requested in _LAYOUT_COMPAT_ALIASES:
+            # Legacy NHD/HND names constrain only the in-block [H, N, C] order, just
+            # as they did before the 5D vocabulary; keep the most preferred candidate
+            # whose block interior matches.
+            interior = layout.stride_order[-3:]
+            layout = next(
+                (c for c in candidates if c.stride_order[-3:] == interior), layout
+            )
         if layout not in candidates:
             raise ValueError(
                 f"VLLM_KV_CACHE_LAYOUT={requested} is not supported by every "
