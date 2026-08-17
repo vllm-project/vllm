@@ -288,7 +288,7 @@ class _FakePrefillMetadata:
     ):
         self.block_table = block_table
         self.cpu_seq_lens = cpu_seq_lens
-        self.query_start_loc = query_start_loc
+        self.query_start_loc_i64 = query_start_loc.to(torch.int64)
         self.req_to_token = req_to_token
         self.req_pool_indices = req_pool_indices
 

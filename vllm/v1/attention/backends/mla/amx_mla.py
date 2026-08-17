@@ -151,6 +151,9 @@ class AMXMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
                 dtype=torch.int64,
                 device=prefill.block_table.device,
             )
+            prefill.query_start_loc_i64 = prefill.query_start_loc.to(  # type: ignore[attr-defined]
+                torch.int64
+            )
         return attn_metadata
 
 
@@ -333,12 +336,15 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
         # Absorb: (N, B, P) x (N, L, P)^T -> (N, B, L)
-        q_nope_t = q_nope.transpose(0, 1).contiguous()
+        # bmm_cpu tolerates non-contiguous mat1/out as long as their last dim
+        # is contiguous, so q_nope's transpose and ql_nope's transposed view
+        # can be passed directly -- no copy needed for either.
+        q_nope_t = q_nope.transpose(0, 1)
         ql_nope = torch.empty(
-            num_heads, num_tokens, self.kv_lora_rank, dtype=q.dtype, device=q.device
+            num_tokens, num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
         )
-        ops.bmm_cpu(ql_nope, q_nope_t, self._w_uk_packed, True, None)
-        mqa_q = torch.cat([ql_nope.transpose(0, 1), q_pe], dim=-1)
+        ops.bmm_cpu(ql_nope.transpose(0, 1), q_nope_t, self._w_uk_packed, True, None)
+        mqa_q = torch.cat([ql_nope, q_pe], dim=-1)
 
         kv_cache_flat = kv_c_and_k_pe_cache.view(-1, 1, self.head_size)
         v_buffer = kv_cache_flat[..., : self.kv_lora_rank]
@@ -347,9 +353,9 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
         req_pool_indices = prefill.req_pool_indices  # type: ignore[attr-defined]
 
         seq_lens = prefill.cpu_seq_lens  # type: ignore[attr-defined]
-        query_start_loc = prefill.query_start_loc.to(torch.int64)
+        query_start_loc = prefill.query_start_loc_i64  # type: ignore[attr-defined]
         extend_seq_lens = query_start_loc[1:] - query_start_loc[:-1]
-        extend_start_loc = query_start_loc[:-1].contiguous()
+        extend_start_loc = query_start_loc[:-1]
         max_len_extend = int(extend_seq_lens.max().item())
 
         # k_extend/v_extend: the new tokens' own latent K/V, aliased in one
@@ -386,9 +392,9 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
             None,
         )
 
-        # De-absorb directly into `output` (view, no extra copy):
+        # De-absorb directly into `output` (view, no extra copy on either side):
         # (N, B, L) x (N, V, L)^T -> (N, B, V)
-        attn_out_t = attn_out.transpose(0, 1).contiguous()
+        attn_out_t = attn_out.transpose(0, 1)
         output_view = output.view(num_tokens, num_heads, self.v_head_dim).transpose(
             0, 1
         )
