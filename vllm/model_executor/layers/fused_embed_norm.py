@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Replicated input embedding + its fused gather/norm kernels.
 
-Groups the ``VLLM_REPLICATE_EMBED`` path in one place: the replicated embedding
-module, its factory (with the fallback to vocab-parallel), and the two Triton
-fusions the full on-rank table unlocks --
+Groups the ``VLLM_REPLICATE_EMBED`` path in one place: the embedding factory,
+the predicate that says whether the fusions apply, and the two Triton fusions
+the full on-rank table unlocks --
 
   * ``fused_embed_norm``: gather + a chained RMSNorm (e.g. the first decoder
     layer's ``input_layernorm``), and
@@ -19,7 +19,9 @@ Self-contained (no model-local imports) so it can live under ``layers/``.
 import torch
 
 import vllm.envs as envs
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.vocab_parallel_embedding import (
+    UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
 )
 from vllm.triton_utils import tl, triton
@@ -34,24 +36,6 @@ def _rms_norm(x, w, eps, HIDDEN_SIZE: tl.constexpr):
     return (x * rrms) * w
 
 
-class ReplicatedEmbedding(torch.nn.Embedding):
-    """Fully-replicated input token embedding for GLM-5.2 / DeepSeek-V32.
-
-    The full [num_embeddings, embedding_dim] table lives on every TP rank and
-    the forward is a local lookup with NO all-reduce (unlike
-    VocabParallelEmbedding, which shards the vocab and all-reduces the output).
-    The full on-rank table also enables the fused gather+norm kernels
-    (``fused_embed_norm`` / ``fused_eh_norm`` GATHER mode). The weight has no
-    ``weight_loader`` attr, so it loads via ``default_weight_loader`` (a
-    shape-checked full-tensor copy). The only addition over
-    ``torch.nn.Embedding`` is the int32->int64 index cast that ``F.embedding``
-    requires (vLLM feeds int32 input_ids).
-    """
-
-    def forward(self, input_: torch.Tensor) -> torch.Tensor:
-        return super().forward(input_.long())
-
-
 def make_input_embedding(
     num_embeddings: int,
     embedding_dim: int,
@@ -60,38 +44,41 @@ def make_input_embedding(
     quant_config=None,
     prefix: str = "",
     tie_word_embeddings: bool = False,
-):
+) -> VocabParallelEmbedding:
     """Input token embedding with an optional replicated escape hatch.
 
-    With ``VLLM_REPLICATE_EMBED=1`` use a fully-replicated ``ReplicatedEmbedding``
-    to unlock the fused gather+norm path (and, at TP>1, skip the embedding
-    all-reduce), at the cost of a full table per rank at TP>1 (no extra memory at
-    TP=1, where vocab-parallel is already unsharded). The replicated table is
-    always the raw (unquantized) ``params_dtype``; ``quant_config`` is accepted
-    only for the vocab-parallel fallback (embeddings are unquantized regardless).
-    Assumes an untied embedding -- a replicated, unsharded table cannot be tied
-    to a vocab-parallel ``ParallelLMHead``, so tied word embeddings are rejected.
-    Otherwise falls back to the default TP-sharded ``VocabParallelEmbedding``
-    (byte-identical to before).
+    ``VLLM_REPLICATE_EMBED=1`` builds the embedding with ``disable_tp``: the full
+    table lives on every rank and the lookup is a local gather with no mask and
+    no all-reduce, which unlocks the fused gather+norm path. The cost is a full
+    table per rank at TP>1 (no extra memory at TP=1, where vocab-parallel is
+    already unsharded). A replicated, unsharded table cannot be tied to a
+    vocab-parallel ``ParallelLMHead``, so tied word embeddings are rejected at
+    TP>1 (at TP=1 ``disable_tp`` is a no-op and tying still works).
     """
-    if envs.VLLM_REPLICATE_EMBED:
-        assert not tie_word_embeddings, (
+    disable_tp = envs.VLLM_REPLICATE_EMBED
+    if disable_tp and tie_word_embeddings:
+        assert get_tensor_model_parallel_world_size() == 1, (
             "VLLM_REPLICATE_EMBED is unsupported with tied word embeddings "
             "(the replicated table cannot tie to a vocab-parallel lm_head)"
         )
-        emb = ReplicatedEmbedding(
-            num_embeddings,
-            embedding_dim,
-            dtype=params_dtype or torch.get_default_dtype(),
-        )
-        emb.weight.requires_grad_(False)
-        return emb
     return VocabParallelEmbedding(
         num_embeddings,
         embedding_dim,
         params_dtype=params_dtype,
         quant_config=quant_config,
         prefix=prefix,
+        disable_tp=disable_tp,
+    )
+
+
+def has_full_vocab_on_rank(embedding: torch.nn.Module) -> bool:
+    """Whether ``embedding.weight`` is the whole vocab as a plain [V, H] table.
+
+    The fused gather kernels index the table directly, so they need every row
+    on-rank (``disable_tp``, or any TP=1 run) and an unquantized weight.
+    """
+    return getattr(embedding, "tp_size", 0) == 1 and isinstance(
+        getattr(embedding, "quant_method", None), UnquantizedEmbeddingMethod
     )
 
 

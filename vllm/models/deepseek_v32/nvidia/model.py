@@ -11,8 +11,8 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_embed_norm import (
-    ReplicatedEmbedding,
     fused_embed_norm,
+    has_full_vocab_on_rank,
     make_input_embedding,
 )
 from vllm.model_executor.layers.fused_moe import (
@@ -200,7 +200,7 @@ class DeepseekV32Model(torch.nn.Module):
         else:
             self.embed_tokens = PPMissingLayer()
         # The fused embed+norm gather needs the full table on-rank.
-        self.replicated_embed = isinstance(self.embed_tokens, ReplicatedEmbedding)
+        self.replicated_embed = has_full_vocab_on_rank(self.embed_tokens)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,

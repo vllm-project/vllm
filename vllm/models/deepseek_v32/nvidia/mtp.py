@@ -11,8 +11,8 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_embed_norm import (
-    ReplicatedEmbedding,
     fused_embed_eh_norm,
+    has_full_vocab_on_rank,
     make_input_embedding,
 )
 from vllm.model_executor.layers.fused_moe import (
@@ -182,8 +182,8 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
             prefix=maybe_prefix(prefix, "embed_tokens"),
             tie_word_embeddings=getattr(config, "tie_word_embeddings", False),
         )
-        # A replicated table lets the eh_norm fusion fold in the embedding gather.
-        self.replicated_embed = isinstance(self.embed_tokens, ReplicatedEmbedding)
+        # A full on-rank table lets the eh_norm fusion fold in the embedding gather.
+        self.replicated_embed = has_full_vocab_on_rank(self.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def set_skip_topk(self, skip: bool):

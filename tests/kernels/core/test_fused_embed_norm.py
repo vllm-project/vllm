@@ -17,7 +17,7 @@ from vllm.model_executor.layers.fused_embed_norm import (
 )
 
 # The model-local (untouched) eh-norm the replicate path must match.
-from vllm.models.deepseek_v32.nvidia.kernels import fused_eh_norm
+from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
