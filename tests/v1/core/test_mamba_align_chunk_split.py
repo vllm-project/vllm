@@ -15,6 +15,7 @@ import torch
 
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_utils import mamba_state_cache_position
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -223,6 +224,10 @@ def test_unaligned_resume_never_runs_past_its_block(
     prompt_len = 3602
     (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
     tail_boundary = prompt_len // ATTN_BLOCK_SIZE * ATTN_BLOCK_SIZE
+    # `_split` runs with use_eagle, which adds the replay landing stop.
+    state_position = mamba_state_cache_position(
+        prompt_len, MAMBA_BLOCK_SIZE, ATTN_BLOCK_SIZE
+    )
 
     pos, ends = resume_at, []
     while pos < prompt_len:
@@ -241,7 +246,8 @@ def test_unaligned_resume_never_runs_past_its_block(
 
     for end in ends[:-1]:
         aligned = end % MAMBA_BLOCK_SIZE == 0
-        assert aligned or (partial_hit and end == tail_boundary), (
+        assert aligned or (partial_hit and end in (tail_boundary, state_position)), (
             f"intermediate chunk end {end} is neither block-aligned nor the "
-            f"partial-tail boundary"
+            f"partial-tail boundary {tail_boundary} nor the replay landing "
+            f"position {state_position}"
         )

@@ -13,6 +13,7 @@ from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     KVCacheBlock,
+    mamba_state_cache_position,
     resolve_block_hashes,
 )
 from vllm.v1.kv_cache_interface import (
@@ -107,6 +108,8 @@ class SingleTypeKVCacheManager(ABC):
         # aligned segment (SWA). Initialized lazily by the coordinator after
         # determining the attention groups.
         self.use_eagle = False
+
+        self.engine_uses_eagle = False
 
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
@@ -460,6 +463,7 @@ class SingleTypeKVCacheManager(ABC):
             use_eagle=self.use_eagle,
             retention_interval=retention_interval,
             reachable_boundaries=reachable_boundaries,
+            unreachable_boundaries=self._unreachable_boundaries(request),
         )
         self.block_pool.cache_full_blocks(
             request=request,
@@ -483,6 +487,7 @@ class SingleTypeKVCacheManager(ABC):
         use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
+        unreachable_boundaries: Sequence[int] = (),
     ) -> list[bool] | None:
         """Per-block mask for ``cache_full_blocks``. ``None`` means cache
         every (non-null) block — the default for full attention.
@@ -490,9 +495,13 @@ class SingleTypeKVCacheManager(ABC):
         Subclasses with sparse hit semantics (SWA / Mamba) override this to skip
         blocks that can never serve a hit at any alignment-aligned prefix length.
         ``reachable_boundaries`` are token positions whose reachable tail must be
-        retained; the base (dense) policy ignores them.
+        retained and ``unreachable_boundaries`` positions proven dead; the base
+        (dense) policy ignores both.
         """
         return None
+
+    def _unreachable_boundaries(self, request: Request) -> Sequence[int]:
+        return ()
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
         """
@@ -797,28 +806,39 @@ class FullAttentionManager(SingleTypeKVCacheManager):
     ) -> None:
         """Cache the prompt tail when it ends inside a cache block.
 
-        Only the final prompt hash boundary is registered as a partial
-        prefix-cache entry; intermediate hash boundaries inside the same cache
-        block are intentionally skipped.
+        Only the final prompt hash boundary (plus, under EAGLE, the boundary a
+        replay can reach) is registered; intermediate hash boundaries inside the
+        same cache block are intentionally skipped.
         """
         hash_block_size = self.block_pool.hash_block_size
-        boundary_tokens = request.num_prompt_tokens // hash_block_size * hash_block_size
-        if boundary_tokens == 0 or boundary_tokens > num_tokens:
-            return
-        if boundary_tokens % self.block_size == 0:
-            return
+        prompt_tokens = request.num_prompt_tokens
+        boundaries = (prompt_tokens // hash_block_size * hash_block_size,)
+        if self.use_eagle:
+            # A replay caps its lookup at ``prompt_tokens - 1``, so a prompt
+            # ending on a boundary can only match one unit lower; the unshifted
+            # tail still serves requests extending this prompt. Deepest first:
+            # a deeper entry overwrites shallower hashes on the same block, not
+            # the other way round.
+            replay_tail = (prompt_tokens - 1) // hash_block_size * hash_block_size
+            if replay_tail != boundaries[0]:
+                boundaries += (replay_tail,)
 
         blocks = self.req_to_blocks[request.request_id]
-        block_idx = boundary_tokens // self.block_size
-        if block_idx >= len(blocks):
-            return
-        self.block_pool.cache_partial_block(
-            request=request,
-            block=blocks[block_idx],
-            num_tokens=boundary_tokens,
-            kv_cache_group_id=self.kv_cache_group_id,
-            block_size=self.block_size,
-        )
+        for boundary_tokens in boundaries:
+            if boundary_tokens == 0 or boundary_tokens > num_tokens:
+                continue
+            if boundary_tokens % self.block_size == 0:
+                continue
+            block_idx = boundary_tokens // self.block_size
+            if block_idx >= len(blocks):
+                continue
+            self.block_pool.cache_partial_block(
+                request=request,
+                block=blocks[block_idx],
+                num_tokens=boundary_tokens,
+                kv_cache_group_id=self.kv_cache_group_id,
+                block_size=self.block_size,
+            )
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         blocks = self.req_to_blocks[running_request_id]
@@ -1008,6 +1028,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
+        unreachable_boundaries: Sequence[int] = (),
     ) -> list[bool] | None:
         assert isinstance(kv_cache_spec, SlidingWindowSpec)
         if alignment_tokens is None:
@@ -1380,6 +1401,7 @@ class MambaManager(SingleTypeKVCacheManager):
         use_eagle: bool,
         retention_interval: int | None = None,
         reachable_boundaries: Sequence[int] = (),
+        unreachable_boundaries: Sequence[int] = (),
     ) -> list[bool] | None:
         """Sparse Mamba state-snapshot retention.
 
@@ -1392,12 +1414,26 @@ class MambaManager(SingleTypeKVCacheManager):
         ``reachable_boundaries`` are proven reuse points (the replay boundary and
         any cross-request shared-prefix junction, Marconi-style APC); their
         boundary state is always kept so sparse retention does not defeat reuse.
+        ``unreachable_boundaries`` are the converse and are dropped from every
+        retention mode, dense included.
         """
-        if retention_interval is None or alignment_tokens is None:
-            # Dense caching (default) or no alignment constraint imposed.
-            return None
         assert isinstance(kv_cache_spec, MambaSpec)
         block_size = kv_cache_spec.block_size
+
+        def drop_unreachable(mask: list[bool] | None) -> list[bool] | None:
+            if not unreachable_boundaries:
+                return mask
+            if mask is None:
+                mask = [True] * (end_block - start_block)
+            for boundary_tokens in unreachable_boundaries:
+                block = boundary_tokens // block_size - 1
+                if start_block <= block < end_block:
+                    mask[block - start_block] = False
+            return mask
+
+        if retention_interval is None or alignment_tokens is None:
+            # Dense caching (default) or no alignment constraint imposed.
+            return drop_unreachable(None)
         mask = [False] * (end_block - start_block)
 
         # (1) Segment-boundary states. A Mamba hit needs exactly the single
@@ -1409,7 +1445,7 @@ class MambaManager(SingleTypeKVCacheManager):
             per_segment = segment_tokens // block_size
             if per_segment <= 1:
                 # Interval at/below the block size: every block is a boundary.
-                return None
+                return drop_unreachable(None)
             first_boundary = (
                 start_block + per_segment
             ) // per_segment * per_segment - 1
@@ -1426,7 +1462,7 @@ class MambaManager(SingleTypeKVCacheManager):
             if start_block <= boundary_block < end_block:
                 mask[boundary_block - start_block] = True
 
-        return mask
+        return drop_unreachable(mask)
 
     def remove_skipped_blocks(
         self,
@@ -1713,6 +1749,50 @@ class MambaManager(SingleTypeKVCacheManager):
                     continue
                 self.cached_blocks_this_step.add(block.block_hash)
 
+    def _state_boundary(self, request: Request) -> int:
+        """Sub-block position whose state this prompt publishes.
+
+        Under a drafter that is where a replay of the prompt lands; otherwise it
+        is the prompt's own hash boundary.
+        """
+        hash_block_size = self.block_pool.hash_block_size
+        if self.engine_uses_eagle:
+            # A replay is rewound one hash unit, so the snapshot belongs there
+            # rather than at the prompt's tail.
+            return mamba_state_cache_position(
+                request.num_prompt_tokens, self.block_size, hash_block_size
+            )
+        return request.num_prompt_tokens // hash_block_size * hash_block_size
+
+    def _unreachable_boundaries(self, request: Request) -> Sequence[int]:
+        """A block-aligned prompt end, once the state below it is published.
+
+        No replay of this prompt can land at or past its own end: the deepest
+        key it offers is that end, and the drafter rewinds one hash unit off
+        whatever the EAGLE group matched. The state there is therefore dead for
+        replays, while the rewound one below it is where they land. Guarded on
+        the latter being cached so a prompt is never left without a state.
+        """
+        num_prompt_tokens = request.num_prompt_tokens
+        if (
+            self.mamba_cache_mode != "align"
+            or not self.engine_uses_eagle
+            or num_prompt_tokens % self.block_size != 0
+        ):
+            return ()
+        boundary = self._state_boundary(request)
+        idx = boundary // self.block_pool.hash_block_size - 1
+        if not 0 <= idx < len(request.block_hashes):
+            return ()
+        if (
+            self.block_pool.get_cached_block(
+                request.block_hashes[idx], [self.kv_cache_group_id]
+            )
+            is None
+        ):
+            return ()
+        return (num_prompt_tokens,)
+
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
 
@@ -1728,10 +1808,7 @@ class MambaManager(SingleTypeKVCacheManager):
             return None
         if num_tokens % hash_block_size != 0:
             return None
-        latest_prompt_hash_boundary = (
-            request.num_prompt_tokens // hash_block_size
-        ) * hash_block_size
-        if num_tokens != latest_prompt_hash_boundary:
+        if num_tokens != self._state_boundary(request):
             return None
 
         block_idx = num_tokens // self.block_size
