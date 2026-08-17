@@ -105,6 +105,26 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
         compilation_config={"cudagraph_capture_sizes": [16]},
         gpu_memory_utilization=0.8,  # mxfp6 models use more scratch space
     ) as llm:
+        # Disabled as check_model is broken: https://github.com/vllm-project/vllm/pull/18465#issuecomment-3329880562
+        # def check_model(model):
+        #     from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
+        #         QuarkLinearMethod)
+        #     from vllm.model_executor.layers.quantization.quark.schemes.quark_ocp_mx import QuarkOCP_MX  # noqa: E501
+        #     from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
+        #         QuarkOCP_MX_MoEMethod)
+
+        #     layer = model.model.layers[0]
+
+        #     qkv_proj = layer.self_attn.qkv_proj
+
+        #     assert isinstance(qkv_proj.quant_method, QuarkLinearMethod)
+        #     assert isinstance(qkv_proj.scheme, QuarkOCP_MX)
+
+        #     assert isinstance(layer.mlp.experts.quant_method,
+        #                       QuarkOCP_MX_MoEMethod)
+
+        # if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
+        #     llm.apply_model(check_model)
         output = llm.generate_greedy("Today I am in the French Alps and", max_tokens=20)
         assert output
 
