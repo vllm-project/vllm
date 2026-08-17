@@ -141,12 +141,7 @@ class Sampler:
         # computing logprobs, so logprobs and ranks reflect the real
         # distribution of the forced token.
         if self.trace_replay_state is not None:
-            self.trace_replay_state.apply_trace(
-                sampled,
-                idx_mapping,
-                self.req_states.total_len.gpu,
-                self.req_states.prompt_len.gpu,
-            )
+            self.trace_replay_state.apply_trace(sampled, idx_mapping)
 
         if return_logprobs:
             if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:

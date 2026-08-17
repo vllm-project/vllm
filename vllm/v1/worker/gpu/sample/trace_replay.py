@@ -22,6 +22,7 @@ class TraceReplayState:
     def __init__(self, req_states: RequestState):
         self.max_num_reqs = req_states.max_num_reqs
         self.device = req_states.device
+        self.req_states = req_states
         self.trace_token_ids = StagedWriteTensor(
             (self.max_num_reqs, req_states.max_model_len),
             dtype=torch.int32,
@@ -52,8 +53,6 @@ class TraceReplayState:
         self,
         sampled: torch.Tensor,
         idx_mapping: torch.Tensor,
-        total_len: torch.Tensor,
-        prompt_len: torch.Tensor,
     ) -> None:
         if not self.any_trace:
             return
@@ -62,8 +61,8 @@ class TraceReplayState:
             idx_mapping,
             self.trace_token_ids.gpu,
             self.trace_len.gpu,
-            total_len,
-            prompt_len,
+            self.req_states.total_len.gpu,
+            self.req_states.prompt_len.gpu,
         )
 
 
