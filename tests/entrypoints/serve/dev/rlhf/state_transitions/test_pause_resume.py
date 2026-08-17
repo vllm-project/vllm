@@ -2,23 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End-to-end tests for the vLLM RL pause/resume lifecycle."""
 
-import json
 import os
-from unittest.mock import patch
 import threading
-from dataclasses import dataclass, field
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 import requests
 
 from tests.entrypoints.serve.dev.rlhf.conftest import (
+    cached_tokens,
+    completion_with_cache_details,
     gen,
+    golden_output,
     is_paused,
     ok,
     pause,
     resume,
     server,
+    start_stream,
 )
 
 
@@ -33,14 +35,16 @@ def server_url(use_v2):
         "VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2 else "0",
     }
 
-    with patch.dict(os.environ, env_vars):
-        with server(
+    with (
+        patch.dict(os.environ, env_vars),
+        server(
             extra_args=[
                 "--enable-prefix-caching",
                 "--enable-prompt-tokens-details",
             ]
-        ) as url:
-            yield url
+        ) as url,
+    ):
+        yield url
 
 
 @pytest.fixture(autouse=True)
@@ -48,97 +52,6 @@ def restore_unpaused_state(server_url):
     assert resume(server_url) == 200
     yield
     assert resume(server_url) == 200
-
-
-@dataclass
-class _StreamResult:
-    started: threading.Event = field(default_factory=threading.Event)
-    done: threading.Event = field(default_factory=threading.Event)
-    chunks: list[dict[str, Any]] = field(default_factory=list)
-    finish_reason: str | None = None
-    error: Exception | None = None
-
-
-def _stream_completion(url: str, result: _StreamResult, max_tokens: int) -> None:
-    try:
-        with requests.post(
-            f"{url}/v1/completions",
-            json={
-                "model": "m",
-                "prompt": "Count upward slowly: one, two, three,",
-                "max_tokens": max_tokens,
-                "temperature": 0,
-                "ignore_eos": True,
-                "stream": True,
-            },
-            stream=True,
-            timeout=(5, 60),
-        ) as response:
-            response.raise_for_status()
-            for line in response.iter_lines(decode_unicode=True):
-                if not line or line == "data: [DONE]":
-                    continue
-                assert line.startswith("data: ")
-                chunk = json.loads(line.removeprefix("data: "))
-                result.chunks.append(chunk)
-                choice = chunk["choices"][0]
-                if choice.get("text"):
-                    result.started.set()
-                if choice.get("finish_reason") is not None:
-                    result.finish_reason = choice["finish_reason"]
-    except Exception as error:
-        result.error = error
-    finally:
-        result.done.set()
-
-
-def _start_stream(url: str, max_tokens: int) -> tuple[_StreamResult, threading.Thread]:
-    result = _StreamResult()
-    thread = threading.Thread(
-        target=_stream_completion,
-        args=(url, result, max_tokens),
-    )
-    thread.start()
-    started = result.started.wait(timeout=10)
-    if not started or result.done.is_set():
-        pause(url, mode="abort")
-        resume(url)
-        thread.join(timeout=10)
-    assert started, "request did not start generating"
-    assert not result.done.is_set(), "request completed before it could be paused"
-    return result, thread
-
-
-def _completion_with_cache_details(url: str, prompt: str) -> dict[str, Any]:
-    response = requests.post(
-        f"{url}/v1/completions",
-        json={
-            "model": "m",
-            "prompt": prompt,
-            "max_tokens": 8,
-            "temperature": 0,
-            "logprobs": 1,
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-    return response.json()
-
-
-def _golden_output(response: dict[str, Any]) -> dict[str, Any]:
-    choice = response["choices"][0]
-    usage = response["usage"]
-    return {
-        "text": choice["text"],
-        "finish_reason": choice["finish_reason"],
-        "tokens": choice["logprobs"]["tokens"],
-        "prompt_tokens": usage["prompt_tokens"],
-        "completion_tokens": usage["completion_tokens"],
-    }
-
-
-def _cached_tokens(response: dict[str, Any]) -> int:
-    return response["usage"]["prompt_tokens_details"]["cached_tokens"]
 
 
 class TestPauseResume:
@@ -191,7 +104,7 @@ class TestPauseResume:
         max_tokens,
         inflight_finish_reason,
     ):
-        inflight, inflight_thread = _start_stream(server_url, max_tokens)
+        inflight, inflight_thread = start_stream(server_url, max_tokens)
         new_result: dict[str, Any] = {}
         new_done = threading.Event()
 
@@ -229,30 +142,27 @@ class TestPauseResume:
         assert not new_thread.is_alive()
         assert ok(new_result.get("response"))
 
-    def test_clear_cache_preserves_output_and_controls_prefix_cache(
-        self, server_url
-    ):
+    def test_clear_cache_preserves_output_and_controls_prefix_cache(self, server_url):
         prompt = (
-            "Paris is the capital of France. "
-            "Berlin is the capital of Germany. "
+            "Paris is the capital of France. Berlin is the capital of Germany. "
         ) * 20
 
         assert pause(server_url, clear_cache=True) == 200
         assert resume(server_url) == 200
-        baseline = _completion_with_cache_details(server_url, prompt)
-        warmed = _completion_with_cache_details(server_url, prompt)
+        baseline = completion_with_cache_details(server_url, prompt)
+        warmed = completion_with_cache_details(server_url, prompt)
 
-        assert _cached_tokens(baseline) == 0
-        assert _cached_tokens(warmed) > 0
+        assert cached_tokens(baseline) == 0
+        assert cached_tokens(warmed) > 0
 
         assert pause(server_url, clear_cache=False) == 200
         assert resume(server_url) == 200
-        preserved = _completion_with_cache_details(server_url, prompt)
-        assert _golden_output(preserved) == _golden_output(baseline)
-        assert _cached_tokens(preserved) > 0
+        preserved = completion_with_cache_details(server_url, prompt)
+        assert golden_output(preserved) == golden_output(baseline)
+        assert cached_tokens(preserved) > 0
 
         assert pause(server_url, clear_cache=True) == 200
         assert resume(server_url) == 200
-        cleared = _completion_with_cache_details(server_url, prompt)
-        assert _golden_output(cleared) == _golden_output(baseline)
-        assert _cached_tokens(cleared) == 0
+        cleared = completion_with_cache_details(server_url, prompt)
+        assert golden_output(cleared) == golden_output(baseline)
+        assert cached_tokens(cleared) == 0

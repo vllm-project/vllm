@@ -10,15 +10,18 @@ PR:  https://github.com/vllm-project/vllm/pull/45586
 """
 
 import contextlib
+import json
 import os
 import subprocess
 import sys
+import threading
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
-from typing import Callable
+from dataclasses import dataclass, field
+from typing import Any
 
 import requests
-
 
 # ---------------------------------------------------------------------------
 # Model / server defaults
@@ -177,8 +180,9 @@ def gen(url, prompt="The capital of France is", max_tokens=8, timeout=30):
         return None
 
 
-def gen_with_logprobs(url, prompt="The capital of France is", max_tokens=8,
-                      logprobs=5, timeout=30):
+def gen_with_logprobs(
+    url, prompt="The capital of France is", max_tokens=8, logprobs=5, timeout=30
+):
     """Fire a /v1/completions request with logprobs; return JSON or None."""
     try:
         r = requests.post(
@@ -208,19 +212,72 @@ def ok(resp) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# HTTP helpers — sleep / wake / pause / resume
+# HTTP helpers — stream generation
 # ---------------------------------------------------------------------------
 
 
-def sleep(url, level=1, mode="abort"):
-    return requests.post(
-        f"{url}/sleep", params={"level": level, "mode": mode}, timeout=15
-    ).status_code
+@dataclass
+class StreamResult:
+    started: threading.Event = field(default_factory=threading.Event)
+    done: threading.Event = field(default_factory=threading.Event)
+    chunks: list[dict[str, Any]] = field(default_factory=list)
+    finish_reason: str | None = None
+    error: Exception | None = None
 
 
-def wake(url, tags=None):
-    params = {"tags": tags} if tags else {}
-    return requests.post(f"{url}/wake_up", params=params, timeout=20).status_code
+def stream_completion(url: str, result: StreamResult, max_tokens: int) -> None:
+    try:
+        with requests.post(
+            f"{url}/v1/completions",
+            json={
+                "model": "m",
+                "prompt": "Count upward slowly: one, two, three,",
+                "max_tokens": max_tokens,
+                "temperature": 0,
+                "ignore_eos": True,
+                "stream": True,
+            },
+            stream=True,
+            timeout=(5, 60),
+        ) as response:
+            response.raise_for_status()
+            for line in response.iter_lines(decode_unicode=True):
+                if not line or line == "data: [DONE]":
+                    continue
+                assert line.startswith("data: ")
+                chunk = json.loads(line.removeprefix("data: "))
+                result.chunks.append(chunk)
+                choice = chunk["choices"][0]
+                if choice.get("text"):
+                    result.started.set()
+                if choice.get("finish_reason") is not None:
+                    result.finish_reason = choice["finish_reason"]
+    except Exception as error:
+        result.error = error
+    finally:
+        result.done.set()
+
+
+def start_stream(url: str, max_tokens: int) -> tuple[StreamResult, threading.Thread]:
+    result = StreamResult()
+    thread = threading.Thread(
+        target=stream_completion,
+        args=(url, result, max_tokens),
+    )
+    thread.start()
+    started = result.started.wait(timeout=10)
+    if not started or result.done.is_set():
+        pause(url, mode="abort")
+        resume(url)
+        thread.join(timeout=10)
+    assert started, "request did not start generating"
+    assert not result.done.is_set(), "request completed before it could be paused"
+    return result, thread
+
+
+# ---------------------------------------------------------------------------
+# HTTP helpers — pause / resume
+# ---------------------------------------------------------------------------
 
 
 def pause(url, mode="abort", clear_cache=True):
@@ -233,6 +290,54 @@ def pause(url, mode="abort", clear_cache=True):
 
 def resume(url):
     return requests.post(f"{url}/resume", timeout=10).status_code
+
+
+def completion_with_cache_details(url: str, prompt: str) -> dict[str, Any]:
+    response = requests.post(
+        f"{url}/v1/completions",
+        json={
+            "model": "m",
+            "prompt": prompt,
+            "max_tokens": 8,
+            "temperature": 0,
+            "logprobs": 1,
+        },
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def golden_output(response: dict[str, Any]) -> dict[str, Any]:
+    choice = response["choices"][0]
+    usage = response["usage"]
+    return {
+        "text": choice["text"],
+        "finish_reason": choice["finish_reason"],
+        "tokens": choice["logprobs"]["tokens"],
+        "prompt_tokens": usage["prompt_tokens"],
+        "completion_tokens": usage["completion_tokens"],
+    }
+
+
+def cached_tokens(response: dict[str, Any]) -> int:
+    return response["usage"]["prompt_tokens_details"]["cached_tokens"]
+
+
+# ---------------------------------------------------------------------------
+# HTTP helpers — sleep / wake
+# ---------------------------------------------------------------------------
+
+
+def sleep(url, level=1, mode="abort"):
+    return requests.post(
+        f"{url}/sleep", params={"level": level, "mode": mode}, timeout=15
+    ).status_code
+
+
+def wake(url, tags=None):
+    params = {"tags": tags} if tags else {}
+    return requests.post(f"{url}/wake_up", params=params, timeout=20).status_code
 
 
 def is_sleeping(url) -> bool:
@@ -286,7 +391,7 @@ def gpu_free_bytes(device: int = 0) -> int:
         [
             sys.executable,
             "-c",
-            f"import torch; f,_=torch.cuda.mem_get_info({device}); print(f)",
+            f"import torch; f,_=torch.accelerator.get_memory_info({device}); print(f)",
         ],
         timeout=10,
     )
