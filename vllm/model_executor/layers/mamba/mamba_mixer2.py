@@ -1188,7 +1188,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 tp_world_size=tp_world_size,
                 logical_window=self.replayssm_buffer_len,
                 backend=self.mamba_config.backend,
-                num_speculative_tokens=self.num_spec,
             )
         return base_shape
 
