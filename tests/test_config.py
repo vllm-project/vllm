@@ -66,6 +66,20 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
+def test_rocm_defaults_deepseek_v4_to_mrv1(monkeypatch):
+    """ROCm keeps DeepSeek V4 on MRV1, which is still faster there."""
+    from vllm.config.vllm import default_v2_model_runner_architectures
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    # The lookup is lru_cached against a fixed platform.
+    default_v2_model_runner_architectures.cache_clear()
+    try:
+        assert "DeepseekV4ForCausalLM" not in default_v2_model_runner_architectures()
+    finally:
+        default_v2_model_runner_architectures.cache_clear()
+
+
 @pytest.mark.parametrize(
     ("use_v2_model_runner", "expected_capture_sizes"),
     [
@@ -181,6 +195,16 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ),
         (
             SimpleNamespace(
+                model="deepseek-ai/DeepSeek-V4-Flash",
+                architectures=["DeepseekV4ForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=True,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
                 model="Qwen/Qwen1.5-MoE-A2.7B",
                 architectures=["Qwen2MoeForCausalLM"],
                 runner_type="generate",
@@ -283,10 +307,20 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ),
     ],
 )
-def test_is_default_v2_model_runner_model(model_config, expected):
+def test_is_default_v2_model_runner_model(model_config, expected, monkeypatch):
+    from vllm.config.vllm import default_v2_model_runner_architectures
+    from vllm.platforms import current_platform
+
+    # The expectations below are the platform-independent defaults; ROCm's
+    # DeepSeek V4 carve-out is covered by test_rocm_defaults_deepseek_v4_to_mrv1.
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    default_v2_model_runner_architectures.cache_clear()
     config = SimpleNamespace(model_config=model_config)
 
-    assert VllmConfig._is_default_v2_model_runner_model(config) is expected
+    try:
+        assert VllmConfig._is_default_v2_model_runner_model(config) is expected
+    finally:
+        default_v2_model_runner_architectures.cache_clear()
 
 
 @pytest.mark.skip_global_cleanup
@@ -480,6 +514,30 @@ def test_draft_model_enables_async_scheduling_by_default():
     )
 
     assert cfg.scheduler_config.async_scheduling is True
+
+
+@pytest.mark.parametrize(
+    ("method", "parallel_drafting", "expected_slots"),
+    [
+        pytest.param("eagle3", False, 0, id="eagle3"),
+        pytest.param("eagle3", True, 7, id="p-eagle"),
+        pytest.param("dflash", True, 8, id="dflash"),
+        pytest.param("dspark", True, 7, id="dspark"),
+        pytest.param("mtp", False, 0, id="mtp"),
+        pytest.param("ngram", False, 0, id="ngram"),
+        pytest.param("draft_model", False, 1, id="draft-model"),
+        pytest.param("draft_model", True, 8, id="pard"),
+    ],
+)
+def test_max_num_new_slots_for_drafting(method, parallel_drafting, expected_slots):
+    speculative_config = SpeculativeConfig(
+        model="ngram",
+        num_speculative_tokens=8,
+    )
+    speculative_config.method = method
+    speculative_config.parallel_drafting = parallel_drafting
+
+    assert speculative_config.max_num_new_slots_for_drafting == expected_slots
 
 
 @dataclass

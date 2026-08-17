@@ -261,6 +261,8 @@ validate_native_workspace() {
 }
 
 prepare_native_workspace() {
+  local test_commands="${1:-}"
+
   if [[ "${VLLM_CI_USE_ARTIFACTS:-0}" != "1" ]]; then
     echo "Native CI requires VLLM_CI_USE_ARTIFACTS=1"
     return 1
@@ -281,6 +283,8 @@ prepare_native_workspace() {
   local recorded_base=""
   local recorded_commit=""
   local recorded_wheel=""
+  local checkout=""
+  local checkout_commit=""
   local workspace_dir="${VLLM_CI_WORKSPACE:-/vllm-workspace}"
   local wheel_dir=""
   local attempt=0
@@ -400,6 +404,53 @@ prepare_native_workspace() {
     return 1
   fi
 
+  # The ROCm artifact intentionally contains only the installed wheel and the
+  # test workspace. The Python-only compilation job also needs setup.py and the
+  # vllm source tree, so overlay the matching Buildkite checkout for that job.
+  if [[ "${test_commands}" == *python_only_compile.sh* ]]; then
+    checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
+    if [[ -z "${checkout}" || ! -d "${checkout}" ]]; then
+      echo "Python-only native CI requires BUILDKITE_BUILD_CHECKOUT_PATH" >&2
+      return 1
+    fi
+    if ! git -c "safe.directory=${checkout}" -C "${checkout}" \
+      rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      echo "Buildkite checkout is not a Git worktree: ${checkout}" >&2
+      return 1
+    fi
+    checkout_commit=$(
+      git -c "safe.directory=${checkout}" -C "${checkout}" rev-parse HEAD
+    ) || return 1
+    if [[ "${checkout_commit}" != "${recorded_commit}" ]]; then
+      echo "Buildkite checkout ${checkout_commit} does not match ROCm artifact ${recorded_commit}" >&2
+      return 1
+    fi
+
+    # setup.py normally derives this from .git via setuptools-scm. The native
+    # source overlay deliberately excludes Git metadata, so preserve the exact
+    # version from the already installed, artifact-matched wheel.
+    VLLM_VERSION_OVERRIDE=$(
+      python3 -c 'import importlib.metadata as m; print(m.version("vllm"))'
+    ) || return 1
+    export VLLM_VERSION_OVERRIDE
+    VLLM_PRECOMPILED_WHEEL_LOCATION="${wheels[0]}"
+    export VLLM_PRECOMPILED_WHEEL_LOCATION
+    echo "INFO: native Python-only wheel=${VLLM_PRECOMPILED_WHEEL_LOCATION}"
+
+    echo "--- Overlaying full source checkout for Python-only compilation"
+    # Archive the verified commit instead of copying the worktree so dirty or
+    # untracked agent files cannot contaminate the artifact-matched workspace.
+    git -c "safe.directory=${checkout}" -C "${checkout}" \
+      archive --format=tar "${recorded_commit}" \
+      | tar --no-same-owner -C "${workspace_dir}" -xf - || return 1
+    for required_source in setup.py pyproject.toml vllm; do
+      if [[ ! -e "${workspace_dir}/${required_source}" ]]; then
+        echo "Full source checkout is missing ${required_source}" >&2
+        return 1
+      fi
+    done
+  fi
+
   return 0
 }
 
@@ -429,11 +480,21 @@ initialize_native_environment() {
   # datasets uses POSIX locks that are unsupported by the shared HF NFS cache.
   # Keep processed datasets job-local while retaining the persistent Hub cache.
   HF_DATASETS_CACHE="${native_root}/cache/huggingface/datasets"
+  # openai-harmony downloads its tiktoken vocab on first use and caches it under
+  # $TMPDIR by default, which is job-local; keep it with the persistent Hub cache.
+  TIKTOKEN_RS_CACHE_DIR="${HF_HOME}/tiktoken-rs-cache"
   : "${HF_HUB_DOWNLOAD_TIMEOUT:=300}"
   : "${HF_HUB_ETAG_TIMEOUT:=60}"
+  if [[ "${VLLM_CI_EXPECTED_GPU_COUNT:-1}" == "0" ]]; then
+    # CPU-only native jobs intentionally reuse the ROCm wheel. Make that target
+    # explicit so platform selection does not depend on wheel metadata.
+    VLLM_TARGET_DEVICE=cpu
+    export VLLM_TARGET_DEVICE
+  fi
   export TMPDIR VLLM_RPC_BASE_PATH
   export TORCHINDUCTOR_CACHE_DIR TRITON_CACHE_DIR VLLM_CACHE_ROOT XDG_CACHE_HOME
   export HF_HOME HF_DATASETS_CACHE HF_HUB_DOWNLOAD_TIMEOUT HF_HUB_ETAG_TIMEOUT
+  export TIKTOKEN_RS_CACHE_DIR
   export PYTORCH_ROCM_ARCH=""
 
   mkdir -p "${TMPDIR}" \
@@ -442,6 +503,7 @@ initialize_native_environment() {
     "${VLLM_CACHE_ROOT}" \
     "${XDG_CACHE_HOME}" \
     "${HF_HOME}" \
+    "${TIKTOKEN_RS_CACHE_DIR}" \
     "${HF_DATASETS_CACHE}" || return 1
 
   echo "Native compile caches: VLLM_CACHE_ROOT=${VLLM_CACHE_ROOT} TORCHINDUCTOR_CACHE_DIR=${TORCHINDUCTOR_CACHE_DIR}"
@@ -943,7 +1005,13 @@ if is_native_runtime; then
     echo "Failed to initialize the native test environment"
     exit 1
   fi
-  if ! prepare_native_workspace; then
+  if [[ "${commands}" == *python_only_compile.sh* ]]; then
+    # This no-GPU job validates the ROCm precompiled/editable install path,
+    # rather than CPU runtime platform selection.
+    VLLM_TARGET_DEVICE=rocm
+    export VLLM_TARGET_DEVICE
+  fi
+  if ! prepare_native_workspace "${commands}"; then
     echo "Failed to prepare native test workspace"
     exit 1
   fi
@@ -1092,7 +1160,7 @@ container_job_id="${container_job_id//[^A-Za-z0-9_.-]/_}"
 container_job_id_short="${container_job_id:0:8}"
 CONTAINER_TMPDIR="/tmp/vllm-${container_job_id_short}"
 CONTAINER_CACHE_ROOT="/tmp/vllm-buildkite-${container_job_id}/cache"
-CONTAINER_PREFLIGHT="mkdir -p \"\$TMPDIR\" \"\$TORCHINDUCTOR_CACHE_DIR\" \"\$TRITON_CACHE_DIR\" \"\$VLLM_CACHE_ROOT\" \"\$XDG_CACHE_HOME\" && python -c \"import encodings, importlib.metadata as im, importlib.util as iu; [im.version(d) for d in ('transformers', 'torch', 'ray', 'sympy', 'markupsafe', 'vllm')]; missing=[m for m in ('torch.utils.model_zoo', 'transformers.models.nomic_bert', 'ray.dag', 'sympy.physics', 'markupsafe._speedups') if iu.find_spec(m) is None]; assert not missing, missing\""
+CONTAINER_PREFLIGHT="mkdir -p \"\$TMPDIR\" \"\$TIKTOKEN_RS_CACHE_DIR\" \"\$TORCHINDUCTOR_CACHE_DIR\" \"\$TRITON_CACHE_DIR\" \"\$VLLM_CACHE_ROOT\" \"\$XDG_CACHE_HOME\" && python -c \"import encodings, importlib.metadata as im, importlib.util as iu; [im.version(d) for d in ('transformers', 'torch', 'ray', 'sympy', 'markupsafe', 'vllm')]; missing=[m for m in ('torch.utils.model_zoo', 'transformers.models.nomic_bert', 'ray.dag', 'sympy.physics', 'markupsafe._speedups') if iu.find_spec(m) is None]; assert not missing, missing\""
 
 # Verify GPU access
 render_gid=$(getent group render | cut -d: -f3)
@@ -1210,6 +1278,7 @@ else
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
     -e "TMPDIR=${CONTAINER_TMPDIR}/tmp" \
+    -e "TIKTOKEN_RS_CACHE_DIR=${HF_MOUNT}/tiktoken-rs-cache" \
     -e "TORCHINDUCTOR_CACHE_DIR=${CONTAINER_CACHE_ROOT}/torchinductor" \
     -e "TRITON_CACHE_DIR=${CONTAINER_CACHE_ROOT}/triton" \
     -e "VLLM_CACHE_ROOT=${CONTAINER_CACHE_ROOT}/vllm" \

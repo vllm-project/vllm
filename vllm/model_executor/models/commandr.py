@@ -154,6 +154,7 @@ class CohereAttention(nn.Module):
         self.max_position_embeddings = getattr(
             config, "model_max_length", None
         ) or getattr(config, "max_position_embeddings", 8192)
+        assert isinstance(self.max_position_embeddings, int)
         self.use_qk_norm = getattr(config, "use_qk_norm", False)
         self.qkv_proj = QKVParallelLinear(
             self.hidden_size,

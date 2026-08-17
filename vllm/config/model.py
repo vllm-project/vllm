@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
 from functools import cached_property
@@ -246,6 +245,8 @@ class ModelConfig:
     flexibility."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
+    return_sampling_mask: bool = False
+    """Whether to return the post-processing token support for each sample."""
     max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
@@ -352,8 +353,6 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation.
     - "terratorch" will use the TerraTorch model implementation.
     """
-    override_attention_dtype: str | None = None
-    """Override dtype for attention"""
     logits_processors: list[str | type[LogitsProcessor]] | None = None
     """One or more logits processors' fully-qualified class names or class
     definitions"""
@@ -427,6 +426,7 @@ class ModelConfig:
             "tokenizer_revision",
             "spec_target_max_model_len",
             "enforce_eager",
+            "return_sampling_mask",
             "logprobs_mode",
             "use_fp64_gumbel",
             "disable_cascade_attn",
@@ -435,7 +435,6 @@ class ModelConfig:
             "config_format",
             "hf_token",
             "hf_overrides",
-            "override_attention_dtype",
             "logits_processors",
             "io_processor_plugin",
             "pooler_config",
@@ -595,12 +594,6 @@ class ModelConfig:
                 self.tokenizer,
                 self.tokenizer_revision,
                 self.hf_token,
-            )
-
-        if self.override_attention_dtype is not None and not current_platform.is_rocm():
-            warnings.warn(
-                "override-attention-dtype is set but not using ROCm platform",
-                stacklevel=2,
             )
 
         if self.enable_sleep_mode:
@@ -895,7 +888,11 @@ class ModelConfig:
         convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
             self.hf_config.model_type, ModelArchConfigConvertorBase
         )
-        convertor = convertor_cls(self.hf_config, self.hf_text_config)
+        convertor = convertor_cls(
+            self.hf_config,
+            self.hf_text_config,
+            revision=getattr(self, "revision", None),
+        )
         return convertor.convert(
             supports_multimodal=self._supports_multimodal_for_mm_prefix()
         )
@@ -1684,6 +1681,7 @@ class ModelConfig:
                 self.hf_config_path or self.model,
                 trust_remote_code=self.trust_remote_code,
                 revision=self.revision,
+                code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
             )
@@ -1691,6 +1689,7 @@ class ModelConfig:
             config = try_get_generation_config(
                 self.generation_config,
                 trust_remote_code=self.trust_remote_code,
+                code_revision=self.code_revision,
                 config_format=self.config_format,
                 hf_token=self.hf_token,
             )
