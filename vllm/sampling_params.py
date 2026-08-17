@@ -272,10 +272,6 @@ class SamplingParams(
     """Token IDs that stop the generation when they are generated. The returned
     output will contain the stop tokens unless the stop tokens are special
     tokens."""
-    trace_decode_token_ids: list[int] | None = None
-    """If provided, forces the engine to emit this predetermined sequence of
-    token IDs during decoding instead of sampling randomly. Real logprobs are
-    still computed. Conflict checking is performed at the engine level."""
     ignore_eos: bool = False
     """Whether to ignore the EOS token and continue generating
     tokens after the EOS token is generated."""
@@ -377,6 +373,12 @@ class SamplingParams(
     '\\emoji \\emoji \\emoji ...'). This feature can detect such behavior
     and terminate early, saving time and tokens."""
 
+    # Debugging / RL-specific parameters. Not intended for production serving.
+    trace_decode_token_ids: list[int] | None = None
+    """If provided, forces the engine to emit this predetermined sequence of
+    token IDs during decoding instead of sampling randomly. Real logprobs are
+    still computed. Conflict checking is performed at the engine level."""
+
     @staticmethod
     def from_optional(
         n: int | None = 1,
@@ -410,8 +412,9 @@ class SamplingParams(
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
         logprob_token_ids: list[int] | None = None,
-        trace_decode_token_ids: list[int] | None = None,
         routed_experts_prompt_start: int = 0,
+        # Debugging / RL-specific parameters.
+        trace_decode_token_ids: list[int] | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -474,8 +477,8 @@ class SamplingParams(
             extra_args=extra_args,
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
-            trace_decode_token_ids=trace_decode_token_ids,
             routed_experts_prompt_start=routed_experts_prompt_start,
+            trace_decode_token_ids=trace_decode_token_ids,
         )
 
     def __post_init__(self) -> None:

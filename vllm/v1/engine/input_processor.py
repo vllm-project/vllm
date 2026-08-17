@@ -160,7 +160,8 @@ class InputProcessor:
     def _normalize_trace_replay_params(sampling_params: SamplingParams) -> None:
         """Apply trace replay's generation semantics to request-local params."""
         trace_token_ids = sampling_params.trace_decode_token_ids
-        assert trace_token_ids
+        if not trace_token_ids:
+            return
 
         # Apply this after the generation config so its EOS token cannot stop
         # replay before the trace is exhausted.
@@ -356,8 +357,7 @@ class InputProcessor:
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
-            if sampling_params.trace_decode_token_ids:
-                self._normalize_trace_replay_params(sampling_params)
+            self._normalize_trace_replay_params(sampling_params)
         else:
             pooling_params = params.clone()
 
