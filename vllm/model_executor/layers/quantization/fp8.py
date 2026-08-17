@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
@@ -108,6 +108,9 @@ class Fp8Config(QuantizationConfig):
             raise ValueError(f"Unsupported activation scheme {activation_scheme}")
         self.activation_scheme = activation_scheme
         self.ignored_layers = ignored_layers or []
+        self.ignored_layers_match_mode: Literal["exact", "substring", "suffix"] = (
+            "exact"
+        )
         self.store_dtype = store_dtype
         if weight_block_size is not None:
             if not is_checkpoint_fp8_serialized:
@@ -177,6 +180,7 @@ class Fp8Config(QuantizationConfig):
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
+                match_mode=self.ignored_layers_match_mode,
             ):
                 return UnquantizedLinearMethod()
             if not self.is_checkpoint_fp8_serialized:
@@ -196,6 +200,7 @@ class Fp8Config(QuantizationConfig):
                 prefix=prefix,
                 ignored_layers=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
+                match_mode=self.ignored_layers_match_mode,
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             if self.store_dtype == "mxfp4":
