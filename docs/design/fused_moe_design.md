@@ -247,12 +247,26 @@ Each `FusedMoEMethodBase` subclass implements `get_fused_moe_quant_config()` to 
 
 ### 8. `FusedMoEMethodBase` (`fused_moe_method_base.py`)
 
-**Role**: Strategy pattern for quantization-specific expert execution. Each quantization scheme (FP8, INT8, INT4, NVFP4, MXFP4, unquantized, etc.) provides a subclass that knows how to:
+**Role**: Strategy pattern for quantization-specific expert execution. Each quantization scheme (FP8, INT8, INT4, NVFP4, MXFP4, unquantized, etc.) provides a subclass that knows how to create weights, build quantization configs, and execute the fused MoE kernel. See [Fused MoE Modular Kernel](./fused_moe_modular_kernel.md) for details on the kernel internals.
+
+**Key attributes**:
+
+- `moe: FusedMoEConfig` — the MoE layer configuration
+- `moe_quant_config: FusedMoEQuantConfig | None` — cached quantization config built by `get_fused_moe_quant_config()`
+- `moe_kernel: FusedMoEKernel | None` — the modular kernel object constructed by the oracle (see section 9). When set, `apply()` and `apply_monolithic()` delegate to it.
+
+**Key methods**:
 
 - `create_weights()` — register the right parameters on `RoutedExperts`
-- `apply()` — execute the fused MoE kernel with pre-computed routing (modular)
-- `apply_monolithic()` — execute a kernel that handles routing internally (monolithic)
-- `get_fused_moe_quant_config()` — produce a `FusedMoEQuantConfig` describing scales/shapes (activations and weights each have a `FusedMoEQuantDesc`)
+- `apply()` — execute the fused MoE kernel with pre-computed routing (modular path)
+- `apply_monolithic()` — execute a kernel that handles routing internally (monolithic path)
+- `get_fused_moe_quant_config()` — produce a `FusedMoEQuantConfig` describing scales/shapes
+
+**Key properties**:
+
+- `supports_internal_mk` — `True` when `moe_kernel` is set; signals `MoERunner` to use the internal modular kernel path (dispatch/combine handled by the kernel's `FusedMoEPrepareAndFinalize`) rather than the legacy external dispatch/combine
+- `mk_can_overlap_shared_experts` — `True` when the kernel's prepare/finalize supports async operation, enabling shared expert overlap via DBO
+- `is_monolithic` — whether the kernel handles routing internally
 
 **Two execution modes**:
 

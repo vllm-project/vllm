@@ -213,7 +213,7 @@ FusedMoEExpertsModular performs the core of the fused MoE operations. The variou
 
 Kernel selection has been refactored into an **oracle** system under [`fused_moe/oracle/`](../../vllm/model_executor/layers/fused_moe/oracle/). Each quantization type has its own oracle module (e.g., `fp8.py`, `nvfp4.py`, `unquantized.py`, `int8.py`, `mxfp4.py`, `mxfp8.py`, `int_wna16.py`, `w4a8.py`, `w4a8_int8.py`).
 
-All oracles inherit from `MoEKernelOracle` (in `oracle/base.py`), which defines:
+The target interface is `MoEKernelOracle` (in `oracle/base.py`). Currently only `UnquantizedMoEKernelOracle` uses this class; the remaining oracles use equivalent module-level free functions following the same convention. The `MoEKernelOracle` abstract class defines:
 
 * `get_priority_backends(moe_config)` — returns platform-appropriate backends in priority order
 * `backend_to_kernel_cls(backend)` — maps a backend enum to its concrete `FusedMoEExperts` subclasses
