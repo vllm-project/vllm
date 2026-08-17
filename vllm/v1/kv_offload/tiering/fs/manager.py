@@ -238,7 +238,7 @@ class FileSystemTierManager(SecondaryTierManager):
 
         self._pool.enqueue_store(
             job_metadata.job_id,
-            len(job_metadata.keys),
+            len(keys),
             self._tasks_from_jobmetadata(job_metadata),
             make_batch_fn=make_batch_fn,
         )
@@ -280,8 +280,8 @@ class FileSystemTierManager(SecondaryTierManager):
             return load_task
 
         self._pool.enqueue_load(
-            job_metadata.job_id,
-            len(job_metadata.keys),
+            job_id,
+            len(keys),
             self._tasks_from_jobmetadata(job_metadata),
             make_batch_fn=make_batch_fn,
         )
