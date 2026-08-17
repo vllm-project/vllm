@@ -3,6 +3,7 @@
 """Unit tests for NixlConnectorScheduler with HMA and Mamba N-1 prefill."""
 
 import gc
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -98,26 +99,28 @@ def test_logical_to_kernel_block_ids_with_hma():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    "is_rocm,has_mamba,use_host_buffer,done_recving,failed_recving,expected_syncs",
+    "is_rocm,is_cuda,has_mamba,has_hisparse,use_host_buffer,done_recving,"
+    "expected_syncs",
     [
-        (True, True, False, {"req"}, set(), 1),
-        (False, True, False, {"req"}, set(), 0),
-        (True, False, False, {"req"}, set(), 0),
-        (True, True, True, {"req"}, set(), 0),
-        (True, True, False, set(), set(), 0),
-        (True, True, False, {"req"}, {"req"}, 0),
+        (True, False, True, False, False, {"req"}, 1),
+        (False, True, False, True, False, {"req"}, 1),
+        (False, True, True, False, False, {"req"}, 0),
+        (True, False, False, True, False, {"req"}, 0),
+        (False, True, False, True, True, {"req"}, 0),
+        (False, True, False, True, False, set(), 0),
     ],
 )
-def test_sync_device_after_mamba_recv_gates(
+def test_sync_device_after_direct_recv_gates(
     monkeypatch,
     is_rocm,
+    is_cuda,
     has_mamba,
+    has_hisparse,
     use_host_buffer,
     done_recving,
-    failed_recving,
     expected_syncs,
 ):
-    """Only direct-GPU Mamba receives on ROCm need a device fence."""
+    """Only backends requiring visibility fences synchronize direct receives."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
@@ -126,16 +129,20 @@ def test_sync_device_after_mamba_recv_gates(
     worker = object.__new__(NixlConnectorWorker)
     worker._has_mamba = has_mamba
     worker.use_host_buffer = use_host_buffer
+    worker.kv_cache_config = SimpleNamespace(
+        hisparse_host_num_blocks=1 if has_hisparse else None
+    )
 
     sync_calls = []
     monkeypatch.setattr(base_worker.current_platform, "is_rocm", lambda: is_rocm)
+    monkeypatch.setattr(base_worker.current_platform, "is_cuda", lambda: is_cuda)
     monkeypatch.setattr(
         base_worker.torch.accelerator,
         "synchronize",
         lambda: sync_calls.append(True),
     )
 
-    worker._sync_device_after_mamba_recv(done_recving, failed_recving)
+    worker._sync_device_after_direct_recv(done_recving)
 
     assert len(sync_calls) == expected_syncs
 

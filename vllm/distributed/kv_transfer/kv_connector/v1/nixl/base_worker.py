@@ -2411,6 +2411,7 @@ class NixlBaseConnectorWorker:
 
         block_ids_for_blocksize_post_process = defaultdict(list)
         block_ids_for_heterogeneous_attn_post_process = list[list[int]]()
+        direct_device_recving = set[str]()
         for req_id in tuple(done_recving):
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
@@ -2437,6 +2438,8 @@ class NixlBaseConnectorWorker:
                 # The staging copy already populated stable host pages and all
                 # mandatory GPU mirrors at their final geometry.
                 continue
+
+            direct_device_recving.add(req_id)
 
             # Post processing for heteroblocksize/layout, and for blocks the
             # transfer clipped. The latter happens either at remote-block
@@ -2486,7 +2489,7 @@ class NixlBaseConnectorWorker:
         for block_ids in block_ids_for_heterogeneous_attn_post_process:
             self.post_process_device_kv_on_receive_heterogeneous_attn(block_ids)
 
-        self._sync_device_after_mamba_recv(done_recving, failed_recv_reqs)
+        self._sync_device_after_direct_recv(direct_device_recving)
 
         # Handle timeout to avoid stranding blocks on remote.
         now = time.perf_counter()
@@ -2509,18 +2512,13 @@ class NixlBaseConnectorWorker:
 
         return done_sending, done_recving
 
-    def _sync_device_after_mamba_recv(
-        self,
-        done_recving: set[str],
-        failed_recv_reqs: set[str],
-    ) -> None:
-        """Synchronize ROCm direct-GPU Mamba receives before model execution."""
-        if (
-            not current_platform.is_rocm()
-            or not self._has_mamba
-            or self.use_host_buffer
-            or not (done_recving - failed_recv_reqs)
-        ):
+    def _sync_device_after_direct_recv(self, done_recving: set[str]) -> None:
+        """Make direct NIXL writes visible before model execution."""
+        requires_sync = (current_platform.is_rocm() and self._has_mamba) or (
+            current_platform.is_cuda()
+            and self.kv_cache_config.hisparse_host_num_blocks is not None
+        )
+        if self.use_host_buffer or not done_recving or not requires_sync:
             return
 
         torch.accelerator.synchronize()
