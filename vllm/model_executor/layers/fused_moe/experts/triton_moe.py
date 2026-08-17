@@ -34,6 +34,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     moe_kernel_quantize_input,
     swiglu_limit_func,
+    uses_whole_tensor_dynamic_scale,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     is_deep_gemm_e8m0_used,
@@ -312,6 +313,16 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             workspace13, (num_tokens * top_k_num, cache2_dim)
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
+
+        if uses_whole_tensor_dynamic_scale(
+            self.quant_dtype, a2_scale, self.per_act_token_quant, self.block_shape
+        ):
+            # The w13 GEMM only writes rows whose expert id is valid, so rows
+            # for topk slots marked -1 (EP non-local experts, all2all padding)
+            # keep whatever the reused workspace held. The a2 scale below is an
+            # amax over the whole tensor, so that stale data would set the scale
+            # for every real token. Zeroing carries through the activation.
+            intermediate_cache1.fill_(0)
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
             _prepare_expert_assignment(
@@ -682,6 +693,13 @@ class TritonWNA16Experts(TritonExperts):
             workspace13, (num_tokens * top_k_num, activation_out_dim)
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
+
+        if uses_whole_tensor_dynamic_scale(
+            self.quant_dtype, a2_scale, self.per_act_token_quant, self.block_shape
+        ):
+            # See the matching comment in TritonExperts.apply: unwritten rows
+            # would otherwise set the shared a2 amax.
+            intermediate_cache1.fill_(0)
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
