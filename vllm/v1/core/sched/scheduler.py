@@ -555,6 +555,18 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            if (
+                self.ec_connector is not None
+                and request.mm_features
+                and not self.ec_connector.ensure_cache_available(
+                    request,
+                    request.num_computed_tokens - request.num_output_placeholders,
+                    self.encoder_cache_manager.cached.keys(),
+                )
+            ):
+                req_index += 1
+                continue
+
             num_new_tokens = (
                 request.num_tokens_with_spec
                 + request.num_output_placeholders
@@ -888,7 +900,9 @@ class Scheduler(SchedulerInterface):
                         self.ec_connector is not None
                         and request.mm_features
                         and not self.ec_connector.ensure_cache_available(
-                            request, num_computed_tokens
+                            request,
+                            num_computed_tokens,
+                            self.encoder_cache_manager.cached.keys(),
                         )
                     ):
                         request_queue.pop_request()
@@ -2039,6 +2053,10 @@ class Scheduler(SchedulerInterface):
         self.grammar_compile_error_reqs.clear()
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:
             error_req_ids.update(failed_kv_load_req_ids)
+        if self.ec_connector is not None:
+            # An encoder input the connector can no longer obtain. Failing is
+            # retryable: re-issuing the request re-runs the encode.
+            error_req_ids.update(self.ec_connector.take_unavailable_requests())
 
         if error_req_ids:
             error_reqs = self.finish_requests(
@@ -2221,7 +2239,7 @@ class Scheduler(SchedulerInterface):
                 # With Whisper, as soon as we've generated a single token,
                 # we know we're done with the encoder input. Cross Attention
                 # KVs have been calculated and cached already.
-                self.encoder_cache_manager.free_encoder_input(request, input_id)
+                self._free_encoder_input(request, input_id)
             elif (
                 start_pos + num_tokens + spec_lookahead
                 <= request.num_computed_tokens - request.num_output_placeholders
@@ -2229,7 +2247,12 @@ class Scheduler(SchedulerInterface):
                 # Processed, stored in the decoder KV cache, and far enough past
                 # the placeholder range (plus the drafter's look-ahead) that no
                 # rejection or drafter gather can reference it.
-                self.encoder_cache_manager.free_encoder_input(request, input_id)
+                self._free_encoder_input(request, input_id)
+
+    def _free_encoder_input(self, request: Request, input_id: int) -> None:
+        self.encoder_cache_manager.free_encoder_input(request, input_id)
+        if self.ec_connector is not None:
+            self.ec_connector.update_state_after_free(request, input_id)
 
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
         for req_id, spec_token_ids in zip(

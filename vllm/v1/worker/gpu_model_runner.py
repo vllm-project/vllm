@@ -4333,7 +4333,10 @@ class GPUModelRunner(
                     encoder_cache=self.encoder_cache,
                 ) as ec_connector_output:
                     self._execute_mm_encoder(scheduler_output)
-                    return make_empty_encoder_model_runner_output(scheduler_output)
+                return ModelRunnerOutput.with_ec_conn_output(
+                    make_empty_encoder_model_runner_output(scheduler_output),
+                    ec_connector_output,
+                )
 
             if not num_scheduled_tokens:
                 if (
@@ -4348,10 +4351,22 @@ class GPUModelRunner(
                     # dummy run to ensure coordinate_batch_across_dp
                     # is called into to avoid out of sync issues.
                     self._dummy_run(1)
-                if not has_kv_transfer_group():
-                    # Return empty ModelRunnerOutput if no work to do.
-                    return EMPTY_MODEL_RUNNER_OUTPUT
-                return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+                if has_kv_transfer_group():
+                    empty_output = self.kv_connector_no_forward(
+                        scheduler_output, self.vllm_config
+                    )
+                else:
+                    empty_output = EMPTY_MODEL_RUNNER_OUTPUT
+                if has_ec_transfer():
+                    with self.maybe_get_ec_connector_output(
+                        scheduler_output,
+                        encoder_cache=self.encoder_cache,
+                    ) as ec_connector_output:
+                        pass
+                    empty_output = ModelRunnerOutput.with_ec_conn_output(
+                        empty_output, ec_connector_output
+                    )
+                return empty_output
 
             if self.cache_config.kv_sharing_fast_prefill:
                 assert not self.num_prompt_logprobs, (

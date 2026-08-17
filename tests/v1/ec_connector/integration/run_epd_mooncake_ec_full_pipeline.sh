@@ -13,8 +13,6 @@
 #   MODEL                    HF model id (default: Qwen/Qwen2.5-VL-3B-Instruct)
 #   GPU_SINGLE / GPU_E / GPU_PD   GPU ids (defaults 0 / 1 / 2)
 #   ENDPOINT_PORT, ENCODE_PORT, PREFILL_DECODE_PORT
-#   EC_MOONCAKE_REGISTRY_PORT   HTTP registry on encoder (default 19018)
-#   EC_REGISTRY_HOST            Host PD uses to query registry (default 127.0.0.1)
 #   MOONCAKE_EC_PROTOCOL        rdma | tcp (default rdma)
 #   USE_MM_PROMPTS              1 (default) or 0 for text-only quick sanity
 #   TIMEOUT_SECONDS             wait_for_server timeout (default 1200)
@@ -25,6 +23,7 @@ set -euo pipefail
 GIT_ROOT=$(git rev-parse --show-toplevel)
 cd "$GIT_ROOT" || exit 1
 export PYTHONPATH="${GIT_ROOT}:${PYTHONPATH:-}"
+PYTHON_BIN="${PYTHON_BIN:-${GIT_ROOT}/.venv/bin/python}"
 
 MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
 USE_MM_PROMPTS="${USE_MM_PROMPTS:-1}"
@@ -42,11 +41,10 @@ PREFILL_DECODE_PORT="${PREFILL_DECODE_PORT:-19537}"
 ENDPOINT_PORT="${ENDPOINT_PORT:-10002}"
 BASELINE_PORT="${BASELINE_PORT:-10003}"
 
-EC_MOONCAKE_REGISTRY_PORT="${EC_MOONCAKE_REGISTRY_PORT:-19018}"
-EC_REGISTRY_HOST="${EC_REGISTRY_HOST:-127.0.0.1}"
+EC_MOONCAKE_RESERVATION_PORT="${EC_MOONCAKE_RESERVATION_PORT:-19019}"
 MOONCAKE_EC_PROTOCOL="${MOONCAKE_EC_PROTOCOL:-rdma}"
-EC_REGISTRY_URL="http://${EC_REGISTRY_HOST}:${EC_MOONCAKE_REGISTRY_PORT}"
-export EC_MOONCAKE_REGISTRY_PORT EC_REGISTRY_HOST MOONCAKE_EC_PROTOCOL EC_REGISTRY_URL
+export EC_MOONCAKE_RESERVATION_PORT
+export MOONCAKE_EC_PROTOCOL
 
 LOG_PATH="${LOG_PATH:-/tmp}"
 BASELINE_FILE="${BASELINE_FILE:-/tmp/vllm_epd_mooncake_baseline.txt}"
@@ -54,33 +52,30 @@ TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-1200}"
 
 mkdir -p "$LOG_PATH"
 
-if command -v vllm &>/dev/null; then
-  VLLM_SERVE=(vllm serve)
-else
-  VLLM_SERVE=(python -m vllm.entrypoints.cli.main serve)
-fi
+VLLM_SERVE=("$PYTHON_BIN" -m vllm.entrypoints.cli.main serve)
 
-ENC_EC_JSON=$(python <<PY
+ENC_EC_JSON=$("$PYTHON_BIN" <<PY
 import json, os
 print(json.dumps({
     "ec_connector": "ECMooncakeConnector",
     "ec_role": "ec_producer",
     "ec_connector_extra_config": {
         "mooncake_protocol": os.environ.get("MOONCAKE_EC_PROTOCOL", "rdma"),
-        "registry_http_port": int(os.environ.get("EC_MOONCAKE_REGISTRY_PORT", "19018")),
     },
 }, separators=(",", ":")))
 PY
 )
 
-PD_EC_JSON=$(python <<PY
+PD_EC_JSON=$("$PYTHON_BIN" <<PY
 import json, os
 print(json.dumps({
     "ec_connector": "ECMooncakeConnector",
     "ec_role": "ec_consumer",
     "ec_connector_extra_config": {
         "mooncake_protocol": os.environ.get("MOONCAKE_EC_PROTOCOL", "rdma"),
-        "remote_registry_url": os.environ["EC_REGISTRY_URL"],
+        "reservation_zmq_port": int(
+            os.environ.get("EC_MOONCAKE_RESERVATION_PORT", "19019")
+        ),
     },
 }, separators=(",", ":")))
 PY
@@ -122,7 +117,7 @@ run_baseline() {
   wait_for_server "$PORT" || { echo "Baseline failed to start; tail log:"; tail -80 "${LOG_PATH}/mooncake_epd_baseline.log"; return 1; }
   curl -s "http://127.0.0.1:${PORT}/v1/models" | head -c 200 || true
   echo ""
-  python "${GIT_ROOT}/tests/v1/ec_connector/integration/test_epd_correctness.py" \
+  "$PYTHON_BIN" "${GIT_ROOT}/tests/v1/ec_connector/integration/test_epd_correctness.py" \
     --service_url "http://localhost:$PORT" \
     --model_name "$MODEL" \
     --mode baseline \
@@ -136,7 +131,7 @@ run_baseline() {
 run_epd_mooncake() {
   echo "================================"
   echo "EPD 1E + 1PD with ECMooncakeConnector"
-  echo "Registry URL for consumer: $EC_REGISTRY_URL"
+  echo "Reservation port on consumer: $EC_MOONCAKE_RESERVATION_PORT"
   echo "Mooncake protocol: $MOONCAKE_EC_PROTOCOL"
   echo "================================"
   cleanup_instances
@@ -147,6 +142,7 @@ run_epd_mooncake() {
   CUDA_VISIBLE_DEVICES="$GPU_E" "${VLLM_SERVE[@]}" "$MODEL" \
     --port "$ENCODE_PORT" \
     --gpu-memory-utilization 0.35 \
+    --mm-tensor-ipc torch_shm \
     --enable-request-id-headers \
     --no-enable-prefix-caching \
     --max-num-batched-tokens 114688 \
@@ -160,6 +156,7 @@ run_epd_mooncake() {
   CUDA_VISIBLE_DEVICES="$GPU_PD" "${VLLM_SERVE[@]}" "$MODEL" \
     --port "$PREFILL_DECODE_PORT" \
     --gpu-memory-utilization 0.75 \
+    --mm-tensor-ipc torch_shm \
     --enable-mm-embeds \
     --enable-request-id-headers \
     --max-num-seqs 32 \
@@ -174,12 +171,14 @@ run_epd_mooncake() {
   wait_for_server "$PREFILL_DECODE_PORT" || { echo "PD log:"; tail -100 "${LOG_PATH}/mooncake_epd_pd.log"; return 1; }
 
   echo "Starting EPD proxy on $ENDPOINT_PORT"
-  python "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
+  "$PYTHON_BIN" "${GIT_ROOT}/examples/disaggregated/disaggregated_encoder/disagg_epd_proxy.py" \
     --host "0.0.0.0" \
     --port "$ENDPOINT_PORT" \
     --encode-servers-urls "http://localhost:$ENCODE_PORT" \
     --prefill-servers-urls "disable" \
     --decode-servers-urls "http://localhost:$PREFILL_DECODE_PORT" \
+    --decode-ec-transfer-zmq-addrs \
+      "tcp://localhost:$EC_MOONCAKE_RESERVATION_PORT" \
     >"${LOG_PATH}/mooncake_epd_proxy.log" 2>&1 &
   PIDS+=($!)
 
@@ -188,7 +187,7 @@ run_epd_mooncake() {
   curl -s "http://127.0.0.1:${ENDPOINT_PORT}/health" || true
   echo ""
 
-  python "${GIT_ROOT}/tests/v1/ec_connector/integration/test_epd_correctness.py" \
+  "$PYTHON_BIN" "${GIT_ROOT}/tests/v1/ec_connector/integration/test_epd_correctness.py" \
     --service_url "http://localhost:$ENDPOINT_PORT" \
     --model_name "$MODEL" \
     --mode disagg \
