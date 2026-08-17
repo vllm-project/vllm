@@ -1094,6 +1094,101 @@ def test_convert_standard_mxfp4_weights_for_flashinfer_cutlass(
     torch.testing.assert_close(interleaved_scales[1], w2_scale)
 
 
+def test_gpt_oss_quant_config_supplies_clamped_swiglu_params():
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.model_executor.layers.quantization.mxfp4 import GptOssMxfp4MoEMethod
+
+    fake_method = types.SimpleNamespace(
+        mxfp4_backend=Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
+        w13_precision_config=None,
+        w2_precision_config=None,
+    )
+    fake_layer = types.SimpleNamespace(
+        w13_weight_scale=torch.zeros(2, 4, 2, dtype=torch.uint8),
+        w2_weight_scale=torch.zeros(2, 4, 2, dtype=torch.uint8),
+    )
+
+    quant_config = GptOssMxfp4MoEMethod.get_fused_moe_quant_config(
+        fake_method, fake_layer
+    )
+
+    assert quant_config is not None
+    assert quant_config.gemm1_alpha == 1.702
+    assert quant_config.gemm1_beta == 1.0
+    assert quant_config.gemm1_clamp_limit == 7.0
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="CUDA is required for FlashInferExperts parameter storage",
+)
+@pytest.mark.parametrize("supplied", [False, True])
+def test_flashinfer_experts_swiglu_params_follow_quant_config(supplied: bool):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+        mxfp4_w4a16_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
+        FlashInferExperts,
+    )
+
+    num_experts, intermediate_size, hidden_size = 2, 128, 256
+    w1_scale = torch.zeros(
+        (num_experts, 2 * intermediate_size, hidden_size // 32),
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    w2_scale = torch.zeros(
+        (num_experts, hidden_size, intermediate_size // 32),
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    extra = (
+        {"gemm1_alpha": 0.5, "gemm1_beta": 0.25, "gemm1_clamp_limit": 3.0}
+        if supplied
+        else {}
+    )
+    quant_config = mxfp4_w4a16_moe_quant_config(
+        w1_scale=w1_scale, w2_scale=w2_scale, **extra
+    )
+    moe_config = FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=1,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        num_local_experts=num_experts,
+        num_logical_experts=num_experts,
+        activation=MoEActivation.SILU,
+        device="cuda",
+        routing_method=RoutingMethodType.TopK,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+    )
+    experts = FlashInferExperts(moe_config=moe_config, quant_config=quant_config)
+
+    if supplied:
+        for name, value in (
+            ("gemm1_alpha", 0.5),
+            ("gemm1_beta", 0.25),
+            ("gemm1_clamp_limit", 3.0),
+        ):
+            parameter = getattr(experts, name)
+            assert isinstance(parameter, torch.Tensor)
+            assert parameter.dtype == torch.float32
+            assert parameter.shape == (num_experts,)
+            torch.testing.assert_close(
+                parameter.cpu(),
+                torch.full((num_experts,), value, dtype=torch.float32),
+            )
+    else:
+        assert experts.gemm1_alpha is None
+        assert experts.gemm1_beta is None
+        assert experts.gemm1_clamp_limit is None
+
+
 @pytest.mark.parametrize("topk", [1, 4])
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("num_tokens", [1, 128])

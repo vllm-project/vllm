@@ -133,16 +133,6 @@ class Mxfp4MoeBackend(Enum):
     HUMMING = "HUMMING"
 
 
-# AITER backends group. This is a vendor grouping, not a weight-format one:
-# members may also appear in TRITON_BACKENDS.
-AITER_BACKENDS = (
-    Mxfp4MoeBackend.AITER_MXFP4_BF16,
-    Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
-    Mxfp4MoeBackend.AITER_MXFP4_FP8,
-    Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
-)
-
-
 # Backends that share the same TRTLLM weight format
 TRTLLM_BACKENDS = (
     Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
