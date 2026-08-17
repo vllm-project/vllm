@@ -1781,7 +1781,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # leave the layout choice to the backend. Mind that backends may only
     # implement and support a subset of all possible layouts.
     # LHBNC hoists the head dim outside the block dim; backends must opt in via
-    # AttentionBackend.supports_kv_cache_layout().
+    # AttentionBackend.supported_kv_cache_layouts().
     "VLLM_KV_CACHE_LAYOUT": env_with_choices(
         "VLLM_KV_CACHE_LAYOUT",
         None,

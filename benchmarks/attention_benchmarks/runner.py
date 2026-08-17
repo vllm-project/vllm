@@ -40,6 +40,8 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     get_kv_cache_layout,
+    get_supported_kv_cache_layouts,
+    publish_kv_cache_layout_to_current_process,
     resolve_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import (
@@ -498,7 +500,11 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             )
             # Set KV cache layout if the backend requires a specific one
             # (e.g., FlashInfer requires LBHNC on SM100/Blackwell for TRTLLM attention)
-            resolve_kv_cache_layout([backend_class], vllm_config.cache_config)
+            supported = get_supported_kv_cache_layouts([backend_class])
+            layout = resolve_kv_cache_layout([[m.name for m in supported]])
+            publish_kv_cache_layout_to_current_process(
+                layout.name, vllm_config.cache_config
+            )
 
             common_metadata = _build_common_attn_metadata(
                 q_lens, kv_lens, config.block_size, device

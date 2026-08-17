@@ -171,16 +171,18 @@ def get_flashinfer_layout_string() -> str:
 def set_kv_cache_layout(cache_layout: KVCacheLayoutType | None):
     """Install a test-only layout override (highest priority)."""
     global _KV_CACHE_LAYOUT_OVERRIDE, _RESOLVED_KV_CACHE_LAYOUT
+    layout = _layout_from_name(cache_layout) if cache_layout is not None else None
     _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
-    _RESOLVED_KV_CACHE_LAYOUT = None
+    _RESOLVED_KV_CACHE_LAYOUT = layout
 
 
 _RESOLVED_KV_CACHE_LAYOUT: KVCacheLayout | None = None
 
-# Preference order when no backend declares a supported set.
+# Preference order when no backend declares a supported set; LBNHC (NHD)
+# first to match main's default.
 _DEFAULT_LAYOUT_PREFERENCE = (
-    KVCacheLayout.LBHNC,
     KVCacheLayout.LBNHC,
+    KVCacheLayout.LBHNC,
     KVCacheLayout.BLNHC,
     KVCacheLayout.BLHNC,
     KVCacheLayout.BHLNC,
@@ -208,9 +210,15 @@ def _merge_layout_preferences(
 ) -> list[KVCacheLayout]:
     """Layouts every list supports, ordered by first-preference votes.
 
-    Each list is most-preferred-first: the layout the most lists put first wins,
-    ties keeping the enum order. An empty intersection is a hard error.
+    Identical lists (the common homogeneous case) merge to themselves, keeping
+    their order. Otherwise each list is most-preferred-first: the layout the
+    most lists put first wins, ties keeping the enum order. An empty
+    intersection is a hard error.
     """
+    first = supported_layouts_lists[0]
+    if all(layouts == first for layouts in supported_layouts_lists[1:]):
+        return list(first)
+
     priorities: dict[KVCacheLayout, int] = defaultdict(int)
     for preferred_layout, *_ in supported_layouts_lists:
         priorities[preferred_layout] += 1
@@ -247,7 +255,9 @@ def get_supported_kv_cache_layouts(
     )
 
 
-def publish_kv_cache_layout(layout_name: str, cache_config=None) -> None:
+def publish_kv_cache_layout_to_current_process(
+    layout_name: str, cache_config=None
+) -> None:
     """Adopt a layout resolved elsewhere (the engine core) in this process.
 
     The layout is published on ``cache_config.kv_cache_layout`` and in a
@@ -261,10 +271,9 @@ def publish_kv_cache_layout(layout_name: str, cache_config=None) -> None:
 
 def resolve_kv_cache_layout(
     supported_layouts: list[list[str]],
-    cache_config=None,
     kv_cache_specs: Iterable[KVCacheSpec] | None = None,
 ) -> KVCacheLayout:
-    """Resolve one layout for the whole model and publish it in this process.
+    """Resolve one KV cache layout for the whole model.
 
     Runs once in the engine core. Every worker reports the layouts its backends
     support, most preferred first (``get_supported_kv_cache_layouts``); the layout
@@ -273,8 +282,9 @@ def resolve_kv_cache_layout(
     ``VLLM_KV_CACHE_LAYOUT`` must be one of the candidates or resolution fails,
     with the legacy ``NHD``/``HND`` names as aliases for ``LBNHC``/``LBHNC``; the
     connector's preference is used when compatible and dropped with a warning
-    otherwise. Workers adopt the resolved layout through the
-    ``update_kv_cache_layout`` RPC and ``KVCacheConfig.kv_cache_layout``.
+    otherwise. The caller publishes the result: locally via
+    ``publish_kv_cache_layout_to_current_process``, to workers through the
+    ``set_kv_cache_layout`` RPC and ``KVCacheConfig.kv_cache_layout``.
     """
     if _KV_CACHE_LAYOUT_OVERRIDE is not None:
         return _layout_from_name(_KV_CACHE_LAYOUT_OVERRIDE)
@@ -320,38 +330,25 @@ def resolve_kv_cache_layout(
         layout = candidates[0]
 
     logger.info_once("Using %s KV cache layout.", layout.name)
-    publish_kv_cache_layout(layout.name, cache_config)
     return layout
 
 
-def get_kv_cache_layout(cache_config=None) -> KVCacheLayout:
-    """Return the resolved physical KV cache layout.
+def get_kv_cache_layout() -> KVCacheLayout:
+    """Return the physical KV cache layout resolved for this model.
 
-    Read-only: prefers the test override, then an explicit or current config, then the
-    process-local value published by ``resolve_kv_cache_layout``. Processes where
-    backend selection never runs fall back to env > connector > LBNHC.
+    Read-only: the engine core resolves the layout once and every process adopts
+    it (``publish_kv_cache_layout_to_current_process``) before the cache is
+    allocated. Processes where resolution never runs (unit tests, standalone
+    tools) get the LBNHC default with a warning; use ``set_kv_cache_layout`` to
+    pick one explicitly.
     """
-    if _KV_CACHE_LAYOUT_OVERRIDE is not None:
-        return _layout_from_name(_KV_CACHE_LAYOUT_OVERRIDE)
-    if cache_config is not None and cache_config.kv_cache_layout is not None:
-        return _layout_from_name(cache_config.kv_cache_layout)
-
-    from vllm.config import get_current_vllm_config_or_none
-
-    vllm_config = get_current_vllm_config_or_none()
-    if (
-        vllm_config is not None
-        and vllm_config.cache_config is not None
-        and vllm_config.cache_config.kv_cache_layout is not None
-    ):
-        return _layout_from_name(vllm_config.cache_config.kv_cache_layout)
     if _RESOLVED_KV_CACHE_LAYOUT is not None:
         return _RESOLVED_KV_CACHE_LAYOUT
-
-    layout_name = envs.VLLM_KV_CACHE_LAYOUT
-    if layout_name is None:
-        layout_name = get_kv_connector_cache_layout()
-    return _layout_from_name(layout_name or "LBNHC")
+    logger.warning_once(
+        "get_kv_cache_layout() called before layout resolution; "
+        "using the LBNHC default."
+    )
+    return KVCacheLayout.LBNHC
 
 
 @dataclass

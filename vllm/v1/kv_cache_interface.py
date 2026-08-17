@@ -271,15 +271,6 @@ class KVCacheLayout(Enum):
         the L and B dimensions are outermost."""
         return set(self.value[:2]) == {_DIM_L, _DIM_B}
 
-    def swap_layer_and_block(self) -> KVCacheLayout:
-        """Return the equivalent layout with the L and B axes exchanged."""
-        return KVCacheLayout(
-            tuple(
-                _DIM_B if dim == _DIM_L else _DIM_L if dim == _DIM_B else dim
-                for dim in self.stride_order
-            )
-        )
-
 
 def compute_layer_kv_cache_shape_bytes(
     spec: KVCacheSpec,

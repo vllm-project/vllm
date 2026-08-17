@@ -9,12 +9,17 @@ import torch.nn as nn
 
 import vllm.ir
 from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
+from vllm.v1.attention.backends.utils import (
+    get_supported_kv_cache_layouts,
+    publish_kv_cache_layout_to_current_process,
+)
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 if TYPE_CHECKING:
@@ -101,19 +106,14 @@ class WorkerBase:
 
     def get_supported_kv_cache_layouts(self) -> list[str]:
         """Layout names every attention backend supports, most preferred first."""
-        from vllm.distributed.kv_transfer.kv_connector.utils import (
-            get_current_attn_backends,
-        )
-        from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
-
         backends = get_current_attn_backends(self.vllm_config)
         return [layout.name for layout in get_supported_kv_cache_layouts(backends)]
 
-    def update_kv_cache_layout(self, kv_cache_layout: str) -> None:
+    def set_kv_cache_layout(self, kv_cache_layout: str) -> None:
         """Adopt the KV cache layout resolved by the engine core."""
-        from vllm.v1.attention.backends.utils import publish_kv_cache_layout
-
-        publish_kv_cache_layout(kv_cache_layout, self.vllm_config.cache_config)
+        publish_kv_cache_layout_to_current_process(
+            kv_cache_layout, self.vllm_config.cache_config
+        )
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.

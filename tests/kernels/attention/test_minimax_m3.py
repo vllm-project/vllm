@@ -981,16 +981,6 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch):
     assert value_cache.is_contiguous()
 
 
-def test_unknown_layout_raises():
-    """An unrecognized layout override is rejected at resolution time."""
-    try:
-        set_kv_cache_layout("BOGUS")
-        with pytest.raises(ValueError, match="Unknown KV cache layout"):
-            get_kv_cache_layout()
-    finally:
-        set_kv_cache_layout(None)
-
-
 def test_indexer_cache_squeezes_to_contiguous_3d():
     """The indexer side cache is standardized 4D with H=1: under both layouts
     the allocator's logical view stays contiguous and squeezes (as

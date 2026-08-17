@@ -68,7 +68,9 @@ from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed, set_torch_threads_for_runtime
-from vllm.v1.attention.backends.utils import publish_kv_cache_layout
+from vllm.v1.attention.backends.utils import (
+    publish_kv_cache_layout_to_current_process,
+)
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -673,7 +675,9 @@ class Worker(WorkerBase):
         # Adopt the engine core's layout; workers spawned after resolution
         # (e.g. elastic EP scale-up) only see it through the config.
         if kv_cache_config.kv_cache_layout is not None:
-            publish_kv_cache_layout(kv_cache_config.kv_cache_layout, self.cache_config)
+            publish_kv_cache_layout_to_current_process(
+                kv_cache_config.kv_cache_layout, self.cache_config
+            )
 
         # Init kv cache connector here, because it requires
         # `kv_cache_config`.

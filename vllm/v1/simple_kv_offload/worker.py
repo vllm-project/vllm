@@ -86,7 +86,10 @@ class SimpleCPUOffloadWorker:
         The worker will infer the underlying raw storage from the kv_caches.
 
         Args:
-            kv_caches: Per-layer GPU KV caches.
+            kv_caches: Per-layer GPU KV caches. Values are either a single
+                tensor (attention layers) or a list of tensors (Mamba layers
+                in hybrid models). All values are included for offloading
+                by resolving to their underlying raw storage.
         """
         if not kv_caches:
             logger.warning("No KV caches to offload.")

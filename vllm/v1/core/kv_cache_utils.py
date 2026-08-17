@@ -1305,7 +1305,6 @@ def _get_packed_kv_cache_layout(
 
 def validate_kv_cache_layout(
     kv_cache_groups: list[KVCacheGroupSpec],
-    cache_config=None,
 ) -> KVCacheLayout:
     """Validate that the resolved layout can express this model's packing.
 
@@ -1314,7 +1313,7 @@ def validate_kv_cache_layout(
     DeepSeek-V4 indexer) declares block-outermost layouts there, so an inexpressible
     layout reaching this point is an error.
     """
-    layout = get_kv_cache_layout(cache_config)
+    layout = get_kv_cache_layout()
     page_sizes = {
         _get_per_layer_spec(group, layer_name).page_size_bytes
         for group in kv_cache_groups
@@ -1372,7 +1371,7 @@ def get_kv_cache_config_from_groups(
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
     size = packed_block_stride * num_blocks
 
-    layout = validate_kv_cache_layout(kv_cache_groups, vllm_config.cache_config)
+    layout = validate_kv_cache_layout(kv_cache_groups)
     kv_cache_tensors = []
     for byte_offset, layer_names, spec in runs:
         layer_stride, block_stride, _, _, _ = compute_layout_strides(  # L, B, H, N, C
