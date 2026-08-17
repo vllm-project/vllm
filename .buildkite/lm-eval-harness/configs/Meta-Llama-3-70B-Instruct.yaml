@@ -1,0 +1,12 @@
+# For hf script, without -t option (tensor parallel size).
+# bash .buildkite/lm-eval-harness/run-lm-eval-gsm-hf-baseline.sh -m meta-llama/Meta-Llama-3-70B-Instruct -b 32 -l 250 -f 5
+model_name: "meta-llama/Meta-Llama-3-70B-Instruct"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.892
+  - name: "exact_match,flexible-extract"
+    value: 0.892
+limit: 250
+num_fewshot: 5

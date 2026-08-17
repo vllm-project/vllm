@@ -1,0 +1,2353 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import logging
+import os
+from dataclasses import MISSING, Field, asdict, dataclass, field
+from types import SimpleNamespace
+from typing import cast
+from unittest.mock import patch
+
+import pydantic
+import pytest
+from huggingface_hub import ResolvedRevision
+from pydantic import ValidationError
+
+import vllm.config.vllm as vllm_config_module
+import vllm.envs as envs
+from vllm.compilation.backends import VllmBackend
+from vllm.config import (
+    CompilationConfig,
+    KernelConfig,
+    ModelConfig,
+    ObservabilityConfig,
+    ParallelConfig,
+    PoolerConfig,
+    SchedulerConfig,
+    SpeculativeConfig,
+    VllmConfig,
+    update_config,
+)
+from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.config.kernel import IrOpPriorityConfig
+from vllm.config.load import LoadConfig
+from vllm.config.mamba import MambaBackendEnum
+from vllm.config.speculative import _validate_qwen3_omni_dspark
+from vllm.config.utils import get_field
+from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
+from vllm.platforms import current_platform
+from vllm.v1.attention.backend import AttentionCGSupport
+
+DEVICE_TYPE = current_platform.device_type
+
+
+def test_kda_recoverssm_derivation_is_revalidated():
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            use_replayssm=True,
+            use_kda_recoverssm=False,
+            mamba_cache_mode="none",
+        ),
+        num_speculative_tokens=3,
+        model_config=SimpleNamespace(
+            supports_replayssm=True,
+            architecture="KimiLinearForCausalLM",
+        ),
+        mamba_config=SimpleNamespace(
+            backend=MambaBackendEnum.TRITON,
+            enable_stochastic_rounding=False,
+        ),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        kv_transfer_config=None,
+        use_v2_model_runner=True,
+    )
+
+    VllmConfig.validate_mamba_cached_kernel(config)
+    assert config.cache_config.use_replayssm
+    assert config.cache_config.use_kda_recoverssm
+
+    config.cache_config.mamba_cache_mode = "align"
+    VllmConfig.validate_mamba_cached_kernel(config)
+    config.use_v2_model_runner = False
+    with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=1"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+    config.use_v2_model_runner = True
+    config.cache_config.mamba_cache_mode = "all"
+    with pytest.raises(ValueError, match="only none and align"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+    config.cache_config.mamba_cache_mode = "none"
+
+    config.model_config.architecture = "NemotronHForCausalLM"
+    with pytest.raises(ValueError, match="only supported for Kimi-K3 KDA"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+
+    config.model_config.architecture = "KimiLinearForCausalLM"
+    config.parallel_config.pipeline_parallel_size = 2
+    with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+
+
+def test_per_request_spec_decode_metrics_requires_spec_decode():
+    # The flag only makes sense with speculative decoding configured; enabling
+    # it without --speculative-config should fail fast rather than silently
+    # produce no metrics.
+    for level in ("summary", "detailed"):
+        with pytest.raises(ValueError, match="speculative"):
+            VllmConfig(
+                observability_config=ObservabilityConfig(
+                    per_request_spec_decode_metrics=level
+                )
+            )
+
+
+def test_compile_config_repr_succeeds():
+    # setup: VllmBackend mutates the config object
+    config = VllmConfig()
+    backend = VllmBackend(config)
+    backend.configure_post_pass()
+
+    # test that repr(config) succeeds
+    val = repr(config)
+    assert "VllmConfig" in val
+    assert "inductor_passes" in val
+
+
+@pytest.mark.parametrize(
+    ("env_value", "expected"),
+    [
+        (None, None),
+        ("0", False),
+        ("1", True),
+    ],
+)
+def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
+    if env_value is None:
+        monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env_value)
+
+    assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
+
+
+def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
+    """ROCm keeps DeepSeek V3.2 and V4 on their compiled MRV1 paths."""
+    from vllm.config.vllm import (
+        default_breakable_cudagraph_architectures,
+        default_v2_model_runner_architectures,
+    )
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    # The lookup is lru_cached against a fixed platform.
+    default_v2_model_runner_architectures.cache_clear()
+    default_breakable_cudagraph_architectures.cache_clear()
+    try:
+        v2_architectures = default_v2_model_runner_architectures()
+        breakable_architectures = default_breakable_cudagraph_architectures()
+
+        assert "DeepseekV32ForCausalLM" not in v2_architectures
+        assert "DeepseekV4ForCausalLM" not in v2_architectures
+        assert "DeepseekV32ForCausalLM" not in breakable_architectures
+        assert "DeepseekV32MTPModel" not in breakable_architectures
+    finally:
+        default_v2_model_runner_architectures.cache_clear()
+        default_breakable_cudagraph_architectures.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("model", "architecture"),
+    [
+        ("nvidia/GLM-5.2-NVFP4", "GlmMoeDsaForCausalLM"),
+        ("zai-org/GLM-5.2-FP8", "GlmMoeDsaForCausalLM"),
+        ("nvidia/DeepSeek-V3.2-NVFP4", "DeepseekV32ForCausalLM"),
+    ],
+)
+@pytest.mark.parametrize("with_mtp", [False, True], ids=["no-mtp", "mtp"])
+def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
+    monkeypatch, model, architecture, with_mtp
+):
+    from vllm.compilation.breakable_cudagraph import (
+        is_breakable_cudagraph_enabled,
+    )
+    from vllm.config.vllm import (
+        default_breakable_cudagraph_architectures,
+        default_v2_model_runner_architectures,
+    )
+    from vllm.platforms import current_platform
+
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    default_v2_model_runner_architectures.cache_clear()
+    default_breakable_cudagraph_architectures.cache_clear()
+
+    model_config = SimpleNamespace(
+        model=model,
+        architectures=[architecture],
+        runner_type="generate",
+        is_moe=True,
+        is_hybrid=False,
+        is_attention_free=False,
+        is_diffusion=False,
+    )
+    config = SimpleNamespace(
+        model_config=model_config,
+        speculative_config=SimpleNamespace(method="mtp") if with_mtp else None,
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+        ),
+    )
+    config._dflash_needs_multi_kv_group = lambda: False
+    config._is_dflash2_draft = lambda: False
+    config._is_default_v2_model_runner_model = lambda: (
+        VllmConfig._is_default_v2_model_runner_model(config)
+    )
+    config._get_v2_model_runner_unsupported_features = lambda: []
+    config._uses_breakable_cudagraph_by_default = lambda: (
+        VllmConfig._uses_breakable_cudagraph_by_default(config)
+    )
+
+    try:
+        assert VllmConfig.use_v2_model_runner.fget(config)
+        assert VllmConfig._maybe_enable_breakable_cudagraph(config)
+        assert is_breakable_cudagraph_enabled()
+        assert config.compilation_config.mode == CompilationMode.NONE
+        assert config.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+    finally:
+        os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        default_v2_model_runner_architectures.cache_clear()
+        default_breakable_cudagraph_architectures.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("architecture", "is_rocm", "expected"),
+    [
+        ("DeepseekV32ForCausalLM", False, True),
+        ("DeepseekV32ForCausalLM", True, False),
+        ("DeepseekV32MTPModel", False, True),
+        ("DeepseekV32MTPModel", True, False),
+        ("GlmMoeDsaForCausalLM", False, True),
+        ("GlmMoeDsaForCausalLM", True, True),
+    ],
+)
+def test_dsa_breakable_cudagraph_platform_default(
+    monkeypatch, architecture, is_rocm, expected
+):
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
+    from vllm.platforms import current_platform
+
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
+    default_breakable_cudagraph_architectures.cache_clear()
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architectures=[architecture]),
+        compilation_config=CompilationConfig(),
+    )
+    config._uses_breakable_cudagraph_by_default = lambda: (
+        VllmConfig._uses_breakable_cudagraph_by_default(config)
+    )
+
+    try:
+        assert VllmConfig._maybe_enable_breakable_cudagraph(config) is expected
+        if expected:
+            assert config.compilation_config.mode == CompilationMode.NONE
+    finally:
+        os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        default_breakable_cudagraph_architectures.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("model_type", "expected_architecture"),
+    [
+        ("deepseek_v32", "DeepseekV32MTPModel"),
+        ("glm_moe_dsa", "DeepseekV32MTPModel"),
+        ("deepseek_v3", "DeepSeekMTPModel"),
+    ],
+)
+def test_dsa_models_select_matching_mtp(model_type, expected_architecture):
+    from transformers import PretrainedConfig
+
+    hf_config = PretrainedConfig(
+        architectures=["DeepseekV32ForCausalLM"],
+        num_nextn_predict_layers=1,
+    )
+    hf_config.model_type = model_type
+
+    SpeculativeConfig.hf_config_override(hf_config)
+
+    assert hf_config.architectures == [expected_architecture]
+
+
+def test_v2_model_runner_supports_extract_hidden_states():
+    config = VllmConfig()
+    config.speculative_config = cast(
+        SpeculativeConfig,
+        SimpleNamespace(
+            method="extract_hidden_states",
+            parallel_drafting=False,
+            enable_adaptive_verification=False,
+        ),
+    )
+
+    assert config._get_v2_model_runner_unsupported_features() == []
+
+
+def test_dflash2_draft_forces_v2_model_runner():
+    """A DFlash2 draft must reach the V2 speculator, the only one that runs its
+    candidate selector; on V1 it would draft as DFlash1 without raising."""
+
+    def config(method, architectures):
+        return SimpleNamespace(
+            speculative_config=SimpleNamespace(
+                method=method,
+                draft_model_config=SimpleNamespace(architectures=architectures),
+            )
+        )
+
+    assert VllmConfig._is_dflash2_draft(config("dflash", ["DFlash2DraftModel"]))
+    assert not VllmConfig._is_dflash2_draft(config("dflash", ["DFlashDraftModel"]))
+    assert not VllmConfig._is_dflash2_draft(config("eagle", ["DFlash2DraftModel"]))
+    assert not VllmConfig._is_dflash2_draft(SimpleNamespace(speculative_config=None))
+    assert not VllmConfig._is_dflash2_draft(
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(method="dflash", draft_model_config=None)
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("use_v2_model_runner", "expected_capture_sizes"),
+    [
+        (False, [4, 8, 12, 16]),
+        (True, list(range(1, 17))),
+    ],
+)
+def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
+    use_v2_model_runner,
+    expected_capture_sizes,
+):
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        cudagraph_capture_sizes=list(range(1, 17)),
+    )
+    compilation_config.max_cudagraph_capture_size = 16
+    compilation_config.post_init_cudagraph_sizes()
+
+    cudagraph_mode = compilation_config.resolve_cudagraph_mode_and_sizes(
+        AttentionCGSupport.ALWAYS,
+        "FakeAttentionBackend",
+        uniform_decode_query_len=4,
+        use_v2_model_runner=use_v2_model_runner,
+        tensor_parallel_size=1,
+    )
+
+    assert cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+    assert compilation_config.cudagraph_capture_sizes == expected_capture_sizes
+
+
+def test_resolve_cudagraph_mode_skips_mamba_block_check_while_profiling():
+    """Cudagraph memory profiling uses a minimal KV cache, so the Mamba
+    block-count guard must only fire for the real cache sizing."""
+    kv_cache_config = SimpleNamespace(has_mamba_layers=True, num_blocks=4)
+
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+    )
+    with pytest.raises(ValueError, match="exceeds available Mamba cache blocks"):
+        compilation_config.resolve_cudagraph_mode_and_sizes(
+            AttentionCGSupport.ALWAYS,
+            "FakeAttentionBackend",
+            uniform_decode_query_len=1,
+            use_v2_model_runner=True,
+            tensor_parallel_size=1,
+            kv_cache_config=kv_cache_config,
+            max_num_reqs=256,
+        )
+
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+    )
+    cudagraph_mode = compilation_config.resolve_cudagraph_mode_and_sizes(
+        AttentionCGSupport.ALWAYS,
+        "FakeAttentionBackend",
+        uniform_decode_query_len=1,
+        use_v2_model_runner=True,
+        tensor_parallel_size=1,
+        kv_cache_config=kv_cache_config,
+        max_num_reqs=256,
+        is_profiling=True,
+    )
+    assert cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+
+
+@pytest.mark.parametrize(
+    ("model_config", "expected"),
+    [
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-1.7B-Base",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-32B",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="meta-llama/Llama-3.2-1B",
+                architectures=["LlamaForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="mistralai/Mistral-7B-v0.1",
+                architectures=["MistralForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="facebook/opt-125m",
+                architectures=["OPTForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="google/gemma-2-2b",
+                architectures=["Gemma2ForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="deepseek-ai/DeepSeek-V2-Lite-Chat",
+                architectures=["DeepseekV2ForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="deepseek-ai/DeepSeek-V2-Chat",
+                architectures=["DeepseekV2ForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="deepseek-ai/DeepSeek-V4-Flash",
+                architectures=["DeepseekV4ForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=True,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen1.5-MoE-A2.7B",
+                architectures=["Qwen2MoeForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen1.5-MoE-A2.7B-Chat",
+                architectures=["Qwen2MoeForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="ibm-research/PowerMoE-3b",
+                architectures=["GraniteMoeForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="thinkingmachines/Inkling",
+                architectures=["InklingForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="thinkingmachines/Inkling",
+                architectures=["InklingForConditionalGeneration"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="mistralai/Mixtral-8x7B-Instruct-v0.1",
+                architectures=["MixtralForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-1.7B-FP8",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=True,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3.5-4B",
+                architectures=["Qwen3_5ForConditionalGeneration"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+                is_hybrid=True,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="state-spaces/mamba-130m-hf",
+                architectures=["MambaForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+                is_attention_free=True,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="sentence-transformers/all-MiniLM-L6-v2",
+                architectures=["BertModel"],
+                runner_type="pooling",
+                is_multimodal_model=False,
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-Embedding-0.6B",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="pooling",
+                is_multimodal_model=False,
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="TomoroAI/tomoro-colqwen3-embed-4b",
+                architectures=["ColQwen3"],
+                runner_type="pooling",
+                is_multimodal_model=True,
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+    ],
+)
+def test_is_default_v2_model_runner_model(model_config, expected, monkeypatch):
+    from vllm.config.vllm import default_v2_model_runner_architectures
+    from vllm.platforms import current_platform
+
+    # The expectations below are the platform-independent defaults; ROCm's
+    # DeepSeek V4 carve-out is covered by test_rocm_defaults_deepseek_v4_to_mrv1.
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    default_v2_model_runner_architectures.cache_clear()
+    config = SimpleNamespace(model_config=model_config)
+
+    try:
+        assert VllmConfig._is_default_v2_model_runner_model(config) is expected
+    finally:
+        default_v2_model_runner_architectures.cache_clear()
+
+
+@pytest.mark.skip_global_cleanup
+def test_with_hf_config_populates_missing_architectures_from_causal_lm_mapping(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        vllm_config_module,
+        "replace",
+        lambda self, **kwargs: SimpleNamespace(**kwargs),
+    )
+    cfg = SimpleNamespace(
+        model_config=SimpleNamespace(
+            is_multimodal_model=False,
+            hf_config=SimpleNamespace(),
+            get_model_arch_config=lambda: "arch-config",
+        )
+    )
+    hf_config = SimpleNamespace(model_type="mistral", architectures=None)
+
+    updated = VllmConfig.with_hf_config(cfg, hf_config)
+
+    assert updated.model_config.hf_config.architectures == ["MistralForCausalLM"]
+    assert hf_config.architectures is None
+
+
+@pytest.mark.skip_global_cleanup
+def test_with_hf_config_preserves_explicit_architectures_override(monkeypatch):
+    monkeypatch.setattr(
+        vllm_config_module,
+        "replace",
+        lambda self, **kwargs: SimpleNamespace(**kwargs),
+    )
+    cfg = SimpleNamespace(
+        model_config=SimpleNamespace(
+            is_multimodal_model=False,
+            hf_config=SimpleNamespace(),
+            get_model_arch_config=lambda: "arch-config",
+        )
+    )
+    hf_config = SimpleNamespace(model_type="mistral", architectures=None)
+
+    updated = VllmConfig.with_hf_config(
+        cfg,
+        hf_config,
+        architectures=["Ministral3ForCausalLM"],
+    )
+
+    assert updated.model_config.hf_config.architectures == ["Ministral3ForCausalLM"]
+
+
+@pytest.mark.skip_global_cleanup
+def test_with_hf_config_leaves_unknown_model_type_without_architectures(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        vllm_config_module,
+        "replace",
+        lambda self, **kwargs: SimpleNamespace(**kwargs),
+    )
+    cfg = SimpleNamespace(
+        model_config=SimpleNamespace(
+            is_multimodal_model=False,
+            hf_config=SimpleNamespace(),
+            get_model_arch_config=lambda: "arch-config",
+        )
+    )
+    hf_config = SimpleNamespace(
+        model_type="not_a_real_model",
+        architectures=None,
+    )
+
+    updated = VllmConfig.with_hf_config(cfg, hf_config)
+
+    assert updated.model_config.hf_config.architectures is None
+
+
+@pytest.mark.parametrize(
+    "checkpoint_tensors,tied",
+    [
+        # The checkpoint has an lm_head of its own, so it must win over the config
+        (["model.embed_tokens.weight", "lm_head.weight"], False),
+        (["model.embed_tokens.weight"], True),
+        # Contents unknown (not safetensors), so the config must be left alone
+        ([], True),
+    ],
+)
+def test_maybe_untie_word_embeddings(tmp_path, checkpoint_tensors, tied):
+    import torch
+    from safetensors.torch import save_file
+
+    if checkpoint_tensors:
+        save_file(
+            {name: torch.zeros(2, 2) for name in checkpoint_tensors},
+            tmp_path / "model.safetensors",
+        )
+
+    text_config = SimpleNamespace(tie_word_embeddings=True)
+    model_config = SimpleNamespace(
+        model=str(tmp_path),
+        revision=None,
+        hf_config=SimpleNamespace(
+            tie_word_embeddings=True,
+            get_text_config=lambda: text_config,
+        ),
+        word_embeddings_untied_by_checkpoint=False,
+    )
+
+    ModelConfig.maybe_untie_word_embeddings(model_config)
+
+    # Both levels must agree, since different callers read different ones
+    assert model_config.hf_config.tie_word_embeddings is tied
+    assert text_config.tie_word_embeddings is tied
+    assert model_config.word_embeddings_untied_by_checkpoint is not tied
+
+
+def test_async_scheduling_with_pipeline_parallelism_is_allowed():
+    cfg = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_model_len=8192,
+            is_encoder_decoder=False,
+            async_scheduling=True,
+        ),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=2,
+            distributed_executor_backend="mp",
+            nnodes=2,
+        ),
+    )
+    assert cfg.scheduler_config.async_scheduling is True
+
+
+def test_data_parallel_rpc_port_has_fixed_default():
+    assert ParallelConfig().data_parallel_rpc_port == 29550
+
+
+@pytest.mark.parametrize("port", [1, 29550, 65535])
+def test_data_parallel_rpc_port_accepts_valid_ports(port: int):
+    assert ParallelConfig(data_parallel_rpc_port=port).data_parallel_rpc_port == port
+
+
+@pytest.mark.parametrize("port", [-1, 0, 65536])
+def test_data_parallel_rpc_port_rejects_invalid_ports(port: int):
+    with pytest.raises(ValidationError):
+        ParallelConfig(data_parallel_rpc_port=port)
+
+
+def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=8,
+        data_parallel_size=2,
+        data_parallel_size_local=1,
+        data_parallel_rank=1,
+        distributed_executor_backend="mp",
+        nnodes=2,
+        node_rank=1,
+    )
+
+    assert parallel_config.nnodes_within_dp == 1
+    assert parallel_config.node_rank_within_dp == 0
+
+    parallel_config.reconfigure_for_independent_dp_rank()
+
+    assert parallel_config.data_parallel_size == 1
+    assert parallel_config.data_parallel_size_local == 1
+    assert parallel_config.data_parallel_rank == 0
+    assert parallel_config.data_parallel_index == 1
+    assert parallel_config.nnodes == 1
+    assert parallel_config.node_rank == 0
+    assert parallel_config.world_size == 8
+
+
+def test_draft_model_enables_async_scheduling_by_default():
+    parallel_config = ParallelConfig(distributed_executor_backend="uni")
+    model_config = ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048)
+    speculative_config = SpeculativeConfig(
+        method="draft_model",
+        model="Qwen/Qwen3-0.6B",
+        num_speculative_tokens=3,
+        target_model_config=model_config,
+        target_parallel_config=parallel_config,
+    )
+    cfg = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_model_len=2048,
+            is_encoder_decoder=False,
+        ),
+        parallel_config=parallel_config,
+        speculative_config=speculative_config,
+    )
+
+    assert cfg.scheduler_config.async_scheduling is True
+
+
+@pytest.mark.parametrize(
+    ("method", "parallel_drafting", "expected_slots"),
+    [
+        pytest.param("eagle3", False, 0, id="eagle3"),
+        pytest.param("eagle3", True, 7, id="p-eagle"),
+        pytest.param("dflash", True, 8, id="dflash"),
+        pytest.param("dspark", True, 7, id="dspark"),
+        pytest.param("mtp", False, 0, id="mtp"),
+        pytest.param("ngram", False, 0, id="ngram"),
+        pytest.param("draft_model", False, 1, id="draft-model"),
+        pytest.param("draft_model", True, 8, id="pard"),
+    ],
+)
+def test_max_num_new_slots_for_drafting(method, parallel_drafting, expected_slots):
+    speculative_config = SpeculativeConfig(
+        model="ngram",
+        num_speculative_tokens=8,
+    )
+    speculative_config.method = method
+    speculative_config.parallel_drafting = parallel_drafting
+
+    assert speculative_config.max_num_new_slots_for_drafting == expected_slots
+
+
+@dataclass
+class _TestConfigFields:
+    a: int
+    b: dict = field(default_factory=dict)
+    c: str = "default"
+
+
+def test_get_field():
+    b = get_field(_TestConfigFields, "b")
+    assert isinstance(b, Field)
+    assert b.default is MISSING
+    assert b.default_factory is dict
+
+    c = get_field(_TestConfigFields, "c")
+    assert isinstance(c, Field)
+    assert c.default == "default"
+    assert c.default_factory is MISSING
+
+
+@dataclass
+class _TestNestedConfig:
+    a: _TestConfigFields = field(default_factory=lambda: _TestConfigFields(a=0))
+
+
+@dataclass
+class _TestDerivedConfigFields(_TestConfigFields):
+    pass
+
+
+def test_update_config():
+    # Simple update
+    config1 = _TestConfigFields(a=0)
+    new_config1 = update_config(config1, {"a": 42})
+    assert new_config1.a == 42
+    # Nonexistent field
+    with pytest.raises(ValueError, match=r"_TestConfigFields\.nonexistent"):
+        new_config1 = update_config(config1, {"nonexistent": 1})
+    # Nested update with dataclass
+    config2 = _TestNestedConfig()
+    new_inner_config = _TestConfigFields(a=1, c="new_value")
+    new_config2 = update_config(config2, {"a": new_inner_config})
+    assert new_config2.a == new_inner_config
+    # Declared field type, not the live value's subtype, defines valid overrides
+    config_with_derived = _TestNestedConfig(a=_TestDerivedConfigFields(a=0))
+    new_config2 = update_config(config_with_derived, {"a": new_inner_config})
+    assert new_config2.a is new_inner_config
+    # Nested update with unrelated dataclass
+    with pytest.raises(ValueError, match=r"_TestNestedConfig\.a"):
+        update_config(config2, {"a": _TestNestedConfig()})
+    # Nested update with dict
+    config3 = _TestNestedConfig()
+    new_config3 = update_config(config3, {"a": {"c": "new_value"}})
+    assert new_config3.a.c == "new_value"
+    # Nested update with invalid type
+    with pytest.raises(ValueError, match=r"_TestNestedConfig\.a"):
+        update_config(config3, {"a": "new_value"})
+    # Invalid nested field preserves its full path
+    with pytest.raises(ValueError, match=r"_TestNestedConfig\.a\.nonexistent"):
+        update_config(config3, {"a": {"nonexistent": 1}})
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_convert_type"),
+    [
+        ("distilbert/distilgpt2", "generate", "none"),
+        ("intfloat/multilingual-e5-small", "pooling", "none"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none"),
+        ("openai/whisper-small", "generate", "none"),
+    ],
+)
+def test_auto_runner(model_id, expected_runner_type, expected_convert_type):
+    config = ModelConfig(model_id, runner="auto")
+
+    assert config.runner_type == expected_runner_type
+    assert config.convert_type == expected_convert_type
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_convert_type"),
+    [
+        ("distilbert/distilgpt2", "pooling", "embed"),
+        ("intfloat/multilingual-e5-small", "pooling", "none"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none"),
+        ("openai/whisper-small", "pooling", "embed"),
+    ],
+)
+def test_pooling_runner(model_id, expected_runner_type, expected_convert_type):
+    config = ModelConfig(model_id, runner="pooling")
+
+    assert config.runner_type == expected_runner_type
+    assert config.convert_type == expected_convert_type
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_convert_type"),
+    [
+        ("Qwen/Qwen2.5-1.5B-Instruct", "draft", "none"),
+    ],
+)
+def test_draft_runner(model_id, expected_runner_type, expected_convert_type):
+    config = ModelConfig(model_id, runner="draft")
+
+    assert config.runner_type == expected_runner_type
+    assert config.convert_type == expected_convert_type
+
+
+MODEL_IDS_EXPECTED = [
+    ("Qwen/Qwen1.5-7B", 32768),
+    ("mistralai/Mistral-7B-v0.1", 4096),
+    ("mistralai/Mistral-7B-Instruct-v0.2", 32768),
+]
+
+
+@pytest.mark.parametrize("model_id_expected", MODEL_IDS_EXPECTED)
+def test_disable_sliding_window(model_id_expected):
+    model_id, expected = model_id_expected
+    model_config = ModelConfig(model_id, disable_sliding_window=True)
+    assert model_config.max_model_len == expected
+
+
+@pytest.mark.skipif(
+    current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
+)
+def test_get_pooling_config():
+    model_id = "sentence-transformers/all-MiniLM-L12-v2"
+    model_config = ModelConfig(model_id)
+
+    assert model_config.pooler_config is not None
+    assert model_config.pooler_config.use_activation
+    assert model_config.pooler_config.seq_pooling_type == "MEAN"
+    assert model_config.pooler_config.tok_pooling_type == "ALL"
+
+
+@pytest.mark.skipif(
+    current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
+)
+def test_get_pooling_config_from_args():
+    model_id = "sentence-transformers/all-MiniLM-L12-v2"
+    pooler_config = PoolerConfig(seq_pooling_type="CLS", use_activation=False)
+    model_config = ModelConfig(model_id, pooler_config=pooler_config)
+
+    assert asdict(model_config.pooler_config) == asdict(pooler_config)
+
+
+@pytest.mark.parametrize(
+    ("model_id", "default_pooling_type", "pooling_type"),
+    [
+        ("tomaarsen/Qwen3-Reranker-0.6B-seq-cls", "LAST", "LAST"),  # LLM
+        ("intfloat/e5-small", "CLS", "MEAN"),  # BertModel
+    ],
+)
+def test_default_seq_pooling_type(model_id, default_pooling_type, pooling_type):
+    model_config = ModelConfig(model_id)
+    assert model_config._model_info.default_seq_pooling_type == default_pooling_type
+    assert model_config.pooler_config.seq_pooling_type == pooling_type
+
+
+@pytest.mark.parametrize(
+    ("model_id", "default_pooling_type", "pooling_type"),
+    [
+        ("Qwen/Qwen2.5-Math-RM-72B", "ALL", "ALL"),  # reward
+        ("Qwen/Qwen2.5-Math-PRM-7B", "STEP", "STEP"),  # step reward
+    ],
+)
+def test_default_tok_pooling_type(model_id, default_pooling_type, pooling_type):
+    model_config = ModelConfig(model_id)
+    assert model_config._model_info.default_tok_pooling_type == default_pooling_type
+    assert model_config.pooler_config.tok_pooling_type == pooling_type
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_is_moe_model"),
+    [
+        ("RedHatAI/Qwen3-8B-speculator.eagle3", False),
+        ("RedHatAI/Llama-3.1-8B-Instruct-NVFP4", False),
+        ("RedHatAI/Llama-3.2-1B-FP8", False),
+        ("RedHatAI/Mistral-Small-24B-Instruct-2501-quantized.w8a8", False),
+        ("RedHatAI/gpt-oss-20b", True),
+        ("RedHatAI/DeepSeek-V2.5-1210-FP8", True),
+        ("RedHatAI/Llama-4-Scout-17B-16E-Instruct", True),
+        ("RedHatAI/Mixtral-8x7B-Instruct-v0.1", True),
+    ],
+)
+def test_moe_model_detection(model_id, expected_is_moe_model):
+    model_config = ModelConfig(model_id)
+    # Just check that is_moe field exists and is a boolean
+    assert model_config.is_moe == expected_is_moe_model
+
+
+@pytest.mark.parametrize(
+    ("model_id", "quantized"),
+    [
+        ("RedHatAI/Qwen3-8B-speculator.eagle3", False),
+        ("RedHatAI/Llama-3.1-8B-Instruct-NVFP4", True),
+        ("RedHatAI/Llama-3.2-1B-FP8", True),
+        ("RedHatAI/Mistral-Small-24B-Instruct-2501-quantized.w8a8", True),
+        ("RedHatAI/gpt-oss-20b", True),
+        ("RedHatAI/DeepSeek-V2.5-1210-FP8", True),
+        ("RedHatAI/Mixtral-8x7B-Instruct-v0.1", False),
+    ],
+)
+def test_is_quantized(model_id, quantized):
+    model_config = ModelConfig(model_id)
+    # Just check that quantized field exists and is a boolean
+    assert model_config.is_quantized == quantized
+
+
+@pytest.mark.skipif(
+    current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
+)
+def test_get_bert_tokenization_sentence_transformer_config():
+    model_id = "BAAI/bge-base-en-v1.5"
+    bge_model_config = ModelConfig(model_id)
+
+    bert_bge_model_config = bge_model_config._get_encoder_config()
+
+    assert bert_bge_model_config["max_seq_length"] == 512
+    assert bert_bge_model_config["do_lower_case"]
+
+
+def test_rope_customization():
+    TEST_ROPE_PARAMETERS = {
+        "rope_theta": 16_000_000.0,
+        "rope_type": "dynamic",
+        "factor": 2.0,
+    }
+    LLAMA_ROPE_PARAMETERS = {"rope_theta": 500000.0, "rope_type": "default"}
+    LONGCHAT_ROPE_PARAMETERS = {"rope_type": "linear", "factor": 8.0}
+
+    llama_model_config = ModelConfig("meta-llama/Meta-Llama-3-8B-Instruct")
+    assert (
+        getattr(llama_model_config.hf_config, "rope_parameters", None)
+        == LLAMA_ROPE_PARAMETERS
+    )
+    assert llama_model_config.max_model_len == 8192
+
+    llama_model_config = ModelConfig(
+        "meta-llama/Meta-Llama-3-8B-Instruct",
+        hf_overrides={"rope_parameters": TEST_ROPE_PARAMETERS},
+    )
+    assert (
+        getattr(llama_model_config.hf_config, "rope_parameters", None)
+        == TEST_ROPE_PARAMETERS
+    )
+    assert llama_model_config.max_model_len == 16384
+
+    longchat_model_config = ModelConfig("lmsys/longchat-13b-16k")
+    # Check if LONGCHAT_ROPE_PARAMETERS entries are in longchat_model_config
+    assert all(
+        longchat_model_config.hf_config.rope_parameters.get(key) == value
+        for key, value in LONGCHAT_ROPE_PARAMETERS.items()
+    )
+    assert longchat_model_config.max_model_len == 16384
+
+    longchat_model_config = ModelConfig(
+        "lmsys/longchat-13b-16k",
+        hf_overrides={
+            "rope_parameters": TEST_ROPE_PARAMETERS,
+        },
+    )
+    assert (
+        getattr(longchat_model_config.hf_config, "rope_parameters", None)
+        == TEST_ROPE_PARAMETERS
+    )
+    assert longchat_model_config.max_model_len == 4096
+
+
+def test_nested_hf_overrides():
+    """Test that nested hf_overrides work correctly."""
+    # Test with a model that has text_config
+    model_config = ModelConfig(
+        "Qwen/Qwen2-VL-2B-Instruct",
+        hf_overrides={
+            "text_config": {
+                "hidden_size": 1024,
+            },
+        },
+    )
+    assert model_config.hf_config.text_config.hidden_size == 1024
+
+    # Test with deeply nested overrides
+    model_config = ModelConfig(
+        "Qwen/Qwen2-VL-2B-Instruct",
+        hf_overrides={
+            "text_config": {
+                "hidden_size": 2048,
+                "num_attention_heads": 16,
+            },
+            "vision_config": {
+                "hidden_size": 512,
+            },
+        },
+    )
+    assert model_config.hf_config.text_config.hidden_size == 2048
+    assert model_config.hf_config.text_config.num_attention_heads == 16
+    assert model_config.hf_config.vision_config.hidden_size == 512
+
+
+def test_model_class_overrides_registers_target():
+    """`model_class_overrides` redirects an architecture to a custom class."""
+    from vllm.model_executor.models import ModelRegistry
+
+    arch = "_TestModelClassOverrideArch"
+    target = "vllm.model_executor.models.llama:LlamaForCausalLM"
+    assert arch not in ModelRegistry.models
+
+    model_config = ModelConfig(
+        "facebook/opt-125m",
+        model_class_overrides={arch: target},
+    )
+    try:
+        # Accessing `.registry` is the chokepoint that applies the overrides;
+        # it has already run during construction.
+        registered = model_config.registry.models[arch]
+        assert registered.module_name == "vllm.model_executor.models.llama"
+        assert registered.class_name == "LlamaForCausalLM"
+        # Idempotent: a second access does not re-register or error out.
+        assert model_config.registry.models[arch] is registered
+    finally:
+        ModelRegistry.models.pop(arch, None)
+
+
+@pytest.mark.skipif(
+    current_platform.is_rocm(), reason="Encoder Decoder models not supported on ROCm."
+)
+@pytest.mark.parametrize(
+    ("model_id", "is_encoder_decoder"),
+    [
+        ("facebook/opt-125m", False),
+        ("openai/whisper-tiny", True),
+        ("meta-llama/Llama-3.2-1B-Instruct", False),
+    ],
+)
+def test_is_encoder_decoder(model_id, is_encoder_decoder):
+    config = ModelConfig(model_id)
+
+    assert config.is_encoder_decoder == is_encoder_decoder
+
+
+@pytest.mark.parametrize(
+    ("model_id", "uses_mrope"),
+    [
+        ("facebook/opt-125m", False),
+        ("Qwen/Qwen2-VL-2B-Instruct", True),
+    ],
+)
+def test_uses_mrope(model_id, uses_mrope):
+    config = ModelConfig(model_id)
+
+    assert config.uses_mrope == uses_mrope
+
+
+def test_generation_config_loading():
+    model_id = "Qwen/Qwen2.5-1.5B-Instruct"
+
+    # When set generation_config to "vllm", the default generation config
+    # will not be loaded.
+    model_config = ModelConfig(model_id, generation_config="vllm")
+    assert model_config.get_diff_sampling_param() == {}
+
+    # When set generation_config to "auto", the default generation config
+    # should be loaded.
+    model_config = ModelConfig(model_id, generation_config="auto")
+
+    correct_generation_config = {
+        "repetition_penalty": 1.1,
+        "temperature": 0.7,
+        "top_p": 0.8,
+        "top_k": 20,
+    }
+
+    assert model_config.get_diff_sampling_param() == correct_generation_config
+
+    # The generation config could be overridden by the user.
+    override_generation_config = {"temperature": 0.5, "top_k": 5}
+
+    model_config = ModelConfig(
+        model_id,
+        generation_config="auto",
+        override_generation_config=override_generation_config,
+    )
+
+    override_result = correct_generation_config.copy()
+    override_result.update(override_generation_config)
+
+    assert model_config.get_diff_sampling_param() == override_result
+
+    # When generation_config is set to "vllm" and override_generation_config
+    # is set, the override_generation_config should be used directly.
+    model_config = ModelConfig(
+        model_id,
+        generation_config="vllm",
+        override_generation_config=override_generation_config,
+    )
+
+    assert model_config.get_diff_sampling_param() == override_generation_config
+
+
+@pytest.mark.parametrize(
+    "pt_load_map_location",
+    [
+        DEVICE_TYPE,
+        {"": DEVICE_TYPE},
+    ],
+)
+def test_load_config_pt_load_map_location(pt_load_map_location):
+    load_config = LoadConfig(pt_load_map_location=pt_load_map_location)
+    config = VllmConfig(load_config=load_config)
+
+    assert config.load_config.pt_load_map_location == pt_load_map_location
+
+
+@pytest.mark.parametrize(
+    ("model_id", "max_model_len", "expected_max_len", "should_raise"),
+    [
+        ("BAAI/bge-reranker-base", None, 512, False),
+        ("BAAI/bge-reranker-base", 256, 256, False),
+        ("BAAI/bge-reranker-base", 513, 512, True),
+        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", None, 131072, False),
+        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", 131073, 131072, True),
+    ],
+)
+def test_get_and_verify_max_len(
+    model_id, max_model_len, expected_max_len, should_raise
+):
+    """Test get_and_verify_max_len with different configurations."""
+    model_config = ModelConfig(model_id)
+
+    if should_raise:
+        with pytest.raises(ValueError):
+            model_config.get_and_verify_max_len(max_model_len)
+    else:
+        actual_max_len = model_config.get_and_verify_max_len(max_model_len)
+        assert actual_max_len == expected_max_len
+
+
+class MockConfig:
+    """Simple mock object for testing maybe_pull_model_tokenizer_for_runai"""
+
+    def __init__(self, model: str, tokenizer: str):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.model_weights = None
+
+
+@pytest.mark.parametrize(
+    "s3_url",
+    [
+        "s3://example-bucket-1/model/",
+        "s3://example-bucket-2/model/",
+    ],
+)
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_s3_url_model_tokenizer_paths(mock_pull_files, s3_url):
+    """Test that S3 URLs create deterministic local directories for model and
+    tokenizer."""
+    # Mock pull_files to avoid actually downloading files during tests
+    mock_pull_files.return_value = None
+
+    # Create first mock and run the method
+    config1 = MockConfig(model=s3_url, tokenizer=s3_url)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(config1, s3_url, s3_url)
+
+    # Check that model and tokenizer point to existing directories
+    assert os.path.exists(config1.model), (
+        f"Model directory does not exist: {config1.model}"
+    )
+    assert os.path.isdir(config1.model), (
+        f"Model path is not a directory: {config1.model}"
+    )
+    assert os.path.exists(config1.tokenizer), (
+        f"Tokenizer directory does not exist: {config1.tokenizer}"
+    )
+    assert os.path.isdir(config1.tokenizer), (
+        f"Tokenizer path is not a directory: {config1.tokenizer}"
+    )
+
+    # Verify that the paths are different from the original S3 URL
+    assert config1.model != s3_url, "Model path should be converted to local directory"
+    assert config1.tokenizer != s3_url, (
+        "Tokenizer path should be converted to local directory"
+    )
+
+    # Store the original paths
+    created_model_dir = config1.model
+    create_tokenizer_dir = config1.tokenizer
+
+    # Create a new mock and run the method with the same S3 URL
+    config2 = MockConfig(model=s3_url, tokenizer=s3_url)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(config2, s3_url, s3_url)
+
+    # Check that the new directories exist
+    assert os.path.exists(config2.model), (
+        f"Model directory does not exist: {config2.model}"
+    )
+    assert os.path.isdir(config2.model), (
+        f"Model path is not a directory: {config2.model}"
+    )
+    assert os.path.exists(config2.tokenizer), (
+        f"Tokenizer directory does not exist: {config2.tokenizer}"
+    )
+    assert os.path.isdir(config2.tokenizer), (
+        f"Tokenizer path is not a directory: {config2.tokenizer}"
+    )
+
+    # Verify that the paths are deterministic (same as before)
+    assert config2.model == created_model_dir, (
+        f"Model paths are not deterministic. "
+        f"Original: {created_model_dir}, New: {config2.model}"
+    )
+    assert config2.tokenizer == create_tokenizer_dir, (
+        f"Tokenizer paths are not deterministic. "
+        f"Original: {create_tokenizer_dir}, New: {config2.tokenizer}"
+    )
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_s3_url_different_models_create_different_directories(mock_pull_files):
+    """Test that different S3 URLs create different local directories."""
+    # Mock pull_files to avoid actually downloading files during tests
+    mock_pull_files.return_value = None
+
+    s3_url1 = "s3://example-bucket-1/model/"
+    s3_url2 = "s3://example-bucket-2/model/"
+
+    # Create mocks with different S3 URLs and run the method
+    config1 = MockConfig(model=s3_url1, tokenizer=s3_url1)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(config1, s3_url1, s3_url1)
+
+    config2 = MockConfig(model=s3_url2, tokenizer=s3_url2)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(config2, s3_url2, s3_url2)
+
+    # Verify that different URLs produce different directories
+    assert config1.model != config2.model, (
+        f"Different S3 URLs should create different model directories. "
+        f"URL1 model: {config1.model}, URL2 model: {config2.model}"
+    )
+    assert config1.tokenizer != config2.tokenizer, (
+        f"Different S3 URLs should create different tokenizer directories. "
+        f"URL1 tokenizer: {config1.tokenizer}, "
+        f"URL2 tokenizer: {config2.tokenizer}"
+    )
+
+    # Verify that both sets of directories exist
+    assert os.path.exists(config1.model) and os.path.isdir(config1.model)
+    assert os.path.exists(config1.tokenizer) and os.path.isdir(config1.tokenizer)
+    assert os.path.exists(config2.model) and os.path.isdir(config2.model)
+    assert os.path.exists(config2.tokenizer) and os.path.isdir(config2.tokenizer)
+
+
+@patch("vllm.transformers_utils.runai_utils.ObjectStorageModel.pull_files")
+def test_s3_url_different_model_and_tokenizer(mock_pull_files):
+    """Test that when model and tokenizer are different cloud URIs,
+    pull_files receives the correct URI for each."""
+    mock_pull_files.return_value = None
+
+    model_url = "s3://bucket/model/"
+    tokenizer_url = "s3://bucket/tokenizer/"
+
+    config = MockConfig(model=model_url, tokenizer=tokenizer_url)
+    ModelConfig.maybe_pull_model_tokenizer_for_runai(config, model_url, tokenizer_url)
+
+    # pull_files should be called twice: once for model, once for tokenizer
+    assert mock_pull_files.call_count == 2
+    # First call: model URI with allow_pattern
+    assert mock_pull_files.call_args_list[0][0][0] == model_url
+    # Second call: tokenizer URI with ignore_pattern
+    assert mock_pull_files.call_args_list[1][0][0] == tokenizer_url
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_attn_type", "expected_result", "reason"),
+    [
+        # pooling models
+        (
+            "jason9693/Qwen2.5-1.5B-apeach",
+            "decoder",
+            True,
+            "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
+        ),
+        (
+            "Qwen/Qwen3-Embedding-0.6B",
+            "decoder",
+            True,
+            "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
+        ),
+        (
+            "Qwen/Qwen2.5-Math-PRM-7B",
+            "decoder",
+            False,
+            "Pooling models with causal attn and LAST/STEP pooling do not support chunked prefill.",  # noqa: E501
+        ),
+        (
+            "internlm/internlm2-1_8b-reward",
+            "decoder",
+            True,
+            "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
+        ),
+        (
+            "BAAI/bge-base-en",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
+        ),
+        (
+            "boltuix/NeuroBERT-NER",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
+        ),
+        (
+            "papluca/xlm-roberta-base-language-detection",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
+        ),
+        (
+            "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
+        ),
+        (
+            "intfloat/e5-small",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
+        ),
+        # multimodal models
+        (
+            "openai/clip-vit-base-patch32",
+            "decoder",
+            True,
+            "Pooling models with causal attn and LAST/ALL pooling support chunked prefill.",  # noqa: E501
+        ),
+        (
+            "google/siglip-base-patch16-224",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn do not support chunked prefill.",  # noqa: E501
+        ),
+        # generate models
+        (
+            "Qwen/Qwen3-0.6B",
+            "decoder",
+            True,
+            "Generative models support chunked prefill.",  # noqa: E501
+        ),
+        (
+            "Qwen/Qwen3-Next-80B-A3B-Instruct",
+            "hybrid",
+            True,
+            "Generative models support chunked prefill.",  # noqa: E501
+        ),
+        (
+            "ibm-granite/granite-4.0-h-small",
+            "hybrid",
+            True,
+            "Generative models support chunked prefill.",  # noqa: E501
+        ),
+        (
+            "state-spaces/mamba-130m-hf",
+            "attention_free",
+            True,
+            "Generative models support chunked prefill.",  # noqa: E501
+        ),
+        # encoder_decoder models
+        (
+            "openai/whisper-small",
+            "encoder_decoder",
+            False,
+            "Encoder decoder models do not support chunked prefill.",  # noqa: E501
+        ),
+    ],
+)
+def test_is_chunked_prefill_supported(
+    model_id: str,
+    expected_attn_type: str,
+    expected_result: bool,
+    reason: str,
+    caplog_vllm,
+):
+    model_config = ModelConfig(model_id, trust_remote_code=True)
+    assert model_config.attn_type == expected_attn_type
+    with caplog_vllm.at_level(level=logging.DEBUG, logger="vllm"):
+        assert model_config.is_chunked_prefill_supported == expected_result
+    assert reason in caplog_vllm.text
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_attn_type", "expected_result", "reason"),
+    [
+        # pooling models
+        (
+            "jason9693/Qwen2.5-1.5B-apeach",
+            "decoder",
+            True,
+            "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
+        ),
+        (
+            "Qwen/Qwen3-Embedding-0.6B",
+            "decoder",
+            True,
+            "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
+        ),
+        (
+            "Qwen/Qwen2.5-Math-PRM-7B",
+            "decoder",
+            False,
+            "Pooling models with causal attn and LAST/STEP pooling do not support prefix caching.",  # noqa: E501
+        ),
+        (
+            "internlm/internlm2-1_8b-reward",
+            "decoder",
+            True,
+            "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
+        ),
+        (
+            "BAAI/bge-base-en",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
+        ),
+        (
+            "boltuix/NeuroBERT-NER",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
+        ),
+        (
+            "papluca/xlm-roberta-base-language-detection",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
+        ),
+        (
+            "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
+        ),
+        (
+            "intfloat/e5-small",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
+        ),
+        # multimodal models
+        (
+            "openai/clip-vit-base-patch32",
+            "decoder",
+            True,
+            "Pooling models with causal attn and LAST/ALL pooling support prefix caching.",  # noqa: E501
+        ),
+        (
+            "google/siglip-base-patch16-224",
+            "encoder_only",
+            False,
+            "Pooling models with bidirectional attn do not support prefix caching.",  # noqa: E501
+        ),
+        # generate models
+        (
+            "Qwen/Qwen3-0.6B",
+            "decoder",
+            True,
+            "Generative models support prefix caching.",  # noqa: E501
+        ),
+        (
+            "Qwen/Qwen3-Next-80B-A3B-Instruct",
+            "hybrid",
+            True,
+            "Generative hybrid models support prefix caching.",  # noqa: E501
+        ),
+        (
+            "ibm-granite/granite-4.0-h-small",
+            "hybrid",
+            True,
+            "Generative hybrid models support prefix caching.",  # noqa: E501
+        ),
+        (
+            "state-spaces/mamba-130m-hf",
+            "attention_free",
+            False,
+            "Attention free models do not support prefix caching since the feature is still experimental.",  # noqa: E501
+        ),
+        # encoder_decoder models
+        (
+            "openai/whisper-small",
+            "encoder_decoder",
+            False,
+            "Encoder decoder models do not support prefix caching.",  # noqa: E501
+        ),
+    ],
+)
+def test_is_prefix_caching_supported(
+    model_id: str,
+    expected_attn_type: str,
+    expected_result: bool,
+    reason: str,
+    caplog_vllm,
+):
+    model_config = ModelConfig(model_id, trust_remote_code=True)
+    assert model_config.attn_type == expected_attn_type
+    with caplog_vllm.at_level(level=logging.DEBUG, logger="vllm"):
+        assert model_config.is_prefix_caching_supported == expected_result
+    assert reason in caplog_vllm.text
+
+
+@pytest.mark.parametrize(
+    ("backend", "custom_ops", "expected"),
+    [
+        ("eager", [], True),
+        ("eager", ["+fused_layernorm"], True),
+        ("eager", ["all", "-fused_layernorm"], False),
+        ("inductor", [], False),
+        ("inductor", ["none", "+fused_layernorm"], True),
+        ("inductor", ["none", "-fused_layernorm"], False),
+    ],
+)
+def test_is_custom_op_enabled(backend: str, custom_ops: list[str], expected: bool):
+    """Test that is_custom_op_enabled works correctly."""
+    config = VllmConfig(
+        compilation_config=CompilationConfig(backend=backend, custom_ops=custom_ops)
+    )
+    assert config.compilation_config.is_custom_op_enabled("fused_layernorm") is expected
+
+
+def test_vllm_config_defaults_are_none():
+    """Verify that optimization-level defaults are None when not set by user."""
+    # Test all optimization levels to ensure defaults work correctly
+    for opt_level in OptimizationLevel:
+        config = object.__new__(VllmConfig)
+        config.compilation_config = CompilationConfig()
+        config.optimization_level = opt_level
+        config.model_config = None
+
+        # Use the global optimization level defaults
+        default_config = OPTIMIZATION_LEVEL_TO_CONFIG[opt_level]
+
+        # Verify that all pass_config values are None before defaults are applied
+        for pass_k in default_config["compilation_config"]["pass_config"]:
+            assert getattr(config.compilation_config.pass_config, pass_k) is None
+
+        # Verify that other config values are None before defaults are applied
+        for k in default_config["compilation_config"]:
+            if k != "pass_config":
+                assert getattr(config.compilation_config, k) is None
+
+
+def test_validate_mamba_align_subblock_prefill():
+    """Align mode permits configured prefill chunks smaller than a block."""
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=11392,
+            mamba_cache_mode="align",
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+        ),
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=8192,
+            long_prefill_token_threshold=4096,
+            disable_chunked_mm_input=False,
+        ),
+    )
+
+    VllmConfig.validate_block_size(config)
+
+
+@pytest.mark.parametrize(
+    ("model_id", "compilation_config", "optimization_level"),
+    [
+        (
+            None,
+            CompilationConfig(backend="eager", custom_ops=["+quant_fp8"]),
+            OptimizationLevel.O0,
+        ),
+        (None, CompilationConfig(), OptimizationLevel.O0),
+        (None, CompilationConfig(), OptimizationLevel.O1),
+        (None, CompilationConfig(), OptimizationLevel.O2),
+        (None, CompilationConfig(), OptimizationLevel.O3),
+        (
+            "RedHatAI/Qwen3-8B-speculator.eagle3",
+            CompilationConfig(backend="inductor", custom_ops=["+quant_fp8"]),
+            OptimizationLevel.O2,
+        ),
+        (
+            "RedHatAI/Qwen3-8B-speculator.eagle3",
+            CompilationConfig(),
+            OptimizationLevel.O0,
+        ),
+        (
+            "RedHatAI/Qwen3-8B-speculator.eagle3",
+            CompilationConfig(),
+            OptimizationLevel.O1,
+        ),
+        (
+            "RedHatAI/Qwen3-8B-speculator.eagle3",
+            CompilationConfig(),
+            OptimizationLevel.O2,
+        ),
+        (
+            "RedHatAI/Qwen3-8B-speculator.eagle3",
+            CompilationConfig(),
+            OptimizationLevel.O3,
+        ),
+        ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O0),
+        ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O1),
+        ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O2),
+        ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O3),
+    ],
+)
+def test_vllm_config_defaults(model_id, compilation_config, optimization_level):
+    """Test that optimization-level defaults are correctly applied."""
+
+    model_config = None
+    if model_id is not None:
+        model_config = ModelConfig(model_id)
+        vllm_config = VllmConfig(
+            model_config=model_config,
+            compilation_config=compilation_config,
+            optimization_level=optimization_level,
+        )
+    else:
+        vllm_config = VllmConfig(
+            compilation_config=compilation_config,
+            optimization_level=optimization_level,
+        )
+    # Use the global optimization level defaults
+    default_config = OPTIMIZATION_LEVEL_TO_CONFIG[optimization_level]
+
+    # Verify pass_config defaults (nested under compilation_config)
+    pass_config_dict = default_config["compilation_config"]["pass_config"]
+    for pass_k, pass_v in pass_config_dict.items():
+        actual = getattr(vllm_config.compilation_config.pass_config, pass_k)
+        expected = pass_v(vllm_config) if callable(pass_v) else pass_v
+        assert actual == expected, (
+            f"pass_config.{pass_k}: expected {expected}, got {actual}"
+        )
+
+    # Verify other compilation_config defaults
+    compilation_config_dict = default_config["compilation_config"]
+    for k, v in compilation_config_dict.items():
+        if k == "pass_config":
+            continue
+        actual = getattr(vllm_config.compilation_config, k)
+        expected = v(vllm_config) if callable(v) else v
+        # On platforms without static graph support, __post_init__ forces
+        # cudagraph_mode to NONE; expect that instead of the level default.
+        if k == "cudagraph_mode" and not current_platform.support_static_graph_mode():
+            expected = CUDAGraphMode.NONE
+        assert actual == expected, (
+            f"compilation_config.{k}: expected {expected}, got {actual}"
+        )
+
+
+def test_vllm_config_callable_defaults():
+    """Test that callable defaults work in the config system.
+
+    Verifies that lambdas in default configs can inspect VllmConfig properties
+    (e.g., is_quantized, is_model_moe) to conditionally set optimization flags.
+    """
+    config_no_model = VllmConfig(optimization_level=OptimizationLevel.O2)
+
+    # Callable that checks if model exists
+    has_model = lambda cfg: cfg.model_config is not None
+    assert has_model(config_no_model) is False
+
+    # Test with quantized model
+    quantized_model = ModelConfig("RedHatAI/Llama-3.2-1B-FP8")
+    config_quantized = VllmConfig(
+        model_config=quantized_model, optimization_level=OptimizationLevel.O2
+    )
+    enable_if_quantized = lambda cfg: (
+        cfg.model_config is not None and cfg.model_config.is_quantized
+    )
+    assert enable_if_quantized(config_quantized) is True
+    assert enable_if_quantized(config_no_model) is False
+
+    # Test with MoE model
+    moe_model = ModelConfig("deepseek-ai/DeepSeek-V2-Lite")
+    config_moe = VllmConfig(
+        model_config=moe_model, optimization_level=OptimizationLevel.O2
+    )
+    enable_if_sequential = lambda cfg: (
+        cfg.model_config is not None and not cfg.model_config.is_moe
+    )
+    assert enable_if_sequential(config_moe) is False
+    assert enable_if_sequential(config_quantized) is True
+
+
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Explicit overrides may be force-overwritten without static graph support.",
+)
+def test_vllm_config_explicit_overrides():
+    """Test that explicit property overrides work correctly with callable defaults.
+
+    When users explicitly set configuration properties, those values
+    take precedence over callable defaults, across different models and
+    optimization levels.
+    """
+    from vllm.config.compilation import PassConfig
+
+    quantized_model = ModelConfig("RedHatAI/Llama-3.2-1B-FP8")
+    moe_model = ModelConfig("deepseek-ai/DeepSeek-V2-Lite")
+    regular_model = ModelConfig("Qwen/Qwen1.5-7B")
+
+    # Explicit compilation mode override on O0 (where default is NONE)
+    compilation_config = CompilationConfig(mode=CompilationMode.VLLM_COMPILE)
+    config = VllmConfig(
+        optimization_level=OptimizationLevel.O0,
+        compilation_config=compilation_config,
+    )
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+
+    # Explicit pass config flags to override defaults
+    pass_config = PassConfig(eliminate_noops=True, fuse_attn_quant=True)
+    compilation_config = CompilationConfig(pass_config=pass_config)
+    config = VllmConfig(
+        optimization_level=OptimizationLevel.O0,
+        compilation_config=compilation_config,
+    )
+    assert config.compilation_config.pass_config.eliminate_noops is True
+    assert config.compilation_config.pass_config.fuse_attn_quant is True
+
+    # Explicit cudagraph mode override on quantized model at O2
+    pass_config = PassConfig(enable_qk_norm_rope_fusion=True)
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.NONE, pass_config=pass_config
+    )
+    config = VllmConfig(
+        model_config=quantized_model,
+        optimization_level=OptimizationLevel.O2,
+        compilation_config=compilation_config,
+    )
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+    assert config.compilation_config.pass_config.enable_qk_norm_rope_fusion is (
+        current_platform.is_cuda_alike() or current_platform.is_xpu()
+    )
+    # Mode should still use default for O2
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+
+    # Different optimization levels with same model
+    config_o0 = VllmConfig(
+        model_config=regular_model, optimization_level=OptimizationLevel.O0
+    )
+    config_o2 = VllmConfig(
+        model_config=regular_model, optimization_level=OptimizationLevel.O2
+    )
+    assert config_o0.compilation_config.mode == CompilationMode.NONE
+    assert config_o2.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert config_o0.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+    assert (
+        config_o2.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+
+    # Same optimization level across different model types
+    config_moe_o2 = VllmConfig(
+        model_config=moe_model, optimization_level=OptimizationLevel.O2
+    )
+    config_regular_o2 = VllmConfig(
+        model_config=regular_model, optimization_level=OptimizationLevel.O2
+    )
+    config_quantized_o2 = VllmConfig(
+        model_config=quantized_model, optimization_level=OptimizationLevel.O2
+    )
+    # All should have same base compilation settings at O2
+    assert config_moe_o2.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert config_regular_o2.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert config_quantized_o2.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert (
+        config_moe_o2.compilation_config.cudagraph_mode
+        == CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    assert (
+        config_regular_o2.compilation_config.cudagraph_mode
+        == CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+
+    # Override one field but not others
+    pass_config = PassConfig(eliminate_noops=False)
+    compilation_config = CompilationConfig(pass_config=pass_config)
+    config = VllmConfig(
+        model_config=regular_model,
+        optimization_level=OptimizationLevel.O2,
+        compilation_config=compilation_config,
+    )
+    # Explicit override should be respected
+    assert config.compilation_config.pass_config.eliminate_noops is False
+    # Other fields should still use defaults
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+
+
+def test_fusion_pass_op_priority():
+    """This test checks that custom op enablement & IR op priority
+    correctly control default fusions"""
+
+    # Default config, O2, rms_norm+quant fusion disabled
+    cfg1 = VllmConfig()
+    assert not cfg1.compilation_config.pass_config.fuse_norm_quant
+
+    # rms_norm manually enabled, O1, rms_norm+quant fusion enabled
+    cfg2 = VllmConfig(
+        optimization_level=OptimizationLevel.O1,
+        compilation_config=CompilationConfig(
+            custom_ops=["+rms_norm"],
+        ),
+    )
+    assert cfg2.compilation_config.pass_config.fuse_norm_quant
+
+    # using custom kernel for RMSNorm via IR:
+    # Note that vLLM IR only supports the non-residual rms_norm for now;
+    # soon this will be resolved.
+    cfg3 = VllmConfig(
+        kernel_config=KernelConfig(
+            ir_op_priority=IrOpPriorityConfig(rms_norm=["vllm_c"])
+        )
+    )
+    assert cfg3.compilation_config.pass_config.fuse_norm_quant
+
+    # block-fp8 model should enable quant_fp8 automatically
+    cfg4 = VllmConfig(model_config=ModelConfig("Qwen/Qwen3-4B-FP8"))
+    assert "+quant_fp8" in cfg4.compilation_config.custom_ops
+    assert cfg4.compilation_config.pass_config.fuse_norm_quant
+
+
+def test_scheduler_config_init():
+    with pytest.raises(ValidationError):
+        # Positional InitVars missing
+        # (InitVars cannot have defaults otherwise they will become attributes)
+        SchedulerConfig()
+
+    with pytest.raises(AttributeError):
+        # InitVar does not become an attribute
+        print(SchedulerConfig.default_factory().max_model_len)
+
+
+@pytest.mark.parametrize(
+    (
+        "model_id",
+        "data_parallel_size",
+        "external_lb",
+        "expected_needs_coordinator",
+    ),
+    [
+        # Non-MoE model with DP=1 should not need coordinator
+        ("facebook/opt-125m", 1, False, False),
+        # Non-MoE model with DP>1 internal LB should need coordinator
+        ("facebook/opt-125m", 2, False, True),
+        # MoE model with DP=1 should not need coordinator
+        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 1, False, False),
+        # MoE model with DP>1 internal LB should need both coordinator
+        # and wave coordination
+        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 2, False, True),
+        # MoE model with DP>1 external LB needs coordinator for wave coordination
+        # (wave coordination runs in coordinator process)
+        ("mistralai/Mixtral-8x7B-Instruct-v0.1", 2, True, True),
+    ],
+)
+def test_needs_dp_coordination(
+    model_id,
+    data_parallel_size,
+    external_lb,
+    expected_needs_coordinator,
+):
+    """Test that DP coordinator and wave coordination are configured correctly."""
+    from vllm.config import ParallelConfig
+
+    model_config = ModelConfig(model_id)
+    parallel_config = ParallelConfig(
+        data_parallel_size=data_parallel_size,
+        data_parallel_external_lb=external_lb,
+    )
+    vllm_config = VllmConfig(model_config=model_config, parallel_config=parallel_config)
+
+    assert vllm_config.needs_dp_coordinator == expected_needs_coordinator
+
+
+def test_fault_tolerance_requires_single_api_server():
+    """Fault tolerance assumes one AsyncMPClient manages all engines, so it
+    is incompatible with API server scale-out (_api_process_count > 1)."""
+    with pytest.raises(ValueError, match="single API server"):
+        ParallelConfig(enable_fault_tolerance=True, _api_process_count=2)
+
+    # Single API server (the FT-supported topology) is accepted.
+    ParallelConfig(enable_fault_tolerance=True, _api_process_count=1)
+
+
+def test_renderer_num_workers_with_mm_cache():
+    """Disallow renderer_num_workers > 1 with the mm processor cache only for
+    pooling models, whose preprocessing runs on the renderer workers."""
+    mm_model = "Qwen/Qwen2-VL-2B-Instruct"
+
+    # Should raise: pooling + multi-worker + cache enabled (default cache_gb=4)
+    with pytest.raises(ValueError, match="renderer-num-workers"):
+        ModelConfig(mm_model, runner="pooling", renderer_num_workers=4)
+
+    # Should raise: pooling + multi-worker + explicit cache size
+    with pytest.raises(ValueError, match="renderer-num-workers"):
+        ModelConfig(
+            mm_model,
+            runner="pooling",
+            renderer_num_workers=2,
+            mm_processor_cache_gb=1.0,
+        )
+
+    # Should pass: pooling + multi-worker + cache disabled
+    config = ModelConfig(
+        mm_model, runner="pooling", renderer_num_workers=4, mm_processor_cache_gb=0
+    )
+    assert config.renderer_num_workers == 4
+
+    # Should pass: generate models preprocess on the dedicated mm executor
+    config = ModelConfig(mm_model, renderer_num_workers=4)
+    assert config.renderer_num_workers == 4
+
+    # Should pass: single worker + cache enabled (default)
+    config = ModelConfig(mm_model, renderer_num_workers=1)
+    assert config.renderer_num_workers == 1
+
+
+def test_eagle_draft_model_config():
+    """Test that EagleDraft model config is correctly set."""
+    target_model_config = ModelConfig(
+        "meta-llama/Meta-Llama-3-8B-Instruct", trust_remote_code=True
+    )
+    speculative_config = SpeculativeConfig(
+        model="yuhuili/EAGLE-LLaMA3-Instruct-8B",
+        num_speculative_tokens=1,
+        target_model_config=target_model_config,
+        target_parallel_config=ParallelConfig(),
+    )
+    draft_model_config = speculative_config.draft_model_config
+    assert draft_model_config.hf_config.architectures == ["EagleLlamaForCausalLM"]
+    assert draft_model_config.hf_text_config.architectures == ["EagleLlamaForCausalLM"]
+    assert draft_model_config.hf_config.model_type == "eagle"
+    assert draft_model_config.hf_text_config.model_type == "eagle"
+    assert draft_model_config.architectures == ["EagleLlamaForCausalLM"]
+    assert draft_model_config.architecture == "EagleLlamaForCausalLM"
+
+
+def test_draft_sample_method_probabilistic_is_accepted():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+        draft_sample_method="probabilistic",
+    )
+    assert speculative_config.draft_sample_method == "probabilistic"
+
+
+def test_draft_sample_method_gumbel_is_rejected():
+    with pytest.raises(ValidationError):
+        SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=1,
+            draft_sample_method="gumbel",
+        )
+
+
+@patch("vllm.config.speculative.ModelConfig")
+def test_mtp_draft_uses_model_weights_not_local_cache(mock_model_config_cls):
+    """Regression test: MTP + runai_streamer should use model_weights (original
+    S3 URL) for the draft model, not model (local cache dir set by
+    pull_runai_model_from_obj_storage)."""
+    from unittest.mock import MagicMock
+
+    s3_url = "s3://my-bucket/Qwen3-35B-A3B-FP8"
+    local_cache = "/root/.cache/vllm/assets/model_streamer/abcd1234"
+
+    mock_draft = MagicMock()
+    mock_draft.model = local_cache
+    mock_draft.hf_config.model_type = "deepseek_mtp"
+    mock_draft.hf_config.n_predict = None
+    mock_draft.max_model_len = 4096
+    mock_model_config_cls.return_value = mock_draft
+
+    target_config = MagicMock()
+    target_config.model = local_cache
+    target_config.model_weights = s3_url
+    target_config.hf_text_config.model_type = "deepseek_v3"
+    target_config.quantization = None
+    target_config.max_model_len = 4096
+
+    SpeculativeConfig(
+        method="mtp",
+        num_speculative_tokens=1,
+        target_model_config=target_config,
+        target_parallel_config=ParallelConfig(),
+    )
+
+    actual_model = mock_model_config_cls.call_args.kwargs["model"]
+    assert actual_model == s3_url
+
+
+def _make_qwen3_omni_dspark_configs():
+    text_config = SimpleNamespace(
+        hidden_size=2048,
+        num_hidden_layers=48,
+        num_attention_heads=32,
+        num_key_value_heads=4,
+        head_dim=128,
+        vocab_size=152064,
+    )
+    target_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(
+            model_type="qwen3_omni_moe",
+            architectures=["Qwen3OmniMoeForConditionalGeneration"],
+            thinker_config=SimpleNamespace(text_config=text_config),
+        ),
+        hf_text_config=text_config,
+        architectures=["Qwen3OmniMoeForConditionalGeneration"],
+        get_hidden_size=lambda: 2048,
+        get_total_num_hidden_layers=lambda: 48,
+        get_vocab_size=lambda: 152064,
+    )
+    draft_hf_config = SimpleNamespace(
+        model_type="qwen3",
+        architectures=["Qwen3OmniDSparkModel"],
+        hidden_size=2048,
+        num_attention_heads=32,
+        num_key_value_heads=4,
+        head_dim=128,
+        block_size=7,
+        target_hidden_size=2048,
+        target_layer_ids=[1, 9, 17, 25, 33],
+        use_aux_hidden_state=True,
+        markov_rank=64,
+        markov_head_type="vanilla",
+        sample_from_anchor=True,
+        dspark_bonus_anchor=False,
+        vocab_size=152064,
+        draft_vocab_size=32000,
+        mask_token_id=151669,
+        rope_parameters={"rope_type": "default", "rope_theta": 1000000.0},
+    )
+    draft_model_config = SimpleNamespace(
+        hf_config=draft_hf_config,
+        architectures=["Qwen3OmniDSparkModel"],
+    )
+    return target_model_config, draft_model_config
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_dspark_checkpoint_contract_is_accepted():
+    target_config, draft_config = _make_qwen3_omni_dspark_configs()
+    _validate_qwen3_omni_dspark(target_config, draft_config, 7)
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_dspark_rejects_generic_qwen3_architecture():
+    target_config, draft_config = _make_qwen3_omni_dspark_configs()
+    draft_config.hf_config.architectures = ["Qwen3DSparkModel"]
+    draft_config.architectures = ["Qwen3DSparkModel"]
+
+    with pytest.raises(ValueError, match="must be converted first"):
+        _validate_qwen3_omni_dspark(target_config, draft_config, 7)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("block_size", 5, "trained block_size"),
+        ("target_hidden_size", 4096, "target_hidden_size"),
+        ("hidden_size", 4096, "draft hidden_size"),
+        ("num_attention_heads", 16, "num_attention_heads"),
+        ("num_key_value_heads", 8, "num_key_value_heads"),
+        ("head_dim", 64, "head_dim"),
+        ("target_layer_ids", [7, 48], "zero-based text-layer"),
+        ("target_layer_ids", [23, 7], "strictly increasing"),
+        ("use_aux_hidden_state", False, "use_aux_hidden_state=true"),
+        ("markov_rank", 0, "markov_rank"),
+        ("markov_head_type", "gated", "markov_head_type='vanilla'"),
+        ("sample_from_anchor", False, "sample_from_anchor=true"),
+        ("dspark_bonus_anchor", True, "dspark_bonus_anchor=false"),
+        ("vocab_size", 0, "input vocab_size must be a positive integer"),
+    ],
+)
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_dspark_rejects_incompatible_checkpoint_fields(field, value, error):
+    target_config, draft_config = _make_qwen3_omni_dspark_configs()
+    setattr(draft_config.hf_config, field, value)
+
+    with pytest.raises(ValueError, match=error):
+        _validate_qwen3_omni_dspark(target_config, draft_config, 7)
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_dspark_rejects_mrope_draft_positions():
+    target_config, draft_config = _make_qwen3_omni_dspark_configs()
+    draft_config.hf_config.rope_parameters["mrope_section"] = [24, 20, 20]
+
+    with pytest.raises(ValueError, match="logical 1-D RoPE"):
+        _validate_qwen3_omni_dspark(target_config, draft_config, 7)
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_dspark_allows_draft_only_noise_token_row():
+    target_config, draft_config = _make_qwen3_omni_dspark_configs()
+    draft_config.hf_config.vocab_size = 152065
+    draft_config.hf_config.draft_vocab_size = 152064
+    draft_config.hf_config.mask_token_id = 152064
+
+    _validate_qwen3_omni_dspark(target_config, draft_config, 7)
+
+
+@pytest.mark.skip_global_cleanup
+def test_qwen3_omni_dspark_allows_smaller_input_vocabulary():
+    target_config, draft_config = _make_qwen3_omni_dspark_configs()
+    draft_config.hf_config.vocab_size = 151936
+    draft_config.hf_config.mask_token_id = 151669
+
+    _validate_qwen3_omni_dspark(target_config, draft_config, 7)
+
+
+def test_ir_op_priority_default():
+    """Test that IR op priority defaults are set correctly."""
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    # Assert default is applied to ops
+    priority_config = IrOpPriorityConfig.with_default(["vllm_c", "native"])
+    assert priority_config.rms_norm == ["vllm_c", "native"]
+    assert priority_config.fused_add_rms_norm == ["vllm_c", "native"]
+
+    # Assert single ops override the default
+    priority_config = IrOpPriorityConfig.with_default(
+        ["native"], rms_norm=["oink", "native"]
+    )
+    assert priority_config.rms_norm == ["oink", "native"]
+    assert priority_config.fused_add_rms_norm == ["native"]
+
+
+def test_ir_op_priority_str():
+    """Test that passing a comma-delimited string works"""
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    priority_config = IrOpPriorityConfig(rms_norm="vllm_c")
+    assert priority_config.rms_norm == ["vllm_c"]
+
+    priority_config = IrOpPriorityConfig(rms_norm="vllm_c,native")
+    assert priority_config.rms_norm == ["vllm_c", "native"]
+
+    priority_config = IrOpPriorityConfig(rms_norm=" native, vllm_c ")
+    assert priority_config.rms_norm == ["native", "vllm_c"]
+
+    with pytest.raises(pydantic.ValidationError):
+        # must be list of only strings
+        priority_config = IrOpPriorityConfig(rms_norm=["vllm_c", 4, "native"])
+
+
+def test_ir_op_priority_ctx():
+    """Test that the priority-setting context sets priority correctly."""
+    from vllm import ir
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    priority = IrOpPriorityConfig.with_default(["native"], rms_norm=["vllm_c"])
+    priority2 = IrOpPriorityConfig.with_default(
+        ["native"], fused_add_rms_norm=["vllm_c"]
+    )
+    with priority.set_priority():
+        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
+        with priority2.set_priority():
+            assert ir.ops.rms_norm.get_priority() == ["native"]
+            assert ir.ops.fused_add_rms_norm.get_priority() == ["vllm_c", "native"]
+
+        # context restored
+        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
+
+        with pytest.raises(ValueError), priority2.set_priority():
+            assert ir.ops.rms_norm.get_priority() == ["native"]
+            assert ir.ops.fused_add_rms_norm.get_priority() == ["vllm_c", "native"]
+
+            raise ValueError
+
+        # context restored even after exception
+        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
+
+
+def test_load_config_rejects_invalid_safetensors_load_strategy():
+    with pytest.raises(pydantic.ValidationError):
+        LoadConfig(safetensors_load_strategy="not_a_real_strategy")
+
+
+@pytest.mark.parametrize("bad_load_format", [None, 123])
+def test_load_config_rejects_non_string_load_format(bad_load_format):
+    with pytest.raises(pydantic.ValidationError):
+        LoadConfig(load_format=bad_load_format)
+
+
+# A real Qwen3-0.6B model revision that is used in the tests below.
+REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
+
+
+@patch("vllm.config.model.resolve_revision", return_value=ResolvedRevision(REVISION))
+def test_revision_not_resolved_when_weights_differ_from_model(mock_resolve):
+    model_weights = "unsloth/Qwen3-0.6B-GGUF:Q8_0"
+    config = ModelConfig("Qwen/Qwen3-0.6B", model_weights=model_weights)
+    assert config.revision is None
+
+
+@patch("vllm.config.model.resolve_revision", return_value=ResolvedRevision(REVISION))
+def test_revision_resolved_when_weights_match_model(mock_resolve):
+    model = "Qwen/Qwen3-0.6B"
+    config = ModelConfig(model)
+    assert isinstance(config.revision, ResolvedRevision)
+    assert config.revision.resolved == REVISION
+    mock_resolve.assert_any_call(model, None, config.hf_token)

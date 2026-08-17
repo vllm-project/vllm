@@ -1,0 +1,86 @@
+{
+  "_comment": "Auto-generated from Dockerfile ARGs. Do not edit manually. Run: python tools/generate_versions_json.py",
+  "variable": {
+    "CUDA_VERSION": {
+      "default": "13.0.3"
+    },
+    "PYTHON_VERSION": {
+      "default": "3.12"
+    },
+    "UBUNTU_VERSION": {
+      "default": "24.04"
+    },
+    "NCCL_VERSION": {
+      "default": "2.30.7"
+    },
+    "BUILD_BASE_IMAGE": {
+      "default": "pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359"
+    },
+    "FINAL_BASE_IMAGE": {
+      "default": "nvidia/cuda:13.0.3-base-ubuntu24.04"
+    },
+    "GET_PIP_URL": {
+      "default": "https://bootstrap.pypa.io/get-pip.py"
+    },
+    "PYTORCH_CUDA_INDEX_BASE_URL": {
+      "default": "https://download.pytorch.org/whl"
+    },
+    "PIP_KEYRING_PROVIDER": {
+      "default": "disabled"
+    },
+    "UV_KEYRING_PROVIDER": {
+      "default": "disabled"
+    },
+    "INSTALL_KV_CONNECTORS": {
+      "default": "false"
+    },
+    "SCCACHE_BUCKET_NAME": {
+      "default": "vllm-build-sccache"
+    },
+    "SCCACHE_REGION_NAME": {
+      "default": "us-west-2"
+    },
+    "SCCACHE_S3_NO_CREDENTIALS": {
+      "default": "0"
+    },
+    "TORCH_CUDA_ARCH_LIST": {
+      "default": "7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0"
+    },
+    "MAX_JOBS": {
+      "default": "2"
+    },
+    "NVCC_THREADS": {
+      "default": "8"
+    },
+    "vllm_target_device": {
+      "default": "cuda"
+    },
+    "DEEPEP_COMMIT_HASH": {
+      "default": "d4f41e4e93"
+    },
+    "GIT_REPO_CHECK": {
+      "default": "0"
+    },
+    "VLLM_MAX_SIZE_MB": {
+      "default": "500"
+    },
+    "RUN_WHEEL_CHECK": {
+      "default": "true"
+    },
+    "FLASHINFER_VERSION": {
+      "default": "0.6.17"
+    },
+    "GDRCOPY_CUDA_VERSION": {
+      "default": "12.8"
+    },
+    "GDRCOPY_OS_VERSION": {
+      "default": "Ubuntu24_04"
+    },
+    "TIMM_VERSION": {
+      "default": ">=1.0.17"
+    },
+    "RUNAI_MODEL_STREAMER_VERSION": {
+      "default": ">=0.15.7"
+    }
+  }
+}

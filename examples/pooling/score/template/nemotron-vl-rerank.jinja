@@ -1,0 +1,15 @@
+{%- set query_msg = (messages | selectattr('role', 'equalto', 'query') | list | first) -%}
+{%- set doc_msg   = (messages | selectattr('role', 'equalto', 'document') | list | first) -%}
+
+{%- set q = query_msg['content'] -%}
+{%- set d = doc_msg['content'] -%}
+
+{# If the doc contains <image> anywhere, hoist a single <image> to the front #}
+{%- set has_image = ("<image>" in d) -%}
+{%- set d_clean = d | replace("<image>", "") -%}
+{%- set q_clean = q | replace("<image>", "") -%}
+
+{%- if has_image -%}<image>{{ " " }}{%- endif -%}
+question:{{ q_clean }}{{ " " }}
+{{ " " }}
+{{ " " }}passage:{{ d_clean }}

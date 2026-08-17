@@ -1,0 +1,14 @@
+MD007:
+  indent: 4
+MD013: false
+MD024:
+  siblings_only: true
+MD025:
+  # Allow front matter title to be different from the first heading in the document.
+  front_matter_title: ""
+MD031:
+  list_items: false
+MD033: false
+MD046: false
+MD052: false
+MD059: false
