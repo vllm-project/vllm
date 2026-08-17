@@ -402,11 +402,11 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptReplacement]:
-        hf_processor = self.info.get_hf_processor()
-
+        # hf_processor.get_token_value returns token ids which breaks PromptReplacement and multimodal capabilities,
+        # hardcoded values have to be used
         placeholder = {
-            "image": hf_processor.get_token_value("image_token"),
-            "video": hf_processor.get_token_value("video_token"),
+            "image": IMAGE_TOKEN,
+            "video": VIDEO_TOKEN,
         }
 
         def get_replacement_ovis(item_idx, modality: str):
@@ -424,7 +424,7 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
         return [
             PromptReplacement(
                 modality=modality,
-                target=[placeholder[modality]],
+                target=placeholder[modality],
                 replacement=partial(get_replacement_ovis, modality=modality),
             )
             for modality in ("image", "video")
