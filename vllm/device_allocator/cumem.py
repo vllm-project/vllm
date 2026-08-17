@@ -17,7 +17,11 @@ from typing import Any
 
 import torch
 
-from vllm.device_allocator import AllocationData, HandleType
+from vllm.device_allocator import (
+    AllocationData,
+    HandleType,
+    should_poison_discarded_pages,
+)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import find_loaded_library
@@ -338,6 +342,8 @@ class CuMemAllocator:
         gc.collect()
         torch.accelerator.empty_cache()
 
+        poison_discarded = should_poison_discarded_pages()
+        poisoned_bytes = 0
         for ptr, data in self.pointer_to_data.items():
             if not data.is_asleep:
                 continue
@@ -354,6 +360,22 @@ class CuMemAllocator:
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
                         data.cpu_backup_tensor = None
+                elif poison_discarded:
+                    # Debug aid for sleep/wake correctness tests (RFC #48310
+                    # SW3): this allocation was discarded without a CPU
+                    # backup, so create_and_map gave it fresh physical pages
+                    # whose contents are platform-dependent (the driver may
+                    # zero them). Fill with 0xFF (NaN in fp16/bf16/fp32) so
+                    # any stale read of the remapped pages becomes
+                    # deterministically detectable.
+                    libcudart.cudaMemset(ptr, 0xFF, handle[1])
+                    poisoned_bytes += handle[1]
+
+        if poison_discarded and poisoned_bytes > 0:
+            logger.info(
+                "CuMemAllocator: poisoned %.2f GiB of discarded pages on wake.",
+                poisoned_bytes / 1024**3,
+            )
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):

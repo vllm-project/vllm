@@ -95,6 +95,7 @@ if TYPE_CHECKING:
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
+    VLLM_POISON_DISCARDED_PAGES: bool = False
     VLLM_USE_PRECOMPILED_RUST: bool = False
     VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX: bool = False
     VLLM_DOCKER_BUILD_CONTEXT: bool = False
@@ -656,6 +657,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, vllm will use the precompiled Rust frontend binary (vllm-rs).
     "VLLM_USE_PRECOMPILED_RUST": lambda: (
         os.environ.get("VLLM_USE_PRECOMPILED_RUST", "").strip().lower() in ("1", "true")
+    ),
+    # Debug-only switch for sleep/wake correctness testing (RFC #48310 SW3):
+    # poison remapped pages of discarded allocations on wake_up with 0xFF so
+    # stale reads are deterministically detectable.
+    "VLLM_POISON_DISCARDED_PAGES": lambda: (
+        os.environ.get("VLLM_POISON_DISCARDED_PAGES", "").strip().lower()
+        in ("1", "true")
     ),
     # If set, skip adding +precompiled suffix to version string
     "VLLM_SKIP_PRECOMPILED_VERSION_SUFFIX": lambda: bool(

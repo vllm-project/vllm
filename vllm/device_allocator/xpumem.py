@@ -9,11 +9,18 @@ from typing import Any
 
 import torch
 
-from vllm.device_allocator import AllocationData, HandleType
+from vllm.device_allocator import (
+    AllocationData,
+    HandleType,
+    should_poison_discarded_pages,
+)
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
+
+# Chunk size for the debug poison buffer (see wake_up).
+_XPU_POISON_CHUNK_BYTES = 256 * 1024 * 1024
 
 MEMCPY_HOST_TO_DEVICE = 0
 MEMCPY_DEVICE_TO_HOST = 1
@@ -263,6 +270,19 @@ class XpuMemAllocator:
             )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
+        poison_discarded = should_poison_discarded_pages()
+        poison_buffer = None
+        if poison_discarded:
+            # One reusable pinned chunk for all poisoned allocations; a
+            # full-size buffer could exhaust pinned host memory on large
+            # KV caches.
+            poison_buffer = torch.full(
+                (_XPU_POISON_CHUNK_BYTES,),
+                0xFF,
+                dtype=torch.uint8,
+                device="cpu",
+                pin_memory=PIN_MEMORY,
+            )
         for ptr, data in self.pointer_to_data.items():
             if not data.is_asleep:
                 continue
@@ -273,6 +293,22 @@ class XpuMemAllocator:
 
             cpu_backup_tensor = data.cpu_backup_tensor
             if cpu_backup_tensor is None:
+                if poison_discarded:
+                    # See CuMemAllocator.wake_up: debug poison (0xFF) for
+                    # discarded pages, whose remapped contents are
+                    # platform-dependent (RFC #48310 SW3). Copy in chunks
+                    # through the reusable pinned buffer.
+                    device, size_in_bytes, _, _ = data.handle
+                    chunk = poison_buffer.numel()
+                    for offset in range(0, size_in_bytes, chunk):
+                        n = min(chunk, size_in_bytes - offset)
+                        _xpu_memcpy_sync(
+                            ptr + offset,
+                            poison_buffer.data_ptr(),
+                            n,
+                            MEMCPY_HOST_TO_DEVICE,
+                            device,
+                        )
                 continue
 
             device, size_in_bytes, _, _ = data.handle
