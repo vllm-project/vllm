@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -704,39 +704,37 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 for gid in group.group_ids:
                     self.single_type_managers[gid].use_eagle = True
 
-    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+    def _align_cacheable(self, num_tokens: int) -> int:
+        """Largest prefix of ``num_tokens`` a future cache hit could match.
+
+        Hits are ``scheduler_block_size``-aligned (see
+        ``find_longest_cache_hit``) unless fine-grained partial hash hits are
+        enabled, in which case no rounding applies -- rounding even to
+        ``hash_block_size`` would re-register a privatized Mamba tail.
+        """
         if self.enable_partial_hash_hits:
-            aligned_num_computed_tokens = num_computed_tokens
-        else:
-            # Cache hits in this coordinator are always a multiple of
-            # ``scheduler_block_size`` tokens (see ``find_longest_cache_hit``).
-            # Within an aligned region, SWA groups may only consult a subset of
-            # blocks per ``scheduler_block_size``-segment so the unused blocks
-            # also stay out of the prefix-cache hash map.
-            aligned_num_computed_tokens = (
-                num_computed_tokens
-                // self.scheduler_block_size
-                * self.scheduler_block_size
-            )
+            return num_tokens
+        return round_down(num_tokens, self.scheduler_block_size)
+
+    def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+        cached_num_computed_tokens = self._align_cacheable(num_computed_tokens)
         for manager in self.single_type_managers:
-            num_tokens_to_cache = aligned_num_computed_tokens
+            num_tokens_to_cache = cached_num_computed_tokens
             # EAGLE groups match one block past each aligned boundary and drop
             # it, so make that lookahead block eligible to be cached.
-            if manager.use_eagle and aligned_num_computed_tokens > 0:
+            if manager.use_eagle and cached_num_computed_tokens > 0:
                 # Only cache tokens with finalized KV. The last
                 # num_reprefillable_tokens tokens can be re-prefilled during
                 # multi-module MTP.
                 num_finalized_computed_tokens = max(
                     0, num_computed_tokens - self.num_reprefillable_tokens
                 )
-                aligned_num_finalized_computed_tokens = (
+                cached_num_finalized_computed_tokens = self._align_cacheable(
                     num_finalized_computed_tokens
-                    // self.scheduler_block_size
-                    * self.scheduler_block_size
                 )
                 num_tokens_to_cache = min(
                     num_finalized_computed_tokens,
-                    aligned_num_finalized_computed_tokens + manager.block_size,
+                    cached_num_finalized_computed_tokens + manager.block_size,
                 )
             # The manager already knows the fine hit granularity
             # (``scheduler_block_size``); retention is passed separately so it
