@@ -51,6 +51,7 @@ from vllm.model_executor.offloader import (
     get_offloader,
     set_offloader,
 )
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
@@ -170,6 +171,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculative_config is not None and self.speculative_config.use_dspark()
         )
         self.observability_config = vllm_config.observability_config
+        self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         self.device = device
         self.dtype = self.model_config.dtype

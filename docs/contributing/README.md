@@ -71,6 +71,7 @@ uv pip install -e . --no-build-isolation
 For more details about installing from source and installing for other hardware, check out the [installation instructions](../getting_started/installation/README.md) for your hardware and head to the "Build wheel from source" section.
 
 For an optimized workflow when iterating on C++/CUDA kernels, see the [Incremental Compilation Workflow](./incremental_build.md) for recommendations.
+For JIT kernel warmup conventions, see [JIT Kernel Warmup](./jit_kernel_warmup.md).
 
 !!! tip
     vLLM is compatible with Python versions 3.10 to 3.13. However, vLLM's default [Dockerfile](../../docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
