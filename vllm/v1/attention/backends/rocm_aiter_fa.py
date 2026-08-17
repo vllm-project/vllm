@@ -773,8 +773,9 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
-        # K and V are taken as transposed views of the packed page rather than
-        # copied, so the head dim can sit on either side of the block dim.
+        # K and V come out of the content dim as transposed views rather than
+        # copies, so the head dim may sit on either side of the block dim, but
+        # the layer must stay outermost.
         return (KVCacheLayout.LBHNC, KVCacheLayout.LHBNC)
 
     @classmethod
