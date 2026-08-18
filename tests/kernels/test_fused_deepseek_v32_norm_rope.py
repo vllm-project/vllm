@@ -515,10 +515,8 @@ def test_fused_q(num_tokens: int, num_q_heads: int, index_interleave: bool):
     torch.testing.assert_close(iw_out, iw_ref, rtol=1e-3, atol=1e-3)
 
 
-@pytest.mark.parametrize(
-    ("num_tokens", "materialize_q_pe"), [(1, False), (17, True), (512, False)]
-)
-def test_fused_q_no_indexer(num_tokens: int, materialize_q_pe: bool):
+@pytest.mark.parametrize("num_tokens", [1, 17, 512])
+def test_fused_q_no_indexer(num_tokens: int):
     torch.manual_seed(3)
     dev = "cuda"
     max_pos = 8192
@@ -531,8 +529,6 @@ def test_fused_q_no_indexer(num_tokens: int, materialize_q_pe: bool):
     )
     q_scale = torch.tensor([0.5], device=dev, dtype=torch.float32)
     q_cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
-    q_pe_out = torch.empty_like(q_pe) if materialize_q_pe else None
-
     _, _, mqa = K.fused_q(
         pos,
         q_pe,
@@ -546,7 +542,6 @@ def test_fused_q_no_indexer(num_tokens: int, materialize_q_pe: bool):
         0.0,
         has_indexer=False,
         index_rope_interleave=False,
-        q_pe_out=q_pe_out,
     )
     s = q_scale.item()
     assert_fp8(mqa[:, :, :KV_LORA], (ql_nope.float() / s).to(FP8), "mqa ql_nope")
@@ -557,8 +552,6 @@ def test_fused_q_no_indexer(num_tokens: int, materialize_q_pe: bool):
         interleave=True,
     )
     assert_fp8(mqa[:, :, KV_LORA:], (qpe_ref / s).to(FP8), "mqa q_pe")
-    if q_pe_out is not None:
-        assert_bf16(q_pe_out, qpe_ref, "materialized q_pe RoPE")
 
 
 @pytest.mark.parametrize("num_tokens", [1, 17, 512])

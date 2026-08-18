@@ -750,7 +750,6 @@ class SparseAttnIndexer(CustomOp):
         topk_indices_buffer: torch.Tensor,
         skip_k_cache_insert: bool = False,
         use_fp4_cache: bool = False,
-        skip_topk_buffer_clear: bool = False,
     ):
         super().__init__()
         self.k_cache = k_cache
@@ -763,7 +762,6 @@ class SparseAttnIndexer(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
-        self.skip_topk_buffer_clear = skip_topk_buffer_clear
         self.dense_mha_metadata_layer_name = ""
         # DCP scalars are constant for the run; resolve them here (config is set
         # during model construction) and pass them into the custom op, rather
@@ -831,7 +829,6 @@ class SparseAttnIndexer(CustomOp):
             self.dcp_rank,
             self.dcp_world_size,
             self.cp_kv_cache_interleave_size,
-            self.skip_topk_buffer_clear,
         )
 
     def forward_xpu(

@@ -31,6 +31,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import (
     SparseAttnIndexer,
+    sparse_attn_indexer,
 )
 from vllm.model_executor.models.deepseek_v2 import (
     DeepSeekV2FusedQkvAProjLinear,
@@ -271,17 +272,14 @@ class DeepseekV32Attention(MLAAttention):
 
         self.skip_topk = False
         enable_short_prefill_scoring_skip = (
-            not is_mtp_layer and not skip_topk and current_platform.is_cuda()
+            not is_mtp_layer
+            and not skip_topk
+            and not self.use_pcp
+            and current_platform.is_cuda()
         )
         self._dense_mha_metadata_layer_name = (
             self.layer_name if enable_short_prefill_scoring_skip else ""
         )
-        if self.indexer is not None:
-            self.indexer.indexer_op.skip_k_cache_insert = not self.use_pcp
-            self.indexer.indexer_op.dense_mha_metadata_layer_name = (
-                self._dense_mha_metadata_layer_name
-            )
-            self.indexer.indexer_op.skip_topk_buffer_clear = True
 
         if self.require_fp8_kv_cache:
             assert is_quantized_kv_cache(self.kv_cache_dtype), (
@@ -450,16 +448,6 @@ class DeepseekV32Attention(MLAAttention):
         else:
             index_q = None
 
-        prefill_metadata = attn_metadata.prefill if attn_metadata is not None else None
-        use_dense_mha = (
-            self.use_pcp
-            and attn_metadata is not None
-            and prefill_metadata is not None
-            and attn_metadata.num_decode_tokens < attn_metadata.num_actual_tokens
-            and prefill_metadata.use_dense_mha
-            and not self._vllm_config.attention_config.sparse_mla_force_mqa
-        )
-        q_pe_out = torch.empty_like(q_pe) if use_dense_mha and self._fp8_query else None
         index_q_fp8, index_weights_out, mqa_q = fused_q(
             positions,
             q_pe,
@@ -474,13 +462,7 @@ class DeepseekV32Attention(MLAAttention):
             has_indexer=has_indexer,
             index_rope_interleave=self._index_rope_interleave,
             quantize_mqa=self._fp8_query,
-            q_pe_out=q_pe_out,
         )
-        q_mha = None
-        if use_dense_mha:
-            q_pe_mha = q_pe_out if self._fp8_query else mqa_q
-            assert q_pe_mha is not None
-            q_mha = torch.cat((q_nope, q_pe_mha), dim=-1)
 
         self._sparse_indexer_and_attn(
             q_c,
@@ -491,7 +473,6 @@ class DeepseekV32Attention(MLAAttention):
             k_pe_out,
             ql_nope,
             mqa_q,
-            q_mha,
             output,
         )
         return self.o_proj(output)[0]
@@ -507,7 +488,6 @@ class DeepseekV32Attention(MLAAttention):
         k_pe: torch.Tensor | None,
         ql_nope: torch.Tensor,
         mqa_q: torch.Tensor,
-        q_mha: torch.Tensor | None,
         output: torch.Tensor,
     ) -> None:
         if self.indexer is not None and not self.skip_topk:
@@ -515,11 +495,36 @@ class DeepseekV32Attention(MLAAttention):
             assert index_weights_out is not None
             if self.use_pcp:
                 assert index_k is not None
-            self.indexer.indexer_op(
+            sparse_attn_indexer(
                 q_c,
+                self.indexer.k_cache.prefix,
+                self.indexer.k_cache.kv_cache,
                 index_q_fp8,
+                None,
                 index_k,
                 index_weights_out,
+                self.indexer.quant_block_size,
+                self.indexer.scale_fmt,
+                self.indexer.topk_tokens,
+                self.indexer.head_dim,
+                self.indexer.max_model_len,
+                self.indexer.max_total_seq_len,
+                self.topk_indices_buffer,
+                skip_k_cache_insert=not self.use_pcp,
+                use_pcp=self.use_pcp,
+                dense_mha_metadata_layer_name=self._dense_mha_metadata_layer_name,
+                dcp_rank=(
+                    self.dcp_manager.group.rank_in_group
+                    if self.dcp_manager is not None
+                    else 0
+                ),
+                dcp_world_size=(
+                    self._vllm_config.parallel_config.decode_context_parallel_size
+                ),
+                cp_kv_cache_interleave_size=(
+                    self._vllm_config.parallel_config.cp_kv_cache_interleave_size
+                ),
+                skip_topk_buffer_clear=True,
             )
 
         attn_metadata, _, kv_cache, layer_slot_mapping = get_attention_context(
@@ -554,33 +559,16 @@ class DeepseekV32Attention(MLAAttention):
         if num_actual == 0:
             output.zero_()
             return
-        num_mqa_tokens = num_actual
-        if q_mha is not None:
-            assert kv_c is not None and k_pe is not None
-            num_mqa_tokens = attn_metadata.num_decode_tokens
-            self.impl.forward_mha(  # type: ignore[attr-defined]
-                q_mha[num_mqa_tokens:num_actual],
-                kv_c[num_mqa_tokens:num_actual],
-                k_pe[num_mqa_tokens:num_actual].unsqueeze(1),
-                self.kv_cache,
-                attn_metadata,
-                self._k_scale,
-                output=output[num_mqa_tokens:num_actual],
-            )
-        if num_mqa_tokens == 0:
-            if self.use_pcp and num_actual < output.shape[0]:
-                output[num_actual:].zero_()
-            return
 
         if self._fp8_kv_needs_view:
             kv_cache = kv_cache.view(torch.float8_e4m3fn)
         if self._fp8_query:
             # FlashInfer sparse: single packed fp8 query.
             mqa_q_arg: torch.Tensor | tuple[torch.Tensor, torch.Tensor] = mqa_q[
-                :num_mqa_tokens
+                :num_actual
             ]
         else:
-            mqa_q_arg = (ql_nope[:num_mqa_tokens], mqa_q[:num_mqa_tokens])
+            mqa_q_arg = (ql_nope[:num_actual], mqa_q[:num_actual])
 
         if self.use_pcp and self.impl.dcp_world_size > self.impl.pcp_world_size:
             if isinstance(mqa_q_arg, tuple):
@@ -614,11 +602,11 @@ class DeepseekV32Attention(MLAAttention):
         # we put it here to avoid copying the attention output. Move this back to the
         # captured region once forward_mqa supports `out` argument.
         x = attn_out.view(
-            num_mqa_tokens, self.num_local_heads, self.kv_lora_rank
+            num_actual, self.num_local_heads, self.kv_lora_rank
         ).transpose(0, 1)
         out = (
-            output[:num_mqa_tokens]
-            .view(num_mqa_tokens, self.num_local_heads, self.v_head_dim)
+            output[:num_actual]
+            .view(num_actual, self.num_local_heads, self.v_head_dim)
             .transpose(0, 1)
         )
         torch.bmm(x, self.W_UV, out=out)
