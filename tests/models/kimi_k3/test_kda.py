@@ -21,6 +21,8 @@ from vllm.models.kimi_k3.amd.ops.third_party.kda import (
     fused_recurrent_kda_packed_decode as fused_recurrent_kda_packed_decode_amd,
 )
 from vllm.models.kimi_k3.nvidia.kda import (
+    _flashkda_prefill,
+    _store_cache_checkpoints_kernel,
     is_flashkda_supported,
     is_fused_kda_decode_supported,
 )
@@ -40,6 +42,7 @@ from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
 DEVICE = current_platform.device_type
 
@@ -1088,6 +1091,17 @@ def test_flashkda_correctness():
         expected_states.append(final_state)
     expected_out = torch.cat(expected_outputs, dim=1)
     expected_state = torch.cat(expected_states).transpose(-1, -2).contiguous()
+    _, expected_checkpoint = naive_recurrent_kda(
+        q_norm[:, :16],
+        k_norm[:, :16],
+        v[:, :16],
+        gate[:, :16],
+        beta[:, :16],
+        initial_state=initial_state[0:1].transpose(-1, -2),
+        output_final_state=True,
+    )
+    assert expected_checkpoint is not None
+    expected_checkpoint = expected_checkpoint.transpose(-1, -2).contiguous()
 
     actual_out = torch.empty_like(v)
     actual_state = torch.empty_like(initial_state)
@@ -1115,3 +1129,99 @@ def test_flashkda_correctness():
 
     assert_close("o", expected_out, actual_out, 0.01)
     assert_close("ht", expected_state, actual_state, 0.01)
+
+    split_out = torch.empty_like(v)
+    split_state = torch.empty_like(initial_state)
+    split_checkpoint = torch.empty_like(initial_state)
+    split_cu_seqlens = torch.tensor(
+        [[[0, 16], [0, 1]], [[0, 31], [0, 0]]],
+        dtype=torch.int32,
+        device=DEVICE,
+    )
+    start = 0
+    for seq_idx, (first_len, tail_len) in enumerate(((16, 1), (31, 0))):
+        first_end = start + first_len
+        end = first_end + tail_len
+        first_final_state = (
+            split_checkpoint[seq_idx : seq_idx + 1]
+            if tail_len
+            else split_state[seq_idx : seq_idx + 1]
+        )
+        _flashkda_prefill(
+            q=q[:, start:first_end],
+            k=k[:, start:first_end],
+            v=v[:, start:first_end],
+            g=raw_g[:, start:first_end],
+            beta=beta_logits[:, start:first_end],
+            A_log=A_log,
+            dt_bias=dt_bias,
+            lower_bound=lower_bound,
+            initial_state=initial_state[seq_idx : seq_idx + 1],
+            cu_seqlens=split_cu_seqlens[seq_idx, 0],
+            out=split_out[:, start:first_end],
+            final_state=first_final_state,
+            workspace=workspace,
+        )
+        if tail_len:
+            _flashkda_prefill(
+                q=q[:, first_end:end],
+                k=k[:, first_end:end],
+                v=v[:, first_end:end],
+                g=raw_g[:, first_end:end],
+                beta=beta_logits[:, first_end:end],
+                A_log=A_log,
+                dt_bias=dt_bias,
+                lower_bound=lower_bound,
+                initial_state=split_checkpoint[seq_idx : seq_idx + 1],
+                cu_seqlens=split_cu_seqlens[seq_idx, 1],
+                out=split_out[:, first_end:end],
+                final_state=split_state[seq_idx : seq_idx + 1],
+                workspace=workspace,
+            )
+        start = end
+
+    assert_close("split_o", expected_out, split_out, 0.01)
+    assert_close("split_ht", expected_state, split_state, 0.01)
+    assert_close("checkpoint", expected_checkpoint, split_checkpoint[:1], 0.01)
+
+    conv_state = torch.zeros(2, H * D, 3, dtype=q.dtype, device=DEVICE)
+    recurrent_storage = torch.zeros(2, H * D * D + 8, device=DEVICE)
+    recurrent_state = recurrent_storage[:, : H * D * D].view(2, H, D, D)
+    conv_input = q[0].flatten(1)
+    checkpoint_offsets = split_cu_seqlens[:, 0, 1]
+    checkpoint_state_indices = torch.tensor(
+        [1, NULL_BLOCK_ID], dtype=torch.int32, device=DEVICE
+    )
+    state_len = conv_state.shape[-1]
+    width = H * D
+    recurrent_row_size = split_checkpoint[0].numel()
+    block_size = 256
+    _store_cache_checkpoints_kernel[
+        (
+            checkpoint_state_indices.numel(),
+            (max(width * state_len, recurrent_row_size) + block_size - 1) // block_size,
+        )
+    ](
+        conv_input,
+        conv_state,
+        split_checkpoint,
+        recurrent_state,
+        cu_seqlens,
+        checkpoint_offsets,
+        checkpoint_state_indices,
+        conv_input.stride(0),
+        conv_input.stride(1),
+        conv_state.stride(0),
+        conv_state.stride(1),
+        conv_state.stride(2),
+        split_checkpoint.stride(0),
+        recurrent_state.stride(0),
+        checkpoint_offsets.stride(0),
+        state_len,
+        width,
+        recurrent_row_size,
+        NULL_BLOCK_ID,
+        block_size,
+    )
+    torch.testing.assert_close(conv_state[1], q[0, 13:16].flatten(1).transpose(0, 1))
+    torch.testing.assert_close(recurrent_state[1], split_checkpoint[0])

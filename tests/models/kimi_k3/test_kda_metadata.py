@@ -87,6 +87,7 @@ def _make_builder(
     device: torch.device = DEVICE,
     mamba_cache_mode: str = "none",
     use_recoverssm: bool = False,
+    num_prefill_checkpoint_blocks: int = 0,
 ) -> AttentionMetadataBuilder:
     vllm_config = create_vllm_config(
         model_name="Qwen/Qwen3.5-0.8B",
@@ -110,6 +111,7 @@ def _make_builder(
             dtypes=(torch.float16,),
             mamba_cache_mode=mamba_cache_mode,
             num_speculative_blocks=(0 if use_recoverssm else num_speculative_tokens),
+            num_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks,
         ),
         layer_names=["layer.0"],
         vllm_config=vllm_config,
@@ -119,6 +121,38 @@ def _make_builder(
         assert isinstance(builder, KimiK3KDAMetadataBuilder)
         builder.recoverssm_context = Mock()
     return builder
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_internal_checkpoint_metadata_targets_last_aligned_boundary():
+    device = torch.device("cuda")
+    batch = BatchSpec(seq_lens=[50, 32], query_lens=[50, 16])
+    common_attn_metadata = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device, arange_block_indices=True
+    ).replace(is_prefilling=torch.tensor([True, True]))
+    actual = _make_builder(
+        KimiK3KDAMetadataBuilder,
+        num_speculative_tokens=0,
+        full_cuda_graph=False,
+        mamba_cache_mode="align",
+        num_prefill_checkpoint_blocks=1,
+        device=device,
+    ).build(0, common_attn_metadata)
+
+    assert actual.checkpoint is not None
+    torch.testing.assert_close(
+        actual.checkpoint.state_indices,
+        torch.tensor([2, NULL_BLOCK_ID], dtype=torch.int32, device=device),
+    )
+    assert actual.checkpoint.splits == ((48, 2), (16, 0))
+    torch.testing.assert_close(
+        actual.checkpoint.cu_seqlens,
+        torch.tensor(
+            [[[0, 48], [0, 2]], [[0, 16], [0, 0]]],
+            dtype=torch.int32,
+            device=device,
+        ),
+    )
 
 
 @pytest.mark.parametrize(
