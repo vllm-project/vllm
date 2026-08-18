@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import httpx
 import pytest
 
+from vllm import envs
 from vllm.version import __version__ as VLLM_VERSION
 
 from ...utils import RemoteOpenAIServer
@@ -40,5 +41,7 @@ async def test_show_version(server: RemoteOpenAIServer):
     response = client.get(server.url_for("version"))
     response.raise_for_status()
 
-    # Tolerate additive fields (e.g. the Rust frontend reports its own version).
-    assert response.json()["version"] == VLLM_VERSION
+    payload = response.json()
+    assert payload["version"] == VLLM_VERSION
+    if envs.VLLM_USE_RUST_FRONTEND:
+        assert payload["rust_frontend_version"] == VLLM_VERSION
