@@ -11,7 +11,6 @@ import vllm.envs
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.tokenizers.mistral import mistral_common_tekkenizer
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (
@@ -24,6 +23,7 @@ from vllm.v1.structured_output.utils import (
     compile_regex_with_timeout,
     convert_lark_to_ebnf,
     grammar_is_likely_lark,
+    maybe_wrap_mistral_common_tokenizer,
 )
 
 if TYPE_CHECKING:
@@ -41,18 +41,10 @@ class XgrammarBackend(StructuredOutputBackend):
             self.vllm_config.structured_outputs_config.disable_any_whitespace
         )
 
-        tokenizer = self.tokenizer
-        if not is_mistral_tokenizer(tokenizer) and (
-            mistral_common_tekkenizer(tokenizer) is not None
-        ):
-            # transformers>=5.5 returns a `MistralCommonBackend` for Mistral
-            # repos under the default `tokenizer_mode="auto"`. xgrammar cannot
-            # classify that class, so wrap it in vLLM's `MistralTokenizer` and
-            # take the Mistral path below instead of failing in
-            # `TokenizerInfo.from_huggingface`.
-            from vllm.tokenizers.mistral import MistralTokenizer
-
-            tokenizer = MistralTokenizer(tokenizer)
+        # Without this, a `MistralCommonBackend` would fall through to
+        # `TokenizerInfo.from_huggingface()`, which cannot classify it and
+        # raises `ValueError: Unsupported tokenizer type`.
+        tokenizer = maybe_wrap_mistral_common_tokenizer(self.tokenizer)
 
         if is_mistral_tokenizer(tokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.

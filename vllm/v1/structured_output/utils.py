@@ -17,7 +17,9 @@ from cachetools import LRUCache
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.tokenizers.mistral import MistralTokenizer, mistral_common_tekkenizer
 from vllm.utils.import_utils import LazyLoader
+from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
@@ -303,6 +305,27 @@ def get_outlines_cache():
 
 re_llama_byte_token = re.compile(r"^<0x[0-9A-F]{2}>$")
 re_replacement_seq = re.compile(r"^.{0,6}�+.{0,6}$")
+
+
+def maybe_wrap_mistral_common_tokenizer(tokenizer: TokenizerLike) -> TokenizerLike:
+    """Return a tokenizer the structured-output backends can consume.
+
+    ``transformers>=5.5`` returns a ``MistralCommonBackend`` for Mistral repos
+    under the default ``tokenizer_mode="auto"``. That class subclasses
+    ``PreTrainedTokenizerBase`` rather than ``PreTrainedTokenizerFast``, and it
+    does not implement the tokenizer surface the grammar backends rely on, so
+    each backend fails on it in its own way. Wrapping it in vLLM's
+    ``MistralTokenizer`` exposes the vocabulary and conversion helpers the
+    backends already support for ``tokenizer_mode="mistral"``.
+
+    Tokenizers that are already a ``MistralTokenizer``, and non-Mistral
+    tokenizers, are returned unchanged.
+    """
+    if not is_mistral_tokenizer(tokenizer) and (
+        mistral_common_tekkenizer(tokenizer) is not None
+    ):
+        return MistralTokenizer(tokenizer)
+    return tokenizer
 
 
 def _reduced_vocabulary(tokenizer: TokenizerLike) -> dict[bytes, list[int]]:
