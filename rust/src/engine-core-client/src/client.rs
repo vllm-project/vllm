@@ -601,6 +601,16 @@ impl EngineCoreClient {
         let (engine_id, rx) =
             self.inner.register_request(request_id.clone(), lora_name, data_parallel_rank)?;
 
+        // Construct the output stream first before actually sending the request to the engine.
+        // This ensures that cancelling the future will properly clean up the request registration
+        // via `Drop` of the stream.
+        let stream = EngineCoreOutputStream::new(
+            request_id.clone(),
+            engine_id.engine_index().unwrap_or(0),
+            self.abort_tx.clone(),
+            rx,
+        );
+
         let result: Result<()> = async {
             if let Some(coordinator) = self.coordinator.as_ref() {
                 let snapshot = coordinator.snapshot();
@@ -627,12 +637,7 @@ impl EngineCoreClient {
             return Err(error);
         }
 
-        Ok(EngineCoreOutputStream::new(
-            request_id,
-            engine_id.engine_index().unwrap_or(0),
-            self.abort_tx.clone(),
-            rx,
-        ))
+        Ok(stream)
     }
 
     /// Abort currently in-flight requests by request ID.
