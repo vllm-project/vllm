@@ -62,10 +62,13 @@ def deep_gemm_fp8_o_proj(
     weight_scale = (
         wo_a.weight_scale if hasattr(wo_a, "weight_scale") else wo_a.weight_scale_inv
     )
-    if envs.VLLM_BATCH_INVARIANT:
+    if envs.VLLM_BATCH_INVARIANT and not tma_aligned_scales:
         # The BI DeepGEMM fork does not currently accept the grouped scale
-        # layout used by fp8_einsum. Preserve W8A8 semantics with the
-        # deterministic block-scaled Triton kernel, one group at a time.
+        # layout used by fp8_einsum on Hopper. Preserve its verified W8A8
+        # semantics with the deterministic block-scaled Triton kernel.
+        #
+        # SM100 scales are packed UE8M0/TMA tensors. They cannot be reshaped as
+        # logical FP32 block scales and must be consumed directly by DeepGEMM.
         group_weight = wo_a.weight.reshape(n_groups, o_lora_rank, -1)
         group_weight_scale = weight_scale.reshape(
             n_groups,
