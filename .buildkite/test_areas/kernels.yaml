@@ -222,16 +222,36 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: Kernels Mamba Test
+- label: Kernels Mamba Test %N
   device: h200_35gb
   key: kernels-mamba-test
-  timeout_in_minutes: 60
+  timeout_in_minutes: 30
+  parallelism: 4
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
   - vllm/model_executor/layers/mamba/ops
   commands:
-    - pytest -v -s kernels/mamba
+    - |
+      set -eu
+      # Deterministic structural split. test_mamba_ssm_ssd.py dominates the
+      # suite (~49m, 94 nodes), so it is sharded 3-way on shards 0-2
+      # (~16.4m each); shard 3 runs the ~17.4m complement once with that file
+      # ignored. One logical key; the 3-way SSD partition and the 820-node
+      # complement are disjoint and cover the exact 914-node union (stable:
+      # byte-identical to the pre-split baseline).
+      case "$$BUILDKITE_PARALLEL_JOB" in
+        0|1|2)
+          pytest -v -s kernels/mamba/test_mamba_ssm_ssd.py --num-shards=3 --shard-id=$$BUILDKITE_PARALLEL_JOB
+          ;;
+        3)
+          pytest -v -s kernels/mamba --ignore=kernels/mamba/test_mamba_ssm_ssd.py
+          ;;
+        *)
+          echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" >&2
+          exit 1
+          ;;
+      esac
 
 - label: Kernels DeepGEMM Test (H100)
   key: kernels-deepgemm-test-h100
