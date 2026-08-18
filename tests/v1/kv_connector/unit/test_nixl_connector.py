@@ -574,6 +574,59 @@ class TestNixlHandshake:
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
     )
+    def test_pcp_producer_publishes_one_replicated_kv_cache(
+        self, default_vllm_config, dist_init
+    ):
+        """PCP expands workers, but rank zero is the sole NIXL producer."""
+        vllm_config = create_vllm_config(kv_role="kv_producer")
+        connector = NixlConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            make_kv_cache_config(block_size=16),
+        )
+        vllm_config.parallel_config.prefill_context_parallel_size = 2
+        worker = connector.connector_worker
+        assert worker is not None
+        payload = MagicMock(spec=NixlHandshakePayload)
+        worker.xfer_handshake_metadata = payload
+
+        worker.pcp_rank = 0
+        assert connector.get_handshake_metadata() is payload
+
+        worker.pcp_rank = 1
+        assert connector.get_handshake_metadata() is None
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_pcp_producer_counts_only_the_published_replica(
+        self, default_vllm_config, dist_init
+    ):
+        """Completion aggregation must not wait for duplicate PCP replicas."""
+        vllm_config = create_vllm_config(kv_role="kv_producer")
+        connector = NixlConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            make_kv_cache_config(block_size=16),
+        )
+        vllm_config.parallel_config.prefill_context_parallel_size = 2
+        worker = connector.connector_worker
+        assert worker is not None
+        worker.pcp_rank = 1
+        worker.get_finished = MagicMock(return_value=({"sent"}, {"received"}))
+
+        done_sending, done_recving = connector.get_finished(set())
+
+        assert done_sending == set()
+        assert done_recving == {"received"}
+        aggregator = KVOutputAggregator.from_connector(connector, world_size=2)
+        assert aggregator._expected_finished_count == 1
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
     def test_multi_xfer_one_engine(
         self,
         default_vllm_config,
