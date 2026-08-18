@@ -94,7 +94,7 @@ def init_attn_backend(
     vllm_config: VllmConfig,
     device: torch.device,
     active_layer_names: set[str] | None = None,
-    cudagraph_layer_names: set[str] | None = None,
+    cudagraph_checked_layer_names: set[str] | None = None,
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
     # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
@@ -168,7 +168,7 @@ def init_attn_backend(
     attn_cg_support_info = get_attn_cg_support(
         attn_groups,
         vllm_config,
-        active_layer_names=cudagraph_layer_names,
+        checked_layer_names=cudagraph_checked_layer_names,
     )
     return attn_groups, attn_cg_support_info, kernel_block_sizes
 
@@ -176,14 +176,14 @@ def init_attn_backend(
 def get_attn_cg_support(
     attn_groups: list[list[AttentionGroup]],
     vllm_config: VllmConfig,
-    active_layer_names: set[str] | None = None,
+    checked_layer_names: set[str] | None = None,
 ) -> AttentionCGSupportInfo:
-    """Return the weakest CUDA graph support among active attention layers."""
+    """Return the weakest CUDA graph support among the checked layers."""
     min_cg_support = AttentionCGSupport.ALWAYS
     min_cg_attn_backend = None
     for groups in attn_groups:
         for group in groups:
-            if active_layer_names is not None and active_layer_names.isdisjoint(
+            if checked_layer_names is not None and checked_layer_names.isdisjoint(
                 group.layer_names
             ):
                 continue
@@ -203,7 +203,7 @@ def get_attn_cg_support(
 
 def get_query_lens_mismatch_unsupported_backend(
     attn_groups: list[list[AttentionGroup]],
-    active_layer_names: set[str] | None = None,
+    checked_layer_names: set[str] | None = None,
 ) -> str | None:
     """Name the first backend needing the CPU query lengths to be exact, if any.
 
@@ -213,7 +213,7 @@ def get_query_lens_mismatch_unsupported_backend(
     """
     for groups in attn_groups:
         for group in groups:
-            if active_layer_names is not None and active_layer_names.isdisjoint(
+            if checked_layer_names is not None and checked_layer_names.isdisjoint(
                 group.layer_names
             ):
                 continue

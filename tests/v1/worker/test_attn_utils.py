@@ -67,7 +67,7 @@ class _DraftBackend:
         return False
 
 
-def test_target_cudagraph_support_ignores_separate_draft_attention():
+def test_attention_checks_only_include_target_graph_layers():
     spec = FullAttentionSpec(
         block_size=16,
         num_kv_heads=1,
@@ -91,16 +91,33 @@ def test_target_cudagraph_support_ignores_separate_draft_attention():
     target_only = get_attn_cg_support(
         groups,
         None,  # type: ignore[arg-type]
-        active_layer_names={"target"},
+        checked_layer_names={"target"},
     )
     assert target_only.min_cg_support == AttentionCGSupport.ALWAYS
     assert target_only.min_cg_attn_backend is None
     assert (
         get_query_lens_mismatch_unsupported_backend(
             groups,
-            active_layer_names={"target"},
+            checked_layer_names={"target"},
         )
         is None
+    )
+
+    # If a group is shared with a target layer, it still participates in both
+    # checks even if it also contains a separately captured draft layer.
+    draft_group.layer_names.append("target")
+    target_with_shared_group = get_attn_cg_support(
+        groups,
+        None,  # type: ignore[arg-type]
+        checked_layer_names={"target"},
+    )
+    assert target_with_shared_group.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
+    assert (
+        get_query_lens_mismatch_unsupported_backend(
+            groups,
+            checked_layer_names={"target"},
+        )
+        == "_DraftBackend"
     )
 
 

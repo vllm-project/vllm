@@ -533,7 +533,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         target_attn_layer_names = None
         if isinstance(self.speculator, DraftModelSpeculator):
-            # The draft owns a separate graph manager and capability check.
+            # Draft prefill reuses these groups, but draft attention is captured
+            # and capability-checked by its own graph manager.
             target_attn_layer_names = {
                 layer_name
                 for group in self.kv_cache_config.kv_cache_groups
@@ -543,7 +544,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_config,
             self.vllm_config,
             self.device,
-            cudagraph_layer_names=target_attn_layer_names,
+            cudagraph_checked_layer_names=target_attn_layer_names,
         )
         attn_cg_support = attn_cg_support.narrow(
             *self.model_state.get_additional_cg_support()
@@ -560,7 +561,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_start_loc=self.input_buffers.query_start_loc,
             num_bonus_tokens=self.model_state.num_new_sampled_tokens_per_step,
             max_total_logits=get_max_chunk_logits(self.vocab_size),
-            active_layer_names=target_attn_layer_names,
+            target_layer_names=target_attn_layer_names,
         )
 
         self.block_tables = BlockTables(
