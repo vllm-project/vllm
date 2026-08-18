@@ -5526,6 +5526,7 @@ dependencies = [
  "minijinja-contrib",
  "ndarray 0.17.2",
  "oss-harmony",
+ "parking_lot",
  "paste",
  "reqwest 0.13.4",
  "rmp-serde",

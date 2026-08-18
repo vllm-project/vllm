@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 asynk-strim-attr.workspace = true
+bytes.workspace = true
 easy-ext.workspace = true
 futures.workspace = true
 half.workspace = true
@@ -15,6 +16,7 @@ llm-multimodal.workspace = true
 minijinja.workspace = true
 minijinja-contrib.workspace = true
 openai-harmony.workspace = true
+parking_lot.workspace = true
 reqwest-0-13.workspace = true
 serde.workspace = true
 serde-json-fmt.workspace = true

@@ -8,7 +8,9 @@ use serde_json::Value;
 use vllm_text::{DynTextBackend, TextBackend};
 
 use crate::error::Result;
-use crate::multimodal::{MmLimitPerPrompt, MultimodalModelInfo};
+use crate::multimodal::{
+    DEFAULT_MM_PROCESSOR_CACHE_CAPACITY, MmLimitPerPrompt, MultimodalModelInfo,
+};
 use crate::output::DynChatOutputProcessor;
 use crate::renderer::DynChatRenderer;
 use crate::request::ChatRequest;
@@ -59,7 +61,7 @@ impl<T> ChatTextBackend for T where T: ChatBackend + TextBackend + ?Sized {}
 pub type DynChatTextBackend = Arc<dyn ChatTextBackend>;
 
 /// Frontend-side chat backend loading options.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadModelBackendsOptions {
     /// Which chat renderer implementation to use.
     pub renderer: RendererSelection,
@@ -77,6 +79,22 @@ pub struct LoadModelBackendsOptions {
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities are unlimited.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
+    /// Maximum process-local multimodal processor-cache size in bytes.
+    pub mm_processor_cache_capacity: usize,
+}
+
+impl Default for LoadModelBackendsOptions {
+    fn default() -> Self {
+        Self {
+            renderer: RendererSelection::default(),
+            language_model_only: false,
+            chat_template_content_format: ChatTemplateContentFormatOption::default(),
+            chat_template: None,
+            default_chat_template_kwargs: HashMap::new(),
+            limit_mm_per_prompt: HashMap::new(),
+            mm_processor_cache_capacity: DEFAULT_MM_PROCESSOR_CACHE_CAPACITY,
+        }
+    }
 }
 
 /// Shared backends loaded from a model id.

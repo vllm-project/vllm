@@ -313,6 +313,13 @@ impl ChatLlm {
         self.processor.backend.multimodal_model_info().is_some()
     }
 
+    /// Clear process-local multimodal processor outputs.
+    pub fn clear_mm_cache(&self) {
+        if let Some(info) = self.processor.backend.multimodal_model_info() {
+            info.clear_processor_cache();
+        }
+    }
+
     /// Prepare media for an already-tokenized request.
     pub async fn prepare_media(
         &self,

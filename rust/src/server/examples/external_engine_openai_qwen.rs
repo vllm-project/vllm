@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
         chat_template: None,
         default_chat_template_kwargs: None,
         limit_mm_per_prompt: HashMap::new(),
+        mm_processor_cache_capacity: vllm_chat::multimodal::DEFAULT_MM_PROCESSOR_CACHE_CAPACITY,
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
         max_logprobs: None,
         api_server_options: ApiServerOptions::default(),

@@ -92,6 +92,7 @@ impl ManagedEngineArgs {
         shutdown_timeout: u64,
         handshake_port: u16,
         limit_mm_per_prompt: Option<String>,
+        mm_processor_cache_gb: Option<String>,
     ) -> ManagedEngineConfig {
         let mut python_args = self.python_args;
         // Manually forward some args to the Python engine.
@@ -130,6 +131,10 @@ impl ManagedEngineArgs {
         if let Some(limit_mm_per_prompt) = limit_mm_per_prompt {
             python_args.push("--limit-mm-per-prompt".to_string());
             python_args.push(limit_mm_per_prompt);
+        }
+        if let Some(mm_processor_cache_gb) = mm_processor_cache_gb {
+            python_args.push("--mm-processor-cache-gb".to_string());
+            python_args.push(mm_processor_cache_gb);
         }
 
         ManagedEngineConfig {

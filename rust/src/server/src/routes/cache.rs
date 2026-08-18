@@ -42,6 +42,7 @@ pub async fn reset_prefix_cache(
 
 /// Reset the multi-modal cache.
 pub async fn reset_mm_cache(State(state): State<Arc<AppState>>) -> Result<StatusCode, ApiError> {
+    state.chat.clear_mm_cache();
     state
         .engine_core_client()
         .reset_mm_cache()

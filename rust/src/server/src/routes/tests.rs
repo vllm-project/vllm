@@ -584,6 +584,7 @@ fn qwen_multimodal_model_info_with_limits(
         },
         Arc::new(fake_chat_tokenizer()),
         limit_mm_per_prompt,
+        0,
     )
     .expect("load multimodal info")
     .expect("qwen multimodal info is registered");

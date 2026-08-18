@@ -16,14 +16,14 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use educe::Educe;
-use serde::de::DeserializeOwned;
+use serde::de::{DeserializeOwned, Error as _};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
 use vllm_chat::ReasoningParserFactory;
-use vllm_chat::multimodal::MmLimitPerPrompt;
+use vllm_chat::multimodal::{DEFAULT_MM_PROCESSOR_CACHE_CAPACITY, MmLimitPerPrompt};
 use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
@@ -262,6 +262,21 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub limit_mm_per_prompt: MmLimitPerPrompt,
 
+    /// Process-local multi-modal processor-cache capacity, configured in GiB.
+    #[arg(
+        long = "mm-processor-cache-gb",
+        value_name = "GIB",
+        default_value = "4",
+        allow_negative_numbers = true,
+        value_parser = parse_mm_processor_cache_gb
+    )]
+    #[serde(
+        default = "default_mm_processor_cache_capacity",
+        rename = "mm_processor_cache_gb",
+        deserialize_with = "deserialize_mm_processor_cache_gb"
+    )]
+    pub mm_processor_cache_capacity: usize,
+
     /// The format to render message content within a chat template.
     ///
     /// * "auto" detects the format from the template
@@ -436,6 +451,14 @@ impl SharedRuntimeArgs {
         })
     }
 
+    fn mm_processor_cache_gb_arg(&self) -> Option<String> {
+        if self.mm_processor_cache_capacity == DEFAULT_MM_PROCESSOR_CACHE_CAPACITY {
+            return None;
+        }
+        let gib = self.mm_processor_cache_capacity as f64 / (1024 * 1024 * 1024) as f64;
+        Some(gib.to_string())
+    }
+
     /// Apply fallback logic for API key configuration from env variables.
     fn apply_env_api_key_fallback(&mut self) {
         if self.api_key.is_empty()
@@ -490,6 +513,7 @@ impl SharedRuntimeArgs {
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
+            mm_processor_cache_capacity: self.mm_processor_cache_capacity,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,
@@ -544,6 +568,7 @@ impl SharedRuntimeArgs {
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
+            mm_processor_cache_capacity: self.mm_processor_cache_capacity,
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,
@@ -603,6 +628,33 @@ fn default_cors_wildcard() -> JsonStringList {
 
 fn default_py_bootstrap_parser_selection() -> ParserSelection {
     ParserSelection::None
+}
+
+fn default_mm_processor_cache_capacity() -> usize {
+    DEFAULT_MM_PROCESSOR_CACHE_CAPACITY
+}
+
+fn parse_mm_processor_cache_gb(value: &str) -> Result<usize, String> {
+    let value = value.parse::<f64>().map_err(|error| format!("invalid cache size: {error}"))?;
+    mm_processor_cache_bytes(value)
+}
+
+fn deserialize_mm_processor_cache_gb<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    mm_processor_cache_bytes(f64::deserialize(deserializer)?).map_err(D::Error::custom)
+}
+
+fn mm_processor_cache_bytes(value: f64) -> Result<usize, String> {
+    if !value.is_finite() || value < 0.0 {
+        return Err("mm_processor_cache_gb must be a finite, non-negative number".to_string());
+    }
+    let bytes = value * (1024 * 1024 * 1024) as f64;
+    if bytes > usize::MAX as f64 {
+        return Err("mm_processor_cache_gb exceeds the platform address space".to_string());
+    }
+    Ok(bytes as usize)
 }
 
 /// Minimal profiler configuration parsed from `--profiler-config`.
@@ -765,6 +817,7 @@ impl ServeArgs {
             self.runtime.shutdown_timeout,
             handshake_port,
             self.runtime.limit_mm_per_prompt_json(),
+            self.runtime.mm_processor_cache_gb_arg(),
         )
     }
 }

@@ -100,6 +100,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         limit_mm_per_prompt: {},
+                        mm_processor_cache_capacity: 4294967296,
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
@@ -800,6 +801,7 @@ fn frontend_args_accept_json() {
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         limit_mm_per_prompt: {},
+                        mm_processor_cache_capacity: 4294967296,
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
@@ -1177,6 +1179,85 @@ fn serve_args_reject_unsupported_modality_in_limit_mm_per_prompt() {
 }
 
 #[test]
+fn serve_args_configure_and_forward_processor_cache_capacity() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--mm-processor-cache-gb",
+        "0.5",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let frontend = args.to_frontend_config("tcp://127.0.0.1:29550".to_string());
+    assert_eq!(frontend.mm_processor_cache_capacity, 512 * 1024 * 1024);
+
+    let engine = args.to_managed_engine_config(5555);
+    assert!(
+        engine
+            .python_args
+            .windows(2)
+            .any(|args| args == ["--mm-processor-cache-gb", "0.5"])
+    );
+}
+
+#[test]
+fn frontend_args_json_configures_processor_cache_capacity() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","mm_processor_cache_gb":0.25}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(
+        args.into_config().mm_processor_cache_capacity,
+        256 * 1024 * 1024
+    );
+}
+
+#[test]
+fn processor_cache_capacity_rejects_negative_values() {
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--mm-processor-cache-gb",
+        "-1",
+    ])
+    .unwrap_err();
+    assert!(error.to_string().contains("must be a finite, non-negative number"));
+
+    let error = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","mm_processor_cache_gb":-1}"#,
+    ])
+    .unwrap_err();
+    assert!(error.to_string().contains("must be a finite, non-negative number"));
+}
+
+#[test]
 fn serve_args_reject_flags_before_model() {
     let error = Cli::try_parse_from(["vllm-rs", "serve", "--python", "python3", "Qwen/Qwen3-0.6B"])
         .unwrap_err();
@@ -1391,6 +1472,7 @@ fn serve_args_accept_handshake_aliases() {
                         chat_template: None,
                         default_chat_template_kwargs: None,
                         limit_mm_per_prompt: {},
+                        mm_processor_cache_capacity: 4294967296,
                         chat_template_content_format: Auto,
                         enable_log_requests: false,
                         enable_prompt_tokens_details: false,
@@ -1536,6 +1618,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             chat_template: None,
             default_chat_template_kwargs: None,
             limit_mm_per_prompt: {},
+            mm_processor_cache_capacity: 4294967296,
             chat_template_content_format: Auto,
             max_logprobs: None,
             api_server_options: ApiServerOptions {
@@ -1622,6 +1705,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             chat_template: None,
             default_chat_template_kwargs: None,
             limit_mm_per_prompt: {},
+            mm_processor_cache_capacity: 4294967296,
             chat_template_content_format: Auto,
             max_logprobs: None,
             api_server_options: ApiServerOptions {
@@ -1728,6 +1812,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             chat_template: None,
             default_chat_template_kwargs: None,
             limit_mm_per_prompt: {},
+            mm_processor_cache_capacity: 4294967296,
             chat_template_content_format: Auto,
             max_logprobs: None,
             api_server_options: ApiServerOptions {

@@ -37,6 +37,7 @@ use crate::renderer::RenderedPrompt;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 
 mod audio;
+mod cache;
 mod expand;
 mod image;
 mod item;
@@ -44,6 +45,9 @@ mod tensor;
 mod video;
 
 use self::expand::expand_prompt_token_ids;
+
+/// Default processor-cache capacity, matching Python's 4 GiB default.
+pub const DEFAULT_MM_PROCESSOR_CACHE_CAPACITY: usize = 4 * 1024 * 1024 * 1024;
 
 /// Resolved multimodal support for one loaded model.
 #[derive(Clone)]
@@ -53,6 +57,7 @@ pub struct MultimodalModelInfo {
     video: Option<ModalitySupport>,
     audio: Option<AudioModalitySupport>,
     media_connector: Arc<MediaConnector>,
+    processor_cache: Arc<cache::ProcessorCache>,
     /// Maximum number of input items allowed per prompt for each modality.
     limit_mm_per_prompt: MmLimitPerPrompt,
 }
@@ -354,6 +359,7 @@ impl MultimodalModelInfo {
         files: MultimodalConfigFiles<'_>,
         tokenizer: DynTokenizer,
         limit_mm_per_prompt: MmLimitPerPrompt,
+        processor_cache_capacity: usize,
     ) -> Result<Option<Self>> {
         let config = match files.config {
             Some(path) => {
@@ -391,6 +397,7 @@ impl MultimodalModelInfo {
             preprocessor_config,
             video_preprocessor_config,
             limit_mm_per_prompt,
+            processor_cache_capacity,
         )
     }
 
@@ -401,6 +408,7 @@ impl MultimodalModelInfo {
         preprocessor_config: PreProcessorConfig,
         video_preprocessor_config: PreProcessorConfig,
         limit_mm_per_prompt: MmLimitPerPrompt,
+        processor_cache_capacity: usize,
     ) -> Result<Option<Self>> {
         let (image, video) = Self::resolve_vision_lanes(
             &context,
@@ -429,6 +437,7 @@ impl MultimodalModelInfo {
             video,
             audio,
             media_connector,
+            processor_cache: Arc::new(cache::ProcessorCache::new(processor_cache_capacity)),
             limit_mm_per_prompt,
         }))
     }
@@ -545,6 +554,10 @@ impl MultimodalModelInfo {
             Modality::Audio => self.audio.as_ref()?.placeholder.token.as_str().into(),
             Modality::ImageEmbeds => None,
         }
+    }
+
+    pub(crate) fn clear_processor_cache(&self) {
+        self.processor_cache.clear();
     }
 }
 
@@ -707,19 +720,37 @@ impl MultimodalModelInfo {
             return Ok(Vec::new());
         }
         self.validate_mm_limits(&media_parts)?;
+        let cache_generation = self.processor_cache.generation();
         let fetched = self.fetch_media(media_parts).await?;
 
         let mut prepared = Vec::new();
         if !fetched.images.is_empty() {
-            prepared
-                .push(self.prepare_images(fetched.images, fetched.image_uuids, model_dtype).await?);
+            prepared.push(
+                self.prepare_images(
+                    fetched.images,
+                    fetched.image_uuids,
+                    model_dtype,
+                    cache_generation,
+                )
+                .await?,
+            );
         }
         if !fetched.videos.is_empty() {
-            prepared
-                .push(self.prepare_videos(fetched.videos, fetched.video_uuids, model_dtype).await?);
+            prepared.push(
+                self.prepare_videos(
+                    fetched.videos,
+                    fetched.video_uuids,
+                    model_dtype,
+                    cache_generation,
+                )
+                .await?,
+            );
         }
         if !fetched.audios.is_empty() {
-            prepared.push(self.prepare_audios(fetched.audios, fetched.audio_uuids).await?);
+            prepared.push(
+                self.prepare_audios(fetched.audios, fetched.audio_uuids, cache_generation)
+                    .await?,
+            );
         }
 
         let mut ranges = expand_prompt_token_ids(prompt_token_ids, &prepared)?;
@@ -880,6 +911,16 @@ mod tests {
         tokenizer: TestTokenizer,
         limit_mm_per_prompt: MmLimitPerPrompt,
     ) -> MultimodalModelInfo {
+        test_info_with_limits_and_cache(model_type, config, tokenizer, limit_mm_per_prompt, 0)
+    }
+
+    fn test_info_with_limits_and_cache(
+        model_type: &str,
+        config: serde_json::Value,
+        tokenizer: TestTokenizer,
+        limit_mm_per_prompt: MmLimitPerPrompt,
+        processor_cache_capacity: usize,
+    ) -> MultimodalModelInfo {
         let context = MultimodalModelContext {
             model_id: format!("{model_type}-test"),
             model_type: Some(model_type.to_string()),
@@ -892,6 +933,7 @@ mod tests {
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             limit_mm_per_prompt,
+            processor_cache_capacity,
         )
         .unwrap()
         .unwrap_or_else(|| panic!("{model_type} multimodal support should resolve"))
@@ -927,6 +969,143 @@ mod tests {
 
     pub(super) fn qwen3_vl_info() -> MultimodalModelInfo {
         test_info("qwen3_vl", qwen3_vl_config(), qwen3_vl_tokenizer())
+    }
+
+    fn tiny_png() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00,
+            0x00, 0xb5, 0x1c, 0x0c, 0x02, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0xda, 0x63, 0x64, 0xf8, 0x0f, 0x00, 0x01, 0x05, 0x01, 0x01, 0x27, 0x18, 0xe3, 0x66,
+            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ]
+    }
+
+    fn image_data_part(uuid: &str) -> MediaContentPart {
+        image_data_part_with_bytes(tiny_png(), uuid)
+    }
+
+    fn second_tiny_png() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xc9, 0xfe, 0x92,
+            0xef, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ]
+    }
+
+    fn image_data_part_with_bytes(data: Vec<u8>, uuid: &str) -> MediaContentPart {
+        MediaContentPart::ImageData {
+            data,
+            mime_type: Some("image/png".to_string()),
+            uuid: Some(uuid.to_string()),
+            detail: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_image_reuses_cached_processor_output_without_reusing_uuid() {
+        let info = test_info_with_limits_and_cache(
+            "qwen3_vl",
+            qwen3_vl_config(),
+            qwen3_vl_tokenizer(),
+            HashMap::new(),
+            64 * 1024 * 1024,
+        );
+        let mut first_prompt = vec![QWEN3_IMAGE_PAD_ID];
+        let first = info
+            .prepare_multimodal(
+                vec![image_data_part("first")],
+                &mut first_prompt,
+                ModelDtype::Float16,
+            )
+            .await
+            .unwrap();
+        let after_first = info.processor_cache.snapshot();
+        assert_eq!(after_first.len, 1);
+        assert_eq!(after_first.hits, 0);
+        assert_eq!(after_first.misses, 1);
+
+        let mut second_prompt = vec![QWEN3_IMAGE_PAD_ID];
+        let second = info
+            .prepare_multimodal(
+                vec![image_data_part("second")],
+                &mut second_prompt,
+                ModelDtype::Float16,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first_prompt, second_prompt);
+        assert_eq!(first[0].data, second[0].data);
+        assert!(second[0].data.is_some());
+        assert_eq!(first[0].identifier, "first");
+        assert_eq!(second[0].identifier, "second");
+        let after_second = info.processor_cache.snapshot();
+        assert_eq!(after_second.len, 1);
+        assert_eq!(after_second.hits, 1);
+        assert_eq!(after_second.misses, 1);
+
+        info.clear_processor_cache();
+        let after_clear = info.processor_cache.snapshot();
+        assert_eq!(after_clear.generation, 1);
+        assert_eq!(after_clear.len, 0);
+
+        let mut third_prompt = vec![QWEN3_IMAGE_PAD_ID];
+        info.prepare_multimodal(
+            vec![image_data_part("third")],
+            &mut third_prompt,
+            ModelDtype::Float16,
+        )
+        .await
+        .unwrap();
+        let after_third = info.processor_cache.snapshot();
+        assert_eq!(after_third.hits, 1);
+        assert_eq!(after_third.misses, 2);
+    }
+
+    #[tokio::test]
+    async fn mixed_image_hits_and_misses_preserve_request_order() {
+        let info = test_info_with_limits_and_cache(
+            "qwen3_vl",
+            qwen3_vl_config(),
+            qwen3_vl_tokenizer(),
+            HashMap::new(),
+            64 * 1024 * 1024,
+        );
+        let mut seed_prompt = vec![QWEN3_IMAGE_PAD_ID];
+        let seed = info
+            .prepare_multimodal(
+                vec![image_data_part("seed")],
+                &mut seed_prompt,
+                ModelDtype::Float16,
+            )
+            .await
+            .unwrap();
+
+        let mut mixed_prompt = vec![QWEN3_IMAGE_PAD_ID, QWEN3_IMAGE_PAD_ID];
+        let mixed = info
+            .prepare_multimodal(
+                vec![
+                    image_data_part("cached"),
+                    image_data_part_with_bytes(second_tiny_png(), "new"),
+                ],
+                &mut mixed_prompt,
+                ModelDtype::Float16,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(mixed.len(), 2);
+        assert_eq!(mixed[0].identifier, "cached");
+        assert_eq!(mixed[1].identifier, "new");
+        assert!(mixed[0].mm_position.offset < mixed[1].mm_position.offset);
+        assert_eq!(mixed[0].data, seed[0].data);
+        let snapshot = info.processor_cache.snapshot();
+        assert_eq!(snapshot.len, 2);
+        assert_eq!(snapshot.hits, 1);
+        assert_eq!(snapshot.misses, 2);
     }
 
     #[test]

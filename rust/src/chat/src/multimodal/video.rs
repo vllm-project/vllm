@@ -37,14 +37,34 @@ impl MultimodalModelInfo {
         clips: Vec<Arc<VideoClip>>,
         uuids: Vec<Option<String>>,
         model_dtype: ModelDtype,
+        cache_generation: u64,
     ) -> Result<PreparedMedia> {
         let support = self.video.as_ref().ok_or_else(|| Error::UnsupportedModality {
             modality: Modality::Video.to_string(),
         })?;
+        if uuids.len() != clips.len() {
+            bail_multimodal!(
+                "number of video UUIDs {} does not match number of video clips {}",
+                uuids.len(),
+                clips.len()
+            );
+        }
         let mut replacements = Vec::with_capacity(clips.len());
         let mut items = Vec::with_capacity(clips.len());
 
         for (clip, uuid) in izip!(&clips, uuids) {
+            if let Some(cached) =
+                self.processor_cache.get(Modality::Video, &clip.hash, model_dtype, 0)
+            {
+                replacements.push(cached.replacement);
+                items.push(PreparedItem {
+                    data: cached.data,
+                    hash: clip.hash.clone(),
+                    uuid,
+                });
+                continue;
+            }
+
             let preprocessed = self.preprocess_video_clip(support, Arc::clone(clip)).await?;
             let mut clip_replacements =
                 support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
@@ -54,14 +74,20 @@ impl MultimodalModelInfo {
                     clip_replacements.len()
                 );
             }
-            replacements.push(clip_replacements.pop().unwrap());
-            items.push(build_video_item(
-                support,
-                preprocessed,
-                clip.hash.clone(),
-                uuid,
+            let replacement = clip_replacements.pop().unwrap();
+            let item =
+                build_video_item(support, preprocessed, clip.hash.clone(), uuid, model_dtype)?;
+            self.processor_cache.insert(
+                cache_generation,
+                Modality::Video,
+                &item.hash,
                 model_dtype,
-            )?);
+                0,
+                &item.data,
+                &replacement,
+            );
+            replacements.push(replacement);
+            items.push(item);
         }
 
         Ok(PreparedMedia {
@@ -208,6 +234,7 @@ mod tests {
                 files,
                 Arc::new(qwen3_vl_tokenizer()),
                 std::collections::HashMap::new(),
+                0,
             )
         };
 

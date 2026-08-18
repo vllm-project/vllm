@@ -20,28 +20,90 @@ impl MultimodalModelInfo {
         &self,
         clips: Vec<Arc<AudioClip>>,
         uuids: Vec<Option<String>>,
+        cache_generation: u64,
     ) -> Result<PreparedMedia> {
         let support = self.audio.as_ref().ok_or_else(|| Error::UnsupportedModality {
             modality: Modality::Audio.to_string(),
         })?;
-        let preprocessed = self.preprocess_audios(support, &clips).await?;
-        let replacements = support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
-        if replacements.len() != clips.len() {
+        if uuids.len() != clips.len() {
             bail_multimodal!(
-                "number of audio prompt replacements {} does not match number of audio clips {}",
-                replacements.len(),
+                "number of audio UUIDs {} does not match number of audio clips {}",
+                uuids.len(),
                 clips.len()
             );
         }
 
-        let hashes = clips.iter().map(|clip| clip.hash.clone()).collect();
-        let items = item::build_batched_items(
-            &support.spec,
-            preprocessed,
-            hashes,
-            uuids,
-            ModelDtype::Float32,
-        )?;
+        let len = clips.len();
+        let mut replacements = vec![None; len];
+        let mut items = (0..len).map(|_| None).collect::<Vec<_>>();
+        let mut missing_indices = Vec::new();
+        let mut missing_clips = Vec::new();
+        let mut missing_uuids = Vec::new();
+
+        for (index, (clip, uuid)) in clips.into_iter().zip(uuids).enumerate() {
+            match self.processor_cache.get(Modality::Audio, &clip.hash, ModelDtype::Float32, 0) {
+                Some(cached) => {
+                    replacements[index] = Some(cached.replacement);
+                    items[index] = Some(super::PreparedItem {
+                        data: cached.data,
+                        hash: clip.hash.clone(),
+                        uuid,
+                    });
+                }
+                None => {
+                    missing_indices.push(index);
+                    missing_clips.push(clip);
+                    missing_uuids.push(uuid);
+                }
+            }
+        }
+
+        if !missing_clips.is_empty() {
+            let preprocessed = self.preprocess_audios(support, &missing_clips).await?;
+            let missing_replacements =
+                support.spec.prompt_replacements_for(&self.context, &preprocessed)?;
+            if missing_replacements.len() != missing_clips.len() {
+                bail_multimodal!(
+                    "number of audio prompt replacements {} does not match number of audio clips {}",
+                    missing_replacements.len(),
+                    missing_clips.len()
+                );
+            }
+
+            let hashes = missing_clips.iter().map(|clip| clip.hash.clone()).collect();
+            let missing_items = item::build_batched_items(
+                &support.spec,
+                preprocessed,
+                hashes,
+                missing_uuids,
+                ModelDtype::Float32,
+            )?;
+
+            for ((index, item), replacement) in
+                missing_indices.into_iter().zip(missing_items).zip(missing_replacements)
+            {
+                self.processor_cache.insert(
+                    cache_generation,
+                    Modality::Audio,
+                    &item.hash,
+                    ModelDtype::Float32,
+                    0,
+                    &item.data,
+                    &replacement,
+                );
+                replacements[index] = Some(replacement);
+                items[index] = Some(item);
+            }
+        }
+
+        let replacements = replacements
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| multimodal!("audio processor cache merge left a missing replacement"))?;
+        let items = items
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| multimodal!("audio processor cache merge left a missing item"))?;
 
         Ok(PreparedMedia {
             modality: Modality::Audio,
@@ -108,12 +170,17 @@ mod tests {
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             HashMap::new(),
+            0,
         )
         .unwrap()
         .expect("Inkling multimodal support")
     }
 
     fn qwen3_asr_info() -> MultimodalModelInfo {
+        qwen3_asr_info_with_cache(0)
+    }
+
+    fn qwen3_asr_info_with_cache(processor_cache_capacity: usize) -> MultimodalModelInfo {
         let context = MultimodalModelContext {
             model_id: "Qwen/Qwen3-ASR-1.7B".to_string(),
             model_type: Some("qwen3_asr".to_string()),
@@ -128,6 +195,7 @@ mod tests {
             PreProcessorConfig::default(),
             PreProcessorConfig::default(),
             HashMap::new(),
+            processor_cache_capacity,
         )
         .unwrap()
         .expect("Qwen3-ASR multimodal support")
@@ -250,7 +318,14 @@ mod tests {
             .await
             .unwrap();
 
-        let prepared = info.prepare_audios(fetched.audios, fetched.audio_uuids).await.unwrap();
+        let prepared = info
+            .prepare_audios(
+                fetched.audios,
+                fetched.audio_uuids,
+                info.processor_cache.generation(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(prepared.replacements.len(), 1);
         assert!(
@@ -280,6 +355,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_audio_reuses_cached_processor_output() {
+        let info = qwen3_asr_info_with_cache(64 * 1024 * 1024);
+        let wav = wav_i16_mono(16_000, &[0; 1_600]);
+
+        let fetched = info
+            .fetch_media(vec![MediaContentPart::AudioData {
+                data: wav.clone(),
+                mime_type: Some("audio/wav".to_string()),
+                uuid: Some("first".to_string()),
+            }])
+            .await
+            .unwrap();
+        let first = info
+            .prepare_audios(
+                fetched.audios,
+                fetched.audio_uuids,
+                info.processor_cache.generation(),
+            )
+            .await
+            .unwrap();
+
+        let fetched = info
+            .fetch_media(vec![MediaContentPart::AudioData {
+                data: wav,
+                mime_type: Some("audio/wav".to_string()),
+                uuid: Some("second".to_string()),
+            }])
+            .await
+            .unwrap();
+        let second = info
+            .prepare_audios(
+                fetched.audios,
+                fetched.audio_uuids,
+                info.processor_cache.generation(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(first.items[0].data, second.items[0].data);
+        assert_eq!(first.items[0].uuid.as_deref(), Some("first"));
+        assert_eq!(second.items[0].uuid.as_deref(), Some("second"));
+        let snapshot = info.processor_cache.snapshot();
+        assert_eq!(snapshot.hits, 1);
+        assert_eq!(snapshot.misses, 1);
+    }
+
+    #[tokio::test]
     async fn inkling_tracker_and_processor_use_standard_audio_key() {
         let info = inkling_info(serde_json::json!(1024));
         let wav = wav_i16_mono(16_000, &[0; 1_600]);
@@ -293,7 +415,14 @@ mod tests {
             .await
             .unwrap();
 
-        let prepared = info.prepare_audios(fetched.audios, fetched.audio_uuids).await.unwrap();
+        let prepared = info
+            .prepare_audios(
+                fetched.audios,
+                fetched.audio_uuids,
+                info.processor_cache.generation(),
+            )
+            .await
+            .unwrap();
 
         assert_eq!(prepared.replacements.len(), 1);
         assert_eq!(
