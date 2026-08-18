@@ -4,30 +4,19 @@ import warnings
 from argparse import Namespace
 from typing import cast
 
-from fastapi import FastAPI
 from starlette.datastructures import State
 
-from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
-from vllm.entrypoints.serve.middleware.register import init_entrypoints_middleware
-from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import process_lora_modules
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-from vllm.plugins.endpoint_plugins.interface import (
-    attach_endpoint_plugins,
-    init_endpoint_plugins_state,
-)
+from vllm.plugins.endpoint_plugins.interface import init_endpoint_plugins_state
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tasks import FALLBACK_SUPPORTED_TASKS, POOLING_TASKS, SupportedTask
-
-from .api_server.routers import register_api_routers
-from .utils.server_utils import lifespan
 
 
 async def init_app_state(
@@ -158,43 +147,3 @@ async def init_app_state(
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
-
-
-def build_app(
-    args: Namespace,
-    supported_tasks: tuple["SupportedTask", ...] | None = None,
-    model_config: ModelConfig | None = None,
-) -> FastAPI:
-    if supported_tasks is None:
-        warnings.warn(
-            "The 'supported_tasks' parameter was not provided to "
-            "build_app and will be required in a future version. "
-            "Defaulting to ('generate',).",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        supported_tasks = FALLBACK_SUPPORTED_TASKS
-
-    if args.disable_fastapi_docs:
-        app = FastAPI(
-            openapi_url=None, docs_url=None, redoc_url=None, lifespan=lifespan
-        )
-    elif args.enable_offline_docs:
-        app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
-    else:
-        app = FastAPI(lifespan=lifespan)
-    app.state.args = args
-    app.root_path = args.root_path
-
-    register_api_routers(args, app, supported_tasks, model_config)
-
-    # Endpoint plugins are attached last so their routes are registered after all core
-    # routers. This runs even for the CPU only render server. A plugin eligible for
-    # the `render` task still gets its routes registered. It receives
-    # `engine_client=None` at Phase B (see `_init_endpoint_plugins_state`).
-    attach_endpoint_plugins(app, supported_tasks)
-
-    init_exception_handler(app)
-    init_entrypoints_middleware(args, app, supported_tasks)
-    app = sagemaker_standards_bootstrap(app)
-    return app
