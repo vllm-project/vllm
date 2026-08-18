@@ -172,10 +172,8 @@ from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterPerTokenFp8ScaledMMLinearKernel,
     AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
 )
-from vllm.model_executor.kernels.linear.scaled_mm.b12x_block import (
+from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
     B12xFp8BlockScaledMMKernel,
-)
-from vllm.model_executor.kernels.linear.scaled_mm.b12x_tensor import (
     B12xTensorFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
@@ -396,12 +394,12 @@ _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]]
 # in priority/performance order (when available)
 _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] = {
     PlatformEnum.CUDA: [
-        MarlinFP8ScaledMMLinearKernel,
         FlashInferFP8ScaledMMLinearKernel,
         CutlassFP8ScaledMMLinearKernel,
         B12xTensorFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
+        MarlinFP8ScaledMMLinearKernel,
         HummingFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
@@ -436,8 +434,8 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         CutlassFp8BlockScaledMMKernel,
         B12xFp8BlockScaledMMKernel,
         MarlinFP8ScaledMMLinearKernel,
-        TritonFp8BlockScaledMMKernel,
         HummingFP8ScaledMMLinearKernel,
+        TritonFp8BlockScaledMMKernel,
         BlockWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
