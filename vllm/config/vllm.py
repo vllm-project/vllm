@@ -676,9 +676,6 @@ class VllmConfig:
         if model_config is None:
             return False
 
-        if model_config.runner_type == "pooling" and model_config.is_multimodal_model:
-            return False
-
         architectures = getattr(model_config, "architectures", [])
         default_architectures = default_v2_model_runner_architectures()
         is_default_v2_architecture = any(

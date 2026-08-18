@@ -326,7 +326,7 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
                 is_moe=False,
                 is_quantized=False,
             ),
-            False,
+            True,
         ),
     ],
 )
