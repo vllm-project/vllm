@@ -526,6 +526,60 @@ def test_gpu_context_ignores_auxiliary_cache_tensors() -> None:
     ]
 
 
+@pytest.mark.skipif(
+    not (torch.cuda.is_available() or torch.xpu.is_available()),
+    reason="CUDA or XPU required",
+)
+def test_gpu_context_records_state_addrs_above_int64_max():
+    """initialize_from_forward_context must record state data_ptr() values
+    that are >= 2**63 (XPU allocates there); element-wise assignment of
+    such values overflows in the Python-to-tensor scalar conversion.
+
+    The uint64 dtype asserts are the CI-portable guard: reverting the
+    pointer tensors to int64 fails here even on CUDA. The >= 2**63
+    overflow itself only reproduces on devices that allocate up there.
+    """
+    device = torch.device("xpu" if torch.xpu.is_available() else "cuda")
+    config = _TestConfig(num_layers=1)
+    layer_names = ["layer_0"]
+    kv_cache_config = _make_kv_cache_config(config, layer_names)
+    conv_state = torch.empty(
+        config.num_blocks,
+        config.conv_width,
+        config.conv_inner_dim,
+        dtype=config.dtype,
+        device=device,
+    )
+    temporal_state = torch.empty(
+        config.num_blocks,
+        config.temporal_state_dim,
+        dtype=config.dtype,
+        device=device,
+    )
+    attention = MagicMock()
+    attention.kv_cache = [conv_state, temporal_state]
+
+    context = _make_gpu_ctx(config, kv_cache_config, device)
+    context.initialize_from_forward_context(
+        kv_cache_config,
+        {layer_names[0]: attention},
+        _COPY_FUNCS,
+        [torch.zeros(1, 1, dtype=torch.int32, device=device)],
+    )
+
+    assert context.state_base_addrs.dtype == torch.uint64
+    assert context.block_table_ptrs.dtype == torch.uint64
+    assert context.state_base_addrs.tolist() == [
+        conv_state.data_ptr(),
+        temporal_state.data_ptr(),
+    ]
+    if max(conv_state.data_ptr(), temporal_state.data_ptr()) < (1 << 63):
+        pytest.skip(
+            "device allocates below 2**63; the large-pointer overflow"
+            " path was not exercised"
+        )
+
+
 def _run_gpu_postprocess(
     gpu_ctx: MambaSpecDecodeGPUContext,
     *,
