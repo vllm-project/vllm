@@ -338,15 +338,17 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 )
                 self._manager = tiering_manager
             except Exception:
+                secondary_shutdown_failed = False
                 for tier in reversed(secondary_tiers):
                     try:
                         tier.shutdown()
                     except Exception:
+                        secondary_shutdown_failed = True
                         logger.exception(
                             "Failed to shut down secondary tier during "
                             "initialization cleanup"
                         )
-                if primary_tier is not None:
+                if primary_tier is not None and not secondary_shutdown_failed:
                     try:
                         primary_tier.shutdown()
                     except Exception:
@@ -354,6 +356,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                             "Failed to shut down primary tier during "
                             "initialization cleanup"
                         )
+                elif primary_tier is not None:
+                    logger.warning(
+                        "Skipping primary tier shutdown during initialization cleanup "
+                        "because a secondary tier may still access its KV memoryview"
+                    )
                 elif scheduler_mmap is not None:
                     try:
                         scheduler_mmap.cleanup()

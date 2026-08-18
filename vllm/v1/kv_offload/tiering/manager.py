@@ -888,26 +888,26 @@ class TieringOffloadingManager(OffloadingManager):
 
     @override
     def shutdown(self) -> None:
-        """Release resources held by every tier.
+        """Shut down secondary tiers before releasing primary resources.
 
-        Tiers are shut down in order. Ordinary failures are logged without
-        aborting cleanup of the remaining tiers.
+        Every secondary tier is given a shutdown attempt. If any shutdown
+        fails, preserve the primary mmap because a failed tier may still use it.
         """
+        shutdown_error: Exception | None = None
         for tier_idx, tier in enumerate(self.secondary_tiers):
             try:
                 tier.shutdown()
-            except Exception:
+            except Exception as exc:
+                shutdown_error = exc
                 logger.exception(
-                    "Failed to shut down secondary tier #%d (tier_type=%s, class=%s)",
+                    "Failed to shut down secondary tier #%d "
+                    "(tier_type=%s, impl_class=%s)",
                     tier_idx,
                     tier.tier_type,
                     type(tier).__name__,
                 )
 
-        try:
-            self.primary_tier.shutdown()
-        except Exception:
-            logger.exception(
-                "Failed to shut down primary tier (class=%s)",
-                type(self.primary_tier).__name__,
-            )
+        if shutdown_error is not None:
+            raise shutdown_error
+
+        self.primary_tier.shutdown()
