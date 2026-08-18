@@ -85,7 +85,7 @@ def _worker(local_rank: int, world_size: int, master_port: int) -> None:
 
     group = dist.group.WORLD
     rank = dist.get_rank(group)
-    max_M, N, K = 384, 7168, 1536
+    max_M, N, K = 384, 7168, 6144
     generator = torch.Generator(device=device)
     generator.manual_seed(4000 + rank)
     for dtype in _SUPPORTED_DTYPES:
@@ -169,16 +169,16 @@ def _worker(local_rank: int, world_size: int, master_port: int) -> None:
     cleanup_dist_env_and_memory()
 
 
-@pytest.mark.distributed(num_gpus=8)
+@pytest.mark.distributed(num_gpus=2)
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100)
     or not has_flashinfer_cutedsl_gemm_allreduce(),
     reason="FlashInfer GEMM-allreduce requires SM100-family GPUs and its kernel",
 )
 def test_flashinfer_gemm_allreduce(monkeypatch: pytest.MonkeyPatch) -> None:
-    world_size = 8
+    world_size = 2
     if torch.accelerator.device_count() < world_size:
-        pytest.skip("FlashInfer GEMM-allreduce requires eight GPUs")
+        pytest.skip("FlashInfer GEMM-allreduce requires two GPUs")
 
     monkeypatch.setenv("NCCL_CUMEM_ENABLE", "1")
     monkeypatch.setenv("NCCL_NVLS_ENABLE", "1")

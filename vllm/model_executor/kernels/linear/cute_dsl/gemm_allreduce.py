@@ -130,7 +130,7 @@ class _CuteDSLFusedGemmARWorkspace:
         self.world_size = tp_group.world_size
         self.device = torch.device("cuda", torch.accelerator.current_device_index())
 
-        assert self.world_size == 8
+        assert self.world_size in (2, 4, 8)
         assert dist.get_world_size() == self.world_size
         assert dtype in _DTYPE_CONFIGS
         (

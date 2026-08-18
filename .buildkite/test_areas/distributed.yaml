@@ -246,7 +246,18 @@ steps:
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
 
-    
+- label: FlashInfer GEMM All-Reduce (2xB200)
+  key: flashinfer-gemm-allreduce-2xb200
+  timeout_in_minutes: 20
+  device: b200-k8s
+  working_dir: "/vllm-workspace/"
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/model_executor/kernels/linear/cute_dsl/gemm_allreduce.py
+    - tests/kernels/test_flashinfer_gemm_allreduce.py
+  commands:
+    - pytest -v -s tests/kernels/test_flashinfer_gemm_allreduce.py
+
 
 - label: 2 Node Test (4 GPUs)
   key: 2-node-test-4-gpus
