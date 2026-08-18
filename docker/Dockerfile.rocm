@@ -154,6 +154,7 @@ FROM rust_toolchain_input_${REMOTE_VLLM} AS rust-toolchain-input
 # REMOTE_VLLM=0: use only the local files that can affect Rust artifacts.
 # REMOTE_VLLM=1: fetch only those same files from the requested remote ref.
 FROM scratch AS rust_input_0
+COPY .git_archival.txt /rust-input/vllm/.git_archival.txt
 COPY requirements/build/rust.txt /rust-input/vllm/requirements/build/rust.txt
 COPY rust/Cargo.lock rust/Cargo.toml /rust-input/vllm/rust/
 COPY rust/proto /rust-input/vllm/rust/proto
@@ -178,7 +179,13 @@ RUN git clone --no-checkout --filter=blob:none ${VLLM_REPO} /rust-input/vllm \
         rust-toolchain.toml \
         tools/build_rust.py \
         build_rust.sh \
-    && git checkout FETCH_HEAD
+    && git checkout FETCH_HEAD \
+    && commit="$(git rev-parse HEAD)" \
+    && commit_date="$(git show -s --format=%cI HEAD)" \
+    && describe="$(git describe --tags --long --abbrev=10 \
+        --match '*[0-9]*' HEAD)" \
+    && printf 'node: %s\nnode-date: %s\ndescribe-name: %s\n' \
+        "${commit}" "${commit_date}" "${describe}" > .git_archival.txt
 
 FROM rust_input_${REMOTE_VLLM} AS rust-input
 
@@ -215,7 +222,6 @@ RUN TOOLCHAIN="$(grep '^channel' /tmp/rust-toolchain.toml | sed 's/.*= *"\(.*\)"
 # don't need the rust toolchain or protoc.
 FROM rust-toolchain AS rust-build
 ARG COMMON_WORKDIR
-ARG REMOTE_VLLM
 ARG USE_SCCACHE
 
 # Cap cargo parallelism to avoid exhausting the AMD CI host's open-file limit
@@ -239,10 +245,7 @@ COPY --from=rust-input /rust-input/vllm/rust rust
 COPY --from=rust-input /rust-input/vllm/rust-toolchain.toml rust-toolchain.toml
 COPY --from=rust-input /rust-input/vllm/tools/build_rust.py tools/build_rust.py
 COPY --from=rust-input /rust-input/vllm/build_rust.sh build_rust.sh
-
-# Local Rust inputs form a partial worktree, so expose Git metadata temporarily
-# and suppress the artificial dirty state caused by other tracked files.
-ENV SETUPTOOLS_SCM_PRETEND_METADATA={dirty=false}
+COPY --from=rust-input /rust-input/vllm/.git_archival.txt .git_archival.txt
 
 # Build the release binary. Cargo's registry/git caches can be written by
 # concurrent BuildKit jobs on shared workers, so lock those cache mounts while
@@ -250,18 +253,12 @@ ENV SETUPTOOLS_SCM_PRETEND_METADATA={dirty=false}
 # can outlive source updates across BuildKit cache reuse.
 RUN --mount=type=cache,id=vllm-rocm-cargo-registry,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,id=vllm-rocm-cargo-git,target=/root/.cargo/git,sharing=locked \
-    --mount=type=bind,source=.git,target=/tmp/local-vllm-git \
-    if [ "$REMOTE_VLLM" = "0" ]; then \
-        ln -s /tmp/local-vllm-git .git; \
-    fi \
-    && \
     if [ "$USE_SCCACHE" = "1" ]; then \
         export RUSTC_WRAPPER=sccache \
         && sccache --show-stats; \
     fi \
     && bash build_rust.sh \
     && test -x vllm/vllm-rs \
-    && if [ "$REMOTE_VLLM" = "0" ]; then rm -f .git; fi \
     && if [ "$USE_SCCACHE" = "1" ]; then \
         sccache --show-stats; \
     fi
