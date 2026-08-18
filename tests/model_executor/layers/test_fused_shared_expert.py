@@ -58,6 +58,23 @@ def test_resolve_fused_shared_expert_fusion_skips_compatibility_when_disabled(
     )
 
 
+def test_resolve_fused_shared_expert_fusion_normalizes_unavailable_aiter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        fused_moe_utils.rocm_aiter_ops,
+        "is_fusion_moe_shared_experts_enabled",
+        lambda: None,
+    )
+
+    assert (
+        fused_moe_utils.resolve_fused_shared_expert_fusion(
+            object(), "model.layers.0.mlp"
+        )
+        is False
+    )
+
+
 def test_resolve_fused_shared_expert_fusion_passes_module_prefixes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

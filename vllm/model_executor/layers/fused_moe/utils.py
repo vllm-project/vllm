@@ -70,7 +70,9 @@ def resolve_fused_shared_expert_fusion(
     Raises:
         ValueError: If requested shared-expert fusion is quantization-incompatible.
     """
-    fse_requested = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+    # NOTE: is_fusion_moe_shared_experts_enabled is decorated with @if_aiter_supported
+    # that returns None if AITER is not available.
+    fse_requested = bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
     fse_compatible, fse_reason = (
         is_shared_expert_quant_fse_compatible(
             quant_config,
