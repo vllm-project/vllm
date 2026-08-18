@@ -1731,7 +1731,7 @@ class GPUModelRunner(
             # needs the sequence length when mm_features is empty (which is
             # the case here since prompt_embeds are filtered out above).
             seq_len = req_state.prompt_embeds.shape[0]
-            input_tokens = list(range(seq_len))
+            input_tokens = [-1] * seq_len
         else:
             raise ValueError(
                 "M-RoPE requires either prompt_token_ids or prompt_embeds."
@@ -1762,7 +1762,7 @@ class GPUModelRunner(
             # filtering prompt_embeds above, the model only needs sequence
             # length to emit text positions.
             seq_len = req_state.prompt_embeds.shape[0]
-            input_tokens = list(range(seq_len))
+            input_tokens = [-1] * seq_len
         else:
             raise ValueError(
                 "XD-RoPE requires either prompt_token_ids or prompt_embeds."

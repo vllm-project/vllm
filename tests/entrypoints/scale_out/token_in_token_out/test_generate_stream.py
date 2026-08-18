@@ -231,7 +231,7 @@ async def test_serve_tokens_threads_session_id_header_to_engine():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("prompt_start", [-1, 1])
+@pytest.mark.parametrize("prompt_start", [-1, 2])
 async def test_serve_tokens_rejects_out_of_range_routed_experts_prompt_start(
     prompt_start: int,
 ):
@@ -258,10 +258,37 @@ async def test_serve_tokens_rejects_out_of_range_routed_experts_prompt_start(
 
     assert isinstance(response, ErrorResponse)
     assert (
-        "routed_experts_prompt_start must be in the range [0, 1)"
+        "routed_experts_prompt_start must be in the range [0, 1]"
         in response.error.message
     )
     engine.generate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_serve_tokens_accepts_routed_experts_start_at_prompt_end():
+    engine = _mock_engine()
+    engine.model_config.enable_return_routed_experts = True
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    serving.online_renderer.preprocess_completion = AsyncMock(
+        return_value=[{"prompt_token_ids": [1]}]
+    )
+    request = GenerateRequest(
+        token_ids=[1],
+        sampling_params=SamplingParams(routed_experts_prompt_start=1),
+        model=MODEL_NAME,
+    )
+
+    response = await serving.serve_tokens(request)
+
+    assert isinstance(response, GenerateResponse)
+    engine.generate.assert_called_once()
 
 
 @pytest.mark.asyncio

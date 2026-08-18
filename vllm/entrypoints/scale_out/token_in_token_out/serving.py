@@ -31,6 +31,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -202,12 +203,10 @@ class ServingTokens(GenerateBaseServing):
 
         input_length = self._extract_prompt_len(engine_input)
         if self.model_config.enable_return_routed_experts:
-            prompt_start = sampling_params.routed_experts_prompt_start
-            if not 0 <= prompt_start < input_length:
-                return self.create_error_response(
-                    "sampling_params.routed_experts_prompt_start must be in the "
-                    f"range [0, {input_length}), got {prompt_start}."
-                )
+            try:
+                sampling_params.validate_routed_experts_prompt_start(input_length)
+            except VLLMValidationError as exc:
+                return self.create_error_response(str(exc))
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None

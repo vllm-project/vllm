@@ -21,6 +21,7 @@ class FakeMRoPEModel(SupportsMRoPE):
     """Minimal model that passes supports_mrope() check."""
 
     def get_mrope_input_positions(self, input_tokens, mm_features):
+        self.input_tokens = input_tokens
         seq_len = len(input_tokens)
         positions = torch.arange(seq_len).unsqueeze(0).expand(3, -1)
         return positions.clone(), 0
@@ -30,6 +31,7 @@ class FakeXDRoPEModel(SupportsXDRoPE):
     """Minimal model that passes supports_xdrope() check."""
 
     def get_xdrope_input_positions(self, input_tokens, mm_features):
+        self.input_tokens = input_tokens
         seq_len = len(input_tokens)
         positions = torch.arange(seq_len).unsqueeze(0).expand(4, -1)
         return positions.clone()
@@ -65,6 +67,7 @@ class TestMRopePromptEmbeds:
 
         assert req_state.mrope_positions is not None
         assert req_state.mrope_positions.shape == (3, 15)
+        assert instance.get_model().input_tokens == [-1] * 15
 
     def test_prompt_token_ids_still_works(self):
         """Normal path with prompt_token_ids continues working."""
@@ -103,6 +106,7 @@ class TestXDRopePromptEmbeds:
 
         assert req_state.xdrope_positions is not None
         assert req_state.xdrope_positions.shape == (4, 15)
+        assert instance.get_model().input_tokens == [-1] * 15
 
     def test_prompt_token_ids_still_works(self):
         instance, req_state = _make_runner_and_req(

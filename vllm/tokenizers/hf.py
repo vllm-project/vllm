@@ -136,7 +136,7 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     # of vocab size, we should take the greater value.
     if hasattr(tokenizer, "vocab_size"):
         with contextlib.suppress(NotImplementedError):
-            max_token_id = max(max_token_id, tokenizer.vocab_size)
+            max_token_id = max(max_token_id, tokenizer.vocab_size - 1)
 
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
         @property

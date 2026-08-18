@@ -42,8 +42,12 @@ pub fn lower_text_request(
     sampling_limits: SamplingLimits,
     tokenizer: &dyn Tokenizer,
 ) -> Result<PreparedTextRequest> {
-    let prompt_len = prompt_token_ids.len() as u32;
-    validate_prompt_token_ids(&prompt_token_ids, &sampling_limits)?;
+    let prompt_len = u32::try_from(prompt_token_ids.len()).map_or(u32::MAX, |value| value);
+    validate_prompt_token_ids(
+        &prompt_token_ids,
+        request.mm_features.as_ref(),
+        &sampling_limits,
+    )?;
 
     let generate_request = GenerateRequest {
         request_id: request.request_id.clone(),
@@ -162,9 +166,7 @@ pub fn lower_sampling_params(
         all_stop_token_ids.insert(primary_eos_token_id);
     }
     all_stop_token_ids.extend(extra_eos_token_ids.iter().copied());
-    if min_tokens > 0 {
-        validate_resolved_stop_token_ids(&all_stop_token_ids)?;
-    }
+    validate_resolved_stop_token_ids(&all_stop_token_ids)?;
 
     if !ignore_eos {
         merge_unique_token_ids(&mut stop_token_ids, extra_eos_token_ids.iter().copied());
@@ -190,7 +192,7 @@ pub fn lower_sampling_params(
         all_stop_token_ids,
         logit_bias,
         allowed_token_ids,
-        bad_words_token_ids: tokenize_bad_words(bad_words.as_deref(), tokenizer)?,
+        bad_words_token_ids: tokenize_bad_words(bad_words.as_deref(), tokenizer, &sampling_limits)?,
         // TODO: Validate structured-output schemas and regexes before submitting requests to engine-core.
         structured_outputs,
         logprob_token_ids,
@@ -257,6 +259,7 @@ fn validate_repetition_detection(params: Option<&RepetitionDetectionParams>) -> 
 fn tokenize_bad_words(
     bad_words: Option<&[String]>,
     tokenizer: &dyn Tokenizer,
+    sampling_limits: &SamplingLimits,
 ) -> Result<Option<Vec<Vec<u32>>>> {
     let bad_words = bad_words.filter(|w| !w.is_empty());
     let mut all_token_ids = Vec::new();
@@ -268,18 +271,18 @@ fn tokenize_bad_words(
         // dedup condition that avoids redundant entries.
         let without_space = tokenizer.encode(bad_word, false)?;
         let with_space = tokenizer.encode(&format!(" {}", bad_word.trim_start()), false)?;
+        let keep_with_space = without_space.is_empty()
+            || (!with_space.is_empty()
+                && with_space[0] != without_space[0]
+                && with_space.len() == without_space.len());
 
         if !without_space.is_empty() {
             all_token_ids.push(without_space);
-            validate_bad_words_tokenized_shape(&all_token_ids)?;
+            validate_bad_words_tokenized_shape(&all_token_ids, sampling_limits)?;
         }
-        if !with_space.is_empty()
-            && all_token_ids.last().is_some_and(|prev: &Vec<u32>| {
-                with_space[0] != prev[0] && with_space.len() == prev.len()
-            })
-        {
+        if !with_space.is_empty() && keep_with_space {
             all_token_ids.push(with_space);
-            validate_bad_words_tokenized_shape(&all_token_ids)?;
+            validate_bad_words_tokenized_shape(&all_token_ids, sampling_limits)?;
         }
     }
 
@@ -330,6 +333,7 @@ mod tests {
 
     use serial_test::file_serial;
     use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, PlaceholderRange};
+    use vllm_engine_core_client::protocol::tensor::WireTensor;
     use vllm_tokenizer::test_utils::TestTokenizer;
     use vllm_tokenizer::{Result as TokenizerResult, Tokenizer};
 
@@ -415,6 +419,8 @@ mod tests {
             max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
             model_vocab_size: 1000,
             tokenizer_vocab_size: 2000,
+            max_num_bad_words: SamplingLimits::DEFAULT_MAX_NUM_BAD_WORDS,
+            max_bad_words_total_tokens: SamplingLimits::DEFAULT_MAX_BAD_WORDS_TOTAL_TOKENS,
         }
     }
 
@@ -797,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_text_request_uses_union_vocab_for_prompt_token_ids() {
+    fn lower_text_request_uses_model_vocab_for_prompt_token_ids() {
         lower_text_request(
             sample_request(),
             vec![1500],
@@ -811,7 +817,7 @@ mod tests {
         )
         .expect("model vocab extends prompt token range");
 
-        lower_text_request(
+        let error = lower_text_request(
             sample_request(),
             vec![1500],
             sample_sampling_hints(),
@@ -822,7 +828,16 @@ mod tests {
             },
             &stub_tokenizer(),
         )
-        .expect("tokenizer vocab extends prompt token range");
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::TokenIds(TokenIdsError::OutOfVocab {
+                parameter: "prompt",
+                token_ids,
+                vocab_size: 1000,
+            }) if token_ids == vec![1500]
+        ));
 
         let error = lower_text_request(
             sample_request(),
@@ -842,8 +857,78 @@ mod tests {
             Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "prompt",
                 token_ids,
-                vocab_size: 2000,
+                vocab_size: 1000,
             }) if token_ids == vec![2000]
+        ));
+    }
+
+    #[test]
+    fn lower_text_request_allows_out_of_vocab_multimodal_embed_positions() {
+        let mut request = sample_request();
+        request.mm_features = Some(vec![MmFeatureSpec {
+            data: None,
+            modality: "image".to_string(),
+            identifier: "image-1".to_string(),
+            mm_position: PlaceholderRange {
+                offset: 0,
+                length: 1,
+                is_embed: None,
+            },
+            mm_hash: None,
+        }]);
+
+        lower_text_request(
+            request,
+            vec![1500],
+            sample_sampling_hints(),
+            SamplingLimits {
+                model_vocab_size: 1000,
+                tokenizer_vocab_size: 2000,
+                ..sample_sampling_limits()
+            },
+            &stub_tokenizer(),
+        )
+        .expect("multimodal embed position replaces the prompt token");
+    }
+
+    #[test]
+    fn lower_text_request_rejects_unreplaced_multimodal_token() {
+        let mut request = sample_request();
+        request.mm_features = Some(vec![MmFeatureSpec {
+            data: None,
+            modality: "image".to_string(),
+            identifier: "image-1".to_string(),
+            mm_position: PlaceholderRange {
+                offset: 0,
+                length: 2,
+                is_embed: Some(
+                    WireTensor::from_bool(vec![2], vec![false, true])
+                        .expect("valid boolean replacement mask"),
+                ),
+            },
+            mm_hash: None,
+        }]);
+
+        let error = lower_text_request(
+            request,
+            vec![1500, 1500],
+            sample_sampling_hints(),
+            SamplingLimits {
+                model_vocab_size: 1000,
+                tokenizer_vocab_size: 2000,
+                ..sample_sampling_limits()
+            },
+            &stub_tokenizer(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::TokenIds(TokenIdsError::OutOfVocab {
+                parameter: "prompt",
+                token_ids,
+                vocab_size: 1000,
+            }) if token_ids == vec![1500]
         ));
     }
 
@@ -888,6 +973,8 @@ mod tests {
                 max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
                 model_vocab_size: backend.model_vocab_size(),
                 tokenizer_vocab_size: backend.tokenizer_vocab_size(),
+                max_num_bad_words: SamplingLimits::DEFAULT_MAX_NUM_BAD_WORDS,
+                max_bad_words_total_tokens: SamplingLimits::DEFAULT_MAX_BAD_WORDS_TOTAL_TOKENS,
             },
             &stub_tokenizer(),
         )
@@ -1177,10 +1264,34 @@ mod tests {
     }
 
     #[test]
+    fn lower_sampling_params_rejects_out_of_vocab_eos_after_expansion() {
+        let error = lower_sampling_params(
+            SamplingParams::default(),
+            SamplingHints {
+                primary_eos_token_id: Some(1000),
+                ..SamplingHints::default()
+            },
+            sample_sampling_limits(),
+            3,
+            &stub_tokenizer(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::TokenIds(TokenIdsError::OutOfVocab {
+                parameter: "stop_token_ids",
+                token_ids,
+                vocab_size: 1000,
+            }) if token_ids == vec![1000]
+        ));
+    }
+
+    #[test]
     fn lower_sampling_params_rejects_out_of_vocab_allowed_token_ids() {
         let error = lower_sampling_params_with_limits(
             SamplingParams {
-                allowed_token_ids: Some(vec![1999, 2000]),
+                allowed_token_ids: Some(vec![999, 1000]),
                 ..Default::default()
             },
             sample_sampling_limits(),
@@ -1192,8 +1303,8 @@ mod tests {
             Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "allowed_token_ids",
                 token_ids,
-                vocab_size: 2000,
-            }) if token_ids == vec![2000]
+                vocab_size: 1000,
+            }) if token_ids == vec![1000]
         ));
     }
 
@@ -1234,7 +1345,7 @@ mod tests {
             Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "bad_words",
                 token_ids,
-                vocab_size: 2000,
+                vocab_size: 1000,
             }) if token_ids == vec![2000]
         ));
     }
@@ -1300,7 +1411,7 @@ mod tests {
     fn lower_sampling_params_rejects_stop_token_ids_after_eos_expansion() {
         let error = lower_sampling_params(
             SamplingParams {
-                min_tokens: Some(1),
+                min_tokens: Some(0),
                 stop_token_ids: Some((0..128).collect()),
                 ..SamplingParams::default()
             },
@@ -1325,8 +1436,8 @@ mod tests {
     }
 
     #[test]
-    fn lower_sampling_params_accepts_over_width_stop_token_ids_when_min_tokens_is_zero() {
-        let params = lower_sampling_params_with_limits(
+    fn lower_sampling_params_rejects_over_width_stop_token_ids_when_min_tokens_is_zero() {
+        let error = lower_sampling_params_with_limits(
             SamplingParams {
                 min_tokens: Some(0),
                 stop_token_ids: Some((0..129).collect()),
@@ -1334,11 +1445,16 @@ mod tests {
             },
             sample_sampler_width_limits(),
         )
-        .expect("stop_token_ids wider than the staged row are unused when min_tokens is zero");
+        .unwrap_err();
 
-        assert_eq!(params.min_tokens, 0);
-        assert_eq!(params.stop_token_ids.len(), 129);
-        assert_eq!(params.all_stop_token_ids.len(), 129);
+        assert!(matches!(
+            error,
+            Error::TokenIds(TokenIdsError::TooManyEntries {
+                parameter: "stop_token_ids",
+                requested: 129,
+                max_allowed,
+            }) if max_allowed == SamplingLimits::MAX_STOP_TOKEN_IDS
+        ));
     }
 
     #[test]
@@ -1403,7 +1519,7 @@ mod tests {
                 parameter: "bad_words",
                 requested: 129,
                 max_allowed,
-            }) if max_allowed == SamplingLimits::MAX_BAD_WORD_TOKEN_SEQUENCES
+            }) if max_allowed == SamplingLimits::DEFAULT_MAX_NUM_BAD_WORDS
         ));
 
         let error = lower_sampling_params_with_limits(
@@ -1420,7 +1536,54 @@ mod tests {
                 parameter: "bad_words",
                 requested: 4000,
                 max_allowed,
-            }) if max_allowed == SamplingLimits::MAX_BAD_WORD_TOTAL_TOKENS
+            }) if max_allowed == SamplingLimits::DEFAULT_MAX_BAD_WORDS_TOTAL_TOKENS
+        ));
+    }
+
+    #[test]
+    fn lower_sampling_params_uses_engine_bad_word_limits() {
+        let limits = SamplingLimits {
+            max_num_bad_words: 1,
+            ..sample_sampler_width_limits()
+        };
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                bad_words: Some(vec!["a".to_string(); 2]),
+                ..SamplingParams::default()
+            },
+            limits,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::TokenIds(TokenIdsError::TooManyTokenizedEntries {
+                parameter: "bad_words",
+                max_allowed: 1,
+                ..
+            })
+        ));
+
+        let limits = SamplingLimits {
+            max_bad_words_total_tokens: 1,
+            ..sample_sampler_width_limits()
+        };
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                bad_words: Some(vec!["😀".to_string()]),
+                ..SamplingParams::default()
+            },
+            limits,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::TokenIds(TokenIdsError::TooManyTokenizedTokens {
+                parameter: "bad_words",
+                max_allowed: 1,
+                ..
+            })
         ));
     }
 

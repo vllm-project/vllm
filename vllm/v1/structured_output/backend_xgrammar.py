@@ -1289,16 +1289,13 @@ def _validate_xgrammar_structural_tag_grammar(
         )
 
 
-def validate_xgrammar_grammar(
+def _validate_xgrammar_grammar(
     sampling_params: SamplingParams,
     *,
     vocab_size: int | None = None,
     tokenizer: Any | None = None,
 ) -> None:
-    """Validate that the request is supported by structured output.
-
-    Raises VLLMValidationError if the request is not supported.
-    """
+    """Validate that the request is supported by structured output."""
     if sampling_params.structured_outputs is None:
         return
 
@@ -1388,3 +1385,22 @@ def validate_xgrammar_grammar(
             vocab_size=vocab_size,
             tokenizer_info_factory=tokenizer_info_factory,
         )
+
+
+def validate_xgrammar_grammar(
+    sampling_params: SamplingParams,
+    *,
+    vocab_size: int | None = None,
+    tokenizer: Any | None = None,
+) -> None:
+    """Validate xgrammar inputs and expose failures as client errors."""
+    try:
+        _validate_xgrammar_grammar(
+            sampling_params,
+            vocab_size=vocab_size,
+            tokenizer=tokenizer,
+        )
+    except VLLMValidationError:
+        raise
+    except (IndexError, KeyError, TypeError, ValueError) as exc:
+        raise VLLMValidationError(str(exc)) from exc

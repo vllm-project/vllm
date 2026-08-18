@@ -7,6 +7,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -18,6 +19,7 @@ from vllm import SamplingParams
 from vllm.config import StructuredOutputsConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.structured_output import backend_xgrammar
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
@@ -1368,6 +1370,30 @@ def test_token_bounds_fail_closed_for_unknown_xgrammar_serialization_version() -
             cast(Any, grammar),
             vocab_size=5,
         )
+
+
+def test_public_xgrammar_validator_translates_token_bounds_to_client_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    grammar = _SerializedGrammar(
+        {
+            "__VERSION__": "v14",
+            "grammar_expr_data": [0],
+            "grammar_expr_indptr": [9, 1, 5],
+        }
+    )
+    grammar_type = SimpleNamespace(from_ebnf=lambda _: grammar)
+    monkeypatch.setattr(
+        backend_xgrammar,
+        "xgr",
+        SimpleNamespace(Grammar=grammar_type),
+    )
+    params = SamplingParams(
+        structured_outputs=StructuredOutputsParams(grammar='root ::= "ok"')
+    )
+
+    with pytest.raises(VLLMValidationError, match="outside the tokenizer"):
+        backend_xgrammar.validate_xgrammar_grammar(params, vocab_size=5)
 
 
 @pytest.mark.parametrize(

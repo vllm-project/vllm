@@ -5,7 +5,7 @@
 import copy
 import json as json_mod
 import math
-from collections.abc import Sized
+from collections.abc import Iterable, Sized
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -424,6 +424,11 @@ class SamplingParams(
         routed_experts_prompt_start: int = 0,
     ) -> "SamplingParams":
         if logit_bias is not None:
+            SamplingParams._validate_fixed_array_length(
+                "logit_bias",
+                logit_bias,
+                MAX_NUM_LOGIT_BIAS_TOKENS,
+            )
             # Fast path uses a dict comprehension; on failure we iterate once
             # to identify the exact offending entry for the error message.
             try:
@@ -513,6 +518,11 @@ class SamplingParams(
         if self.stop_token_ids is None:
             self.stop_token_ids = []
         else:
+            self._validate_fixed_array_length(
+                "stop_token_ids",
+                self.stop_token_ids,
+                MAX_NUM_STOP_TOKEN_IDS,
+            )
             self.stop_token_ids = list(dict.fromkeys(self.stop_token_ids))
 
         if self.bad_words is None:
@@ -695,7 +705,7 @@ class SamplingParams(
             self.logit_bias,
             MAX_NUM_LOGIT_BIAS_TOKENS,
         )
-        if self.min_tokens > 0 and effective_stop_token_ids is not None:
+        if effective_stop_token_ids is not None:
             self._validate_fixed_array_length(
                 "stop_token_ids",
                 effective_stop_token_ids,
@@ -744,7 +754,10 @@ class SamplingParams(
             return
         self._bad_words_token_ids = []
         max_num_bad_words = envs.VLLM_MAX_NUM_BAD_WORDS
+        max_total_tokens = envs.VLLM_MAX_BAD_WORDS_TOTAL_TOKENS
+        total_tokens = 0
         for bad_word in self.bad_words:
+            unprefixed_token_ids: list[int] | None = None
             # To prohibit words both at the beginning
             # and in the middle of text
             # (related to add_prefix_space tokenizer parameter)
@@ -754,15 +767,22 @@ class SamplingParams(
                 prompt_token_ids = tokenizer.encode(
                     text=prompt, add_special_tokens=False
                 )
+                if not prompt_token_ids:
+                    continue
+                if not add_prefix_space:
+                    unprefixed_token_ids = prompt_token_ids
 
                 # If no space at the beginning
                 # or if prefix space produces a new word token
                 if (not add_prefix_space) or (
-                    add_prefix_space
-                    and prompt_token_ids[0] != self._bad_words_token_ids[-1][0]
-                    and len(prompt_token_ids) == len(self._bad_words_token_ids[-1])
+                    unprefixed_token_ids is None
+                    or (
+                        prompt_token_ids[0] != unprefixed_token_ids[0]
+                        and len(prompt_token_ids) == len(unprefixed_token_ids)
+                    )
                 ):
                     self._bad_words_token_ids.append(prompt_token_ids)
+                    total_tokens += len(prompt_token_ids)
                     if len(self._bad_words_token_ids) > max_num_bad_words:
                         raise VLLMValidationError(
                             f"Too many bad words after tokenization: "
@@ -771,23 +791,13 @@ class SamplingParams(
                             parameter="bad_words",
                             value=self.bad_words,
                         )
-
-        invalid_token_ids = [
-            token_id
-            for bad_words_token_ids in self._bad_words_token_ids
-            for token_id in bad_words_token_ids
-            if token_id < 0 or token_id > tokenizer.max_token_id
-        ]
-        if len(invalid_token_ids) > 0:
-            raise VLLMValidationError(
-                f"The model vocabulary size is {tokenizer.max_token_id + 1},"
-                f" but the following tokens"
-                f" were specified as bad: {invalid_token_ids}."
-                f" All token id values should be integers satisfying:"
-                f" 0 <= token_id <= {tokenizer.max_token_id}.",
-                parameter="bad_words",
-                value=self.bad_words,
-            )
+                    if total_tokens > max_total_tokens:
+                        raise VLLMValidationError(
+                            "Too many total bad word tokens after tokenization: "
+                            f"{total_tokens}. The max number is {max_total_tokens}.",
+                            parameter="bad_words",
+                            value=self.bad_words,
+                        )
 
     @cached_property
     def sampling_type(self) -> SamplingType:
@@ -837,7 +847,8 @@ class SamplingParams(
         self._validate_logprobs(model_config)
         self._validate_logit_bias(model_config)
         self._validate_logits_processors(model_config)
-        self._validate_allowed_token_ids(tokenizer)
+        self._validate_allowed_token_ids()
+        self.validate_model_token_ids(model_config)
         self._validate_spec_decode(speculative_config)
         self._validate_diffusion(model_config)
         self._validate_structured_outputs(
@@ -933,7 +944,7 @@ class SamplingParams(
 
         validate_logits_processors_parameters(model_config.logits_processors, self)
 
-    def _validate_allowed_token_ids(self, tokenizer: TokenizerLike | None) -> None:
+    def _validate_allowed_token_ids(self) -> None:
         allowed_token_ids = self.allowed_token_ids
         if allowed_token_ids is None:
             return
@@ -945,19 +956,56 @@ class SamplingParams(
                 value=allowed_token_ids,
             )
 
-        if tokenizer is not None:
-            vocab_size = len(tokenizer)
-            invalid_token_ids = [
-                token_id
-                for token_id in allowed_token_ids
-                if token_id < 0 or token_id >= vocab_size
-            ]
-            if invalid_token_ids:
-                raise VLLMValidationError(
-                    "allowed_token_ids contains out-of-vocab token id!",
-                    parameter="allowed_token_ids",
-                    value=invalid_token_ids,
-                )
+    @staticmethod
+    def _validate_model_vocab_token_ids(
+        parameter: str,
+        token_ids: Iterable[int],
+        vocab_size: int,
+    ) -> None:
+        invalid_token_ids = [
+            token_id
+            for token_id in token_ids
+            if not isinstance(token_id, int) or token_id < 0 or token_id >= vocab_size
+        ]
+        if invalid_token_ids:
+            raise VLLMValidationError(
+                f"token_id(s) {invalid_token_ids} in {parameter} contain "
+                f"out-of-vocab token ids. Vocabulary size: {vocab_size}",
+                parameter=parameter,
+                value=invalid_token_ids,
+            )
+
+    def validate_model_token_ids(self, model_config: ModelConfig) -> None:
+        """Validate all sampler token IDs that index model-sized tensors."""
+        vocab_size = model_config.get_vocab_size()
+        self._validate_model_vocab_token_ids(
+            "stop_token_ids", self._all_stop_token_ids, vocab_size
+        )
+        if self.allowed_token_ids is not None:
+            self._validate_model_vocab_token_ids(
+                "allowed_token_ids", self.allowed_token_ids, vocab_size
+            )
+        if self._bad_words_token_ids is not None:
+            self._validate_model_vocab_token_ids(
+                "bad_words",
+                (
+                    token_id
+                    for token_ids in self._bad_words_token_ids
+                    for token_id in token_ids
+                ),
+                vocab_size,
+            )
+
+    def validate_routed_experts_prompt_start(self, prompt_len: int) -> None:
+        """Validate the routed-expert prompt offset for a resolved prompt."""
+        prompt_start = self.routed_experts_prompt_start
+        if not isinstance(prompt_start, int) or not 0 <= prompt_start <= prompt_len:
+            raise VLLMValidationError(
+                "routed_experts_prompt_start must be in the range "
+                f"[0, {prompt_len}], got {prompt_start}.",
+                parameter="routed_experts_prompt_start",
+                value=prompt_start,
+            )
 
     def _validate_spec_decode(
         self,

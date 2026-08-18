@@ -5,7 +5,9 @@ use std::collections::BTreeSet;
 use std::result::Result;
 
 use thiserror::Error;
+use vllm_engine_core_client::protocol::multimodal::{MmFeatureSpec, MmFeatures};
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
+use vllm_engine_core_client::protocol::tensor::WireArrayData;
 
 use crate::SamplingLimits;
 use crate::request::SamplingParams;
@@ -78,7 +80,9 @@ fn validate_param(
 ) -> Result<(), TokenIdsError> {
     let invalid_token_ids: Vec<_> = token_ids
         .into_iter()
-        .filter(|&token_id| token_id as usize >= vocab_size)
+        .filter(|&token_id| {
+            usize::try_from(token_id).map_or(true, |token_id| token_id >= vocab_size)
+        })
         .collect();
     if invalid_token_ids.is_empty() {
         return Ok(());
@@ -105,6 +109,13 @@ pub(crate) fn validate_sampler_control_sizes(params: &SamplingParams) -> Result<
             "logit_bias",
             logit_bias.len(),
             SamplingLimits::MAX_LOGIT_BIAS_TOKENS,
+        )?;
+    }
+    if let Some(stop_token_ids) = params.stop_token_ids.as_deref() {
+        validate_count(
+            "stop_token_ids",
+            stop_token_ids.len(),
+            SamplingLimits::MAX_STOP_TOKEN_IDS,
         )?;
     }
     if let Some(bad_words) = params.bad_words.as_deref() {
@@ -142,21 +153,31 @@ pub(crate) fn validate_resolved_stop_token_ids(
 /// Validate tokenized bad-word state against the engine's fixed-size sampler buffers.
 pub(crate) fn validate_bad_words_tokenized_shape(
     bad_words_token_ids: &[Vec<u32>],
+    limits: &SamplingLimits,
 ) -> Result<(), TokenIdsError> {
-    if bad_words_token_ids.len() > SamplingLimits::MAX_BAD_WORD_TOKEN_SEQUENCES {
+    if bad_words_token_ids.len() > limits.max_num_bad_words {
         return Err(TokenIdsError::TooManyTokenizedEntries {
             parameter: "bad_words",
             requested: bad_words_token_ids.len(),
-            max_allowed: SamplingLimits::MAX_BAD_WORD_TOKEN_SEQUENCES,
+            max_allowed: limits.max_num_bad_words,
         });
     }
 
-    let total_tokens = bad_words_token_ids.iter().map(Vec::len).sum();
-    if total_tokens > SamplingLimits::MAX_BAD_WORD_TOTAL_TOKENS {
+    let total_tokens = bad_words_token_ids
+        .iter()
+        .try_fold(0usize, |total, tokens| total.checked_add(tokens.len()));
+    let Some(total_tokens) = total_tokens else {
+        return Err(TokenIdsError::TooManyTokenizedTokens {
+            parameter: "bad_words",
+            requested: usize::MAX,
+            max_allowed: limits.max_bad_words_total_tokens,
+        });
+    };
+    if total_tokens > limits.max_bad_words_total_tokens {
         return Err(TokenIdsError::TooManyTokenizedTokens {
             parameter: "bad_words",
             requested: total_tokens,
-            max_allowed: SamplingLimits::MAX_BAD_WORD_TOTAL_TOKENS,
+            max_allowed: limits.max_bad_words_total_tokens,
         });
     }
 
@@ -167,13 +188,51 @@ pub(crate) fn validate_bad_words_tokenized_shape(
 /// vocabulary range.
 pub(crate) fn validate_prompt_token_ids(
     prompt_token_ids: &[u32],
+    mm_features: Option<&MmFeatures>,
     limits: &SamplingLimits,
 ) -> Result<(), TokenIdsError> {
-    validate_param(
-        "prompt",
-        prompt_token_ids.iter().copied(),
-        limits.prompt_token_vocab_size(),
-    )
+    let invalid_token_ids = prompt_token_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(position, &token_id)| {
+            (usize::try_from(token_id).map_or(true, |token_id| token_id >= limits.model_vocab_size)
+                && !is_multimodal_embed_position(position, mm_features))
+            .then_some(token_id)
+        })
+        .collect::<Vec<_>>();
+    if invalid_token_ids.is_empty() {
+        return Ok(());
+    }
+    Err(TokenIdsError::OutOfVocab {
+        parameter: "prompt",
+        token_ids: invalid_token_ids,
+        vocab_size: limits.model_vocab_size,
+    })
+}
+
+fn is_multimodal_embed_position(position: usize, mm_features: Option<&MmFeatures>) -> bool {
+    mm_features.is_some_and(|features| {
+        features.iter().any(|feature| feature_replaces_position(feature, position))
+    })
+}
+
+fn feature_replaces_position(feature: &MmFeatureSpec, position: usize) -> bool {
+    let Some(offset) = position.checked_sub(feature.mm_position.offset) else {
+        return false;
+    };
+    if offset >= feature.mm_position.length {
+        return false;
+    }
+    let Some(mask) = feature.mm_position.is_embed.as_ref() else {
+        return true;
+    };
+    if mask.dtype != "bool" || mask.shape.as_slice() != [feature.mm_position.length] {
+        return false;
+    }
+    match &mask.data {
+        WireArrayData::RawView(bytes) => bytes.get(offset).is_some_and(|value| *value != 0),
+        WireArrayData::AuxIndex(_) => false,
+    }
 }
 
 /// Validate that token IDs in text sampling parameters are within their
@@ -184,7 +243,7 @@ pub(crate) fn validate_vocab_range(
 ) -> Result<(), TokenIdsError> {
     validate_param(
         "stop_token_ids",
-        params.stop_token_ids.iter().copied(),
+        params.all_stop_token_ids.iter().copied(),
         limits.model_vocab_size,
     )?;
 
@@ -195,7 +254,7 @@ pub(crate) fn validate_vocab_range(
         validate_param(
             "allowed_token_ids",
             token_ids.iter().copied(),
-            limits.tokenizer_vocab_size,
+            limits.model_vocab_size,
         )?;
     }
 
@@ -219,7 +278,7 @@ pub(crate) fn validate_vocab_range(
         validate_param(
             "bad_words",
             bad_words_token_ids.iter().flatten().copied(),
-            limits.tokenizer_vocab_size,
+            limits.model_vocab_size,
         )?;
     }
 
