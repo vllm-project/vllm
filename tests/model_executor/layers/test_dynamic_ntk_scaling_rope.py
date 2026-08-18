@@ -57,16 +57,26 @@ class TestDynamicNTKScalingRotaryEmbeddingBelowTrainedLength:
     def test_served_above_trained_length_still_applies_ntk_scaling(
         self, default_vllm_config
     ):
-        # Extension behavior above the trained length must be unchanged:
-        # the cache should differ from the plain, unscaled RoPE cache.
+        # Extension behavior above the trained length must be unchanged: the
+        # cache should match the original (pre-guard) NTK formula exactly,
+        # not merely differ from plain, unscaled RoPE.
         rope = _make_rope(max_position_embeddings=4096, max_trained_positions=2048)
         cache = rope._compute_cos_sin_cache()
         assert not cache.is_complex()
         assert torch.isfinite(cache).all()
 
-        plain_inv_freq = rope._compute_inv_freq(rope.base)
-        plain_cache = _reference_cache(rope.max_position_embeddings, plain_inv_freq)
-        assert not torch.allclose(cache, plain_cache)
+        legacy_base = rope.base * (
+            (
+                rope.scaling_factor
+                * rope.max_position_embeddings
+                / rope.max_trained_positions
+            )
+            - (rope.scaling_factor - 1)
+        ) ** (rope.rotary_dim / (rope.rotary_dim - 2))
+        legacy_cache = _reference_cache(
+            rope.max_position_embeddings, rope._compute_inv_freq(legacy_base)
+        )
+        assert torch.allclose(cache, legacy_cache)
 
 
 def _reference_cache(max_position_embeddings: int, inv_freq: torch.Tensor):
