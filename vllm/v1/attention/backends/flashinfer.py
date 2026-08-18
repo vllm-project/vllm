@@ -946,7 +946,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             assert self.kv_cache_spec.dtype == self.model_config.dtype
             self.kv_cache_dtype = self.kv_cache_spec.dtype
 
-
         if self.is_kvcache_nvfp4 and get_kv_cache_layout() != "HND":
             # The NVFP4 per-side [data | scale] carve is only byte-coherent
             # under the head-major HND layout (see
@@ -967,11 +966,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         # Prefer TRTLLM/XQA for decoding whenever supported. The decode kernel
         # must be selected statically for FULL cudagraph capture.
-        # NVFP4 KV on consumer Blackwell is served by the FA2 paged reader;
-        # XQA/trtllm-gen decode cannot read NVFP4 cache.
+        # XQA NVFP4 support was added in flashinfer PRs #3534, #3724, #3608.
         can_use_xqa_or_trtllm_gen_decode = (
-            not self.use_fa2_nvfp4_kv
-            and can_use_trtllm_attention(
+            can_use_trtllm_attention(
                 self.num_qo_heads, self.num_kv_heads, is_prefill=False
             )
         )
@@ -1198,16 +1195,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         is_sm12x = current_platform.is_device_capability_family(120)
-        # NVFP4 KV on consumer Blackwell is served by the FA2 paged reader
-        # (XQA/trtllm-gen cannot read NVFP4, and head_size > 256 routes
-        # decode through the VO-split prefill wrapper), so the uniform-batch
-        # capture contract does not hold; fall back to per-request capture.
-        if (
-            is_sm12x
-            and vllm_config.cache_config is not None
-            and vllm_config.cache_config.cache_dtype.startswith("nvfp4")
-        ):
-            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
         # XQA does not return LSE and therefore does not support DCP.
         if is_sm12x and vllm_config.parallel_config.decode_context_parallel_size > 1:
             return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
@@ -2615,7 +2602,6 @@ class FlashInferImpl(AttentionImpl):
         )
         if decode_with_dedicated_xqa:
             assert not use_dcp
-            assert not self.is_kvcache_nvfp4
             assert self.o_sf_scale is None
             assert output.dtype != FP4_DTYPE
 
@@ -3056,6 +3042,7 @@ class FlashInferImpl(AttentionImpl):
                         q_len_per_req=q_len_per_req,
                         mask=attn_metadata.decode.mask,
                         q_cu_seq_lens=attn_metadata.decode.q_cu_seq_lens,
+                        kv_cache_sf=nvfp4_kv_block_scales,
                     )
                     return output_padded
 

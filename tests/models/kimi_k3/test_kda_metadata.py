@@ -89,7 +89,7 @@ def _make_builder(
     use_recoverssm: bool = False,
 ) -> AttentionMetadataBuilder:
     vllm_config = create_vllm_config(
-        model_name="Qwen/Qwen3.5-0.8B",
+        model_name="/data/models/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
     )
     if num_speculative_tokens:
