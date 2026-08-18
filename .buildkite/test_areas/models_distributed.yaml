@@ -2,7 +2,7 @@ group: Models - Distributed
 depends_on: 
   - image-build
 steps:
-- label: Distributed Model Tests (2 GPUs)
+- label: ":nvidia: (L4) Distributed Models"
   key: distributed-model-tests-2-gpus
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
