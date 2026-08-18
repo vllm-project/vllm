@@ -185,6 +185,19 @@ impl RoundtripCase {
         }
     }
 
+    /// GLM-5.2 XML-like argument format with `<think>` reasoning tags.
+    fn glm52() -> Self {
+        Self {
+            model_id: "zai-org/GLM-5.2-FP8",
+            assistant_stop_suffix: "",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
     /// Gemma4 channel reasoning with custom function-call arguments.
     fn gemma4() -> Self {
         Self {
@@ -324,6 +337,7 @@ roundtrip_tests! {
     deepseek_v32 => [tool_call_mix],
     glm45 => [reasoning_and_content, tool_call_mix],
     glm47 => [reasoning_and_content, tool_call_mix],
+    glm52 => [reasoning_and_content, tool_call_mix],
     seed_oss => [reasoning_and_content, tool_call_mix],
     step3p5 => [reasoning_and_content],
     nemotron_v3 => [reasoning_and_content],
