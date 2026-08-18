@@ -12,6 +12,7 @@ use serde_tuple::{Deserialize_tuple, Serialize_tuple};
 use super::utility::UtilityOutput;
 use crate::error::{Error, Result, ext_value_decode};
 use crate::protocol::logprobs::MaybeWireLogprobs;
+use crate::protocol::routed_experts::MaybeWireRoutedExperts;
 use crate::protocol::stats::{PrefillStats, SchedulerStats};
 use crate::protocol::{OpaqueValue, decode_msgpack};
 
@@ -108,7 +109,7 @@ pub struct EngineCoreOutput {
     #[serde(default)]
     pub prefill_stats: Option<PrefillStats>,
     #[serde(default)]
-    pub routed_experts: Option<OpaqueValue>,
+    pub routed_experts: Option<MaybeWireRoutedExperts>,
     /// Number of NaNs seen in logits. Values above zero indicate corruption.
     #[serde(default)]
     pub num_nans_in_logits: u32,
@@ -145,6 +146,8 @@ impl EngineCoreOutput {
         self.new_prompt_logprobs_tensors = (self.new_prompt_logprobs_tensors.take())
             .map(|value| value.resolve(frames, "new_prompt_logprobs_tensors"))
             .transpose()?;
+        self.routed_experts =
+            (self.routed_experts.take()).map(|value| value.resolve(frames)).transpose()?;
         Ok(())
     }
 }

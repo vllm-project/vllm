@@ -1,0 +1,142 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+use bytes::Bytes;
+use enum_as_inner::EnumAsInner;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::error::{Error, Result, bail_ext_value_decode, ext_value_decode};
+use crate::protocol::tensor::{ShapeExt as _, WireArrayData, WireNdArray};
+
+/// Semantic routed-experts payload returned by engine-core.
+///
+/// The first dimension is the token dimension; the remaining dimensions are
+/// model layers and experts selected per token. Engine-core emits the compact
+/// unsigned dtype chosen by its scheduler-side routed-experts buffer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutedExperts {
+    pub dtype: String,
+    pub shape: Vec<usize>,
+    pub data: Vec<u8>,
+}
+
+/// Routed-experts output is initially decoded from Python's ndarray wire
+/// tuple and resolved against optional multipart frames before it is exposed.
+#[derive(Debug, Clone, PartialEq, EnumAsInner)]
+pub enum MaybeWireRoutedExperts {
+    Wire(WireNdArray),
+    Direct(RoutedExperts),
+}
+
+impl<'de> Deserialize<'de> for MaybeWireRoutedExperts {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        WireNdArray::deserialize(deserializer).map(Self::Wire)
+    }
+}
+
+impl Serialize for MaybeWireRoutedExperts {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Wire(value) => value.serialize(serializer),
+            Self::Direct(value) => {
+                WireNdArray::from_raw(value.dtype.clone(), value.shape.clone(), value.data.clone())
+                    .serialize(serializer)
+            }
+        }
+    }
+}
+
+impl MaybeWireRoutedExperts {
+    pub(super) fn resolve<Frame>(self, frames: &[Frame]) -> Result<Self>
+    where
+        Frame: AsRef<[u8]>,
+    {
+        let Self::Wire(WireNdArray { dtype, shape, data }) = self else {
+            return Ok(self);
+        };
+        if shape.len() != 3 {
+            bail_ext_value_decode!(
+                "routed_experts: expected a rank-3 ndarray, got shape {shape:?}"
+            );
+        }
+        let (dtype, item_size) = match dtype.as_str() {
+            "|u1" | "uint8" => ("uint8", 1usize),
+            "<u2" | "=u2" | "uint16" => ("uint16", 2usize),
+            other => bail_ext_value_decode!(
+                "routed_experts: expected native uint8 or uint16 dtype, got {other:?}"
+            ),
+        };
+        let data = match data {
+            WireArrayData::RawView(bytes) => bytes,
+            WireArrayData::AuxIndex(index) => {
+                let frame = frames.get(index).ok_or_else(|| {
+                    ext_value_decode!(
+                        "routed_experts: aux frame index {index} out of range for {} frames",
+                        frames.len()
+                    )
+                })?;
+                Bytes::copy_from_slice(frame.as_ref())
+            }
+        };
+        let expected = shape
+            .checked_numel()
+            .and_then(|numel| numel.checked_mul(item_size))
+            .ok_or_else(|| {
+                ext_value_decode!("routed_experts: shape byte length overflowed usize: {shape:?}")
+            })?;
+        if data.len() != expected {
+            bail_ext_value_decode!(
+                "routed_experts: byte length mismatch: expected {expected}, got {}",
+                data.len()
+            );
+        }
+        Ok(Self::Direct(RoutedExperts {
+            dtype: dtype.to_string(),
+            shape,
+            data: data.to_vec(),
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_multipart_uint16_routed_experts() {
+        let payload = [1_u16, 2, 300, 4].into_iter().flat_map(u16::to_le_bytes).collect::<Vec<_>>();
+        let frames = [Bytes::new(), Bytes::from(payload.clone())];
+        let decoded = MaybeWireRoutedExperts::Wire(WireNdArray {
+            dtype: "<u2".to_string(),
+            shape: vec![2, 1, 2],
+            data: WireArrayData::AuxIndex(1),
+        })
+        .resolve(&frames)
+        .expect("resolve routed experts")
+        .into_direct()
+        .expect("direct routed experts");
+
+        assert_eq!(decoded.dtype, "uint16");
+        assert_eq!(decoded.shape, [2, 1, 2]);
+        assert_eq!(decoded.data, payload);
+    }
+
+    #[test]
+    fn rejects_non_rank_three_routed_experts() {
+        let error = MaybeWireRoutedExperts::Wire(WireNdArray {
+            dtype: "|u1".to_string(),
+            shape: vec![2, 2],
+            data: WireArrayData::RawView(Bytes::from_static(&[1, 2, 3, 4])),
+        })
+        .resolve(&[Bytes::new()])
+        .expect_err("rank must be checked");
+
+        assert!(error.to_string().contains("expected a rank-3 ndarray"));
+    }
+}
