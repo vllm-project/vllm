@@ -1,0 +1,27 @@
+diff --git a/csrc/apis/attention.hpp b/csrc/apis/attention.hpp
+index 1abfd5c..de7d55d 100644
+--- a/csrc/apis/attention.hpp
++++ b/csrc/apis/attention.hpp
+@@ -387,7 +387,9 @@ static torch::Tensor fp8_fp4_paged_mqa_logits(const std::tuple<torch::Tensor, st
+     // Allocate output
+     // SM120a: 2 groups × 64 KV rows = 128; SM90/100: 256
+     const int split_kv = (arch_major == 12) ? 128 : 256;
+-    DG_HOST_ASSERT(logits_dtype == torch::kFloat32 or logits_dtype == torch::kBFloat16);
++    DG_HOST_ASSERT(logits_dtype == torch::kFloat32 or
++                   logits_dtype == torch::kFloat16 or
++                   logits_dtype == torch::kBFloat16);
+     // Logits row stride must be 1024-byte aligned
+     const int stride_logits_alignment = 1024 / static_cast<int>(c10::elementSize(logits_dtype));
+     const auto aligned_max_context_len = align(align(max_context_len, split_kv), stride_logits_alignment);
+diff --git a/csrc/jit_kernels/impls/runtime_utils.hpp b/csrc/jit_kernels/impls/runtime_utils.hpp
+index 6a1e068..b7656a2 100644
+--- a/csrc/jit_kernels/impls/runtime_utils.hpp
++++ b/csrc/jit_kernels/impls/runtime_utils.hpp
+@@ -55,6 +55,7 @@ static std::string to_string(const at::ScalarType& dtype) {
+     switch (dtype) {
+         case torch::kInt:           return "int";
+         case torch::kFloat:         return "float";
++        case torch::kFloat16:       return "cutlass::half_t";
+         case torch::kBFloat16:      return "cutlass::bfloat16_t";
+         case torch::kFloat8_e4m3fn: return "cutlass::float_e4m3_t";
+         case kPackedFP4:            return "cutlass::detail::float_e2m1_unpacksmem_t";

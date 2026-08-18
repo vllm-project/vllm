@@ -35,12 +35,37 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
     max_smem_per_block = device_prop->sharedMemPerBlockOptin;
   }
 
-  if (num_rows > 32 && max_smem_per_block >= 128 * 1024) {
-    cudaError_t status =
-        vllm::FilteredTopKRaggedTransform<float, int32_t, TopK>(
-            logits.const_data_ptr<float>(), output.mutable_data_ptr<int32_t>(),
-            lengths.const_data_ptr<int32_t>(), static_cast<uint32_t>(num_rows),
-            static_cast<uint32_t>(TopK), static_cast<uint32_t>(stride), stream);
+  const bool is_half =
+      logits.scalar_type() == torch::headeronly::ScalarType::Half;
+  const bool is_bfloat16 =
+      logits.scalar_type() == torch::headeronly::ScalarType::BFloat16;
+  if (is_half || is_bfloat16) {
+    STD_TORCH_CHECK(max_smem_per_block >= 128 * 1024,
+                    "Reduced-precision persistent_topk requires at least "
+                    "128KB of shared memory per block");
+  }
+
+  if ((num_rows > 32 || is_half || is_bfloat16) &&
+      max_smem_per_block >= 128 * 1024) {
+    cudaError_t status;
+    if (is_half) {
+      status = vllm::FilteredTopKRaggedTransform<__half, int32_t, TopK>(
+          reinterpret_cast<const __half*>(logits.const_data_ptr()),
+          output.mutable_data_ptr<int32_t>(), lengths.const_data_ptr<int32_t>(),
+          static_cast<uint32_t>(num_rows), static_cast<uint32_t>(TopK),
+          static_cast<uint32_t>(stride), stream);
+    } else if (is_bfloat16) {
+      status = vllm::FilteredTopKRaggedTransform<__nv_bfloat16, int32_t, TopK>(
+          reinterpret_cast<const __nv_bfloat16*>(logits.const_data_ptr()),
+          output.mutable_data_ptr<int32_t>(), lengths.const_data_ptr<int32_t>(),
+          static_cast<uint32_t>(num_rows), static_cast<uint32_t>(TopK),
+          static_cast<uint32_t>(stride), stream);
+    } else {
+      status = vllm::FilteredTopKRaggedTransform<float, int32_t, TopK>(
+          logits.const_data_ptr<float>(), output.mutable_data_ptr<int32_t>(),
+          lengths.const_data_ptr<int32_t>(), static_cast<uint32_t>(num_rows),
+          static_cast<uint32_t>(TopK), static_cast<uint32_t>(stride), stream);
+    }
     STD_TORCH_CHECK(status == cudaSuccess,
                     "FilteredTopK failed: ", cudaGetErrorString(status));
   } else {
@@ -241,8 +266,11 @@ void persistent_topk(const torch::stable::Tensor& logits,
   STD_TORCH_CHECK(logits.is_cuda(), "logits must be CUDA tensor");
   STD_TORCH_CHECK(lengths.is_cuda(), "lengths must be CUDA tensor");
   STD_TORCH_CHECK(output.is_cuda(), "output must be CUDA tensor");
-  STD_TORCH_CHECK(logits.scalar_type() == torch::headeronly::ScalarType::Float,
-                  "Only float32 supported");
+  STD_TORCH_CHECK(
+      logits.scalar_type() == torch::headeronly::ScalarType::Float ||
+          logits.scalar_type() == torch::headeronly::ScalarType::Half ||
+          logits.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "Only float32, float16, and bfloat16 are supported");
   STD_TORCH_CHECK(lengths.scalar_type() == torch::headeronly::ScalarType::Int,
                   "lengths must be int32");
   STD_TORCH_CHECK(output.scalar_type() == torch::headeronly::ScalarType::Int,

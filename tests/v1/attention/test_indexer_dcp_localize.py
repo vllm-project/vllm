@@ -415,7 +415,10 @@ def test_local_topk_union_is_not_equivalent_to_global_topk_attention():
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-def test_sparse_decode_dcp_persistent_topk_matches_non_dcp():
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_sparse_decode_dcp_persistent_topk_matches_non_dcp(
+    logits_dtype: torch.dtype,
+):
     torch.manual_seed(3)
     device = torch.device("cuda")
     world = 2
@@ -428,7 +431,7 @@ def test_sparse_decode_dcp_persistent_topk_matches_non_dcp():
     q = torch.randn(num_rows, head_dim, device=device)
     k = torch.randn(max_seq_len, head_dim, device=device)
     v = torch.randn(max_seq_len, head_dim, device=device)
-    logits = q @ k.T
+    logits = (q @ k.T).to(logits_dtype)
     seq_lens = torch.tensor([[1024], [1025]], dtype=torch.int32, device=device)
 
     non_dcp_topk = torch.empty((num_rows, topk), dtype=torch.int64, device=device)
@@ -496,8 +499,10 @@ def test_sparse_decode_dcp_persistent_topk_matches_non_dcp():
     reason="This test requires CUDA and CuteDSL",
 )
 @pytest.mark.parametrize("use_row_starts", [False, True])
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
     use_row_starts: bool,
+    logits_dtype: torch.dtype,
 ):
     from vllm.model_executor.kernels.attention.dsa.dcp_indexer_cutedsl import (
         pack_dcp_topk_candidates_cutedsl,
@@ -524,7 +529,7 @@ def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
 
     packed_by_rank = []
     for rank in range(world):
-        logits = torch.randn((rows, width), device=device, dtype=torch.float32)
+        logits = torch.randn((rows, width), device=device, dtype=logits_dtype)
         local_topks = []
         for row in range(rows):
             start = int(row_offsets[row].item())
@@ -548,7 +553,7 @@ def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
             1, topk_indices.to(torch.long) + row_offsets.to(torch.long).view(-1, 1)
         )
         expected_ids = (topk_indices * world + rank).to(torch.float32)
-        torch.testing.assert_close(packed[..., 0], expected_scores)
+        torch.testing.assert_close(packed[..., 0], expected_scores.float())
         torch.testing.assert_close(packed[..., 1], expected_ids)
         packed_by_rank.append(packed)
 

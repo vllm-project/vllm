@@ -6,10 +6,12 @@
 #define PERSISTENT_TOPK_CUH_
 
 #include <cuda.h>
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
 #include <cstdint>
+#include <type_traits>
 
 #include "topk_histogram_4096.cuh"
 
@@ -1024,6 +1026,52 @@ struct FilteredTopKTraits<float> {
   }
 };
 
+// FP16 keys are already the precision being selected. The coarse pass consumes
+// the high byte of the ordered 16-bit key and one refinement pass resolves the
+// low byte exactly.
+template <>
+struct FilteredTopKTraits<__half> {
+  using OrderedType = uint16_t;
+  static constexpr int NUM_REFINE_ROUNDS = 1;
+  static constexpr int FIRST_REFINE_SHIFT = 0;
+
+  __device__ __forceinline__ static OrderedType ToOrdered(__half x) {
+    const uint16_t bits = __half_as_ushort(x);
+    return (bits & 0x8000) ? static_cast<uint16_t>(~bits)
+                           : static_cast<uint16_t>(bits | 0x8000);
+  }
+
+  __device__ __forceinline__ static uint8_t ToCoarseKey(__half x) {
+    return static_cast<uint8_t>(ToOrdered(x) >> 8);
+  }
+};
+
+template <>
+struct FilteredTopKTraits<__nv_bfloat16> {
+  using OrderedType = uint16_t;
+  static constexpr int NUM_REFINE_ROUNDS = 1;
+  static constexpr int FIRST_REFINE_SHIFT = 0;
+
+  __device__ __forceinline__ static OrderedType ToOrdered(__nv_bfloat16 x) {
+    const uint16_t bits = __bfloat16_as_ushort(x);
+    return (bits & 0x8000) ? static_cast<uint16_t>(~bits)
+                           : static_cast<uint16_t>(bits | 0x8000);
+  }
+
+  __device__ __forceinline__ static uint8_t ToCoarseKey(__nv_bfloat16 x) {
+    // The upper byte of a BF16 key is almost entirely exponent bits. Around
+    // the normal-distribution top-k boundary this can put more than the 16K
+    // refinement-buffer capacity in one bin. Use the same FP16 projection as
+    // the FP32 path for a finer coarse partition; the native BF16 key below
+    // still resolves the selected bin exactly.
+    const __half h = __float2half_rn(__bfloat162float(x));
+    const uint16_t bits = __half_as_ushort(h);
+    const uint16_t key = (bits & 0x8000) ? static_cast<uint16_t>(~bits)
+                                         : static_cast<uint16_t>(bits | 0x8000);
+    return static_cast<uint8_t>(key >> 8);
+  }
+};
+
 constexpr uint32_t FILTERED_TOPK_BLOCK_THREADS = 1024;
 constexpr uint32_t FILTERED_TOPK_SMEM_INPUT_SIZE =
     16 * 1024;  // 16K indices per buffer
@@ -1071,13 +1119,16 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
   if (length <= 32768) {
     extern __shared__ uint8_t _smem_reg[];
     if constexpr (UsePredicatedShortLoads) {
-      hist4096::histogram_4096_topk_predicated<MAX_K, 12, 8>(score, dst, length,
-                                                             _smem_reg);
+      if constexpr (std::is_same_v<DType, float>) {
+        hist4096::histogram_4096_topk_predicated<MAX_K, 12, 8>(
+            score, dst, length, _smem_reg);
+        return;
+      }
     } else {
-      hist4096::histogram_4096_topk<MAX_K, 12, 8>(score, dst, length,
-                                                  _smem_reg);
+      hist4096::histogram_4096_topk<DType, MAX_K, 12, 8>(score, dst, length,
+                                                         _smem_reg);
+      return;
     }
-    return;
   }
 
   // Static shared memory

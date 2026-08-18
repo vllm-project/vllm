@@ -97,7 +97,8 @@ def _ref_fp8_mqa_logits(
     not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
 )
 @pytest.mark.parametrize("clean_logits", [True, False])
-def test_deepgemm_fp8_mqa_logits(clean_logits: bool):
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_deepgemm_fp8_mqa_logits(clean_logits: bool, logits_dtype: torch.dtype):
     torch.manual_seed(0)
     random.seed(0)
     num_heads, head_dim = 32, 128
@@ -129,8 +130,15 @@ def test_deepgemm_fp8_mqa_logits(clean_logits: bool):
                 q_fp8 = q.to(torch.float8_e4m3fn)
                 kv_fp8 = per_custom_dims_cast_to_fp8(kv, (0,), False)
                 logits = fp8_fp4_mqa_logits(
-                    (q_fp8, None), kv_fp8, weights, ks, ke, clean_logits=clean_logits
+                    (q_fp8, None),
+                    kv_fp8,
+                    weights,
+                    ks,
+                    ke,
+                    clean_logits=clean_logits,
+                    logits_dtype=logits_dtype,
                 )
+                assert logits.dtype == logits_dtype
 
                 ref_logits = _ref_fp8_mqa_logits(
                     q=q,
@@ -208,7 +216,10 @@ def _ref_fp8_fp4_paged_mqa_logits(
 )
 # next_n = 1 + num_speculative_tokens, so next_n=4 is MTP=3 (issue #35878).
 @pytest.mark.parametrize("batch_size,next_n", [(4, 1), (2, 2), (2, 4)])
-def test_deepgemm_fp8_fp4_paged_mqa_logits(batch_size: int, next_n: int):
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_deepgemm_fp8_fp4_paged_mqa_logits(
+    batch_size: int, next_n: int, logits_dtype: torch.dtype
+):
     if not native_next_n_supported(next_n):
         pytest.skip(f"next_n={next_n} has no native kernel on this architecture")
 
@@ -287,6 +298,7 @@ def test_deepgemm_fp8_fp4_paged_mqa_logits(batch_size: int, next_n: int):
                 schedule_metadata,
                 max_model_len,
                 clean_logits=clean_logits,
+                logits_dtype=logits_dtype,
             )
 
             ref_logits = _ref_fp8_fp4_paged_mqa_logits(
@@ -312,4 +324,5 @@ def test_deepgemm_fp8_fp4_paged_mqa_logits(batch_size: int, next_n: int):
             logits = logits.masked_fill(~mask, 0)
             ref_logits = ref_logits.masked_fill(~mask, 0)
             diff = calc_diff(logits, ref_logits)
+            assert logits.dtype == logits_dtype
             assert diff < 1e-3, f"{diff=}"

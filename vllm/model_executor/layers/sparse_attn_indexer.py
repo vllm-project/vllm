@@ -44,6 +44,21 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
 
+_INDEXER_LOGITS_DTYPES = {
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "float32": torch.float32,
+}
+
+
+def _get_indexer_logits_dtype() -> torch.dtype:
+    setting = envs.VLLM_INDEXER_LOGITS_DTYPE
+    if setting != "auto":
+        return _INDEXER_LOGITS_DTYPES[setting]
+    if not current_platform.is_cuda():
+        return torch.float32
+    return torch.float16
+
 
 def _assert_cutedsl_dcp_merge_supported(
     logits: torch.Tensor,
@@ -60,10 +75,12 @@ def _assert_cutedsl_dcp_merge_supported(
         )
     if logits.device.type != "cuda":
         raise RuntimeError("DCP sparse-indexer merge requires CUDA tensors.")
-    if logits.dtype != torch.float32 or topk_indices.dtype != torch.int32:
+    if logits.dtype not in (torch.float32, torch.float16, torch.bfloat16):
         raise RuntimeError(
-            "DCP sparse-indexer merge requires fp32 logits and int32 indices."
+            "DCP sparse-indexer merge requires fp32, fp16, or bf16 logits."
         )
+    if topk_indices.dtype != torch.int32:
+        raise RuntimeError("DCP sparse-indexer merge requires int32 indices.")
     if k not in (512, 1024, 2048):
         raise RuntimeError(
             f"DCP sparse-indexer merge requires index_topk in (512, 1024, 2048); "
@@ -485,7 +502,12 @@ def sparse_attn_indexer(
                     q_slice_cast = q_slice
                     k_quant_cast = k_quant
                     k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
+                logits_dtype = _get_indexer_logits_dtype()
                 if current_platform.is_xpu():
+                    if logits_dtype != torch.float32:
+                        raise RuntimeError(
+                            "Reduced-precision indexer logits are not supported on XPU"
+                        )
                     if q_scale_slice is not None:
                         raise RuntimeError("XPU fp8_mqa_logits does not support FP4 Q")
                     logits = torch.ops.vllm.xpu_fp8_mqa_logits(
@@ -504,6 +526,7 @@ def sparse_attn_indexer(
                         cu_seqlen_ks,
                         cu_seqlen_ke,
                         clean_logits=False,
+                        logits_dtype=logits_dtype,
                     )
                 num_rows = logits.shape[0]
                 ops.top_k_per_row_prefill(
@@ -584,7 +607,12 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
+        logits_dtype = _get_indexer_logits_dtype()
         if current_platform.is_xpu():
+            if logits_dtype != torch.float32:
+                raise RuntimeError(
+                    "Reduced-precision indexer logits are not supported on XPU"
+                )
             if padded_q_scale is not None:
                 raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
             seq_lens_xpu = (
@@ -610,6 +638,7 @@ def sparse_attn_indexer(
                 max_model_len=max_model_len,
                 clean_logits=False,
                 indices=decode_metadata.indices,
+                logits_dtype=logits_dtype,
             )
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
@@ -618,7 +647,7 @@ def sparse_attn_indexer(
             current_platform.is_cuda()
             and topk_tokens in (512, 1024, 2048)
             and num_rows <= 32
-            and logits.stride(0) % 4 == 0  # TMA 16-byte alignment
+            and logits.stride(0) % (16 // logits.element_size()) == 0
             and current_platform.has_device_capability(90)
             and not current_platform.is_device_capability_family(120)
         )

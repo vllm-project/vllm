@@ -14,6 +14,39 @@ INDEXER_LAYER = "model.layers.0.self_attn.indexer.k_cache"
 MLA_LAYER = "model.layers.0.self_attn.attn"
 
 
+@pytest.mark.parametrize(
+    ("setting", "expected"),
+    [
+        ("auto", torch.float16),
+        ("float16", torch.float16),
+        ("bfloat16", torch.bfloat16),
+        ("float32", torch.float32),
+    ],
+)
+def test_indexer_logits_dtype_setting(
+    monkeypatch: pytest.MonkeyPatch,
+    setting: str,
+    expected: torch.dtype,
+) -> None:
+    monkeypatch.setitem(
+        sparse_indexer.envs.__dict__, "VLLM_INDEXER_LOGITS_DTYPE", setting
+    )
+    monkeypatch.setattr(sparse_indexer.current_platform, "is_cuda", lambda: True)
+
+    assert sparse_indexer._get_indexer_logits_dtype() == expected
+
+
+def test_auto_indexer_logits_uses_fp32_off_cuda(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        sparse_indexer.envs.__dict__, "VLLM_INDEXER_LOGITS_DTYPE", "auto"
+    )
+    monkeypatch.setattr(sparse_indexer.current_platform, "is_cuda", lambda: False)
+
+    assert sparse_indexer._get_indexer_logits_dtype() == torch.float32
+
+
 def make_indexer_metadata(
     *,
     num_decodes: int = 0,

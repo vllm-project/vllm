@@ -12,17 +12,18 @@ namespace hist4096 = vllm::topk_histogram_4096;
 #endif
 
 #ifndef USE_ROCM
-template <uint32_t TopK, uint32_t CS>
-void launch_cooperative_cluster(ct::CooperativeTopKParams<TopK>& params,
-                                size_t smem, cudaStream_t stream) {
+template <typename InputType, uint32_t TopK, uint32_t CS>
+void launch_cooperative_cluster(
+    ct::CooperativeTopKParams<InputType, TopK>& params, size_t smem,
+    cudaStream_t stream) {
   auto kernel = []() {
     if constexpr (CS == 16) {
-      return &ct::cooperative_topk_cs16<TopK>;
+      return &ct::cooperative_topk_cs16<InputType, TopK>;
     } else if constexpr (CS == 8) {
-      return &ct::cooperative_topk_cs8<TopK>;
+      return &ct::cooperative_topk_cs8<InputType, TopK>;
     } else {
       static_assert(CS == 4, "unsupported cooperative_topk cluster size");
-      return &ct::cooperative_topk_cs4<TopK>;
+      return &ct::cooperative_topk_cs4<InputType, TopK>;
     }
   }();
   if constexpr (CS > 8) {
@@ -47,7 +48,7 @@ void launch_cooperative_cluster(ct::CooperativeTopKParams<TopK>& params,
                   "cooperative_topk launch failed: ", cudaGetErrorString(err));
 }
 
-template <uint32_t TopK>
+template <typename InputType, uint32_t TopK>
 void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
                                   const torch::stable::Tensor& lengths,
                                   torch::stable::Tensor& output,
@@ -65,8 +66,9 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
       "cooperative_topk supports <=32 rows; use persistent_topk for "
       "larger batches");
 
-  STD_TORCH_CHECK(stride % 4 == 0,
-                  "cooperative_topk: stride must be multiple of 4 for TMA "
+  constexpr uint32_t kTmaAlignment = 16 / sizeof(InputType);
+  STD_TORCH_CHECK(stride % kTmaAlignment == 0,
+                  "cooperative_topk: stride must satisfy 16-byte TMA "
                   "alignment, got stride (max_model_len)=",
                   stride);
 
@@ -75,8 +77,12 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
       workspace.scalar_type() == torch::headeronly::ScalarType::Byte,
       "workspace must be uint8");
 
-  ct::CooperativeTopKParams<TopK> params;
-  params.input = logits.const_data_ptr<float>();
+  ct::CooperativeTopKParams<InputType, TopK> params;
+  if constexpr (std::is_same_v<InputType, float>) {
+    params.input = logits.const_data_ptr<float>();
+  } else {
+    params.input = reinterpret_cast<const InputType*>(logits.const_data_ptr());
+  }
   params.output = output.mutable_data_ptr<int32_t>();
   params.lengths = lengths.const_data_ptr<int32_t>();
   params.num_rows = static_cast<uint32_t>(num_rows);
@@ -93,11 +99,14 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
 
   const bool supports_cluster16 = get_device_prop()->major >= 10;
   if (num_rows <= 4 && supports_cluster16) {
-    launch_cooperative_cluster<TopK, 16>(params, ct::kSmemSize8, stream);
+    launch_cooperative_cluster<InputType, TopK, 16>(
+        params, ct::kSmemSize8<InputType>, stream);
   } else if (num_rows <= 8) {
-    launch_cooperative_cluster<TopK, 8>(params, ct::kSmemSize8, stream);
+    launch_cooperative_cluster<InputType, TopK, 8>(
+        params, ct::kSmemSize8<InputType>, stream);
   } else {
-    launch_cooperative_cluster<TopK, 4>(params, ct::kSmemSize4, stream);
+    launch_cooperative_cluster<InputType, TopK, 4>(
+        params, ct::kSmemSize4<InputType>, stream);
   }
 }
 #endif  // USE_ROCM
@@ -111,8 +120,11 @@ void cooperative_topk(const torch::stable::Tensor& logits,
   STD_TORCH_CHECK(logits.is_cuda(), "logits must be CUDA tensor");
   STD_TORCH_CHECK(lengths.is_cuda(), "lengths must be CUDA tensor");
   STD_TORCH_CHECK(output.is_cuda(), "output must be CUDA tensor");
-  STD_TORCH_CHECK(logits.scalar_type() == torch::headeronly::ScalarType::Float,
-                  "Only float32 supported");
+  STD_TORCH_CHECK(
+      logits.scalar_type() == torch::headeronly::ScalarType::Float ||
+          logits.scalar_type() == torch::headeronly::ScalarType::Half ||
+          logits.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+      "Only float32, float16, and bfloat16 are supported");
   STD_TORCH_CHECK(lengths.scalar_type() == torch::headeronly::ScalarType::Int,
                   "lengths must be int32");
   STD_TORCH_CHECK(output.scalar_type() == torch::headeronly::ScalarType::Int,
@@ -130,15 +142,43 @@ void cooperative_topk(const torch::stable::Tensor& logits,
       k == 512 || k == 1024 || k == 2048,
       "cooperative_topk supports k=512, k=1024, or k=2048, got k=", k);
 
+  const bool is_half =
+      logits.scalar_type() == torch::headeronly::ScalarType::Half;
+  const bool is_bfloat16 =
+      logits.scalar_type() == torch::headeronly::ScalarType::BFloat16;
   if (k == 512) {
-    launch_cooperative_topk_impl<512>(logits, lengths, output, workspace,
-                                      max_seq_len);
+    if (is_half) {
+      launch_cooperative_topk_impl<__half, 512>(logits, lengths, output,
+                                                workspace, max_seq_len);
+    } else if (is_bfloat16) {
+      launch_cooperative_topk_impl<__nv_bfloat16, 512>(logits, lengths, output,
+                                                       workspace, max_seq_len);
+    } else {
+      launch_cooperative_topk_impl<float, 512>(logits, lengths, output,
+                                               workspace, max_seq_len);
+    }
   } else if (k == 1024) {
-    launch_cooperative_topk_impl<1024>(logits, lengths, output, workspace,
-                                       max_seq_len);
+    if (is_half) {
+      launch_cooperative_topk_impl<__half, 1024>(logits, lengths, output,
+                                                 workspace, max_seq_len);
+    } else if (is_bfloat16) {
+      launch_cooperative_topk_impl<__nv_bfloat16, 1024>(logits, lengths, output,
+                                                        workspace, max_seq_len);
+    } else {
+      launch_cooperative_topk_impl<float, 1024>(logits, lengths, output,
+                                                workspace, max_seq_len);
+    }
   } else {
-    launch_cooperative_topk_impl<2048>(logits, lengths, output, workspace,
-                                       max_seq_len);
+    if (is_half) {
+      launch_cooperative_topk_impl<__half, 2048>(logits, lengths, output,
+                                                 workspace, max_seq_len);
+    } else if (is_bfloat16) {
+      launch_cooperative_topk_impl<__nv_bfloat16, 2048>(logits, lengths, output,
+                                                        workspace, max_seq_len);
+    } else {
+      launch_cooperative_topk_impl<float, 2048>(logits, lengths, output,
+                                                workspace, max_seq_len);
+    }
   }
 #else
   STD_TORCH_CHECK(false, "cooperative_topk is not supported on ROCm");

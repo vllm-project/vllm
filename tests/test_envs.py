@@ -49,6 +49,20 @@ def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch)
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5799
 
 
+def test_indexer_logits_dtype_defaults_to_auto(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("VLLM_INDEXER_LOGITS_DTYPE", raising=False)
+    if hasattr(envs.__getattr__, "cache_clear"):
+        envs.__getattr__.cache_clear()
+    assert envs.VLLM_INDEXER_LOGITS_DTYPE == "auto"
+
+    monkeypatch.setenv("VLLM_INDEXER_LOGITS_DTYPE", "float32")
+    if hasattr(envs.__getattr__, "cache_clear"):
+        envs.__getattr__.cache_clear()
+    assert envs.VLLM_INDEXER_LOGITS_DTYPE == "float32"
+
+
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_HOST_IP", "1.1.1.1")
     monkeypatch.setenv("VLLM_PORT", "1234")
