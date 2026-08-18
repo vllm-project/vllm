@@ -104,11 +104,7 @@ def _aiter_mla_native_h24_metadata_supported() -> bool:
         from aiter.jit.core import AITER_CSRC_DIR
 
         metadata_source = (
-            Path(AITER_CSRC_DIR)
-            / "kernels"
-            / "mla"
-            / "metadata"
-            / "v1_2_device.cuh"
+            Path(AITER_CSRC_DIR) / "kernels" / "mla" / "metadata" / "v1_2_device.cuh"
         )
         source = "".join(metadata_source.read_text(encoding="utf-8").split())
     except (ImportError, OSError):
