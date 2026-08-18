@@ -506,6 +506,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
         if self.model.confidence_head is not None and not loaded_confidence_head:
             self.model.confidence_head = None
+        self.process_weights_after_loading()
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
