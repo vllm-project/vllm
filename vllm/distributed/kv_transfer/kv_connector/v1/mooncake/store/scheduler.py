@@ -374,12 +374,40 @@ class MooncakeStoreScheduler:
                 if req_meta is not None:
                     meta.add_request(req_meta)
 
-        offloads = getattr(scheduler_output, "boundary_state_offloads", None)
-        if offloads and not force_skip_save:
-            self._handle_boundary_state_offloads(offloads, meta)
+        block_state = getattr(scheduler_output, "kv_connector_block_state", None)
+        if (
+            block_state is not None
+            and block_state.boundary_state_offloads
+            and not force_skip_save
+        ):
+            self._handle_boundary_state_offloads(
+                block_state.boundary_state_offloads, meta
+            )
 
+        self._apply_current_save_block_ids(meta, scheduler_output)
         self._reference_save_blocks(meta)
         return meta
+
+    def _apply_current_save_block_ids(
+        self,
+        meta: MooncakeStoreConnectorMetadata,
+        scheduler_output: SchedulerOutput,
+    ) -> None:
+        """Replace append-only mirrors with the core's current block tables."""
+        save_metas = [req_meta for req_meta in meta.requests if req_meta.can_save]
+        if not save_metas:
+            return
+
+        block_state = scheduler_output.kv_connector_block_state
+        assert block_state is not None, (
+            "Current block tables are required for Mooncake store jobs"
+        )
+        for req_meta in save_metas:
+            block_ids = block_state.block_ids.get(req_meta.req_id)
+            assert block_ids is not None, (
+                f"Missing current block table for store request {req_meta.req_id}"
+            )
+            req_meta.block_ids = block_ids
 
     def _reference_save_blocks(self, meta: MooncakeStoreConnectorMetadata) -> None:
         """Take a GPU block reference for every store job this step emits.
@@ -402,16 +430,24 @@ class MooncakeStoreScheduler:
                 block_ids.extend(
                     block_id for _, block_id, _ in req_meta.boundary_state_offloads
                 )
+            assert NULL_BLOCK_ID not in block_ids, (
+                "A null block cannot back a boundary-state offload"
+            )
             # Every allocated block is referenced, not just the ones covering
             # this job's token range: a rank resumes from its own last
             # successful offset, which lags the scheduler's whenever a save was
             # skipped or failed, so it may read anywhere below the range.
             block_ids.extend(
-                block_id for group in req_meta.block_ids for block_id in group
+                block_id
+                for group_id, group in enumerate(req_meta.block_ids)
+                if group_id not in self._boundary_state_group_ids
+                for block_id in group
+                if block_id != NULL_BLOCK_ID
             )
             # An aligned boundary block may also be present in the request's
             # block table. Take and release exactly one reference per block.
             block_ids = list(dict.fromkeys(block_ids))
+            assert NULL_BLOCK_ID not in block_ids
             if not block_ids:
                 continue
             self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
