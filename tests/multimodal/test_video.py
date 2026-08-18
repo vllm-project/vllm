@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+import subprocess
 import sys
 import threading
 from contextlib import ExitStack, contextmanager
@@ -16,23 +17,25 @@ from transformers.video_utils import VideoMetadata
 from vllm.assets.base import get_vllm_public_assets
 from vllm.models.minimax_m3.common.mm_preprocess import MiniMaxM3VideoBackend
 from vllm.multimodal.video import (
-    PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
     DynamicVideoBackend,
     GLM46VVideoBackend,
     Molmo2VideoBackend,
-    PyNvVideoCodecDecoderSlot,
-    PyNvVideoCodecVideoBackend,
-    PyNvVideoCodecVideoBackendMixin,
     Qwen2VLVideoBackend,
     Qwen3VLVideoBackend,
     VideoBackend,
     VideoLoader,
     VideoSourceMetadata,
     VideoTargetMetadata,
-    _pynv_decoder_pool,
     get_video_loader_backend_for_processor,
+)
+from vllm.multimodal.video_decoders import decode_video, resolve_video_backend_kwargs
+from vllm.multimodal.video_decoders.pynvvideocodec import (
+    PYNVVIDEOCODEC_DECODER_CACHE_SIZE,
+    PyNvVideoCodecDecoderSlot,
+    PyNvVideoCodecVideoBackendMixin,
+    _pynv_decoder_pool,
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.processor import get_video_processor_cls_name_from_config
@@ -99,6 +102,126 @@ def test_video_loader_type_doesnt_exist():
         VIDEO_LOADER_REGISTRY.load("non_existing_video_loader")
 
 
+def test_video_decoder_backends_are_lazy_imported():
+    code = """
+import sys
+import vllm.multimodal.video  # noqa: F401
+
+backend_modules = {
+    f"vllm.multimodal.video_decoders.{backend}"
+    for backend in ("opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream")
+}
+loaded = sorted(backend_modules & sys.modules.keys())
+assert not loaded, loaded
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "backend",
+    ["opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"],
+)
+def test_decode_video_imports_only_selected_backend(
+    backend: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    imports = []
+    decoded = object()
+
+    def fake_decoder(*args, **kwargs):
+        return decoded
+
+    class FakeBackendModule:
+        pass
+
+    setattr(FakeBackendModule, f"decode_{backend}", fake_decoder)
+
+    def fake_import_module(name: str, package: str):
+        imports.append((name, package))
+        return FakeBackendModule
+
+    monkeypatch.setattr(
+        "vllm.multimodal.video_decoders.import_module", fake_import_module
+    )
+    result = decode_video(
+        backend,
+        loader_cls=None,
+        data=b"",
+        target=VideoTargetMetadata(-1, -1, 300),
+        sampling_kwargs={},
+        backend_kwargs={},
+        frame_recovery=False,
+    )
+
+    assert result is decoded
+    assert imports == [(f".{backend}", "vllm.multimodal.video_decoders")]
+
+
+@pytest.mark.parametrize(
+    ("backend", "kwargs", "expected_sampling", "expected_backend"),
+    [
+        (
+            "torchcodec",
+            {"min_frames": 4, "num_ffmpeg_threads": 2, "seek_mode": "approximate"},
+            {"min_frames": 4},
+            {"num_ffmpeg_threads": 2, "seek_mode": "approximate"},
+        ),
+        (
+            "deepstream",
+            {"max_frames": 16, "pool_size": 3, "timeout_sec": 10.0},
+            {"max_frames": 16},
+            {"pool_size": 3, "timeout_sec": 10.0},
+        ),
+    ],
+)
+def test_video_backend_kwargs_are_separated_from_sampling_kwargs(
+    backend: str,
+    kwargs: dict,
+    expected_sampling: dict,
+    expected_backend: dict,
+):
+    original_kwargs = dict(kwargs)
+    sampling_kwargs, backend_kwargs = resolve_video_backend_kwargs(backend, kwargs)
+
+    assert sampling_kwargs == expected_sampling
+    assert backend_kwargs == expected_backend
+    assert kwargs == original_kwargs
+
+
+def test_video_backend_rejects_options_for_another_decoder():
+    with pytest.raises(
+        ValueError, match="num_ffmpeg_threads is not supported by the 'pyav' backend"
+    ):
+        resolve_video_backend_kwargs("pyav", {"num_ffmpeg_threads": 2})
+
+
+@pytest.mark.parametrize(
+    ("backend", "error"),
+    [
+        ("pyav", AssertionError),
+        (PYNVVIDEOCODEC_VIDEO_BACKEND, ValueError),
+    ],
+)
+def test_video_decoder_spec_validates_frame_recovery(
+    backend: str, error: type[Exception]
+):
+    with pytest.raises(error, match="frame_recovery is not supported"):
+        decode_video(
+            backend,
+            loader_cls=None,
+            data=b"",
+            target=VideoTargetMetadata(-1, -1, 300),
+            sampling_kwargs={},
+            backend_kwargs={},
+            frame_recovery=True,
+        )
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_pynvvideocodec_backend_accounts_raw_decoded_frames(
     monkeypatch: pytest.MonkeyPatch,
@@ -145,7 +268,9 @@ def test_pynvvideocodec_backend_accounts_raw_decoded_frames(
         "vllm.multimodal.gpu_ipc_memory.get_mm_gpu_ipc_pool", lambda: pool
     )
     monkeypatch.setattr(
-        PyNvVideoCodecVideoBackend, "_decode_to_pinned_host", classmethod(fake_decode)
+        PyNvVideoCodecVideoBackendMixin,
+        "_decode_to_pinned_host",
+        classmethod(fake_decode),
     )
 
     loader = VIDEO_LOADER_REGISTRY.load(PYNVVIDEOCODEC_VIDEO_BACKEND)
@@ -205,7 +330,9 @@ def test_pynvvideocodec_codec_uses_dynamic_sampling_strategy(
         "vllm.multimodal.gpu_ipc_memory.get_mm_gpu_ipc_pool", lambda: pool
     )
     monkeypatch.setattr(
-        DynamicVideoBackend, "_decode_to_pinned_host", classmethod(fake_decode)
+        PyNvVideoCodecVideoBackendMixin,
+        "_decode_to_pinned_host",
+        classmethod(fake_decode),
     )
 
     loader = VIDEO_LOADER_REGISTRY.load("opencv_dynamic")
@@ -273,7 +400,7 @@ def test_pynvvideocodec_decoder_slots_are_bounded(
 
     create_count = 0
     with _fresh_decoder_pool():
-        PyNvVideoCodecVideoBackend._configure_decoder_slots(hw_decoders)
+        PyNvVideoCodecVideoBackendMixin._configure_decoder_slots(hw_decoders)
 
         def fake_create_slot(cls):
             nonlocal create_count
@@ -281,7 +408,7 @@ def test_pynvvideocodec_decoder_slots_are_bounded(
             return FakeSlot()
 
         monkeypatch.setattr(
-            PyNvVideoCodecVideoBackend,
+            PyNvVideoCodecVideoBackendMixin,
             "_create_decoder_slot",
             classmethod(fake_create_slot),
         )
@@ -291,12 +418,16 @@ def test_pynvvideocodec_decoder_slots_are_bounded(
 
         with ExitStack() as stack:
             retained_slots = [
-                stack.enter_context(PyNvVideoCodecVideoBackend._borrow_decoder_slot())
+                stack.enter_context(
+                    PyNvVideoCodecVideoBackendMixin._borrow_decoder_slot()
+                )
                 for _ in range(hw_decoders)
             ]
 
             def borrow_extra_slot():
-                with PyNvVideoCodecVideoBackend._borrow_decoder_slot() as extra_slot:
+                with (
+                    PyNvVideoCodecVideoBackendMixin._borrow_decoder_slot()
+                ) as extra_slot:
                     seen_slots.append(extra_slot)
                     borrowed.set()
 
@@ -317,11 +448,11 @@ def test_pynvvideocodec_decoder_slots_are_configured_once(
 ):
     monkeypatch.setattr(_pynv_decoder_pool, "max_slots", None)
 
-    PyNvVideoCodecVideoBackend._configure_decoder_slots(2)
-    PyNvVideoCodecVideoBackend._configure_decoder_slots(2)
+    PyNvVideoCodecVideoBackendMixin._configure_decoder_slots(2)
+    PyNvVideoCodecVideoBackendMixin._configure_decoder_slots(2)
 
     with pytest.raises(RuntimeError, match="already configured as 2, got 3"):
-        PyNvVideoCodecVideoBackend._configure_decoder_slots(3)
+        PyNvVideoCodecVideoBackendMixin._configure_decoder_slots(3)
 
 
 def test_pynvvideocodec_failed_rebuild_invalidates_decoder_slot():
@@ -367,7 +498,7 @@ def test_pynvvideocodec_failed_rebuild_invalidates_decoder_slot():
 
         with (
             pytest.raises(RuntimeError, match="construct failed"),
-            PyNvVideoCodecVideoBackend._borrow_decoder_slot() as borrowed,
+            PyNvVideoCodecVideoBackendMixin._borrow_decoder_slot() as borrowed,
         ):
             assert borrowed is slot
             borrowed.get_decoder(
@@ -456,6 +587,12 @@ def test_pynvvideocodec_cross_subclass_shares_single_pool():
     counters via ClassVar shadowing.
     """
 
+    class MixinSubclassA(PyNvVideoCodecVideoBackendMixin):
+        pass
+
+    class MixinSubclassB(PyNvVideoCodecVideoBackendMixin):
+        pass
+
     class FakeSlot:
         pass
 
@@ -475,8 +612,8 @@ def test_pynvvideocodec_cross_subclass_shares_single_pool():
         )
         try:
             with ExitStack() as stack:
-                stack.enter_context(VideoBackend._borrow_decoder_slot())
-                stack.enter_context(Qwen3VLVideoBackend._borrow_decoder_slot())
+                stack.enter_context(MixinSubclassA._borrow_decoder_slot())
+                stack.enter_context(MixinSubclassB._borrow_decoder_slot())
                 assert pool.active == 2
 
                 blocked = threading.Event()
@@ -484,7 +621,7 @@ def test_pynvvideocodec_cross_subclass_shares_single_pool():
 
                 def try_borrow():
                     blocked.set()
-                    with Qwen2VLVideoBackend._borrow_decoder_slot():
+                    with MixinSubclassB._borrow_decoder_slot():
                         acquired.set()
 
                 t = threading.Thread(target=try_borrow)
@@ -1418,17 +1555,24 @@ def test_torchcodec_decode_failure_is_client_error(
     backend. With seek_mode="approximate" the message must point the user
     at "exact", since metadata-overstated frame counts are the common cause.
     """
-    monkeypatch.setattr(
-        "vllm.multimodal.video.check_torchcodec_available", lambda: None
+    from vllm.multimodal.video_decoders.torchcodec import (
+        TorchCodecVideoBackendMixin,
     )
 
-    def raise_runtime_error(cls, data, **kwargs):
+    monkeypatch.setattr(
+        "vllm.multimodal.video_decoders.torchcodec.check_torchcodec_available",
+        lambda: None,
+    )
+
+    def raise_runtime_error(data, **kwargs):
         raise RuntimeError(
             "Requested next frame while there are no more frames left to decode."
         )
 
     monkeypatch.setattr(
-        VideoBackend, "make_torchcodec_decoder", classmethod(raise_runtime_error)
+        TorchCodecVideoBackendMixin,
+        "make_torchcodec_decoder",
+        staticmethod(raise_runtime_error),
     )
 
     with pytest.raises(
