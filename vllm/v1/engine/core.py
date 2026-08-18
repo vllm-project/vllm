@@ -1636,6 +1636,12 @@ class EngineCoreProc(EngineCore):
             max_num_seqs=scheduler_config.max_num_seqs,
             max_num_batched_tokens=scheduler_config.max_num_batched_tokens,
             instance_id=self.vllm_config.instance_id,
+            supports_lora=self.vllm_config.lora_config is not None,
+            max_loras=(
+                self.vllm_config.lora_config.max_loras
+                if self.vllm_config.lora_config is not None
+                else 0
+            ),
             kv_events_config=self.scheduler.get_kv_event_publisher_config(),
             weight_transfer_backend=(
                 self.vllm_config.weight_transfer_config.backend
