@@ -11,7 +11,7 @@ target-model hidden states. All the PARD-2 fusion/loading logic is shared in
 import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
 
 from .pard2_base import (
@@ -19,25 +19,12 @@ from .pard2_base import (
     Pard2ForCausalLMMixin,
     Pard2ModelBase,
 )
-from .utils import maybe_prefix
 
 
 @support_torch_compile(dynamic_arg_dims=PARD2_COMPILE_DYNAMIC_ARG_DIMS)
 class Pard2LlamaModel(Pard2ModelBase):
-    def build_layers(
-        self, vllm_config: VllmConfig, start_layer_id: int, prefix: str
-    ) -> nn.ModuleList:
-        current_vllm_config = get_current_vllm_config()
-        return nn.ModuleList(
-            [
-                LlamaDecoderLayer(
-                    current_vllm_config,
-                    prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
-                    config=self.config,
-                )
-                for i in range(self.config.num_hidden_layers)
-            ]
-        )
+    def _make_decoder_layer(self, vllm_config: VllmConfig, prefix: str) -> nn.Module:
+        return LlamaDecoderLayer(vllm_config, prefix=prefix, config=self.config)
 
 
 class Pard2LlamaForCausalLM(Pard2ForCausalLMMixin, LlamaForCausalLM):

@@ -373,6 +373,13 @@ def _validate_qwen3_omni_dspark(
         )
 
 
+def uses_pard2(hf_config) -> bool:
+    """Whether a draft's HF config selects the PARD-2 method (amd/PARD2-*)."""
+    return getattr(hf_config, "spd_type", None) == "pard2" or getattr(
+        hf_config, "pard2", False
+    )
+
+
 @config
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
@@ -1309,11 +1316,7 @@ class SpeculativeConfig:
                     )
                 ):
                     self.method = "dspark"
-                elif getattr(
-                    self.draft_model_config.hf_config, "spd_type", None
-                ) == "pard2" or getattr(
-                    self.draft_model_config.hf_config, "pard2", False
-                ):
+                elif uses_pard2(self.draft_model_config.hf_config):
                     # PARD-2 (amd/PARD2-*): parallel draft with target-hidden fusion.
                     self.method = "pard2"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
