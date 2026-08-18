@@ -160,7 +160,23 @@ class KVBlockZeroer:
                 kv = static_forward_context[layer_name].kv_cache
                 if not isinstance(kv, torch.Tensor):
                     continue
-                dp = kv.data_ptr()
+                # Packed block-first views (e.g. DeepSeek V4) are strided views
+                # into a shared block-interleaved backing allocation:
+                # ``kv.data_ptr()`` includes the layer's byte offset inside each
+                # block, while ``kv.stride(block_dim) * element_size()`` is the
+                # whole slab's per-block stride. Starting the segment at the
+                # layer's data_ptr would make ``block_id * PAGE_SIZE_EL`` walk
+                # past the end of the backing allocation for the last blocks.
+                #
+                # Start segments at the backing storage base and deduplicate on
+                # the storage pointer so each packed slab is zeroed exactly once
+                # (instead of once per aliased layer view). Because the zeroed
+                # span is ``block_stride_bytes`` (the whole block for packed
+                # views, equal to the single-layer page size for standalone
+                # allocations), a single segment clears every interleaved layer.
+                # Standalone allocations have storage base == data_ptr(), so
+                # behavior is unchanged there.
+                dp = kv.untyped_storage().data_ptr()
                 if dp in seen_ptrs:
                     continue
                 seen_ptrs.add(dp)
@@ -175,13 +191,6 @@ class KVBlockZeroer:
                     if kv.stride(d) * el > block_stride_bytes
                 ]
                 outer_strides = [kv.stride(d) * el for d in outer_dims]
-                inner_dims = [
-                    d for d in range(kv.ndim) if d != block_dim and d not in outer_dims
-                ]
-                kernel_page_bytes = el + sum(
-                    (kv.shape[d] - 1) * kv.stride(d) * el for d in inner_dims
-                )
-                assert kernel_page_bytes % 4 == 0
                 logical_block_stride_bytes = block_stride_bytes * ratio
                 for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
                     off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
@@ -191,7 +200,7 @@ class KVBlockZeroer:
                             dp + off_bytes + virtual_index * block_stride_bytes
                         )
                         seg_block_strides.append(logical_block_stride_bytes // 4)
-                        seg_page_sizes.append(kernel_page_bytes // 4)
+                        seg_page_sizes.append(block_stride_bytes // 4)
 
         if not seg_addrs:
             self._meta = None
