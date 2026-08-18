@@ -86,8 +86,6 @@ def _find_first_mhc_layer(model: torch.nn.Module) -> torch.nn.Module | None:
         if all(
             hasattr(module, attr)
             for attr in (
-                "hc_pre",
-                "hc_post",
                 "hc_attn_fn",
                 "hc_attn_scale",
                 "hc_attn_base",
@@ -116,6 +114,11 @@ def _warmup_layer_mhc(
     layer: torch.nn.Module,
     token_sizes: list[int],
 ) -> None:
+    from vllm.model_executor.kernels.mhc.tilelang import (
+        mhc_post_tilelang,
+        mhc_pre_tilelang,
+    )
+
     max_tokens = max(token_sizes)
     hidden_size = int(layer.hidden_size)
     hc_mult = int(layer.hc_mult)
@@ -130,17 +133,34 @@ def _warmup_layer_mhc(
 
     for size in token_sizes:
         residual_slice = residual[:size]
-        for fn, scale, base in (
-            (layer.hc_attn_fn, layer.hc_attn_scale, layer.hc_attn_base),
-            (layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base),
+        for fn, scale, base, norm in (
+            (
+                layer.hc_attn_fn,
+                layer.hc_attn_scale,
+                layer.hc_attn_base,
+                layer.attn_norm,
+            ),
+            (
+                layer.hc_ffn_fn,
+                layer.hc_ffn_scale,
+                layer.hc_ffn_base,
+                layer.ffn_norm,
+            ),
         ):
-            layer_input, post_mix, comb_mix = layer.hc_pre(
+            post_mix, comb_mix, layer_input = mhc_pre_tilelang(
                 residual_slice,
                 fn,
                 scale,
                 base,
+                layer.rms_norm_eps,
+                layer.hc_eps,
+                layer.hc_eps,
+                layer.hc_post_alpha,
+                layer.hc_sinkhorn_iters,
+                norm_weight=norm.weight.data,
+                norm_eps=norm.variance_epsilon,
             )
-            layer.hc_post(layer_input, residual_slice, post_mix, comb_mix)
+            mhc_post_tilelang(layer_input, residual_slice, post_mix, comb_mix)
 
 
 def _warmup_broadcast_mhc(
@@ -264,7 +284,7 @@ def deepseek_v4_mhc_warmup(
     )
     with torch.inference_mode():
         _warmup_layer_mhc(layer, token_sizes)
-        _warmup_broadcast_mhc(layer, split_token_sizes)
+        _warmup_broadcast_mhc(layer, token_sizes)
         if deepseek_model is not None:
             _warmup_hc_head(deepseek_model, token_sizes)
         torch.accelerator.synchronize()
