@@ -900,7 +900,7 @@ class AttentionImplBase(ABC, Generic[T]):
     # False => base 2      (lse = log2(sum(exp(qk))))
     #          -- e.g. FlashInfer trtllm-gen MLA
     # The DCP combine kernel (cp_lse_ag_out_rs / dcp_a2a_lse_reduce in
-    # vllm/v1/attention/ops/common.py) branches on this via its IS_BASE_E
+    # vllm/v1/attention/ops/dcp.py) branches on this via its IS_BASE_E
     # constexpr; getting it wrong silently corrupts the cross-shard
     # softmax denominator.
     lse_base_on_e: bool = True

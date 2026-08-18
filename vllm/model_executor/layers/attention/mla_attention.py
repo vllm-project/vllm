@@ -293,7 +293,7 @@ from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.dcp_utils import MLADCPManager
+from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
