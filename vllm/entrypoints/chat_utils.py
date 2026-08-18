@@ -408,9 +408,11 @@ def make_reasoning_parser_chat_template_kwargs(
     final_message: ChatCompletionMessageParam | None,
 ) -> dict[str, Any]:
     kwargs = {
-        **chat_template_kwargs,
-        "_vllm_continue_final_message": continue_final_message,
+        key: value
+        for key, value in chat_template_kwargs.items()
+        if not key.startswith("_vllm_continue_final_message")
     }
+    kwargs["_vllm_continue_final_message"] = continue_final_message
     if not continue_final_message or final_message is None:
         return kwargs
 
