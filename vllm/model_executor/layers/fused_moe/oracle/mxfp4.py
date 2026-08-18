@@ -516,7 +516,7 @@ def select_mxfp4_moe_backend(
         for requested_backend in requested_backends:
             act_key = (
                 requested_activation_key
-                if requested_activation_key is not None
+                if requested_backend == Mxfp4MoeBackend.EMULATION
                 else _backend_activation_key(requested_backend)
             )
             try:

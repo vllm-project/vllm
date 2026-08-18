@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the b12x tensor-parallel MoE integration."""
 
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -14,11 +14,11 @@ import vllm.model_executor.layers.fused_moe.oracle.mxfp4 as mxfp4_oracle
 import vllm.model_executor.layers.fused_moe.oracle.nvfp4 as nvfp4_oracle
 from tests.kernels.moe.utils import make_dummy_moe_config
 from tests.kernels.quantization.nvfp4_utils import (
-    FLOAT4_E2M1_MAX,
-    FLOAT8_E4M3_MAX,
-    break_fp4_bytes,
+    dequantize_nvfp4_to_dtype,
+    quant_nvfp4_tensor,
 )
 from tests.kernels.utils import torch_moe
+from tests.quantization.reference_mxfp4 import dq_mxfp4_torch
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_topk
@@ -45,6 +45,7 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
 from vllm.model_executor.layers.quantization.utils.b12x_moe import (
     prepare_nvfp4_moe_layer_for_b12x,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mxfp4_quantize
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Static,
     kMxfp8Dynamic,
@@ -62,12 +63,8 @@ def _quantize_nvfp4_linear(
     scales = []
     global_scales = []
     for expert_weight in weight:
-        global_scale = (
-            FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / expert_weight.abs().max()
-        ).to(torch.float32)
-        weight_q, scale = ops.scaled_fp4_quant(
+        weight_q, scale, global_scale = quant_nvfp4_tensor(
             expert_weight,
-            global_scale,
             is_sf_swizzled_layout=False,
         )
         weights_q.append(weight_q)
@@ -82,15 +79,13 @@ def _dequantize_nvfp4_linear(
     global_scale: torch.Tensor,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    rows, packed_cols = tensor_fp4.shape
-    cols = packed_cols * 2
-    values = break_fp4_bytes(tensor_fp4, torch.float32)
-    values = values.reshape(rows, cols // 16, 16)
-    scales = tensor_sf.view(torch.float8_e4m3fn).to(torch.float32)
-    return (
-        (values * (scales[:, : cols // 16] / global_scale).unsqueeze(-1))
-        .reshape(rows, cols)
-        .to(dtype)
+    return dequantize_nvfp4_to_dtype(
+        tensor_fp4,
+        tensor_sf,
+        global_scale,
+        dtype=dtype,
+        device=tensor_fp4.device,
+        is_sf_linear_layout=True,
     )
 
 
@@ -155,85 +150,6 @@ def _nvfp4_activation_reference(
         .sum(dim=1)
         .to(hidden_states.dtype)
     )
-
-
-def _e8m0_bytes_to_float(scale_bytes: torch.Tensor) -> torch.Tensor:
-    return torch.exp2(scale_bytes.view(torch.uint8).to(torch.float32) - 127.0)
-
-
-def _e8m0_scale_bytes_from_amax(amax: torch.Tensor) -> torch.Tensor:
-    scale = amax.to(torch.float32) / 6.0
-    scale = torch.where(scale > 0, scale, torch.full_like(scale, 2.0**-127))
-    exponent = torch.ceil(torch.log2(scale)).clamp(min=-127.0, max=120.0)
-    return (exponent + 127.0).to(torch.uint8)
-
-
-def _mxfp4_decode_packed(packed: torch.Tensor, cols: int) -> torch.Tensor:
-    fp4_lut = torch.tensor(
-        [
-            0.0,
-            0.5,
-            1.0,
-            1.5,
-            2.0,
-            3.0,
-            4.0,
-            6.0,
-            -0.0,
-            -0.5,
-            -1.0,
-            -1.5,
-            -2.0,
-            -3.0,
-            -4.0,
-            -6.0,
-        ],
-        dtype=torch.float32,
-        device=packed.device,
-    )
-    packed = packed.view(torch.uint8)
-    lo = (packed & 0x0F).to(torch.long)
-    hi = ((packed >> 4) & 0x0F).to(torch.long)
-    codes = torch.stack((lo, hi), dim=-1).reshape(packed.shape[0], -1)
-    return fp4_lut[codes[:, :cols]]
-
-
-def _mxfp4_encode_values(values: torch.Tensor) -> torch.Tensor:
-    mag = values.abs()
-    codes = torch.zeros_like(mag, dtype=torch.uint8)
-    codes = torch.where((mag > 0.25) & (mag < 0.75), 1, codes)
-    codes = torch.where((mag >= 0.75) & (mag <= 1.25), 2, codes)
-    codes = torch.where((mag > 1.25) & (mag < 1.75), 3, codes)
-    codes = torch.where((mag >= 1.75) & (mag <= 2.5), 4, codes)
-    codes = torch.where((mag > 2.5) & (mag < 3.5), 5, codes)
-    codes = torch.where((mag >= 3.5) & (mag <= 5.0), 6, codes)
-    codes = torch.where(mag > 5.0, 7, codes)
-    return codes | ((values < 0).to(torch.uint8) << 3)
-
-
-def _quantize_mxfp4(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    rows, cols = weight.shape[-2:]
-    blocks = weight.float().reshape(-1, cols // 32, 32)
-    scale_bytes = _e8m0_scale_bytes_from_amax(blocks.abs().amax(dim=-1))
-    scales = _e8m0_bytes_to_float(scale_bytes).unsqueeze(-1)
-    codes = _mxfp4_encode_values(blocks / scales).reshape(-1, cols)
-    packed = codes[:, 0::2] | (codes[:, 1::2] << 4)
-    return (
-        packed.reshape(*weight.shape[:-2], rows, cols // 2),
-        scale_bytes.reshape(*weight.shape[:-2], rows, cols // 32),
-    )
-
-
-def _dequantize_mxfp4(
-    packed: torch.Tensor,
-    scale_bytes: torch.Tensor,
-    dtype: torch.dtype,
-) -> torch.Tensor:
-    rows, packed_cols = packed.shape
-    cols = packed_cols * 2
-    values = _mxfp4_decode_packed(packed, cols)
-    scales = _e8m0_bytes_to_float(scale_bytes).repeat_interleave(32, dim=1)
-    return (values * scales[:, :cols]).to(dtype)
 
 
 def _has_b12x_moe() -> bool:
@@ -335,33 +251,6 @@ def _quant_config(weight_dtype: str, activation_dtype: str | None):
     )
 
 
-@pytest.mark.parametrize(
-    "weight_dtype,activation_dtype,mode,source_format,w13_layout",
-    [
-        ("mxfp4", "mxfp8", "w4a8_mx", "fp4_e8m0_k32", "w31"),
-        ("mxfp4", None, "w4a16", "fp4_e8m0_k32", "w31"),
-        ("nvfp4", "nvfp4", "nvfp4", "modelopt_nvfp4", "w31"),
-        ("nvfp4", "mxfp8", "w4a8_nvfp4", "modelopt_nvfp4", "w31"),
-        ("nvfp4", None, "w4a16", "modelopt_nvfp4", "w13"),
-    ],
-)
-def test_b12x_moe_quant_mode_contract(
-    weight_dtype: str,
-    activation_dtype: str | None,
-    mode: str,
-    source_format: str,
-    w13_layout: str,
-) -> None:
-    experts = B12xExperts(
-        make_dummy_moe_config(hidden_dim=128, intermediate_size=64),
-        _quant_config(weight_dtype, activation_dtype),
-    )
-
-    assert experts._quant_mode() == mode
-    assert experts._source_format() == source_format
-    assert experts._w13_layout() == w13_layout
-
-
 def test_b12x_moe_supports_only_tensor_parallel() -> None:
     parallel = FusedMoEParallelConfig.make_no_parallel()
 
@@ -377,62 +266,137 @@ def test_b12x_moe_supports_only_tensor_parallel() -> None:
     )
 
 
-def test_b12x_moe_rejects_unsupported_input_dtype(
+_SITU_REASON = "kernel supports only SiTU beta=4 and linear_beta=25"
+_UNINTERLEAVED_W4A8_REASON = "kernel does not support swigluoai_uninterleave with W4A8"
+
+
+@pytest.mark.parametrize(
+    "config_kwargs,overrides,weight_key,activation_key,expected_reason",
+    [
+        pytest.param(
+            {"in_dtype": torch.float32},
+            {},
+            kMxfp4Static,
+            None,
+            "kernel does not support torch.float32 input/output dtype",
+            id="input-dtype",
+        ),
+        pytest.param(
+            {"hidden_dim": 128, "activation": MoEActivation.SWIGLUOAI},
+            {},
+            kMxfp4Static,
+            None,
+            "kernel does not support MoEActivation.SWIGLUOAI activation",
+            id="interleaved-swigluoai",
+        ),
+        pytest.param(
+            {
+                "hidden_dim": 128,
+                "activation": MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            },
+            {},
+            kMxfp4Static,
+            kMxfp8Dynamic,
+            _UNINTERLEAVED_W4A8_REASON,
+            id="mxfp4-w4a8-uninterleaved-swigluoai",
+        ),
+        pytest.param(
+            {
+                "hidden_dim": 128,
+                "activation": MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            },
+            {},
+            kNvfp4Static,
+            kNvfp4Dynamic,
+            _UNINTERLEAVED_W4A8_REASON,
+            id="nvfp4-w4a8-uninterleaved-swigluoai",
+        ),
+        pytest.param(
+            {
+                "hidden_dim": 128,
+                "activation": MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            },
+            {},
+            kMxfp4Static,
+            None,
+            None,
+            id="w4a16-uninterleaved-swigluoai",
+        ),
+        pytest.param(
+            {"activation": MoEActivation.RELU2_NO_MUL},
+            {},
+            kMxfp4Static,
+            kMxfp8Dynamic,
+            "MXFP4 W4A8 supports only SiLU and SiTU",
+            id="mxfp4-w4a8-relu2",
+        ),
+        pytest.param(
+            {"hidden_dim": 128},
+            {},
+            kMxfp4Static,
+            kMxfp8Dynamic,
+            (
+                "MXFP4 W4A8 requires hidden size divisible by 256 and per-rank "
+                "intermediate size divisible by 32"
+            ),
+            id="mxfp4-w4a8-alignment",
+        ),
+        pytest.param(
+            {"hidden_dim": 128, "intermediate_size": 48},
+            {"intermediate_size_per_partition": 64},
+            kMxfp4Static,
+            None,
+            "MXFP4 requires the per-rank intermediate size to be divisible by 32",
+            id="mxfp4-tp-scale-groups",
+        ),
+        pytest.param(
+            {"activation": MoEActivation.SITU},
+            {"activation_situ_beta": 3.0, "activation_situ_linear_beta": 25.0},
+            kMxfp4Static,
+            None,
+            _SITU_REASON,
+            id="situ-beta",
+        ),
+        pytest.param(
+            {"activation": MoEActivation.SITU},
+            {"activation_situ_beta": 4.0, "activation_situ_linear_beta": 24.0},
+            kMxfp4Static,
+            None,
+            _SITU_REASON,
+            id="situ-linear-beta",
+        ),
+        pytest.param(
+            {"activation": MoEActivation.SITU},
+            {"activation_situ_beta": None, "activation_situ_linear_beta": None},
+            kMxfp4Static,
+            None,
+            _SITU_REASON,
+            id="situ-missing-parameters",
+        ),
+        pytest.param(
+            {"activation": MoEActivation.SITU},
+            {"activation_situ_beta": 4.0, "activation_situ_linear_beta": 25.0},
+            kMxfp4Static,
+            None,
+            None,
+            id="situ-standard-parameters",
+        ),
+    ],
+)
+def test_b12x_moe_config_support(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
-    config = make_dummy_moe_config(
-        hidden_dim=256,
-        intermediate_size=64,
-        in_dtype=torch.float32,
-    )
-
-    supported, reason = B12xExperts.is_supported_config(
-        B12xExperts,
-        config,
-        kMxfp4Static,
-        None,
-        mk.FusedMoEActivationFormat.Standard,
-    )
-
-    assert not supported
-    assert reason == "kernel does not support torch.float32 input/output dtype"
-
-
-def test_b12x_moe_rejects_interleaved_swigluoai(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
-    config = make_dummy_moe_config(
-        hidden_dim=128,
-        intermediate_size=64,
-        activation=MoEActivation.SWIGLUOAI,
-    )
-
-    supported, reason = B12xExperts.is_supported_config(
-        B12xExperts,
-        config,
-        kMxfp4Static,
-        None,
-        mk.FusedMoEActivationFormat.Standard,
-    )
-
-    assert not supported
-    assert reason == "kernel does not support MoEActivation.SWIGLUOAI activation"
-
-
-@pytest.mark.parametrize("activation_key", [kMxfp8Dynamic, kNvfp4Dynamic])
-def test_b12x_moe_rejects_uninterleaved_swigluoai_for_w4a8(
-    monkeypatch: pytest.MonkeyPatch,
+    config_kwargs,
+    overrides,
+    weight_key,
     activation_key,
+    expected_reason: str | None,
 ) -> None:
     monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
     config = make_dummy_moe_config(
-        hidden_dim=128,
-        intermediate_size=64,
-        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        **{"hidden_dim": 256, "intermediate_size": 64, **config_kwargs}
     )
-    weight_key = kMxfp4Static if activation_key == kMxfp8Dynamic else kNvfp4Static
+    for name, value in overrides.items():
+        setattr(config, name, value)
 
     supported, reason = B12xExperts.is_supported_config(
         B12xExperts,
@@ -442,148 +406,7 @@ def test_b12x_moe_rejects_uninterleaved_swigluoai_for_w4a8(
         mk.FusedMoEActivationFormat.Standard,
     )
 
-    assert not supported
-    assert reason == "kernel does not support swigluoai_uninterleave with W4A8"
-
-
-def test_b12x_moe_supports_uninterleaved_swigluoai_for_w4a16(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
-    config = make_dummy_moe_config(
-        hidden_dim=128,
-        intermediate_size=64,
-        activation=MoEActivation.SWIGLUOAI_UNINTERLEAVE,
-    )
-
-    supported, reason = B12xExperts.is_supported_config(
-        B12xExperts,
-        config,
-        kMxfp4Static,
-        None,
-        mk.FusedMoEActivationFormat.Standard,
-    )
-
-    assert supported
-    assert reason is None
-
-
-def test_b12x_moe_rejects_relu2_for_mxfp4_w4a8(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
-    config = make_dummy_moe_config(
-        hidden_dim=256,
-        intermediate_size=64,
-        activation=MoEActivation.RELU2_NO_MUL,
-    )
-
-    supported, reason = B12xExperts.is_supported_config(
-        B12xExperts,
-        config,
-        kMxfp4Static,
-        kMxfp8Dynamic,
-        mk.FusedMoEActivationFormat.Standard,
-    )
-
-    assert not supported
-    assert reason == "MXFP4 W4A8 supports only SiLU and SiTU"
-
-
-def test_b12x_moe_rejects_unaligned_mxfp4_w4a8(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
-    config = make_dummy_moe_config(hidden_dim=128, intermediate_size=64)
-
-    supported, reason = B12xExperts.is_supported_config(
-        B12xExperts,
-        config,
-        kMxfp4Static,
-        kMxfp8Dynamic,
-        mk.FusedMoEActivationFormat.Standard,
-    )
-
-    assert not supported
-    assert reason == (
-        "MXFP4 W4A8 requires hidden size divisible by 256 and per-rank "
-        "intermediate size divisible by 32"
-    )
-
-
-def test_b12x_moe_rejects_mxfp4_scale_groups_crossing_tp_shards(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
-    config = make_dummy_moe_config(hidden_dim=128, intermediate_size=48)
-    config.intermediate_size_per_partition = 64
-
-    supported, reason = B12xExperts.is_supported_config(
-        B12xExperts,
-        config,
-        kMxfp4Static,
-        None,
-        mk.FusedMoEActivationFormat.Standard,
-    )
-
-    assert not supported
-    assert reason == (
-        "MXFP4 requires the per-rank intermediate size to be divisible by 32"
-    )
-
-
-@pytest.mark.parametrize(
-    "beta,linear_beta",
-    [(3.0, 25.0), (4.0, 24.0), (None, None)],
-)
-def test_b12x_moe_rejects_nonstandard_situ_parameters(
-    monkeypatch: pytest.MonkeyPatch,
-    beta: float | None,
-    linear_beta: float | None,
-) -> None:
-    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
-    config = make_dummy_moe_config(
-        hidden_dim=256,
-        intermediate_size=64,
-        activation=MoEActivation.SITU,
-    )
-    config.activation_situ_beta = beta
-    config.activation_situ_linear_beta = linear_beta
-
-    supported, reason = B12xExperts.is_supported_config(
-        B12xExperts,
-        config,
-        kMxfp4Static,
-        None,
-        mk.FusedMoEActivationFormat.Standard,
-    )
-
-    assert not supported
-    assert reason == "kernel supports only SiTU beta=4 and linear_beta=25"
-
-
-def test_b12x_moe_supports_standard_situ_parameters(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
-    config = make_dummy_moe_config(
-        hidden_dim=256,
-        intermediate_size=64,
-        activation=MoEActivation.SITU,
-    )
-    config.activation_situ_beta = 4.0
-    config.activation_situ_linear_beta = 25.0
-
-    supported, reason = B12xExperts.is_supported_config(
-        B12xExperts,
-        config,
-        kMxfp4Static,
-        None,
-        mk.FusedMoEActivationFormat.Standard,
-    )
-
-    assert supported
-    assert reason is None
+    assert (supported, reason) == (expected_reason is None, expected_reason)
 
 
 @pytest.mark.parametrize(
@@ -617,6 +440,28 @@ def test_explicit_b12x_mxfp4_selection(
     )
 
     assert backend == expected_backend
+    assert experts_cls is B12xExperts
+
+
+def test_explicit_b12x_mxfp4_force_a16_uses_a16_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
+    monkeypatch.setattr(mxfp4_oracle, "_user_moe_activation_override", lambda: None)
+    monkeypatch.setattr(
+        mxfp4_oracle.envs,
+        "VLLM_B12X_MOE_FP4_FORCE_A16",
+        True,
+    )
+    config = make_dummy_moe_config(hidden_dim=128, intermediate_size=64)
+    config.moe_backend = "b12x"
+
+    backend, experts_cls = select_mxfp4_moe_backend(
+        config,
+        activation_key=kMxfp8Dynamic,
+    )
+
+    assert backend == Mxfp4MoeBackend.B12X_MXFP4_BF16
     assert experts_cls is B12xExperts
 
 
@@ -923,29 +768,30 @@ def test_b12x_moe_warmup_runs_each_planner_regime_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     experts = B12xExperts(
-        make_dummy_moe_config(hidden_dim=128, intermediate_size=64),
+        make_dummy_moe_config(
+            num_experts=4,
+            experts_per_token=2,
+            hidden_dim=128,
+            intermediate_size=64,
+        ),
         _quant_config("mxfp4", None),
     )
-    meta = SimpleNamespace(
-        w1=torch.empty(0),
-        w2=torch.empty(0),
-        activation=MoEActivation.SILU,
-        quant_mode="w4a16",
+    prepared = SimpleNamespace(
         num_experts=4,
         hidden_size=128,
-        device=torch.device("cpu"),
-        dtype=torch.bfloat16,
-        topk=2,
-        apply_router_weight_on_input=False,
-        swiglu_limit=None,
-        swiglu_alpha=None,
-        swiglu_beta=None,
+        intermediate_size=64,
+        w1_fp4=torch.empty(0),
     )
-    prepared = SimpleNamespace()
+    experts._prepared_experts = prepared
+    layer = SimpleNamespace(
+        activation=MoEActivation.SILU,
+        apply_router_weight_on_input=False,
+        w13_weight=torch.empty(0),
+        w2_weight=torch.empty(0),
+    )
     planned_tokens = []
     launched_tokens = []
 
-    monkeypatch.setattr(experts, "_warmup_metadata", lambda layer: meta)
     monkeypatch.setattr(experts, "_prepare_experts", lambda **kwargs: prepared)
 
     def fake_execution_plan(**kwargs):
@@ -974,43 +820,11 @@ def test_b12x_moe_warmup_runs_each_planner_regime_once(
     monkeypatch.setattr(b12x, "_run_b12x_moe_plan", fake_run)
     monkeypatch.setattr(experts, "_plan", fake_plan)
 
-    warmed = experts.warmup_launches(
-        SimpleNamespace(),
-        token_counts=(1, 2, 3, 4, 8),
-    )
+    warmed = experts.warmup_launches(layer, token_counts=(1, 2, 3, 4, 8))
 
     assert warmed == 3
     assert planned_tokens == [1, 3, 8]
     assert launched_tokens == planned_tokens
-
-
-def test_b12x_moe_exposes_provider_owned_warmup_unit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    experts = B12xExperts(
-        make_dummy_moe_config(hidden_dim=128, intermediate_size=64),
-        _quant_config("mxfp4", None),
-    )
-    calls = []
-    layer = SimpleNamespace()
-    monkeypatch.setattr(experts, "warmup_signature", lambda layer: ("signature",))
-
-    def fake_warmup(self, layer, *, token_counts):
-        calls.append(tuple(token_counts))
-        return 2
-
-    monkeypatch.setattr(B12xExperts, "warmup_launches", fake_warmup)
-
-    unit = experts.get_b12x_warmup_unit(
-        layer,
-        token_counts=(1, 3, 4),
-        output_dtype=torch.bfloat16,
-    )
-    unit.compile()
-
-    assert unit.name == "MoE"
-    assert unit.key == (B12xExperts, "signature")
-    assert calls == [(1, 3, 4)]
 
 
 def test_b12x_moe_warmup_distinguishes_intermediate_sizes() -> None:
@@ -1097,31 +911,6 @@ def test_b12x_source_release_preserves_prepared_storage_owner() -> None:
         tuple(tensor.untyped_storage().data_ptr() for tensor in owner_tensors)
         == owner_ptrs
     )
-
-
-def test_b12x_moe_reload_reuses_prepared_tensor_addresses() -> None:
-    @dataclass(frozen=True)
-    class Prepared:
-        weight: torch.Tensor
-        contract: tuple[str, ...]
-
-    layer = torch.nn.Module()
-    previous = Prepared(torch.tensor([1.0, 2.0]), ("w4a16", "bf16"))
-    replacement = Prepared(torch.tensor([3.0, 4.0]), ("w4a16", "bf16"))
-    layer._b12x_prepared_experts = previous
-    experts = B12xExperts(
-        make_dummy_moe_config(hidden_dim=128, intermediate_size=64),
-        _quant_config("mxfp4", None),
-    )
-    weight_ptr = previous.weight.data_ptr()
-
-    reused = experts._reuse_prepared_storage(layer, replacement)
-
-    assert reused is previous
-    assert experts._prepared_experts is previous
-    assert layer._b12x_prepared_experts is previous
-    assert previous.weight.data_ptr() == weight_ptr
-    torch.testing.assert_close(previous.weight, replacement.weight)
 
 
 def test_b12x_moe_rejects_router_weight_on_input_for_w4a8() -> None:
@@ -1352,17 +1141,17 @@ def test_b12x_dynamic_fp4_modes_match_torch(
             dtype=torch.float32,
         )
         if weight_dtype == "mxfp4":
-            w1_q, w1_scale = _quantize_mxfp4(w1)
-            w2_q, w2_scale = _quantize_mxfp4(w2)
+            w1_q, w1_scale = mxfp4_quantize(w1)
+            w2_q, w2_scale = mxfp4_quantize(w2)
             w1_ref = torch.stack(
                 [
-                    _dequantize_mxfp4(w1_q[e], w1_scale[e], dtype)
+                    dq_mxfp4_torch(w1_q[e], w1_scale[e], dtype)
                     for e in range(num_experts)
                 ]
             )
             w2_ref = torch.stack(
                 [
-                    _dequantize_mxfp4(w2_q[e], w2_scale[e], dtype)
+                    dq_mxfp4_torch(w2_q[e], w2_scale[e], dtype)
                     for e in range(num_experts)
                 ]
             )
@@ -1486,13 +1275,13 @@ def test_b12x_mxfp4_w4a16_matches_torch(workspace_init) -> None:
             )
             / 15
         )
-        w1_q, w1_scale = _quantize_mxfp4(w1)
-        w2_q, w2_scale = _quantize_mxfp4(w2)
+        w1_q, w1_scale = mxfp4_quantize(w1)
+        w2_q, w2_scale = mxfp4_quantize(w2)
         w1_ref = torch.empty_like(w1)
         w2_ref = torch.empty_like(w2)
         for expert in range(num_experts):
-            w1_ref[expert] = _dequantize_mxfp4(w1_q[expert], w1_scale[expert], dtype)
-            w2_ref[expert] = _dequantize_mxfp4(w2_q[expert], w2_scale[expert], dtype)
+            w1_ref[expert] = dq_mxfp4_torch(w1_q[expert], w1_scale[expert], dtype)
+            w2_ref[expert] = dq_mxfp4_torch(w2_q[expert], w2_scale[expert], dtype)
         quant_config = mxfp4_w4a16_moe_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,
@@ -1571,8 +1360,8 @@ def test_b12x_moe_cuda_graph_replay(
         / 15
     )
     if weight_dtype == "mxfp4":
-        w1_q, w1_scale = _quantize_mxfp4(w1)
-        w2_q, w2_scale = _quantize_mxfp4(w2)
+        w1_q, w1_scale = mxfp4_quantize(w1)
+        w2_q, w2_scale = mxfp4_quantize(w2)
         if activation_dtype is None:
             quant_config = mxfp4_w4a16_moe_quant_config(
                 w1_scale=w1_scale,
