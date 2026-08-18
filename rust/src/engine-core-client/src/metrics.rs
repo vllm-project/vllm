@@ -272,23 +272,56 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
         }
     }
 
-    // Connector-specific KV transfer stats. The payload is a
-    // `{connector_class_name: {"data": <connector-specific shape>}}` map
-    // (see `MultiKVConnectorStats`/`KVConnectorStats` on the Python side);
-    // we only know how to decode the two connectors we run in production.
+    // Connector-specific KV transfer stats. When `MultiConnector` wraps
+    // several connectors (e.g. prefill combining NixlConnector,
+    // SimpleCPUOffloadConnector, MooncakeStoreConnector), the payload is
+    // `{connector_class_name: {"data": <connector-specific shape>}}`
+    // (see `MultiKVConnectorStats` on the Python side). But a bare, unwrapped
+    // connector (e.g. decode's standalone `kv_connector: NixlConnector`)
+    // reports its own `KVConnectorStats.data` directly as
+    // `kv_connector_stats`, with no connector-name key and no extra "data"
+    // nesting -- `SchedulerStats.kv_connector_stats` is always just
+    // `kv_connector_stats.data` on the Python side, regardless of whether
+    // that's a `MultiKVConnectorStats` or a single connector's own stats.
     if let Some(kv_connector_stats) = &stats.kv_connector_stats {
-        for (connector_id, value) in kv_connector_stats {
-            let Some(data) = map_get(value, "data") else {
-                continue;
-            };
-            match connector_id.as_str() {
-                "MooncakeStoreConnector" => record_mooncake_stats(handles, data),
-                "NixlPullConnector" | "NixlPushConnector" => record_nixl_stats(handles, data),
-                _ => {}
+        if NIXL_FLAT_DATA_KEYS.iter().any(|key| kv_connector_stats.contains_key(*key)) {
+            // Bare NixlConnector: the map itself *is* the NIXL data blob.
+            let synthetic = Value::Map(
+                kv_connector_stats
+                    .iter()
+                    .map(|(k, v)| (Value::String(k.clone().into()), v.clone()))
+                    .collect(),
+            );
+            record_nixl_stats(handles, &synthetic);
+        } else {
+            // MultiConnector: dispatch each sub-connector by class name.
+            // We only know how to decode the two connectors we run in production.
+            for (connector_id, value) in kv_connector_stats {
+                let Some(data) = map_get(value, "data") else {
+                    continue;
+                };
+                match connector_id.as_str() {
+                    "MooncakeStoreConnector" => record_mooncake_stats(handles, data),
+                    "NixlConnector" | "NixlPullConnector" | "NixlPushConnector" => {
+                        record_nixl_stats(handles, data)
+                    }
+                    _ => {}
+                }
             }
         }
     }
 }
+
+/// Keys that only ever appear directly on `NixlKVConnectorStats.data`
+/// (see `nixl/stats.py::NixlKVConnectorStats.reset()` on the Python side).
+/// Their presence at the top level of `kv_connector_stats` means we're
+/// looking at a bare connector's own data, not a `MultiConnector` wrapper.
+const NIXL_FLAT_DATA_KEYS: &[&str] = &[
+    "transfer_duration",
+    "post_duration",
+    "bytes_transferred",
+    "num_descriptors",
+];
 
 /// Look up a string key in a msgpack map value, e.g. `{"data": ...}`.
 fn map_get<'a>(value: &'a OpaqueValue, key: &str) -> Option<&'a OpaqueValue> {
@@ -564,7 +597,9 @@ mod tests {
 
         let mut kv_connector_stats = BTreeMap::new();
         kv_connector_stats.insert("MooncakeStoreConnector".to_string(), mooncake_data);
-        kv_connector_stats.insert("NixlPullConnector".to_string(), nixl_data);
+        // Prefill's actual configured class name (`kv_connector: NixlConnector`
+        // inside `MultiConnector`), not the Pull/Push variants.
+        kv_connector_stats.insert("NixlConnector".to_string(), nixl_data);
 
         let stats = SchedulerStats {
             kv_connector_stats: Some(kv_connector_stats),
@@ -594,6 +629,71 @@ mod tests {
         assert!(
             rendered
                 .contains("vllm:nixl_xfer_time_seconds_count{model_name=\"model\",engine=\"0\"} 2")
+        );
+    }
+
+    /// Decode configures a bare `kv_connector: NixlConnector` (no
+    /// `MultiConnector` wrapper), so `SchedulerStats.kv_connector_stats` is
+    /// `NixlKVConnectorStats.data` directly -- a flat
+    /// `{"transfer_duration": [...], ...}` map with no connector-name key
+    /// and no extra `"data"` nesting. This must be decoded too, not just
+    /// the `MultiConnector`-wrapped shape used on prefill.
+    #[test]
+    fn bare_nixl_connector_stats_are_decoded_without_multi_connector_wrapping() {
+        let metrics = Metrics::new();
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+
+        let mut kv_connector_stats = BTreeMap::new();
+        kv_connector_stats.insert(
+            "transfer_duration".to_string(),
+            rmpv::Value::Array(vec![rmpv::Value::F64(0.03)]),
+        );
+        kv_connector_stats.insert(
+            "post_duration".to_string(),
+            rmpv::Value::Array(vec![rmpv::Value::F64(0.002)]),
+        );
+        kv_connector_stats.insert(
+            "bytes_transferred".to_string(),
+            rmpv::Value::Array(vec![rmpv::Value::from(8192i64)]),
+        );
+        kv_connector_stats.insert(
+            "num_descriptors".to_string(),
+            rmpv::Value::Array(vec![rmpv::Value::from(4i64)]),
+        );
+        kv_connector_stats.insert(
+            "num_failed_transfers".to_string(),
+            rmpv::Value::Array(vec![]),
+        );
+        kv_connector_stats.insert(
+            "num_failed_notifications".to_string(),
+            rmpv::Value::Array(vec![]),
+        );
+        kv_connector_stats.insert(
+            "num_kv_expired_reqs".to_string(),
+            rmpv::Value::Array(vec![]),
+        );
+
+        let stats = SchedulerStats {
+            kv_connector_stats: Some(kv_connector_stats),
+            ..Default::default()
+        };
+
+        super::record_scheduler_stats_with_handles(&handles, &stats);
+
+        let rendered = metrics.render().unwrap();
+        assert!(
+            rendered
+                .contains("vllm:nixl_xfer_time_seconds_count{model_name=\"model\",engine=\"0\"} 1")
+        );
+        assert!(
+            rendered.contains(
+                "vllm:nixl_xfer_time_seconds_sum{model_name=\"model\",engine=\"0\"} 0.03"
+            )
+        );
+        assert!(
+            rendered.contains(
+                "vllm:nixl_bytes_transferred_sum{model_name=\"model\",engine=\"0\"} 8192"
+            )
         );
     }
 }
