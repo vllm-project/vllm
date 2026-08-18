@@ -4,6 +4,7 @@
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -486,6 +487,9 @@ class TrtLlmNvFp4ExpertsMonolithic(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
+        if routing_method_type == RoutingMethodType.Simulated:
+            return envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY == "uniform_random"
+
         # NOTE(rob): this is a conservative list.
         return routing_method_type in [
             RoutingMethodType.DeepSeekV3,
@@ -495,7 +499,6 @@ class TrtLlmNvFp4ExpertsMonolithic(
             RoutingMethodType.SigmoidRenorm,
             RoutingMethodType.Sigmoid,
             RoutingMethodType.MiniMax2,
-            RoutingMethodType.Simulated,
         ]
 
     @staticmethod
@@ -524,16 +527,22 @@ class TrtLlmNvFp4ExpertsMonolithic(
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         import flashinfer
 
+        routing_method_type = self.routing_method_type
+        is_simulated = routing_method_type == RoutingMethodType.Simulated
+        if is_simulated:
+            routing_method_type = self.moe_config.original_routing_method
+            assert routing_method_type is not None
+
         assert self._supports_activation(activation)
         assert a1q_scale is not None or self.per_token_activation
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
         assert (
             apply_router_weight_on_input
-            and self.routing_method_type == RoutingMethodType.Llama4
+            and routing_method_type == RoutingMethodType.Llama4
         ) or (
             not apply_router_weight_on_input
-            and self.routing_method_type != RoutingMethodType.Llama4
+            and routing_method_type != RoutingMethodType.Llama4
         )
 
         # Per-token: input is unquantized, quantize it here (see modular apply).
@@ -555,6 +564,25 @@ class TrtLlmNvFp4ExpertsMonolithic(
             num_tokens=num_tokens,
             device=hidden_states.device,
         )
+
+        if is_simulated:
+            from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (  # noqa: E501
+                RoutingSimulator,
+            )
+
+            router_logits = RoutingSimulator.simulate_monolithic_logits(
+                router_logits=router_logits,
+                strategy_name=envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY,
+            )
+            if routing_method_type in (
+                RoutingMethodType.DeepSeekV3,
+                RoutingMethodType.MiniMax2,
+            ):
+                assert e_score_correction_bias is not None
+                e_score_correction_bias = torch.zeros_like(e_score_correction_bias)
+            else:
+                e_score_correction_bias = None
+
         # Invoke kernel.
         # NOTE: Activation padding and output
         # truncation are handled by the MoE runner's
@@ -585,7 +613,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
-            routing_method_type=self.routing_method_type,
+            routing_method_type=routing_method_type,
             do_finalize=not defer,
             activation_type=activation_to_flashinfer_int(activation),
             per_token_scale=per_token_scale,
