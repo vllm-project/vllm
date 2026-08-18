@@ -7,6 +7,7 @@
 
 #include <cooperative_groups.h>
 #include <cuda.h>
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cuda/ptx>
@@ -72,6 +73,8 @@ template <typename InputType>
 __device__ __forceinline__ float score_to_float(InputType x) {
   if constexpr (std::is_same_v<InputType, __half>) {
     return __half2float(x);
+  } else if constexpr (std::is_same_v<InputType, __nv_bfloat16>) {
+    return __bfloat162float(x);
   } else {
     return x;
   }
@@ -79,7 +82,7 @@ __device__ __forceinline__ float score_to_float(InputType x) {
 
 template <typename InputType>
 __device__ __forceinline__ uint32_t extract_coarse_bin(InputType x) {
-  return hist4096::extract_coarse_bin_N<kHistBits>(score_to_float(x));
+  return hist4096::extract_input_coarse_bin<kHistBits>(x);
 }
 
 __device__ __forceinline__ void mbarrier_init(uint64_t* a, uint32_t n) {
@@ -519,15 +522,13 @@ __device__ void cooperative_topk_body(
   }
 
   // Short-Medium path: histogram_4096_topk on rank 0 only - all data fits in RF
-  if constexpr (std::is_same_v<InputType, float>) {
-    if (sl <= static_cast<int32_t>(hist4096::kHist4096MaxLen)) {
-      if (rank == 0) {
-        extern __shared__ uint8_t sr[];
-        hist4096::histogram_4096_topk<TopK, 12>(
-            in, out, sl, sr);  // 4096-bin (12-bit) histogram
-      }
-      return;
+  if (sl <= static_cast<int32_t>(hist4096::kHist4096MaxLen)) {
+    if (rank == 0) {
+      extern __shared__ uint8_t sr[];
+      hist4096::histogram_4096_topk<InputType, TopK, 12>(
+          in, out, sl, sr);  // 4096-bin (12-bit) histogram
     }
+    return;
   }
 
   // Large path: init mbarriers + state, then dispatch fused or twopass

@@ -2345,3 +2345,962 @@ unqualified 6.1%.
   exports).
 - Driver logs use the same stems with `_driver_20260815.log`; prompt tokens are
   in `/tmp/gvr_beam_prompt_199400.json`.
+
+## 2026-08-15 FP16 non-GVR baseline revalidation
+
+This follow-up isolates FP16 indexer logits from GVR. It will compare the
+existing FP32 selector baseline with native FP16 cooperative/persistent top-k,
+measure both chunked-prefill and CUDA-graph decode paths, and evaluate real
+long-context BEAM prompts rather than relying on the short-context GSM8K run.
+FlashInfer autotuning remains disabled, and all Python commands use this
+worktree's `.venv`.
+
+Initial audit: FP16 cooperative and persistent decode selectors are present,
+but the old `VLLM_GVR_FP16_LOGITS` switch is coupled to allocated GVR state and
+therefore cannot run a non-GVR model. The prefill wrapper also always requests
+FP32 output even though the pinned DeepGEMM API already accepts an output dtype,
+and `top_k_per_row_prefill` still assumes `const float*`. A genuine FP16
+baseline therefore requires an independent indexer-logits switch plus FP16
+prefill-selector dispatch; simply disabling GVR in the prior FP16 run would
+silently restore FP32 logits.
+
+The independent path now uses `VLLM_FP16_INDEXER_LOGITS=1` without allocating
+GVR state. DeepGEMM writes FP16 for both contiguous prefill and paged decode,
+and the prefill, cooperative, and persistent baseline selectors consume FP16
+directly. Twenty selected FP16 top-k tests pass, including the 300K-column
+multi-pass decode path. The contiguous DeepGEMM FP16-output test also passes;
+the local DeepGEMM extension and its JIT headers had to be rebuilt together to
+avoid mixing incompatible generated-kernel signatures.
+
+### Selector microbenchmarks
+
+The following tables report FP32-time/FP16-time speedup. Both implementations
+use baseline selectors; GVR is not launched. Inputs are saved real model
+logits, every FP16 selector result matches exact top-k of its FP16 input, and
+the timings use 50 selector nodes per CUDA graph and 50 replays. B1/B8/B32 are
+native captures; B64/B128/B1024 repeat real B32 rows as throughput-scaling
+controls.
+
+| Decode context | B1 | B8 | B32 | B64 | B128 | B1024 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10K | 0.510x | 0.579x | 0.540x | 0.660x | 0.646x | 0.616x |
+| 50K | 1.027x | 1.012x | 1.010x | 1.140x | 1.157x | 1.172x |
+| 100K | 0.999x | 1.020x | 1.023x | 1.120x | 1.125x | 1.208x |
+| 200K | 1.020x | 1.025x | 1.046x | 1.131x | 1.399x | 1.452x |
+
+FP16 decode is substantially slower at 10K because the FP16 baseline selects
+the filtered persistent path while FP32 can use its cheaper short-row path.
+The bandwidth benefit appears at 50K and grows with batch and context, reaching
+1.45x for the repeated-row 200K/B1024 selector.
+
+| Prefill context | B1 | B8 | B32 | B64 | B128 | B1024 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10K | 0.981x | 0.996x | 0.994x | 0.996x | 0.997x | 1.027x |
+| 50K | 1.203x | 1.203x | 1.211x | 1.205x | 1.207x | 1.201x |
+| 100K | 1.165x | 1.156x | 1.147x | 1.150x | 1.151x | 1.333x |
+| 200K | 1.183x | 1.180x | 1.160x | 1.158x | 1.648x | 1.235x |
+
+The anomalously high 200K/B128 prefill ratio contains an FP32 timing split
+between the two saved layers (119.2 versus 91.2 us); it should not be treated
+as a stable 1.65x kernel gain. Neighboring cells indicate approximately
+1.16--1.24x. FP32/FP16 selected-index overlap is 100% at 10K and
+99.926%--99.972% at longer contexts in these captures.
+
+Microbenchmark logs are
+`/tmp/gvr_fp16_baseline_decode_{b1,b8,b32plus}_20260815.log` and
+`/tmp/gvr_fp16_baseline_prefill_{b1,b8,b32plus}_20260815.log`.
+
+### Real-model FP32 control run
+
+The FP32/no-GVR control run is complete. It uses the real
+GLM-5.2-NVFP4 checkpoint, TP4 on GB200, the real BEAM token stream, 40 GiB of
+KV cache per rank, disabled FlashInfer autotuning, and full-decode CUDA graphs
+captured at B1/B8/B32/B64/B128/B1024. No selector timing events were inserted.
+The Nsight trace derives each forward span from the first through last kernel
+belonging to the graph-launch correlation ID enclosed by the model's NVTX
+range.
+
+| KV length | B1 | B8 | B32 | B64 | B128 | B1024 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 10K | 7.187 | 7.844 | 9.790 | 11.846 | 14.517 | 52.527 |
+| 50K | 7.392 | 8.007 | 10.230 | 12.850 | 15.999 | 63.171 |
+| 100K | 7.412 | 8.174 | 10.629 | 13.766 | 17.474 | 74.707 |
+| 199.4K | 7.550 | 8.363 | 11.409 | 15.515 | 20.676 | 99.682 |
+
+Values are median milliseconds over all TP ranks. Every retained B1024 cell
+reached an exact 1,024-sequence plateau; the retained rank-event counts are
+204, 200, 156, and 128. The corresponding 5th--95th percentile intervals are
+52.441--52.699, 63.077--63.315, 74.606--75.046, and
+99.218--99.994 ms. These values reproduce the earlier fixed-GVR baseline
+within normal run-to-run variation.
+
+True uncached prefill TTFT for a single request was measured with four unique
+BEAM-derived prompts at each length. Discarding the first repetition gives
+median wall times of 1.092 s at 10K, 5.255 s at 50K, 10.307 s at 100K, and
+20.695 s at 199.4K. The trace contains 2,048-token chunk-forward ranges, so
+the paired FP16 run will report both request-level TTFT and per-chunk forward
+latency.
+
+Artifacts are `/tmp/gvr_fp32_nogvr_model_20260815.{nsys-rep,sqlite}`,
+`/tmp/gvr_fp32_nogvr_model_analysis_20260815.log`, and
+`/tmp/gvr_fp32_nogvr_{prefill_client,decode_b1_b128_driver,decode_b1024_driver}_20260815.log`.
+
+### Upstream numerical precedents
+
+The OSS vLLM audit has not found an existing proposal to emit the DSA indexer
+logits as FP16. It did find closely related constraints that make a long-context
+model evaluation mandatory:
+
+- merged PR #37421 uses an FP16 histogram for speed but retains FP32 radix
+  refinement in persistent TopK;
+- issue #26554 and merged PR #27568 added a slower fallback so concentrated
+  values cannot silently evict true top-k candidates;
+- issue #51782 reports another concentrated-logit failure in a persistent
+  coarse-bin path, showing that index validity and absence of duplicates are
+  insufficient correctness checks; selected values must be compared;
+- merged PR #33568 removed padding cleanup only after proving every downstream
+  selector is length-bounded, a useful example of eliminating indexer overhead
+  without changing numerics; and
+- issue #47827 initially attributed long-context GLM-5.2 corruption to paged
+  logits but ultimately traced it to an invalid layer-sharing pattern. This is
+  a warning that an end-to-end regression needs kernel, metadata, and model
+  checks before assigning cause.
+
+Status: selector microbenchmarks and the FP32 model control are complete. The
+paired FP16 model trace and long-context BEAM answer comparison are in progress.
+
+### Long-context BEAM control failure
+
+The paired BEAM generation finished for all 20 questions from chat 1. Prompts
+contain 194,659--194,704 tokens after applying the verifier's official
+whole-message truncation policy with a 200K model limit. FP32 and FP16 are
+bit-for-bit identical on all 20 responses, but this is **not usable accuracy
+evidence**: both implementations emit `lock` repeatedly for all 256 output
+tokens, so the control model itself scores zero. The same FP32 failure occurs
+on the first question from BEAM chats 2--5 at 3.5K--4.9K prompt tokens and on
+chat 1 as soon as enough history is retained (1,601 tokens fails, while a
+44-token question-only prompt remains coherent). Thus the failure predates the
+FP16 change and is not a long-context FP16 regression, but it prevents a valid
+BEAM score comparison on this checkpoint/portable-model serving path.
+
+### Accuracy benchmark replacement and BF16 extension
+
+Because the FP32 BEAM control itself degenerates to repeated `lock` tokens, the
+paired precision check was replaced with a deterministic
+needle-in-a-haystack driver. The final haystack is the standard Paul Graham
+essay corpus from the original needle-in-a-haystack repository; using BEAM
+chat text as the haystack was rejected after the same control failure. The
+driver inserts a unique seven-digit key and requires exact number-only
+recovery, so it needs neither a judge nor a BEAM rubric. The reusable driver is
+`benchmarks/benchmark_niah_accuracy.py`.
+
+At the user's request, BF16 was evaluated as a third no-GVR logits format.
+DeepGEMM already had native BF16-output instantiations; FP16 output was added in
+the local DeepGEMM checkout. The vLLM integration provides independent FP16 and
+BF16 switches, extends every ragged selector to both formats, and keeps the two
+switches mutually exclusive.
+
+### FP16 no-GVR decode result
+
+The clean FP16 retry used Nsight's graph-level tracing mode, with no CUDA events
+inserted into the model graph. The CUDA graph replay spans on rank 0 give the
+following FP32/FP16 forward speedups (greater than one favors FP16):
+
+| Batch | 10K | 50K | 100K | 199.4K |
+|---:|---:|---:|---:|---:|
+| 1 | 0.9866x | 1.0089x | 1.0060x | 1.0284x |
+| 8 | 1.0086x | 1.0165x | 1.0201x | 1.0286x |
+| 32 | 1.0093x | 1.0219x | 1.0186x | 1.0291x |
+| 64 | 1.0096x | 1.0273x | 1.0268x | 1.0324x |
+| 128 | 1.0071x | 1.0228x | 1.0197x | 1.0364x |
+| 1024 | 0.9984x | 1.0214x | 1.0208x | **1.0415x** |
+
+For example, the 199.4K/B1024 graph median falls from 99.682 ms to
+95.712 ms. The independent selector changes from 487.458 us to 335.782 us
+(1.452x). Amdahl's law converts the 1.0415x whole-forward gain and 1.452x
+selector gain into an implied optimized fraction of about 12.8%, which is
+plausible for 21 indexer calls and consistent with the earlier measured
+indexer share. The speedup is therefore bounded and internally consistent; it
+is not the impossible 10% whole-forward gain from changing a 10%-share region
+by only 2x.
+
+Artifacts are
+`/tmp/gvr_fp16_nogvr_model_retry_20260815.{nsys-rep,sqlite}` and
+`/tmp/gvr_fp16_nogvr_model_retry_analysis_20260816.log`. The first FP16
+uncached prefill wall measurements remain 1.086/5.559/10.920/21.953 seconds
+at 10K/50K/100K/199.4K versus FP32's
+1.092/5.255/10.307/20.695 seconds. Thus FP16 is neutral at 10K and about 6%
+slower for long prefill. The retry's later prefill requests reused prefixes
+across lengths, so their lower wall times are not substituted for this clean
+uncached comparison.
+
+### Initial BF16 no-GVR kernel results (before cooperative BF16)
+
+BF16 is now independently selectable with `VLLM_BF16_INDEXER_LOGITS`.
+DeepGEMM already had native BF16 output. vLLM's ragged selector and the
+FilteredTopK path now accept BF16, using the exact monotone ordered 16-bit key.
+At this point in the experiment, the cooperative selector remained
+FP32/FP16-only, so BF16 decode deliberately used FilteredTopK for every batch.
+This restriction has since been removed; the results in this subsection are
+retained as the before measurement.
+
+The BF16 decode selector microbenchmark below reports absolute latency and its
+speedup over the existing FP32 production selector. All outputs exactly match
+`torch.topk` on the corresponding BF16 tensor (zero mismatched rows).
+
+| Batch | 10K BF16 us / vs FP32 | 50K | 100K | 200K |
+|---:|---:|---:|---:|---:|
+| 1 | 9.637 / 0.523x | 19.743 / 0.528x | 29.351 / 0.371x | 55.049 / 0.233x |
+| 8 | 9.638 / 0.539x | 19.916 / 0.529x | 29.203 / 0.396x | 55.185 / 0.274x |
+| 32 | 9.658 / 0.552x | 20.010 / 0.654x | 29.535 / 0.490x | 55.391 / 0.436x |
+| 64 | 9.744 / 0.577x | 20.087 / 1.218x | 29.657 / 1.003x | 55.486 / 0.988x |
+| 128 | 9.800 / 0.564x | 20.219 / 1.225x | 29.857 / 1.005x | 55.665 / 1.218x |
+| 1024 | 63.432 / 0.537x | 136.832 / 1.256x | 203.988 / 1.075x | 385.592 / 1.264x |
+
+This makes BF16 structurally unattractive at batch 1--32: replacing the highly
+efficient cooperative FP32 selector costs 2--4x at long context. It helps some
+large-batch cells, but at 200K/B1024 its 385.592 us is still 14.8% slower than
+FP16's 335.782 us. BF16's reduced mantissa also changes more selected indices.
+Across the real prefill captures, FP32/BF16 overlap is 99.27--99.98%, versus
+99.93--100% for FP16. The direct valid layer-21 input gives 99.658% BF16 and
+99.951% FP16 overlap.
+
+Native producer measurements on valid real layer-21 Q/K/scale/weight tensors
+show that neither reduced format materially changes DeepGEMM time. Across
+batches 1/8/32/128/1024, FP16 versus FP32 is
+1.038x/1.012x/1.006x/0.997x/1.007x and BF16 is
+1.026x/1.026x/1.010x/1.001x/1.020x. These few-percent variations are not a
+reliable producer win; the same Q/K products, FP32 accumulation, activation,
+and head reduction still run. The validated driver rejects NaN/Inf captures;
+four older saved calls are invalid, while calls 0 and 21 are finite. Results
+and raw logs are in `benchmarks/kernels/benchmark_indexer_logits_dtype.py`,
+`/tmp/gvr_indexer_logits_dtype_valid_20260816.log`, and the three
+`/tmp/gvr_bf16_baseline_{decode,prefill}_*_20260816.log` files.
+
+The paired answer artifacts are
+`/tmp/gvr_beam_chat1_{fp32,fp16}_nogvr_20260815.jsonl`. The deterministic
+generator is `benchmarks/kernels/benchmark_fp16_beam_accuracy.py`. No judge
+was run because every long-context control answer is visibly invalid; reporting
+20/20 exact FP32/FP16 agreement as model accuracy would be misleading.
+
+### Initial BF16 real-model result (before cooperative BF16)
+
+The BF16/no-GVR run used the same real checkpoint, BEAM-derived token stream,
+TP4 placement, 40 GiB KV cache per rank, disabled FlashInfer autotuning, and
+the same six full-decode CUDA-graph sizes as the FP32 and FP16 runs. Nsight
+graph tracing was enabled without inserting CUDA events. The table reports
+FP32/BF16 forward speedup; values below one are BF16 regressions.
+
+| Batch | 10K | 50K | 100K | 199.4K |
+|---:|---:|---:|---:|---:|
+| 1 | 0.9974x | 0.9884x | 0.9515x | **0.9022x** |
+| 8 | 1.0150x | 0.9897x | 0.9686x | **0.9164x** |
+| 32 | 1.0192x | 1.0097x | 0.9907x | **0.9594x** |
+| 64 | 1.0176x | 1.0355x | 1.0324x | 1.0293x |
+| 128 | 1.0106x | 1.0268x | 1.0234x | 1.0345x |
+| 1024 | 0.9979x | 1.0211x | 1.0198x | 1.0400x |
+
+The corresponding BF16 medians in milliseconds are:
+
+| Batch | 10K | 50K | 100K | 199.4K |
+|---:|---:|---:|---:|---:|
+| 1 | 7.206 | 7.478 | 7.789 | 8.369 |
+| 8 | 7.728 | 8.090 | 8.439 | 9.126 |
+| 32 | 9.606 | 10.132 | 10.729 | 11.892 |
+| 64 | 11.641 | 12.410 | 13.334 | 15.073 |
+| 128 | 14.365 | 15.582 | 17.074 | 19.987 |
+| 1024 | 52.636 | 61.865 | 73.259 | 95.853 |
+
+This was the expected whole-model manifestation of the old selector result. At
+199.4K/B1, the BF16 selector is 4.29x slower than FP32, so the forward pass
+regresses 10.8%. At B64 and above, BF16 recovers roughly the same 3--4% gain as
+FP16 because output traffic is lower and the large-batch persistent selector
+is competitive. BF16 is nevertheless not the preferred reduced format: its
+199.4K/B1024 forward time is 0.15% slower than FP16, its small-batch behavior is
+much worse, and it changes about seven times as many selected indices on the
+valid layer-21 input. Artifacts are
+`/tmp/gvr_bf16_nogvr_model_20260816.{nsys-rep,sqlite}`.
+
+### Accuracy-control conclusion
+
+The standard Paul Graham NIAH control is also invalid on this checkpoint and
+portable-model serving path. FP16 and BF16 both recover the inserted key
+exactly at a 100-token target, but both emit repeated `lock` at 200 and 10K
+tokens. The indexer top-k is 2,048, so a 200-token prompt cannot have lost a
+candidate to top-k; the failure is upstream of the indexer-logit precision
+choice. A full 10K--190K matrix would only repeat a known broken control and is
+not reported as an accuracy comparison. The matched FP32, FP16, and BF16 runs
+behave identically at these control lengths. Artifacts are
+`/tmp/gvr_niah_fp32_pg_smoke_20260816.jsonl`,
+`/tmp/gvr_niah_fp16_pg_smoke_20260815.jsonl`, and
+`/tmp/gvr_niah_bf16_pg_smoke_20260816.jsonl` (the earlier FP16 threshold sweep
+is `/tmp/gvr_niah_fp16_pg_threshold_20260815.jsonl`).
+
+### Cooperative reduced-precision follow-up
+
+The initial BF16 result above used FilteredTopK at every batch because the
+cooperative selector accepted only FP32 and FP16. That was an implementation
+gap, not an algorithmic constraint. The cooperative kernel's TMA streaming,
+cluster histogram reduction, scatter, and exact FP32 tie refinement are now
+instantiated for BF16 as well. Its register-resident 4,096-bin short-row path
+has also been generalized to 16-byte vector-load FP32, FP16, or BF16 while
+converting only histogram keys and exact tie values as needed. Consequently all
+three formats use the same baseline selector policy: cooperative top-k for
+B1--32 and persistent top-k above B32. Row-stride admission is now expressed as
+16-byte alignment instead of four elements, so it is correct for either
+element width.
+
+The final CUDA-graph microbenchmark below uses finite real layer-0 and layer-21
+model captures. Each cell is FP32 / FP16 / BF16 latency in microseconds. All
+three outputs have zero mismatched rows against exact `torch.topk` values in
+the corresponding input dtype.
+
+| Batch | 10K | 50K | 100K | 200K |
+|---:|---:|---:|---:|---:|
+| 1 | 5.033 / 5.639 / 5.611 | 10.389 / 10.409 / 10.372 | 10.872 / 10.700 / 10.533 | 12.794 / 12.578 / 12.552 |
+| 8 | 5.186 / 5.773 / 5.740 | 10.544 / 10.380 / 10.332 | 11.525 / 11.358 / 11.208 | 15.133 / 14.752 / 14.654 |
+| 32 | 5.330 / 5.846 / 5.818 | 13.071 / 12.974 / 12.928 | 14.484 / 14.105 / 13.999 | 24.241 / 23.101 / 23.131 |
+| 64 | 5.511 / 6.150 / 6.053 | 24.473 / 21.566 / 22.358 | 29.958 / 26.815 / 28.288 | 54.749 / 48.186 / 50.775 |
+| 128 | 5.536 / 6.163 / 6.089 | 24.659 / 21.738 / 22.560 | 30.021 / 26.990 / 28.413 | 66.684 / 48.387 / 50.972 |
+| 1024 | 34.084 / 38.662 / 38.110 | 171.825 / 147.296 / 153.077 | 219.140 / 183.772 / 192.980 | 487.744 / 334.821 / 353.253 |
+
+The structural change removes the BF16 small-batch cliff. At 200K, BF16 B1,
+B8, and B32 improve from 55.049/55.185/55.391 us to
+12.552/14.654/23.131 us: **4.39x/3.77x/2.39x faster**. They are now
+1.019x/1.033x/1.048x faster than the FP32 cooperative path rather than 2--4x
+slower. At 10K, launch and fixed histogram costs dominate, so reduced precision
+is still about 10--12% slower than FP32; sharing an algorithm does not imply
+identical instruction cost or latency in every shape.
+
+An expanded synthetic correctness matrix then exposed a BF16-only long-row
+bug in the shared persistent/filtered path. A native BF16 upper-byte coarse
+key contains almost only exponent bits, so a single coarse bin could exceed
+the 16K refinement buffer even though FP16 passed. The fix uses the same FP16
+coarse projection as the FP32 implementation, followed by the native BF16
+ordered key for exact refinement. This preserves the common algorithm while
+making its capacity assumption valid for the tested score range. The corrected
+B64+ timings above supersede the earlier values; the real captured tensors had
+not shown value mismatches, but the wider random long-row test did.
+
+The CuTe GVR kernel itself already contained FP32, FP16, and BF16
+instantiations. The remaining BF16 exclusion in the indexer was therefore also
+removed. Exact-value correctness passed for cold start, degenerate temporal
+hints, and adaptive 50K/100K/200K rungs in all three dtypes. On the real
+captures, BF16 baseline/GVR speedup is:
+
+| Batch | 10K | 50K | 100K | 200K |
+|---:|---:|---:|---:|---:|
+| 1 | 0.615x | 0.493x | 0.723x | 0.454x |
+| 8 | 0.619x | 0.490x | 0.562x | 0.487x |
+| 32 | 0.611x | 0.624x | 0.695x | 0.756x |
+| 64 | 0.614x | 1.039x | 1.285x | 1.283x |
+| 128 | 0.645x | 1.104x | 1.185x | 1.024x |
+| 1024 | 1.111x | 1.567x | 1.859x | 0.966x |
+
+This distinguishes kernel availability from dispatch policy. BF16 can now run
+every kernel FP32 can, but GVR should still be selected by measured shape: the
+cooperative baseline is decisively better for B1--32, whereas BF16 GVR wins in
+several long-context B64+ cells. The earlier request to force GVR for all
+reduced-precision sizes remains supported, even though it is not the fastest
+policy at small batch.
+
+The old BF16 end-to-end table above is superseded by a real matched trace of the
+shared-path implementation. The run uses the real GLM-5.2-NVFP4 checkpoint,
+TP4, BEAM-derived tokens, full-decode CUDA graphs, disabled FlashInfer
+autotuning, and `temperature=1.0`. Prefix caching is enabled only to give the
+multi-output children one shared real prompt KV; the reported interval is the
+normal decode graph itself. No timing events were inserted into the graph.
+
+The BF16 graph medians in milliseconds are:
+
+| Batch | 10K | 50K | 100K | 199.4K |
+|---:|---:|---:|---:|---:|
+| 1 | 7.309 | 7.493 | 7.507 | 7.495 |
+| 8 | 7.973 | 8.187 | 8.188 | 8.361 |
+| 32 | 9.850 | 10.349 | 10.586 | 11.372 |
+| 64 | 11.969 | 12.897 | 13.669 | 15.406 |
+| 128 | 14.644 | 15.996 | 17.364 | 20.279 |
+| 1024 | 52.775 | 62.406 | 73.735 | 96.300 |
+
+Using the earlier matched FP32 trace as the denominator, FP32/BF16 speedup is:
+
+| Batch | 10K | 50K | 100K | 199.4K |
+|---:|---:|---:|---:|---:|
+| 1 | 0.9833x | 0.9865x | 0.9873x | 1.0073x |
+| 8 | 0.9838x | 0.9780x | 0.9983x | 1.0002x |
+| 32 | 0.9939x | 0.9885x | 1.0040x | 1.0033x |
+| 64 | 0.9897x | 0.9963x | 1.0071x | 1.0071x |
+| 128 | 0.9913x | 1.0002x | 1.0063x | 1.0196x |
+| 1024 | 0.9953x | 1.0123x | 1.0132x | **1.0351x** |
+
+Nsight verifies the intended path directly. Every B1/B8/B32 forward contains
+21 `cooperative_topk` BF16 launches with cluster size 16/8/4 respectively;
+every B64/B128/B1024 forward contains 21 BF16 `FilteredTopKUnifiedKernel`
+launches. At 199.4K/B1024 the standalone selector changes from 487.744 us to
+353.253 us (1.381x), while the whole graph changes from 99.682 ms to 96.300 ms
+(1.035x). Amdahl's law implies an optimized fraction of 12.3%, consistent with
+the measured 21-indexer share. FP16 remains slightly preferable: its matching
+graph is 95.712 ms, 0.6% faster than BF16, and its standalone selector is
+334.821 us. The trace artifacts are
+`/tmp/gvr_bf16_shared_model_20260816.{nsys-rep,sqlite}`.
+
+Validation completed with a native rebuild. The final run passed 72 shared
+selector cases spanning FP32/FP16/BF16, cooperative/persistent,
+short/medium/long, clean/unclean logits, and ordinary/speculative decode; 12
+padded-stride cases also passed. The DeepGEMM FP32/FP16/BF16 output matrix
+passed 9 cases, and the GVR dtype/rung checks passed 15 cases.
+
+## 2026-08-16: fresh reduced-precision no-GVR rebenchmark (complete)
+
+The final rerun compares FP32, FP16, and BF16 with GVR disabled, uses only this
+repository's `.venv`, keeps FlashInfer autotuning disabled, and separates four
+quantities that earlier notes sometimes mixed:
+
+1. standalone decode top-k;
+2. standalone prefill top-k;
+3. the DeepGEMM indexer-logit producer; and
+4. complete real-model prefill and CUDA-graph decode latency.
+
+Kernel measurements used the finite real layer-0/layer-21 captures in
+`/tmp/gvr_real_matrix_valid`, exact selected-value checks in each input dtype,
+and 50-operation CUDA graphs replayed 50 times. The final shared-path kernel
+and model tables are in the preceding subsection. DeepGEMM output dtype remains
+essentially neutral: the real layer-21 producer changes by less than about 2%
+across the batch matrix because only the output stores change; the FP8/FP4 dot
+products, FP32 accumulation, activation, and head reduction are identical.
+
+The BEAM and NIAH controls remain invalid for model accuracy on this checkpoint
+and portable-model serving path: matched FP32/FP16/BF16 runs produce the same
+degenerate `lock` behavior. Therefore no exact-agreement number is presented as
+an accuracy score. The selector-level evidence is still valid: every dtype is
+exact relative to `torch.topk` on that dtype, while the direct finite layer-21
+capture retains 99.951% of FP32 indices in FP16 and 99.658% in BF16.
+
+## 2026-08-16: valid native-model NIAH FP32/FP16 comparison
+
+The earlier NIAH conclusion above applies only to the forced portable
+DeepSeek-V3.2 model override. Its FP32 control failed at only 200 tokens, before
+the 2,048-entry sparse selector can discard any token, so it could not test
+indexer-logit precision. The accuracy rerun removes
+`--model-class-override`, resolves the checkpoint's native
+`GlmMoeDsaForCausalLM` implementation, and uses the standard Paul Graham essay
+corpus from `gkamradt/needle-in-a-haystack` at commit
+`021385d68d3202e37893e9d3cd29011c569abe30`.
+
+The real `nvidia/GLM-5.2-NVFP4` checkpoint ran on TP4 with greedy decoding,
+FP8 E4M3 KV cache, 2,048-token chunked prefill, eager execution, disabled
+FlashInfer autotuning, and GVR disabled. FP32 and FP16 used identical settings;
+the only changed model environment setting was
+`VLLM_FP16_INDEXER_LOGITS=0/1`. A short FP32 qualification recovered the exact
+key at 100, 200, and 1,000 tokens, confirming that the native control was
+functional before running long contexts.
+
+The long-context matrix contains three target lengths, needle depths of
+10%/50%/90%, and two distinct seven-digit keys per cell. Each row is scored by
+exact number-only retrieval:
+
+| Context target | FP32 exact | FP16 exact | Paired responses identical |
+|---:|---:|---:|---:|
+| 50K | 6/6 | 6/6 | 6/6 |
+| 75K | 6/6 | 6/6 | 6/6 |
+| 95K | 6/6 | 6/6 | 6/6 |
+| **Total** | **18/18** | **18/18** | **18/18** |
+
+Actual server prompt lengths span 50,000--95,002 tokens. FP16 therefore has
+zero observed NIAH exact-retrieval loss in this 18-case paired sample: both
+precisions score 100%, for a measured delta of 0 percentage points. This is
+valid end-to-end evidence for deterministic single-needle recall at up to 95K,
+not proof that the accuracy delta is zero on every long-context task. The
+paired artifacts are
+`/tmp/gvr_niah_native_{fp32,fp16}_50kplus_20260816.jsonl`; the diagnostic is
+`/tmp/gvr_niah_native_fp32_diagnostic_20260816.jsonl`.
+
+## 2026-08-16: portable GLM path `lock` degeneration root cause
+
+The portable `DeepseekV32ForCausalLM` failure is independent of GVR and
+reduced-precision indexer logits. A real-checkpoint FP32/GVR-off boundary sweep
+passed through 127 actual prompt tokens and failed at 129 and every tested
+larger length through 1,001. The boundary is the FlashInfer sparse MLA
+metadata builder's 128-token `reorder_batch_threshold` for GLM's 16 local
+query heads, not a 64-token KV-cache addressing boundary.
+
+The default dispatch is internally inconsistent for the portable attention
+wrapper:
+
+1. Up to 128 tokens, metadata treats the prompt as decode-like MQA. The
+   indexer scores it and fills `topk_indices_buffer`, after which the wrapper's
+   unconditional `forward_mqa` call has valid indices.
+2. From 129 through `index_topk=2048`, metadata selects dense MHA and
+   `sparse_attn_indexer` deliberately skips scoring because dense MHA does not
+   consume top-k indices.
+3. `DeepseekV32Attention._sparse_indexer_and_attn` nevertheless always calls
+   `self.impl.forward_mqa`; it has no dense-MHA branch. Its fused norm/RoPE
+   kernel has just cleared the top-k buffer to `-1`, so sparse MQA receives an
+   empty attention set. The near-zero attention output causes the observed
+   repeated `lock` degeneration.
+
+This explanation was tested causally, not inferred only from source. The same
+432.9-GiB checkpoint, TP4, eager execution, FP8 E4M3 KV cache, FP32 indexer
+logits, GVR disabled, and FlashInfer autotuning disabled was relaunched with
+only `--attention-config '{"sparse_mla_force_mqa":true}'` added. All 19 NIAH
+boundary cases passed exactly, spanning 97, 101, 122, 127, 129, 130, 131, 132,
+162, 191, 192, 193, 194, 196, 202, 257, 301, 502, and 1,001 actual prompt
+tokens. This includes every previously failing regime. The artifact is
+`/tmp/gvr_niah_portable_fp32_force_mqa_boundary_20260816.jsonl`; the failing
+control is `/tmp/gvr_niah_portable_fp32_boundary_20260816.jsonl`.
+
+For making this implementation the GLM default, `sparse_mla_force_mqa=true`
+is a correct immediate requirement because the wrapper only implements MQA.
+The alternative is a larger implementation change: retain normalized/rotated
+K and full Q tensors and add a real `forward_mha` branch matching the metadata
+decision. Silently leaving the generic default false is unsafe. A regression
+test must cross the 128/129 boundary and assert that an MQA-only wrapper never
+allows metadata to skip indexer scoring.
+
+### Why the earlier GSM8K run did not reveal this failure
+
+The passing 1,319-example FP16/GVR GSM8K result did use the new NVIDIA
+DeepSeek-V3.2 override; `/tmp/gvr_fp16_server.log` records the explicit class
+override, V2 runner, 2,048-token scheduler budget, and 128 concurrent requests.
+Reconstructing the exact five-shot prompts with lm-eval seed 1234 and the real
+GLM tokenizer gives 521--1,407 tokens (mean 875.6). Thus every prompt was above
+the 128-token classification boundary and below `index_topk=2048`; prompt
+length did not protect the evaluation. Prefix caching did not protect it
+either: the prompts share only a three-token prefix, and the server reported a
+0.5--1.0% cache hit rate.
+
+Concurrency masked the bug in two related ways. The 2,048-token scheduler
+budget was shared across as many as 128 requests, so many individual scheduled
+prompt chunks were at most 128 tokens and were classified as decode-like MQA
+even though the complete prompts were longer. In addition, the indexer skips
+short-prefill scoring only for a **pure-prefill** model step: its guard requires
+dense-prefill metadata and `num_decode_tokens == 0`. Once any admitted request
+was generating, mixed decode+prefill steps had `num_decode_tokens > 0`, so the
+indexer computed top-k indices for the whole step and the wrapper's MQA call
+received valid indices. The server log confirms mixed operation early in the
+run (56 running requests with nonzero generation throughput, then 128 running)
+and only a 0.5--1.0% prefix-cache hit rate. Any request that did encounter a
+rare vulnerable pure-prefill step could fail without producing a statistically
+obvious drop inside GSM8K's normal error count.
+
+The serial NIAH boundary test is therefore the stronger regression detector:
+each request begins with a pure-prefill step, deterministically exercising the
+inconsistent branch at 129--2,048 tokens. Future model-path validation must
+include such a single-request boundary case; a high-concurrency aggregate
+accuracy score alone cannot cover scheduler-dependent dispatch.
+
+### Fix validation and PR preparation
+
+The fix gives sparse MLA two independent capability checks: whether the
+backend implements dense-MHA prefill and whether the model-layer wrapper can
+actually dispatch to it. `DeepseekV32Attention` declares the latter false, so
+metadata no longer advertises dense prefill or permits the indexer scoring
+skip for this MQA-only wrapper. A focused unit case crosses this dispatch
+condition and verifies that scoring still populates the top-k buffer.
+
+On the patched branch, the same real GLM-5.2-NVFP4 configuration passed all
+19/19 serial NIAH cases exactly without `sparse_mla_force_mqa=true`, spanning
+97, 101, 122, 127, 129, 130, 131, 132, 162, 191, 192, 193, 194, 196, 202, 257,
+301, 502, and 1,001 actual prompt tokens. This removes the old deterministic
+failure beginning at 129 tokens while retaining the already-correct shorter
+cases. The artifact is
+`/tmp/gvr_niah_portable_fp32_prfix_boundary_20260816.jsonl`.
+
+The focused pytest reports 7 passed; pre-commit passed every hook on the three
+changed files; `compileall` and `git diff --check` also passed. The isolated
+branch is `agent/fix-deepseek-v32-prefill-dispatch` at commit `709f2d0ba8`.
+Draft PR: <https://github.com/vllm-project/vllm/pull/52512>. It remains a draft
+pending the required human line-by-line review and ownership of the change.
+
+## 2026-08-16: FP16 no-GVR prefill at Q=8K, KV=100K
+
+This experiment compares the original prefill top-k in FP32 with its FP16
+specialization. GVR is explicitly disabled in both arms; there is no GVR
+state, kernel, repair, or fallback. The Nsight kernel summaries contain the
+expected `topKPerRowPrefill<float>` and `topKPerRowPrefill<__half>` symbols and
+no GVR kernel symbols. FlashInfer autotuning is also disabled.
+
+### Kernel microbenchmark
+
+The shape is 8,192 causal query rows by exactly 100,000 KV columns with
+`topk=2048`. The input reconstructs the finite real layer-21 FP8 Q/K, KV
+scales, and indexer weights from `indexer_call21.pt`, repeats the captured query
+over the requested rows, and varies causal row ends from 91,809 through
+100,000. Nine alternating rounds of ten eager launches give:
+
+| Component | FP32 median | FP16 median | FP32 / FP16 |
+|---|---:|---:|---:|
+| DeepGEMM logits producer | 2.749 ms | 2.705 ms | 1.016x |
+| Original prefill top-k | 1.557 ms | 1.318 ms | 1.181x |
+| Sequential producer + top-k | 4.067 ms | 3.782 ms | **1.075x** |
+
+The paired geometric-mean speedups are 1.008x, 1.155x, and 1.081x,
+respectively. Thus FP16 primarily helps the original top-k scan; halving the
+output width barely changes DeepGEMM because QK products, FP32 accumulation,
+activation, and head reduction are unchanged. Across 256 sampled rows, every
+selector returns the exact top-k values for its own input. FP32/FP16 selected
+index overlap is 99.9264% on average (99.7559% minimum), and maximum sampled
+absolute logit error is 0.007633. Raw log:
+`/tmp/gvr_fp16_prefill_q8192_kv100000_kernel_20260816.log`.
+
+#### Why the selector speedup is 1.18x rather than 2x
+
+FP16 changes only the width of the global logits input. It does not halve the
+rest of `topKPerRowPrefill`. At this shape both specializations launch the same
+8,192 CTAs with 512 threads per CTA and 8 KiB of dynamic shared memory. The
+common histogram step reads the logits once to build a 2,048-bin shared-memory
+histogram and reads them again to emit the selected and threshold-bin items.
+Both versions still perform the same contended shared-memory atomics, four
+block-wide histogram scans, barriers, candidate ranking, int32 index output,
+and FP32 candidate storage and comparisons. The FP16 specialization also
+converts each loaded value to FP32 before this common logic; this is a storage
+optimization, not a native 16-bit top-k computation. Its 16-byte vector loads
+contain eight values instead of four, so the input scans do transfer half as
+many bytes, but those scans are only part of the kernel's cost.
+
+A two-component model quantifies the result. Let the FP32 time be `C + B`,
+where `B` is input-transfer time and `C` is work unaffected by input width.
+Ideal FP16 time is then `C + B/2`. The observed ratio
+`1.318 / 1.557 = 0.8465` implies `B / (C + B) = 30.7%`: about 31% of the FP32
+kernel time was removable input traffic and about 69% was common work. This
+predicts exactly `1 / (0.693 + 0.307 / 2) = 1.181x`. A 2x result would require
+nearly all time to be proportional to logits bytes, which this histogram and
+selection kernel is not.
+
+### Real-model TP4 forward
+
+The end-to-end forward benchmark uses the real 432.9-GiB
+`nvidia/GLM-5.2-NVFP4` checkpoint, the NVIDIA DeepSeek-V3.2 override, TP4 on
+GB200, FP8 E4M3 KV cache, eager execution, `max_num_batched_tokens=8192`, and
+the same BEAM-derived real token stream. The separately required
+`sparse_mla_force_mqa=true` workaround keeps the portable attention wrapper on
+its implemented path; it is identical in both arms. Each run first caches a
+91,840-token prefix. Nine profiled prompts then change their first suffix token
+so that every request computes exactly 8,192 new tokens and ends at 100,032
+total KV tokens. Nsight capture begins after prefix priming; no timing event is
+inserted into the model.
+
+| Metric per TP rank / forward | FP32 original top-k | FP16 original top-k | Speedup |
+|---|---:|---:|---:|
+| All prefill top-k launches | 37.638 ms | 30.397 ms | **1.238x** |
+| All DeepGEMM producer launches | 73.770 ms | 73.332 ms | 1.006x |
+| Producer + top-k | 111.408 ms | 103.728 ms | 1.074x |
+| TP4 critical-path model forward median | 445.036 ms | 438.404 ms | **1.0151x** |
+
+The model-forward latency reduction is 6.631 ms by ratio of medians, or 1.49%.
+Pairing corresponding requests gives a 7.295-ms median saving and 1.0165x
+geometric-mean speedup. Request wall medians, retained only as a cross-check,
+are 521.666 and 515.470 ms (1.0120x); the GPU forward spans are the primary
+result because they exclude HTTP, scheduler, and tokenizer time.
+
+This result is first-principles consistent. Original top-k occupies 8.46% of
+the FP32 critical forward and becomes 1.238x faster, saving 7.242 ms in the
+trace. The observed paired forward saving is 7.295 ms. Including the small
+0.438-ms producer reduction predicts 437.356 ms from the FP32 median versus
+438.404 ms observed, a 1.05-ms residual attributable to the other kernels and
+rank variation. There is therefore no unexplained large end-to-end gain: FP16
+logits make the complete indexer about 1.074x faster, but only make the whole
+8K/100K model forward about **1.5% faster**.
+
+Artifacts are
+`/tmp/gvr_{fp32,fp16}_nogvr_prefill_q8192_kv100032_20260816.nsys-rep`, their
+matching `.sqlite` exports, and
+`/tmp/gvr_{fp32,fp16}_nogvr_prefill_q8192_kv100032_client_20260816.{jsonl,log}`.
+
+## 2026-08-16: FP16-native original prefill selector (complete)
+
+The optimized no-GVR specialization treats every finite FP16 value as an exact
+monotonic uint16 key. It extracts the coarse 11-bit histogram bin directly from
+the stored half bits and stores candidate keys as uint16 rather than widening
+them to FP32. More importantly, when the coarse threshold bin fits the 2,048
+candidate slots, it replaces the old quadratic insertion ranking with a
+32-bin histogram over the five remaining key bits. It then emits keys strictly
+above the exact threshold and only enough threshold ties to fill top-k. This is
+an exact linear refinement over the FP16 value domain; output order remains
+unspecified as before. Pathological coarse bins larger than the candidate
+capacity retain the existing exact multi-stage refinement fallback. FP32 and
+BF16 behavior is unchanged.
+
+Two intermediate designs were rejected. Direct half candidate comparisons
+were correct but took 1.445 ms, and ordered uint16 candidates with the old
+quadratic insertion loop took 1.428 ms. Both were slower than the 1.318-ms
+widened-FP16 baseline because scalar half/integer comparison did not address
+the expensive candidate-ranking structure. The 32-bin linear refinement is
+the material optimization.
+
+### Kernel result
+
+The matched real layer-21 Q=8,192, KV=100,000, top-k=2,048 harness was rerun
+with no GVR. Across three alternating eager runs, the final FP16-native selector
+medians were 1.222, 1.240, and 1.253 ms (1.240-ms median), versus 1.318 ms for
+the prior widened-FP16 path: a 1.063x additional improvement. The final
+10-node CUDA-graph measurement is much less variable and gives:
+
+| Selector | CUDA-graph latency | Relative to FP16-native |
+|---|---:|---:|
+| Original FP32 | 1.253 ms | 1.276x |
+| FP16-native | **0.982 ms** | 1.000x |
+
+The graph result repeated at 0.982 ms in every timed round except one 0.985-ms
+round. The input remains reconstructed from real layer-21 FP8 Q/K values,
+scales, and indexer weights; 256 sampled rows exactly matched `torch.topk` for
+their FP16 inputs. FP32/FP16 index overlap was 99.9285% on average, 99.8047%
+minimum, with 0.007633 maximum absolute logit error. Artifact:
+`/tmp/gvr_fp16_native_final_graph_prefill_q8192_kv100000_kernel_20260816.log`.
+
+### Real-model TP4 result
+
+The real 432.9-GiB model trace repeats the preceding experiment exactly: the
+same checkpoint and BEAM tokens, 91,840 cached prefix tokens plus an 8,192-token
+uncached suffix, TP4 GB200, FP8 E4M3 KV cache, eager forward, nine requests,
+GVR disabled, and FlashInfer autotuning disabled. Nsight contains only the
+expected `topKPerRowPrefill<__half>` selector and no GVR kernel.
+
+| Metric per TP rank / forward | FP32 | Widened FP16 | FP16-native |
+|---|---:|---:|---:|
+| All prefill top-k launches | 37.638 ms | 30.397 ms | **24.287 ms** |
+| All DeepGEMM producers | 73.770 ms | 73.332 ms | 73.142 ms |
+| Producer + top-k | 111.408 ms | 103.728 ms | **97.429 ms** |
+| TP4 critical forward median | 445.036 ms | 438.404 ms | **431.223 ms** |
+
+Relative to widened FP16, native refinement makes top-k 1.252x faster and the
+whole forward 1.0167x faster, saving 7.181 ms. Relative to the original FP32
+configuration, it makes top-k 1.550x faster and the real model forward 1.0320x
+faster, a 3.10% latency reduction.
+
+The result closes under Amdahl's law. FP32-to-native top-k saves 13.351 ms per
+rank/forward and the producer saves another 0.628 ms. Subtracting those two
+measured changes from the 445.036-ms FP32 forward predicts 431.057 ms; Nsight
+observes 431.223 ms, leaving only a 0.166-ms residual. The improvement is
+therefore attributable to the selector rewrite rather than unrelated model
+variation.
+
+The final focused suite passed 41 cases covering FP32/FP16/BF16 prefill plus
+FP16/BF16 single- and multi-pass decode. A new adversarial unit test places the
+top-k boundary inside one FP16 coarse bin and verifies exact selected values.
+All code-only pre-commit hooks pass. Whole-file markdownlint still reports 362
+legacy table-style findings in this living log, unrelated to the kernel change.
+Artifacts are
+`/tmp/gvr_fp16_native_nogvr_prefill_q8192_kv100032_20260816.{nsys-rep,sqlite}`
+and
+`/tmp/gvr_fp16_native_nogvr_prefill_q8192_kv100032_client_20260816.{jsonl,log}`.
+
+## 2026-08-16: FP16-native batch/context sweep (complete)
+
+The follow-up sweep compares only the original FP32 prefill selector with the
+FP16-native version above. GVR is disabled. Inputs are the saved real-model
+layer-0 and layer-21 logits for context targets 10K, 50K, 100K, and 200K. The
+native captured batches 1, 8, and 32 are measured directly; batches 64, 128,
+1,024, and 8,192 repeat the captured 32-row distributions. Every timing uses a
+CUDA graph, FlashInfer autotuning remains disabled, and each cell first checks
+the kernel's selected values exactly against `torch.topk` in the input dtype.
+
+This is a selector-level sweep: "batch" is the number of top-k rows, which is
+the number of uncached query tokens presented to this prefill operator. It is
+not a new full-model batch sweep. Each latency is the mean of the two real
+layer captures, using 20 selector nodes per graph and 20 timed graph replays
+(400 launches per capture). CUDA events surround graph replays on the host
+stream; no event is captured as a graph node.
+
+### CUDA-graph latency
+
+Original FP32 selector latency, in microseconds:
+
+| Rows | KV 10K | KV 50K | KV 100K | KV 200K |
+|---:|---:|---:|---:|---:|
+| 1 | 7.201 | 25.068 | 35.901 | 71.859 |
+| 8 | 7.317 | 25.322 | 37.580 | 73.033 |
+| 32 | 7.417 | 25.652 | 38.027 | 73.714 |
+| 64 | 7.447 | 25.753 | 38.082 | 73.974 |
+| 128 | 7.540 | 25.903 | 38.299 | 94.902 [1] |
+| 1,024 | 25.001 | 104.960 | 172.758 | 334.711 |
+| 8,192 | 178.517 | 711.892 | 1,177.570 | 2,341.335 |
+
+FP16-native selector latency, in microseconds:
+
+| Rows | KV 10K | KV 50K | KV 100K | KV 200K |
+|---:|---:|---:|---:|---:|
+| 1 | 7.856 | 19.416 | 30.801 | 57.257 |
+| 8 | 7.849 | 19.589 | 31.552 | 57.947 |
+| 32 | 7.944 | 19.819 | 32.372 | 59.697 |
+| 64 | 8.006 | 19.887 | 32.431 | 59.833 |
+| 128 | 8.054 | 19.992 | 32.522 | 59.968 [1] |
+| 1,024 | 25.371 | 82.767 | 131.927 | 263.570 |
+| 8,192 | 173.057 | 581.307 | 925.991 | 1,833.904 |
+
+FP32 / FP16-native speedup:
+
+| Rows | KV 10K | KV 50K | KV 100K | KV 200K |
+|---:|---:|---:|---:|---:|
+| 1 | 0.917x | 1.291x | 1.166x | 1.255x |
+| 8 | 0.932x | 1.293x | 1.191x | 1.260x |
+| 32 | 0.934x | 1.294x | 1.175x | 1.235x |
+| 64 | 0.930x | 1.295x | 1.174x | 1.236x |
+| 128 | 0.936x | 1.296x | 1.178x | 1.583x [1] |
+| 1,024 | 0.985x | 1.268x | 1.309x | 1.270x |
+| 8,192 | 1.032x | 1.225x | 1.272x | 1.277x |
+
+[1] The standard one-buffer CUDA-graph result at 200K/128 rows lies on a
+cache-residency boundary and is not repeat-stable for FP32. Its 102.4-MB FP32
+working set moved between 85 and 119 us in six isolated alternating runs,
+while FP16 stayed between 59.84 and 59.88 us. After explicitly evicting cache
+with a 512-MiB buffer before every one-node graph replay, the two layer medians
+converged to 144.288 and 142.784 us for FP32 and 82.688 and 82.080 us for FP16,
+or 1.742x by the means. This confirms a real byte-traffic advantage but also
+shows that neither the table's 1.583x warm-cache result nor the cold 1.742x
+sensitivity result should be treated as the general algorithmic speedup. The
+stable large-batch 200K result is approximately 1.27x.
+
+### Correctness and interpretation
+
+All 112 kernel checks across 56 capture/shape combinations and two dtypes
+passed exact selected-value comparison against `torch.topk` for that dtype
+before timing. Relative to FP32 selection, FP16 index overlap is 100% at 10K,
+99.921%-99.927% at 50K, 99.951%-99.973% at 100K, and 99.960%-99.976% at 200K.
+Repeated-row batches have the same overlap as their source 32-row captures by
+construction.
+
+The scaling has two regimes. Through 128 rows, one block per row fits within
+the GB200's 152 SMs, so additional rows consume otherwise idle parallelism and
+latency stays nearly flat. At 1,024 and 8,192 rows, blocks arrive in multiple
+waves and latency grows approximately with total work. At 10K context, the
+fixed cost of the FP16 exact 32-bin refinement is larger than the bandwidth it
+saves, causing a 6%-9% regression through 128 rows and near parity at 1,024;
+only the saturated 8,192-row case gains 3.2%. At 50K-200K, input scanning is
+large enough to amortize that fixed work, and the stable gains are generally
+1.17x-1.31x. The gain is below the 2x input-byte reduction because histogram
+atomics, synchronization, output writes, and exact threshold refinement do not
+shrink with input element width.
+
+The 8,192-row/100K point repeats the separately measured final graph result:
+1.178 ms FP32 versus 0.926 ms FP16-native here (1.272x), compared with 1.253 ms
+versus 0.982 ms (1.276x) in the independent layer-21 harness. The absolute
+latencies differ with capture and harness residency, but the speedup agrees to
+0.4%. The preceding real-model TP4 section remains the end-to-end measurement
+for this point: 1.550x for all top-k work translates through Amdahl's law to a
+1.0320x forward speedup, not a 1.27x model speedup.
+
+Artifacts:
+`/tmp/gvr_fp16_native_prefill_matrix_{small,large}_20260816.log`,
+`/tmp/gvr_fp16_native_prefill_kv200000_b128_{rerun,paired_graph,cold}_20260816.log`.
+
+## 2026-08-16: Structurally matched FP16 selector (complete)
+
+The next experiment removes the FP16-only 32-bin final refinement. FP16 will
+follow the same histogram and insertion/radix candidate-selection control flow
+as FP32, with the same 512-thread CTA and launch tiers. The only intended
+difference is representation: input loads and shared candidate keys remain
+16-bit ordered FP16 keys and are never widened merely for candidate comparison.
+This isolates datatype width from the preceding algorithmic rewrite.
+
+The implementation now uses the FP32 path's same 2,048-bin histogram stages,
+512-thread CTA, insertion/radix choice, candidate capacity, and launch tiers.
+FP16 values are mapped monotonically to uint16 keys, so insertion comparisons
+and radix sorting operate directly on the complete FP16 value domain. If a
+coarse bin exceeds candidate capacity, the fallback consumes the remaining
+five FP16 key bits directly instead of converting each value to FP32. An exact
+FP16 value tied more than 2,048 times is filled directly because no additional
+precision bits exist to refine it.
+
+### Matched-path CUDA-graph result
+
+FP16 matched-path latency, in microseconds:
+
+| Rows | KV 10K | KV 50K | KV 100K | KV 200K |
+|---:|---:|---:|---:|---:|
+| 1 | 7.273 | 20.891 | 30.632 | 60.643 |
+| 8 | 7.338 | 21.186 | 32.246 | 61.425 |
+| 32 | 7.396 | 21.400 | 32.712 | 63.143 |
+| 64 | 7.442 | 21.423 | 32.835 | 63.225 |
+| 128 | 7.441 | 21.518 | 32.987 | 63.380 |
+| 1,024 | 24.549 | 93.069 | 135.215 | 286.409 |
+| 8,192 | 169.785 | 658.915 | 946.035 | 2,004.972 |
+
+FP32 / matched FP16 speedup:
+
+| Rows | KV 10K | KV 50K | KV 100K | KV 200K |
+|---:|---:|---:|---:|---:|
+| 1 | 0.991x | 1.201x | 1.173x | 1.184x |
+| 8 | 1.000x | 1.196x | 1.166x | 1.189x |
+| 32 | 1.006x | 1.199x | 1.162x | 1.168x |
+| 64 | 0.999x | 1.202x | 1.160x | 1.170x |
+| 128 | 1.008x | 1.203x | 1.160x | 1.500x [1] |
+| 1,024 | 1.018x | 1.127x | 1.277x | 1.169x |
+| 8,192 | 1.051x | 1.080x | 1.245x | 1.168x |
+
+[1] This is the same cache-sensitive FP32 200K/128-row cell described in the
+preceding section and is not a representative algorithmic ratio.
+
+The controlled change resolves the 10K regression. The prior 32-bin FP16 path
+ran at 0.917x-0.936x of FP32 through 128 rows; the matched path is now within
+0.9% of FP32 at one row and ranges from parity to 0.8% faster at 8-128 rows.
+At 1,024 and 8,192 rows, halved input traffic produces 1.018x and 1.051x.
+
+The longer-context cost also follows directly from matching FP32's insertion
+algorithm. Insertion work is quadratic in the number of candidates in the
+coarse threshold bin. Across the real captures, that bin averages about 29
+candidates at 10K, 185 at 50K, 98 at 100K, and 271 at 200K. The matched path is
+therefore particularly inexpensive at 10K but gives back some of the linear
+32-bin algorithm's advantage at 50K and 200K. For example, at 8,192 rows the
+matched path is 1.051x, 1.080x, 1.245x, and 1.168x faster than FP32 from 10K to
+200K; the prior algorithm gave 1.032x, 1.225x, 1.272x, and 1.277x. This is the
+expected cost of making control flow equivalent rather than retaining the
+FP16-specific algorithmic optimization.
+
+All 112 matrix checks again matched `torch.topk` exactly for the input dtype.
+A focused pytest run passed 47 FP16 cases, including a new adversarial case
+where one exact FP16 value exceeds the 2,048-candidate capacity. CUDA
+clang-format and Python ruff hooks pass. Artifacts:
+`/tmp/gvr_fp16_matched_prefill_matrix_{small,large}_20260816.log`.
+
+## 2026-08-16: FP16-first production policy and tuning
+
+The production objective is now to emit FP16 indexer logits by default on
+CUDA, retaining FP32 only when the operator requires it or the user explicitly
+selects it. `VLLM_INDEXER_LOGITS_DTYPE` accepts `auto`, `float16`, `bfloat16`,
+or `float32`; `auto` is the default and resolves to FP16 on CUDA. It resolves
+to FP32 on non-CUDA platforms and for the prefill DCP merge, whose current
+candidate-exchange format requires FP32. An explicit setting takes precedence
+over the older FP16/BF16 boolean switches, so
+`VLLM_INDEXER_LOGITS_DTYPE=float32` is an unambiguous compatibility override.
+
+The final FP16 prefill selector uses three measured policies:
+
+1. Candidate bins of at most 64 entries use native uint16 insertion ranking;
+   larger bins use the linear 32-bin exact refinement.
+2. Both tiers use 512 threads. Experiments with 256 and 1,024 threads were
+   rejected: 256 lost 10%-33% at 50K-200K, while 1,024 badly regressed short
+   rows and saturated batches.
+3. Fewer than 512 rows use the unconstrained latency kernel. At 512 or more,
+   an FP16-only launch-bound specialization caps the kernel at 32 registers and
+   requests four CTAs per SM. Applying that constraint to FP32 accidentally
+   changed its code generation and was rejected; the final kernels are separate
+   symbols, leaving the FP32 binary unchanged.
+
+The resulting FP32/production-FP16 CUDA-graph speedup matrix is:
+
+| Rows | KV 10K | KV 50K | KV 100K | KV 200K |
+|---:|---:|---:|---:|---:|
+| 1 | 0.984x | 1.293x | 1.182x | 1.270x |
+| 8 | 0.987x | 1.291x | 1.201x | 1.271x |
+| 32 | 0.992x | 1.289x | 1.184x | 1.247x |
+| 64 | 0.986x | 1.288x | 1.184x | 1.248x |
+| 128 | 0.997x | 1.291x | 1.186x | 1.761x [1] |
+| 1,024 | 1.016x | 1.259x | 1.305x | 1.264x |
+| 8,192 | 1.049x | 1.214x | 1.267x | 1.273x |
+
+[1] The 200K/128-row FP32 cache-residency instability documented above still
+applies. Neighboring cells, not 1.761x, describe the stable algorithmic gain.
+
+Thus FP16 is within 1.6% of FP32 in the worst 10K small-row selector cell and
+becomes faster once the launch is throughput-bound. At 50K-200K, stable gains
+are 1.18x-1.31x. The small 10K selector regression is acceptable for an
+FP16-first indexer because the FP16 producer and halved logits allocation also
+benefit, while automatically substituting FP32 there would add dtype-dependent
+graphs and memory planning for less than 0.2 us per selector invocation.
+
+All 112 final matrix checks match `torch.topk` exactly for the FP16 input.
+Forty-seven focused FP16 selector cases and six dtype-policy tests pass.
+Artifacts are
+`/tmp/gvr_fp16_production_dual_launch_{small,mid,boundary}_20260816.log` and
+`/tmp/gvr_fp16_production_prefill_matrix_{small,large}_20260816.log`.

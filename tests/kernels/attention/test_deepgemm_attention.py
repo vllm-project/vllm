@@ -96,7 +96,8 @@ def _ref_fp8_mqa_logits(
     not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
 )
 @pytest.mark.parametrize("clean_logits", [True, False])
-def test_deepgemm_fp8_mqa_logits(clean_logits: bool):
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_deepgemm_fp8_mqa_logits(clean_logits: bool, logits_dtype: torch.dtype):
     torch.manual_seed(0)
     random.seed(0)
     num_heads, head_dim = 32, 128
@@ -128,8 +129,15 @@ def test_deepgemm_fp8_mqa_logits(clean_logits: bool):
                 q_fp8 = q.to(torch.float8_e4m3fn)
                 kv_fp8 = per_custom_dims_cast_to_fp8(kv, (0,), False)
                 logits = fp8_fp4_mqa_logits(
-                    (q_fp8, None), kv_fp8, weights, ks, ke, clean_logits=clean_logits
+                    (q_fp8, None),
+                    kv_fp8,
+                    weights,
+                    ks,
+                    ke,
+                    clean_logits=clean_logits,
+                    logits_dtype=logits_dtype,
                 )
+                assert logits.dtype == logits_dtype
 
                 ref_logits = _ref_fp8_mqa_logits(
                     q=q,
@@ -205,7 +213,7 @@ def _ref_fp8_fp4_paged_mqa_logits(
 @pytest.mark.skipif(
     not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
 )
-@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_deepgemm_fp8_fp4_paged_mqa_logits(logits_dtype: torch.dtype):
     # NOTE: clean_logits=True is incompatible with the 2D context_lens
     # required by csrc/apis/attention.hpp; only the False path is exercised.

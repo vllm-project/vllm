@@ -5,9 +5,11 @@
 #ifndef TOPK_HISTOGRAM_4096_CUH_
 #define TOPK_HISTOGRAM_4096_CUH_
 
+#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <type_traits>
 
 namespace vllm {
 namespace topk_histogram_4096 {
@@ -82,6 +84,39 @@ __device__ __forceinline__ uint32_t extract_coarse_bin_N(float x) {
   uint16_t key = (bits & 0x8000) ? static_cast<uint16_t>(~bits)
                                  : static_cast<uint16_t>(bits | 0x8000);
   return key >> (16 - kBits);
+}
+
+template <uint32_t kBits>
+__device__ __forceinline__ uint32_t extract_coarse_bin_N(__half x) {
+  const uint16_t bits = __half_as_ushort(x);
+  const uint16_t key = (bits & 0x8000) ? static_cast<uint16_t>(~bits)
+                                       : static_cast<uint16_t>(bits | 0x8000);
+  return key >> (16 - kBits);
+}
+
+template <uint32_t kBits>
+__device__ __forceinline__ uint32_t extract_coarse_bin_N(__nv_bfloat16 x) {
+  return extract_coarse_bin_N<kBits>(static_cast<__half>(x));
+}
+
+template <typename InputType>
+__device__ __forceinline__ float score_to_float(InputType x) {
+  if constexpr (std::is_same_v<InputType, __half>) {
+    return __half2float(x);
+  } else if constexpr (std::is_same_v<InputType, __nv_bfloat16>) {
+    return __bfloat162float(x);
+  } else {
+    return x;
+  }
+}
+
+template <uint32_t kBits, typename InputType>
+__device__ __forceinline__ uint32_t extract_input_coarse_bin(InputType x) {
+  if constexpr (std::is_same_v<InputType, __nv_bfloat16>) {
+    return extract_coarse_bin_N<kBits>(x);
+  } else {
+    return extract_coarse_bin_N<kBits>(score_to_float(x));
+  }
 }
 
 // running sum within each warp — thread 0 gets its own value, thread 1 gets
@@ -327,10 +362,10 @@ struct Histogram4096Smem {
   };
 };
 
-template <uint32_t TopK, uint32_t HIST_BITS,
+template <typename InputType, uint32_t TopK, uint32_t HIST_BITS,
           uint32_t VECS_PER_THREAD = kHist4096VecsPerThread,
           bool UsePredicatedLoads = false>
-__device__ void histogram_4096_topk(const float* __restrict__ scores,
+__device__ void histogram_4096_topk(const InputType* __restrict__ scores,
                                     int32_t* __restrict__ output,
                                     uint32_t length, void* _smem) {
   constexpr uint32_t HIST_BINS = 1 << HIST_BITS;
@@ -344,9 +379,17 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
   const auto lane_id = tx % kWarpSize;
   const auto warp_id = tx / kWarpSize;
 
+  static_assert(std::is_same_v<InputType, float> ||
+                std::is_same_v<InputType, __half> ||
+                std::is_same_v<InputType, __nv_bfloat16>);
+  constexpr uint32_t ELEMS_PER_VEC = sizeof(uint4) / sizeof(InputType);
+  union InputVec {
+    uint4 packed;
+    InputType elems[ELEMS_PER_VEC];
+  };
+
   // Phase 1: Load all data into RF + build histogram
-  float4
-      vecs[VECS_PER_THREAD];  // 4 vectors x 4 floats = 16 elements per thread
+  InputVec vecs[VECS_PER_THREAD];
   if constexpr (ITEMS_PER_THREAD >= 4) {
     // Zero the histogram (SMEM writes)
     for (uint32_t i = 0; i < ITEMS_PER_THREAD / 4; i++)
@@ -361,26 +404,28 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
     smem->counter_eq = 0;
   }
   if constexpr (UsePredicatedLoads) {
+    static_assert(std::is_same_v<InputType, float>);
     const bool row_aligned = (reinterpret_cast<uintptr_t>(scores) & 0xFu) == 0;
 #pragma unroll
     for (uint32_t v = 0; v < VECS_PER_THREAD; v++) {
-      const uint32_t base = (tx + v * kBlockSize) * 4;
+      const uint32_t base = (tx + v * kBlockSize) * ELEMS_PER_VEC;
       if (base < length) {
-        if (row_aligned && base + 3 < length) {
-          vecs[v] = *reinterpret_cast<const float4*>(scores + base);
+        if (row_aligned && base + ELEMS_PER_VEC - 1 < length) {
+          vecs[v].packed = *reinterpret_cast<const uint4*>(scores + base);
         } else {
           load_float4_predicated(scores + base, static_cast<int>(base),
-                                 static_cast<int>(length), vecs[v].x, vecs[v].y,
-                                 vecs[v].z, vecs[v].w);
+                                 static_cast<int>(length), vecs[v].elems[0],
+                                 vecs[v].elems[1], vecs[v].elems[2],
+                                 vecs[v].elems[3]);
         }
       }
     }
   } else {
 #pragma unroll
     for (uint32_t v = 0; v < VECS_PER_THREAD; v++) {
-      const uint32_t base = (tx + v * kBlockSize) * 4;
+      const uint32_t base = (tx + v * kBlockSize) * ELEMS_PER_VEC;
       if (base < length) {
-        vecs[v] = *reinterpret_cast<const float4*>(scores + base);
+        vecs[v].packed = *reinterpret_cast<const uint4*>(scores + base);
       }
     }
   }
@@ -390,15 +435,14 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
   bool done = false;
 #pragma unroll
   for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
-    const float* elems = reinterpret_cast<const float*>(&vecs[v]);
 #pragma unroll
-    for (uint32_t e = 0; e < 4 && !done; e++) {
-      const uint32_t idx = (tx + v * kBlockSize) * 4 + e;
+    for (uint32_t e = 0; e < ELEMS_PER_VEC && !done; e++) {
+      const uint32_t idx = (tx + v * kBlockSize) * ELEMS_PER_VEC + e;
       if (idx >= length) {
         done = true;
       } else {
-        atomicAdd(&smem->histogram[extract_coarse_bin_N<HIST_BITS>(elems[e])],
-                  1);
+        const auto bin = extract_input_coarse_bin<HIST_BITS>(vecs[v].elems[e]);
+        atomicAdd(&smem->histogram[bin], 1);
       }
     }
   }
@@ -449,14 +493,14 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
   done = false;
 #pragma unroll
   for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
-    const float* elems = reinterpret_cast<const float*>(&vecs[v]);
 #pragma unroll
-    for (uint32_t e = 0; e < 4 && !done; e++) {
-      const uint32_t idx = (tx + v * kBlockSize) * 4 + e;
+    for (uint32_t e = 0; e < ELEMS_PER_VEC && !done; e++) {
+      const uint32_t idx = (tx + v * kBlockSize) * ELEMS_PER_VEC + e;
       if (idx >= length) {
         done = true;
       } else {
-        const uint32_t bin = extract_coarse_bin_N<HIST_BITS>(elems[e]);
+        const auto raw_score = vecs[v].elems[e];
+        const uint32_t bin = extract_input_coarse_bin<HIST_BITS>(raw_score);
         if (bin > thr_bin) {
           output[atomicAdd(&smem->counter_gt, 1)] =
               idx;  // above -> output directly
@@ -468,7 +512,8 @@ __device__ void histogram_4096_topk(const float* __restrict__ scores,
             }
           } else {
             if (pos < TopK) {
-              smem->tie_buffer[pos] = {idx, elems[e]};  // store for refirement
+              const auto score = score_to_float(raw_score);
+              smem->tie_buffer[pos] = {idx, score};  // store for refinement
             }
           }
         }
@@ -553,8 +598,8 @@ template <uint32_t TopK, uint32_t HIST_BITS,
 __device__ __noinline__ void histogram_4096_topk_predicated(
     const float* __restrict__ scores, int32_t* __restrict__ output,
     uint32_t length, void* _smem) {
-  histogram_4096_topk<TopK, HIST_BITS, VECS_PER_THREAD, true>(scores, output,
-                                                              length, _smem);
+  histogram_4096_topk<float, TopK, HIST_BITS, VECS_PER_THREAD, true>(
+      scores, output, length, _smem);
 }
 
 }  // namespace topk_histogram_4096

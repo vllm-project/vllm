@@ -514,6 +514,7 @@ def fp8_fp4_mqa_logits(
     cu_seqlen_ks: torch.Tensor,
     cu_seqlen_ke: torch.Tensor,
     clean_logits: bool,
+    logits_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     """Compute MQA logits for a single sequence without KV paging.
 
@@ -535,9 +536,10 @@ def fp8_fp4_mqa_logits(
         cu_seqlen_ke: End indices (exclusive) for valid K per query
             position, shape [M], dtype int32.
         clean_logits: Whether to clean the unfilled logits into `-inf`.
+        logits_dtype: Output dtype. Supports float32, float16, and bfloat16.
 
     Returns:
-        Logits tensor of shape [M, N], dtype `torch.float32`.
+        Logits tensor of shape [M, N] with `logits_dtype`.
     """
     _lazy_init()
     if _fp8_fp4_mqa_logits_impl is None:
@@ -549,6 +551,7 @@ def fp8_fp4_mqa_logits(
         cu_seqlen_ks,
         cu_seqlen_ke,
         clean_logits=clean_logits,
+        logits_dtype=logits_dtype,
     )
 
 

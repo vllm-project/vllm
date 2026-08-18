@@ -256,7 +256,7 @@ def main() -> None:
     parser.add_argument(
         "--dtypes",
         default="float32",
-        help="Comma-separated input dtypes: float32,float16.",
+        help="Comma-separated input dtypes: float32,float16,bfloat16.",
     )
     parser.add_argument(
         "--target-batches",
@@ -270,7 +270,7 @@ def main() -> None:
     parser.add_argument(
         "--baseline-dtypes",
         default="",
-        help="Comma-separated production baseline dtypes: float32,float16.",
+        help=("Comma-separated production baseline dtypes: float32,float16,bfloat16."),
     )
     parser.add_argument(
         "--configs",
@@ -286,8 +286,9 @@ def main() -> None:
     dtype_by_name = {
         "float32": torch.float32,
         "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
     }
-    dtype_names = list(dict.fromkeys(args.dtypes.split(",")))
+    dtype_names = [name for name in dict.fromkeys(args.dtypes.split(",")) if name]
     unknown_dtypes = set(dtype_names) - dtype_by_name.keys()
     if unknown_dtypes:
         raise ValueError(f"unknown dtypes: {sorted(unknown_dtypes)}")

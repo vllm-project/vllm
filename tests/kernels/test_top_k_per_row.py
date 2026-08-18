@@ -66,10 +66,10 @@ def _run_topk_backend(
                 "cooperative_topk supports <=32 rows; "
                 "persistent_topk covers larger batches"
             )
-        if logits.stride(0) % 4 != 0:
+        if logits.stride(0) % (16 // logits.element_size()) != 0:
             pytest.skip(
-                "cooperative_topk requires row stride divisible by 4; "
-                "persistent_topk covers unaligned strides"
+                "cooperative_topk requires a 16-byte-aligned row stride; "
+                "persistent_topk covers unaligned rows"
             )
         workspace = torch.empty(
             RADIX_TOPK_WORKSPACE_SIZE, dtype=torch.uint8, device="cuda"
@@ -223,12 +223,14 @@ def validate_topk_against_reference(
 @pytest.mark.parametrize("num_rows", NUM_ROWS)
 @pytest.mark.parametrize("top_k", TOP_K_VALUES)
 @pytest.mark.parametrize("clean_logits", [True, False])
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @torch.inference_mode()
 def test_top_k_per_row(
     num_rows: int,
     top_k: int,
     clean_logits: bool,
+    logits_dtype: torch.dtype,
 ) -> None:
     """
     Test top_k_per_row.
@@ -240,7 +242,7 @@ def test_top_k_per_row(
     vocab_size = 20000
     row_starts, row_ends = create_row_boundaries(num_rows, vocab_size)
     logits = create_random_logits(
-        row_starts, row_ends, torch.float32, 42, clean_logits, "random"
+        row_starts, row_ends, logits_dtype, 42, clean_logits, "random"
     )
 
     # Create output tensors
@@ -272,6 +274,79 @@ def test_top_k_per_row(
     ), "CUDA top_k_per_row_prefill results don't match torch.topk"
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@torch.inference_mode()
+def test_top_k_per_row_prefill_fp16_refines_native_half_bin() -> None:
+    """FP16 prefill must refine a partially selected coarse half bin."""
+    top_k = 2048
+    better = torch.full((1536,), 2.0, dtype=torch.float16, device="cuda")
+    candidate_bits = torch.arange(0x3C00, 0x3C20, dtype=torch.int16, device="cuda")
+    candidates = candidate_bits.view(torch.float16).repeat_interleave(64)
+    logits = torch.cat((better, candidates))
+    logits = logits[torch.randperm(logits.numel(), device="cuda")].unsqueeze(0)
+    row_starts = torch.zeros(1, dtype=torch.int32, device="cuda")
+    row_ends = torch.full((1,), logits.shape[1], dtype=torch.int32, device="cuda")
+    indices = torch.empty((1, top_k), dtype=torch.int32, device="cuda")
+
+    torch.ops._C.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        1,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+
+    validate_topk_against_reference(
+        logits,
+        indices,
+        row_starts,
+        row_ends,
+        top_k,
+        "FP16-native prefill top-k",
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@torch.inference_mode()
+def test_top_k_per_row_prefill_fp16_handles_large_exact_tie() -> None:
+    """FP16 prefill must fill top-k when an exact-value tie exceeds capacity."""
+    top_k = 2048
+    logits = torch.cat(
+        (
+            torch.full((512,), 2.0, dtype=torch.float16, device="cuda"),
+            torch.full((4096,), 1.0, dtype=torch.float16, device="cuda"),
+            torch.full((512,), 0.0, dtype=torch.float16, device="cuda"),
+        )
+    )
+    logits = logits[torch.randperm(logits.numel(), device="cuda")].unsqueeze(0)
+    row_starts = torch.zeros(1, dtype=torch.int32, device="cuda")
+    row_ends = torch.full((1,), logits.shape[1], dtype=torch.int32, device="cuda")
+    indices = torch.empty((1, top_k), dtype=torch.int32, device="cuda")
+
+    torch.ops._C.top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        1,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+
+    validate_topk_against_reference(
+        logits,
+        indices,
+        row_starts,
+        row_ends,
+        top_k,
+        "FP16-native prefill top-k with a large exact tie",
+    )
+
+
 def _run_top_k_per_row_decode_test(
     top_k: int,
     batch_size: int,
@@ -279,6 +354,7 @@ def _run_top_k_per_row_decode_test(
     vocab_size: int,
     clean_logits: bool,
     data_generation: str,
+    logits_dtype: torch.dtype = torch.float32,
 ) -> None:
     """
     Helper function to run top_k_per_row_decode test with given parameters.
@@ -299,7 +375,7 @@ def _run_top_k_per_row_decode_test(
     next_n_offset = torch.arange(num_rows, device="cuda") % next_n
     row_ends = seq_lens[row_indices] - next_n + next_n_offset + 1
     logits = create_random_logits(
-        row_starts, row_ends, torch.float32, 42, clean_logits, data_generation
+        row_starts, row_ends, logits_dtype, 42, clean_logits, data_generation
     )
 
     # Create output tensors
@@ -376,6 +452,26 @@ def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("vocab_size", [20000, 300000])
+@torch.inference_mode()
+@pytest.mark.parametrize("logits_dtype", [torch.float16, torch.bfloat16])
+def test_top_k_per_row_decode_reduced_precision_matches_torch(
+    vocab_size: int, logits_dtype: torch.dtype
+) -> None:
+    """Reduced-precision logits must work in single- and multi-pass paths."""
+    set_random_seed(0)
+    _run_top_k_per_row_decode_test(
+        top_k=2048,
+        batch_size=2,
+        next_n=1,
+        vocab_size=vocab_size,
+        clean_logits=False,
+        data_generation="random",
+        logits_dtype=logits_dtype,
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize(
     "seq_len_range,test_id",
     [
@@ -388,6 +484,7 @@ def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
 @pytest.mark.parametrize("top_k", [2048])
 @pytest.mark.parametrize("next_n", [1, 4])
 @pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16, torch.bfloat16])
 @torch.inference_mode()
 def test_deepseek_workspace_topk(
     seq_len_range: tuple[int, int],
@@ -396,6 +493,7 @@ def test_deepseek_workspace_topk(
     top_k: int,
     next_n: int,
     backend: str,
+    logits_dtype: torch.dtype,
 ) -> None:
     """
     Test workspace top-k backends with varying sequence lengths and speculative
@@ -415,7 +513,8 @@ def test_deepseek_workspace_topk(
         dtype=torch.int32,
         device="cuda",
     )
-    seq_lens = (seq_lens + 3) & ~3  # align to 4 for TMA
+    alignment = 16 // logits_dtype.itemsize
+    seq_lens = (seq_lens + alignment - 1) & ~(alignment - 1)
 
     # Compute row boundaries for speculative decoding
     row_starts = torch.zeros(num_rows, dtype=torch.int32, device="cuda")
@@ -424,7 +523,7 @@ def test_deepseek_workspace_topk(
     row_ends = seq_lens[row_indices] - next_n + next_n_offset + 1
 
     logits = create_random_logits(
-        row_starts, row_ends, torch.float32, 42, clean_logits, "random"
+        row_starts, row_ends, logits_dtype, 42, clean_logits, "random"
     )
 
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
@@ -963,8 +1062,17 @@ def test_persistent_topk_reused_group_after_short_row() -> None:
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("top_k", [512, 2048])
-@pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
-@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize(
+    "backend,logits_dtype",
+    [
+        ("cooperative_topk", torch.float32),
+        ("cooperative_topk", torch.float16),
+        ("cooperative_topk", torch.bfloat16),
+        ("persistent_topk", torch.float32),
+        ("persistent_topk", torch.float16),
+        ("persistent_topk", torch.bfloat16),
+    ],
+)
 @torch.inference_mode()
 def test_workspace_topk_padded_stride(
     top_k: int, backend: str, logits_dtype: torch.dtype
@@ -1062,7 +1170,7 @@ def test_gvr_dispatch_starts_at_measured_crossover() -> None:
     ),
     reason="GVR requires CuTe DSL on an SM100-family GPU",
 )
-@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16, torch.bfloat16])
 @torch.inference_mode()
 def test_gvr_topk_cold_start_matches_torch(logits_dtype: torch.dtype) -> None:
     """A request without a temporal hint must still get an exact top-k."""
@@ -1106,7 +1214,7 @@ def test_gvr_topk_cold_start_matches_torch(logits_dtype: torch.dtype) -> None:
     ),
     reason="GVR requires CuTe DSL on an SM100-family GPU",
 )
-@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16, torch.bfloat16])
 @torch.inference_mode()
 def test_gvr_topk_recovers_from_degenerate_hints(logits_dtype: torch.dtype) -> None:
     """Repeated hint values must not turn into an unchecked identity result."""
@@ -1147,14 +1255,17 @@ def test_gvr_topk_recovers_from_degenerate_hints(logits_dtype: torch.dtype) -> N
     reason="GVR requires CuTe DSL on an SM100-family GPU",
 )
 @pytest.mark.parametrize("num_candidates", [50000, 100000, 200000])
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16, torch.bfloat16])
 @torch.inference_mode()
-def test_gvr_adaptive_rungs_match_torch(num_candidates: int) -> None:
+def test_gvr_adaptive_rungs_match_torch(
+    num_candidates: int, logits_dtype: torch.dtype
+) -> None:
     """Runtime rung selection must remain exact across its length bands."""
     from vllm.models.deepseek_v32.nvidia.ops.gvr_topk import gvr_topk
 
     batch_size = 8
     top_k = 2048
-    logits = torch.randn(batch_size, num_candidates, device="cuda")
+    logits = torch.randn(batch_size, num_candidates, dtype=logits_dtype, device="cuda")
     seq_lens = torch.full(
         (batch_size,), num_candidates, dtype=torch.int32, device="cuda"
     )

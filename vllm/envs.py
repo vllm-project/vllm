@@ -58,7 +58,11 @@ if TYPE_CHECKING:
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
     VLLM_USE_GVR_TOPK: bool = False
-    VLLM_GVR_FP16_LOGITS: bool = False
+    VLLM_FP16_INDEXER_LOGITS: bool = False
+    VLLM_BF16_INDEXER_LOGITS: bool = False
+    VLLM_INDEXER_LOGITS_DTYPE: Literal["auto", "float16", "bfloat16", "float32"] = (
+        "auto"
+    )
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
@@ -1072,8 +1076,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Enable temporal-hint GVR top-k for the DeepSeek V3.2 NVIDIA indexer.
     "VLLM_USE_GVR_TOPK": lambda: bool(int(os.getenv("VLLM_USE_GVR_TOPK", "0"))),
-    # Store DeepGEMM paged-MQA logits in FP16 and select them with GVR.
-    "VLLM_GVR_FP16_LOGITS": lambda: bool(int(os.getenv("VLLM_GVR_FP16_LOGITS", "0"))),
+    # Store DeepGEMM indexer logits in FP16 independently of top-k backend.
+    "VLLM_FP16_INDEXER_LOGITS": lambda: bool(
+        int(os.getenv("VLLM_FP16_INDEXER_LOGITS", "0"))
+    ),
+    # Store DeepGEMM indexer logits in BF16 independently of top-k backend.
+    "VLLM_BF16_INDEXER_LOGITS": lambda: bool(
+        int(os.getenv("VLLM_BF16_INDEXER_LOGITS", "0"))
+    ),
+    # Indexer-logit precision. Auto uses FP16 on CUDA and FP32 where reduced
+    # precision is unsupported or the distributed merge requires FP32.
+    "VLLM_INDEXER_LOGITS_DTYPE": env_with_choices(
+        "VLLM_INDEXER_LOGITS_DTYPE",
+        "auto",
+        ["auto", "float16", "bfloat16", "float32"],
+        case_sensitive=False,
+    ),
     # KV context length each adaptive-verification profiling request pretends to
     # carry, so the profiled step reads a realistic amount of cache.
     # Raise it for long-context deployments, where step cost is dominated by
