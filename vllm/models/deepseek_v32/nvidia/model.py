@@ -10,13 +10,15 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.model_executor.layers.fused_embed_norm import (
+    fused_embed_norm,
+    has_full_vocab_on_rank,
+    make_input_embedding,
+)
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding,
-)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -116,12 +118,18 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
+        attn_in: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         full_num_tokens = positions.shape[0]
 
         if residual is None:
+            # First layer: hidden_states is the embedding (the residual).
             residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+            # ``attn_in`` is input_layernorm(embedding) already computed fused
+            # with the embedding gather; otherwise apply it here.
+            hidden_states = (
+                attn_in if attn_in is not None else self.input_layernorm(hidden_states)
+            )
         elif self.use_sequence_parallel:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
         else:
@@ -182,14 +190,17 @@ class DeepseekV32Model(torch.nn.Module):
         )
 
         if get_pp_group().is_first_rank:
-            self.embed_tokens = VocabParallelEmbedding(
+            self.embed_tokens = make_input_embedding(
                 config.vocab_size,
                 config.hidden_size,
                 quant_config=quant_config,
                 prefix=f"{prefix}.embed_tokens",
+                tie_word_embeddings=getattr(config, "tie_word_embeddings", False),
             )
         else:
             self.embed_tokens = PPMissingLayer()
+        # The fused embed+norm gather needs the full table on-rank.
+        self.replicated_embed = has_full_vocab_on_rank(self.embed_tokens)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -222,9 +233,21 @@ class DeepseekV32Model(torch.nn.Module):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        attn_in = None
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
+            elif self.replicated_embed:
+                assert input_ids is not None
+                # Full table on-rank: gather the embedding and the first layer's
+                # input_layernorm in one launch. ``attn_in`` is the pre-normed
+                # attention input; ``hidden_states`` is the (residual) embedding.
+                hidden_states, attn_in = fused_embed_norm(
+                    input_ids,
+                    self.embed_tokens.weight,
+                    chain_weight=self.layers[self.start_layer].input_layernorm.weight,
+                    eps=self.config.rms_norm_eps,
+                )
             else:
                 assert input_ids is not None
                 hidden_states = self.embed_input_ids(input_ids)
@@ -242,6 +265,8 @@ class DeepseekV32Model(torch.nn.Module):
                     forward_context.is_padding, hidden_states
                 )
             hidden_states = sp_shard(hidden_states)
+            if attn_in is not None:
+                attn_in = sp_shard(attn_in)
             assert residual is None, "Currently, SP is not supported with PP"
 
         aux_hidden_states = []
@@ -253,7 +278,8 @@ class DeepseekV32Model(torch.nn.Module):
                 aux_hidden_states.append(
                     hidden_states if residual is None else hidden_states + residual
                 )
-            hidden_states, residual = layer(positions, hidden_states, residual)
+            hidden_states, residual = layer(positions, hidden_states, residual, attn_in)
+            attn_in = None
 
         if not get_pp_group().is_last_rank:
             assert not self.use_sequence_parallel, (
