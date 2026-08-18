@@ -752,6 +752,13 @@ class GPUModelRunner(
         self._init_kernel_block_sizes = [placeholder_block_size]
         self._init_max_num_blocks = [placeholder_max_num_blocks]
         self._init_slot_mapping_modes = [SlotMappingMode.TOKEN_TO_KV_SLOT]
+        logitsprocs = build_logitsprocs(
+            self.vllm_config,
+            self.device,
+            PIN_MEMORY,
+            self.is_pooling_model,
+            custom_logitsprocs,
+        )
         # Capture warmup providers registered by the initial placeholder InputBatch
         with self.jit_warmup_registry.activate():
             self.input_batch = InputBatch(
@@ -766,18 +773,12 @@ class GPUModelRunner(
                 kernel_block_sizes=[placeholder_block_size],
                 max_num_blocks_per_req=[placeholder_max_num_blocks],
                 num_spec_tokens=self.num_spec_tokens,
-                logitsprocs=build_logitsprocs(
-                    self.vllm_config,
-                    self.device,
-                    PIN_MEMORY,
-                    self.is_pooling_model,
-                    custom_logitsprocs,
-                ),
-                # We currently don't know whether a particular custom logits processor
-                # uses output token ids so we set this conservatively. Thinking-budget
-                # tracking is requested dynamically when a budgeted request is in the
-                # batch.
-                logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
+                logitsprocs=logitsprocs,
+                # Async scheduling `-1` placeholder repair is only needed when
+                # some processor reads output token id values. Thinking-budget
+                # tracking is requested dynamically when a budgeted request is
+                # in the batch.
+                logitsprocs_need_output_token_ids=logitsprocs.needs_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
                 cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
                 reasoning_config=self.vllm_config.reasoning_config,
