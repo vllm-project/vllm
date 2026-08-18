@@ -70,19 +70,6 @@ class ReasoningParser:
         """
         return False
 
-    def should_stream_content_after_reasoning(self) -> bool:
-        """Whether this parser keeps emitting content after reasoning ends.
-
-        By default ``reasoning_ended`` hands the stream from this parser to the
-        tool parser. A parser that produces the final user-facing answer itself
-        -- and only needs ``reasoning_ended`` to gate structured outputs --
-        overrides this to return True while it owns the answer body, so the
-        delegating parser stays in the reasoning phase instead of handing off.
-        Must return False again once a tool channel opens, otherwise the tool
-        parser can never take over.
-        """
-        return False
-
     @abstractmethod
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """

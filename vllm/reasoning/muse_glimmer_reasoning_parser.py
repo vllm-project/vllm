@@ -122,7 +122,6 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         self._emitted_reasoning: str = ""
         self._emitted_content: str = ""
         self._tool_handoff_done: bool = False
-        self._streaming_to_user: bool = False
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -204,17 +203,6 @@ class MuseGlimmerReasoningParser(ReasoningParser):
                 continue
             return recipient
         return None
-
-    def should_stream_content_after_reasoning(self) -> bool:
-        """Whether this parser keeps emitting content after reasoning ends.
-
-        Opt-in hook for ``DelegatingParser``: while True it stays in the
-        reasoning phase rather than handing off to the tool parser. Needed for
-        the ``to=user`` answer, where ``is_reasoning_end`` must report True to
-        gate the grammar even though this parser is still streaming the body.
-        Tool channels leave it False so the tool parser owns their output.
-        """
-        return self._streaming_to_user
 
     @classmethod
     def _tool_channel_remainder(cls, text: str) -> str:
@@ -336,10 +324,6 @@ class MuseGlimmerReasoningParser(ReasoningParser):
         emitted yet, so no framing token is ever surfaced and a delta straddling
         a channel boundary only contributes the portion inside a real body.
         """
-        # Track whether the turn is answering the user rather than calling a
-        # tool; ``should_stream_content_after_reasoning`` reports this upward so
-        # DelegatingParser keeps the answer body on this parser.
-        self._streaming_to_user = self._response_recipient(current_text) == "user"
         curr_reason, curr_content = self._classify_bodies(current_text)
         reasoning_delta = ""
         if curr_reason.startswith(self._emitted_reasoning) and len(curr_reason) > len(
