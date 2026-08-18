@@ -365,25 +365,9 @@ def moe_kernel_quantize_input(
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
     is_scale_swizzled: bool = True,
-    ocp_mx_scheme: str | None = None,
     quantization_emulation: bool = False,
     mx_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    # Handle OCP MX scheme that requires QDQ (quantize-dequantize) for emulation
-    if ocp_mx_scheme is not None:
-        if ocp_mx_scheme in {"w_mxfp4", "w_mxfp4_a_mxfp4"}:
-            pass  # No QDQ needed for these schemes
-        elif ocp_mx_scheme.endswith("a_fp8"):
-            # Perform QDQ (quantize and dequantize) on activation for emulation
-            # purpose, because there is no native kernel for weight in ocp_mx_scheme
-            # and activation in FP8. The implementation is based on existing
-            # non-emulation ops.
-            # TODO: Remove this `ocp_mx_scheme is not None` block and rely solely
-            # on `quantization_emulation`.
-            return _fp8_quantize_dequantize(A, A_scale)
-        # else: For other schemes (e.g., *_a_mxfp6_e3m2, *_a_mxfp6_e2m3),
-        # weights are already dequantized, and we proceed with normal
-        # activation quantization below.
     if quant_dtype == current_platform.fp8_dtype():
         if quantization_emulation:
             return _fp8_quantize_dequantize(A, A_scale)
