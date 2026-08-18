@@ -5,6 +5,7 @@ from typing import Any
 
 import torch
 
+from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
@@ -170,6 +171,12 @@ def maybe_make_prepare_finalize(
 
     elif moe.use_deepep_ll_kernels:
         assert quant_config is not None
+        ll_capacity = envs.VLLM_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK
+        if ll_capacity <= 0:
+            raise ValueError(
+                "VLLM_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK must be positive, "
+                f"got {ll_capacity}"
+            )
         global_to_physical = physical_to_global = local_expert_global_ids = None
         if routing_tables is not None:
             (
@@ -178,7 +185,7 @@ def maybe_make_prepare_finalize(
                 local_expert_global_ids,
             ) = routing_tables
         all_to_all_args = dict(
-            max_num_tokens_per_dp_rank=moe.max_num_tokens,
+            max_num_tokens_per_dp_rank=ll_capacity,
             token_hidden_size=moe.hidden_dim,
             num_ep_ranks=all2all_manager.world_size,
             num_global_experts=moe.num_experts,
@@ -195,7 +202,7 @@ def maybe_make_prepare_finalize(
 
         prepare_finalize = DeepEPLLPrepareAndFinalize(
             handle,
-            max_tokens_per_rank=moe.max_num_tokens,
+            max_tokens_per_rank=ll_capacity,
             num_dispatchers=all2all_manager.world_size,
             use_fp8_dispatch=use_fp8_dispatch,
             global_to_physical=global_to_physical,

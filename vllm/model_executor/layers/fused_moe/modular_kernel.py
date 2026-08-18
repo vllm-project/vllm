@@ -10,6 +10,10 @@ from typing import final
 import torch
 
 import vllm.envs as envs
+from vllm.forward_context import (
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     ApplyMoEActivationConfig,
@@ -42,6 +46,32 @@ from vllm.v1.worker.ubatching import (
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
+
+
+def compute_deepep_ll_staging_slices(
+    *, local_num_tokens: int, max_num_tokens: int, capacity: int
+) -> list[slice]:
+    """Return rank-synchronous token windows for DeepEP low-latency MoE.
+
+    This mirrors Slime/SGLang's deterministic prefill staging contract.  A
+    rank with fewer tokens still participates in every collective with empty
+    tail slices, so dispatch/combine call counts remain identical across EP.
+    """
+    if capacity <= 0:
+        raise ValueError(f"DeepEP staging capacity must be positive, got {capacity}")
+    if local_num_tokens < 0 or max_num_tokens < local_num_tokens:
+        raise ValueError(
+            "Invalid DeepEP staging token counts: "
+            f"local={local_num_tokens}, max={max_num_tokens}"
+        )
+    num_stages = (max_num_tokens + capacity - 1) // capacity
+    return [
+        slice(
+            min(stage * capacity, local_num_tokens),
+            min((stage + 1) * capacity, local_num_tokens),
+        )
+        for stage in range(num_stages)
+    ]
 
 #
 # This file defines a set of base classes used to make MoE kernels more modular.
@@ -243,6 +273,14 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         Indicates whether or not this class implements prepare_async and
         finalize_async.
+        """
+        return False
+
+    def supports_rank_synchronous_token_staging(self) -> bool:
+        """Whether oversized local token batches may be split safely.
+
+        Only collective implementations whose dispatch/combine contract is
+        explicitly stageable should opt in.
         """
         return False
 
@@ -1420,7 +1458,7 @@ class FusedMoEKernelModularImpl:
 
         return output
 
-    def apply(
+    def _apply_once(
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
@@ -1514,6 +1552,91 @@ class FusedMoEKernelModularImpl:
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )
+
+    def apply(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        activation: MoEActivation = MoEActivation.SILU,
+        global_num_experts: int = -1,
+        expert_map: torch.Tensor | None = None,
+        apply_router_weight_on_input: bool = False,
+        shared_experts: SharedExperts | None = None,
+        shared_experts_input: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        capacity = self.prepare_finalize.max_num_tokens_per_rank()
+        if (
+            capacity is None
+            or not self.prepare_finalize.supports_rank_synchronous_token_staging()
+        ):
+            return self._apply_once(
+                hidden_states,
+                w1,
+                w2,
+                topk_ids,
+                topk_weights,
+                activation,
+                global_num_experts,
+                expert_map,
+                apply_router_weight_on_input,
+                shared_experts,
+                shared_experts_input,
+            )
+
+        local_num_tokens = hidden_states.shape[0]
+        max_num_tokens = local_num_tokens
+        if is_forward_context_available():
+            dp_metadata = get_forward_context().dp_metadata
+            if dp_metadata is not None:
+                max_num_tokens = int(dp_metadata.num_tokens_across_dp_cpu.max().item())
+
+        staging_slices = compute_deepep_ll_staging_slices(
+            local_num_tokens=local_num_tokens,
+            max_num_tokens=max_num_tokens,
+            capacity=capacity,
+        )
+        if len(staging_slices) <= 1:
+            return self._apply_once(
+                hidden_states,
+                w1,
+                w2,
+                topk_ids,
+                topk_weights,
+                activation,
+                global_num_experts,
+                expert_map,
+                apply_router_weight_on_input,
+                shared_experts,
+                shared_experts_input,
+            )
+
+        output = torch.empty_like(hidden_states)
+        for stage_idx, token_slice in enumerate(staging_slices):
+            # SharedExperts owns a single full-batch output slot. Launch it at
+            # most once (on the first routed stage), preserving vLLM's normal
+            # INTERNAL_OVERLAPPED lifecycle while only DeepEP/routed experts
+            # are staged.
+            stage_shared_experts = shared_experts if stage_idx == 0 else None
+            stage_shared_input = shared_experts_input if stage_idx == 0 else None
+            staged_output = self._apply_once(
+                hidden_states[token_slice],
+                w1,
+                w2,
+                topk_ids[token_slice],
+                topk_weights[token_slice],
+                activation,
+                global_num_experts,
+                expert_map,
+                apply_router_weight_on_input,
+                stage_shared_experts,
+                stage_shared_input,
+            )
+            if token_slice.stop > token_slice.start:
+                output[token_slice].copy_(staged_output)
+        return output
 
 
 @final

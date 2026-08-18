@@ -226,6 +226,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     def supports_async(self) -> bool:
         return True
 
+    def supports_rank_synchronous_token_staging(self) -> bool:
+        return True
+
     def prepare_async(
         self,
         a1: torch.Tensor,
