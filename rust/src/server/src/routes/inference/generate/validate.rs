@@ -6,7 +6,7 @@ use crate::error::{ApiError, bail_invalid_request};
 
 /// Enforce the minimal compatibility contract for the Rust token generate
 /// route.
-pub(super) fn validate_request_compat(
+pub(crate) fn validate_request_compat(
     request: &GenerateRequest,
     served_model_names: &[String],
 ) -> Result<(), ApiError> {

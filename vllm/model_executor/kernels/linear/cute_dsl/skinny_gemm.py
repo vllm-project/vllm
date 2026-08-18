@@ -23,6 +23,7 @@ class SkinnyGemmConfig:
     outputs_per_block: int
     k_unroll: int = 1
     vector_width: int = 8
+    static_k: int | None = None
 
 
 class ShapeDynamicSkinnyGemm:
@@ -112,7 +113,11 @@ class ShapeDynamicSkinnyGemm:
 
         element_type = self._cutlass_dtype(dtype)
         n = cute.sym_int(divisibility=config.outputs_per_block)
-        k = cute.sym_int(divisibility=config.block_size * config.vector_width)
+        k = (
+            config.static_k
+            if config.static_k is not None
+            else cute.sym_int(divisibility=config.block_size * config.vector_width)
+        )
         a = make_fake_tensor(
             element_type,
             (config.num_rows, k),
@@ -134,6 +139,7 @@ class ShapeDynamicSkinnyGemm:
             k_unroll=config.k_unroll,
             has_residual=has_residual,
             use_pdl=self._use_pdl(),
+            static_k=config.static_k,
         )
         self._compiled[(dtype, config, has_residual)] = cute.compile(
             kernel,
@@ -143,17 +149,6 @@ class ShapeDynamicSkinnyGemm:
             c,
             self._stream(),
             options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",
-        )
-
-    def request_warmup(
-        self,
-        dtype: torch.dtype,
-        shapes: Iterable[tuple[int, int, int]],
-    ) -> None:
-        """Request compilation of ``(M, N, K)`` shapes before graph capture."""
-        self.request_warmup_configs(
-            dtype,
-            (self._config(m, n, k) for m, n, k in shapes),
         )
 
     def request_warmup_configs(
@@ -239,6 +234,8 @@ class ShapeDynamicSkinnyGemm:
             raise ValueError(
                 "K must be divisible by block_size * vector_width for this config"
             )
+        if config.static_k is not None and a.shape[1] != config.static_k:
+            raise ValueError("input K must match config static_k")
         has_residual = residual is not None
         cache_key = (a.dtype, config, has_residual)
         if cache_key not in self._compiled:
