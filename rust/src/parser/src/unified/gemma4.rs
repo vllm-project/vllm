@@ -421,6 +421,11 @@ fn gemma4_nesting_is_within_limit(mut input: &str) -> bool {
                 input = &input[1..];
                 continue;
             }
+            // A closing delimiter for the wrong container would otherwise be
+            // treated as a bare-value delimiter below. At offset zero that
+            // would leave `input` unchanged and spin forever.
+            Container::Args if input.strip_prefix(']').is_some() => return false,
+            Container::Array if input.strip_prefix('}').is_some() => return false,
             Container::Args => {
                 let Some(key_end) = input.find(':') else {
                     return true;
@@ -460,6 +465,12 @@ fn gemma4_nesting_is_within_limit(mut input: &str) -> bool {
                 let Some(value_end) = input.find([',', '}', ']']) else {
                     return true;
                 };
+                // Every successful iteration must consume input. A delimiter
+                // at the current position is either a mismatched closer (caught
+                // above) or otherwise malformed input.
+                if value_end == 0 {
+                    return false;
+                }
                 input = &input[value_end..];
             }
             None => return true,
@@ -860,6 +871,21 @@ mod tests {
             .join(",");
 
         assert!(super::gemma4_nesting_is_within_limit(&args));
+    }
+
+    #[test]
+    fn gemma4_nesting_limit_rejects_mismatched_closing_delimiters() {
+        for args in [
+            "value:[1}",
+            "value:{a:[1}",
+            "value:[{a:[1}]}",
+        ] {
+            assert!(
+                !super::gemma4_nesting_is_within_limit(args),
+                "expected mismatched delimiters to be rejected: {args}",
+            );
+            assert!(matches!(parse_gemma4_args(args), Err(ErrMode::Cut(_))));
+        }
     }
 
     #[test]
