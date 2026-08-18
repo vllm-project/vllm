@@ -1578,16 +1578,18 @@ def test_spec_decode_padding_first_decode_step():
 
 
 @pytest.mark.parametrize(
-    ("kv_role", "mamba_cache_mode"),
+    ("kv_role", "mamba_cache_mode", "num_preemptions"),
     [
-        pytest.param("kv_consumer", "all", id="consumer-all"),
-        pytest.param("kv_both", "all", id="both-all"),
-        pytest.param("kv_both", "align", id="both-align"),
+        pytest.param("kv_consumer", "all", 0, id="consumer-all"),
+        pytest.param("kv_both", "all", 0, id="both-all"),
+        pytest.param("kv_both", "align", 0, id="both-align"),
+        pytest.param("kv_both", "align", 1, id="both-align-preempted"),
     ],
 )
 def test_mamba_first_fallback_spec_padding_scope(
     kv_role: str,
     mamba_cache_mode: str,
+    num_preemptions: int,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """A remote-KV handoff step skips speculative padding for ANY kv_role.
@@ -1598,7 +1600,13 @@ def test_mamba_first_fallback_spec_padding_scope(
     kv_role == "kv_consumer" is False on both. A disaggregated deployment may
     configure "kv_both" on BOTH roles, and is then indistinguishable from an
     aggregated one by role alone -- so the handoff must be detected per request
-    and every case here expects the same unpadded step."""
+    and every case here expects the same unpadded step.
+
+    num_preemptions > 0 makes promotion leave the request PREEMPTED rather than
+    WAITING. That is a true handoff too -- a request can be preempted, put back
+    into a fresh async remote-KV load, and promoted when that load finishes -- so
+    it must also skip the padding. It does, because the predicate keys on the
+    per-request marker rather than on the request status."""
     from tests.v1.kv_connector.unit.utils import create_model_runner_output
 
     num_spec = 3
@@ -1649,6 +1657,7 @@ def test_mamba_first_fallback_spec_padding_scope(
             post_handoff_computed_tokens.append(request.num_computed_tokens)
 
     monkeypatch.setattr(scheduler, "_update_waiting_for_remote_kv", capture_handoff)
+    r2.num_preemptions = num_preemptions
     out = scheduler.schedule()
 
     assert r2.num_output_tokens == 0
@@ -1658,6 +1667,63 @@ def test_mamba_first_fallback_spec_padding_scope(
     assert r2.received_remote_kv is True
     assert out.num_scheduled_tokens[r2.request_id] == 1
     assert r2.request_id not in out.scheduled_spec_decode_tokens
+
+
+def test_mamba_spec_padding_kept_without_remote_kv_handoff():
+    """Scope control: on a hybrid-Mamba model a LOCAL first decode step still pads.
+
+    Same shape as the handoff step (whole prompt already computed, one real
+    query, a co-batched neighbour verifying real drafts) and same
+    has_mamba_layers, but the prompt came from the local prefix cache rather
+    than a remote prefill. Dropping the per-request conjunct would widen the
+    gate to this step and cost every hybrid model its FULL decode graph replay,
+    so this pins the gate to the handoff itself.
+    """
+    num_spec = 3
+    block_size = 16
+    scheduler = create_scheduler(
+        num_speculative_tokens=num_spec,
+        enable_prefix_caching=True,
+        block_size=block_size,
+        kv_cache_spec=MambaSpec(
+            block_size=block_size,
+            shapes=((1, 1),),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="all",
+        ),
+    )
+    # Two identical 33-token prompts: r2 then arrives at
+    # num_computed == num_prompt_tokens - 1 -- the handoff step's shape, locally.
+    r1, r2 = create_requests(
+        num_requests=2, num_tokens=33, same_prompt=True, max_tokens=16
+    )
+    # Mamba's block-aligned split chunks the prompt at the last cacheable block
+    # boundary, so drive the prefill to the end rather than assuming one step.
+    scheduler.add_request(r1)
+    while True:
+        out = scheduler.schedule()
+        last = (
+            r1.num_computed_tokens + out.num_scheduled_tokens[r1.request_id]
+            >= r1.num_prompt_tokens
+        )
+        _model_output(scheduler, out, [[100]] if last else [[]])
+        if last:
+            break
+    scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
+
+    scheduler.add_request(r2)
+    out = scheduler.schedule()
+
+    # getattr, not attribute access: this control must also run against an
+    # engine that does not define the marker at all.
+    assert getattr(r2, "received_remote_kv", False) is False
+    assert r2.num_output_tokens == 0
+    # NB: assert on the scheduler OUTPUT, not request.num_computed_tokens --
+    # schedule() advances that optimistically before returning.
+    assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
+    # Still padded: no remote-KV handoff, so the gate must not fire.
+    assert out.num_scheduled_tokens[r2.request_id] == 1 + num_spec
+    assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
 
 
 def test_spec_decode_padding_skipped_for_diffusion():
