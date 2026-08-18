@@ -378,8 +378,15 @@ class PaliGemmaForConditionalGeneration(
         if image_input is None:
             return []
         vision_embeddings = self._process_image_input(image_input)
-        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/paligemma/modeling_paligemma.py#L294 # noqa
-        vision_embeddings = vision_embeddings * (self.config.hidden_size**-0.5)
+        # NOTE: image features are intentionally *not* rescaled here. Gemma
+        # applies its ``sqrt(hidden_size)`` embedding normalizer inside
+        # ``GemmaModel.embed_input_ids`` (the text path); ``GemmaModel.forward``
+        # consumes the merged ``inputs_embeds`` as-is. The former inverse scale
+        # (``* hidden_size**-0.5``) compensated for a normalizer that used to run
+        # in ``forward``; after that normalization moved to embed time it left
+        # image rows at ``1/hidden_size`` of the intended magnitude relative to
+        # text. This matches HF Transformers, which scales text and leaves the
+        # projected image features unscaled.
         return vision_embeddings
 
     def forward(
