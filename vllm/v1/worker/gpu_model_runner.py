@@ -4821,17 +4821,11 @@ class GPUModelRunner(
                 draft_after_bookkeeping = True
 
             if not input_fits_in_drafter:
-                # Zero out draft tokens so the scheduler doesn't schedule
-                # stale drafts from the previous step.
-                # For Nemotron-H: it is necessary to zero out the draft tokens,
-                # otherwise the stale tokens will corrupt Mamba recurrent
+                # Clear draft tokens so the scheduler doesn't schedule stale
+                # drafts from the previous step.
+                # For Nemotron-H: stale tokens will corrupt Mamba recurrent
                 # state and logprobs for sequences near max_model_len.
-                self._draft_token_ids = torch.zeros(
-                    1, device=self.device, dtype=torch.int32
-                ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
-                self._draft_probs = None
-                self._draft_prob_req_ids = None
-                self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
+                self._set_empty_draft_token_ids()
 
         with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
             (
@@ -5008,9 +5002,13 @@ class GPUModelRunner(
         draft_token_ids, req_ids = self._get_draft_token_ids_cpu()
         return DraftTokenIds(req_ids, draft_token_ids)
 
-    def _copy_draft_token_ids_to_cpu(
-        self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
-    ) -> None:
+    def _set_empty_draft_token_ids(self) -> None:
+        self._draft_token_ids = [[] for _ in self.input_batch.req_ids]
+        self._draft_probs = None
+        self._draft_prob_req_ids = None
+        self._draft_token_req_ids = self.input_batch.req_ids.copy()
+
+    def _copy_draft_token_ids_to_cpu(self, scheduler_output: "SchedulerOutput") -> None:
         if torch.is_tensor(self._draft_token_ids):
             assert isinstance(self._draft_token_ids, torch.Tensor)
             self.prev_num_spec_tokens = self._draft_token_ids.shape[1]
@@ -5034,20 +5032,16 @@ class GPUModelRunner(
         num_reqs = draft_token_ids.shape[0]
         num_spec_tokens = draft_token_ids.shape[1]
         with torch.cuda.stream(self.draft_token_ids_copy_stream):
-            if not zeros_only:
-                # Trigger async copy of draft token ids to cpu.
-                self.draft_token_ids_copy_stream.wait_stream(default_stream)
-                self.draft_token_ids_cpu[:num_reqs, :num_spec_tokens].copy_(
-                    draft_token_ids, non_blocking=True
-                )
-            else:
-                # No copy needed, just zero-out cpu tensor.
-                self.draft_token_ids_cpu[:num_reqs, :num_spec_tokens] = 0
+            # Trigger async copy of draft token ids to cpu.
+            self.draft_token_ids_copy_stream.wait_stream(default_stream)
+            self.draft_token_ids_cpu[:num_reqs, :num_spec_tokens].copy_(
+                draft_token_ids, non_blocking=True
+            )
             self.draft_token_ids_event.record()
 
     def _get_draft_token_ids_cpu(self) -> tuple[list[list[int]], list[str]]:
         if isinstance(self._draft_token_ids, list):
-            return self._draft_token_ids, self.input_batch.req_ids
+            return self._draft_token_ids, self._draft_token_req_ids or []
         req_ids = self._draft_token_req_ids
         if req_ids is None:
             return [], []
