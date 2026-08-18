@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils.cpu_resource_utils import (
     DEVICE_CONTROL_ENV_VAR,
@@ -69,6 +70,10 @@ class CpuPlatform(Platform):
             return [torch.bfloat16, torch.float16, torch.float32]
         # x86/aarch64 CPU has supported both bf16 and fp16 natively.
         return [torch.bfloat16, torch.float16, torch.float32]
+
+    @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -199,10 +204,7 @@ class CpuPlatform(Platform):
             # cache. So use VLLM_CPU_CI_ENV to indicate the CI environment,
             # and just execute model with dynamo + eager mode to save time.
             # VLLM_CPU_CI_ENV is only used as an internal variable.
-            if os.environ.get("VLLM_CPU_CI_ENV", "0") != "0":
-                backend = "eager"
-            else:
-                backend = "inductor"
+            backend = "eager" if envs.VLLM_CPU_CI_ENV else "inductor"
 
             compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
             compilation_config.backend = backend
