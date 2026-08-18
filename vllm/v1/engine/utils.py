@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 STARTUP_POLL_PERIOD_MS = 10000
-ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S = 60.0
+ROCM_ENGINE_PROCESS_SHUTDOWN_TIMEOUT_S = 15.0
 
 
 def get_engine_process_shutdown_timeout(

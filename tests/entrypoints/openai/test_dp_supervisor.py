@@ -255,7 +255,7 @@ async def test_shutdown_children_uses_engine_process_timeout(
     monkeypatch.setattr(
         dp_sup,
         "get_engine_process_shutdown_timeout",
-        lambda request_timeout, manager_timeout: 60.0,
+        lambda request_timeout, manager_timeout: 15.0,
     )
     monkeypatch.setattr(
         dp_sup,
@@ -266,7 +266,7 @@ async def test_shutdown_children_uses_engine_process_timeout(
     await supervisor._shutdown_children()
 
     assert calls == [
-        (supervisor._processes, 60.0 + CHILD_EXIT_GRACE_S),
+        (supervisor._processes, 15.0 + CHILD_EXIT_GRACE_S),
     ]
 
 

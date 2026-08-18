@@ -1276,6 +1276,7 @@ class EngineCoreProc(EngineCore):
 
         engine_core: EngineCoreProc | None = None
         signal_callback: SignalCallback | None = None
+        clean_shutdown = False
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
@@ -1340,6 +1341,10 @@ class EngineCoreProc(EngineCore):
 
         except SystemExit:
             logger.info_once("[shutdown] EngineCore: exiting busy loop")
+            clean_shutdown = (
+                engine_core is not None
+                and engine_core.shutdown_state == EngineShutdownState.SHUTTING_DOWN
+            )
             raise
         except Exception as e:
             if engine_core is None:
@@ -1355,6 +1360,15 @@ class EngineCoreProc(EngineCore):
                 signal_callback.stop()
             if engine_core is not None:
                 engine_core.shutdown()
+            if clean_shutdown:
+                from vllm.platforms import current_platform
+
+                if current_platform.is_rocm():
+                    # This dedicated process is exiting, and cleanup above
+                    # already unfreezes and collects the heap. Avoid scanning
+                    # the surviving graph again during process finalization,
+                    # which is particularly slow on ROCm.
+                    gc.freeze()
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass

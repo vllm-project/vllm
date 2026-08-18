@@ -23,7 +23,7 @@ pytestmark = pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
     ("is_rocm", "request_timeout", "manager_timeout", "process_timeout"),
     [
-        (True, 0, 0, 60.0),
+        (True, 0, 0, 15.0),
         (True, 0, 7, 7),
         (True, 0, None, None),
         (False, 0, 0, 0),
