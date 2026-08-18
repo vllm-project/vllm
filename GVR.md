@@ -3773,6 +3773,11 @@ autotuning. KV storage was fixed at 40 GiB/GPU in both arms, yielding exactly
 The only changed engine setting was `indexer_logits_dtype=float32` versus
 `float16`.
 
+The repository `.venv` had a stale `deep_ep` extension that failed to import
+with an undefined symbol, so both arms used the same non-DeepEP/PyNCCL
+fallback. This preserves the controlled dtype comparison, but the absolute
+throughput is not representative of a working production DeepEP setup.
+
 Concurrency 1--256 used three prompts per offered slot. The original factor-3
 concurrency-1,024 point was stopped after confirming saturation because it
 would repeat the same capacity-limited queue for 3,072 requests. Both dtypes
