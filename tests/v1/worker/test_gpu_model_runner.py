@@ -68,6 +68,16 @@ NUM_BLOCKS = 10
 DEVICE_TYPE = current_platform.device_type
 
 
+@pytest.fixture(autouse=True)
+def _restore_default_dtype():
+    """Several tests here set the process-wide default dtype to float16 and
+    previously leaked it, corrupting later float-sensitive tests in the same
+    pytest process (torch.randn silently produced fp16)."""
+    old = torch.get_default_dtype()
+    yield
+    torch.set_default_dtype(old)
+
+
 def initialize_kv_cache(runner: GPUModelRunner):
     """
     Only perform necessary steps in GPUModelRunner.initialize_kv_cache()
