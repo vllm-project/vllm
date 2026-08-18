@@ -97,7 +97,7 @@ def _ref_fp8_mqa_logits(
     not current_platform.has_device_capability(90), reason="SM90 and SM100 only"
 )
 @pytest.mark.parametrize("clean_logits", [True, False])
-@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16])
 def test_deepgemm_fp8_mqa_logits(clean_logits: bool, logits_dtype: torch.dtype):
     torch.manual_seed(0)
     random.seed(0)
@@ -216,7 +216,7 @@ def _ref_fp8_fp4_paged_mqa_logits(
 )
 # next_n = 1 + num_speculative_tokens, so next_n=4 is MTP=3 (issue #35878).
 @pytest.mark.parametrize("batch_size,next_n", [(4, 1), (2, 2), (2, 4)])
-@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16])
 def test_deepgemm_fp8_fp4_paged_mqa_logits(
     batch_size: int, next_n: int, logits_dtype: torch.dtype
 ):

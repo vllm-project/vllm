@@ -7,13 +7,11 @@
 
 #include <cooperative_groups.h>
 #include <cuda.h>
-#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cuda/ptx>
 #include <algorithm>
 #include <cstdint>
-#include <type_traits>
 
 #include "topk_histogram_4096.cuh"
 
@@ -68,17 +66,6 @@ __device__ __forceinline__ uint32_t warp_reduce_sum_subN(uint32_t v) {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-template <typename InputType>
-__device__ __forceinline__ float score_to_float(InputType x) {
-  if constexpr (std::is_same_v<InputType, __half>) {
-    return __half2float(x);
-  } else if constexpr (std::is_same_v<InputType, __nv_bfloat16>) {
-    return __bfloat162float(x);
-  } else {
-    return x;
-  }
-}
 
 template <typename InputType>
 __device__ __forceinline__ uint32_t extract_coarse_bin(InputType x) {
@@ -207,8 +194,7 @@ __device__ void tma_stream_pass(const InputType* scores, uint32_t length,
         break;
       }
       const auto raw_score = smem->score_buffer[b][li];
-      const auto score = score_to_float(raw_score);
-      const auto bn = hist4096::extract_coarse_bin_N<kBinBits>(score);
+      const auto bn = hist4096::extract_input_coarse_bin<kBinBits>(raw_score);
       if constexpr (kIsScatter) {  // compile-time branch
         // Scatter pass: place above-threshold and collect ties
         const auto gi = o + li;
@@ -217,7 +203,7 @@ __device__ void tma_stream_pass(const InputType* scores, uint32_t length,
         } else if (bn == thr_bin) {
           const auto p = atomicAdd(&smem->counter_eq, 1);
           if (p < hist4096::kMaxTies) {
-            smem->tie_buffer[p] = {gi, score};
+            smem->tie_buffer[p] = {gi, hist4096::score_to_ordered(raw_score)};
           }
         }
       } else {
@@ -383,7 +369,6 @@ __device__ void large_topk(const InputType* __restrict__ row_input,
           break;
         }
         const auto raw_score = smem->score_buffer[iter][li];  // still in smem
-        const auto score = score_to_float(raw_score);
         const auto bin = extract_coarse_bin(raw_score);
         const auto gidx = off + li;
         if (bin > thr) {
@@ -392,7 +377,7 @@ __device__ void large_topk(const InputType* __restrict__ row_input,
           const auto p = atomicAdd(&smem->counter_eq,
                                    1);  // equal -> ties (later refinement)
           if (p < hist4096::kMaxTies) {
-            smem->tie_buffer[p] = {gidx, score};
+            smem->tie_buffer[p] = {gidx, hist4096::score_to_ordered(raw_score)};
           }
         }
       }
@@ -465,7 +450,7 @@ __device__ void large_topk(const InputType* __restrict__ row_input,
     }
     uint32_t tp = prefix_equal + i;
     if (tp < (TopK <= hist4096::kBlockSize ? hist4096::kMaxTies : TopK)) {
-      tie_ws[tp] = hist4096::Tie{t.idx + my_start, t.score};
+      tie_ws[tp] = hist4096::Tie{t.idx + my_start, t.key};
     }
   }
 
@@ -478,22 +463,22 @@ __device__ void large_topk(const InputType* __restrict__ row_input,
     return;
   }
 
-  // Tie-breaking uses FP32 (4-round radix sort)
+  // FP16 refines its native low key byte; FP32 refines all four key bytes.
   if constexpr (TopK <= hist4096::kBlockSize) {
     // copy ties from tie_ws back to smem, then refine
     const uint32_t num_ties = min(s_total_equal, hist4096::kMaxTies);
     // TODO (roberto): could vectorize with uint2 (8 bytes = exactly one Tie)
     for (uint32_t i = tx; i < num_ties; i += hist4096::kBlockSize) {
-      smem->tie_buffer[i] = hist4096::Tie{tie_ws[i].idx, tie_ws[i].score};
+      smem->tie_buffer[i] = hist4096::Tie{tie_ws[i].idx, tie_ws[i].key};
     }
     __syncthreads();
-    hist4096::tie_handle<TopK>(smem->tie_buffer, num_ties, s_total_above,
-                               row_output, smem);
+    hist4096::tie_handle<InputType, TopK>(smem->tie_buffer, num_ties,
+                                          s_total_above, row_output, smem);
   } else {
     // TopK=2048: process directly from tie_ws (GMEM)
     const uint32_t num_ties = min(s_total_equal, static_cast<uint32_t>(TopK));
-    hist4096::tie_handle_large<TopK>(tie_ws, num_ties, s_total_above,
-                                     row_output, smem);
+    hist4096::tie_handle_large<InputType, TopK>(tie_ws, num_ties, s_total_above,
+                                                row_output, smem);
   }
 }
 

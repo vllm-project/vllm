@@ -415,7 +415,7 @@ def test_local_topk_union_is_not_equivalent_to_global_topk_attention():
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16])
 def test_sparse_decode_dcp_persistent_topk_matches_non_dcp(
     logits_dtype: torch.dtype,
 ):
@@ -499,7 +499,7 @@ def test_sparse_decode_dcp_persistent_topk_matches_non_dcp(
     reason="This test requires CUDA and CuteDSL",
 )
 @pytest.mark.parametrize("use_row_starts", [False, True])
-@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16])
 def test_cutedsl_dcp_candidate_pack_and_select_matches_reference(
     use_row_starts: bool,
     logits_dtype: torch.dtype,

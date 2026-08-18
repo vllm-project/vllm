@@ -536,7 +536,7 @@ def fp8_fp4_mqa_logits(
         cu_seqlen_ke: End indices (exclusive) for valid K per query
             position, shape [M], dtype int32.
         clean_logits: Whether to clean the unfilled logits into `-inf`.
-        logits_dtype: Output dtype. Supports float32, float16, and bfloat16.
+        logits_dtype: Output dtype. Supports float32 and float16.
 
     Returns:
         Logits tensor of shape [M, N] with `logits_dtype`.
@@ -644,7 +644,7 @@ def fp8_fp4_paged_mqa_logits(
         max_model_len: Maximum sequence length used to size the logits output.
         clean_logits: Whether to clean the unfilled logits into `-inf`.
         indices: Optional request index for each varlen row.
-        logits_dtype: Output dtype. Supports float32, float16, and bfloat16.
+        logits_dtype: Output dtype. Supports float32 and float16.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len] with

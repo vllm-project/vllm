@@ -6,7 +6,6 @@
 #define PERSISTENT_TOPK_CUH_
 
 #include <cuda.h>
-#include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cub/cub.cuh>
@@ -1046,42 +1045,21 @@ struct FilteredTopKTraits<__half> {
   }
 };
 
-template <>
-struct FilteredTopKTraits<__nv_bfloat16> {
-  using OrderedType = uint16_t;
-  static constexpr int NUM_REFINE_ROUNDS = 1;
-  static constexpr int FIRST_REFINE_SHIFT = 0;
-
-  __device__ __forceinline__ static OrderedType ToOrdered(__nv_bfloat16 x) {
-    const uint16_t bits = __bfloat16_as_ushort(x);
-    return (bits & 0x8000) ? static_cast<uint16_t>(~bits)
-                           : static_cast<uint16_t>(bits | 0x8000);
-  }
-
-  __device__ __forceinline__ static uint8_t ToCoarseKey(__nv_bfloat16 x) {
-    // The upper byte of a BF16 key is almost entirely exponent bits. Around
-    // the normal-distribution top-k boundary this can put more than the 16K
-    // refinement-buffer capacity in one bin. Use the same FP16 projection as
-    // the FP32 path for a finer coarse partition; the native BF16 key below
-    // still resolves the selected bin exactly.
-    const __half h = __float2half_rn(__bfloat162float(x));
-    const uint16_t bits = __half_as_ushort(h);
-    const uint16_t key = (bits & 0x8000) ? static_cast<uint16_t>(~bits)
-                                         : static_cast<uint16_t>(bits | 0x8000);
-    return static_cast<uint8_t>(key >> 8);
-  }
-};
-
 constexpr uint32_t FILTERED_TOPK_BLOCK_THREADS = 1024;
 constexpr uint32_t FILTERED_TOPK_SMEM_INPUT_SIZE =
     16 * 1024;  // 16K indices per buffer
-constexpr size_t FILTERED_TOPK_SMEM_DYNAMIC =
-    sizeof(int) * 2 * FILTERED_TOPK_SMEM_INPUT_SIZE;  // 128KB
+
+template <typename DType>
+constexpr size_t filtered_topk_smem_dynamic() {
+  constexpr int kBuffers =
+      FilteredTopKTraits<DType>::NUM_REFINE_ROUNDS == 1 ? 1 : 2;
+  return sizeof(int) * kBuffers * FILTERED_TOPK_SMEM_INPUT_SIZE;
+}
 
 /*!
  * \brief Filtered Top-K kernel for ragged sequences.
  *
- * \tparam DType Data type (float, half, nv_bfloat16)
+ * \tparam DType Data type (float or half)
  * \tparam IdType Index type (int32_t)
  * \tparam VEC_SIZE Vector size for input loads (1, 2, 4, or 8)
  */
@@ -1364,7 +1342,7 @@ cudaError_t FilteredTopKRaggedTransform(const DType* input,
                                         uint32_t num_rows, uint32_t top_k_val,
                                         uint32_t max_len,
                                         cudaStream_t stream = 0) {
-  constexpr size_t smem_size = FILTERED_TOPK_SMEM_DYNAMIC;
+  constexpr size_t smem_size = filtered_topk_smem_dynamic<DType>();
   constexpr int MAX_VEC = 16 / sizeof(DType);
 
   dim3 grid(num_rows);

@@ -857,13 +857,9 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
   const auto numColumns = logits.size(1);
   const bool is_half =
       logits.scalar_type() == torch::headeronly::ScalarType::Half;
-  const bool is_bfloat16 =
-      logits.scalar_type() == torch::headeronly::ScalarType::BFloat16;
   STD_TORCH_CHECK(
-      is_half || is_bfloat16 ||
-          logits.scalar_type() == torch::headeronly::ScalarType::Float,
-      "top_k_per_row_decode supports only float32, float16, and bfloat16 "
-      "logits");
+      is_half || logits.scalar_type() == torch::headeronly::ScalarType::Float,
+      "top_k_per_row_decode supports only float32 and float16 logits");
 
   // True if seqLens is 2D (B, next_n): each logit row has its own pre-computed
   // effective seq_len. False if seqLens is 1D (B,): all rows in a batch share
@@ -876,13 +872,6 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
       vllm::topKPerRowDecode<__half, kNumThreadsPerBlock, false>
           <<<numRows, kNumThreadsPerBlock, topK * sizeof(int32_t), stream>>>(
               reinterpret_cast<const __half*>(logits.const_data_ptr()),
-              seqLens.const_data_ptr<int>(), indices.mutable_data_ptr<int>(),
-              static_cast<int>(stride0), static_cast<int>(stride1),
-              static_cast<int>(topK), static_cast<int>(next_n), seqLensIs2D);
-    } else if (is_bfloat16) {
-      vllm::topKPerRowDecode<__nv_bfloat16, kNumThreadsPerBlock, false>
-          <<<numRows, kNumThreadsPerBlock, topK * sizeof(int32_t), stream>>>(
-              reinterpret_cast<const __nv_bfloat16*>(logits.const_data_ptr()),
               seqLens.const_data_ptr<int>(), indices.mutable_data_ptr<int>(),
               static_cast<int>(stride0), static_cast<int>(stride1),
               static_cast<int>(topK), static_cast<int>(next_n), seqLensIs2D);
@@ -900,13 +889,6 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
       vllm::topKPerRowDecode<__half, kNumThreadsPerBlock, true>
           <<<numRows, kNumThreadsPerBlock, topK * sizeof(int32_t), stream>>>(
               reinterpret_cast<const __half*>(logits.const_data_ptr()),
-              seqLens.const_data_ptr<int>(), indices.mutable_data_ptr<int>(),
-              static_cast<int>(stride0), static_cast<int>(stride1),
-              static_cast<int>(topK), static_cast<int>(next_n), seqLensIs2D);
-    } else if (is_bfloat16) {
-      vllm::topKPerRowDecode<__nv_bfloat16, kNumThreadsPerBlock, true>
-          <<<numRows, kNumThreadsPerBlock, topK * sizeof(int32_t), stream>>>(
-              reinterpret_cast<const __nv_bfloat16*>(logits.const_data_ptr()),
               seqLens.const_data_ptr<int>(), indices.mutable_data_ptr<int>(),
               static_cast<int>(stride0), static_cast<int>(stride1),
               static_cast<int>(topK), static_cast<int>(next_n), seqLensIs2D);
@@ -934,16 +916,6 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
           <<<dim3(numRows, multipleBlocksPerRowConfig), kNumThreadsPerBlock,
              2 * topK * sizeof(int32_t), stream>>>(
               reinterpret_cast<const __half*>(logits.const_data_ptr()),
-              seqLens.const_data_ptr<int>(),
-              outIndicesAux.mutable_data_ptr<int>(), static_cast<int>(stride0),
-              static_cast<int>(stride1), static_cast<int>(topK),
-              static_cast<int>(next_n), seqLensIs2D,
-              outLogitsAux.mutable_data_ptr<float>());
-    } else if (is_bfloat16) {
-      vllm::topKPerRowDecode<__nv_bfloat16, kNumThreadsPerBlock, true, true>
-          <<<dim3(numRows, multipleBlocksPerRowConfig), kNumThreadsPerBlock,
-             2 * topK * sizeof(int32_t), stream>>>(
-              reinterpret_cast<const __nv_bfloat16*>(logits.const_data_ptr()),
               seqLens.const_data_ptr<int>(),
               outIndicesAux.mutable_data_ptr<int>(), static_cast<int>(stride0),
               static_cast<int>(stride1), static_cast<int>(topK),
@@ -984,13 +956,9 @@ void top_k_per_row_prefill(const torch::stable::Tensor& logits,
   const cudaStream_t stream = get_current_cuda_stream();
   const bool is_half =
       logits.scalar_type() == torch::headeronly::ScalarType::Half;
-  const bool is_bfloat16 =
-      logits.scalar_type() == torch::headeronly::ScalarType::BFloat16;
   STD_TORCH_CHECK(
-      is_half || is_bfloat16 ||
-          logits.scalar_type() == torch::headeronly::ScalarType::Float,
-      "top_k_per_row_prefill supports only float32, float16, and bfloat16 "
-      "logits");
+      is_half || logits.scalar_type() == torch::headeronly::ScalarType::Float,
+      "top_k_per_row_prefill supports only float32 and float16 logits");
 
   int numInsertionBlocks =
       std::min(static_cast<int>(numRows), kSortingAlgorithmThreshold);
@@ -1012,14 +980,6 @@ void top_k_per_row_prefill(const torch::stable::Tensor& logits,
               indices.mutable_data_ptr<int>(), static_cast<int>(stride0),
               static_cast<int>(stride1), static_cast<int>(topK), 0);
     }
-  } else if (is_bfloat16) {
-    vllm::topKPerRowPrefill<__nv_bfloat16, kNumThreadsPerBlock, false>
-        <<<numInsertionBlocks, kNumThreadsPerBlock, topK * sizeof(int32_t),
-           stream>>>(
-            reinterpret_cast<const __nv_bfloat16*>(logits.const_data_ptr()),
-            rowStarts.const_data_ptr<int>(), rowEnds.const_data_ptr<int>(),
-            indices.mutable_data_ptr<int>(), static_cast<int>(stride0),
-            static_cast<int>(stride1), static_cast<int>(topK), 0);
   } else {
     vllm::topKPerRowPrefill<float, kNumThreadsPerBlock, false>
         <<<numInsertionBlocks, kNumThreadsPerBlock, topK * sizeof(int32_t),
@@ -1041,15 +1001,6 @@ void top_k_per_row_prefill(const torch::stable::Tensor& logits,
                        indices.mutable_data_ptr<int>(),
                        static_cast<int>(stride0), static_cast<int>(stride1),
                        static_cast<int>(topK), kSortingAlgorithmThreshold);
-    } else if (is_bfloat16) {
-      vllm::topKPerRowPrefill<__nv_bfloat16, kNumThreadsPerBlock, true>
-          <<<numRadixBlocks, kNumThreadsPerBlock, topK * sizeof(int32_t),
-             stream>>>(
-              reinterpret_cast<const __nv_bfloat16*>(logits.const_data_ptr()),
-              rowStarts.const_data_ptr<int>(), rowEnds.const_data_ptr<int>(),
-              indices.mutable_data_ptr<int>(), static_cast<int>(stride0),
-              static_cast<int>(stride1), static_cast<int>(topK),
-              kSortingAlgorithmThreshold);
     } else {
       vllm::topKPerRowPrefill<float, kNumThreadsPerBlock, true>
           <<<numRadixBlocks, kNumThreadsPerBlock, topK * sizeof(int32_t),

@@ -80,6 +80,30 @@ def _run_topk_backend(
         raise ValueError(f"Unknown top-k backend: {backend}")
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("backend", TOPK_BACKENDS)
+def test_topk_backends_reject_bfloat16(backend: str) -> None:
+    logits = torch.randn(1, 4096, dtype=torch.bfloat16, device="cuda")
+    lengths = torch.full((1,), 4096, dtype=torch.int32, device="cuda")
+    indices = torch.empty((1, 512), dtype=torch.int32, device="cuda")
+
+    with pytest.raises(RuntimeError, match="float32.*float16"):
+        _run_topk_backend(backend, logits, lengths, indices, 512, 4096)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+def test_top_k_per_row_prefill_rejects_bfloat16() -> None:
+    logits = torch.randn(1, 4096, dtype=torch.bfloat16, device="cuda")
+    starts = torch.zeros(1, dtype=torch.int32, device="cuda")
+    ends = torch.full((1,), 4096, dtype=torch.int32, device="cuda")
+    indices = torch.empty((1, 512), dtype=torch.int32, device="cuda")
+
+    with pytest.raises(RuntimeError, match="float32.*float16"):
+        torch.ops._C.top_k_per_row_prefill(
+            logits, starts, ends, indices, 1, 4096, 1, 512
+        )
+
+
 def create_random_logits(
     row_starts: torch.Tensor,
     row_ends: torch.Tensor,
@@ -222,7 +246,7 @@ def validate_topk_against_reference(
 @pytest.mark.parametrize("num_rows", NUM_ROWS)
 @pytest.mark.parametrize("top_k", TOP_K_VALUES)
 @pytest.mark.parametrize("clean_logits", [True, False])
-@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16])
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @torch.inference_mode()
 def test_top_k_per_row(
@@ -452,7 +476,7 @@ def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize("vocab_size", [20000, 300000])
-@pytest.mark.parametrize("logits_dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("logits_dtype", [torch.float16])
 @torch.inference_mode()
 def test_top_k_per_row_decode_reduced_precision_matches_torch(
     vocab_size: int, logits_dtype: torch.dtype
@@ -483,7 +507,7 @@ def test_top_k_per_row_decode_reduced_precision_matches_torch(
 @pytest.mark.parametrize("top_k", [2048])
 @pytest.mark.parametrize("next_n", [1, 4])
 @pytest.mark.parametrize("backend", WORKSPACE_TOPK_BACKENDS)
-@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("logits_dtype", [torch.float32, torch.float16])
 @torch.inference_mode()
 def test_deepseek_workspace_topk(
     seq_len_range: tuple[int, int],
@@ -1066,10 +1090,8 @@ def test_persistent_topk_reused_group_after_short_row() -> None:
     [
         ("cooperative_topk", torch.float32),
         ("cooperative_topk", torch.float16),
-        ("cooperative_topk", torch.bfloat16),
         ("persistent_topk", torch.float32),
         ("persistent_topk", torch.float16),
-        ("persistent_topk", torch.bfloat16),
     ],
 )
 @torch.inference_mode()

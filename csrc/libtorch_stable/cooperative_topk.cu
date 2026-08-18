@@ -122,9 +122,8 @@ void cooperative_topk(const torch::stable::Tensor& logits,
   STD_TORCH_CHECK(output.is_cuda(), "output must be CUDA tensor");
   STD_TORCH_CHECK(
       logits.scalar_type() == torch::headeronly::ScalarType::Float ||
-          logits.scalar_type() == torch::headeronly::ScalarType::Half ||
-          logits.scalar_type() == torch::headeronly::ScalarType::BFloat16,
-      "Only float32, float16, and bfloat16 are supported");
+          logits.scalar_type() == torch::headeronly::ScalarType::Half,
+      "Only float32 and float16 are supported");
   STD_TORCH_CHECK(lengths.scalar_type() == torch::headeronly::ScalarType::Int,
                   "lengths must be int32");
   STD_TORCH_CHECK(output.scalar_type() == torch::headeronly::ScalarType::Int,
@@ -144,15 +143,10 @@ void cooperative_topk(const torch::stable::Tensor& logits,
 
   const bool is_half =
       logits.scalar_type() == torch::headeronly::ScalarType::Half;
-  const bool is_bfloat16 =
-      logits.scalar_type() == torch::headeronly::ScalarType::BFloat16;
   if (k == 512) {
     if (is_half) {
       launch_cooperative_topk_impl<__half, 512>(logits, lengths, output,
                                                 workspace, max_seq_len);
-    } else if (is_bfloat16) {
-      launch_cooperative_topk_impl<__nv_bfloat16, 512>(logits, lengths, output,
-                                                       workspace, max_seq_len);
     } else {
       launch_cooperative_topk_impl<float, 512>(logits, lengths, output,
                                                workspace, max_seq_len);
@@ -161,9 +155,6 @@ void cooperative_topk(const torch::stable::Tensor& logits,
     if (is_half) {
       launch_cooperative_topk_impl<__half, 1024>(logits, lengths, output,
                                                  workspace, max_seq_len);
-    } else if (is_bfloat16) {
-      launch_cooperative_topk_impl<__nv_bfloat16, 1024>(logits, lengths, output,
-                                                        workspace, max_seq_len);
     } else {
       launch_cooperative_topk_impl<float, 1024>(logits, lengths, output,
                                                 workspace, max_seq_len);
@@ -172,9 +163,6 @@ void cooperative_topk(const torch::stable::Tensor& logits,
     if (is_half) {
       launch_cooperative_topk_impl<__half, 2048>(logits, lengths, output,
                                                  workspace, max_seq_len);
-    } else if (is_bfloat16) {
-      launch_cooperative_topk_impl<__nv_bfloat16, 2048>(logits, lengths, output,
-                                                        workspace, max_seq_len);
     } else {
       launch_cooperative_topk_impl<float, 2048>(logits, lengths, output,
                                                 workspace, max_seq_len);

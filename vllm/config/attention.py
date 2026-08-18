@@ -14,7 +14,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 logger = init_logger(__name__)
 
 IndexerKVDType = Literal["auto", "bf16", "fp8", "mxfp4", "nvfp4"]
-IndexerLogitsDType = Literal["auto", "float16", "bfloat16", "float32"]
+IndexerLogitsDType = Literal["auto", "float16", "float32"]
 MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
 
 

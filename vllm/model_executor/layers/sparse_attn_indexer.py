@@ -46,9 +46,16 @@ MXFP4_BLOCK_SIZE = 32
 
 _INDEXER_LOGITS_DTYPES = {
     "float16": torch.float16,
-    "bfloat16": torch.bfloat16,
     "float32": torch.float32,
 }
+
+
+def _should_use_native_fp16_decode_topk(
+    logits_dtype: torch.dtype, num_rows: int, max_seq_len: int
+) -> bool:
+    return logits_dtype == torch.float16 and (
+        max_seq_len <= 65536 or (max_seq_len <= 131072 and num_rows >= 256)
+    )
 
 
 def _get_indexer_logits_dtype() -> torch.dtype:
@@ -75,10 +82,8 @@ def _assert_cutedsl_dcp_merge_supported(
         )
     if logits.device.type != "cuda":
         raise RuntimeError("DCP sparse-indexer merge requires CUDA tensors.")
-    if logits.dtype not in (torch.float32, torch.float16, torch.bfloat16):
-        raise RuntimeError(
-            "DCP sparse-indexer merge requires fp32, fp16, or bf16 logits."
-        )
+    if logits.dtype not in (torch.float32, torch.float16):
+        raise RuntimeError("DCP sparse-indexer merge requires fp32 or fp16 logits.")
     if topk_indices.dtype != torch.int32:
         raise RuntimeError("DCP sparse-indexer merge requires int32 indices.")
     if k not in (512, 1024, 2048):
@@ -651,10 +656,13 @@ def sparse_attn_indexer(
             and current_platform.has_device_capability(90)
             and not current_platform.is_device_capability_family(120)
         )
-        use_persistent_topk = current_platform.is_cuda() and topk_tokens in (
-            512,
-            1024,
-            2048,
+        use_native_fp16_decode_topk = _should_use_native_fp16_decode_topk(
+            logits.dtype, num_rows, attn_metadata_narrowed.max_seq_len
+        )
+        use_persistent_topk = (
+            current_platform.is_cuda()
+            and topk_tokens in (512, 1024, 2048)
+            and not use_native_fp16_decode_topk
         )
         if use_cooperative_topk:
             workspace_manager = current_workspace_manager()

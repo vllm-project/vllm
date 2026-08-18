@@ -19,7 +19,6 @@ MLA_LAYER = "model.layers.0.self_attn.attn"
     [
         ("auto", torch.float16),
         ("float16", torch.float16),
-        ("bfloat16", torch.bfloat16),
         ("float32", torch.float32),
     ],
 )
@@ -51,6 +50,26 @@ def test_auto_indexer_logits_uses_fp32_off_cuda(
     monkeypatch.setattr(sparse_indexer.current_platform, "is_cuda", lambda: False)
 
     assert sparse_indexer._get_indexer_logits_dtype() == torch.float32
+
+
+@pytest.mark.parametrize(
+    ("dtype", "num_rows", "max_seq_len", "expected"),
+    [
+        (torch.float16, 128, 65536, True),
+        (torch.float16, 128, 65537, False),
+        (torch.float16, 256, 131072, True),
+        (torch.float16, 255, 131072, False),
+        (torch.float16, 1024, 131073, False),
+        (torch.float32, 1024, 50000, False),
+    ],
+)
+def test_native_fp16_decode_topk_selection(
+    dtype: torch.dtype, num_rows: int, max_seq_len: int, expected: bool
+) -> None:
+    assert (
+        sparse_indexer._should_use_native_fp16_decode_topk(dtype, num_rows, max_seq_len)
+        is expected
+    )
 
 
 def make_indexer_metadata(
