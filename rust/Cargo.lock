@@ -5699,6 +5699,7 @@ dependencies = [
  "expect-test",
  "futures",
  "openai-protocol",
+ "rustpython-parser",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

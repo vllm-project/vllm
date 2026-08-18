@@ -9,8 +9,8 @@ pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
     Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser, HyV3ToolParser,
     Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MinimaxM2ToolParser,
-    MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser,
-    Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
+    MinimaxM3ToolParser, MistralToolParser, Olmo3ToolParser, Phi4MiniJsonToolParser,
+    Qwen3CoderToolParser, Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -39,6 +39,7 @@ pub mod names {
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
     pub const MISTRAL: &str = "mistral";
+    pub const OLMO3: &str = "olmo3";
     pub const PHI4_MINI_JSON: &str = "phi4_mini_json";
     pub const QWEN3_CODER: &str = "qwen3_coder";
     pub const QWEN3_XML: &str = "qwen3_xml";
@@ -85,12 +86,15 @@ impl ToolParserFactory {
             .register_parser::<MinimaxM2ToolParser>(names::MINIMAX_M2)
             .register_parser::<MinimaxM3ToolParser>(names::MINIMAX_M3)
             .register_parser::<MistralToolParser>(names::MISTRAL)
+            .register_parser::<Olmo3ToolParser>(names::OLMO3)
             .register_parser::<Phi4MiniJsonToolParser>(names::PHI4_MINI_JSON)
             .register_parser::<Qwen3XmlToolParser>(names::QWEN3_XML)
             .register_parser::<Qwen3CoderToolParser>(names::QWEN3_CODER)
             .register_parser::<SeedOssToolParser>(names::SEED_OSS);
 
         factory
+            .register_pattern("olmo-3", names::OLMO3)
+            .register_pattern("olmo3", names::OLMO3)
             .register_pattern("mistral-", names::MISTRAL)
             .register_pattern("mixtral-", names::MISTRAL)
             .register_pattern("qwen3-coder", names::QWEN3_CODER)
