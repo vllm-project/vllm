@@ -24,7 +24,7 @@
 # limitations under the License.
 """Inference-only GraniteMoe model."""
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from itertools import islice
 
 import torch
@@ -39,10 +39,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoEFactory,
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -56,11 +53,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-    sharded_weight_loader,
-)
+from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
@@ -69,51 +62,11 @@ from .granite import granite_layer_attn_params
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
 )
-
-# Packed expert / router tensors, in both the legacy HF checkpoint spelling and
-# the current one. The layouts are identical, so only the names differ.
-_MOE_GATE_UP_NAMES = (
-    ".block_sparse_moe.input_linear.weight",
-    ".block_sparse_moe.experts.gate_up_proj",
-)
-_MOE_DOWN_NAMES = (
-    ".block_sparse_moe.output_linear.weight",
-    ".block_sparse_moe.experts.down_proj",
-)
-_MOE_ROUTER_NAMES = (
-    ".block_sparse_moe.router.layer.weight",
-    ".block_sparse_moe.router.weight",
-)
-
-
-def _endswith_any(name: str, suffixes: tuple[str, ...]) -> str | None:
-    return next((s for s in suffixes if name.endswith(s)), None)
-
-
-def granitemoe_split_expert_weights(
-    weights: Iterable[tuple[str, torch.Tensor]],
-) -> Iterator[tuple[str, torch.Tensor]]:
-    """Split packed GraniteMoe expert tensors into per-expert `w1`/`w2`/`w3`."""
-    for n, p in weights:
-        if suffix := _endswith_any(n, _MOE_GATE_UP_NAMES):
-            for e in range(p.size(0)):
-                w1_param, w3_param = p[e].chunk(2, dim=0)
-                base = n.removesuffix(suffix) + f".block_sparse_moe.experts.{e}"
-                yield f"{base}.w1.weight", w1_param
-                yield f"{base}.w3.weight", w3_param
-        elif suffix := _endswith_any(n, _MOE_DOWN_NAMES):
-            for e in range(p.size(0)):
-                base = n.removesuffix(suffix) + f".block_sparse_moe.experts.{e}"
-                yield f"{base}.w2.weight", p[e]
-        elif suffix := _endswith_any(n, _MOE_ROUTER_NAMES):
-            yield n.removesuffix(suffix) + ".block_sparse_moe.gate.weight", p
-        else:
-            yield n, p
 
 
 class GraniteMoeMoE(nn.Module):
@@ -349,6 +302,23 @@ class GraniteMoeDecoderLayer(nn.Module):
 
 @support_torch_compile
 class GraniteMoeModel(nn.Module):
+    hf_to_vllm_mapper: WeightsMapper = WeightsMapper(
+        orig_to_new_suffix={
+            # Legacy names to new names
+            "moe.input_linear.weight": "moe.experts.gate_up_proj",
+            "moe.output_linear.weight": "moe.experts.down_proj",
+            ".router.layer.weight": ".gate.weight",
+            # Checkpoint name to vLLM name
+            ".router.weight": ".gate.weight",
+        },
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        },
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -404,100 +374,9 @@ class GraniteMoeModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def _load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """
-        This function is copied from `MixtralModel.load_weights`, mainly to
-        decouple from mixtral, avoiding impact on support like BNB
-        quantization.
-        """
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="w1",
-            ckpt_down_proj_name="w2",
-            ckpt_up_proj_name="w3",
-            num_experts=self.config.num_local_experts,
-        )
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if (
-                    name.endswith(".bias") or name.endswith("_bias")
-                ) and name not in params_dict:
-                    continue
-                # Skip layers on other devices.
-                if is_pp_missing_parameter(name, self):
-                    continue
-                if name.endswith("scale"):
-                    # Remapping the name of FP8 kv-scale.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
-                        continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    # Skip layers on other devices.
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    if (
-                        name.endswith(".bias") or name.endswith("_bias")
-                    ) and name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                    )
-                    break
-                else:
-                    # Skip loading extra bias for GPTQ models.
-                    if (
-                        name.endswith(".bias") or name.endswith("_bias")
-                    ) and name not in params_dict:
-                        continue
-                    # Skip layers on other devices.
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    # Remapping the name of FP8 kv-scale.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
-                        continue
-
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        return self._load_weights(granitemoe_split_expert_weights(weights))
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
@@ -573,8 +452,6 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else None
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights)

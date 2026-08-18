@@ -34,12 +34,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .granitemoe import (
-    GraniteMoeAttention,
-    GraniteMoeModel,
-    GraniteMoeMoE,
-    granitemoe_split_expert_weights,
-)
+from .granitemoe import GraniteMoeAttention, GraniteMoeModel, GraniteMoeMoE
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import AutoWeightsLoader, make_layers, maybe_prefix
 
@@ -216,10 +211,8 @@ class GraniteMoeSharedModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        return GraniteMoeModel._load_weights(
-            self, granitemoe_split_expert_weights(weights)
-        )
+    hf_to_vllm_mapper = GraniteMoeModel.hf_to_vllm_mapper
+    load_weights = GraniteMoeModel.load_weights
 
 
 class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
@@ -296,8 +289,6 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
-        )
+        skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else None
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights)

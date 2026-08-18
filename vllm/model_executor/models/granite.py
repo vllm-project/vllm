@@ -472,8 +472,5 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         # processed with quantization, LoRA, fine-tuning, etc.
         skip_prefixes = ["lm_head."] if self.config.tie_word_embeddings else None
 
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=skip_prefixes,
-        )
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights)
