@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Run registered CuTeDSL warmup compile units."""
+"""Deprecated compatibility registry for legacy CuTeDSL warmups."""
 
 # TODO(roberto): Remove this compatibility registry after registered CuTeDSL
 # warmups are migrated to the shared JIT warmup infrastructure.
