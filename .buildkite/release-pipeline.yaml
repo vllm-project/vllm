@@ -972,7 +972,7 @@ steps:
       branch: "main"
       message: "(NIGHTLY=${NIGHTLY:-0}) Evaluate vLLM $BUILDKITE_COMMIT"
       env:
-        NIGHTLY: "${NIGHTLY:-0}"
+        NIGHTLY: 1 # run all perf-eval workloads
         VLLM_COMMIT: "$BUILDKITE_COMMIT"
         VLLM_IMAGE_CUDA: "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64"
         VLLM_IMAGE_ROCM: "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-rocm"
