@@ -1,4 +1,4 @@
-group: XPU Expert Parallelism
+group: Expert Parallelism
 depends_on:
   - image-build-xpu
 steps:

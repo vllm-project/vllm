@@ -1,4 +1,4 @@
-group: XPU Engine
+group: Engine Intel
 depends_on:
   - image-build-xpu
 steps:

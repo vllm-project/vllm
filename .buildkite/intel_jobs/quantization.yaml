@@ -1,4 +1,4 @@
-group: XPU Quantization
+group: Quantization
 depends_on:
   - image-build-xpu
 steps:

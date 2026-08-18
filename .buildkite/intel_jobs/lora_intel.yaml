@@ -1,4 +1,4 @@
-group: XPU LoRA
+group: LoRA Intel
 depends_on:
   - image-build-xpu
 steps:

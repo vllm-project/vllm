@@ -1,4 +1,4 @@
-group: XPU Kernels
+group: Kernels Intel
 depends_on: 
   - image-build-xpu
 steps:

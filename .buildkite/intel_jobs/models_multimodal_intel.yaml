@@ -1,4 +1,4 @@
-group: XPU Models - Multimodal
+group: Models - Multimodal
 depends_on:
   - image-build-xpu
 steps:
