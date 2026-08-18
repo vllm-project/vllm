@@ -607,17 +607,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
         )
-        if self.adaptive_verification is not None:
-            self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
-        elif self.draft_trimmer is not None and (
-            self.compilation_config.cudagraph_mode is None
-            or self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        ):
-            # Trimmed decode batches have per-request varlen queries, which
-            # uniform-decode full graphs cannot replay. The trimmer is only
-            # created with full cudagraphs when the attention backend
-            # supports varlen decode capture (AttentionCGSupport.ALWAYS).
-            self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+        varlen_decode = bool(self.adaptive_verification or self.draft_trimmer)
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
@@ -626,6 +616,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             tensor_parallel_size=self.parallel_config.tensor_parallel_size,
             kv_cache_config=self.kv_cache_config,
             max_num_reqs=self.max_num_reqs,
+            varlen_decode=varlen_decode,
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
@@ -633,8 +624,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cudagraph_mode,
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
-            varlen_decode=self.adaptive_verification is not None
-            or self.draft_trimmer is not None,
+            varlen_decode=varlen_decode,
         )
         check_attention_cp_compatibility(self.vllm_config)
         if isinstance(self.speculator, DraftModelSpeculator):

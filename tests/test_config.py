@@ -158,6 +158,38 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
 
 
 @pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        # Only a mode without a separate decode routine has to change: varlen
+        # decode batches would otherwise replay on a mixed full graph.
+        (CUDAGraphMode.FULL, CUDAGraphMode.FULL_AND_PIECEWISE),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE),
+        (CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_DECODE_ONLY),
+        (CUDAGraphMode.PIECEWISE, CUDAGraphMode.PIECEWISE),
+        (CUDAGraphMode.NONE, CUDAGraphMode.NONE),
+    ],
+)
+def test_resolve_cudagraph_mode_varlen_decode(requested, expected):
+    """varlen_decode requires a separate decode routine for full cudagraphs."""
+    compilation_config = CompilationConfig(
+        cudagraph_mode=requested,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+    )
+    compilation_config.max_cudagraph_capture_size = 8
+    compilation_config.post_init_cudagraph_sizes()
+
+    cudagraph_mode = compilation_config.resolve_cudagraph_mode_and_sizes(
+        AttentionCGSupport.ALWAYS,
+        "FakeAttentionBackend",
+        use_v2_model_runner=True,
+        varlen_decode=True,
+    )
+
+    assert cudagraph_mode == expected
+    assert compilation_config.cudagraph_mode == expected
+
+
+@pytest.mark.parametrize(
     ("model_config", "expected"),
     [
         (
