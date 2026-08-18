@@ -2,7 +2,84 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """EC connector helper utilities."""
 
+from typing import TYPE_CHECKING, Any
+
+import torch
+
+from vllm.logger import init_logger
 from vllm.v1.outputs import ECConnectorOutput, ModelRunnerOutput
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
+    from vllm.v1.request import Request
+
+logger = init_logger(__name__)
+
+
+def placeholder_metadata_fields(
+    modality: str, model_config: "ModelConfig", cache: dict[str, set[str]]
+) -> set[str]:
+    """Which processed keys this model needs published for `modality`.
+
+    Read from `MultiModalDataParser.embedding_fields`, the same declaration
+    the consumer's parser requires, so the two cannot drift. An empty set
+    means the modality cannot be delivered out of band, and the consumer
+    will process the media itself.
+
+    Args:
+        modality: the modality to report fields for.
+        model_config: the producer's model config.
+        cache: per-connector memo of the answer, keyed by modality.
+    """
+    if modality in cache:
+        return cache[modality]
+
+    fields: set[str] = set()
+    try:
+        from vllm.multimodal import MULTIMODAL_REGISTRY
+
+        info = MULTIMODAL_REGISTRY.create_processor(model_config).info
+        fields = info.data_parser.placeholder_metadata_fields(modality)
+    except Exception:
+        # Reporting nothing is a safe degradation: the consumer falls back to
+        # processing the media itself.
+        logger.warning(
+            "Could not determine the placeholder metadata fields for "
+            "modality %s; the consumer will preprocess the media itself.",
+            modality,
+            exc_info=True,
+        )
+
+    cache[modality] = fields
+    return fields
+
+
+def build_ec_items(
+    request: "Request", model_config: "ModelConfig", cache: dict[str, set[str]]
+) -> list[dict[str, Any]]:
+    """Report each item's cache key and grid so a consumer can skip the
+    image transform.
+
+    A consumer only needs the grid to size the prompt's placeholder range;
+    the embedding itself arrives through the connector. Reporting the grid
+    the producer actually computed keeps the two sides in agreement without
+    the caller re-deriving it from the raw media.
+    """
+    items: list[dict[str, Any]] = []
+    for feature in request.mm_features:
+        metadata = {}
+        # `data` is None for items served from the processor cache, in which
+        # case the metadata is unavailable here and the consumer has to fall
+        # back to processing the media itself.
+        if feature.data is not None:
+            wanted = placeholder_metadata_fields(feature.modality, model_config, cache)
+            metadata = {
+                key: value.tolist()
+                for key, value in feature.data.get_data().items()
+                if key in wanted and isinstance(value, torch.Tensor)
+            }
+        items.append({"mm_hash": feature.identifier, **metadata})
+    return items
 
 
 class ECOutputAggregator:

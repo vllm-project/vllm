@@ -100,8 +100,12 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
     `item_meta` holds what the encoder reported for each item (its cache key and
     the grid its processor actually produced), so the grid is never re-derived
     here -- a second derivation could disagree with the encoder's.
+
+    The rewritten keys are also reported in `ec_transfer_params`: a push-based
+    connector delivers the embedding asynchronously, so the consumer has to know
+    which items to wait for instead of encoding them itself.
     """
-    rewritten = 0
+    rewritten: list[str] = []
     idx = 0
     new_messages = []
     for msg in req_data.get("messages", []):
@@ -133,13 +137,19 @@ def rewrite_for_decode(req_data: dict, item_meta: dict[int, dict]) -> dict:
                     "uuid": item_uuid,
                 }
             )
-            rewritten += 1
+            rewritten.append(item_uuid)
         new_messages.append({**msg, "content": new_content})
 
     if not rewritten:
         return req_data
-    logger.info("Rewrote %d image item(s) as metadata references", rewritten)
-    return {**req_data, "messages": new_messages}
+    logger.info("Rewrote %d image item(s) as metadata references", len(rewritten))
+    return {
+        **req_data,
+        "messages": new_messages,
+        "ec_transfer_params": {
+            "ec_items": [{"mm_hash": mm_hash} for mm_hash in rewritten]
+        },
+    }
 
 
 def extract_mm_items(request_data: dict) -> list[dict]:

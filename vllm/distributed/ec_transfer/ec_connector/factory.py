@@ -89,3 +89,9 @@ ECConnectorFactory.register_connector(
     "vllm.distributed.ec_transfer.ec_connector.cpu.connector",
     "ECCPUConnector",
 )
+
+ECConnectorFactory.register_connector(
+    "ECZmqConnector",
+    "vllm.distributed.ec_transfer.ec_connector.zmq.connector",
+    "ECZmqConnector",
+)
