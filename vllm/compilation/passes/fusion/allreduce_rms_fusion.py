@@ -1244,7 +1244,6 @@ class AiterAllreduceFusedAddRMSNormPattern(BasePattern, VllmPatternReplacement):
 
         return _replacement
 
-
 class AiterAllreduceFusedAddRMSNormOutputOnlyPattern(
     AiterAllreduceFusedAddRMSNormPattern
 ):
@@ -1269,6 +1268,116 @@ class AiterAllreduceFusedAddRMSNormOutputOnlyPattern(
             residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
         ) -> torch.Tensor:
             return replacement(residual, input, weight)[0]
+
+        return _replacement
+
+
+class AiterAllreduceFusedGemmaRMSNormPattern(BasePattern, VllmPatternReplacement):
+    """Gemma-style variant of ``AiterAllreduceFusedRMSNormPattern`` (no residual).
+
+    Matches ``all_reduce -> rms_norm(weight.float() + 1.0)`` (the subgraph a
+    ``GemmaRMSNorm`` traces to) and lowers it to the AITER Gemma fused op, which
+    applies ``(1 + weight)`` inside the kernel. The raw gamma is forwarded.
+    """
+
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+        use_aiter_rmsnorm: bool = True,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.dtype = dtype
+        self.epsilon = epsilon
+        self.FUSED_AR_GEMMA_RMSNORM_OP = (
+            rocm_aiter_ops.get_fused_allreduce_gemma_rmsnorm_op()
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        return [self.empty(5, 16), self.empty(16)]
+
+    @property
+    def pattern(self):
+        def _pattern(
+            input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            allreduce_output = tensor_model_parallel_all_reduce(input)
+            rms = vllm.ir.ops.rms_norm(
+                allreduce_output, weight.float() + 1.0, self.epsilon
+            )
+            return rms, allreduce_output
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            residual = torch.zeros_like(input)
+            allreduce = self.FUSED_AR_GEMMA_RMSNORM_OP(
+                input_=input,
+                residual=residual,
+                weight=weight.to(input.dtype),
+                epsilon=self.epsilon,
+            )
+            return allreduce[0], allreduce[1]
+
+        return _replacement
+
+
+class AiterAllreduceFusedAddGemmaRMSNormPattern(BasePattern, VllmPatternReplacement):
+    """Gemma-style variant of ``AiterAllreduceFusedAddRMSNormPattern`` (residual).
+
+    Matches ``all_reduce -> fused_add_rms_norm(weight.float() + 1.0)`` and lowers
+    it to the AITER Gemma fused op, forwarding the raw gamma (the kernel adds the
+    ``+1`` via its ``GEMMA_NORM`` instantiation).
+    """
+
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+        use_aiter_rmsnorm: bool = True,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.dtype = dtype
+        self.FUSED_AR_GEMMA_RMSNORM_OP = (
+            rocm_aiter_ops.get_fused_allreduce_gemma_rmsnorm_op()
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        # input, residual, weight
+        return [self.empty(5, 16), self.empty(5, 16), self.empty(16)]
+
+    @property
+    def pattern(self):
+        def _pattern(
+            residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            allreduce_output = tensor_model_parallel_all_reduce(input)
+            rms, residual = vllm.ir.ops.fused_add_rms_norm(
+                allreduce_output, residual, weight.float() + 1.0, self.epsilon
+            )
+            return rms, residual
+
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
+            residual: torch.Tensor, input: torch.Tensor, weight: torch.Tensor
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            allreduce = self.FUSED_AR_GEMMA_RMSNORM_OP(
+                input_=input,
+                residual=residual,
+                weight=weight.to(input.dtype),
+                epsilon=self.epsilon,
+            )
+            return allreduce[0], allreduce[1]
 
         return _replacement
 
@@ -1638,6 +1747,24 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
                     )
                 )
 
+            # Gemma variants register before the plain AR+RMS patterns so the
+            # matcher tries the ``weight.float() + 1.0`` subgraph first; otherwise
+            # the plain pattern consumes the all_reduce node and the Gemma bias
+            # would be left as a separate (unfused) elementwise add.
+            self.register(
+                AiterAllreduceFusedGemmaRMSNormPattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
+                )
+            )
+            self.register(
+                AiterAllreduceFusedAddGemmaRMSNormPattern(
+                    epsilon,
+                    self.model_dtype,
+                    self.device,
+                )
+            )
             self.register(
                 AiterAllreduceFusedRMSNormPattern(
                     epsilon,
