@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
+from fractions import Fraction
 from typing import Any
 
 import torch
@@ -66,7 +68,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         # Extract properties from weight_quant
         self.symmetric = weight_quant.symmetric
         self.num_bits = weight_quant.num_bits
-        self.packed_factor = 32 // weight_quant.num_bits
+        self.packed_factor = Fraction(32, weight_quant.num_bits)
         self.strategy = weight_quant.strategy
         self.group_size = weight_quant.group_size
         self.actorder = weight_quant.actorder
@@ -138,6 +140,9 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             # Non-Marlin WNA16 always uses bf16/fp16 inputs
             self.input_dtype = torch.bfloat16
 
+    def _packed_dim(self, dim: int) -> int:
+        return math.ceil(dim * self.num_bits / 32)
+
     def get_weight_shape(
         self,
         weight_name: str,
@@ -167,11 +172,11 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 "Flashinfer": (
                     num_experts,
                     w13_num_shards * intermediate_size_per_partition,
-                    hidden_size // self.packed_factor,
+                    self._packed_dim(hidden_size),
                 ),
                 "Marlin": (
                     num_experts,
-                    hidden_size // self.packed_factor,
+                    self._packed_dim(hidden_size),
                     w13_num_shards * intermediate_size_per_partition,
                 ),
             },
@@ -191,20 +196,20 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 "Marlin": (
                     num_experts,
                     num_groups_w13,
-                    w13_num_shards
-                    * intermediate_size_per_partition
-                    // self.packed_factor,
+                    self._packed_dim(
+                        w13_num_shards * intermediate_size_per_partition
+                    ),
                 ),
             },
             "w2_weight": {
                 "Flashinfer": (
                     num_experts,
                     hidden_size,
-                    intermediate_size_per_partition // self.packed_factor,
+                    self._packed_dim(intermediate_size_per_partition),
                 ),
                 "Marlin": (
                     num_experts,
-                    intermediate_size_per_partition // self.packed_factor,
+                    self._packed_dim(intermediate_size_per_partition),
                     hidden_size,
                 ),
             },
@@ -216,7 +221,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 "Marlin": (
                     num_experts,
                     num_groups_w2,
-                    hidden_size // self.packed_factor,
+                    self._packed_dim(hidden_size),
                 ),
             },
         }
@@ -581,7 +586,12 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 get_humming_moe_quant_config,
             )
 
-            return get_humming_moe_quant_config(layer)
+            return get_humming_moe_quant_config(
+                layer,
+                gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+                gemm1_beta=getattr(layer, "swiglu_beta", None),
+                gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+            )
         return make_wna16_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,

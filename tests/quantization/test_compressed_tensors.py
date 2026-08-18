@@ -1070,6 +1070,96 @@ def test_wna16_moe_allows_humming_only_bitwidths(monkeypatch, num_bits):
     assert captured["weight_key"].scale.group_shape == GroupShape(row=1, col=128)
 
 
+@pytest.mark.parametrize("num_bits", [3, 5, 6, 7])
+def test_wna16_moe_create_weights_uses_ceil_packed_shapes(monkeypatch, num_bits):
+    from tests.kernels.moe.utils import make_dummy_moe_config
+    from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import WNA16MoEBackend
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
+        compressed_tensors_moe_wna16 as wna16_module,
+    )
+
+    def fake_select_wna16_moe_backend(*args, **kwargs):
+        del args, kwargs
+        return WNA16MoEBackend.HUMMING, object
+
+    monkeypatch.setattr(
+        wna16_module,
+        "select_wna16_moe_backend",
+        fake_select_wna16_moe_backend,
+    )
+
+    quant_args = QuantizationArgs(
+        num_bits=num_bits,
+        type=QuantizationType.INT,
+        strategy=QuantizationStrategy.GROUP,
+        symmetric=True,
+        dynamic=False,
+        group_size=128,
+    )
+    moe_config = make_dummy_moe_config(
+        num_experts=2,
+        hidden_dim=128,
+        intermediate_size=256,
+    )
+    method = wna16_module.CompressedTensorsWNA16MoEMethod(
+        quant_args,
+        None,
+        moe_config,
+    )
+    layer = torch.nn.Module()
+
+    method.create_weights(
+        layer,
+        num_experts=2,
+        hidden_size=128,
+        intermediate_size_per_partition=256,
+        params_dtype=torch.float16,
+        intermediate_size_full=256,
+    )
+
+    packed_hidden = (128 * num_bits + 31) // 32
+    packed_intermediate = (256 * num_bits + 31) // 32
+    assert layer.w13_weight_packed.shape == (2, 512, packed_hidden)
+    assert layer.w2_weight_packed.shape == (2, 128, packed_intermediate)
+
+
+def test_wna16_moe_humming_quant_config_forwards_swiglu(monkeypatch):
+    from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import WNA16MoEBackend
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
+        CompressedTensorsWNA16MoEMethod,
+    )
+    from vllm.model_executor.layers.quantization.utils import humming_utils
+
+    method = object.__new__(CompressedTensorsWNA16MoEMethod)
+    method.wna16_backend = WNA16MoEBackend.HUMMING
+    layer = SimpleNamespace(
+        swiglu_alpha=1.702,
+        swiglu_beta=1.0,
+        swiglu_limit=7.0,
+    )
+    quant_config = object()
+    captured = {}
+
+    def fake_get_humming_moe_quant_config(actual_layer, **kwargs):
+        captured["layer"] = actual_layer
+        captured.update(kwargs)
+        return quant_config
+
+    monkeypatch.setattr(
+        humming_utils,
+        "get_humming_moe_quant_config",
+        fake_get_humming_moe_quant_config,
+    )
+
+    assert method.get_fused_moe_quant_config(layer) is quant_config
+    assert captured == {
+        "layer": layer,
+        "gemm1_alpha": 1.702,
+        "gemm1_beta": 1.0,
+        "gemm1_clamp_limit": 7.0,
+    }
+
+
 @pytest.mark.parametrize("num_bits", range(2, 9))
 def test_humming_linear_kernel_uses_wna16_bitwidth(monkeypatch, num_bits):
     from vllm.model_executor.kernels.linear.mixed_precision.humming import (
@@ -1085,18 +1175,32 @@ def test_humming_linear_kernel_uses_wna16_bitwidth(monkeypatch, num_bits):
 
     captured: dict[str, Any] = {}
 
+    def fake_convert(layer, name_map):
+        captured["name_map"] = name_map
+        layer.weight = torch.nn.Parameter(torch.empty(1))
+
     monkeypatch.setattr(
         humming_utils,
         "convert_linear_layer_to_humming_standard",
-        lambda layer, name_map: captured.setdefault("name_map", name_map),
+        fake_convert,
     )
 
     def fake_prepare(layer, quant_config, input_quant_config=None):
         del layer
         captured["quant_config"] = quant_config
         captured["input_quant_config"] = input_quant_config
+        return object()
 
-    monkeypatch.setattr(humming_utils, "prepare_humming_layer", fake_prepare)
+    monkeypatch.setattr(
+        humming_utils,
+        "prepare_humming_linear_layer_config",
+        fake_prepare,
+    )
+    monkeypatch.setattr(
+        humming_utils,
+        "get_humming_linear_compute_config",
+        lambda: "compute_config",
+    )
 
     kernel = HummingLinearKernel(
         MPLinearLayerConfig(
