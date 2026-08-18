@@ -28,8 +28,9 @@ steps:
 
 - label: LoRA TP (Distributed)
   key: lora-tp-distributed
-  timeout_in_minutes: 60
+  timeout_in_minutes: 25
   num_devices: 4
+  parallelism: 4
   source_file_dependencies:
   - vllm/lora
   - vllm/model_executor/layers/fused_moe/
@@ -42,10 +43,17 @@ steps:
     - export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
     # There is some Tensor Parallelism related processing logic in LoRA that
     # requires multi-GPU testing for validation.
-    - pytest -v -s -x lora/test_chatglm3_tp.py
-    - pytest -v -s -x lora/test_llama_tp.py
-    - pytest -v -s -x lora/test_qwen3_with_multi_loras.py
-    - pytest -v -s -x lora/test_olmoe_tp.py
-    - pytest -v -s -x lora/test_gptoss_tp.py
-    - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
-    - pytest -v -s -x lora/test_gemma4_tp.py
+    # Timing-balanced static split (per-file walls stable across builds 83921/
+    # 83936): shard 0 = gptoss alone (12.2m, the single-file floor), shard 1 =
+    # llama + qwen35 (~11.4m), shard 2 = gemma4 + olmoe (~11.2m), shard 3 =
+    # qwen3_multi + chatglm3 (~8.6m). Measured setup varies 1.3-4.9m, so the
+    # 12.2m max bucket keeps worst-case walls ~17m.
+    # An index outside 0-3 would skip every guard and pass empty; fail it instead.
+    - case "$$BUILDKITE_PARALLEL_JOB" in 0|1|2|3) ;; *) echo "unexpected BUILDKITE_PARALLEL_JOB=$$BUILDKITE_PARALLEL_JOB" && exit 1;; esac
+    - test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest -v -s -x lora/test_chatglm3_tp.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -x lora/test_llama_tp.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "3" || pytest -v -s -x lora/test_qwen3_with_multi_loras.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_olmoe_tp.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "0" || pytest -v -s -x lora/test_gptoss_tp.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "1" || pytest -v -s -x lora/test_qwen35_densemodel_lora.py
+    - test "$$BUILDKITE_PARALLEL_JOB" != "2" || pytest -v -s -x lora/test_gemma4_tp.py
