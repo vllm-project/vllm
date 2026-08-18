@@ -3,9 +3,10 @@
 
 import os
 import platform
+from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
@@ -1126,6 +1127,103 @@ class RocmPlatform(Platform):
         return IrOpPriorityConfig.with_default(
             default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm
         )
+
+    @classmethod
+    def set_additional_forward_context(cls, *args, **kwargs) -> dict[str, Any]:
+        """Cache the current HIP stream once per forward pass.
+
+        Called once per ``set_forward_context()`` invocation (i.e. once per
+        forward) while the ambient current stream is that forward's logical
+        "main" stream: the worker compute stream at runtime, and the capture
+        stream inside ``graph_capture()``. ``launch_multi_stream`` reads
+        this cached handle so every fork/join edge binds to the same stream
+        object, keeping the stream DAG statically reason-able and avoiding
+        per-call ``torch.cuda.current_stream()`` queries that widen the HIP
+        stream handle pool.
+        """
+        return {"main_stream": torch.cuda.current_stream()}
+
+    @classmethod
+    def launch_multi_stream(
+        cls,
+        default_fn: Callable[[], Any],
+        aux_fns: list[Callable[[], Any] | None],
+        start_event: torch.cuda.Event,
+        done_events: list[torch.cuda.Event],
+        aux_streams: list[torch.cuda.Stream] | None = None,
+        queue_aux_before_default: bool = False,
+    ) -> tuple[Any, list[Any]]:
+        """Launch default and auxiliary work on separate HIP streams.
+
+        Uses ``Stream.wait_stream()`` fork-join instead of CUDA events.
+        On HIP, ``Event.wait()`` / ``Event.wait_event()`` cross-stream
+        ordering is not reliably enforced and can deadlock or hang under
+        multistream overlap, especially during HIP graph capture/replay.
+        Stream-level waits express dependencies directly and are the
+        supported synchronization path on ROCm.
+
+        The main stream is fetched from the forward context cache
+        (``additional_kwargs["main_stream"]``, populated once per forward
+        by ``set_additional_forward_context``) so all fork/join edges bind
+        to a single stream handle. During HIP graph capture the cached
+        stream equals the capture stream, so the fork/join edges are
+        recorded into the graph correctly. Falls back to
+        ``torch.cuda.current_stream()`` when no forward context is set.
+
+        ``start_event`` and ``done_events`` are kept for API compatibility
+        with CUDA but are unused here.
+
+        Args:
+            default_fn: Callable for the current (default) stream.
+            aux_fns: Per-aux callables; entries may be None to skip.
+            start_event: Unused on ROCm; CUDA-path fan-out event.
+            done_events: Unused on ROCm; CUDA-path per-aux join events.
+            aux_streams: Per-aux HIP streams. Length must match ``aux_fns``.
+            queue_aux_before_default: When True, queue aux kernels before
+                ``default_fn`` (``execute_in_parallel`` pattern).  When
+                False, run ``default_fn`` first (``maybe_execute_in_parallel``
+                pattern).
+
+        Returns:
+            Tuple of (default_result, aux_results).
+        """
+        assert aux_streams is not None
+        aux_results = [None] * len(aux_fns)
+
+        from vllm.forward_context import (
+            get_forward_context,
+            is_forward_context_available,
+        )
+
+        current_stream = None
+        if is_forward_context_available():
+            current_stream = get_forward_context().additional_kwargs.get("main_stream")
+        if current_stream is None:
+            current_stream = torch.cuda.current_stream()
+
+        pending: list[torch.cuda.Stream] = []
+
+        def _launch_aux() -> None:
+            for i, fn in enumerate(aux_fns):
+                if fn is None:
+                    continue
+                aux_stream = aux_streams[i]
+                aux_stream.wait_stream(current_stream)
+                with torch.cuda.stream(aux_stream):
+                    aux_results[i] = fn()
+                pending.append(aux_stream)
+
+        if queue_aux_before_default:
+            _launch_aux()
+            default_result = default_fn()
+        else:
+            default_result = default_fn()
+            _launch_aux()
+
+        for aux_stream in pending:
+            current_stream.wait_stream(aux_stream)
+
+        return default_result, aux_results
 
     @classmethod
     @with_amdsmi_context
