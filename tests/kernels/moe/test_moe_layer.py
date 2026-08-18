@@ -1628,15 +1628,9 @@ def _run_one_config(
 @pytest.mark.parametrize("num_experts", NUM_EXPERTS)
 @pytest.mark.parametrize("top_k", TOP_KS)
 @pytest.mark.parametrize("quantization", QUANT_METHODS)
-@pytest.mark.parametrize(
-    "use_routed_input_transform,use_gate,use_shared_experts",
-    [
-        (False, False, False),
-        (False, False, True),
-        (False, True, True),
-        (True, False, True),
-    ],
-)
+@pytest.mark.parametrize("use_shared_experts", [False, True])
+@pytest.mark.parametrize("use_gate", [False, True])
+@pytest.mark.parametrize("use_routed_input_transform", [False, True])
 def test_moe_layer_no_parallel(
     m: int,
     n: int,
