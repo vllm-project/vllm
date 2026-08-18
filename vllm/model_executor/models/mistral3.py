@@ -22,7 +22,7 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -42,7 +42,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
+from .pixtral import PixtralHFVisionModel
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -286,16 +286,20 @@ class Mistral3MultiModalProcessor(BaseMultiModalProcessor[Mistral3ProcessingInfo
         image_end_id = vocab[processor.image_end_token]
 
         assert isinstance(hf_config.vision_config, PixtralVisionConfig)
-        encoder_info = PixtralHFEncoderInfo(hf_config)
+        # Effective grid stride matches the Mistral3PatchMerger's post-merge
+        # token layout: one placeholder token per (patch_size * spatial_merge_size)
+        # region. Reading pixel_values.shape directly keeps ncols/nrows in
+        # lock-step with the HF image processor even when the caller overrides
+        # `size={"longest_edge": ...}` via mm_processor_kwargs.
+        patch_size = hf_config.vision_config.patch_size * hf_config.spatial_merge_size
 
         def get_replacement(item_idx: int):
-            images = mm_items.get_items("image", ImageProcessorItems)
-            image_size = images.get_image_size(item_idx)
-
-            ncols, nrows = encoder_info.get_patch_grid_size(
-                image_width=image_size.width,
-                image_height=image_size.height,
-            )
+            out_item = out_mm_kwargs["image"][item_idx]
+            pixel_values = out_item["pixel_values"].data
+            assert isinstance(pixel_values, torch.Tensor)
+            image_height, image_width = pixel_values.shape[-2:]
+            ncols = image_width // patch_size
+            nrows = image_height // patch_size
 
             tokens = ([image_token_id] * ncols + [image_break_id]) * nrows
             tokens[-1] = image_end_id
