@@ -11,12 +11,22 @@ def is_shared_expert_quant_fse_compatible(
     quant_config: "QuantizationConfig | None",
     expert_prefix: str,
     shared_expert_prefix: str,
+    projection_names: list[str] | None = None,
 ) -> tuple[bool, str | None]:
     """Check whether quantization permits fused shared-expert execution.
+
+    Args:
+        quant_config: Model quantization configuration.
+        expert_prefix: Routed-expert module prefix.
+        shared_expert_prefix: Shared-expert module prefix.
+        projection_names: Shared-expert projection names.
 
     Returns:
         A compatibility flag and, when incompatible, the reason.
     """
+    if projection_names is None:
+        projection_names = ["gate_up_proj", "down_proj"]
+
     if quant_config is None:
         return True, None
 
@@ -28,19 +38,31 @@ def is_shared_expert_quant_fse_compatible(
 
     if isinstance(quant_config, DeepseekV4FP8Config):
         from vllm.config import get_current_vllm_config
+        from vllm.model_executor.models.utils import extract_layer_index
 
         if quant_config.expert_dtype != "fp4":
             return False, "DeepSeek-V4 routed experts are not MXFP4"
 
-        quantization_config = getattr(
-            get_current_vllm_config().model_config.hf_config,
-            "quantization_config",
-            None,
-        )
+        hf_config = get_current_vllm_config().model_config.hf_config
+
+        # TODO: This is adapted from former `_shared_experts_are_fp4`, and
+        # needs to be cleaned up this . There should not be Quark-specific
+        # logic in DeepseekV4FP8Config.
+        if not quant_config._is_quark_mxfp4_ocp(hf_config):
+            return False, "DeepSeek-v4 FSE is only implemented/tested with Quark MXFP4"
+
+        quantization_config = getattr(hf_config, "quantization_config", None)
         if quantization_config is None:
             return False, "DeepSeek-V4 has no quantization configuration"
 
-        shared_expert_prefix = shared_expert_prefix.removeprefix("model.")
+        layer_idx = extract_layer_index(shared_expert_prefix)
+        if layer_idx >= hf_config.num_hidden_layers:
+            shared_expert_prefix = (
+                f"mtp.{layer_idx - hf_config.num_hidden_layers}.ffn.shared_experts"
+            )
+        else:
+            shared_expert_prefix = f"layers.{layer_idx}.ffn.shared_experts"
+
         if any(
             entry.startswith(shared_expert_prefix)
             for entry in quantization_config.get("exclude") or []
@@ -77,11 +99,11 @@ def is_shared_expert_quant_fse_compatible(
         )
         shared_expert_is_ignored = any(
             should_ignore_layer(
-                f"{shared_expert_prefix}.{projection}",
+                f"{shared_expert_prefix}.{projection_name}",
                 ignore=ignored_layers,
                 fused_mapping=quant_config.packed_modules_mapping,
             )
-            for projection in ("gate_up_proj", "down_proj")
+            for projection_name in projection_names
         )
         if expert_is_ignored or shared_expert_is_ignored:
             ignored_prefix = (
@@ -101,21 +123,40 @@ def is_shared_expert_quant_fse_compatible(
         return (
             False,
             "online quantization requires identical non-empty moe and linear "
-            f"quantization configurations; got moe={quant_config.args.moe!r}, "
-            f"linear={quant_config.args.linear!r}",
+            f"quantization configurations; got moe={quant_config.args.moe}, "
+            f"linear={quant_config.args.linear}",
         )
 
     if isinstance(quant_config, QuarkConfig):
-        # TODO: Check on `layer_quant_config`. There could be cases where
-        # `expert_prefix` and `shared_expert_prefix` have a different per-layer
-        # quantization config through `layer_quant_config`
+        assert "exclude" in quant_config.quant_config
+        assert "global_quant_config" in quant_config.quant_config
+
         is_compatible = not any(
             "shared_expert" in str(entry)
-            for entry in quant_config.quant_config.get("exclude", [])
+            for entry in quant_config.quant_config["exclude"]
         )
-        if is_compatible:
+        if not is_compatible:
+            return False, f"Quark excludes shared experts at {shared_expert_prefix}"
+
+        global_quant_config = quant_config.quant_config["global_quant_config"]
+        expert_quant_config = (
+            quant_config.get_layer_quant_config_from_name(expert_prefix)
+            or global_quant_config
+        )
+        shared_expert_quant_configs = [
+            quant_config.get_layer_quant_config_from_name(
+                f"{shared_expert_prefix}.{projection_name}"
+            )
+            or global_quant_config
+            for projection_name in projection_names
+        ]
+        if all(config == expert_quant_config for config in shared_expert_quant_configs):
             return True, None
-        return False, f"Quark excludes shared experts at {shared_expert_prefix}"
+        return (
+            False,
+            "Quark uses different quantization configurations for routed and "
+            f"shared experts at {shared_expert_prefix}",
+        )
 
     # TODO: Extend FSE support detection to other quantization methods. Typically,
     # one would check that the experts and shared_experts use the same
