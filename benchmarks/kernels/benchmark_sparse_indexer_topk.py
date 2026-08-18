@@ -39,6 +39,13 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--rows", nargs="+", type=int, default=ROWS)
     parser.add_argument("--kv-lengths", nargs="+", type=int, default=KV_LENGTHS)
+    parser.add_argument(
+        "--max-seq-len",
+        type=int,
+        help=(
+            "Allocate this row stride and pass it as the captured max sequence length."
+        ),
+    )
     parser.add_argument("--top-k", type=int, default=2048)
     parser.add_argument("--samples", type=int, default=7)
     parser.add_argument(
@@ -64,7 +71,7 @@ def _make_source(args: argparse.Namespace) -> torch.Tensor:
         if extra.shape[0] != source.shape[0]:
             raise ValueError("Captures must contain the same number of rows")
         source = torch.cat((source, extra), dim=1)
-    required = max(args.kv_lengths)
+    required = max(max(args.kv_lengths), args.max_seq_len or 0)
     if source.shape[1] < required:
         repeats = math.ceil(required / source.shape[1])
         source = source.repeat(1, repeats)
@@ -77,13 +84,13 @@ def _selector(
     output: torch.Tensor,
     workspace: torch.Tensor,
     top_k: int,
-    kv_length: int,
+    max_seq_len: int,
     backend_override: str,
 ) -> tuple[str, Callable[[], None]]:
     use_cooperative = logits.shape[0] <= 32
     use_decode = logits.dtype == torch.float16 and (
-        (kv_length <= 32768 and logits.shape[0] >= 512)
-        or (32768 < kv_length <= 131072 and logits.shape[0] >= 256)
+        (max_seq_len <= 32768 and logits.shape[0] >= 512)
+        or (32768 < max_seq_len <= 131072 and logits.shape[0] >= 256)
     )
     backend = (
         ("cooperative" if use_cooperative else "decode" if use_decode else "persistent")
@@ -96,7 +103,7 @@ def _selector(
 
         def launch() -> None:
             torch.ops._C.cooperative_topk(
-                logits, lengths, output, workspace, top_k, kv_length
+                logits, lengths, output, workspace, top_k, max_seq_len
             )
 
     elif backend == "decode":
@@ -119,7 +126,7 @@ def _selector(
 
         def launch() -> None:
             torch.ops._C.persistent_topk(
-                logits, lengths, output, workspace, top_k, kv_length
+                logits, lengths, output, workspace, top_k, max_seq_len
             )
 
     else:
@@ -128,15 +135,17 @@ def _selector(
     return backend, launch
 
 
-def _check_correctness(logits: torch.Tensor, output: torch.Tensor, top_k: int) -> None:
+def _check_correctness(
+    logits: torch.Tensor, output: torch.Tensor, top_k: int, kv_length: int
+) -> None:
     checked_rows = min(logits.shape[0], 32)
     actual = torch.gather(logits[:checked_rows], 1, output[:checked_rows].long())
     actual = actual.sort(dim=1, descending=True).values
-    expected = torch.topk(logits[:checked_rows], top_k, dim=1).values
+    expected = torch.topk(logits[:checked_rows, :kv_length], top_k, dim=1).values
     if not torch.equal(actual, expected):
         mismatch = (actual != expected).sum().item()
         raise AssertionError(f"Top-k selected values differ at {mismatch} positions")
-    if not bool(((output >= 0) & (output < logits.shape[1])).all()):
+    if not bool(((output >= 0) & (output < kv_length)).all()):
         raise AssertionError("Top-k returned an out-of-range index")
 
 
@@ -189,7 +198,12 @@ def main() -> None:
     for dtype_name in args.dtypes:
         dtype = dtype_by_name[dtype_name]
         for kv_length in args.kv_lengths:
-            base = source[:, :kv_length].to(dtype)
+            max_seq_len = args.max_seq_len or kv_length
+            if kv_length > max_seq_len:
+                raise ValueError(
+                    f"KV length {kv_length} exceeds max sequence length {max_seq_len}"
+                )
+            base = source[:, :max_seq_len].to(dtype)
             for rows in args.rows:
                 repeats = math.ceil(rows / base.shape[0])
                 logits = base.repeat(repeats, 1)[:rows].contiguous()
@@ -208,12 +222,12 @@ def main() -> None:
                     output,
                     workspace,
                     args.top_k,
-                    kv_length,
+                    max_seq_len,
                     args.backend,
                 )
                 launch()
                 torch.accelerator.synchronize()
-                _check_correctness(logits, output, args.top_k)
+                _check_correctness(logits, output, args.top_k, kv_length)
 
                 graph_calls, replays = _graph_parameters(rows * kv_length)
                 latency_us = _benchmark_graph(

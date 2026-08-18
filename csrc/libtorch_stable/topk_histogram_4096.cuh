@@ -78,6 +78,11 @@ __device__ __forceinline__ uint32_t score_to_ordered(__half x) {
                          : static_cast<uint16_t>(bits | 0x8000);
 }
 
+__device__ __forceinline__ uint32_t fp16_bits_to_ordered(uint16_t bits) {
+  return (bits & 0x8000) ? static_cast<uint16_t>(~bits)
+                         : static_cast<uint16_t>(bits | 0x8000);
+}
+
 // Converts each score to a 12-bit bin (FP16 sign-magnitude -> top 12 bits ->
 // bin 0-4095)
 template <uint32_t kBits>
@@ -131,12 +136,90 @@ __device__ __forceinline__ uint32_t warp_reduce_sum_full(uint32_t v) {
 }
 
 // ============================================================================
-// Tie refinement on ordered score keys. FP16 needs one low-byte pass after its
-// native coarse histogram; FP32 needs four passes because its coarse histogram
-// is based on an FP16 projection.
+// Tie refinement on ordered score keys. FP16 scans only the native key bits
+// below its coarse histogram. FP32 needs four radix passes because its coarse
+// histogram is based on an FP16 projection.
 // ============================================================================
 
-template <typename InputType, uint32_t TopK>
+template <uint32_t TopK, uint32_t FineBits>
+__device__ void tie_handle_fp16(const Tie* ties, uint32_t num_ties,
+                                uint32_t num_above, int32_t* output,
+                                void* _smem) {
+  constexpr uint32_t kFineBins = 1 << FineBits;
+  constexpr uint32_t kFineWarps = (kFineBins + kWarpSize - 1) / kWarpSize;
+  constexpr uint32_t kScanThreads = kFineWarps * kWarpSize;
+  constexpr uint32_t kPerThread = (TopK + kBlockSize - 1) / kBlockSize;
+  struct TS {
+    alignas(128) uint32_t counter;
+    alignas(128) MatchBin match;
+    uint32_t histogram[kFineBins];
+    uint32_t warp_sum[kFineWarps];
+  };
+  auto* s = static_cast<TS*>(_smem);
+  const auto tx = threadIdx.x;
+  const auto lane = tx % kWarpSize;
+
+  Tie my_ties[kPerThread];
+  bool active[kPerThread];
+#pragma unroll
+  for (uint32_t e = 0; e < kPerThread; e++) {
+    const uint32_t pos = e * kBlockSize + tx;
+    active[e] = pos < num_ties;
+    my_ties[e] = active[e] ? ties[pos] : Tie{0, 0};
+  }
+
+  if (tx < kFineBins) s->histogram[tx] = 0;
+  if (tx == 0) s->counter = 0;
+  __syncthreads();
+
+#pragma unroll
+  for (uint32_t e = 0; e < kPerThread; e++) {
+    if (active[e])
+      atomicAdd(&s->histogram[my_ties[e].key & (kFineBins - 1)], 1);
+  }
+  __syncthreads();
+
+  const uint32_t value = tx < kFineBins ? s->histogram[tx] : 0;
+  const uint32_t inclusive =
+      tx < kScanThreads ? warp_inclusive_sum(lane, value) : 0;
+  const uint32_t warp = tx / kWarpSize;
+  if (tx < kScanThreads) {
+    if (lane == kWarpSize - 1) s->warp_sum[warp] = inclusive;
+  }
+  __syncthreads();
+  if (tx < kScanThreads) {
+    uint32_t total = 0;
+    uint32_t prior = 0;
+#pragma unroll
+    for (uint32_t w = 0; w < kFineWarps; w++) {
+      total += s->warp_sum[w];
+      if (w < warp) prior += s->warp_sum[w];
+    }
+    const uint32_t above = total - prior - inclusive;
+    const uint32_t remaining = TopK - num_above;
+    if (tx < kFineBins && above < remaining && above + value >= remaining) {
+      s->match = {
+          .bin = tx, .above_count = above, .equal_count = remaining - above};
+    }
+  }
+  __syncthreads();
+
+  const auto threshold = s->match.bin;
+#pragma unroll
+  for (uint32_t e = 0; e < kPerThread; e++) {
+    if (!active[e]) continue;
+    const uint32_t bin = my_ties[e].key & (kFineBins - 1);
+    uint32_t pos = TopK;
+    if (bin > threshold) {
+      pos = num_above + atomicAdd(&s->counter, 1);
+    } else if (bin == threshold) {
+      pos = TopK - atomicAdd(&s->match.equal_count, -1u);
+    }
+    if (pos < TopK) output[pos] = my_ties[e].idx;
+  }
+}
+
+template <uint32_t TopK>
 __device__ void tie_handle(const Tie* ties, uint32_t num_ties,
                            uint32_t num_above, int32_t* output, void* _smem) {
   struct TS {
@@ -154,7 +237,7 @@ __device__ void tie_handle(const Tie* ties, uint32_t num_ties,
   const auto tie = has ? ties[tx] : Tie{0, 0};
   const uint32_t key = tie.key;
 
-  constexpr int kRadixRounds = std::is_same_v<InputType, __half> ? 1 : 4;
+  constexpr int kRadixRounds = 4;
 
   bool active = has;  // tracks whether this thread's tie is still a candidate.
   uint32_t remain =
@@ -163,9 +246,6 @@ __device__ void tie_handle(const Tie* ties, uint32_t num_ties,
   s->counter = 0;
   __syncthreads();
 
-  // FP16's coarse histogram already consumed its high key bits, so only the
-  // low byte remains. FP32 needs all four ordered-key bytes because its coarse
-  // histogram is based on an FP16 projection rather than a key prefix.
 #pragma unroll
   for (int r = 0; r < kRadixRounds; r++) {
     uint32_t sh = (kRadixRounds - 1 - r) * 8;
@@ -220,7 +300,7 @@ __device__ void tie_handle(const Tie* ties, uint32_t num_ties,
 // Extended tie_handle for TopK > kBlockSize (e.g. TopK=2048).
 // tie_handle assumes 1 tie per thread (max 1024).
 // This version handles 2 ties per thread via kPerThread=2
-template <typename InputType, uint32_t TopK>
+template <uint32_t TopK>
 __device__ void tie_handle_large(const Tie* ties, uint32_t num_ties,
                                  uint32_t num_above, int32_t* output,
                                  void* _smem) {
@@ -254,7 +334,7 @@ __device__ void tie_handle_large(const Tie* ties, uint32_t num_ties,
     }
   }
 
-  constexpr int kRadixRounds = std::is_same_v<InputType, __half> ? 1 : 4;
+  constexpr int kRadixRounds = 4;
 
   uint32_t remain = TopK - num_above;
   s->counter = 0;
@@ -371,6 +451,7 @@ __device__ void histogram_4096_topk(const InputType* __restrict__ scores,
   union InputVec {
     uint4 packed;
     InputType elems[ELEMS_PER_VEC];
+    uint16_t fp16_bits[sizeof(uint4) / sizeof(uint16_t)];
   };
 
   // Phase 1: Load all data into RF + build histogram
@@ -426,7 +507,12 @@ __device__ void histogram_4096_topk(const InputType* __restrict__ scores,
       if (idx >= length) {
         done = true;
       } else {
-        const auto bin = extract_input_coarse_bin<HIST_BITS>(vecs[v].elems[e]);
+        uint32_t bin;
+        if constexpr (std::is_same_v<InputType, __half>) {
+          bin = fp16_bits_to_ordered(vecs[v].fp16_bits[e]) >> (16 - HIST_BITS);
+        } else {
+          bin = extract_input_coarse_bin<HIST_BITS>(vecs[v].elems[e]);
+        }
         atomicAdd(&smem->histogram[bin], 1);
       }
     }
@@ -485,20 +571,31 @@ __device__ void histogram_4096_topk(const InputType* __restrict__ scores,
         done = true;
       } else {
         const auto raw_score = vecs[v].elems[e];
-        const uint32_t bin = extract_input_coarse_bin<HIST_BITS>(raw_score);
+        uint32_t key = 0;
+        uint32_t bin;
+        if constexpr (std::is_same_v<InputType, __half>) {
+          key = fp16_bits_to_ordered(vecs[v].fp16_bits[e]);
+          bin = key >> (16 - HIST_BITS);
+        } else {
+          bin = extract_input_coarse_bin<HIST_BITS>(raw_score);
+        }
         if (bin > thr_bin) {
-          output[atomicAdd(&smem->counter_gt, 1)] =
-              idx;  // above -> output directly
+          output[atomicAdd(&smem->counter_gt, 1)] = idx;
         } else if (bin == thr_bin) {
           const auto pos = atomicAdd(&smem->counter_eq, 1);
           if (!need_tie) {
             if (pos + num_above < TopK) {
-              output[pos + num_above] = idx;  // all fit
+              output[pos + num_above] = idx;
             }
           } else {
             if (pos < TopK) {
-              smem->tie_buffer[pos] = {
-                  idx, score_to_ordered(raw_score)};  // store for refinement
+              uint32_t tie_key;
+              if constexpr (std::is_same_v<InputType, __half>) {
+                tie_key = key;
+              } else {
+                tie_key = score_to_ordered(raw_score);
+              }
+              smem->tie_buffer[pos] = {idx, tie_key};
             }
           }
         }
@@ -569,12 +666,14 @@ __device__ void histogram_4096_topk(const InputType* __restrict__ scores,
     }
   } else {
     // Large tie count: fall back to 4-round radix-256 sort
-    if constexpr (TopK <= kBlockSize) {
-      tie_handle<InputType, TopK>(smem->tie_buffer, num_ties, num_above, output,
-                                  smem);
+    if constexpr (std::is_same_v<InputType, __half>) {
+      tie_handle_fp16<TopK, 16 - HIST_BITS>(smem->tie_buffer, num_ties,
+                                            num_above, output, smem);
+    } else if constexpr (TopK <= kBlockSize) {
+      tie_handle<TopK>(smem->tie_buffer, num_ties, num_above, output, smem);
     } else {
-      tie_handle_large<InputType, TopK>(smem->tie_buffer, num_ties, num_above,
-                                        output, smem);
+      tie_handle_large<TopK>(smem->tie_buffer, num_ties, num_above, output,
+                             smem);
     }
   }
 }

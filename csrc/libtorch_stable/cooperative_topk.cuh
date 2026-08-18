@@ -463,8 +463,12 @@ __device__ void large_topk(const InputType* __restrict__ row_input,
     return;
   }
 
-  // FP16 refines its native low key byte; FP32 refines all four key bytes.
-  if constexpr (TopK <= hist4096::kBlockSize) {
+  // Refine the score bits below the coarse histogram.
+  if constexpr (std::is_same_v<InputType, __half>) {
+    const uint32_t num_ties = min(s_total_equal, static_cast<uint32_t>(TopK));
+    hist4096::tie_handle_fp16<TopK, 16 - kHistBits>(
+        tie_ws, num_ties, s_total_above, row_output, smem);
+  } else if constexpr (TopK <= hist4096::kBlockSize) {
     // copy ties from tie_ws back to smem, then refine
     const uint32_t num_ties = min(s_total_equal, hist4096::kMaxTies);
     // TODO (roberto): could vectorize with uint2 (8 bytes = exactly one Tie)
@@ -472,13 +476,13 @@ __device__ void large_topk(const InputType* __restrict__ row_input,
       smem->tie_buffer[i] = hist4096::Tie{tie_ws[i].idx, tie_ws[i].key};
     }
     __syncthreads();
-    hist4096::tie_handle<InputType, TopK>(smem->tie_buffer, num_ties,
-                                          s_total_above, row_output, smem);
+    hist4096::tie_handle<TopK>(smem->tie_buffer, num_ties, s_total_above,
+                               row_output, smem);
   } else {
     // TopK=2048: process directly from tie_ws (GMEM)
     const uint32_t num_ties = min(s_total_equal, static_cast<uint32_t>(TopK));
-    hist4096::tie_handle_large<InputType, TopK>(tie_ws, num_ties, s_total_above,
-                                                row_output, smem);
+    hist4096::tie_handle_large<TopK>(tie_ws, num_ties, s_total_above,
+                                     row_output, smem);
   }
 }
 
