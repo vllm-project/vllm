@@ -15,6 +15,7 @@ from transformers import (
     SiglipVisionConfig,
 )
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
@@ -54,7 +55,6 @@ from vllm.multimodal.processing import (
     TimingContext,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsQuant
@@ -903,6 +903,7 @@ class SiglipTextEmbeddings(nn.Module):
 
 
 # Assume EOS token corresponds to CLS token in text model
+@support_torch_compile
 @default_pooling_type(seq_pooling_type="CLS")
 @MULTIMODAL_REGISTRY.register_processor(
     SiglipMultiModalProcessor,
@@ -992,38 +993,36 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         SigLIP position_ids are reversed within each sequence. This method detects
         sequence boundaries and flips each sequence individually.
         """
-        if len(features) == 1:
+        num_tokens = features.shape[0]
+        if num_tokens <= 1:
             return features
 
-        # Detect sequence boundaries where position_ids decrease
-        position_diffs = position_ids[1:] - position_ids[:-1]
-        boundary_mask = position_diffs <= 0
+        token_indices = torch.arange(num_tokens, device=features.device)
+        boundary_mask = position_ids[1:] <= position_ids[:-1]
 
-        with gpu_sync_allowed():
-            boundary_mid_cpu = torch.where(boundary_mask.cpu())[0] + 1
-
-        zero = torch.zeros(1, dtype=boundary_mid_cpu.dtype)
-        end = torch.full((1,), len(features), dtype=boundary_mid_cpu.dtype)
-        boundary_indices_cpu = torch.cat([zero, boundary_mid_cpu, end])
-
-        # For each sequence [start, end), position i flips to: start + end - 1 - i
-        lengths_cpu = boundary_indices_cpu[1:] - boundary_indices_cpu[:-1]
-        starts_cpu = boundary_indices_cpu[:-1]
-        ends_cpu = boundary_indices_cpu[1:]
-
-        # Assign sequence ID to each element
-        sequence_ids_cpu = torch.arange(
-            len(lengths_cpu), dtype=boundary_mid_cpu.dtype
-        ).repeat_interleave(lengths_cpu)
-
-        # Calculate flipped indices for all positions at once
-        current_positions_cpu = torch.arange(
-            len(features), dtype=boundary_mid_cpu.dtype
+        segment_starts = torch.cat(
+            (
+                torch.ones(1, dtype=torch.bool, device=position_ids.device),
+                boundary_mask,
+            )
         )
-        flip_indices_cpu = (
-            starts_cpu[sequence_ids_cpu] + ends_cpu[sequence_ids_cpu]
-        ) - (1 + current_positions_cpu)
-        flip_indices = flip_indices_cpu.to(features.device, non_blocking=True)
+        segment_ends = torch.cat(
+            (
+                boundary_mask,
+                torch.ones(1, dtype=torch.bool, device=position_ids.device),
+            )
+        )
+
+        rows = token_indices[:, None]
+        columns = token_indices[None, :]
+        starts = torch.where(
+            segment_starts[None, :] & (columns <= rows), columns, 0
+        ).amax(dim=1)
+        ends = torch.where(
+            segment_ends[None, :] & (columns >= rows), columns, num_tokens - 1
+        ).amin(dim=1)
+
+        flip_indices = starts + ends - token_indices
 
         return features[flip_indices]
 
