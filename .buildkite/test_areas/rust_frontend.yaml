@@ -58,7 +58,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
   # server_load can be flaky under the Rust frontend; keep it excluded for now.
-  - pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not show_version and not server_load"
+  - pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not server_load"
   # test_generate_logprobs expects Python-style top_logprobs truncation (dedup sampled + cap at max(k, 1)).
   - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py -k "not stream and not lora and not test_generate_logprobs and not stop_string_workflow"
   - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist"
@@ -108,6 +108,7 @@ steps:
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/utils.py
+  - tests/v1/distributed/test_dense_dp_world_size.py
   - tests/v1/distributed/test_external_lb_dp.py
   - tests/v1/distributed/test_hybrid_lb_dp.py
   - tests/v1/distributed/test_internal_lb_dp.py
@@ -115,6 +116,7 @@ steps:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - export NCCL_CUMEM_HOST_ENABLE=0
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_dense_dp_world_size.py
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py -k "not 4 and not server_info"
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k "not 4 and not server_info"
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py -k "not 4 and not server_info"
