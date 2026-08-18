@@ -45,6 +45,10 @@ MXFP4_CASES = [
     (8192, 1024, True),
 ]
 
+# The native MXFP8 selector keys on all of M, N and K, so these shapes are its
+# own -- see the note on its sweep below for what each one reaches.
+MXFP8_CASES = [(4096, 2048), (2048, 6144), (1024, 768), (1536, 1024), (1024, 384)]
+
 # The AITER MXFP4 selector switches on M alone -- the config is identical for
 # every (N, K) probed -- at 1/9/33/65/129/257/513, and M <= 8 is the only band
 # that splits K (NUM_KSPLIT=4). Straddle every boundary.
@@ -68,9 +72,9 @@ MXFP4_TOKEN_COUNTS = [
     2048,
 ]
 
-# The native MXFP8 selector keys on all of M, N and K. Together with the shapes
-# below these counts cover 11 distinct tile configurations, spanning every
-# BLOCK_K it can choose (128/256/512/1024) and BLOCK_M of 16, 64 and 128.
+# Together with MXFP8_CASES these counts cover 11 distinct tile configurations,
+# spanning every BLOCK_K the MXFP8 selector can choose (128/256/512/1024) and
+# BLOCK_M of 16, 64 and 128.
 MXFP8_TOKEN_COUNTS = [1, 32, 64, 65, 128, 129, 256, 257, 512, 1024, 1025, 2048]
 
 # Row 0 always sits at offset 0, so it lands in the first tile of every
@@ -167,24 +171,30 @@ def _reference_operands(fmt: str, n: int, k: int):
 
 
 @requires_mx
-@pytest.mark.parametrize("fmt", ["mxfp4", "mxfp8"])
-def test_scale_spread_exposes_reordering(fmt: str):
+@pytest.mark.parametrize(
+    "fmt,n,k",
+    [("mxfp4", n, k) for n, k, _ in MXFP4_CASES]
+    + [("mxfp8", n, k) for n, k in MXFP8_CASES],
+)
+def test_scale_spread_exposes_reordering(fmt: str, n: int, k: int):
     """Positive control for the sweeps below, not a test of the operands.
 
     Summing one K row in the opposite order has to move the bf16 result at
-    SCALE_SPREAD, or the invariance sweeps below are asserting nothing. MXFP4
-    needs the wide spread for this; MXFP8 carries enough mantissa that it holds
-    at any spread.
+    SCALE_SPREAD, or the invariance sweep over that shape is asserting nothing.
+    MXFP4 needs the wide spread for this; MXFP8 carries enough mantissa that it
+    holds at any spread. Parametrized over the swept shapes, since sensitivity
+    is a property of K as much as of the spread.
     """
     set_random_seed(SEED)
-    a, b = _reference_operands(fmt, 512, 2048)
+    a, b = _reference_operands(fmt, n, k)
 
     forward = torch.einsum("mk,nk->mn", a, b).to(torch.bfloat16)
     reverse = torch.einsum("mk,nk->mn", a.flip(-1), b.flip(-1)).to(torch.bfloat16)
     assert not torch.equal(forward, reverse), (
         f"reversing the K order leaves every {fmt} output bit unchanged at "
-        f"SCALE_SPREAD={SCALE_SPREAD}: the fp32 accumulation is exact for these "
-        f"operands, so the batch-invariance sweeps cannot fail"
+        f"SCALE_SPREAD={SCALE_SPREAD} (N={n}, K={k}): the fp32 accumulation is "
+        f"exact for these operands, so the batch-invariance sweep over this "
+        f"shape cannot fail"
     )
 
 
@@ -217,9 +227,7 @@ def test_mxfp4_linear_is_batch_invariant(n: int, k: int, use_asm_gemm: bool):
 
 
 @requires_mx
-@pytest.mark.parametrize(
-    "n,k", [(4096, 2048), (2048, 6144), (1024, 768), (1536, 1024), (1024, 384)]
-)
+@pytest.mark.parametrize("n,k", MXFP8_CASES)
 # The kernel writes the fp32 accumulator out in the activation dtype, so fp16
 # rounds the same reordering differently -- and sees more of it. With
 # VLLM_BATCH_INVARIANT=0 on gfx950 the unpinned BLOCK_K moves probe rows in
