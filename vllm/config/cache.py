@@ -165,15 +165,16 @@ class CacheConfig:
     """
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM logical history length B for Mamba2. Triton uses B physical
-    rows and FlashInfer uses B+1. Kimi-K3 speculative decode does not use B.
-    Default 16."""
+    rows and FlashInfer uses B+T, where T is the target verification length.
+    Kimi-K3 speculative decode does not use B. Default 16."""
     use_replayssm: bool = False
     """Use the ReplaySSM Mamba2 decode kernel: cache recent SSM inputs and skip
     the per-step full-state store, writing the checkpoint back only on flush.
     Requires mamba_cache_mode 'none' or 'align' (prefix caching) and the Triton
-    or FlashInfer mamba backend; standard (non-speculative) decode only. In align
-    mode flushes are most efficient when mamba_block_size is a multiple of
-    replayssm_buffer_len, but this is not required."""
+    or FlashInfer mamba backend. Mamba2 speculative decode requires FlashInfer
+    and mamba_cache_mode 'none'. In align mode flushes are most efficient when
+    mamba_block_size is a multiple of replayssm_buffer_len, but this is not
+    required."""
     use_kda_recoverssm: bool = field(default=False, init=False)
     """Whether Kimi-K3 KDA uses RecoverSSM speculative decode."""
 

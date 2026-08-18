@@ -28,6 +28,8 @@ class _TestReplaySSMMixer(MambaMixer2):
         self.replayssm_buffer_len = 16
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
+        self._replayssm_prev_query_len = torch.empty(0, dtype=torch.int32)
+        self._commits_replayssm_trackers = True
         self._updates_replayssm_trackers = True
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
@@ -66,6 +68,10 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
         == mixers[2]._replayssm_prev_num_accepted.data_ptr()
     )
     assert (
+        mixers[0]._replayssm_prev_query_len.data_ptr()
+        == mixers[2]._replayssm_prev_query_len.data_ptr()
+    )
+    assert (
         mixers[1]._replayssm_ring_start.data_ptr()
         != mixers[0]._replayssm_ring_start.data_ptr()
     )
@@ -73,12 +79,19 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group():
         mixers[1]._replayssm_prev_num_accepted.data_ptr()
         != mixers[0]._replayssm_prev_num_accepted.data_ptr()
     )
+    assert (
+        mixers[1]._replayssm_prev_query_len.data_ptr()
+        != mixers[0]._replayssm_prev_query_len.data_ptr()
+    )
     assert mixers[0]._replayssm_ring_start.shape == (4,)
     assert mixers[0]._replayssm_prev_num_accepted.shape == (4,)
+    assert mixers[0]._replayssm_prev_query_len.shape == (4,)
     assert mixers[0]._replayssm_ring_start.dtype == torch.int32
     assert mixers[0]._replayssm_ring_start.is_contiguous()
     assert torch.count_nonzero(mixers[0]._replayssm_ring_start) == 0
     assert torch.count_nonzero(mixers[0]._replayssm_prev_num_accepted) == 0
+    assert torch.count_nonzero(mixers[0]._replayssm_prev_query_len) == 0
+    assert [m._commits_replayssm_trackers for m in mixers] == [True, True, False]
     assert [m._updates_replayssm_trackers for m in mixers] == [False, True, True]
 
 

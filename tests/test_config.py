@@ -44,6 +44,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
             use_replayssm=True,
             use_kda_recoverssm=False,
             mamba_cache_mode="none",
+            replayssm_buffer_len=16,
         ),
         num_speculative_tokens=3,
         model_config=SimpleNamespace(
@@ -75,10 +76,22 @@ def test_kda_recoverssm_derivation_is_revalidated():
     config.cache_config.mamba_cache_mode = "none"
 
     config.model_config.architecture = "NemotronHForCausalLM"
-    with pytest.raises(ValueError, match="only supported for Kimi-K3 KDA"):
+    config.mamba_config.backend = MambaBackendEnum.FLASHINFER
+    VllmConfig.validate_mamba_cached_kernel(config)
+    assert not config.cache_config.use_kda_recoverssm
+
+    config.mamba_config.backend = MambaBackendEnum.TRITON
+    with pytest.raises(ValueError, match="requires --mamba-backend flashinfer"):
         VllmConfig.validate_mamba_cached_kernel(config)
 
+    config.mamba_config.backend = MambaBackendEnum.FLASHINFER
+    config.cache_config.replayssm_buffer_len = 3
+    with pytest.raises(ValueError, match="replayssm-buffer-len"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+    config.cache_config.replayssm_buffer_len = 16
+
     config.model_config.architecture = "KimiLinearForCausalLM"
+    config.mamba_config.backend = MambaBackendEnum.TRITON
     config.parallel_config.pipeline_parallel_size = 2
     with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
         VllmConfig.validate_mamba_cached_kernel(config)
@@ -122,6 +135,7 @@ def _replayssm_config(
         cache_config=SimpleNamespace(
             use_replayssm=True,
             mamba_cache_mode="none",
+            replayssm_buffer_len=16,
         ),
         model_config=None,
         num_speculative_tokens=0,
@@ -148,6 +162,14 @@ def test_v2_flashinfer_replayssm_is_supported():
     )
 
     assert VllmConfig.validate_mamba_cached_kernel(config) is config
+
+
+def test_flashinfer_replayssm_rejects_unsupported_buffer_length():
+    config = _replayssm_config(backend=MambaBackendEnum.FLASHINFER)
+    config.cache_config.replayssm_buffer_len = 17
+
+    with pytest.raises(ValueError, match="replayssm-buffer-len <= 16"):
+        VllmConfig.validate_mamba_cached_kernel(config)
 
 
 def test_rocm_defaults_deepseek_v4_to_mrv1(monkeypatch):

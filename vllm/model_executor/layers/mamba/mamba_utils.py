@@ -216,6 +216,7 @@ class MambaStateShapeCalculator:
         tp_world_size: int,
         logical_window: int,
         backend: MambaBackendEnum,
+        num_speculative_tokens: int = 0,
     ) -> tuple[tuple[int, ...], ...]:
         """Append the physical ReplaySSM ring shapes.
 
@@ -224,8 +225,8 @@ class MambaStateShapeCalculator:
         """
         ring_buffer_len = logical_window
         if backend == MambaBackendEnum.FLASHINFER:
-            # FlashInfer keeps the live window and appended token together.
-            ring_buffer_len += 1
+            # FlashInfer keeps the live window and current verify window together.
+            ring_buffer_len += 1 + num_speculative_tokens
         local_nheads, head_dim, state_size = base_shapes[1]
         local_ngroups = divide(n_groups, tp_world_size)
         return (
