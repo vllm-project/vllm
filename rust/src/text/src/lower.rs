@@ -188,6 +188,7 @@ pub fn lower_sampling_params(
         logprob_token_ids,
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
+        routed_experts_prompt_start: 0,
     };
     validate_resolved_sampling_params(&params)?;
     validate_vocab_range(&params, &sampling_limits)?;
@@ -645,6 +646,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -694,6 +696,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -859,6 +862,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -926,6 +930,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -986,6 +991,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -1235,6 +1241,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
