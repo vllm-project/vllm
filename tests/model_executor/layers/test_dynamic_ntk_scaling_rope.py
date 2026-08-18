@@ -1,14 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for DynamicNTKScalingRotaryEmbedding.
+"""Tests for dynamic NTK scaling below and above the trained context length."""
 
-Regression tests for a bug where serving a model below its trained
-context length drove the Dynamic NTK base negative, producing a complex
-RoPE cache with huge magnitudes that silently discarded its imaginary
-part when cast to a real dtype (see GH issue about NomicBert NaN
-embeddings at max_model_len < max_trained_positions).
-"""
-
+import pytest
 import torch
 
 from vllm.model_executor.layers.rotary_embedding.dynamic_ntk_scaling_rope import (
@@ -29,57 +23,30 @@ def _make_rope(max_position_embeddings: int, max_trained_positions: int = 2048):
     )
 
 
-class TestDynamicNTKScalingRotaryEmbeddingBelowTrainedLength:
-    def test_served_below_trained_length_is_real_and_finite(self, default_vllm_config):
-        rope = _make_rope(max_position_embeddings=512, max_trained_positions=2048)
-        cache = rope._compute_cos_sin_cache()
-        assert not cache.is_complex()
-        assert torch.isfinite(cache).all()
-        assert cache.abs().max().item() <= 1.0
-
-    def test_served_below_trained_length_matches_unscaled_base(
-        self, default_vllm_config
-    ):
-        # Below the trained length, NTK scaling should not kick in: the
-        # cache should match plain RoPE with the original base.
-        rope = _make_rope(max_position_embeddings=512, max_trained_positions=2048)
-        plain_inv_freq = rope._compute_inv_freq(rope.base)
-        plain_cache = _reference_cache(rope.max_position_embeddings, plain_inv_freq)
-        assert torch.allclose(rope._compute_cos_sin_cache(), plain_cache)
-
-    def test_served_at_trained_length_is_real_and_finite(self, default_vllm_config):
-        rope = _make_rope(max_position_embeddings=2048, max_trained_positions=2048)
-        cache = rope._compute_cos_sin_cache()
-        assert not cache.is_complex()
-        assert torch.isfinite(cache).all()
-        assert cache.abs().max().item() <= 1.0
-
-    def test_served_above_trained_length_still_applies_ntk_scaling(
-        self, default_vllm_config
-    ):
-        # Extension behavior above the trained length must be unchanged: the
-        # cache should match the original (pre-guard) NTK formula exactly,
-        # not merely differ from plain, unscaled RoPE.
-        rope = _make_rope(max_position_embeddings=4096, max_trained_positions=2048)
-        cache = rope._compute_cos_sin_cache()
-        assert not cache.is_complex()
-        assert torch.isfinite(cache).all()
-
-        legacy_base = rope.base * (
-            (
-                rope.scaling_factor
-                * rope.max_position_embeddings
-                / rope.max_trained_positions
-            )
-            - (rope.scaling_factor - 1)
-        ) ** (rope.rotary_dim / (rope.rotary_dim - 2))
-        legacy_cache = _reference_cache(
-            rope.max_position_embeddings, rope._compute_inv_freq(legacy_base)
-        )
-        assert torch.allclose(cache, legacy_cache)
-
-
-def _reference_cache(max_position_embeddings: int, inv_freq: torch.Tensor):
+def _compute_cache(max_position_embeddings: int, inv_freq: torch.Tensor):
     t = torch.arange(max_position_embeddings, dtype=torch.float)
     freqs = torch.einsum("i,j -> ij", t, inv_freq)
     return torch.cat((freqs.cos(), freqs.sin()), dim=-1)
+
+
+@pytest.mark.parametrize("max_position_embeddings", [512, 2048])
+def test_no_scaling_at_or_below_trained_length(
+    default_vllm_config, max_position_embeddings
+):
+    rope = _make_rope(max_position_embeddings)
+    expected = _compute_cache(
+        max_position_embeddings, rope._compute_inv_freq(rope.base)
+    )
+    assert torch.allclose(rope._compute_cos_sin_cache(), expected)
+
+
+def test_scaling_above_trained_length(default_vllm_config):
+    rope = _make_rope(4096)
+    scaled_base = rope.base * (
+        rope.scaling_factor * rope.max_position_embeddings / rope.max_trained_positions
+        - (rope.scaling_factor - 1)
+    ) ** (rope.rotary_dim / (rope.rotary_dim - 2))
+    expected = _compute_cache(
+        rope.max_position_embeddings, rope._compute_inv_freq(scaled_base)
+    )
+    assert torch.allclose(rope._compute_cos_sin_cache(), expected)

@@ -56,10 +56,7 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
         # Thus, the maximum length after applying the rope scaling is
         # self.max_position_embeddings * self.scaling_factor.
         if self.max_position_embeddings <= self.max_trained_positions:
-            # Serving at or below the trained length is ordinary truncation:
-            # keep the original base. Applying the NTK formula here can drive
-            # its base negative, producing a complex (and effectively
-            # unbounded) cache once raised to a fractional power.
+            # Dynamic NTK scaling is only needed beyond the trained context length.
             base = self.base
         else:
             base = self.base * (
