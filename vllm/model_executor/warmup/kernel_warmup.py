@@ -33,6 +33,9 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
 from vllm.model_executor.warmup.kimi_k3_triton_warmup import (
     kimi_k3_triton_warmup,
 )
+from vllm.model_executor.warmup.mhc_cutedsl_warmup import (
+    mhc_cutedsl_warmup,
+)
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
 from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
     sparse_mla_triton_warmup,
@@ -140,6 +143,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     # Run next so input-prep kernels JIT against pristine runner state.
     if worker.vllm_config.kernel_config.enable_jit_warmup:
         kimi_k3_triton_warmup(worker)
+        mhc_cutedsl_warmup(worker)
         fa4_cutedsl_warmup(worker)
         sparse_mla_triton_warmup(worker)
 
