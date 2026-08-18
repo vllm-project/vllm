@@ -570,58 +570,115 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
 
 
 class TestNixlHandshake:
+    @pytest.mark.parametrize("pcp_rank", [0, 1])
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
     )
-    def test_pcp_producer_publishes_one_replicated_kv_cache(
-        self, default_vllm_config, dist_init
+    def test_pcp_producer_uses_canonical_replica(
+        self, default_vllm_config, dist_init, pcp_rank
     ):
-        """PCP expands workers, but rank zero is the sole NIXL producer."""
+        """Only PCP rank zero publishes and reports sending completion."""
         vllm_config = create_vllm_config(kv_role="kv_producer")
-        connector = NixlConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            make_kv_cache_config(block_size=16),
-        )
         vllm_config.parallel_config.prefill_context_parallel_size = 2
+        with (
+            patch(
+                "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
+                "base_worker.get_current_attn_backends",
+                return_value=[FlashAttentionBackend],
+            ),
+            patch(
+                "vllm.distributed.kv_transfer.kv_connector.v1.nixl."
+                "base_worker.get_pcp_group"
+            ) as mock_get_pcp_group,
+        ):
+            mock_get_pcp_group.return_value.rank_in_group = pcp_rank
+            connector = NixlConnector(
+                vllm_config,
+                KVConnectorRole.WORKER,
+                make_kv_cache_config(block_size=16),
+            )
+
         worker = connector.connector_worker
         assert worker is not None
+        assert worker.pcp_rank == pcp_rank
         payload = MagicMock(spec=NixlHandshakePayload)
         worker.xfer_handshake_metadata = payload
-
-        worker.pcp_rank = 0
-        assert connector.get_handshake_metadata() is payload
-
-        worker.pcp_rank = 1
-        assert connector.get_handshake_metadata() is None
-
-    @patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
-        FakeNixlWrapper,
-    )
-    def test_pcp_producer_counts_only_the_published_replica(
-        self, default_vllm_config, dist_init
-    ):
-        """Completion aggregation must not wait for duplicate PCP replicas."""
-        vllm_config = create_vllm_config(kv_role="kv_producer")
-        connector = NixlConnector(
-            vllm_config,
-            KVConnectorRole.WORKER,
-            make_kv_cache_config(block_size=16),
-        )
-        vllm_config.parallel_config.prefill_context_parallel_size = 2
-        worker = connector.connector_worker
-        assert worker is not None
-        worker.pcp_rank = 1
         worker.get_finished = MagicMock(return_value=({"sent"}, {"received"}))
 
+        expected_payload = payload if pcp_rank == 0 else None
+        assert connector.get_handshake_metadata() is expected_payload
         done_sending, done_recving = connector.get_finished(set())
-
-        assert done_sending == set()
+        assert done_sending == ({"sent"} if pcp_rank == 0 else set())
         assert done_recving == {"received"}
+
+    @pytest.mark.parametrize(
+        ("kv_role", "dcp_size", "error_match"),
+        [
+            (
+                "kv_producer",
+                2,
+                "PCP producers.*decode_context_parallel_size=1",
+            ),
+            (
+                "kv_consumer",
+                1,
+                "Consumers and kv_both.*prefill_context_parallel_size=1",
+            ),
+            (
+                "kv_both",
+                1,
+                "Consumers and kv_both.*prefill_context_parallel_size=1",
+            ),
+        ],
+    )
+    def test_rejects_unsupported_pcp_topology(self, kv_role, dcp_size, error_match):
+        vllm_config = create_vllm_config(kv_role=kv_role)
+        parallel_config = vllm_config.parallel_config
+        parallel_config.prefill_context_parallel_size = 2
+        parallel_config.decode_context_parallel_size = dcp_size
+
+        with pytest.raises(NotImplementedError, match=error_match):
+            NixlConnector(
+                vllm_config,
+                KVConnectorRole.SCHEDULER,
+                make_kv_cache_config(block_size=16),
+            )
+
+    def test_pcp_producer_uses_distinct_send_recv_counts(self):
+        """Canonical sends and bidirectional receives have different fan-in."""
+        vllm_config = create_vllm_config(kv_role="kv_producer")
+        parallel_config = vllm_config.parallel_config
+        parallel_config.prefill_context_parallel_size = 2
+        parallel_config.world_size = 2
+        connector = NixlConnector(
+            vllm_config,
+            KVConnectorRole.SCHEDULER,
+            make_kv_cache_config(block_size=16),
+        )
         aggregator = KVOutputAggregator.from_connector(connector, world_size=2)
-        assert aggregator._expected_finished_count == 1
+
+        aggregated = aggregator.aggregate(
+            [
+                SimpleNamespace(
+                    kv_connector_output=KVConnectorOutput(
+                        finished_sending={"send"},
+                        finished_recving={"recv"},
+                    )
+                )
+            ]
+        )
+        assert aggregated.kv_connector_output.finished_sending == {"send"}
+        assert aggregated.kv_connector_output.finished_recving is None
+
+        aggregated = aggregator.aggregate(
+            [
+                SimpleNamespace(
+                    kv_connector_output=KVConnectorOutput(finished_recving={"recv"})
+                )
+            ]
+        )
+        assert aggregated.kv_connector_output.finished_recving == {"recv"}
 
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",

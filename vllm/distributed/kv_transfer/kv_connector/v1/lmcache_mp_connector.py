@@ -985,7 +985,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
             )
         return None
 
-    def get_finished_count(self) -> int | None:
+    def get_finished_count(self) -> tuple[int, int] | None:
         """
         Get the count of requests expected to complete send/receive operations
         via this connector. This method is used to initialize the

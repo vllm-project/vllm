@@ -131,6 +131,21 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
                 "kv_role='kv_consumer' for decode instances. "
             )
 
+        parallel_config = vllm_config.parallel_config
+        pcp_size = parallel_config.prefill_context_parallel_size
+        kv_role = vllm_config.kv_transfer_config.kv_role
+        if pcp_size > 1 and kv_role in ("kv_consumer", "kv_both"):
+            raise NotImplementedError(
+                "NixlConnector PCP currently supports kv_producer only. "
+                "Consumers and kv_both require "
+                "prefill_context_parallel_size=1."
+            )
+        if pcp_size > 1 and parallel_config.decode_context_parallel_size > 1:
+            raise NotImplementedError(
+                "NixlConnector PCP producers currently require "
+                "decode_context_parallel_size=1."
+            )
+
         self.kv_cache_config = kv_cache_config
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
         self.kv_transfer_config = vllm_config.kv_transfer_config
@@ -164,15 +179,19 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler Side Methods
     ############################################################
 
-    def get_finished_count(self) -> int | None:
+    def get_finished_count(self) -> tuple[int, int] | None:
         parallel_config = self._vllm_config.parallel_config
         if (
             self.kv_transfer_config.kv_role == "kv_producer"
             and parallel_config.prefill_context_parallel_size > 1
         ):
-            return (
+            expected_finished_sending_count = (
                 parallel_config.tensor_parallel_size
                 * parallel_config.pipeline_parallel_size
+            )
+            return (
+                expected_finished_sending_count,
+                parallel_config.world_size,
             )
         return None
 

@@ -55,16 +55,26 @@ class KVOutputAggregator:
     """Utility class to aggregate the output of all workers into a single
     output corresponding to Rank 0 for scheduler."""
 
-    def __init__(self, expected_finished_count: int):
+    def __init__(
+        self,
+        expected_finished_count: int,
+        expected_finished_recving_count: int | None = None,
+    ):
         # Complete transfer tracker. Used to track finished requests
         # [req_id -> n_remaining_workers]
         self._recv_remaining_count = dict[str, int]()
         self._send_remaining_count = dict[str, int]()
-        self._expected_finished_count = expected_finished_count
+        self._expected_finished_sending_count = expected_finished_count
+        self._expected_finished_recving_count = (
+            expected_finished_count
+            if expected_finished_recving_count is None
+            else expected_finished_recving_count
+        )
 
     @classmethod
     def from_connector(cls, connector: "KVConnectorBase", world_size: int):
-        return cls(connector.get_finished_count() or world_size)
+        expected_counts = connector.get_finished_count()
+        return cls(world_size) if expected_counts is None else cls(*expected_counts)
 
     def aggregate(
         self, outputs: list[ModelRunnerOutput | None], output_rank: int = 0
@@ -78,10 +88,11 @@ class KVOutputAggregator:
             req_ids: set[str] | None,
             remaining_count_dict: dict[str, int],
             finished_set: set[str],
+            expected_finished_count: int,
         ) -> None:
             for req_id in req_ids or ():
                 remaining_count = remaining_count_dict.get(
-                    req_id, self._expected_finished_count
+                    req_id, expected_finished_count
                 )
                 remaining_count_dict[req_id] = remaining_count - 1
                 if remaining_count_dict[req_id] == 0:
@@ -101,22 +112,36 @@ class KVOutputAggregator:
                 continue
             # Allow the worker to dynamically update the expected number of
             # finished sending/recving for new requests.
-            if (
-                kv_output.expected_finished_count > 0
-                and kv_output.expected_finished_count != self._expected_finished_count
+            if kv_output.expected_finished_count > 0 and (
+                kv_output.expected_finished_count
+                != self._expected_finished_sending_count
+                or kv_output.expected_finished_count
+                != self._expected_finished_recving_count
             ):
                 logger.debug(
-                    "Expected finished requests updated from %d to %d",
-                    self._expected_finished_count,
+                    "Expected finished requests updated from (%d, %d) to %d",
+                    self._expected_finished_sending_count,
+                    self._expected_finished_recving_count,
                     kv_output.expected_finished_count,
                 )
-                self._expected_finished_count = kv_output.expected_finished_count
+                self._expected_finished_sending_count = (
+                    kv_output.expected_finished_count
+                )
+                self._expected_finished_recving_count = (
+                    kv_output.expected_finished_count
+                )
 
             update_finished_set(
-                kv_output.finished_sending, self._send_remaining_count, finished_sending
+                kv_output.finished_sending,
+                self._send_remaining_count,
+                finished_sending,
+                self._expected_finished_sending_count,
             )
             update_finished_set(
-                kv_output.finished_recving, self._recv_remaining_count, finished_recving
+                kv_output.finished_recving,
+                self._recv_remaining_count,
+                finished_recving,
+                self._expected_finished_recving_count,
             )
 
             # Aggregate kv_connector_stats from all workers.
@@ -168,7 +193,12 @@ class KVOutputAggregator:
             kv_cache_events=combined_kv_cache_events or None,
             kv_connector_worker_meta=aggregated_kv_connector_worker_meta or None,
             invalid_block_ids=invalid_block_ids,
-            expected_finished_count=self._expected_finished_count,
+            expected_finished_count=(
+                self._expected_finished_sending_count
+                if self._expected_finished_sending_count
+                == self._expected_finished_recving_count
+                else 0
+            ),
         )
 
         return output
