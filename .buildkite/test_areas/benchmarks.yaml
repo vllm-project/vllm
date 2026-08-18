@@ -2,7 +2,7 @@ group: Benchmarks
 depends_on: 
   - image-build
 steps:
-- label: Benchmarks CLI Test
+- label: ":nvidia: (H200) Benchmarks CLI"
   key: benchmarks-cli-test
   timeout_in_minutes: 45
   device: h200_18gb
@@ -14,13 +14,14 @@ steps:
   - pytest -v -s benchmarks/
   mirror:
     amd:
+      label: ":amd: (MI300) Benchmarks CLI"
       dind: false
       device: mi300_1
       timeout_in_minutes: 40
       depends_on:
       - image-build-amd
 
-- label: Attention Benchmarks Smoke Test (B200)
+- label: ":nvidia: (B200) Attention Benchmark Smoke"
   key: attention-benchmarks-smoke-test-b200
   device: b200-k8s
   num_gpus: 2

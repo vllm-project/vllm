@@ -2,7 +2,7 @@ group: Expert Parallelism
 depends_on: 
   - image-build
 steps:
-- label: EPLB Algorithm
+- label: ":nvidia: (H200) EPLB Algorithm"
   key: eplb-algorithm
   timeout_in_minutes: 20
   device: h200_18gb
@@ -16,6 +16,7 @@ steps:
   - pytest -v -s distributed/test_eplb_utils.py
   mirror:
     amd:
+      label: ":amd: (MI300) EPLB Algorithm"
       dind: false
       device: mi300_1
       timeout_in_minutes: 30
@@ -27,7 +28,7 @@ steps:
       - tests/distributed/test_eplb_utils.py
       - vllm/platforms/rocm.py
 
-- label: EPLB Execution # 17min
+- label: ":nvidia: (L4) EPLB Execution"
   key: eplb-execution
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
@@ -39,7 +40,7 @@ steps:
   - pytest -v -s distributed/test_eplb_execute.py
   - pytest -v -s distributed/test_eplb_spec_decode.py
 
-- label: Elastic EP Scaling Test
+- label: ":nvidia: (H100) Elastic EP Scaling"
   key: elastic-ep-scaling-test
   timeout_in_minutes: 30
   device: h100

@@ -2,7 +2,7 @@ group: Disaggregated Mooncake
 depends_on:
   - image-build
 steps:
-- label: Distributed MooncakeConnector PD accuracy (4 GPUs)
+- label: ":nvidia: (B200) Distributed MooncakeConnector PD accuracy"
   key: distributed-mooncakeconnector-pd-accuracy-4-gpus
   timeout_in_minutes: 10
   working_dir: "/vllm-workspace/tests"

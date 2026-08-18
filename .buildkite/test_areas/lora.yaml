@@ -2,7 +2,7 @@ group: LoRA
 depends_on: 
   - image-build
 steps:
-- label: LoRA %N
+- label: ":nvidia: (H200) LoRA Shard %N"
   device: h200_35gb
   key: lora
   timeout_in_minutes: 40
@@ -14,6 +14,7 @@ steps:
   parallelism: 4
   mirror:
     amd:
+      label: ":amd: (MI300) LoRA Shard %N"
       dind: false
       device: mi300_1
       working_dir: "/vllm-workspace/tests"
@@ -26,7 +27,7 @@ steps:
       - image-build-amd
 
 
-- label: LoRA TP (Distributed)
+- label: ":nvidia: (L4) LoRA TP (Distributed)"
   key: lora-tp-distributed
   timeout_in_minutes: 60
   num_devices: 4
