@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEMethodBase,
+)
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+    MoERunner,
+    _moe_forward,
+)
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import SharedExperts
 
 
@@ -36,6 +42,9 @@ def _runner_with_fused_shared_method() -> tuple[MoERunner, MagicMock]:
     runner.routed_experts.quant_method = quant_method
     runner.router = MagicMock()
     runner.routed_scaling_factor = 2.5
+    runner.routed_output_transform = None
+    runner._raw_shared_experts = raw_shared
+    runner.enable_dbo = False
     return runner, raw_shared
 
 
@@ -78,9 +87,77 @@ def test_fused_shared_method_does_not_rescale_combined_output():
 
 def test_fused_shared_method_uses_single_output_custom_op_schema():
     runner, _ = _runner_with_fused_shared_method()
-    runner.routed_experts.quant_method = SimpleNamespace(
-        mk_fuses_shared_experts=True,
-    )
-    output = torch.randn(2, 8)
 
-    assert runner._maybe_combine(None, output) is output
+    with patch(
+        "vllm.model_executor.layers.fused_moe.runner.moe_runner."
+        "current_platform.is_cpu",
+        return_value=True,
+    ):
+        assert runner._select_forward() is _moe_forward
+
+
+@pytest.mark.parametrize(
+    "disabled_attribute",
+    ["shard_sequence_parallel", "use_fi_nvl_two_sided_kernels"],
+)
+def test_fused_shared_method_skips_separate_shared_when_overlap_is_disabled(
+    disabled_attribute,
+):
+    runner, raw_shared = _runner_with_fused_shared_method()
+    if disabled_attribute == "shard_sequence_parallel":
+        raw_shared.shard_sequence_parallel = True
+    else:
+        runner.moe_config.moe_parallel_config.use_fi_nvl_two_sided_kernels = True
+    hidden_states = torch.randn(2, 8)
+    runner.router.select_experts.return_value = (
+        torch.randn(2, 2),
+        torch.zeros(2, 2, dtype=torch.int32),
+    )
+    runner.routed_experts.forward_modular.return_value = torch.randn_like(hidden_states)
+
+    runner._apply_quant_method(
+        hidden_states,
+        torch.randn(2, 4),
+        shared_experts_input=hidden_states,
+    )
+
+    raw_shared.assert_not_called()
+    assert runner._shared_experts._output == [None, None]
+
+
+def test_replace_quant_method_rebinds_and_reselects_forward():
+    runner, raw_shared = _runner_with_fused_shared_method()
+    replacement = MagicMock()
+    replacement.mk_fuses_shared_experts = False
+    replacement.supports_dbo = True
+    selected_forward = object()
+    runner._select_forward = MagicMock(return_value=selected_forward)
+    runner.routed_experts._replace_quant_method.side_effect = lambda method: setattr(
+        runner.routed_experts, "quant_method", method
+    )
+
+    runner._replace_quant_method(replacement)
+
+    replacement.bind_shared_experts.assert_called_once_with(
+        raw_shared,
+        routed_output_transform=None,
+    )
+    replacement.bind_routed_scaling_factor.assert_called_once_with(2.5)
+    assert runner._forward_entry is selected_forward
+
+
+def test_runner_rejects_dbo_for_unsupported_method():
+    runner, _ = _runner_with_fused_shared_method()
+    runner.enable_dbo = True
+    runner.routed_experts.quant_method.supports_dbo = False
+
+    with pytest.raises(NotImplementedError, match="does not support DBO"):
+        runner._bind_quant_method()
+
+
+def test_fused_method_without_scaling_bind_fails_closed():
+    method = MagicMock(spec=FusedMoEMethodBase)
+    method.mk_fuses_shared_experts = True
+
+    with pytest.raises(NotImplementedError, match="routed_scaling_factor"):
+        FusedMoEMethodBase.bind_routed_scaling_factor(method, 2.0)
