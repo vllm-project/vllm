@@ -479,6 +479,8 @@ def test_models_fse_init(
         is_mm_prefix_lm=False,
         multimodal_config=None,
         quantization_config=None,
+        runner_type="generate",
+        is_moe=True,
     )
     vllm_config.parallel_config.enable_expert_parallel = False
     if model_type == "deepseek_v4":
