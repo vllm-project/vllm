@@ -3,11 +3,14 @@
 import torch
 
 from vllm.multimodal.inputs import (
+    MultiModalBatchedField,
     MultiModalFeatureSpec,
+    MultiModalFieldElem,
     MultiModalKwargsItem,
     PlaceholderRange,
 )
-from vllm.v1.core.sched.output import NewRequestData, strip_covered_mm_data
+from vllm.multimodal.utils import strip_covered_mm_data
+from vllm.v1.core.sched.output import NewRequestData
 
 
 def _create_new_requests_data(prompt_embeds: torch.Tensor | None) -> NewRequestData:
@@ -80,3 +83,41 @@ def test_strip_covered_mm_data_zero_computed() -> None:
     features = [_mm_feature(offset=0, length=100)]
     stripped = strip_covered_mm_data(features, num_computed_tokens=0)
     assert stripped[0].data is not None
+
+
+def _mm_feature_mixed(offset: int, length: int) -> MultiModalFeatureSpec:
+    data = MultiModalKwargsItem(
+        {
+            "pixel_values": MultiModalFieldElem(
+                data=torch.empty(4), field=MultiModalBatchedField()
+            ),
+            "image_grid_thw": MultiModalFieldElem(
+                data=torch.ones(1, 3, dtype=torch.long),
+                field=MultiModalBatchedField(keep_on_cpu=True),
+            ),
+        }
+    )
+    return MultiModalFeatureSpec(
+        data=data,
+        mm_position=PlaceholderRange(offset=offset, length=length),
+        identifier=f"hash_{offset}",
+        modality="image",
+    )
+
+
+def test_strip_covered_mm_data_mrope() -> None:
+    """For M-RoPE models, covered items keep their keep_on_cpu metadata fields
+    (the worker needs them to compute positions); payload fields are dropped."""
+    covered = _mm_feature_mixed(offset=0, length=100)
+    uncovered = _mm_feature_mixed(offset=300, length=100)
+
+    stripped = strip_covered_mm_data(
+        [covered, uncovered], num_computed_tokens=250, uses_mrope=True
+    )
+
+    assert stripped[0].data is not None
+    assert list(stripped[0].data.keys()) == ["image_grid_thw"]
+    assert stripped[1].data is not None
+    assert set(stripped[1].data.keys()) == {"pixel_values", "image_grid_thw"}
+    # original list is not mutated
+    assert set(covered.data.keys()) == {"pixel_values", "image_grid_thw"}
