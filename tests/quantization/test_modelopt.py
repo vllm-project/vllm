@@ -144,13 +144,16 @@ def test_modelopt_fp8_updates_weight_dims_after_transpose():
 def test_modelopt_fp8_pb_wo_dequantizes_standard_block_scales():
     layer = torch.nn.Module()
     layer.quant_method = object.__new__(ModelOptFp8PbWoLinearMethod)
-    layer.weight = torch.ones((128, 128), dtype=torch.float8_e4m3fn)
-    layer.weight_scale = torch.full((1, 1), 0.25, dtype=torch.float32)
+    layer.weight = torch.ones((256, 256), dtype=torch.float8_e4m3fn)
+    layer.weight_scale = torch.tensor([[0.25, 0.5], [0.75, 1.0]], dtype=torch.float32)
     layer.weight_block_size = [128, 128]
 
     weight = get_and_maybe_dequant_weights(layer)
+    expected = layer.weight_scale.repeat_interleave(128, dim=0).repeat_interleave(
+        128, dim=1
+    )
 
-    torch.testing.assert_close(weight, torch.full((128, 128), 0.25))
+    torch.testing.assert_close(weight, expected)
 
 
 def test_modelopt_nvfp4_leaves_excluded_parallel_lm_head_unquantized():
