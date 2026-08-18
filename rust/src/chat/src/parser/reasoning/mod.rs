@@ -7,8 +7,8 @@ use std::sync::{Arc, LazyLock};
 
 pub use vllm_parser::reasoning::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
-    DeepSeekV4ReasoningParser, Glm45ReasoningParser, Glm47ReasoningParser, KimiK2ReasoningParser,
-    KimiReasoningParser, MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser,
+    DeepSeekV4ReasoningParser, Ernie45ReasoningParser, Glm45ReasoningParser, Glm47ReasoningParser,
+    KimiK2ReasoningParser, KimiReasoningParser, MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser,
     NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningError,
     ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser, Step3p5ReasoningParser,
 };
@@ -22,6 +22,7 @@ pub mod names {
     pub const DEEPSEEK_R1: &str = "deepseek_r1";
     pub const DEEPSEEK_V3: &str = "deepseek_v3";
     pub const DEEPSEEK_V4: &str = "deepseek_v4";
+    pub const ERNIE45: &str = "ernie45";
     pub const GLM45: &str = "glm45";
     pub const GLM47: &str = "glm47";
     pub const KIMI: &str = "kimi";
@@ -62,6 +63,7 @@ impl ReasoningParserFactory {
             .register_parser::<DeepSeekR1ReasoningParser>(names::DEEPSEEK_R1)
             .register_parser::<DeepSeekV3ReasoningParser>(names::DEEPSEEK_V3)
             .register_parser::<DeepSeekV4ReasoningParser>(names::DEEPSEEK_V4)
+            .register_parser::<Ernie45ReasoningParser>(names::ERNIE45)
             .register_parser::<Glm45ReasoningParser>(names::GLM45)
             .register_parser::<Glm47ReasoningParser>(names::GLM47)
             .register_parser::<KimiReasoningParser>(names::KIMI)
@@ -79,6 +81,9 @@ impl ReasoningParserFactory {
             .register_pattern("deepseek-v4", names::DEEPSEEK_V4)
             .register_pattern("deepseek_v4", names::DEEPSEEK_V4)
             .register_pattern("deepseek-v3", names::DEEPSEEK_V3)
+            // Only the ERNIE-4.5 thinking checkpoint has `<think>` tokens and a
+            // reasoning template; the `*-PT` text checkpoints have neither.
+            .register_pattern("ernie-4.5-21b-a3b-thinking", names::ERNIE45)
             .register_pattern("qwq", names::DEEPSEEK_R1)
             .register_pattern("qwen3", names::QWEN3)
             .register_pattern("glm-5", names::GLM47)

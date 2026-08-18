@@ -21,6 +21,7 @@ mod cohere_cmd;
 mod deepseek_r1;
 mod deepseek_v3;
 mod delimited;
+mod ernie45;
 mod glm45;
 mod hy;
 mod kimi;
@@ -38,6 +39,7 @@ pub use self::deepseek_v3::DeepSeekV3ReasoningParser;
 pub(crate) use self::delimited::{
     DelimitedReasoningParser, DelimitedReasoningParserBuilder, last_reasoning_boundary,
 };
+pub use self::ernie45::Ernie45ReasoningParser;
 pub use self::glm45::Glm45ReasoningParser;
 pub(crate) use self::hy::HyReasoningParser;
 pub use self::kimi::KimiReasoningParser;
