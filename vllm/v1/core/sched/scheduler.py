@@ -852,12 +852,23 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = request.num_tokens - num_computed_tokens
 
                     # Hybrid-Mamba P/D decoders recompute the final prompt token.
-                    # Keep that one-token handoff step out of speculative padding.
-                    kv_transfer_config = self.vllm_config.kv_transfer_config
+                    # Keep that one-token handoff step out of speculative padding:
+                    # padding it to 1 + num_spec with placeholder drafts makes it
+                    # look like a uniform decode batch, so it is replayed through
+                    # the captured FULL decode graph where the placeholder slots
+                    # read recurrent state belonging to co-batched neighbours.
+                    #
+                    # Keyed on the PER-REQUEST handoff marker rather than the
+                    # instance-level kv_role: "kv_both" is a member of both
+                    # KVProducer and KVConsumer, so a role check either fires on
+                    # the prefill instance too (is_kv_consumer) or never fires at
+                    # all (kv_role == "kv_consumer"). A disaggregated deployment
+                    # may configure "kv_both" on BOTH roles, which would make a
+                    # role-keyed predicate silently no-op on the real decode
+                    # worker.
                     is_disagg_mamba_first_fallback = (
                         self.has_mamba_layers
-                        and kv_transfer_config is not None
-                        and kv_transfer_config.kv_role == "kv_consumer"
+                        and request.received_remote_kv
                         and request.num_output_tokens == 0
                         and num_computed_tokens == request.num_prompt_tokens - 1
                     )
@@ -2647,6 +2658,12 @@ class Scheduler(SchedulerInterface):
             if request.request_id not in self.finished_recving_kv_req_ids:
                 return False
             self._update_waiting_for_remote_kv(request)
+            # Mark the decode side per request. The instance-level kv_role
+            # cannot do this: "kv_both" is a member of both KVProducer and
+            # KVConsumer, so is_kv_consumer is True on the prefill instance too
+            # and kv_role == "kv_consumer" is False on both. Only an instance
+            # that actually waited for remote KV reaches this point.
+            request.received_remote_kv = True
             if request.num_preemptions:
                 request.status = RequestStatus.PREEMPTED
             else:

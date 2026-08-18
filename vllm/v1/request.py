@@ -102,6 +102,11 @@ class Request:
         self.kv_transfer_params: dict[str, Any] | None = None
         # E/P/D: Connector-specific encoder-cache transfer parameters.
         self.ec_transfer_params: dict[str, Any] | None = None
+        # P/D: set once this request's prompt KV arrived from a remote prefill
+        # instance (i.e. it left WAITING_FOR_REMOTE_KVS). Identifies the decode
+        # side per request, which the instance-level kv_role cannot do: kv_both
+        # satisfies both the producer and the consumer predicates.
+        self.received_remote_kv: bool = False
 
         if pooling_params is not None:
             # Pooling models.

@@ -1578,18 +1578,27 @@ def test_spec_decode_padding_first_decode_step():
 
 
 @pytest.mark.parametrize(
-    ("kv_role", "expect_placeholder_drafts"),
+    ("kv_role", "mamba_cache_mode"),
     [
-        pytest.param("kv_consumer", False, id="disagg-consumer"),
-        pytest.param("kv_both", True, id="aggregated-both"),
+        pytest.param("kv_consumer", "all", id="consumer-all"),
+        pytest.param("kv_both", "all", id="both-all"),
+        pytest.param("kv_both", "align", id="both-align"),
     ],
 )
 def test_mamba_first_fallback_spec_padding_scope(
     kv_role: str,
-    expect_placeholder_drafts: bool,
+    mamba_cache_mode: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Only a P/D Mamba handoff skips speculative padding."""
+    """A remote-KV handoff step skips speculative padding for ANY kv_role.
+
+    kv_role is parametrized because it is an INSTANCE-level knob that cannot
+    identify the decode side: "kv_both" is a member of both KVProducer and
+    KVConsumer, so is_kv_consumer() is True on the prefill instance too, while
+    kv_role == "kv_consumer" is False on both. A disaggregated deployment may
+    configure "kv_both" on BOTH roles, and is then indistinguishable from an
+    aggregated one by role alone -- so the handoff must be detected per request
+    and every case here expects the same unpadded step."""
     from tests.v1.kv_connector.unit.utils import create_model_runner_output
 
     num_spec = 3
@@ -1605,7 +1614,7 @@ def test_mamba_first_fallback_spec_padding_scope(
             block_size=block_size,
             shapes=((1, 1),),
             dtypes=(torch.float32,),
-            mamba_cache_mode="all",
+            mamba_cache_mode=mamba_cache_mode,
         ),
     )
     r1, r2 = create_requests(
@@ -1645,13 +1654,10 @@ def test_mamba_first_fallback_spec_padding_scope(
     assert r2.num_output_tokens == 0
     assert post_handoff_computed_tokens == [r2.num_prompt_tokens - 1]
     assert out.scheduled_spec_decode_tokens[r1.request_id] == [4, 5, 6]
-    assert out.num_scheduled_tokens[r2.request_id] == (
-        1 + num_spec if expect_placeholder_drafts else 1
-    )
-    if expect_placeholder_drafts:
-        assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
-    else:
-        assert r2.request_id not in out.scheduled_spec_decode_tokens
+    # The handoff was identified per request, not from the instance-level role.
+    assert r2.received_remote_kv is True
+    assert out.num_scheduled_tokens[r2.request_id] == 1
+    assert r2.request_id not in out.scheduled_spec_decode_tokens
 
 
 def test_spec_decode_padding_skipped_for_diffusion():
