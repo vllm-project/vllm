@@ -520,9 +520,7 @@ def _supports_native_decode(next_n: int) -> bool:
 
 def _use_flattening(vllm_config: VllmConfig) -> bool:
     speculative_config = vllm_config.speculative_config
-    next_n = 1 + (
-        speculative_config.num_speculative_tokens if speculative_config else 0
-    )
+    next_n = 1 + vllm_config.num_speculative_tokens
     return not _supports_native_decode(next_n) or (
         speculative_config is not None
         and speculative_config.enable_adaptive_verification
