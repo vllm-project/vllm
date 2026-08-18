@@ -2187,20 +2187,16 @@ def get_kv_cache_configs(
             adjusted_memory.append(override * bytes_per_block)
         available_memory = adjusted_memory
 
+    # Reserve the null block BlockPool permanently holds back, so auto-fit and
+    # the capacity check both plan against usable blocks. Allocation below
+    # still uses the full memory.
+    check_memory = [
+        avail_mem - _pool_bytes_per_block(vllm_config, groups) if groups else avail_mem
+        for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
+    ]
+
     if vllm_config.model_config.original_max_model_len == -1:
-        _auto_fit_max_model_len(
-            vllm_config, projected_groups_per_worker, available_memory
-        )
-        check_memory = available_memory
-    else:
-        # For an explicitly set max_model_len, validate against the usable block
-        # count: BlockPool keeps one block as the null block, so only
-        # num_blocks - 1 blocks per worker are usable.
-        check_memory = []
-        for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
-            if groups:
-                avail_mem -= _pool_bytes_per_block(vllm_config, groups)
-            check_memory.append(avail_mem)
+        _auto_fit_max_model_len(vllm_config, projected_groups_per_worker, check_memory)
 
     # Check if the available memory is enough per worker.
     for groups, avail_mem in zip(projected_groups_per_worker, check_memory):

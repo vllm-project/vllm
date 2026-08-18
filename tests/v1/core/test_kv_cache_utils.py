@@ -2627,7 +2627,9 @@ def test_auto_fit_max_model_len_with_hybrid():
         "layer_2": new_kv_cache_spec(),
     }
 
-    available_memory = mem_per_block_per_layer * (1024 // 16 + 1 + gamma)
+    # One extra block on top of what a 1024-token request needs: the pool
+    # reserves one block as the null block.
+    available_memory = mem_per_block_per_layer * (1024 // 16 + 1 + gamma + 1)
     _kv_cache_configs = get_kv_cache_configs(
         vllm_config, [kv_cache_specs], [available_memory]
     )
@@ -3062,3 +3064,23 @@ def test_kv_cache_reserves_null_block_for_max_model_len(use_override):
 
     with pytest.raises(ValueError, match="max seq len"):
         get_kv_cache_configs(vllm_config, [{"layer1": spec}], available_memory)
+
+
+def test_auto_fit_max_model_len_reserves_null_block():
+    """Auto-fit (max_model_len=-1) must size max_model_len against usable
+    blocks, not the total pool. With memory for exactly 64 blocks, one is the
+    null block, so auto-fit must settle on 63 * block_size; picking the full
+    pool would leave a max-length request unschedulable and hang the engine.
+    """
+    block_size = 16
+    model_config = ModelConfig(max_model_len=1024)
+    model_config.original_max_model_len = -1
+    vllm_config = VllmConfig(model_config=model_config)
+    spec = new_kv_cache_spec(block_size=block_size)
+
+    # Exactly the 1024 / 16 = 64 blocks a full-length request would need.
+    available_memory = [spec.page_size_bytes * 64]
+
+    get_kv_cache_configs(vllm_config, [{"layer1": spec}], available_memory)
+
+    assert vllm_config.model_config.max_model_len == 63 * block_size
