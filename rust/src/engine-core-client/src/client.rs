@@ -282,31 +282,6 @@ pub struct EngineCoreClient {
     coordinator_task: Option<AbortOnDropHandle<()>>,
 }
 
-/// Removes utility waiters if a call future is cancelled before completion.
-struct UtilityCallGuard {
-    inner: Arc<ClientInner>,
-    call_ids: Vec<u64>,
-}
-
-impl UtilityCallGuard {
-    fn new(inner: Arc<ClientInner>) -> Self {
-        Self {
-            inner,
-            call_ids: Vec::new(),
-        }
-    }
-
-    fn track(&mut self, call_id: u64) {
-        self.call_ids.push(call_id);
-    }
-}
-
-impl Drop for UtilityCallGuard {
-    fn drop(&mut self) {
-        self.inner.unregister_utility_calls(self.call_ids.drain(..));
-    }
-}
-
 impl EngineCoreClient {
     /// Connect to Python `EngineCoreProc`s using the configured
     /// transport/coordinator modes.
@@ -700,25 +675,37 @@ impl EngineCoreClient {
             "sending utility request"
         );
 
-        let mut call_guard = UtilityCallGuard::new(self.inner.clone());
-        let mut pending_calls = Vec::with_capacity(self.engines.len());
-        let mut prepared_sends = Vec::with_capacity(self.engines.len());
-        for engine in &self.engines {
-            let (call_id, rx) = self.inner.allocate_and_register_utility_call()?;
-            call_guard.track(call_id);
-            let request =
-                EngineCoreUtilityRequest::new(self.config.client_index, call_id, method, &args)?;
-            pending_calls.push((call_id, rx));
-            prepared_sends.push((&engine.engine_id, request));
+        /// Removes utility waiters if a call future is cancelled before completion.
+        struct UtilityCallGuard<'a> {
+            inner: &'a ClientInner,
+            call_ids: Vec<u64>,
         }
 
-        let send_results = join_all(prepared_sends.iter().map(|(engine_id, request)| {
-            self.inner.send_to_engine(engine_id, EngineCoreRequestType::Utility, request)
-        }))
-        .await;
-        let outcomes = join_all(pending_calls.into_iter().zip(send_results).map(
-            |((call_id, rx), send_result)| async move {
-                send_result?;
+        impl Drop for UtilityCallGuard<'_> {
+            fn drop(&mut self) {
+                self.inner.unregister_utility_calls(self.call_ids.drain(..));
+            }
+        }
+
+        let mut call_guard = UtilityCallGuard {
+            inner: self.inner.as_ref(),
+            call_ids: Vec::with_capacity(self.engines.len()),
+        };
+
+        let mut prepared_calls = Vec::with_capacity(self.engines.len());
+        for engine in &self.engines {
+            let (call_id, rx) = self.inner.allocate_and_register_utility_call()?;
+            call_guard.call_ids.push(call_id);
+            let request =
+                EngineCoreUtilityRequest::new(self.config.client_index, call_id, method, &args)?;
+            prepared_calls.push((&engine.engine_id, call_id, rx, request));
+        }
+
+        let outcomes = join_all(prepared_calls.into_iter().map(
+            |(engine_id, call_id, rx, request)| async move {
+                self.inner
+                    .send_to_engine(engine_id, EngineCoreRequestType::Utility, &request)
+                    .await?;
                 rx.await
                     .map_err(|_| Error::UtilityCallClosed {
                         method: method.to_string(),
