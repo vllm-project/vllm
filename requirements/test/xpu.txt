@@ -669,7 +669,7 @@ pystemmer==3.0.0
     #   mteb
 pytablewriter==1.2.1
     # via lm-eval
-pytest==9.0.2
+pytest==9.1.0
     # via
     #   -r requirements/test/xpu.in
     #   pytest-asyncio
@@ -679,7 +679,7 @@ pytest==9.0.2
     #   pytest-shard
     #   pytest-timeout
     #   schemathesis
-pytest-asyncio==1.3.0
+pytest-asyncio==1.4.0
     # via -r requirements/test/xpu.in
 pytest-cov==6.3.0
     # via -r requirements/test/xpu.in
