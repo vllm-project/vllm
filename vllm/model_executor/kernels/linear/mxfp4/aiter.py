@@ -107,9 +107,9 @@ if is_aiter_found_and_supported():
         x: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
-        x_scales: torch.Tensor = None,
         rocm_use_aiter_fp4_asm_gemm: bool = False,
         out_dtype: torch.dtype | None = torch.bfloat16,
+        x_scales: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return torch.empty(
             (*x.shape[:-1], weight.shape[0]), dtype=out_dtype, device=x.device
