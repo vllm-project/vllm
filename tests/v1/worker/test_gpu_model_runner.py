@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
@@ -1821,15 +1821,40 @@ class TestSyncNumAcceptedTokens:
             runner.input_batch.num_accepted_tokens_cpu[:num_reqs], expected
         )
 
-    def test_d2h_target_is_runner_buffer(self):
-        """Verify D2H copy target is unconditionally runner.num_accepted_tokens.cpu."""
+    @patch("vllm.v1.worker.gpu_model_runner.mamba_utils.postprocess_mamba_align_gpu")
+    def test_d2h_target_is_runner_buffer(self, mock_postprocess):
+        """Verify _update_states_after_model_execute passes
+        runner.num_accepted_tokens.cpu to postprocess_mamba_align_gpu
+        instead of input_batch's tensor.
+        """
         runner = Mock(spec=GPUModelRunner)
-        runner.use_async_scheduling = True
-        runner.num_accepted_tokens = SimpleNamespace(cpu=Mock(), gpu=Mock())
+        runner.speculative_config = Mock()
+        runner.model_config = SimpleNamespace(is_hybrid=True)
+        runner.cache_config = SimpleNamespace(mamba_cache_mode="align")
+        runner.num_accepted_tokens = SimpleNamespace(
+            cpu=Mock(), gpu=torch.zeros(5, dtype=torch.int64)
+        )
         runner.input_batch = SimpleNamespace(num_accepted_tokens_cpu_tensor=Mock())
+        runner._get_mamba_bufs = Mock(return_value=Mock())
+        runner.kv_cache_config = Mock()
+        runner.compilation_config = SimpleNamespace(static_forward_context=Mock())
+        runner.model = SimpleNamespace(
+            get_mamba_state_copy_func=Mock(return_value=Mock())
+        )
+        runner.num_accepted_tokens_event = Mock()
 
-        # runner buffer should be distinct from input_batch buffer
+        GPUModelRunner._update_states_after_model_execute(
+            runner,
+            output_token_ids=torch.tensor([[1, 2, -1], [1, -1, -1]]),
+            scheduler_output=Mock(),
+        )
+
+        mock_postprocess.assert_called_once()
+        _, kwargs = mock_postprocess.call_args
         assert (
-            runner.num_accepted_tokens.cpu
-            != runner.input_batch.num_accepted_tokens_cpu_tensor
+            kwargs["num_accepted_tokens_cpu_tensor"] is runner.num_accepted_tokens.cpu
+        )
+        assert (
+            kwargs["num_accepted_tokens_cpu_tensor"]
+            is not runner.input_batch.num_accepted_tokens_cpu_tensor
         )
