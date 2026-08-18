@@ -183,6 +183,7 @@ steps:
       - tests/kernels/quantization
       - tests/kernels/quantization/test_rocm_skinny_gemms.py
       - vllm/_aiter_ops.py
+      - vllm/kernels/aiter_ops.py
       - vllm/platforms/rocm.py
       - vllm/model_executor/kernels/
       depends_on:
