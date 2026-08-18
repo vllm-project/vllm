@@ -63,7 +63,13 @@ def get_num_disk_slots(
     padded_slot_size = get_padded_slot_size(
         total_bpb, direct_io_alignment, use_page_cache
     )
-    return max(1, disk_capacity_bytes // padded_slot_size)
+    num_slots = disk_capacity_bytes // padded_slot_size
+    if num_slots < 1:
+        raise ValueError(
+            f"disk_capacity_bytes={disk_capacity_bytes} is smaller than one "
+            f"disk slot ({padded_slot_size} bytes)"
+        )
+    return num_slots
 
 
 def _alloc_aligned(num_slots: int, bpb: int, alignment: int) -> torch.Tensor:
@@ -167,8 +173,7 @@ class DiskBackend:
         pin_tensor(load_flat)
 
         # Non-contiguous views: stride(0) = padded_total > bpb, so build_params
-        # reports dst_bpb = padded_total. copy_blocks transfers min(src_bpb,
-        # dst_bpb) = real_bpb bytes - only real data, not the trailing pad.
+        # uses the padded stride for addressing and the real bpb for copying.
         self._store_buffer_caches = {}
         self._load_buffer_caches = {}
         for i, name in enumerate(self._tensor_names):
@@ -190,12 +195,14 @@ class DiskBackend:
             self._store_buffer_caches,
             store_stream,
             src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
+            copy_sizes=self._per_tensor_bpb,
         )
         self._load_params = build_params(
             self._load_buffer_caches,
             gpu_caches,
             load_stream,
             src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
+            copy_sizes=self._per_tensor_bpb,
         )
 
         os.makedirs(os.path.dirname(disk_path) or ".", exist_ok=True)

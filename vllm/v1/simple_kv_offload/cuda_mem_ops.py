@@ -110,8 +110,9 @@ def _resolve_batch_memcpy():
 class BatchMemcpyParams(NamedTuple):
     src_bases: np.ndarray  # [num_layers] uint64 — data_ptr per layer
     dst_bases: np.ndarray  # [num_layers] uint64
-    src_bpb: np.ndarray  # [num_layers] uint64 - src bytes per block
-    dst_bpb: np.ndarray  # [num_layers] uint64 - dst bytes per block
+    src_strides: np.ndarray  # [num_layers] uint64 - source row strides
+    dst_strides: np.ndarray  # [num_layers] uint64 - destination row strides
+    copy_sizes: np.ndarray  # [num_layers] uint64 - logical bytes to copy
     num_layers: int
     # CUDA only: one attributes entry carrying srcAccessOrder. Unused on ROCm
     # (7.2.1 or 7.2.2) because the current runtime rejects numAttrs > 0.
@@ -128,6 +129,7 @@ def build_params(
     dst_caches: dict[str, torch.Tensor],
     stream: torch.cuda.Stream,
     src_access_order: int = CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
+    copy_sizes: list[int] | None = None,
 ) -> BatchMemcpyParams:
     global _batch_memcpy_fn
     if _batch_memcpy_fn is None:
@@ -137,22 +139,37 @@ def build_params(
     src_tensors = list(src_caches.values())
     dst_tensors = list(dst_caches.values())
 
-    src_bases, dst_bases, src_bpb, dst_bpb = [], [], [], []
+    src_bases, dst_bases, src_strides, dst_strides = [], [], [], []
+    resolved_copy_sizes = []
     for s, d in zip(src_tensors, dst_tensors):
-        s_bpb = s.stride(0) * s.element_size()
-        d_bpb = d.stride(0) * d.element_size()
+        s_stride = s.stride(0) * s.element_size()
+        d_stride = d.stride(0) * d.element_size()
         src_bases.append(s.data_ptr())
         dst_bases.append(d.data_ptr())
-        src_bpb.append(s_bpb)
-        dst_bpb.append(d_bpb)
+        src_strides.append(s_stride)
+        dst_strides.append(d_stride)
+        resolved_copy_sizes.append(s_stride)
+
+    if copy_sizes is None:
+        assert src_strides == dst_strides, (
+            "source and destination row strides must match unless explicit "
+            "copy_sizes are provided"
+        )
+    else:
+        assert len(copy_sizes) == len(src_tensors)
+        for size, src_stride, dst_stride in zip(copy_sizes, src_strides, dst_strides):
+            assert 0 < size <= src_stride
+            assert size <= dst_stride
+        resolved_copy_sizes = copy_sizes
 
     attrs = _CUmemcpyAttributes(srcAccessOrder=src_access_order)
 
     return BatchMemcpyParams(
         src_bases=np.array(src_bases, dtype=np.uint64),
         dst_bases=np.array(dst_bases, dtype=np.uint64),
-        src_bpb=np.array(src_bpb, dtype=np.uint64),
-        dst_bpb=np.array(dst_bpb, dtype=np.uint64),
+        src_strides=np.array(src_strides, dtype=np.uint64),
+        dst_strides=np.array(dst_strides, dtype=np.uint64),
+        copy_sizes=np.array(resolved_copy_sizes, dtype=np.uint64),
         num_layers=len(src_tensors),
         attrs=attrs,
         attrs_idx=ctypes.c_size_t(0),
@@ -175,12 +192,12 @@ def copy_blocks(
     dst_ids = np.array(dst_block_ids, dtype=np.uint64)
 
     src_all = (
-        params.src_bases[:, None] + src_ids[None, :] * params.src_bpb[:, None]
+        params.src_bases[:, None] + src_ids[None, :] * params.src_strides[:, None]
     ).ravel()
     dst_all = (
-        params.dst_bases[:, None] + dst_ids[None, :] * params.dst_bpb[:, None]
+        params.dst_bases[:, None] + dst_ids[None, :] * params.dst_strides[:, None]
     ).ravel()
-    sz_all = np.repeat(np.minimum(params.src_bpb, params.dst_bpb), n)
+    sz_all = np.repeat(params.copy_sizes, n)
     total = n * params.num_layers
 
     # ROCm 7.2.1/7.2.2 rejects any call with numAttrs>0 (hipMemcpyBatchAsync

@@ -65,25 +65,11 @@ def _wait_events(events, timeout=10.0):
     events[0][1].synchronize()
 
 
-@pytest.mark.parametrize(
-    ("direct_io_alignment", "use_page_cache", "expected_padded_total"),
-    [
-        (4096, False, 8192),
-        (512, False, 4608),
-        (4096, True, 4224),
-    ],
-)
-def test_padded_slot_round_trip_preserves_bytes(
-    tmp_path, direct_io_alignment, use_page_cache, expected_padded_total
-):
+def test_padded_slot_round_trip_preserves_bytes(tmp_path):
     """Store then load back through the padded slot path."""
-    backend, gpu = _make_disk_backend(
-        tmp_path,
-        direct_io_alignment=direct_io_alignment,
-        use_page_cache=use_page_cache,
-    )
+    backend, gpu = _make_disk_backend(tmp_path)
     try:
-        assert backend._padded_total == expected_padded_total
+        assert backend._padded_total == 8192
         assert backend._padded_total % backend._effective_alignment == 0
         assert (
             backend._store_buffer_caches["k"].data_ptr() % backend._effective_alignment

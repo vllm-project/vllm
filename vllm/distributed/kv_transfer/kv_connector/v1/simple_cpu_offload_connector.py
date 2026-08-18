@@ -118,9 +118,10 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         )
         disk_buffer_slots = max(1, int(extra_config.get("disk_buffer_slots", 2)))
         use_page_cache = bool(extra_config.get("use_page_cache", False))
-        direct_io_alignment = _get_direct_io_alignment(extra_config)
+        direct_io_alignment = _DEFAULT_DIRECT_IO_ALIGNMENT
 
         if disk_mode:
+            direct_io_alignment = _get_direct_io_alignment(extra_config)
             if disk_path is None:
                 raise ValueError(
                     'kv_offload_backend="disk" requires disk_path to be set.'
