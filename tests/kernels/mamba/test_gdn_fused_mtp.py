@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import types
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -37,6 +38,7 @@ from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (  # noq
 )
 from vllm.utils.torch_utils import _encode_layer_name  # noqa: E402
 from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
+    GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
 )
 from vllm.v1.kv_cache_interface import MambaSpec  # noqa: E402
@@ -137,6 +139,46 @@ def _build_layer(
             types.MethodType(getattr(QwenGatedDeltaNetAttention, name), layer),
         )
     return layer
+
+
+@pytest.mark.parametrize(
+    "num_v_heads,expected",
+    [
+        pytest.param(2, True, id="ratio1"),
+        pytest.param(4, True, id="ratio2"),
+        pytest.param(6, True, id="ratio3"),
+        pytest.param(8, True, id="ratio4"),
+        pytest.param(16, True, id="ratio8"),
+        pytest.param(5, False, id="non-integral-ratio"),
+        pytest.param(10, False, id="unsupported-ratio5"),
+    ],
+)
+def test_fused_mtp_head_ratio_guard(num_v_heads: int, expected: bool) -> None:
+    if not hasattr(torch.ops._C, "fused_gdn_decode_post_conv_mtp"):
+        pytest.skip("fused GDN decode MTP op is not built")
+
+    layer = types.SimpleNamespace(
+        num_k_heads=2,
+        num_v_heads=num_v_heads,
+        kv_cache=(None, torch.empty(1, dtype=torch.float32, device="cuda")),
+        gdn_decode_kernel="cuda",
+    )
+    attn_metadata = types.SimpleNamespace(
+        spec_state_indices_tensor=torch.ones(
+            1, SPEC_TOKENS, dtype=torch.int32, device="cuda"
+        ),
+        spec_sequence_masks=object(),
+        num_decodes=0,
+        num_spec_decodes=1,
+    )
+
+    assert (
+        QwenGatedDeltaNetAttention._can_use_fused_gdn_mtp_decode(
+            cast(QwenGatedDeltaNetAttention, layer),
+            cast(GDNAttentionMetadata, attn_metadata),
+        )
+        is expected
+    )
 
 
 @torch.inference_mode()
