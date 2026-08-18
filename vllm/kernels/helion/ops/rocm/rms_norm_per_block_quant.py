@@ -181,7 +181,13 @@ def rms_norm_per_block_quant_rocm(
             s_blk = s_blk.clamp(max=hl.load(scale_ub, []))
 
         s_blk = (s_blk * (1.0 / qtype_max)).clamp(min=min_scaling_factor)
-        scale[tile_m, hl.arange(groups_per_row)] = s_blk
+        group_idx = hl.arange(padded_groups_per_row)
+        hl.store(
+            scale,
+            [m_idx[:, None], group_idx[None, :]],
+            s_blk,
+            extra_mask=(group_idx < groups_per_row)[None, :],
+        )
 
         if quant_dtype == torch.int8:
             y_blk = (x_grouped * (1.0 / s_blk[:, :, None])).round()

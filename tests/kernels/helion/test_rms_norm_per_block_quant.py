@@ -178,6 +178,58 @@ EPS = 1e-6
 
 
 class TestRmsNormPerBlockQuantCorrectness:
+    @pytest.mark.parametrize("hidden_size", [3072, 5120, 7168])
+    def test_rocm_non_power_of_two_hidden_size_scale_store(
+        self, hidden_size: int
+    ) -> None:
+        skip_if_platform_unsupported("rms_norm_per_block_quant")
+        if not current_platform.is_rocm():
+            pytest.skip("ROCm-specific padded scale-store regression test")
+
+        set_random_seed(0)
+        num_tokens = 2
+        group_size = 128
+        input = torch.randn(
+            num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
+        )
+        weight = torch.randn(hidden_size, dtype=input.dtype, device=input.device)
+        groups_per_row = hidden_size // group_size
+        ref_out = torch.empty_like(input, dtype=FP8_DTYPE)
+        ops_out = torch.empty_like(ref_out)
+        ref_scales = torch.empty(
+            num_tokens, groups_per_row, dtype=torch.float32, device=input.device
+        )
+        ops_scales = torch.full_like(ref_scales, torch.nan)
+
+        rms_norm_per_block_quant_reference_rocm(
+            ref_out,
+            input,
+            weight,
+            ref_scales,
+            EPS,
+            None,
+            None,
+            group_size,
+            False,
+        )
+        rms_norm_per_block_quant(
+            ops_out,
+            input,
+            weight,
+            ops_scales,
+            EPS,
+            None,
+            None,
+            group_size,
+            False,
+        )
+
+        torch.testing.assert_close(ref_scales, ops_scales)
+        assert (
+            ref_out.view(torch.uint8).to(torch.int16)
+            - ops_out.view(torch.uint8).to(torch.int16)
+        ).abs().max() <= 1
+
     @pytest.mark.parametrize("num_tokens, hidden_size", NUM_TOKENS_HIDDEN_SIZES)
     @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
     @pytest.mark.parametrize("has_scale_ub", SCALE_UBS)
