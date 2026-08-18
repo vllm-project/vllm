@@ -204,7 +204,7 @@ import itertools
 import math
 from abc import abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from math import lcm
 from typing import ClassVar, Generic, TypeVar, cast
@@ -270,6 +270,7 @@ from vllm.utils.torch_utils import (
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
+    get_dtype_size,
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
     np_to_pinned_tensor,
@@ -298,6 +299,7 @@ from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
+    KVQuantMode,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     get_kv_quant_mode,
@@ -1152,6 +1154,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+            # fp8_ds_mla: 656-byte custom layout (kv_lora_rank=512 +
+            # qk_rope_head_dim=64, head_size=576). See flashmla_sparse.py.
+            state_content_bytes=656 if self.kv_cache_dtype == "fp8_ds_mla" else None,
         )
         if self.sliding_window is not None:
             return SlidingWindowMLASpec(
@@ -1370,6 +1375,20 @@ class _DecodeConcatQuantFP8(QuantFP8):
 
 
 class MLACommonBackend(AttentionBackend):
+    @classmethod
+    def customize_spec(cls, spec: "AttentionSpec") -> "AttentionSpec":
+        """Per-token-head modes pack an inline fp32 scale pair after the
+        latent data (single-sided: ``head_size_v == 0`` for MLA)."""
+        mode = spec.kv_quant_mode
+        if spec.state_content_bytes is not None or not mode.is_per_token_head:
+            return spec
+        head_size = spec.head_size
+        if mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            head_size //= 2
+        scale_bytes = get_dtype_size(torch.float32)
+        content = head_size * get_dtype_size(spec.dtype) + 2 * scale_bytes
+        return replace(spec, state_content_bytes=content)
+
     @staticmethod
     def get_name() -> str:
         return "TRITON_MLA"
@@ -1965,12 +1984,40 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     # Whether this builder can flatten a non-causal query block into decode rows.
     supports_non_causal_multi_token_decode: ClassVar[bool] = False
 
+    # Whether can support non-causal multi-token decode with DCP KV cache.
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = False
+
     # The threshold for reordering the batch into decode and prefill requests.
     # If > 1, the batch will be reordered such that requests with
     # query length <= threshold are classified as decode requests.
     # Use `query_len_support` (above) to set this automatically
     # when speculative decoding is enabled.
     reorder_batch_threshold: int = 1
+
+    def _validate_dspark_dcp_support(self, supports_dcp_with_varlen: bool) -> None:
+        speculative_config = getattr(self.vllm_config, "speculative_config", None)
+        parallel_config = self.vllm_config.parallel_config
+        if (
+            speculative_config is None
+            or getattr(speculative_config, "method", None) != "dspark"
+            or parallel_config.decode_context_parallel_size <= 1
+        ):
+            return
+
+        if self.non_causal_multi_token_decode:
+            supported = self.supports_non_causal_multi_token_dcp
+            query_mode = "non-causal draft"
+        else:
+            supported = supports_dcp_with_varlen
+            query_mode = "causal multi-token"
+
+        if not supported:
+            raise ValueError(
+                f"{type(self).__name__} does not support {query_mode} MLA "
+                "attention for DSpark with decode context parallelism. Select "
+                "a backend with explicit DSpark DCP support or set "
+                "decode_context_parallel_size=1."
+            )
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -2065,6 +2112,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.non_causal_multi_token_decode = getattr(
             kv_cache_spec, "non_causal_multi_token_decode", False
         )
+        self._validate_dspark_dcp_support(supports_dcp_with_varlen)
 
         # A draft cache group can have a different head count from the target.
         self.num_heads = get_num_attention_heads_from_layers(
@@ -2414,6 +2462,22 @@ def reorg_kvcache(
     return reorganized_kv_c_normed, reorganized_k_pe
 
 
+def neutralize_empty_context_partials(
+    chunked_context: "MLACommonPrefillMetadata.ChunkedContextMetadata",
+    output: torch.Tensor,
+    output_lse: torch.Tensor,
+) -> None:
+    """Neutralize the partial of every prefill that no chunk covers.
+
+    A prefill without context is never gathered, so nothing would write its rows;
+    a zero output with an ``-inf`` lse carries no weight into the final merge
+    against the suffix partial.
+    """
+    for token_slice in chunked_context.empty_token_slices:
+        output[token_slice].zero_()
+        output_lse[:, token_slice].fill_(float("-inf"))
+
+
 def init_mla_context_partial(
     chunked_context: "MLACommonPrefillMetadata.ChunkedContextMetadata",
     attn_output: torch.Tensor,
@@ -2423,7 +2487,9 @@ def init_mla_context_partial(
     """Allocate the running context partial over all prefill tokens.
 
     Laid out like the chunk partials so the final whole-batch merge against the
-    suffix partial sees matching head strides.
+    suffix partial sees matching head strides. Callers whose backend honors an
+    ``out`` tensor already know that layout and can allocate directly, pairing it
+    with ``neutralize_empty_context_partials``.
     """
     output = torch.empty(
         (num_tokens, *attn_output.shape[1:]),
@@ -2435,10 +2501,7 @@ def init_mla_context_partial(
         dtype=attn_softmax_lse.dtype,
         device=attn_softmax_lse.device,
     )
-    # No chunk covers a prefill without context, so neutralize its partial.
-    for token_slice in chunked_context.empty_token_slices:
-        output[token_slice].zero_()
-        output_lse[:, token_slice].fill_(float("-inf"))
+    neutralize_empty_context_partials(chunked_context, output, output_lse)
     return output, output_lse
 
 
@@ -2448,16 +2511,26 @@ def accumulate_mla_context_chunk(
     attn_softmax_lse: torch.Tensor,
     output: torch.Tensor,
     output_lse: torch.Tensor,
+    output_written: bool = False,
 ) -> None:
     """Fold one chunk's partial into the running context partial.
 
     Only the first request may be a continuation; its tokens are merged and the
     remaining token range is initialized.
+
+    Args:
+        output_written: The chunk's attention output already landed in
+            ``output[chunk.token_slice]`` because the backend was handed it as
+            ``out``, leaving only the lse to fold. Invalid for a continuation
+            chunk, whose leading tokens must be merged rather than overwritten.
     """
     token_start = chunk.token_slice.start
     token_end = chunk.token_slice.stop
     init_start = token_start
     if chunk.is_continuation:
+        assert not output_written, (
+            "a continuation chunk must not write over the partial it merges with"
+        )
         init_start = chunk.continuation_token_end
         num_merged = init_start - token_start
         merge_attn_states(
@@ -2470,7 +2543,8 @@ def accumulate_mla_context_chunk(
         )
     if init_start < token_end:
         written = init_start - token_start
-        output[init_start:token_end].copy_(attn_output[written:])
+        if not output_written:
+            output[init_start:token_end].copy_(attn_output[written:])
         output_lse[:, init_start:token_end].copy_(attn_softmax_lse[:, written:])
 
 
