@@ -19,10 +19,10 @@ MiniMaxM3MSADecodeBackend = Literal["triton", "cutlass"]
 
 @config
 class HiSparseConfig:
-    """Configuration for HiSparse sparse-MLA decode."""
+    """Configuration for HiSparse sparse-MLA KV offloading."""
 
     host_pool_gib: float = Field(gt=0)
-    """Per-rank pinned host pool size in GiB."""
+    """Usable host-cache capacity in GiB per data-parallel replica."""
 
     device_buffer_size: int | None = Field(default=None, gt=0)
     """Total per-request GPU hot-buffer rows, including the newest-token slot.

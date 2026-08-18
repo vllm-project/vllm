@@ -1359,7 +1359,7 @@ def _get_kv_cache_config_packed(
 
 
 def _hisparse_host_pool_bytes(vllm_config: VllmConfig) -> int | None:
-    """Return the HiSparse per-rank pinned host budget."""
+    """Return per-replica HiSparse host-cache capacity in bytes."""
     config = vllm_config.attention_config.hisparse_config
     if config is None:
         return None
@@ -1673,7 +1673,7 @@ def _hisparse_gpu_memory_usage(
 ) -> int | None:
     """GPU bytes for one max-length request under a HiSparse layout.
 
-    Host-resident MLA layers are budgeted against the pinned host pool (see
+    Host-resident MLA layers consume host-cache capacity (see
     ``get_kv_cache_config_from_groups``), so admission and auto-fit must not
     count their bytes against GPU memory.
     """

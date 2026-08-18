@@ -178,12 +178,12 @@ class ResolvedHiSparseConfig:
         )
 
 
-def check_hisparse_host_memory(rank_bytes: int) -> None:
-    """Fail fast when this rank's pinned host pool cannot fit in RAM."""
+def check_hisparse_host_memory(pool_bytes: int) -> None:
+    """Reject a physical host-pool allocation that cannot fit in RAM."""
     mem = psutil.virtual_memory()
-    if rank_bytes > mem.available * 0.95:
+    if pool_bytes > mem.available * 0.95:
         raise ValueError(
-            f"HiSparse pinned host pool needs ~{rank_bytes / 2**30:.0f} GiB "
+            f"HiSparse pinned host pool needs ~{pool_bytes / 2**30:.0f} GiB "
             f"but only {mem.available / 2**30:.0f} GiB of RAM is available. "
             "Lower hisparse_config.host_pool_gib or leave headroom for co-tenants."
         )
@@ -203,7 +203,7 @@ def allocate_pinned_host_pool(size: int) -> tuple[torch.Tensor, torch.Tensor]:
 def release_pinned_state(
     runtimes: list[HiSparseRuntime], pinned_host_pools: list[torch.Tensor]
 ) -> None:
-    """Synchronize and release one worker's registered host KV pools."""
+    """Synchronize and release registered host KV pools."""
     if pinned_host_pools:
         try:
             torch.accelerator.synchronize()
