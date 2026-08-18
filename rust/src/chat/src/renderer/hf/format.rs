@@ -332,6 +332,7 @@ pub(super) fn probe_message(
         tools: None,
         reasoning: None,
         reasoning_content: None,
+        thoughts: None,
         tool_calls: None,
         tool_call_id: None,
     }
