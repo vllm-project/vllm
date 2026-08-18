@@ -2296,6 +2296,15 @@ void wvSplitKQ(const at::Tensor& in_b, const at::Tensor& in_a,
   TORCH_CHECK(in_a.dtype() == in_b.dtype() && in_a.dtype() == kFp8Type);
   TORCH_CHECK(out_c.dtype() == torch::kFloat16 ||
               out_c.dtype() == torch::kBFloat16);
+  // The staging loop walks in_a for stride(0) * N elements while compute uses
+  // only K per row, so a strided activation is read past its extent.
+  // is_contiguous() cannot express this: it ignores the stride of a size-1
+  // dim, so a single-row view keeps an arbitrary row stride and reports true.
+  TORCH_CHECK(in_a.dim() == 2 && in_a.stride(1) == 1 &&
+                  in_a.stride(0) == in_a.size(1),
+              "wvSplitKQ: activation must be densely packed; got shape [",
+              in_a.size(0), ", ", in_a.size(1), "] strides [", in_a.stride(0),
+              ", ", in_a.stride(1), "]. Call .contiguous() on it first.");
 
   dim3 grid(CuCount);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
