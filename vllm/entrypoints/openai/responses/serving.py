@@ -762,16 +762,23 @@ class OpenAIServingResponses(GenerateBaseServing):
                         "chat_template_kwargs"
                     )
                     if isinstance(parser_chat_template_kwargs, dict):
+                        next_chat_template_kwargs = (
+                            make_reasoning_parser_chat_template_kwargs(
+                                parser_chat_template_kwargs,
+                                continue_final_message=False,
+                                final_message=None,
+                            )
+                        )
                         reasoning_parser_kwargs = {
                             **reasoning_parser_kwargs,
-                            "chat_template_kwargs": (
-                                make_reasoning_parser_chat_template_kwargs(
-                                    parser_chat_template_kwargs,
-                                    continue_final_message=False,
-                                    final_message=None,
-                                )
-                            ),
+                            "chat_template_kwargs": next_chat_template_kwargs,
                         }
+                        if context.response_parser is not None:
+                            context.response_parser = self._make_response_parser(
+                                context.request,
+                                context.tokenizer,
+                                next_chat_template_kwargs,
+                            )
 
                 sampling_params.max_tokens = get_max_tokens(
                     max_model_len,

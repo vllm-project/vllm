@@ -151,7 +151,11 @@ async def test_builtin_tool_turn_clears_reasoning_continuation_context() -> None
         available_tools=[],
         chat_template=None,
         chat_template_content_format="auto",
+        response_parser=MagicMock(),
     )
+    initial_response_parser = context.response_parser
+    refreshed_response_parser = MagicMock()
+    serving._make_response_parser = MagicMock(return_value=refreshed_response_parser)
     context.append_output = MagicMock()
     context.need_builtin_tool_call = MagicMock(side_effect=[True, False])
     context.call_tool = AsyncMock(return_value=[])
@@ -191,6 +195,16 @@ async def test_builtin_tool_turn_clears_reasoning_continuation_context() -> None
             "_vllm_continue_final_message": False,
         }
     }
+    assert context.response_parser is refreshed_response_parser
+    assert context.response_parser is not initial_response_parser
+    serving._make_response_parser.assert_called_once_with(
+        context.request,
+        context.tokenizer,
+        {
+            "thinking_mode": "adaptive",
+            "_vllm_continue_final_message": False,
+        },
+    )
 
 
 @pytest.fixture
