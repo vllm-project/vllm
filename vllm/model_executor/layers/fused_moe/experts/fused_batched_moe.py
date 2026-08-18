@@ -11,7 +11,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import try_get_optimal_moe_config
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    get_default_config,
+    try_get_optimal_moe_config,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
@@ -339,15 +342,14 @@ def batched_triton_kernel(
     BLOCK_K: tl.constexpr,
     USE_TD: tl.constexpr = False,
 ):
-    expert_id = tl.program_id(axis=0)
+    expert_id = tl.program_id(axis=1)
     e_num_tokens = tl.load(expert_num_tokens + expert_id)
     if e_num_tokens == 0:
         # Early exit
         return
 
-    # axis 1 is M_blocks * N_blocks
-    pid_mn = tl.program_id(axis=1)
-    # num_pid_m = tl.cdiv(max_num_tokens, BLOCK_M)
+    # axis 0 is M_blocks * N_blocks
+    pid_mn = tl.program_id(axis=0)
     num_pid_n = tl.cdiv(N, BLOCK_N)
     pid_m = pid_mn // num_pid_n
     pid_n = pid_mn % num_pid_n
@@ -422,6 +424,37 @@ def batched_triton_kernel(
     )
 
 
+def get_default_batched_config(
+    max_num_tokens: int,
+    E: int,
+    N: int,
+    K: int,
+    top_k: int,
+    dtype: str | None,
+    block_shape: list[int] | None = None,
+) -> dict[str, int]:
+    """Tile sizes for the E per-expert GEMMs of the expert-batched layout.
+
+    Mirrors get_default_config, then applies the one per-architecture tile
+    choice that measured a win: narrower N/K on Xe. Every other platform keeps
+    the shared config, so this is a no-op fallback there.
+    """
+    config = get_default_config(max_num_tokens, E, N, K, top_k, dtype, block_shape)
+
+    # A config without num_warps came from a path that pins its own tiles
+    # (batch-invariant mode, wna16); leave those alone.
+    if "num_warps" not in config:
+        return config
+
+    # Narrower N/K tiles measured 1.24x on Xe; that is a per-architecture tile
+    # choice, so other platforms keep the shared config's N/K. Quantized paths
+    # tie N/K to the scale-group shape, so only override the unquantized case.
+    if block_shape is None and current_platform.is_xpu():
+        config["BLOCK_SIZE_N"] = 32
+        config["BLOCK_SIZE_K"] = 32
+    return config
+
+
 def invoke_moe_batched_triton_kernel(
     A: torch.Tensor,  # [E, max_tokens, K]
     B: torch.Tensor,  # [E, N, K]
@@ -449,9 +482,11 @@ def invoke_moe_batched_triton_kernel(
     BLOCK_N = config["BLOCK_SIZE_N"]
     BLOCK_K = config["BLOCK_SIZE_K"]
 
+    # Tile index is the fastest-varying axis so consecutive work-groups share an
+    # expert's weight tile.
     grid = (
-        expert_num_tokens.size(0),
         triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.size(1), BLOCK_N),
+        expert_num_tokens.size(0),
     )
 
     A_scale = normalize_batched_scales_shape(A_scale, expert_num_tokens.shape[0])
@@ -949,6 +984,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             config_dtype,
             max_num_tokens,
             block_shape=self.block_shape,
+            default_config_func=get_default_batched_config,
         )
 
         if hidden_states.dtype == torch.bfloat16:

@@ -5,6 +5,7 @@
 import functools
 import json
 import os
+from collections.abc import Callable
 from typing import Any
 
 import torch
@@ -1426,7 +1427,13 @@ def try_get_optimal_moe_config(
     dtype: str | None,
     M: int,
     block_shape: list[int] | None = None,
+    default_config_func: Callable[..., dict[str, int]] | None = None,
 ) -> dict[str, int]:
+    """Resolve a kernel config: override, then tuned file, then a default.
+
+    default_config_func overrides the fallback for callers whose M is not a
+    whole-GEMM row count.
+    """
     from vllm.model_executor.layers.fused_moe import get_config
 
     override_config = get_config()
@@ -1445,6 +1452,10 @@ def try_get_optimal_moe_config(
             # If an optimal configuration map has been found, look up the
             # optimal config
             config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
+        elif default_config_func is not None:
+            config = default_config_func(
+                M, E, N, w1_shape[2], top_k, dtype, block_shape
+            )
         else:
             # Else use the default config
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype, block_shape)

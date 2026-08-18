@@ -404,7 +404,7 @@ def _run_td(A, B, num_expert_tokens, use_td: bool):
     K = A.shape[2]
     N = B.shape[1]
     BM = BN = BK = 64
-    grid = (E, triton.cdiv(max_tokens, BM) * triton.cdiv(N, BN))
+    grid = (triton.cdiv(max_tokens, BM) * triton.cdiv(N, BN), E)
     batched_triton_kernel[grid](
         A,
         B,
@@ -540,3 +540,44 @@ def test_batched_triton_backend_mapping():
         == UnquantizedMoeBackend.BATCHED_TRITON
     )
     assert map_unquantized_backend("triton") == UnquantizedMoeBackend.TRITON
+
+
+# get_default_batched_config: parity with the shared config off Xe, plus the
+# one per-architecture override (narrow N/K on Xe).
+def test_batched_default_config_matches_shared_off_xpu():
+    from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+        get_default_batched_config,
+    )
+    from vllm.model_executor.layers.fused_moe.fused_moe import get_default_config
+    from vllm.platforms import current_platform
+
+    # Off Xe the batched fallback must equal the shared config: the shared
+    # default is the per-expert GEMM tiling that measured best on CUDA/ROCm.
+    args = (3072, 64, 1408, 2048, 6, None)
+    if not current_platform.is_xpu():
+        assert get_default_batched_config(*args) == get_default_config(*args)
+
+
+def test_batched_default_config_narrows_nk_on_xpu():
+    from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+        get_default_batched_config,
+    )
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_xpu():
+        pytest.skip("narrow N/K tiles are an Xe-only measurement")
+    cfg = get_default_batched_config(3072, 64, 1408, 2048, 6, None)
+    assert cfg["BLOCK_SIZE_N"] == 32
+    assert cfg["BLOCK_SIZE_K"] == 32
+
+
+def test_batched_default_config_keeps_blockwise_quant_k_tile():
+    from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+        get_default_batched_config,
+    )
+
+    block_shape = [128, 128]
+    cfg = get_default_batched_config(512, 64, 1408, 2048, 6, "fp8_w8a8", block_shape)
+    # moe_mmk derives scale-group offsets from BLOCK_SIZE_K, so a mismatched
+    # K tile would straddle two groups and read the wrong scales.
+    assert cfg["BLOCK_SIZE_K"] == block_shape[1]
