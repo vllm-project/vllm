@@ -270,15 +270,15 @@ def test_quark_w8a8_fp8_moe_per_block_weight_shapes():
     assert layer.weight_block_size == [128, 128]
     assert layer.w13_weight.shape == (4, 2 * 256, 512)
     assert layer.w2_weight.shape == (4, 512, 256)
-    # Block-quantized checkpoints name their scales `weight_scale_inv`, so the
-    # parameters have to use that name for the weight loader to find them.
-    assert method.weight_scale_name == "weight_scale_inv"
-    assert not hasattr(layer, "w13_weight_scale")
+    # Quark exports block scales as `weight_scale`, like the per-tensor and
+    # per-channel schemes, so all schemes register the same parameter name.
+    assert not hasattr(layer, "w13_weight_scale_inv")
+    assert not hasattr(layer, "w2_weight_scale_inv")
     # One scale per 128x128 tile of each expert's weight.
-    assert layer.w13_weight_scale_inv.shape == (4, 2 * (256 // 128), 512 // 128)
-    assert layer.w2_weight_scale_inv.shape == (4, 512 // 128, 256 // 128)
+    assert layer.w13_weight_scale.shape == (4, 2 * (256 // 128), 512 // 128)
+    assert layer.w2_weight_scale.shape == (4, 512 // 128, 256 // 128)
     # The loader shards block scales on the block grid, not per row.
-    for scale in (layer.w13_weight_scale_inv, layer.w2_weight_scale_inv):
+    for scale in (layer.w13_weight_scale, layer.w2_weight_scale):
         assert scale.quant_method == FusedMoeWeightScaleSupported.BLOCK.value
 
 
