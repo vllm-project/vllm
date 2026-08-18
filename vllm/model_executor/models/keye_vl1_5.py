@@ -309,13 +309,15 @@ def _keye_field_config(
     return dict(
         pixel_values=MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
         image_embeds=MultiModalFieldConfig.flat_from_sizes("image", image_grid_sizes),
-        image_grid_thw=MultiModalFieldConfig.batched("image"),
+        image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
             "video", video_num_patches
         ),
         video_embeds=MultiModalFieldConfig.flat_from_sizes("video", video_num_patches),
-        video_grid_thw=MultiModalFieldConfig.flat_from_sizes("video", video_num_grids),
-        num_frames=MultiModalFieldConfig.batched("video"),
+        video_grid_thw=MultiModalFieldConfig.flat_from_sizes(
+            "video", video_num_grids, keep_on_cpu=True
+        ),
+        num_frames=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
     )
 
 
