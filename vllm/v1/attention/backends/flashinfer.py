@@ -77,6 +77,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
+from vllm.v1.attention.ops.dcp_utils import FlashInferDCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -1806,6 +1807,21 @@ class FlashInferImpl(AttentionImpl):
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
+        self.dcp_world_size = (
+            vllm_config.parallel_config.decode_context_parallel_size
+            if vllm_config is not None
+            else 1
+        )
+        self.dcp_manager = (
+            FlashInferDCPManager(
+                vllm_config,
+                num_heads,
+                head_size,
+                vllm_config.model_config.dtype,
+            )
+            if vllm_config is not None and self.dcp_world_size > 1
+            else None
+        )
 
         # Pre-allocated FP8 output buffer for NVFP4 without fused output quant.
         if self.is_kvcache_nvfp4 and vllm_config is not None:
@@ -1817,16 +1833,6 @@ class FlashInferImpl(AttentionImpl):
             )
         else:
             self._nvfp4_fp8_out = None
-
-        dcp_a2a = (
-            vllm_config is not None
-            and vllm_config.parallel_config.decode_context_parallel_size > 1
-            and vllm_config.parallel_config.dcp_comm_backend == "a2a"
-        )
-        if dcp_a2a:
-            self.dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
-        else:
-            self.dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         # XQA does not support FP8/NVFP4 output, so require trtllm-gen
@@ -2305,15 +2311,11 @@ class FlashInferImpl(AttentionImpl):
                     out_decode = output[:num_decode_tokens]
 
                 if use_dcp:
-                    decode_query = get_dcp_group().all_gather(
-                        decode_query.contiguous(), dim=-2
+                    assert self.dcp_manager is not None
+                    output_tmp, lse = self.dcp_manager.get_decode_buffers(
+                        num_decode_tokens
                     )
-                    output_tmp = torch.empty_like(decode_query)
-                    lse = torch.empty(
-                        (decode_query.size(0), decode_query.size(1)),
-                        dtype=torch.float32,
-                        device=decode_query.device,
-                    )
+                    decode_query = self.dcp_manager.gather_query(decode_query)
                     decode_wrapper.run(
                         decode_query,
                         kv_cache_for_fi,
@@ -2326,10 +2328,9 @@ class FlashInferImpl(AttentionImpl):
                         kv_cache_sf=kv_cache_sf,
                         sinks=self.sinks,
                     )
-                    output[:num_decode_tokens] = self.dcp_combine(
+                    output[:num_decode_tokens] = self.dcp_manager.combine(
                         output_tmp,
                         lse,
-                        get_dcp_group(),
                     )
                 else:
                     decode_wrapper.run(
@@ -2490,12 +2491,12 @@ class FlashInferImpl(AttentionImpl):
                 )
 
                 if use_dcp:
+                    assert self.dcp_manager is not None
                     assert isinstance(out, torch.Tensor)
                     assert lse is not None
-                    output[:num_decode_tokens] = self.dcp_combine(
+                    output[:num_decode_tokens] = self.dcp_manager.combine(
                         out,
                         lse,
-                        get_dcp_group(),
                     )
                 elif needs_fp8_out:
                     output[:num_decode_tokens].copy_(out.to(output.dtype))
