@@ -1,0 +1,4 @@
+DeepSeek-R1-0528-NVFP4.yaml
+DeepSeek-V3.2-NVFP4.yaml
+Kimi-K2-Thinking-NVFP4.yaml
+Kimi-K2-Thinking-INT4.yaml
