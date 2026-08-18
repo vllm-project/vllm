@@ -39,7 +39,8 @@ use crate::cli::unsupported::UnsupportedArgs;
 #[derive(Debug, Parser)]
 #[command(
     name = "vllm-rs",
-    about = "Rust frontend and managed-engine CLI for vLLM."
+    about = "Rust frontend and managed-engine CLI for vLLM.",
+    version = vllm_build_info::VERSION
 )]
 pub struct Cli {
     #[command(subcommand)]
