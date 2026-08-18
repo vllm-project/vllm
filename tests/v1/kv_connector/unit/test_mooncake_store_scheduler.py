@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler impor
     MooncakeStoreScheduler,
 )
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.sched.output import KVConnectorBlockState
 
 
 def _make_bare_scheduler(
@@ -50,6 +51,16 @@ def _make_bare_scheduler(
     return scheduler
 
 
+def _make_connector_block_state(
+    block_ids: tuple[list[int], ...] | None = None,
+    offloads: list[tuple[int, int, int]] | None = None,
+) -> KVConnectorBlockState:
+    return KVConnectorBlockState(
+        block_ids={} if block_ids is None else {"req-0": block_ids},
+        boundary_state_offloads=({} if offloads is None else {"req-0": offloads}),
+    )
+
+
 def _make_scheduler_output(*, scheduled_spec_tokens: list[int] | None):
     return SimpleNamespace(
         finished_req_ids=set(),
@@ -65,6 +76,7 @@ def _make_scheduler_output(*, scheduled_spec_tokens: list[int] | None):
         scheduled_spec_decode_tokens=(
             {"req-0": scheduled_spec_tokens} if scheduled_spec_tokens else {}
         ),
+        kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1, 2],)),
     )
 
 
@@ -84,6 +96,7 @@ def _make_decode_scheduler_output(
         ),
         num_scheduled_tokens={"req-0": num_scheduled_tokens},
         scheduled_spec_decode_tokens={},
+        kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1, 2],)),
     )
 
 
@@ -109,6 +122,7 @@ def _make_new_scheduler_output() -> SimpleNamespace:
         ),
         num_scheduled_tokens={"req-0": 32},
         scheduled_spec_decode_tokens={},
+        kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1],)),
     )
 
 
@@ -491,6 +505,7 @@ def _make_resumed_scheduler_output(*, num_scheduled_tokens: int) -> SimpleNamesp
         ),
         num_scheduled_tokens={"req-0": num_scheduled_tokens},
         scheduled_spec_decode_tokens={},
+        kv_connector_block_state=_make_connector_block_state(block_ids=([0, 1, 2],)),
     )
 
 
@@ -915,7 +930,10 @@ def _add_pending_partial_tail_request(
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
-        boundary_state_offloads={"req-0": [(1, 7, 12)]},
+        kv_connector_block_state=_make_connector_block_state(
+            block_ids=block_ids,
+            offloads=[(1, 7, 12)],
+        ),
     )
 
 
@@ -944,7 +962,8 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
     assert req_meta.num_prompt_tokens == 12
     assert req_meta.block_ids == ([0],)
     store_job_id = req_meta.store_job_id
-    assert scheduler._pinned_saves[store_job_id][0] == [7, 0]
+    assert scheduler._pinned_saves[store_job_id][0] == [7]
+    assert scheduler._gpu_block_pool.blocks[0].ref_cnt == 0
     assert scheduler._gpu_block_pool.blocks[7].ref_cnt == 1
     tracker = scheduler._request_trackers["req-0"]
     assert tracker.num_saved_tokens == 0
@@ -985,7 +1004,7 @@ def test_decode_boundary_state_offload_dropped_unclaimed():
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
         # Boundary 16 is a decode boundary for a 12-token prefill.
-        boundary_state_offloads={"req-0": [(1, 7, 16)]},
+        kv_connector_block_state=_make_connector_block_state(offloads=[(1, 7, 16)]),
     )
 
     meta = scheduler.build_connector_meta(out)
@@ -1014,7 +1033,7 @@ def _register_offload_request(scheduler, *, prefill_end_tokens, num_prompt_token
     )
 
 
-def _make_offload_only_output(entries):
+def _make_offload_only_output(entries, block_ids=([0],)):
     return SimpleNamespace(
         finished_req_ids=set(),
         preempted_req_ids=set(),
@@ -1027,7 +1046,10 @@ def _make_offload_only_output(entries):
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
-        boundary_state_offloads={"req-0": entries},
+        kv_connector_block_state=_make_connector_block_state(
+            block_ids=block_ids,
+            offloads=entries,
+        ),
     )
 
 
@@ -1046,14 +1068,16 @@ def test_resumed_prefill_claims_boundaries_past_prompt_length():
     # 16 and 20 are inside the resumed prefill; 24 is past it.
     assert meta.requests[0].boundary_state_offloads == [(1, 7, 16), (1, 9, 20)]
     store_job_id = meta.requests[0].store_job_id
-    assert scheduler._pinned_saves[store_job_id][0] == [7, 9, 0]
+    assert scheduler._pinned_saves[store_job_id][0] == [7, 9]
 
 
 def test_boundary_state_job_pins_exact_blocks_once():
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
     _register_offload_request(scheduler, prefill_end_tokens=64, num_prompt_tokens=64)
     scheduler._request_trackers["req-0"].allocated_block_ids = ([7],)
-    out = _make_offload_only_output([(1, 7, 16), (1, 8, 32), (1, 9, 48)])
+    out = _make_offload_only_output(
+        [(1, 7, 16), (1, 8, 32), (1, 9, 48)], block_ids=([7],)
+    )
 
     meta = scheduler.build_connector_meta(out)
 
@@ -1077,6 +1101,67 @@ def test_boundary_state_job_pins_exact_blocks_once():
         0,
         0,
     ]
+
+
+def test_store_job_pins_current_non_null_non_mamba_blocks():
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    request = SimpleNamespace(
+        all_token_ids=list(range(48)),
+        block_hashes=[bytes([i]) for i in range(12)],
+        num_output_placeholders=0,
+    )
+    scheduler._unfinished_requests["req-0"] = (request, ([7, 2, 0], [21, 0, 22]))
+    scheduler._request_trackers["req-0"] = RequestTracker(
+        req_id="req-0",
+        token_len=44,
+        allocated_block_ids=([7, 2, 0], [21, 0, 22]),
+        num_saved_tokens=32,
+        token_ids=list(range(44)),
+        prefill_end_tokens=48,
+    )
+    stale_block_ids = ([7, 2, 0, 5], [21, 0, 22, 23])
+    current_block_ids = ([7, 2, 0, 6], [24, 0, 25, 26])
+    out = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(
+            req_ids=["req-0"],
+            new_block_ids=[([5], [23])],
+            num_computed_tokens=[44],
+            resumed_req_ids=set(),
+        ),
+        num_scheduled_tokens={"req-0": 4},
+        scheduled_spec_decode_tokens={},
+        kv_connector_block_state=_make_connector_block_state(
+            block_ids=current_block_ids,
+            offloads=[(1, 8, 16)],
+        ),
+    )
+    pool = scheduler._gpu_block_pool
+
+    meta = scheduler.build_connector_meta(out)
+
+    assert scheduler._request_trackers["req-0"].allocated_block_ids == stale_block_ids
+    req_meta = meta.requests[0]
+    assert req_meta.block_ids == current_block_ids
+    store_job_id = req_meta.store_job_id
+    assert scheduler._pinned_saves[store_job_id][0] == [8, 7, 2, 6]
+    assert pool.blocks[0].ref_cnt == 0
+    assert pool.blocks[5].ref_cnt == 0
+    assert [pool.blocks[i].ref_cnt for i in (21, 22, 23, 24, 25, 26)] == [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ]
+    assert [pool.blocks[i].ref_cnt for i in (8, 7, 2, 6)] == [1, 1, 1, 1]
+
+    scheduler.update_connector_output(_make_worker_output({store_job_id: 1}))
+
+    assert [pool.blocks[i].ref_cnt for i in (8, 7, 2, 6)] == [0, 0, 0, 0]
 
 
 def test_boundary_state_release_is_per_store_job():
@@ -1168,7 +1253,7 @@ def test_resumed_partial_tail_attached_to_save_keeps_exact_boundary():
         prefill_end_tokens=48,
     )
     out = _make_scheduler_output(scheduled_spec_tokens=None)
-    out.boundary_state_offloads = {"req-0": [(0, 7, 36)]}
+    out.kv_connector_block_state.boundary_state_offloads = {"req-0": [(0, 7, 36)]}
 
     meta = scheduler.build_connector_meta(out)
 
@@ -1200,7 +1285,8 @@ def test_partial_tail_cow_block_is_referenced_for_the_job():
     store_job_id = meta.requests[0].store_job_id
     # It leads the list, as in `pop_blocks_for_free`, so that the reversed free
     # puts it last in eviction priority.
-    assert scheduler._pinned_saves[store_job_id][0] == [7, 0]
+    assert scheduler._pinned_saves[store_job_id][0] == [7]
+    assert pool.blocks[0].ref_cnt == 0
     assert pool.blocks[7].ref_cnt == 1
 
     scheduler.update_connector_output(_make_worker_output({store_job_id: 1}))
