@@ -390,6 +390,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     3. Return the output tensor.
     """
 
+    supports_dense_mha_prefill: ClassVar[bool] = True
+
     def __init__(
         self,
         num_heads: int,
@@ -549,9 +551,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
 
         self.prefill_backend: MLAPrefillBackend | None
-        if self.impl.is_sparse and not self.impl.supports_dense_mha_prefill:
+        if self.impl.is_sparse and not (
+            self.impl.supports_dense_mha_prefill and self.supports_dense_mha_prefill
+        ):
             logger.warning_once(
-                "Sparse MLA impl has no dense-MHA prefill path; using the top-k "
+                "Sparse MLA layer has no dense-MHA prefill path; using the top-k "
                 "MQA path only."
             )
             self.prefill_backend = None
@@ -1984,12 +1988,40 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     # Whether this builder can flatten a non-causal query block into decode rows.
     supports_non_causal_multi_token_decode: ClassVar[bool] = False
 
+    # Whether can support non-causal multi-token decode with DCP KV cache.
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = False
+
     # The threshold for reordering the batch into decode and prefill requests.
     # If > 1, the batch will be reordered such that requests with
     # query length <= threshold are classified as decode requests.
     # Use `query_len_support` (above) to set this automatically
     # when speculative decoding is enabled.
     reorder_batch_threshold: int = 1
+
+    def _validate_dspark_dcp_support(self, supports_dcp_with_varlen: bool) -> None:
+        speculative_config = getattr(self.vllm_config, "speculative_config", None)
+        parallel_config = self.vllm_config.parallel_config
+        if (
+            speculative_config is None
+            or getattr(speculative_config, "method", None) != "dspark"
+            or parallel_config.decode_context_parallel_size <= 1
+        ):
+            return
+
+        if self.non_causal_multi_token_decode:
+            supported = self.supports_non_causal_multi_token_dcp
+            query_mode = "non-causal draft"
+        else:
+            supported = supports_dcp_with_varlen
+            query_mode = "causal multi-token"
+
+        if not supported:
+            raise ValueError(
+                f"{type(self).__name__} does not support {query_mode} MLA "
+                "attention for DSpark with decode context parallelism. Select "
+                "a backend with explicit DSpark DCP support or set "
+                "decode_context_parallel_size=1."
+            )
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
@@ -2084,6 +2116,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.non_causal_multi_token_decode = getattr(
             kv_cache_spec, "non_causal_multi_token_decode", False
         )
+        self._validate_dspark_dcp_support(supports_dcp_with_varlen)
 
         # A draft cache group can have a different head count from the target.
         self.num_heads = get_num_attention_heads_from_layers(
