@@ -286,13 +286,15 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
     if let Some(kv_connector_stats) = &stats.kv_connector_stats {
         if NIXL_FLAT_DATA_KEYS.iter().any(|key| kv_connector_stats.contains_key(*key)) {
             // Bare NixlConnector: the map itself *is* the NIXL data blob.
-            let synthetic = Value::Map(
-                kv_connector_stats
-                    .iter()
-                    .map(|(k, v)| (Value::String(k.clone().into()), v.clone()))
-                    .collect(),
-            );
-            record_nixl_stats(handles, &synthetic);
+            record_nixl_stats(handles, &to_synthetic_map(kv_connector_stats));
+        } else if MOONCAKE_FLAT_OPERATION_KEYS
+            .iter()
+            .any(|key| kv_connector_stats.contains_key(*key))
+        {
+            // Bare MooncakeStoreConnector: the map itself *is* the
+            // operation->records data blob (same shape `record_mooncake_stats`
+            // expects for the MultiConnector-wrapped case's inner "data").
+            record_mooncake_stats(handles, &to_synthetic_map(kv_connector_stats));
         } else {
             // MultiConnector: dispatch each sub-connector by class name.
             // We only know how to decode the two connectors we run in production.
@@ -322,6 +324,23 @@ const NIXL_FLAT_DATA_KEYS: &[&str] = &[
     "bytes_transferred",
     "num_descriptors",
 ];
+
+/// Mooncake store RPC operation names, i.e. the only keys that ever appear
+/// directly on `MooncakeStoreConnectorStats.data` (see
+/// `mooncake/store/worker.py::_record_operation()` call sites on the Python
+/// side). Their presence at the top level of `kv_connector_stats` means
+/// we're looking at a bare `MooncakeStoreConnector`'s own data, not a
+/// `MultiConnector` wrapper.
+const MOONCAKE_FLAT_OPERATION_KEYS: &[&str] = &["save_exists", "save_put", "load_get"];
+
+/// A bare (non-`MultiConnector`) connector reports its own `.data` directly
+/// as `kv_connector_stats`, so the top-level map itself needs to be handed
+/// to the same per-connector decoders that otherwise operate on the inner
+/// `"data"` value of a `MultiConnector`-wrapped entry. Both decoders take an
+/// `&OpaqueValue`, so re-wrap the map into one.
+fn to_synthetic_map(map: &BTreeMap<String, OpaqueValue>) -> Value {
+    Value::Map(map.iter().map(|(k, v)| (Value::String(k.clone().into()), v.clone())).collect())
+}
 
 /// Look up a string key in a msgpack map value, e.g. `{"data": ...}`.
 fn map_get<'a>(value: &'a OpaqueValue, key: &str) -> Option<&'a OpaqueValue> {
@@ -397,17 +416,23 @@ fn record_mooncake_stats(handles: &SchedulerStatsHandles, data: &OpaqueValue) {
 /// `NixlPromMetrics.observe()` on the Python side (each list is one
 /// observation per transfer/event since the last flush).
 fn record_nixl_stats(handles: &SchedulerStatsHandles, data: &OpaqueValue) {
-    let list_len = |key: &str| -> u64 {
-        map_get(data, key)
-            .and_then(Value::as_array)
-            .map(|values| values.len() as u64)
-            .unwrap_or(0)
-    };
     let list_values = |key: &str| -> Vec<f64> {
         map_get(data, key)
             .and_then(Value::as_array)
             .map(|values| values.iter().filter_map(value_as_f64).collect())
             .unwrap_or_default()
+    };
+    // Mirrors `NixlPromMetrics.observe()`, which does
+    // `counter_obj.inc(list_item)` per list item rather than incrementing by
+    // the list length -- sum the values instead of counting entries so the
+    // two stay equivalent even if a list item is ever recorded as something
+    // other than `1`.
+    let list_sum_u64 = |key: &str| -> u64 {
+        list_values(key)
+            .iter()
+            .filter(|v| v.is_finite() && **v >= 0.0)
+            .map(|v| *v as u64)
+            .sum()
     };
 
     for value in list_values("transfer_duration") {
@@ -422,11 +447,11 @@ fn record_nixl_stats(handles: &SchedulerStatsHandles, data: &OpaqueValue) {
     for value in list_values("num_descriptors") {
         handles.nixl_num_descriptors.observe(value);
     }
-    handles.nixl_num_failed_transfers.inc_by(list_len("num_failed_transfers"));
+    handles.nixl_num_failed_transfers.inc_by(list_sum_u64("num_failed_transfers"));
     handles
         .nixl_num_failed_notifications
-        .inc_by(list_len("num_failed_notifications"));
-    handles.nixl_num_kv_expired_reqs.inc_by(list_len("num_kv_expired_reqs"));
+        .inc_by(list_sum_u64("num_failed_notifications"));
+    handles.nixl_num_kv_expired_reqs.inc_by(list_sum_u64("num_kv_expired_reqs"));
 }
 
 /// Exports `vllm:lora_requests_info` as a single series covering all LoRA
@@ -695,5 +720,52 @@ mod tests {
                 "vllm:nixl_bytes_transferred_sum{model_name=\"model\",engine=\"0\"} 8192"
             )
         );
+    }
+
+    /// A bare `kv_connector: MooncakeStoreConnector` (no `MultiConnector`
+    /// wrapper) reports `MooncakeStoreConnectorStats.data` directly as
+    /// `kv_connector_stats` -- a flat `{"load_get": [...], ...}` map keyed
+    /// by RPC operation name, with no connector-name key and no extra
+    /// `"data"` nesting. This must be decoded too, not just the
+    /// `MultiConnector`-wrapped shape.
+    #[test]
+    fn bare_mooncake_connector_stats_are_decoded_without_multi_connector_wrapping() {
+        let metrics = Metrics::new();
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+
+        let load_get_record = msgpack_map(vec![
+            ("duration_seconds", rmpv::Value::F64(0.05)),
+            ("num_keys", rmpv::Value::from(3i64)),
+            ("num_bytes", rmpv::Value::from(1024i64)),
+            ("status", rmpv::Value::String("ok".into())),
+            ("num_failed_keys", rmpv::Value::from(0i64)),
+        ]);
+
+        let mut kv_connector_stats = BTreeMap::new();
+        kv_connector_stats.insert(
+            "load_get".to_string(),
+            rmpv::Value::Array(vec![load_get_record]),
+        );
+
+        let stats = SchedulerStats {
+            kv_connector_stats: Some(kv_connector_stats),
+            ..Default::default()
+        };
+
+        super::record_scheduler_stats_with_handles(&handles, &stats);
+
+        let rendered = metrics.render().unwrap();
+        assert!(rendered.contains(
+            "vllm:mooncake_store_operation_total{model_name=\"model\",engine=\"0\",\
+             operation=\"load_get\",status=\"ok\"} 1"
+        ));
+        assert!(rendered.contains(
+            "vllm:mooncake_store_operation_keys_total{model_name=\"model\",engine=\"0\",\
+             operation=\"load_get\",status=\"ok\"} 3"
+        ));
+        assert!(rendered.contains(
+            "vllm:mooncake_store_operation_bytes_total{model_name=\"model\",engine=\"0\",\
+             operation=\"load_get\",status=\"ok\"} 1024"
+        ));
     }
 }
