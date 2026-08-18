@@ -155,7 +155,6 @@ class NgramGPUSpeculator(BaseSpeculator):
 
     supports_mm_inputs = False
     draft_logits = None
-    trims_drafts_on_gpu = True
 
     def __init__(
         self,
@@ -203,7 +202,7 @@ class NgramGPUSpeculator(BaseSpeculator):
         )
         # Per request-slot count of usable drafts from the latest proposal,
         # consumed by the model runner's GPU draft trimmer.
-        self.num_valid_drafts = torch.zeros(
+        self.num_valid_drafts_for_trim = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=device
         )
         # Batch-ordered draft output, scattered into RequestState.draft_tokens
@@ -270,7 +269,7 @@ class NgramGPUSpeculator(BaseSpeculator):
             self.scratch,
             self.scratch.stride(0),
             self.drafts,
-            self.num_valid_drafts,
+            self.num_valid_drafts_for_trim,
             self.max_model_len,
             self.n_blocks,
             self.num_speculative_steps,

@@ -107,7 +107,7 @@ class VariableDraftTrimmer:
     """GPU-side verification trimming for variable-length drafters (ngram).
 
     The drafter records per-request valid draft counts on GPU in
-    `num_valid_drafts`. The scheduler still schedules the full
+    `num_valid_drafts_for_trim`. The scheduler still schedules the full
     num_speculative_tokens per request; at the next step this trimmer clamps
     each request's scheduled draft slots to the recorded count and rebuilds
     cu_num_logits / query_start_loc on device, so the CPU keeps only upper
@@ -180,10 +180,8 @@ def maybe_create_draft_trimmer(
     padded drafts, which is correct but wastes verification compute."""
     from vllm.v1.worker.gpu.spec_decode.rejection_sampler import get_max_chunk_logits
 
-    if speculator is None or not speculator.trims_drafts_on_gpu:
+    if speculator is None or speculator.num_valid_drafts_for_trim is None:
         return None
-    num_valid_drafts = speculator.num_valid_drafts
-    assert num_valid_drafts is not None
 
     parallel_config = vllm_config.parallel_config
     cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
@@ -217,7 +215,7 @@ def maybe_create_draft_trimmer(
 
     logger.info("GPU draft trimming enabled for variable-length drafts.")
     return VariableDraftTrimmer(
-        num_valid_drafts,
+        speculator.num_valid_drafts_for_trim,
         query_start_loc,
         num_bonus_tokens,
         req_states.max_num_reqs,

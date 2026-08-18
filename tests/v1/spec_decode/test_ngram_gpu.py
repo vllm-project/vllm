@@ -155,7 +155,7 @@ def _propose(
         temperature=torch.zeros(B, dtype=torch.float32, device=DEVICE),
         seeds=torch.zeros(B, dtype=torch.int64, device=DEVICE),
     )
-    num_valid = spec.num_valid_drafts[idx_mapping]
+    num_valid = spec.num_valid_drafts_for_trim[idx_mapping]
     return drafts.cpu().tolist(), num_valid.cpu().tolist()
 
 
@@ -295,14 +295,14 @@ def test_noncontiguous_idx_mapping():
 
 
 def test_num_valid_written_to_request_slots():
-    """num_valid_drafts is req-slot indexed for the GPU draft trimmer."""
+    """num_valid_drafts_for_trim is req-slot indexed for the draft trimmer."""
     spec = _make_speculator(min_n=2, max_n=2, k=2)
     _propose(
         spec,
         [[7, 8, 9, 7, 8], [1, 2, 3, 4, 5]],
         slots=[5, 2],
     )
-    nv = spec.num_valid_drafts.cpu()
+    nv = spec.num_valid_drafts_for_trim.cpu()
     assert nv[5].item() == 2  # match
     assert nv[2].item() == 0  # no match
 
@@ -311,7 +311,7 @@ def test_dummy_run_does_not_touch_state():
     """Dummy runs must not mutate persistent request or drafter state."""
     spec = _make_speculator(min_n=2, max_n=2, k=2)
     _propose(spec, [[1, 2, 3, 1, 2]], slots=[1])
-    before = spec.num_valid_drafts.clone()
+    before = spec.num_valid_drafts_for_trim.clone()
 
     input_batch = SimpleNamespace(
         num_reqs=1,
@@ -332,7 +332,7 @@ def test_dummy_run_does_not_touch_state():
         dummy_run=True,
     )
     assert drafts.shape == (1, 2)
-    assert torch.equal(spec.num_valid_drafts.cpu(), before.cpu())
+    assert torch.equal(spec.num_valid_drafts_for_trim.cpu(), before.cpu())
 
 
 def test_construction_validates_speculative_config():
