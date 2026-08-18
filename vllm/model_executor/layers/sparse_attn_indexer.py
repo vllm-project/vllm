@@ -344,6 +344,7 @@ def sparse_attn_indexer(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
+    use_fp16_logits: bool = False,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     forward_context = get_forward_context()
@@ -513,7 +514,7 @@ def sparse_attn_indexer(
                     q_slice_cast = q_slice
                     k_quant_cast = k_quant
                     k_scale_cast = k_scale.view(torch.float32).squeeze(-1)
-                logits_dtype = _get_indexer_logits_dtype()
+                logits_dtype = torch.float16 if use_fp16_logits else torch.float32
                 if current_platform.is_xpu():
                     if logits_dtype != torch.float32:
                         raise RuntimeError(
@@ -618,7 +619,7 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
-        logits_dtype = _get_indexer_logits_dtype()
+        logits_dtype = torch.float16 if use_fp16_logits else torch.float32
         if current_platform.is_xpu():
             if logits_dtype != torch.float32:
                 raise RuntimeError(
@@ -755,6 +756,7 @@ def sparse_attn_indexer_fake(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
+    use_fp16_logits: bool = False,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -805,6 +807,7 @@ class SparseAttnIndexer(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
+        self.use_fp16_logits = _get_indexer_logits_dtype() == torch.float16
         self.dense_mha_metadata_layer_name = ""
         # DCP scalars are constant for the run; resolve them here (config is set
         # during model construction) and pass them into the custom op, rather
@@ -872,6 +875,8 @@ class SparseAttnIndexer(CustomOp):
             self.dcp_rank,
             self.dcp_world_size,
             self.cp_kv_cache_interleave_size,
+            False,
+            self.use_fp16_logits,
         )
 
     def forward_xpu(
