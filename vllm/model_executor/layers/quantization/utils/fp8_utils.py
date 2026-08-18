@@ -1241,6 +1241,33 @@ def validate_fp8_block_shape(
                 )
 
 
+def validate_fp8_block_shape_moe(
+    intermediate_size_per_partition: int,
+    block_size: list[int],
+    tp_size: int,
+) -> None:
+    """Validate fused MoE block quantization shapes for tensor parallelism."""
+    block_n, block_k = block_size[0], block_size[1]
+
+    # NOTE: To ensure proper alignment of the block-wise quantization
+    # scales, the output_size of the weights for both the gate and up
+    # layers must be divisible by block_n.
+    # Required by column parallel or enabling merged weights
+    if intermediate_size_per_partition % block_n != 0:
+        raise ValueError(
+            f"The output_size of gate's and up's weight = "
+            f"{intermediate_size_per_partition} is not divisible by "
+            f"weight quantization block_n = {block_n}."
+        )
+    if tp_size > 1 and intermediate_size_per_partition % block_k != 0:
+        # Required by row parallel
+        raise ValueError(
+            f"The input_size of down's weight = "
+            f"{intermediate_size_per_partition} is not divisible by "
+            f"weight quantization block_k = {block_k}."
+        )
+
+
 def create_fp8_weight_parameter(
     output_size_per_partition: int,
     input_size_per_partition: int,
