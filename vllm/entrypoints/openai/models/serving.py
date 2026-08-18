@@ -14,11 +14,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     ModelPermission,
 )
 from vllm.entrypoints.openai.models.protocol import BaseModelPath, LoRAModulePath
+from vllm.entrypoints.serve import create_error_response
 from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
 )
-from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
