@@ -24,7 +24,6 @@ from vllm import envs
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.launchers.utils.constants import MCP_PREFIX
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
@@ -58,6 +57,7 @@ _TOOL_NAME_TO_TYPE_MAP = {
     "python": "code_interpreter",
     "container": "container",
 }
+MCP_PREFIX = "mcp_"
 
 
 def _map_tool_name_to_tool_type(tool_name: str) -> str:
