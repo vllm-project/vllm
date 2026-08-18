@@ -160,6 +160,7 @@ class DeepseekV32Attention(MLAAttention):
     indexer_cls: "type[DeepseekV32Indexer]" = DeepseekV32Indexer
 
     require_fp8_kv_cache: bool = True
+    supports_dense_mha_prefill = False
 
     def __init__(
         self,
@@ -265,6 +266,7 @@ class DeepseekV32Attention(MLAAttention):
             and not skip_topk
             and not self.use_pcp
             and current_platform.is_cuda()
+            and self.supports_dense_mha_prefill
         )
         self._dense_mha_metadata_layer_name = (
             self.layer_name if enable_short_prefill_scoring_skip else ""
