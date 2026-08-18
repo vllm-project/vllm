@@ -154,6 +154,77 @@ uv pip install vllm==${VLLM_VERSION} \
 --8<-- [end:pre-built-wheels]
 --8<-- [start:build-wheel-from-source]
 
+#### Set up using Python-only build (without compilation) {#python-only-build}
+
+If you only need to change Python code, you can build and install vLLM without
+compilation. Changes you make to the code will be reflected when you run vLLM:
+
+```bash
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+VLLM_USE_PRECOMPILED=1 python3 setup.py develop
+```
+
+This command will do the following:
+
+1. Look for the current branch in your vLLM clone.
+1. Identify the corresponding base commit in the main branch.
+1. Detect the ROCm version in your environment and select the matching wheel
+   variant.
+1. Download the pre-built wheel of the base commit.
+1. Use its compiled libraries and `vllm-rs` binary in the installation.
+
+!!! note
+    1. If you change C++, HIP, or kernel code, you cannot use Python-only build;
+       otherwise you may see an import error about a library not being found or
+       an undefined symbol.
+    2. If you rebase your development branch, it is recommended to uninstall
+       vLLM and re-run the above command to make sure your libraries are up to
+       date.
+
+!!! tip "Rebuilding the Rust frontend"
+If you need to recompile the `vllm-rs` Rust frontend binary, you can rebuild and
+install it without re-running the full installation:
+
+    ```bash
+    ./build_rust.sh          # release build
+    ./build_rust.sh --debug  # faster build for development
+    ```
+
+    This will install the required Rust toolchain if needed, build the binary,
+    and place it in `vllm/vllm-rs`.
+
+If you see an error about a wheel not being found, the wheel for your base
+commit and ROCm patch version might not be available. Check the available
+variants under `https://wheels.vllm.ai/rocm/<commit>/`. For example, ROCm 7.2.1
+uses the `rocm721` variant.
+
+There are more environment variables to control the behavior of Python-only
+build:
+
+- `VLLM_PRECOMPILED_WHEEL_LOCATION`: specify the exact wheel URL or local file
+  path of a pre-compiled wheel to use. All other logic to find the wheel will be
+  skipped.
+- `VLLM_PRECOMPILED_WHEEL_COMMIT`: override the full commit hash used to
+  download the pre-compiled wheel.
+- `VLLM_PRECOMPILED_WHEEL_VARIANT`: specify the ROCm variant subdirectory, e.g.,
+  `rocm700` or `rocm721`. If not specified, the variant is auto-detected based
+  on your system's ROCm version. An explicitly specified variant must match the
+  detected environment.
+
+You can find more information about vLLM's wheels in
+[Install the latest code](#install-the-latest-code).
+
+!!! note
+    There is a possibility that your source code may have a different commit ID
+    compared to the vLLM wheel, which could potentially lead to unknown errors.
+    It is recommended to use the same commit ID for the source code as the vLLM
+    wheel you have installed. Please refer to
+    [Install the latest code](#install-the-latest-code) for instructions on how
+    to install a specified wheel.
+
+#### Full build (with compilation) {#full-build}
+
 !!! tip
     - If you found that the following installation step does not work for you, please refer to [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base). Dockerfile is a form of installation steps.
 
