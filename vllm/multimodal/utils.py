@@ -232,14 +232,13 @@ def strip_covered_mm_data(
             f.mm_position.offset + f.mm_position.length > num_computed_tokens
         ):
             return f
-        return replace(
-            f,
-            data=None
-            if not uses_mrope
-            else MultiModalKwargsItem(
+
+        data = None
+        if uses_mrope:
+            data = MultiModalKwargsItem(
                 {k: elem for k, elem in f.data.items() if elem.field.keep_on_cpu}
-            ),
-        )
+            )
+        return replace(f, data=data)
 
     return [maybe_strip(f) for f in mm_features]
 
