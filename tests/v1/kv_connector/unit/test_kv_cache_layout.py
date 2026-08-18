@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for create_kv_cache_views."""
 
+from fractions import Fraction
+
 import pytest
 import torch
 
@@ -80,3 +82,32 @@ def test_dense_kv_cache_views(layout):
                     f"dim {j} (physical pos {stride_order[j]}), got "
                     f"strides={strides}"
                 )
+
+
+@pytest.mark.parametrize(
+    ("block_size", "tokens_per_state", "kernel_block_size", "expected_shape"),
+    [
+        (256, 4, 64, (16, NUM_KV_HEADS, 16, 2 * HEAD_SIZE * 2)),
+        (4, Fraction(1, 4), 2, (8, NUM_KV_HEADS, 8, 2 * HEAD_SIZE * 2)),
+    ],
+)
+def test_kv_cache_shape_accounts_for_tokens_per_state(
+    block_size: int,
+    tokens_per_state: int | Fraction,
+    kernel_block_size: int,
+    expected_shape: tuple[int, ...],
+):
+    spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+        tokens_per_state=tokens_per_state,
+    )
+
+    assert (
+        compute_layer_kv_cache_shape_bytes(
+            spec, NUM_BLOCKS, kernel_block_size=kernel_block_size
+        )
+        == expected_shape
+    )

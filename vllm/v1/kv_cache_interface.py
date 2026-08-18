@@ -172,7 +172,12 @@ class KVCacheSpec:
 
     @property
     def num_states(self) -> int:
-        return self.block_size
+        return self.get_num_kernel_states(self.block_size)
+
+    def get_num_kernel_states(self, kernel_block_size: int) -> int:
+        if self.tokens_per_state > 0:
+            return kernel_block_size // self.tokens_per_state
+        return 1
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """
@@ -288,11 +293,10 @@ def compute_layer_kv_cache_shape_bytes(
         f"Kernel block size {bs} must divide KV cache block size {spec.block_size}."
     )
     blocks_per_page = spec.block_size // bs
-    num_states = spec.num_states * bs // spec.block_size
     return (
         num_blocks * blocks_per_page,
         spec.num_heads,
-        num_states,
+        spec.get_num_kernel_states(bs),
         spec.state_content_size_bytes,
     )
 
@@ -419,15 +423,6 @@ class AttentionSpec(KVCacheSpec):
         if self.num_head_slots is not None:
             return self.num_head_slots
         return self.num_kv_heads
-
-    @property
-    def num_states(self) -> int:
-        num_states = Fraction(self.block_size) / self.tokens_per_state
-        assert num_states.denominator == 1, (
-            f"block_size {self.block_size} not divisible by "
-            f"tokens_per_state {self.tokens_per_state}"
-        )
-        return int(num_states)
 
     @property
     def state_content_size_bytes(self) -> int:
@@ -847,10 +842,6 @@ class MambaSpec(KVCacheSpec):
     num_speculative_blocks: int = 0
     num_heads: int = 1
     tokens_per_state: int = -1
-
-    @property
-    def num_states(self) -> int:
-        return 1  # recurrent: a single state per block
 
     @property
     def state_content_size_bytes(self) -> int:
