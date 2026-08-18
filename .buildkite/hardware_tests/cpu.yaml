@@ -64,9 +64,13 @@ steps:
   - tests/models/language/generation/
   - tests/models/language/pooling/
   - tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py
+  # RELEASE-ONLY: torch 2.14.0 makes these CPU model-execution shards run 2-3x
+  # slower than 2.13, so the old 45m/50m limits killed them mid-run and produced
+  # no signal. Raised to 90m to measure the real duration. Revert once
+  # https://github.com/pytorch/pytorch/issues/193951 is resolved.
   commands:
     - |
-      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 50m "
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 90m "
       pytest -x -v -s tests/models/language/generation -m cpu_model
       pytest -x -v -s tests/models/language/pooling -m cpu_model
       pytest -x -v -s tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py"
@@ -129,9 +133,13 @@ steps:
   # - vllm/
   - vllm/model_executor/layers/rotary_embedding
   - tests/models/multimodal/generation/
+  # RELEASE-ONLY: torch 2.14.0 makes these CPU model-execution shards run 2-3x
+  # slower than 2.13, so the old 45m/50m limits killed them mid-run and produced
+  # no signal. Raised to 90m to measure the real duration. Revert once
+  # https://github.com/pytorch/pytorch/issues/193951 is resolved.
   commands:
     - |
-      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 45m "
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 90m "
       pytest -x -v -s tests/models/multimodal/generation --ignore=tests/models/multimodal/generation/test_pixtral.py --ignore=tests/models/multimodal/generation/test_qwen2_5_vl.py -m cpu_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
   parallelism: 4
 
