@@ -2,15 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import io
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
 from typing import Any, Final, cast
 
-import numpy as np
-import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -39,6 +36,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatMessage,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    CompletionTokenUsageInfo,
     DeltaMessage,
     ErrorResponse,
     FunctionCall,
@@ -64,6 +62,7 @@ from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
+from vllm.utils.serial_utils import numpy2base64
 
 logger = init_logger(__name__)
 
@@ -107,6 +106,12 @@ def _make_prompt_tokens_details(
     )
 
 
+def _make_completion_tokens_details(
+    reasoning_tokens: int,
+) -> CompletionTokenUsageInfo:
+    return CompletionTokenUsageInfo(reasoning_tokens=reasoning_tokens)
+
+
 class OpenAIServingChat(GenerateBaseServing):
     def __init__(
         self,
@@ -148,6 +153,7 @@ class OpenAIServingChat(GenerateBaseServing):
         self.enable_log_deltas = enable_log_deltas
 
         self.enable_auto_tools: bool = enable_auto_tools
+        self._include_reasoning_tokens_details = bool(reasoning_parser)
         self.parser_cls = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
@@ -441,6 +447,9 @@ class OpenAIServingChat(GenerateBaseServing):
         # Send response for each token for each request.n (index)
         num_choices = 1 if request.n is None else request.n
         previous_num_tokens = [0] * num_choices
+        # TODO: Remove once all reasoning parsers use the Parser Engine.
+        generated_token_ids: list[list[int]] = [[] for _ in range(num_choices)]
+        previous_reasoning_tokens = [0] * num_choices
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
@@ -539,6 +548,11 @@ class OpenAIServingChat(GenerateBaseServing):
                                 prompt_tokens=num_prompt_tokens,
                                 completion_tokens=0,
                                 total_tokens=num_prompt_tokens,
+                                completion_tokens_details=(
+                                    _make_completion_tokens_details(0)
+                                    if self._include_reasoning_tokens_details
+                                    else None
+                                ),
                             )
 
                         data = chunk.model_dump_json(exclude_unset=True)
@@ -575,6 +589,11 @@ class OpenAIServingChat(GenerateBaseServing):
                                         prompt_tokens=num_prompt_tokens,
                                         completion_tokens=0,
                                         total_tokens=num_prompt_tokens,
+                                        completion_tokens_details=(
+                                            _make_completion_tokens_details(0)
+                                            if self._include_reasoning_tokens_details
+                                            else None
+                                        ),
                                     )
 
                                 data = chunk.model_dump_json(exclude_unset=True)
@@ -633,6 +652,11 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     # set the previous values for the next iteration
                     previous_num_tokens[i] += len(output.token_ids)
+                    if parser is not None:
+                        generated_token_ids[i].extend(output.token_ids)
+                        previous_reasoning_tokens[i] = parser.count_reasoning_tokens(
+                            tuple(generated_token_ids[i])
+                        )
 
                     # if the message delta is None (e.g. because it was a
                     # "control token" for tool calls or the parser otherwise
@@ -758,6 +782,13 @@ class OpenAIServingChat(GenerateBaseServing):
                             prompt_tokens=num_prompt_tokens,
                             completion_tokens=completion_tokens,
                             total_tokens=num_prompt_tokens + completion_tokens,
+                            completion_tokens_details=(
+                                _make_completion_tokens_details(
+                                    previous_reasoning_tokens[i]
+                                )
+                                if self._include_reasoning_tokens_details
+                                else None
+                            ),
                         )
 
                     data = chunk.model_dump_json(exclude_unset=True)
@@ -771,6 +802,11 @@ class OpenAIServingChat(GenerateBaseServing):
                     prompt_tokens=num_prompt_tokens,
                     completion_tokens=completion_tokens,
                     total_tokens=num_prompt_tokens + completion_tokens,
+                    completion_tokens_details=_make_completion_tokens_details(
+                        sum(previous_reasoning_tokens)
+                    )
+                    if self._include_reasoning_tokens_details
+                    else None,
                 )
                 final_usage.prompt_tokens_details = _make_prompt_tokens_details(
                     self.enable_prompt_tokens_details,
@@ -815,6 +851,11 @@ class OpenAIServingChat(GenerateBaseServing):
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=num_completion_tokens,
                 total_tokens=num_prompt_tokens + num_completion_tokens,
+                completion_tokens_details=_make_completion_tokens_details(
+                    sum(previous_reasoning_tokens)
+                )
+                if self._include_reasoning_tokens_details
+                else None,
             )
 
             # Log complete streaming response if output logging is enabled
@@ -873,6 +914,7 @@ class OpenAIServingChat(GenerateBaseServing):
             )
 
         choices: list[ChatCompletionResponseChoice] = []
+        total_reasoning_tokens = 0
 
         role = self.get_chat_request_role(request)
         tool_parser_cls = (
@@ -910,6 +952,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 suppress_metadata = not request.include_reasoning and parser is not None
                 if not request.include_reasoning:
                     reasoning = None
+                total_reasoning_tokens += parser.count_reasoning_tokens(token_ids)
                 if suppress_metadata:
                     logprobs = None
             else:
@@ -1007,15 +1050,11 @@ class OpenAIServingChat(GenerateBaseServing):
                 and output.finish_reason == "stop"
             )
 
-            # Encode routed_experts for transport. JSON can't carry raw
-            # bytes, so we write the ndarray as a ``.npy`` byte stream
-            # and base64-encode it. ``pybase64`` is ~3x faster than the
-            # stdlib ``base64`` on large payloads thanks to SIMD.
-            routed_experts_b64 = None
-            if output.routed_experts is not None:
-                buf = io.BytesIO()
-                np.save(buf, output.routed_experts)
-                routed_experts_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            routed_experts_b64 = (
+                numpy2base64(output.routed_experts)
+                if output.routed_experts is not None
+                else None
+            )
 
             choice_data = ChatCompletionResponseChoice(
                 index=output.index,
@@ -1064,6 +1103,11 @@ class OpenAIServingChat(GenerateBaseServing):
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
+            completion_tokens_details=_make_completion_tokens_details(
+                total_reasoning_tokens
+            )
+            if self._include_reasoning_tokens_details
+            else None,
         )
         usage.prompt_tokens_details = _make_prompt_tokens_details(
             self.enable_prompt_tokens_details,
