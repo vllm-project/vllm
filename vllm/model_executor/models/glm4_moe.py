@@ -39,11 +39,14 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
-from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
+)
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
+    resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -71,8 +74,6 @@ from .utils import (
     maybe_prefix,
     skip_spec_layers,
 )
-
-logger = init_logger(__name__)
 
 
 class Glm4MoeMLP(nn.Module):
@@ -159,14 +160,15 @@ class Glm4MoE(nn.Module):
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
-        # AITER fused shared-expert (FSE) gate; mirrors the deepseek_v2.py
-        # pattern (see Glm4MoE / MoERunner wiring there).
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-        self.is_fusion_moe_shared_experts_enabled = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        )
 
-        if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:
+        self.is_fused_shared_expert_enabled = False
+        if config.n_shared_experts is not None:
+            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
+                quant_config, prefix
+            )
+
+        if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -200,10 +202,9 @@ class Glm4MoE(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             router_logits_dtype=torch.float32,
             n_shared_experts=(
-                config.n_shared_experts
-                if self.is_fusion_moe_shared_experts_enabled
-                else None
+                config.n_shared_experts if self.is_fused_shared_expert_enabled else None
             ),
+            fuse_shared_experts=self.is_fused_shared_expert_enabled,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -443,6 +444,12 @@ class Glm4MoeModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            self.layers,
+            Glm4MoE,
+            "mlp",
+        )
+
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
@@ -488,6 +495,7 @@ class Glm4MoeModel(nn.Module):
             skip_spec_layers(weights, self.config),
             n_routed_experts=self.config.n_routed_experts,
             n_shared_experts=self.config.n_shared_experts or 1,
+            enabled=self.is_fused_shared_expert_enabled,
         )
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
