@@ -18,7 +18,16 @@ from .utils import FLA_CHUNK_SIZE, use_cuda_graph
 
 NUM_WARPS = [2, 4, 8, 16]
 # Triton's AMD backend fails to lower this kernel with num_stages=4.
-_CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
+try:  # gfx1250: num_stages 1 is needed for now otherwise accuracy goes to 0
+    from vllm.platforms.rocm import on_gfx1250 as _on_gfx1250
+
+    _IS_GFX1250 = bool(torch.version.hip) and _on_gfx1250()
+except Exception:
+    _IS_GFX1250 = False
+
+_CHUNK_DELTA_H_NUM_STAGES = (
+    [1] if _IS_GFX1250 else ([2, 3] if torch.version.hip else [2, 3, 4])
+)
 
 
 @triton.heuristics(
