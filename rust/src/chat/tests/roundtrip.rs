@@ -167,6 +167,19 @@ impl RoundtripCase {
         }
     }
 
+    /// Olmo 3 newline-separated Python-style function calls.
+    fn olmo3() -> Self {
+        Self {
+            model_id: "allenai/Olmo-3-7B-Instruct",
+            assistant_stop_suffix: "<|endoftext|>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::None,
+            thinking_behavior: ThinkingBehavior::Always { value: false },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
     /// DeepSeek V4 DSML tool-call format.
     fn deepseek_v4() -> Self {
         Self {
@@ -384,6 +397,7 @@ roundtrip_tests! {
     qwen35 => [reasoning_and_content, tool_call_mix],
     minimax_m25 => [reasoning_and_content, tool_call_mix],
     minimax_m3 => [reasoning_and_content, tool_call_mix],
+    olmo3 => [tool_calls_only],
     deepseek_v4 => [reasoning_and_content, tool_call_mix],
     deepseek_v32 => [tool_call_mix],
     glm45 => [reasoning_and_content, tool_call_mix],
@@ -520,6 +534,71 @@ async fn run_roundtrip_tool_call_mix(
         "parsed message: {:#?}",
         result.parsed_message
     );
+    assert_eq!(tool_calls[0].name, "get_weather");
+    assert_eq!(
+        tool_calls[0].arguments,
+        expected_arguments(case, r#"{"location": "Shanghai"}"#)?,
+    );
+    assert_eq!(tool_calls[1].name, "add");
+    assert_eq!(
+        tool_calls[1].arguments,
+        expected_arguments(case, r#"{"y": 1.0, "x": 2, "items": ["left", "right"]}"#)?,
+    );
+
+    assert_eq!(
+        result.rerendered_closed_completion,
+        result.closed_completion
+    );
+
+    Ok(())
+}
+
+/// Run the fixed content+multiple-tools fixture for models without reasoning.
+async fn run_roundtrip_tool_calls_only(
+    case: &RoundtripCase,
+    backends: &vllm_chat::LoadedModelBackends,
+) -> Result<()> {
+    let request = roundtrip_request(
+        "roundtrip-tools-only",
+        vec![ChatMessage::text(
+            ChatRole::User,
+            "Check Shanghai weather and add 1.0 plus 2.",
+        )],
+        test_tools(),
+        Some(false),
+        case.thinking_behavior,
+    );
+    let expected_text = "I will call the tools.";
+
+    let result = run_roundtrip(
+        case,
+        backends,
+        &request,
+        AssistantMessage {
+            content: vec![
+                AssistantContentBlock::Text {
+                    text: expected_text.to_string(),
+                },
+                AssistantContentBlock::ToolCall(AssistantToolCall {
+                    id: "functions.get_weather:0".to_string(),
+                    name: "get_weather".to_string(),
+                    arguments: r#"{"location":"Shanghai"}"#.to_string(),
+                }),
+                AssistantContentBlock::ToolCall(AssistantToolCall {
+                    id: "functions.add:1".to_string(),
+                    name: "add".to_string(),
+                    arguments: r#"{"y":1.0,"x":2,"items":["left","right"]}"#.to_string(),
+                }),
+            ],
+        },
+    )
+    .await?;
+
+    assert!(result.parsed_message.reasoning().is_none());
+    assert_eq!(result.parsed_message.text().trim(), expected_text);
+
+    let tool_calls = result.parsed_message.tool_calls().collect::<Vec<_>>();
+    assert_eq!(tool_calls.len(), 2);
     assert_eq!(tool_calls[0].name, "get_weather");
     assert_eq!(
         tool_calls[0].arguments,
