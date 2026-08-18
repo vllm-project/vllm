@@ -1,3 +1,5 @@
+# TODO(tms): Delete this preview pipeline and its Dockerfile workarounds once
+# public Rubin-ready CUDA images and PyTorch wheels are available (#49735).
 env:
   CUDA134_STAGING_REPO: "public.ecr.aws/q9t5s3a7/vllm-release-repo"
 

@@ -1,3 +1,5 @@
+# TODO(tms): Delete these preview pins when Rubin APIs ship in regular PyTorch
+# wheels (#49735).
 torch==2.15.0.dev20260812+cu134
 torchvision==0.29.0.dev20260813+cu134
 torchaudio==2.11.0.dev20260813+cu134

@@ -190,6 +190,8 @@ RUN CUDA_DRIVER_STUB=$(find -H /usr/local/cuda \
 # Developer-preview CUDA toolkits may be published as Python packages before
 # NVIDIA container images are available. Overlay the complete toolkit on the
 # regular manylinux builder while preserving the default image-based path.
+# TODO(tms): Delete this overlay and its driver/linker workarounds once a
+# public Rubin-ready CUDA builder image is available (#49735).
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ -n "${CUDA_TOOLKIT_PYPI_VERSION}" ]; then \
         uv pip install --python /opt/venv/bin/python3 \
@@ -745,6 +747,8 @@ COPY --from=base /opt/cuda-driver-stub/libcuda.so \
 # Install CUDA development tools for runtime JIT compilation. Developer-
 # preview builds use NVIDIA's public Python packages when no CUDA base image
 # or apt repository is available.
+# TODO(tms): Delete the PyPI-toolkit branch once a public Rubin-ready CUDA
+# runtime image is available (#49735).
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ -n "${CUDA_TOOLKIT_PYPI_VERSION}" ]; then \
         apt-get update -y \
@@ -893,6 +897,8 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
 ARG FLASHINFER_VERSION=0.6.17
+# TODO(tms): Remove this switch once FlashInfer publishes a JIT cache for the
+# preview CUDA version (#49735).
 ARG INSTALL_FLASHINFER_JIT_CACHE=true
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${INSTALL_FLASHINFER_JIT_CACHE}" = "true" ]; then \
