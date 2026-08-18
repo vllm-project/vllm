@@ -3680,3 +3680,77 @@ Validation for production commit `99e35c9b88` includes a clean CUDA build,
 all 56 exact-stride benchmark cells, all 50 fixed-stride benchmark cells, and
 all applicable pre-commit hooks. The benchmark and tests use the repository
 `.venv`; no external environment or CPU top-k implementation is used.
+
+## 2026-08-18: final real long-context FP16 accuracy comparison
+
+The final PR code was run end to end with the real
+`nvidia/GLM-5.2-NVFP4` checkpoint (snapshot
+`aec724e8c7b8ee9db3b48c01c320f63f9cdaf8aa`) and the standard Paul Graham
+NIAH corpus (repository commit `021385d68d3202e37893e9d3cd29011c569abe30`).
+The model resolved to native `GlmMoeDsaForCausalLM`; no portable-model
+override or MHA fallback was used.
+
+The first real launch exposed an integration error before evaluation. The
+sparse-indexer operator queried `get_current_vllm_config()` from a worker
+warm-up callback, outside the config context. Commit `a47dda42d5` resolves the
+logits dtype during `SparseAttnIndexer` construction and passes it as a
+constant custom-op argument. The focused sparse-indexer suite passed 20/20,
+all applicable pre-commit hooks passed, and explicit FP32 and FP16 TP4 servers
+then completed model warm-up and inference. The fix was pushed to PR #52696
+before continuing the benchmark.
+
+The paired serving configuration was TP4, 256K maximum model length, FP8 E4M3
+KV cache, 2,048-token chunked prefill, `max_num_seqs=1`, eager execution,
+prefix caching disabled, FlashInfer autotuning disabled, greedy decoding, and
+no GVR. Both arms used the Python API frontend because the locally installed
+Rust frontend binary had a stale MessagePack schema. The only model-path
+change between arms was
+`--attention-config.indexer_logits_dtype=float32` versus `float16`.
+
+Each target context used needle depths 10%, 50%, and 90%, with two distinct
+seven-digit keys per cell:
+
+|Context|FP32 exact|FP16 exact|Identical paired responses|
+|---:|---:|---:|---:|
+|50K|6/6|6/6|6/6|
+|100K|6/6|6/6|6/6|
+|200K|6/6|6/6|6/6|
+|250K|6/6|6/6|6/6|
+|**Total**|**24/24**|**24/24**|**24/24**|
+
+Server prompt lengths were 50,000--50,002, 100,001--100,002, 200,002, and
+250,001--250,002 tokens. The raw results are
+`/tmp/glm52_nvfp4_niah_fp32_20260818.jsonl` and
+`/tmp/glm52_nvfp4_niah_fp16_20260818.jsonl`. This demonstrates no observed
+accuracy loss on deterministic single-needle retrieval through 250K; it does
+not establish zero loss on every long-context downstream task.
+
+### Real-data top-k recall relative to FP32
+
+The selector-level comparison uses logits captured from real GLM BEAM decode
+inputs. FP32 scores were rounded to FP16, exact top-2,048 was recomputed for
+both representations, and recall was measured as
+`|topk(FP16) intersection topk(FP32)| / 2048`. This isolates score-rounding
+effects; the NIAH comparison above exercises the actual native FP16 DeepGEMM
+and selector path.
+
+Two layer-74 snapshots contain 1,024 rows each at 199,401--199,481 live KV
+tokens. Across all 2,048 rows, mean recall was **99.9313%**, median recall was
+99.9512%, the first percentile was 99.8047%, and the worst row was 99.7070%.
+FP16 changed 1.41 indices per row on average and at most 6 of 2,048. The
+captures are `/tmp/gvr_beam_b1024_layer74_early.pt` and
+`/tmp/gvr_beam_b1024_layer74.pt`.
+
+A second sweep used two real selector positions and 64 rows per live length:
+
+|Live KV|Mean recall|Worst row|Mean changed indices|
+|---:|---:|---:|---:|
+|10K|100.0000%|100.0000%|0.00|
+|50K|99.9496%|99.9023%|1.03|
+|100K|99.9733%|99.9023%|0.55|
+|200K|99.9428%|99.8535%|1.17|
+|**Overall**|**99.9664%**|**99.8535%**|**0.69**|
+
+The combined evidence is internally consistent: FP16 perturbs only scores at
+the selection boundary (roughly one or two of 2,048 indices on real 200K
+rows), while the tested end-to-end retrieval answers remain unchanged.
