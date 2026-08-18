@@ -2383,3 +2383,47 @@ def test_clef_omni_backend_samples_reference_frames(tmp_path):
     assert metadata["do_sample_frames"] is False
     for frame, idx in zip(frames, [0, 15, 30, 45]):
         assert abs(round(float(np.asarray(frame).mean())) - idx) <= 1
+
+
+def test_torchcodec_decode_failure_is_client_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """TorchCodec decode failures on user bytes must surface as ValueError
+    (-> HTTP 400), not RuntimeError (-> 500), mirroring the pynvvideocodec
+    backend. With seek_mode="approximate" the message must point the user
+    at "exact", since metadata-overstated frame counts are the common cause.
+    """
+    from vllm.multimodal.video_decoders.torchcodec import (
+        TorchCodecVideoBackendMixin,
+    )
+
+    monkeypatch.setattr(
+        "vllm.multimodal.video_decoders.torchcodec.check_torchcodec_available",
+        lambda: None,
+    )
+
+    def raise_runtime_error(data, **kwargs):
+        raise RuntimeError(
+            "Requested next frame while there are no more frames left to decode."
+        )
+
+    monkeypatch.setattr(
+        TorchCodecVideoBackendMixin,
+        "make_torchcodec_decoder",
+        staticmethod(raise_runtime_error),
+    )
+
+    with pytest.raises(
+        ValueError, match=r"Failed to decode video with the torchcodec backend"
+    ) as exc_info:
+        VideoBackend.load_bytes(b"fake video", num_frames=4, backend="torchcodec")
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert "seek_mode" not in str(exc_info.value)
+
+    with pytest.raises(ValueError, match=r"retry with seek_mode='exact'"):
+        VideoBackend.load_bytes(
+            b"fake video",
+            num_frames=4,
+            backend="torchcodec",
+            seek_mode="approximate",
+        )
