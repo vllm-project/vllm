@@ -54,6 +54,10 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
+    resolve_layer_fused_shared_expert,
+)
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -330,9 +334,13 @@ class DeepseekV2MoE(nn.Module):
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
 
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
-        self.is_fusion_moe_shared_experts_enabled = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        )
+
+        self.is_fused_shared_expert_enabled = False
+        if config.n_shared_experts is not None:
+            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
+                quant_config, prefix
+            )
+
         if (
             self.is_rocm_aiter_moe_enabled
             and self.gate.e_score_correction_bias is not None
@@ -341,7 +349,7 @@ class DeepseekV2MoE(nn.Module):
             # Accumulates in fp32; avoids bf16->fp32 cast.
             self.gate.set_out_dtype(self.gate.weight.dtype)
 
-        if config.n_shared_experts is None or self.is_fusion_moe_shared_experts_enabled:
+        if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -378,8 +386,9 @@ class DeepseekV2MoE(nn.Module):
             is_sequence_parallel=self.is_sequence_parallel,
             reduce_results=reduce_results,
             n_shared_experts=config.n_shared_experts
-            if self.is_fusion_moe_shared_experts_enabled
+            if self.is_fused_shared_expert_enabled
             else None,
+            fuse_shared_experts=self.is_fused_shared_expert_enabled,
             router_logits_dtype=self.gate.out_dtype,
         )
 
@@ -1419,6 +1428,12 @@ class DeepseekV2Model(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            self.layers,
+            DeepseekV2MoE,
+            "mlp",
+        )
+
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
         else:
@@ -1529,9 +1544,6 @@ class DeepseekV2Model(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        rocm_aiter_moe_shared_expert_enabled = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        )
         stacked_params_mapping: list[tuple[str, str, int | str]] = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
@@ -1572,7 +1584,7 @@ class DeepseekV2Model(nn.Module):
             num_experts=self.config.n_routed_experts
             + (
                 self.config.n_shared_experts
-                if rocm_aiter_moe_shared_expert_enabled
+                if self.is_fused_shared_expert_enabled
                 else 0
             ),
             num_redundant_experts=self.num_redundant_experts,
@@ -1600,7 +1612,7 @@ class DeepseekV2Model(nn.Module):
                 continue  # this layer has no indexer; drop its checkpoint weights
 
             is_fusion_moe_shared_experts_layer = (
-                rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
+                self.is_fused_shared_expert_enabled and ("mlp.shared_experts" in name)
             )
 
             if _try_load_fp8_indexer_wk(
