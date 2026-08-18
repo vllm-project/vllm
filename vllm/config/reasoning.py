@@ -26,6 +26,33 @@ class ReasoningConfig:
     reasoning_end_str: str = ""
     """String forced when the thinking budget is exhausted."""
 
+    loop_break_max_pattern_size: int = 0
+    """Maximum N-gram pattern size for reasoning-scoped repetition detection.
+    When > 0 (together with ``loop_break_min_count``), a request whose current
+    reasoning section ends in a repeating token pattern is forced out of
+    reasoning via ``reasoning_end_str`` — instead of looping until
+    ``max_tokens`` or a ``thinking_token_budget`` — and then answers normally.
+    Set to 0 (the default) to disable. Detection semantics match
+    ``SamplingParams.repetition_detection``, which by contrast finishes the
+    whole request."""
+
+    loop_break_min_pattern_size: int = 0
+    """Minimum N-gram pattern size for reasoning loop breaking. If 0, it
+    defaults to 1. Must be <= ``loop_break_max_pattern_size``. Values >= 4
+    are recommended to avoid firing on benign short repeats (e.g. separator
+    runs)."""
+
+    loop_break_min_count: int = 0
+    """Number of consecutive repetitions of a pattern that triggers reasoning
+    loop breaking. Must be >= 2 when enabled."""
+
+    loop_break_min_reasoning_tokens: int = 256
+    """Do not check a reasoning section for loops until it has generated at
+    least this many tokens."""
+
+    loop_break_check_interval: int = 16
+    """Check for loops every this many newly accepted reasoning tokens."""
+
     _reasoning_start_token_ids: list[int] | None = field(
         default=None, init=False, repr=False
     )
