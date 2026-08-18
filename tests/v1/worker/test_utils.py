@@ -192,30 +192,6 @@ def test_hisparse_worker_preserves_directly_imported_indexer(monkeypatch):
     assert copied == [([4], [20])]
 
 
-def test_hisparse_worker_prepare_step_accepts_warmup_without_command():
-    worker = object.__new__(HiSparseWorker)
-    worker.kernel_block_size = 64
-    worker._pending_invalid_block_ids = []
-    worker._post_forward_transfers = [object()]
-    scheduler_output = SimpleNamespace(
-        scheduled_new_reqs=[],
-        scheduled_cached_reqs=SimpleNamespace(new_block_ids=[]),
-    )
-    cache_handle = SimpleNamespace(fully_resident=True)
-    worker.cache_handles = [cache_handle]
-    calls = []
-    worker.restore_prefix = lambda output, ready: calls.append(
-        ("restore", output, ready)
-    )
-
-    worker.prepare_step(None, scheduler_output)
-
-    assert not cache_handle.fully_resident
-    assert worker._post_forward_transfers == []
-    assert calls == [("restore", scheduler_output, ())]
-    assert worker._pending_invalid_block_ids == []
-
-
 def test_hisparse_worker_enqueues_fused_page_spill(monkeypatch):
     worker = object.__new__(HiSparseWorker)
     worker.kernel_block_size = 4

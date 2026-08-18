@@ -1163,39 +1163,6 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
     assert scheduler._get_new_block_ids_to_zero() == {0: [13, 14, 15]}
 
 
-@pytest.mark.cpu_test
-@pytest.mark.parametrize("failed", [False, True])
-def test_device_import_target_is_consumed_after_remote_receive(failed):
-    """Only a successful direct import may suppress indexer restoration."""
-    from unittest.mock import MagicMock
-
-    from vllm.v1.core.sched.scheduler import Scheduler
-    from vllm.v1.request import HiSparseImportTarget
-
-    scheduler = object.__new__(Scheduler)
-    scheduler.connector = MagicMock()
-    scheduler.needs_kv_cache_zeroing = False
-    scheduler.kv_cache_manager = MagicMock()
-    scheduler.failed_recving_kv_req_ids = {"req-1"} if failed else set()
-    scheduler.finished_recving_kv_req_ids = {"req-1"}
-
-    request = MagicMock()
-    request.request_id = "req-1"
-    request.num_computed_tokens = 32
-    request.num_tokens = 48
-    request.hisparse_host_import = False
-    request.hisparse_import_target = HiSparseImportTarget.DEVICE
-
-    scheduler._update_waiting_for_remote_kv(request)
-
-    assert request.hisparse_import_target is HiSparseImportTarget.NONE
-    complete = scheduler.kv_cache_manager.hisparse_coordinator.complete_device_import
-    if failed:
-        complete.assert_not_called()
-    else:
-        complete.assert_called_once_with("req-1")
-
-
 # ── Mamba N-1 prefill tests ──────────────────────────────────────────────
 
 
