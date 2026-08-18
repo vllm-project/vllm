@@ -98,7 +98,9 @@ def _find_matching_targets(
     targets: Mapping[str, str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
 ) -> list[str]:
-    per_shard_matches = find_matching_patterns(prefix, targets, fused_mapping)
+    per_shard_matches = find_matching_patterns(
+        prefix, targets, fused_mapping, use_fnmatch=True
+    )
     if all(len(matches) == 0 for matches in per_shard_matches):
         return []
     if any(len(matches) == 0 for matches in per_shard_matches):
@@ -233,6 +235,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
             prefix,
             ignore=self.ignored_layers,
             fused_mapping=self.packed_modules_mapping,
+            use_fnmatch=True,
         )
         matches = _find_matching_targets(
             prefix, self.args.targets, fused_mapping=self.packed_modules_mapping
@@ -294,6 +297,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 prefix,
                 ignore=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
+                use_fnmatch=True,
             ):
                 return UnquantizedLinearMethod()
             method = self._dispatch(self.args.linear, _ONLINE_LINEAR_METHODS, layer)
@@ -310,6 +314,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 prefix,
                 ignore=self.ignored_layers,
                 fused_mapping=self.packed_modules_mapping,
+                use_fnmatch=True,
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
             method = self._dispatch(self.args.moe, _ONLINE_MOE_METHODS, layer)

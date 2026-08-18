@@ -114,11 +114,13 @@ class QuantizationConfigArgs:
     """Spec applied to ``FusedMoEFactory`` layers."""
 
     ignore: list[str] = Field(default_factory=list)
-    """Layers to skip quantization for."""
+    """Layers to skip quantization for. Online quantization also supports
+    fnmatch-style patterns."""
 
     targets: dict[str, str] | None = None
     """Per-layer online quantization overrides, keyed by exact layer name or
-    regex patterns with a `re:` , mapping to an online shorthand name (see
+    regex patterns with a `re:`, or fnmatch-style patterns for online
+    quantization, mapping to an online shorthand name (see
     `_ONLINE_SHORTHANDS`). A layer that matches no pattern is left unquantized.
     Mutually exclusive with `linear` and `moe`.
     """

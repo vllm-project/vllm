@@ -54,10 +54,13 @@ def should_ignore_layer(
     layer_name: str | None,
     ignore: Iterable[str] = tuple(),
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
+    use_fnmatch: bool = False,
 ) -> bool:
     if layer_name is None:
         return False
-    per_shard_matches = find_matching_patterns(layer_name, ignore, fused_mapping)
+    per_shard_matches = find_matching_patterns(
+        layer_name, ignore, fused_mapping, use_fnmatch=use_fnmatch
+    )
     shards_ignored = [len(matches) > 0 for matches in per_shard_matches]
     if any(shards_ignored) and not all(shards_ignored):
         raise ValueError(

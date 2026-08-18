@@ -2,12 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests quantization configuration matching utilities."""
 
+from unittest.mock import Mock
+
 import pytest
 
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
     _find_matching_targets,
 )
 from vllm.model_executor.layers.quantization.quark.utils import (
@@ -26,6 +30,35 @@ def test_is_equal_or_regex_match():
     )
     assert is_equal_or_regex_match("model.layers.0.mlp.down_proj", r"re:.*down_proj")
     assert not is_equal_or_regex_match("model.layers.0.mlp.down_proj", "other")
+
+
+def test_fnmatch_is_opt_in():
+    layer_name = "model.layers.0.mlp.experts"
+    pattern = "*mlp.experts*"
+
+    assert not is_equal_or_regex_match(layer_name, pattern)
+    assert is_equal_or_regex_match(layer_name, pattern, use_fnmatch=True)
+    assert not should_ignore_layer(layer_name, [pattern])
+    assert not quark_should_ignore_layer(layer_name, [pattern])
+    assert should_ignore_layer(layer_name, [pattern], use_fnmatch=True)
+
+
+def test_online_targets_support_fnmatch_patterns():
+    layer_name = "model.layers.0.mlp.experts"
+    targets = {"*mlp.experts*": "mxfp4"}
+
+    assert _find_matching_targets(layer_name, targets) == ["*mlp.experts*"]
+
+
+def test_online_ignore_supports_fnmatch_patterns():
+    layer_name = "model.layers.0.mlp.experts"
+    ignore = ["*mlp.experts*"]
+    config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={"*mlp.experts*": "mxfp4"}, ignore=ignore)
+    )
+
+    with pytest.raises(ValueError, match="matches both quantization_config.ignore"):
+        config._dispatch_target(layer_name, Mock())
 
 
 @pytest.mark.parametrize(
