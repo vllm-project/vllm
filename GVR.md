@@ -3370,3 +3370,99 @@ Duplicate-work checks found PR #52149, which addresses persistent top-k
 candidate overflow, and PR #48726, which adds an opt-in fused DSA
 indexer/top-k path. PR #52696 is distinct: it adds native reduced-precision
 support to the existing materialized-logits path, including DeepGEMM and DCP.
+
+## 2026-08-18: BF16 removal and final native-FP16 top-k matrix
+
+The upstream branch now focuses only on FP16 and FP32 indexer logits. BF16 was
+removed from the engine setting and vLLM top-k dispatch surface. This also
+removed the BF16 specializations from cooperative, persistent, prefill, and
+decode top-k. The pre-existing lower-level DeepGEMM BF16 output capability was
+not deleted, but the indexer can no longer select it.
+
+The native FP16 implementation no longer widens scores in the histogram or
+tie-refinement kernels. It uses an ordered 16-bit key directly, retains only
+one low-byte radix refinement rather than FP32's four passes, and uses one
+16K-index refinement buffer (64 KiB) rather than two. Short histograms use
+half as many 128-bit vectors per thread as FP32 because each vector contains
+twice as many FP16 elements; this restores CTA parallelism at 10K. A measured
+selector chooses among the existing exact FP16 algorithms:
+
+- at most 32 rows: cooperative top-k;
+- over 32 rows and at most 32K KV: persistent through 256 rows, native decode
+  radix from 512 rows;
+- 32K-64K KV: native decode radix;
+- 64K-128K KV: persistent below 256 rows, native decode radix otherwise; and
+- above 128K KV: persistent filtered top-k.
+
+A 512-thread persistent specialization with one 64 KiB buffer was tested and
+rejected. Although it permits two resident CTAs per SM, halving the per-row
+parallelism regressed 100K/128 from 28.6 to 35.2 us and 200K/1,024 from 313 to
+352 us. The final persistent kernel retains 1,024 threads.
+
+The final benchmark used GB200, the current workspace's `.venv`, top-k 2,048,
+and model logits captured from real GLM-5.2-NVFP4 forward passes. KV lengths up
+to 100K are prefixes of the captured 21st-selector tensor. The 200K input
+concatenates the captured 21st and first selector tensors and truncates to
+200K; larger row counts repeat those real 32 rows. Thus all values are real
+model values, but the 200K tensor is real-data-derived rather than a single
+native 200K capture.
+
+Each selector was captured into a CUDA graph. Small cells contain multiple
+selector launches per graph, and the reported time divides by that count.
+CUDA events bracket warmed graph replays; no event is captured in the graph.
+This removes Python and eager-dispatch overhead while retaining device launch
+and kernel time. Every one of the 56 dtype/shape cells matched `torch.topk` on
+the checked real rows by selected value, and every returned index was in
+range.
+
+FP16 latency in microseconds:
+
+| Rows | 10K | 50K | 100K | 200K |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 4.817 | 7.669 | 8.256 | 9.514 |
+| 8 | 5.257 | 7.715 | 9.107 | 11.651 |
+| 32 | 5.366 | 8.944 | 11.662 | 18.941 |
+| 128 | 5.695 | 21.270 | 28.611 | 47.335 |
+| 1,024 | 30.152 | 95.526 | 148.928 | 313.888 |
+| 8,192 | 214.645 | 635.104 | 1,010.123 | 2,375.072 |
+| 16,384 | 417.771 | 1,248.619 | 1,988.821 | 4,723.989 |
+
+FP32 latency in microseconds:
+
+| Rows | 10K | 50K | 100K | 200K |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 4.631 | 9.709 | 10.473 | 12.022 |
+| 8 | 5.098 | 10.016 | 11.504 | 14.049 |
+| 32 | 5.282 | 11.412 | 14.252 | 22.540 |
+| 128 | 5.603 | 19.610 | 29.999 | 67.836 |
+| 1,024 | 33.428 | 140.115 | 221.824 | 475.861 |
+| 8,192 | 269.525 | 1,033.525 | 1,643.115 | 3,642.880 |
+| 16,384 | 529.109 | 2,044.427 | 3,252.075 | 7,222.603 |
+
+FP16 speedup over FP32:
+
+| Rows | 10K | 50K | 100K | 200K |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.961x | 1.266x | 1.269x | 1.264x |
+| 8 | 0.970x | 1.298x | 1.263x | 1.206x |
+| 32 | 0.984x | 1.276x | 1.222x | 1.190x |
+| 128 | 0.984x | 0.922x | 1.049x | 1.433x |
+| 1,024 | 1.109x | 1.467x | 1.489x | 1.516x |
+| 8,192 | 1.256x | 1.627x | 1.627x | 1.534x |
+| 16,384 | 1.267x | 1.637x | 1.635x | 1.529x |
+
+The remaining regressions are bounded and explainable. At 1-32 rows and 10K,
+the selector is launch/fixed-work dominated, so halving score bytes cannot
+recover the common histogram and synchronization cost; FP16 is 1.6%-4.1%
+slower. At 50K/128, the best exact FP16 algorithm is native decode radix at
+21.270 us, still 8.5% slower than the unusually efficient FP32 persistent cell
+at 19.610 us. For throughput-bound shapes, FP16 is 1.11x-1.64x faster, below
+the 2x bandwidth ceiling because histogram atomics, index traffic, output, and
+synchronization are unchanged.
+
+Focused validation after the final rebuild includes 13 BF16-rejection/native
+FP16/padded-stride cases, 10 DeepGEMM FP16/FP32 cases, 2 full DCP FP16/FP32
+parity cases, 9 dtype/selector-policy cases, and all applicable pre-commit
+hooks. The reusable benchmark is
+`benchmarks/kernels/benchmark_sparse_indexer_topk.py` on PR branch
+`agent/fp16-indexer-logits`.
