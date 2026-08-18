@@ -181,7 +181,7 @@ steps:
   commands:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
-- label: Multi-Modal Models (Extended Generation 3)
+- label: Multi-Modal Models (Extended Generation 3) %N
   device: h200_35gb
   key: multi-modal-models-extended-generation-3
   optional: true
@@ -190,7 +190,8 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal/generation
   commands:
-    - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+    - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 6
 
 - label: Multi-Modal Models (Extended Pooling)
   key: multi-modal-models-extended-pooling
