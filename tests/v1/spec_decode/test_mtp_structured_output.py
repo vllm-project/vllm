@@ -300,7 +300,8 @@ def test_xgrammar_validate_tokens_stops_at_termination(capfd):
 
     assert grammar.validate_tokens([eos, trailing]) == [eos]
     assert "trying to accept new token" not in capfd.readouterr().err
-    assert not grammar.is_terminated()
+    # Check matcher state directly to verify validation rolled it back.
+    assert not grammar.matcher.is_terminated()
 
     assert grammar.accept_tokens(request.request_id, [eos])
     assert grammar.is_terminated()
