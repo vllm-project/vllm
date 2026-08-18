@@ -840,7 +840,11 @@ def rocm_fp8_paged_mqa_logits(
 
     aiter_paged_mqa_logits_module = None
 
-    if rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_aiter_enabled():
+    if (
+        rocm_aiter_ops.is_enabled()
+        or rocm_aiter_ops.is_rdna_aiter_enabled()
+        or rocm_aiter_ops.is_gfx11_aiter_enabled()
+    ):
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
 
     if aiter_paged_mqa_logits_module is not None:
@@ -998,7 +1002,11 @@ def rocm_fp8_mqa_logits(
         )
 
     aiter_mqa_logits_module = None
-    if rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_aiter_enabled():
+    if (
+        rocm_aiter_ops.is_enabled()
+        or rocm_aiter_ops.is_rdna_aiter_enabled()
+        or rocm_aiter_ops.is_gfx11_aiter_enabled()
+    ):
         aiter_mqa_logits_module = mqa_logits_module()
 
     if aiter_mqa_logits_module is not None:
