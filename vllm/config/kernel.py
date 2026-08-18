@@ -122,6 +122,7 @@ class IrOpPriorityConfig:
 MoEBackend = Literal[
     "auto",
     "triton",
+    "batched_triton",
     "deep_gemm",
     "deep_gemm_mega_moe",
     "cutlass",
@@ -134,6 +135,7 @@ MoEBackend = Literal[
     "triton_unfused",
     "aiter",
     "flydsl",
+    "hpc",
     "emulation",
 ]
 
@@ -145,7 +147,9 @@ LinearBackend = Literal[
     "flashinfer_trtllm",
     "flashinfer_cudnn",
     "flashinfer_b12x",
+    "b12x",
     "marlin",
+    "humming",
     "triton",
     "deep_gemm",
     "torch",
@@ -155,6 +159,8 @@ LinearBackend = Literal[
     "conch",
     "exllama",
     "emulation",
+    "xpu",
+    "xpu_woq",
 ]
 
 
@@ -171,11 +177,25 @@ class KernelConfig:
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
 
+    # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
+    # to the shared JIT warmup infrastructure.
+    # https://github.com/vllm-project/vllm/pull/47451
+    enable_cutedsl_warmup: bool = True
+    """Deprecated: run legacy CuTeDSL warmup providers."""
+
+    enable_jit_warmup: bool = True
+    """If True, run JIT compile warmup during kernel warmup."""
+
+    enable_bf16x3_router_gemm: bool = False
+    """If True, use the experimental SM100 BF16x3 CuteDSL router GEMM."""
+
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 
     - "auto": Automatically select the best backend based on model and hardware
     - "triton": Use Triton-based fused MoE kernels
+    - "batched_triton": Use batched Triton experts (moe_mmk) on the batched
+      activation format ([E_local, max_num_tokens, K])
     - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)
     - "deep_gemm_mega_moe": Use DeepGEMM mega MoE kernels
     - "cutlass": Use vLLM CUTLASS kernels
@@ -189,6 +209,7 @@ class KernelConfig:
     - "triton_unfused": Use Triton unfused MoE kernels
     - "aiter": Use AMD AITer kernels (ROCm only)
     - "flydsl": Use AMD FlyDSL kernels (ROCm only)
+    - "hpc": Use HPC kernels (FP8 and Hopper only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
     """
@@ -203,6 +224,7 @@ class KernelConfig:
     - "flashinfer_trtllm": Use FlashInfer with TensorRT-LLM kernels
     - "flashinfer_cudnn": Use FlashInfer with cuDNN kernels
     - "flashinfer_b12x": Use FlashInfer b12x CuteDSL NVFP4 GEMM (SM120+)
+    - "b12x": Use native B12X FP8 and FP4 linear kernels on SM12x
     - "marlin": Use Marlin kernels
     - "triton": Use Triton-based kernels
     - "deep_gemm": Use DeepGEMM kernels
@@ -212,7 +234,10 @@ class KernelConfig:
     - "fbgemm": Use FBGEMM kernels
     - "conch": Use Conch mixed-precision kernels
     - "exllama": Use Exllama mixed-precision kernels
-    - "emulation": Use slow dequant-to-BF16 emulation (for testing only)"""
+    - "emulation": Use slow dequant-to-BF16 emulation (for testing only)
+    - "xpu": Use XPU kernels
+    - "xpu_woq": Use XPU kernels for weight-only quantization (e.g. W8A16)
+    """
 
     @field_validator("moe_backend", mode="before")
     @classmethod
@@ -235,6 +260,8 @@ class KernelConfig:
         Any future fields that don't affect compilation should be excluded.
         """
         ignored_factors = {
+            "enable_cutedsl_warmup",
+            "enable_jit_warmup",
             "enable_flashinfer_autotune",
             "ir_op_priority",  # handled separately below
         }
@@ -242,7 +269,12 @@ class KernelConfig:
         factors["ir_op_priority"] = self.ir_op_priority.compute_hash()
         return hash_factors(factors)
 
-    @field_validator("enable_flashinfer_autotune", mode="wrap")
+    @field_validator(
+        "enable_flashinfer_autotune",
+        "enable_cutedsl_warmup",
+        "enable_jit_warmup",
+        mode="wrap",
+    )
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         """Skip validation if the value is `None` when initialization is delayed."""

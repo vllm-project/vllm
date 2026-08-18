@@ -3,8 +3,9 @@
 
 import pytest
 import torch
-from transformers import AutoModelForTokenClassification
+from transformers import AutoModelForMaskedLM, AutoModelForTokenClassification
 
+from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.models.utils import softmax
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -28,28 +29,29 @@ def seed_everything():
 )
 # The float32 is required for this tiny model to pass the test.
 @pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.core_model
 @torch.inference_mode
-def test_bert_models(
+def test_bert_model_runner_v2(
     hf_runner,
     vllm_runner,
     example_prompts,
+    monkeypatch,
     model: str,
     dtype: str,
 ) -> None:
-    with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.token_classify(example_prompts)
+    prompt_batches = [[example_prompts[0]], example_prompts]
 
-    # Use eager attention on ROCm to avoid HF Transformers flash attention
-    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
-    hf_model_kwargs = {}
-    if current_platform.is_rocm():
-        hf_model_kwargs["attn_implementation"] = "eager"
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
+        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
+        vllm_output_batches = [
+            vllm_model.token_classify(prompts) for prompts in prompt_batches
+        ]
 
     with hf_runner(
         model,
         dtype=dtype,
         auto_cls=AutoModelForTokenClassification,
-        model_kwargs=hf_model_kwargs,
     ) as hf_model:
         tokenizer = hf_model.tokenizer
         hf_outputs = []
@@ -58,12 +60,14 @@ def test_bert_models(
             inputs = hf_model.wrap_device(inputs)
             output = hf_model.model(**inputs)
             hf_outputs.append(softmax(output.logits[0]))
+        hf_output_batches = [[hf_outputs[0]], hf_outputs]
 
     # check logits difference
-    for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
-        hf_output = hf_output.detach().clone().cpu().float()
-        vllm_output = vllm_output.detach().clone().cpu().float()
-        torch.testing.assert_close(hf_output, vllm_output, atol=3.2e-2, rtol=1e-3)
+    for hf_outputs, vllm_outputs in zip(hf_output_batches, vllm_output_batches):
+        for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
+            hf_output = hf_output.detach().clone().cpu().float()
+            vllm_output = vllm_output.detach().clone().cpu().float()
+            torch.testing.assert_close(hf_output, vllm_output, atol=3.2e-2, rtol=1e-3)
 
 
 @pytest.mark.parametrize("model", ["disham993/electrical-ner-ModernBERT-base"])
@@ -89,17 +93,10 @@ def test_modernbert_models(
     with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.token_classify(example_prompts)
 
-    # Use eager attention on ROCm to avoid HF Transformers flash attention
-    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
-    hf_model_kwargs = {}
-    if current_platform.is_rocm():
-        hf_model_kwargs["attn_implementation"] = "eager"
-
     with hf_runner(
         model,
         dtype=dtype,
         auto_cls=AutoModelForTokenClassification,
-        model_kwargs=hf_model_kwargs,
     ) as hf_model:
         tokenizer = hf_model.tokenizer
         hf_outputs = []
@@ -114,6 +111,88 @@ def test_modernbert_models(
         hf_output = hf_output.detach().clone().cpu().float()
         vllm_output = vllm_output.detach().clone().cpu().float()
         torch.testing.assert_close(hf_output, vllm_output, atol=3.2e-2, rtol=1e-3)
+
+
+@pytest.mark.parametrize("model", ["Davlan/xlm-roberta-base-ner-hrl"])
+@pytest.mark.parametrize("dtype", ["float"])
+@torch.inference_mode
+def test_xlm_roberta_models(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+) -> None:
+    with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
+        vllm_outputs = vllm_model.token_classify(example_prompts)
+
+    with hf_runner(
+        model,
+        dtype=dtype,
+        auto_cls=AutoModelForTokenClassification,
+    ) as hf_model:
+        tokenizer = hf_model.tokenizer
+        hf_outputs = []
+        for prompt in example_prompts:
+            inputs = tokenizer([prompt], return_tensors="pt")
+            inputs = hf_model.wrap_device(inputs)
+            output = hf_model.model(**inputs)
+            hf_outputs.append(softmax(output.logits[0]))
+
+    # check logits difference
+    for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
+        hf_output = hf_output.detach().clone().cpu().float()
+        vllm_output = vllm_output.detach().clone().cpu().float()
+        torch.testing.assert_close(hf_output, vllm_output, atol=3.2e-2, rtol=1e-3)
+
+
+PRIVACY_FILTER_PROMPTS = [
+    "My name is Harry Potter.",
+    "Email me at harry.potter@hogwarts.edu.",
+    "Call me on +44 20 7946 0958 tomorrow.",
+    "My account number is 12345678 and the API key is sk-live-abc123def456.",
+    "I live at 4 Privet Drive, Little Whinging.",
+    "Visit https://example.com/profile/harry for more info.",
+    "We met on 12 January 2024.",
+]
+
+
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="Workspace growth allocation issue on ROCm. See https://github.com/vllm-project/vllm/issues/48510",
+)
+@pytest.mark.parametrize("model", ["openai/privacy-filter"])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@torch.inference_mode
+def test_openai_privacy_filter(
+    hf_runner,
+    vllm_runner,
+    model: str,
+    dtype: str,
+) -> None:
+    model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
+    model_info.check_transformers_version(on_fail="skip")
+
+    with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
+        vllm_outputs = vllm_model.token_classify(PRIVACY_FILTER_PROMPTS)
+
+    with hf_runner(
+        model,
+        dtype=dtype,
+        auto_cls=AutoModelForTokenClassification,
+    ) as hf_model:
+        tokenizer = hf_model.tokenizer
+        hf_outputs = []
+        for prompt in PRIVACY_FILTER_PROMPTS:
+            inputs = tokenizer([prompt], return_tensors="pt")
+            inputs = hf_model.wrap_device(inputs)
+            output = hf_model.model(**inputs)
+            hf_outputs.append(softmax(output.logits[0]))
+
+    for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
+        hf_output = hf_output.detach().clone().cpu().float()
+        vllm_output = vllm_output.detach().clone().cpu().float()
+        torch.testing.assert_close(hf_output, vllm_output, atol=0.1, rtol=1e-2)
 
 
 @pytest.mark.parametrize("model", ["bd2lcco/Qwen3-0.6B-finetuned"])
@@ -145,3 +224,55 @@ def test_auto_conversion(
         hf_output = hf_output.detach().clone().cpu().float()
         vllm_output = vllm_output.detach().clone().cpu().float()
         assert torch.allclose(hf_output, vllm_output, atol=1e-2)
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        # Original Google checkpoint: legacy `gamma`/`beta` LayerNorm names, an
+        # NSP head (`cls.seq_relationship.*`) and a decoder tied to the input
+        # embeddings (no explicit decoder weight in the checkpoint).
+        "google-bert/bert-base-uncased",
+    ],
+)
+@pytest.mark.parametrize("dtype", ["float"])
+@torch.inference_mode
+def test_bert_for_masked_lm(
+    hf_runner,
+    vllm_runner,
+    example_prompts,
+    model: str,
+    dtype: str,
+) -> None:
+    # BertForMaskedLM exposes its MLM head as a token-level pooling task; the
+    # head applies softmax over the vocabulary, so each output row is a
+    # distribution (matching HF's softmax(logits) below).
+    with vllm_runner(model, max_model_len=None, dtype=dtype) as vllm_model:
+        vllm_outputs = vllm_model.token_classify(example_prompts)
+
+    # Run hf_runner reference with "highest" fp32 precision to match
+    # default behvior of vLLM. This is needed on ROCm since the
+    # pooling tests set matmul precision to "high" in conftest.py
+    prev_matmul_precision = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision("highest")
+    with hf_runner(
+        model,
+        dtype=dtype,
+        auto_cls=AutoModelForMaskedLM,
+    ) as hf_model:
+        tokenizer = hf_model.tokenizer
+        hf_outputs = []
+        for prompt in example_prompts:
+            inputs = tokenizer([prompt], return_tensors="pt")
+            inputs = hf_model.wrap_device(inputs)
+            output = hf_model.model(**inputs)
+            hf_outputs.append(softmax(output.logits[0]))
+    torch.set_float32_matmul_precision(prev_matmul_precision)
+
+    # Compare the per-token vocabulary distributions position by position.
+    for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
+        hf_output = hf_output.detach().clone().cpu().float()
+        vllm_output = vllm_output.detach().clone().cpu().float()
+        assert hf_output.shape == vllm_output.shape
+        assert torch.equal(hf_output.argmax(dim=-1), vllm_output.argmax(dim=-1))
+        torch.testing.assert_close(hf_output, vllm_output, atol=3.2e-2, rtol=1e-3)

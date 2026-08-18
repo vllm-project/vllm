@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from transformers import PretrainedConfig
 
     from vllm.config import CacheConfig, ModelConfig, VllmConfig
+    from vllm.config.cache import MambaDType
 
 
 logger = init_logger(__name__)
@@ -54,31 +55,175 @@ class Gemma3TextModelConfig(VerifyAndUpdateConfig):
         hf_config.is_causal = not hf_config.use_bidirectional_attention
 
 
+class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """Configure Unlimited-OCR attention backends for R-SWA and vision.
+
+        Backend selection — controlled by the standard ``--attention-config``
+        CLI argument (priority order):
+
+          1. ``--attention-config '{"backend": "FLASH_ATTN"}'``
+             → FA4 + rswa_mask_mod.  Exact token-level R-SWA.
+               ``flash_attn_version`` is forced to 4 if not already set (R-SWA
+               mask_mod requires FA4; FA3 cannot express it).  Raises if FA4 is
+               not available on this device.
+
+          2. ``--attention-config '{"backend": "FLEX_ATTENTION"}'``
+             → FlexAttention R-SWA via Triton block mask.
+
+          3. ``--attention-config '{"backend": "TRITON_ATTN"}'``
+             → Triton unified attention with an R-SWA decode mask.
+
+          4. ``--attention-config '{"backend": "auto"}'`` (or omitted)
+             → Auto-detect: FA4 if available (H20/H100 SM90), else TritonAttention.
+
+        Regardless of backend, prefix caching is disabled for this model: R-SWA
+        decode-phase KV is not a pure causal function of the prefix (so decode
+        blocks are not reusable), and single-turn image-led OCR prompts rarely
+        hit the prefix cache.
+
+        Example — force FlexAttention even on a machine with FA4::
+
+            vllm serve baidu/Unlimited-OCR \\
+                --attention-config '{"backend": "FLEX_ATTENTION"}'
+        """
+        from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        attn_config = vllm_config.attention_config
+        fa4_available = is_fa_version_supported(4)
+
+        # ── step 1: resolve backend ─────────────────────────────────────────
+        # None means the user did not explicitly specify a backend; auto-select.
+        if attn_config.backend is None:
+            attn_config.backend = (
+                AttentionBackendEnum.FLASH_ATTN
+                if fa4_available
+                else AttentionBackendEnum.TRITON_ATTN
+            )
+            logger.info(
+                "Unlimited-OCR: auto-selected attention backend=%s (fa4_available=%s).",
+                attn_config.backend.value,
+                fa4_available,
+            )
+
+        # ── step 2: configure the chosen backend ────────────────────────────
+        if attn_config.backend == AttentionBackendEnum.FLASH_ATTN:
+            if not fa4_available:
+                raise RuntimeError(
+                    "Unlimited-OCR: --attention-config backend=FLASH_ATTN "
+                    "requires FA4 (rswa_mask_mod), but FA4 is not available on "
+                    "this device/installation. Use backend=TRITON_ATTN or "
+                    "FLEX_ATTENTION, or upgrade vllm-flash-attn."
+                )
+            # On SM90 (H20), the default FA version is FA3 regardless of FA4
+            # availability (FA4 is only auto-upgraded when head_size > 256).
+            # The R-SWA mask_mod requires FA4, so force the version globally.
+            if attn_config.flash_attn_version is None:
+                attn_config.flash_attn_version = 4
+            elif attn_config.flash_attn_version < 4:
+                logger.warning(
+                    "Unlimited-OCR: flash_attn_version=%d cannot express the "
+                    "R-SWA mask_mod; upgrading to 4.",
+                    attn_config.flash_attn_version,
+                )
+                attn_config.flash_attn_version = 4
+            logger.info(
+                "Unlimited-OCR: FlashAttention FA%d + rswa_mask_mod — exact R-SWA.",
+                attn_config.flash_attn_version,
+            )
+
+        elif attn_config.backend == AttentionBackendEnum.TRITON_ATTN:
+            logger.info(
+                "Unlimited-OCR: TritonAttention — R-SWA via unified attention mask."
+            )
+
+        elif attn_config.backend == AttentionBackendEnum.FLEX_ATTENTION:
+            logger.info(
+                "Unlimited-OCR: FlexAttention — R-SWA via Triton block mask%s.",
+                ""
+                if not fa4_available
+                else (
+                    " (FA4 available but not used; pass backend=FLASH_ATTN to upgrade)"
+                ),
+            )
+
+        else:
+            raise ValueError(
+                f"Unlimited-OCR: unsupported attention backend "
+                f"{attn_config.backend!r} for R-SWA. "
+                "Use FLASH_ATTN (FA4), TRITON_ATTN or FLEX_ATTENTION."
+            )
+
+        # R-SWA windows the *generated* tokens, so a decode-token's KV is not a
+        # pure causal function of the prefix and cannot be safely reused across
+        # requests via prefix caching. Only the prompt/image prefix is cacheable,
+        # but OCR is single-turn with image-led prompts that rarely share a
+        # prefix, so prefix caching brings little benefit while complicating the
+        # KV cache manager. Disable it for this model.
+        cache_config = vllm_config.cache_config
+        if cache_config.enable_prefix_caching:
+            cache_config.enable_prefix_caching = False
+            logger.info(
+                "Unlimited-OCR: disabling prefix caching (R-SWA decode KV is not "
+                "cacheable, and single-turn image-led prompts rarely hit the "
+                "prefix cache)."
+            )
+
+        mm_config = getattr(vllm_config.model_config, "multimodal_config", None)
+        if mm_config is not None:
+            if mm_config.mm_encoder_attn_backend is None:
+                mm_config.mm_encoder_attn_backend = AttentionBackendEnum.FLASH_ATTN
+            elif mm_config.mm_encoder_attn_backend == AttentionBackendEnum.FLASHINFER:
+                logger.warning(
+                    "Unlimited-OCR: FlashInfer is not supported for the vision "
+                    "encoder (the CLIP stage runs full attention without "
+                    "cu_seqlens); falling back to FlashAttention."
+                )
+                mm_config.mm_encoder_attn_backend = AttentionBackendEnum.FLASH_ATTN
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        text_config = model_config.hf_config.text_config
+        text_config.architectures = ["DeepseekV2ForCausalLM"]
+        if getattr(model_config.hf_config, "rswa_window", None) is None:
+            model_config.hf_config.rswa_window = 128
+        # Propagate rswa_window to text_config so that DeepseekAttention (which
+        # receives text_config as its vllm_config.model_config.hf_config via
+        # init_vllm_registered_model) can read it and create RSWAAttention.
+        rswa_window = model_config.hf_config.rswa_window
+        text_config.rswa_window = rswa_window
+
+
 class Gemma4Config(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         """Configure attention for heterogeneous head dimensions.
 
-        Gemma4 uses different head dimensions for sliding window
-        (head_dim) vs full attention (global_head_dim) layers. The
-        default FA3 on Hopper cannot handle head_dim > 256, which
-        causes mixed backend selection and numerical divergence.
+        Gemma4 uses different head dimensions for sliding window vs full attention
+        layers. The default FA3 on Hopper cannot handle head_dim > 256, which causes
+        mixed backend selection and numerical divergence.
 
-        When FA4 is available we force it for ALL layers, giving a
-        uniform kernel path and avoiding the mixed FA3+FA4 penalty.
-        When FA4 is not available we fall back to Triton.
+        When FA4 is available we force it for ALL layers, giving a uniform kernel path
+        and avoiding the mixed FA3+FA4 penalty. When FA4 is not available we fall back
+        to Triton.
         """
-        hf_text_config = vllm_config.model_config.hf_text_config
-        head_dim = getattr(hf_text_config, "head_dim", None)
-        global_head_dim = getattr(hf_text_config, "global_head_dim", None)
+        model_config = vllm_config.model_config
+        arch_config = model_config.model_arch_config
+        layer_types = getattr(model_config.hf_text_config, "layer_types", None) or []
+        head_dims = {
+            layer_types[i]: arch_config[i].head_size
+            for i in range(min(arch_config.total_num_hidden_layers, len(layer_types)))
+        }
 
-        if head_dim is None or global_head_dim is None or head_dim == global_head_dim:
+        if len(set(head_dims.values())) <= 1:
             return
 
         from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-        max_head_dim = max(head_dim, global_head_dim)
+        max_head_dim = max(head_dims.values())
 
         if is_fa_version_supported(4) and max_head_dim <= 512:
             if (
@@ -88,20 +233,16 @@ class Gemma4Config(VerifyAndUpdateConfig):
             ):
                 vllm_config.attention_config.flash_attn_version = 4
                 logger.info(
-                    "Gemma4 model has heterogeneous head dimensions "
-                    "(head_dim=%d, global_head_dim=%d). Using FA4 for "
+                    "Gemma4 model has heterogeneous head dimensions %s. Using FA4 for "
                     "all layers to avoid mixed FA3/FA4 penalty.",
-                    head_dim,
-                    global_head_dim,
+                    head_dims,
                 )
         elif vllm_config.attention_config.backend is None:
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
-                "(head_dim=%d, global_head_dim=%d). FA4 not available, "
-                "forcing TRITON_ATTN backend.",
-                head_dim,
-                global_head_dim,
+                "%s. FA4 not available, forcing TRITON_ATTN backend.",
+                head_dims,
             )
 
 
@@ -198,6 +339,39 @@ class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
                 )
 
 
+class KimiK3ForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    """Route MXFP4-checkpointed Kimi-K3 MoE experts to the MXFP4 interface.
+
+    Kimi-K3 ships its routed experts as compressed-tensors
+    ``mxfp4-pack-quantized`` (``quant_method="compressed-tensors"``), which
+    lands them on ``CompressedTensorsW4A4Mxfp4MoEMethod`` and its narrow kernel
+    selection. Rewriting ``quant_method`` to ``"mxfp4"`` selects ``Mxfp4Config``
+    (hence ``Mxfp4MoEMethod``) with its full backend set, while any non-MXFP4
+    checkpoint is left untouched. Covers both the main model and the MTP draft.
+
+    ``model_arch_config.quantization_config`` is a separate dict, snapshotted in
+    ``ModelConfig.__init__`` before this hook runs, and it is what
+    ``_verify_quantization`` reads when resolving the quant method. Patch it
+    alongside the hf configs so the rewrite lands before resolution; otherwise
+    the main model still resolves to compressed-tensors.
+    """
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        for cfg in (
+            model_config.hf_config,
+            model_config.hf_text_config,
+            model_config.model_arch_config,
+        ):
+            quant_config = getattr(cfg, "quantization_config", None)
+            if (
+                isinstance(quant_config, dict)
+                and quant_config.get("quant_method") == "compressed-tensors"
+                and quant_config.get("format") == "mxfp4-pack-quantized"
+            ):
+                quant_config["quant_method"] = "mxfp4"
+
+
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -271,23 +445,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         Args:
             vllm_config: vLLM Config
         """
-        cache_config = vllm_config.cache_config
-
-        # Disable calculate_kv_scales for hybrid models: uninitialized
-        # recurrent state corrupts scales during the calibration pass.
-        # See issue: https://github.com/vllm-project/vllm/issues/37554
-
-        if cache_config.calculate_kv_scales:
-            logger.warning(
-                "Disabling calculate_kv_scales for hybrid model '%s'. "
-                "Hybrid models with recurrent layers (GDN, Mamba, SSM) "
-                "produce unreliable KV cache scales during the "
-                "calibration pass because recurrent state is "
-                "uninitialized. Using default scale of 1.0 instead.",
-                vllm_config.model_config.model,
-            )
-            cache_config.calculate_kv_scales = False
-
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
 
@@ -296,8 +453,31 @@ class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         pooler_config = model_config.pooler_config
+        assert pooler_config is not None
         if pooler_config.use_activation is None:
             pooler_config.use_activation = False
+
+
+class JinaEmbeddingsV5ModelConfig(VerifyAndUpdateConfig):
+    """Config handler for Jina Embeddings V5 embedding models."""
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        """Enable the bidirectional encoder backbone for -nano checkpoints.
+
+        The V5 family ships more than one backbone under a single
+        `architectures` entry: the `-small` variants are Qwen3 decoders, while
+        `-nano` is a bidirectional EuroBERT encoder. Upstream ships a separate
+        `configuration_*.py` per repository, so the config carries no backbone
+        field and the encoder variants are only identifiable by
+        `is_decoder=False`. For encoder checkpoints, set `is_causal=False` so the
+        Llama backbone uses EncoderOnlyAttention; `JinaEmbeddingsV5Model` then
+        dispatches to its encoder implementation.
+        """
+        if getattr(model_config.hf_config, "is_decoder", True):
+            return
+
+        model_config.hf_config.is_causal = False
 
 
 class JinaForRankingConfig(VerifyAndUpdateConfig):
@@ -340,6 +520,7 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
         config = model_config.hf_config
         config.num_labels = 1
         pooler_config = model_config.pooler_config
+        assert pooler_config is not None
         if pooler_config.logit_mean is None:
             pooler_config.logit_mean = 2.65
 
@@ -358,10 +539,11 @@ class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
             "last": "LAST",
         }
 
-        pooling_type = pooling_type_map.get(hf_config.pooling, None)
+        pooling_type = pooling_type_map.get(hf_config.pooling)
         if pooling_type is None:
             raise ValueError(f"pool_type {hf_config.pooling!r} not supported")
 
+        assert model_config.pooler_config is not None
         model_config.pooler_config.seq_pooling_type = pooling_type
 
 
@@ -394,10 +576,13 @@ class LlamaNemotronVLConfig(VerifyAndUpdateConfig):
         if pooling is None and hasattr(hf_config, "llm_config"):
             pooling = getattr(hf_config.llm_config, "pooling", "avg")
 
+        assert isinstance(pooling, str)
+
         pooling_type = pooling_type_map.get(pooling)
         if pooling_type is None:
             raise ValueError(f"pool_type {pooling!r} not supported")
 
+        assert model_config.pooler_config is not None
         model_config.pooler_config.seq_pooling_type = pooling_type
 
 
@@ -416,10 +601,8 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
         if cache_config.enable_prefix_caching:
             if cache_config.mamba_cache_mode == "none":
-                cache_config.mamba_cache_mode = (
-                    "all" if model_config.supports_mamba_prefix_caching else "align"
-                )
-                logger.warning(
+                cache_config.mamba_cache_mode = "align"
+                logger.info(
                     "Mamba cache mode is set to '%s' for %s by default "
                     "when prefix caching is enabled",
                     cache_config.mamba_cache_mode,
@@ -439,13 +622,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 assert vllm_config.scheduler_config.enable_chunked_prefill, (
                     "Chunked prefill is required for mamba cache mode 'align'."
                 )
-            logger.info(
-                "Warning: Prefix caching in Mamba cache '%s' "
-                "mode is currently enabled. "
-                "Its support for Mamba layers is experimental. "
-                "Please report any issues you may observe.",
-                cache_config.mamba_cache_mode,
-            )
             # By default, mamba block size will be set to max_model_len (see
             # below). When enabling prefix caching, we align mamba block size
             # to the block size as the basic granularity for prefix caching.
@@ -462,7 +638,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
 
 class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
-    DEFAULT_MAMBA_SSM_CACHE_DTYPE = "float32"
+    DEFAULT_MAMBA_SSM_CACHE_DTYPE: "MambaDType" = "float32"
     """Only `float32` is known to have no accuracy issues by default."""
 
     @classmethod
@@ -474,7 +650,7 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
         `float32` if not specified.
         """
         if cache_config.mamba_ssm_cache_dtype == "auto":
-            mamba_ssm_cache_dtype = getattr(
+            mamba_ssm_cache_dtype: MambaDType = getattr(
                 hf_config, "mamba_ssm_cache_dtype", cls.DEFAULT_MAMBA_SSM_CACHE_DTYPE
             )
             logger.info(
@@ -560,6 +736,7 @@ class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         pooler_config = model_config.pooler_config
+        assert pooler_config is not None
 
         if pooler_config.step_tag_id is None:
             pooler_config.step_tag_id = 151651
@@ -569,6 +746,7 @@ class Qwen2ForRewardModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         pooler_config = model_config.pooler_config
+        assert pooler_config is not None
 
         if pooler_config.use_activation is None:
             pooler_config.use_activation = False
@@ -627,18 +805,56 @@ class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
             )
 
 
+class Qwen3_5ForCausalLMConfig(Qwen3_5ForConditionalGenerationConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+
+        # Text-only Qwen3.5 models use one-dimensional positions. Remove the
+        # M-RoPE fields inherited from the multimodal configuration.
+        hf_text_config = vllm_config.model_config.hf_text_config
+        rope_parameters = getattr(hf_text_config, "rope_parameters", None)
+        if rope_parameters is not None:
+            rope_parameters.pop("mrope_section", None)
+            rope_parameters.pop("mrope_interleaved", None)
+
+
 class ColQwen3_5Config(Qwen3_5ForConditionalGenerationConfig):
-    """ColQwen3.5 (late-interaction retrieval) inherits Qwen3.5's mamba cache
-    handling and additionally serves BIDIRECTIONAL attention: ColPali-style
-    document/query encoding attends over the whole sequence, not causally. Set
-    is_causal=False so Qwen3NextAttention builds its full_attention layers with
-    AttentionType.ENCODER_ONLY (the linear_attention GatedDeltaNet layers are
-    unaffected). Generation arches keep the parent (causal) and are untouched.
-    """
+    """Apply the attention contract declared by a ColQwen3.5 checkpoint."""
 
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
-        model_config.hf_config.is_causal = False
+        configs = {
+            id(config): config
+            for config in (
+                model_config.hf_config,
+                model_config.hf_text_config,
+            )
+        }
+        declarations = [
+            contract
+            for config in configs.values()
+            if (contract := getattr(config, "retrieval_attention_contract", None))
+            is not None
+        ]
+        supported = {"causal", "bidirectional"}
+        if not declarations:
+            raise ValueError(
+                "ColQwen3.5 checkpoints must declare "
+                "retrieval_attention_contract as 'causal' or 'bidirectional'"
+            )
+        if (
+            any(not isinstance(contract, str) for contract in declarations)
+            or any(contract not in supported for contract in declarations)
+            or len(set(declarations)) != 1
+        ):
+            raise ValueError(
+                "unsupported or conflicting ColQwen3.5 "
+                f"retrieval_attention_contract declarations: {declarations!r}"
+            )
+        is_causal = declarations[0] == "causal"
+        for config in configs.values():
+            config.is_causal = is_causal
 
 
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
@@ -668,6 +884,23 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
         model_config.hf_config.embedding_size = model_config.hf_config.num_labels
 
 
+class LongcatFlashNgramForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        # LongCat-Flash-Lite's zero-expert MoE trips a data-dependent assert
+        # under torch.compile, and its n-gram inputs_embeds are only wired for
+        # FULL cudagraph capture (PIECEWISE prefill drops them). Default to
+        # no-compile + FULL cudagraph (prefill runs eager) unless the user
+        # configured compilation explicitly.
+        from vllm.config.compilation import CompilationMode, CUDAGraphMode
+
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.mode is None:
+            compilation_config.mode = CompilationMode.NONE
+        if compilation_config.cudagraph_mode is None:
+            compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "ColQwen3_5": ColQwen3_5Config,
@@ -681,12 +914,16 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Gemma4ForConditionalGeneration": Gemma4Config,
     "Gemma4UnifiedForConditionalGeneration": Gemma4Config,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
+    "LongcatFlashNgramForCausalLM": LongcatFlashNgramForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
+    "JinaEmbeddingsV5Model": JinaEmbeddingsV5ModelConfig,
     "JinaForRanking": JinaForRankingConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
+    "KimiK3ForConditionalGeneration": KimiK3ForConditionalGenerationConfig,
+    "KimiK3MTPModel": KimiK3ForConditionalGenerationConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "LlamaNemotronVLForSequenceClassification": LlamaNemotronVLConfig,
@@ -701,8 +938,11 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
+    "Qwen3_5ForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "Qwen3_5MoeForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "UnlimitedOCRForCausalLM": UnlimitedOCRForCausalLMConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
 }

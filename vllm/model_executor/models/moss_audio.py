@@ -33,7 +33,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     AudioItem,
@@ -56,6 +55,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -742,37 +742,6 @@ class GatedMLP(nn.Module):
         x, _ = self.down_proj(x)
         return x
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            target_name = name
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                components = target_name.split(".")
-                if weight_name not in components:
-                    continue
-
-                target_name = ".".join(
-                    param_name if component == weight_name else component
-                    for component in components
-                )
-                param = params_dict[target_name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[target_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-
-            loaded_params.add(target_name)
-        return loaded_params
-
 
 @support_torch_compile(
     dynamic_arg_dims={
@@ -867,15 +836,14 @@ class MossQwen3ForCausalLM(Qwen3ForCausalLM):
         )
 
         if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
             if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+                self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         else:
             from .utils import PPMissingLayer
 
@@ -894,6 +862,10 @@ class MossQwen3ForCausalLM(Qwen3ForCausalLM):
             batch_size, dtype, device
         )
         for layer_idx in self.deepstack_inject_layer_indices:
+            # Non-first PP ranks only receive DeepStack payloads for layers
+            # at or after their local start layer.
+            if layer_idx < self.model.start_layer:
+                continue
             intermediate_tensors[f"deepstack_input_embeds_{layer_idx}"] = torch.zeros(
                 (batch_size, self.config.hidden_size),
                 dtype=dtype,
@@ -1478,7 +1450,11 @@ class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             "language_model.embed_tokens.": "language_model.model.embed_tokens.",
             "language_model.layers.": "language_model.model.layers.",
             "language_model.norm.": "language_model.model.norm.",
-        }
+        },
+        orig_to_new_stacked={
+            ".gate_proj": (".gate_up_proj", 0),
+            ".up_proj": (".gate_up_proj", 1),
+        },
     )
 
     def get_mm_mapping(self) -> MultiModelKeys:
@@ -1692,15 +1668,19 @@ class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         """
         audio_data = audio_input["audio_data"]
         audio_data_seqlens = audio_input["audio_data_seqlens"]
-        last_hidden_state, deepstack = self.audio_encoder(
-            audio_data.to(self.audio_encoder.dtype),
-            feature_lens=audio_data_seqlens,
-            output_deepstack_hidden_states=len(self.deepstack_audio_merger_list) > 0,
-        )
-        audio_embeds = self.audio_adapter(last_hidden_state)
-        audio_lengths = MossAudioEncoder._compute_downsampled_length(
-            audio_data_seqlens.to(device=audio_embeds.device, dtype=torch.long)
-        ).tolist()
+        # The encoder chunks the input by per-audio feature lengths, which
+        # needs Python ints for `split`/`pad_sequence`.
+        want_deepstack = len(self.deepstack_audio_merger_list) > 0
+        with gpu_sync_allowed():
+            last_hidden_state, deepstack = self.audio_encoder(
+                audio_data.to(self.audio_encoder.dtype),
+                feature_lens=audio_data_seqlens,
+                output_deepstack_hidden_states=want_deepstack,
+            )
+            audio_embeds = self.audio_adapter(last_hidden_state)
+            audio_lengths = MossAudioEncoder._compute_downsampled_length(
+                audio_data_seqlens.to(device=audio_embeds.device, dtype=torch.long)
+            ).tolist()
         main_embeddings = tuple(audio_embeds.squeeze(0).split(audio_lengths, dim=0))
 
         deepstack_embeddings: list[tuple[torch.Tensor, ...]] = []

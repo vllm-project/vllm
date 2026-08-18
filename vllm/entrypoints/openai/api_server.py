@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import importlib
-import inspect
 import multiprocessing
 import multiprocessing.forkserver as forkserver
 import os
@@ -16,9 +14,7 @@ from contextlib import asynccontextmanager
 from typing import Any, cast
 
 import uvloop
-from fastapi import FastAPI, HTTPException
-from fastapi.exceptions import RequestValidationError
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
 from starlette.datastructures import State
 
 import vllm.envs as envs
@@ -27,12 +23,12 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
+from vllm.entrypoints.launchers.api_server.routers import register_api_routers
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
-from vllm.entrypoints.serve.render.serving import ServingRender
+from vllm.entrypoints.serve.exception_handling.register import init_exception_handler
+from vllm.entrypoints.serve.middleware.register import init_entrypoints_middleware
 from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
@@ -43,16 +39,9 @@ from vllm.entrypoints.serve.utils.api_utils import (
 )
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.server_utils import (
-    engine_error_handler,
-    exception_handler,
-    generation_error_handler,
     get_uvicorn_log_config,
-    http_exception_handler,
     lifespan,
-    log_response,
-    validation_exception_handler,
 )
-from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.renderers.online_derenderer import OnlineDerenderer
@@ -64,7 +53,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import is_valid_ipv6_address
 from vllm.utils.system_utils import decorate_logs, set_ulimit
-from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.version import __version__ as VLLM_VERSION
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
@@ -73,6 +61,41 @@ prometheus_multiproc_dir: tempfile.TemporaryDirectory
 logger = init_logger("vllm.entrypoints.openai.api_server")
 
 _FALLBACK_SUPPORTED_TASKS: tuple[SupportedTask, ...] = ("generate",)
+
+
+def _attach_endpoint_plugins(
+    app: FastAPI, supported_tasks: tuple["SupportedTask", ...]
+) -> None:
+    """Phase A of endpoint plugin wiring: discover, gate and attach routes.
+
+    Attached last after all core routers. This is so endpoint plugin routes can
+    shadow core routes with the same path (see `EndpointPlugin.attach_router`
+    docstring). No-ops when no plugins are discovered/allowlisted.
+    """
+    from vllm.plugins import load_endpoint_plugins
+
+    endpoint_plugins = load_endpoint_plugins(supported_tasks)
+    for plugin in endpoint_plugins:
+        plugin.attach_router(app)
+    app.state.endpoint_plugins = endpoint_plugins
+
+
+async def _init_endpoint_plugins_state(
+    engine_client: EngineClient | None, state: State, args: Namespace
+) -> None:
+    """Phase B of endpoint plugin wiring: initialize per app plugin state.
+
+    `state.endpoint_plugins` is set by `_attach_endpoint_plugins` (Phase A)
+    in `build_app`. Some `init_app_state` callers (e.g. `run_batch.py`)
+    build their own bare `State` without going through `build_app`. As a result
+    `endpoint_plugins` may be absent and are treated that the same as "none attached".
+
+    `engine_client` is `None` for the CPU only render server which has no
+    engine (see `init_render_app_state`). Plugins must handle a `None`
+    `engine_client` themselves (see `EndpointPlugin.init_state`).
+    """
+    for plugin in getattr(state, "endpoint_plugins", []):
+        await plugin.init_state(engine_client, state, args)
 
 
 @asynccontextmanager
@@ -179,125 +202,18 @@ def build_app(
     else:
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
-
-    from vllm.entrypoints.serve import register_vllm_serve_api_routers
-
-    register_vllm_serve_api_routers(app)
-
-    from vllm.entrypoints.openai.models.api_router import (
-        attach_router as register_models_api_router,
-    )
-
-    register_models_api_router(app)
-
-    from vllm.entrypoints.serve.sagemaker.api_router import (
-        attach_router as register_sagemaker_api_router,
-    )
-
-    register_sagemaker_api_router(app, supported_tasks, model_config)
-
-    if envs.VLLM_SERVER_DEV_MODE:
-        from vllm.entrypoints.serve import register_vllm_dev_api_routers
-
-        register_vllm_dev_api_routers(app)
-
-    if "generate" in supported_tasks:
-        from vllm.entrypoints.generate.api_router import (
-            register_generate_api_routers,
-        )
-
-        register_generate_api_routers(app)
-
-        from vllm.entrypoints.serve.disagg.api_router import (
-            attach_router as attach_disagg_router,
-        )
-
-        attach_disagg_router(app)
-
-        from vllm.entrypoints.serve.elastic_ep.api_router import (
-            attach_router as elastic_ep_attach_router,
-        )
-
-        elastic_ep_attach_router(app)
-
-    if "generate" in supported_tasks or "render" in supported_tasks:
-        from vllm.entrypoints.serve.render.api_router import (
-            attach_router as attach_render_router,
-        )
-
-        attach_render_router(app)
-
-    if "transcription" in supported_tasks or "realtime" in supported_tasks:
-        from vllm.entrypoints.speech_to_text.factories import (
-            register_speech_to_text_api_routers,
-        )
-
-        register_speech_to_text_api_routers(app, supported_tasks)
-
-    if any(task in POOLING_TASKS for task in supported_tasks):
-        from vllm.entrypoints.pooling.factories import register_pooling_api_routers
-
-        register_pooling_api_routers(app, supported_tasks, model_config)
-
     app.root_path = args.root_path
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=args.allowed_origins,
-        allow_credentials=args.allow_credentials,
-        allow_methods=args.allowed_methods,
-        allow_headers=args.allowed_headers,
-    )
 
-    app.exception_handler(HTTPException)(http_exception_handler)
-    app.exception_handler(RequestValidationError)(validation_exception_handler)
-    app.exception_handler(EngineGenerateError)(engine_error_handler)
-    app.exception_handler(EngineDeadError)(engine_error_handler)
-    app.exception_handler(GenerationError)(generation_error_handler)
-    app.exception_handler(VLLMValidationError)(exception_handler)
-    app.exception_handler(Exception)(exception_handler)
+    register_api_routers(args, app, supported_tasks, model_config)
 
-    # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
-    if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
-        from vllm.entrypoints.serve.utils.server_utils import AuthenticationMiddleware
+    # Endpoint plugins are attached last so their routes are registered after all core
+    # routers. This runs even for the CPU only render server. A plugin eligible for
+    # the `render` task still gets its routes registered. It receives
+    # `engine_client=None` at Phase B (see `_init_endpoint_plugins_state`).
+    _attach_endpoint_plugins(app, supported_tasks)
 
-        app.add_middleware(AuthenticationMiddleware, tokens=tokens)
-
-    if args.enable_request_id_headers:
-        from vllm.entrypoints.serve.utils.server_utils import XRequestIdMiddleware
-
-        app.add_middleware(XRequestIdMiddleware)
-
-    # Add scaling middleware to check for scaling state
-    app.add_middleware(ScalingMiddleware)
-
-    if "realtime" in supported_tasks:
-        # Add WebSocket metrics middleware
-        from vllm.entrypoints.speech_to_text.factories import (
-            add_websocket_metrics_middleware,
-        )
-
-        add_websocket_metrics_middleware(app)
-
-    if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
-        logger.warning(
-            "CAUTION: Enabling log response in the API Server. "
-            "This can include sensitive information and should be "
-            "avoided in production."
-        )
-        app.middleware("http")(log_response)
-
-    for middleware in args.middleware:
-        module_path, object_name = middleware.rsplit(".", 1)
-        imported = getattr(importlib.import_module(module_path), object_name)
-        if inspect.isclass(imported):
-            app.add_middleware(imported)  # type: ignore[arg-type]
-        elif inspect.iscoroutinefunction(imported):
-            app.middleware("http")(imported)
-        else:
-            raise ValueError(
-                f"Invalid middleware {middleware}. Must be a function or a class."
-            )
-
+    init_exception_handler(app)
+    init_entrypoints_middleware(args, app, supported_tasks)
     app = sagemaker_standards_bootstrap(app)
     return app
 
@@ -376,6 +292,7 @@ async def init_app_state(
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
+    state.online_renderer.warmup()
 
     state.online_derenderer = OnlineDerenderer(
         model_config=engine_client.model_config,
@@ -401,12 +318,6 @@ async def init_app_state(
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
-    state.serving_render = ServingRender(
-        state.openai_serving_models,
-        state.online_renderer,
-        state.online_derenderer,
-        request_logger=request_logger,
-    )
 
     if "generate" in supported_tasks:
         from vllm.entrypoints.generate.api_router import init_generate_state
@@ -414,6 +325,10 @@ async def init_app_state(
         await init_generate_state(
             engine_client, state, args, request_logger, supported_tasks
         )
+
+        from vllm.entrypoints.scale_out.factories import init_scale_out_state
+
+        init_scale_out_state(state, args, engine_client, request_logger)
 
     if "transcription" in supported_tasks or "realtime" in supported_tasks:
         from vllm.entrypoints.speech_to_text.factories import init_speech_to_text_state
@@ -426,6 +341,8 @@ async def init_app_state(
         from vllm.entrypoints.pooling.factories import init_pooling_state
 
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
+
+    await _init_endpoint_plugins_state(engine_client, state, args)
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
@@ -479,6 +396,7 @@ async def init_render_app_state(
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
+    state.online_renderer.warmup()
 
     state.online_derenderer = OnlineDerenderer(
         model_config=vllm_config.model_config,
@@ -505,12 +423,10 @@ async def init_render_app_state(
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
-    state.serving_render = ServingRender(
-        model_registry,
-        state.online_renderer,
-        state.online_derenderer,
-        request_logger=request_logger,
-    )
+
+    from vllm.entrypoints.scale_out.factories import init_render_state
+
+    init_render_state(state, request_logger)
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.
@@ -520,15 +436,24 @@ async def init_render_app_state(
     state.enable_server_load_tracking = False
     state.server_load_metrics = 0
 
+    # No `EngineClient` exists for the render server, so plugins get `None` and
+    # must handle it themselves (see `EndpointPlugin.init_state`).
+    await _init_endpoint_plugins_state(None, state, args)
 
-def create_server_socket(addr: tuple[str, int]) -> socket.socket:
+
+def create_server_socket(
+    addr: tuple[str, int],
+    *,
+    reuse_port: bool,
+) -> socket.socket:
     family = socket.AF_INET
     if is_valid_ipv6_address(addr[0]):
         family = socket.AF_INET6
 
     sock = socket.socket(family=family, type=socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    if reuse_port:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.bind(addr)
 
     return sock
@@ -559,7 +484,7 @@ def validate_api_server_args(args):
 
 
 @instrument(span_name="API server setup")
-def setup_server(args):
+def setup_server(args, *, reuse_port: bool):
     """Validate API server args and create the server socket."""
 
     log_version_and_model(logger, VLLM_VERSION, args.model)
@@ -580,7 +505,7 @@ def setup_server(args):
         sock = create_server_unix_socket(args.uds)
     else:
         sock_addr = (args.host or "", args.port)
-        sock = create_server_socket(sock_addr)
+        sock = create_server_socket(sock_addr, reuse_port=reuse_port)
 
     # workaround to avoid footguns where uvicorn drops requests with too
     # many concurrent requests active
@@ -701,7 +626,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     signal.signal(signal.SIGTERM, _interrupt_init)
 
-    listen_address, sock = setup_server(args)
+    listen_address, sock = setup_server(args, reuse_port=False)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
 
 

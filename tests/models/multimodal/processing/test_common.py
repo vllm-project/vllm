@@ -20,6 +20,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import batched_tensors_equal
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
+from vllm.platforms import current_platform
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.utils.mistral import is_mistral_tokenizer
 
@@ -83,6 +84,14 @@ MM_DATA_PATCHES = {
     "glmasr": glmasr_patch_mm_data,
 }
 
+_XPU_EXCLUDED_MODEL_IDS = {
+    "baidu/Unlimited-OCR",
+    "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
+    "moonshotai/Kimi-K3",
+    "Qwen/Qwen2.5-Omni-7B-AWQ",
+    "thinkingmachines/Inkling-NVFP4",
+}
+
 
 def _iter_model_ids_to_test(model_arch_list: AbstractSet[str]):
     for model_arch in model_arch_list:
@@ -97,7 +106,14 @@ def _iter_model_ids_to_test(model_arch_list: AbstractSet[str]):
 
 
 def _get_model_ids_to_test(model_arch_list: AbstractSet[str]):
-    return list(_iter_model_ids_to_test(model_arch_list))
+    model_ids = list(_iter_model_ids_to_test(model_arch_list))
+
+    if current_platform.is_xpu():
+        for excluded_model_id in _XPU_EXCLUDED_MODEL_IDS:
+            while excluded_model_id in model_ids:
+                model_ids.remove(excluded_model_id)
+
+    return model_ids
 
 
 def get_model_ids_to_test():
@@ -116,6 +132,17 @@ def get_model_ids_to_test():
     }
 
     return _get_model_ids_to_test(vllm_only_archs)
+
+
+def get_transformers_backend_model_ids_to_test():
+    return sorted(
+        {
+            model_id
+            for arch, info in _TRANSFORMERS_BACKEND_MODELS.items()
+            if "MultiModal" in arch
+            for model_id in (info.default, *info.extras.values())
+        }
+    )
 
 
 def get_text_token_prompts(
@@ -195,6 +222,7 @@ def _test_processing_correctness(
     hit_rate: float,
     num_batches: int,
     simplify_rate: float,
+    model_impl: str = "auto",
 ):
     if model_id_or_arch in HF_EXAMPLE_MODELS.get_supported_archs():
         # Use model architecture to get the default model id
@@ -222,6 +250,7 @@ def _test_processing_correctness(
         enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype,
+        model_impl=model_impl,
     )
     # Ensure that the cache can fit all of the data
     # (set after because ModelConfig would set it to 0 for encoder-decoder models)
@@ -438,12 +467,48 @@ def test_processing_correctness(
             "audio placeholders from processed audio lengths. Its vLLM "
             "processor paths are covered by test_moss_audio.py."
         )
+    # TODO: Remove when transformers 5.15.0 is released, which contains
+    # https://github.com/huggingface/transformers/pull/47483.
+    if model_id == "microsoft/VibeVoice-ASR-HF":
+        pytest.skip(
+            "VibeVoice ASR requires audio as a positional argument and hence "
+            "cannot pass the processing correctness test as is. Its generation "
+            "is covered by test_transformers_audio.py."
+        )
+    if model_id == "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct":
+        pytest.skip(
+            "LLaVA-OneVision-2 video processing routes frames through custom "
+            "video backends (qwen_vl_utils / codec) that require real encoded "
+            "video bytes and metadata. The synthetic numpy-array videos used by "
+            "this test yield empty video features, so the generic correctness "
+            "check cannot exercise the video path. Image processing is covered "
+            "by registration/inference tests."
+        )
 
     _test_processing_correctness(
         model_id,
         hit_rate=hit_rate,
         num_batches=num_batches,
         simplify_rate=simplify_rate,
+    )
+
+
+@pytest.mark.parametrize("model_id", get_transformers_backend_model_ids_to_test())
+@pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
+@pytest.mark.parametrize("num_batches", [32])
+@pytest.mark.parametrize("simplify_rate", [1.0])
+def test_processing_correctness_transformers(
+    model_id: str,
+    hit_rate: float,
+    num_batches: int,
+    simplify_rate: float,
+):
+    _test_processing_correctness(
+        model_id,
+        hit_rate=hit_rate,
+        num_batches=num_batches,
+        simplify_rate=simplify_rate,
+        model_impl="transformers",
     )
 
 

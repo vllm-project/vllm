@@ -5,19 +5,28 @@
 import ctypes
 import time
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
 from vllm.distributed.nixl_utils import NixlWrapper as nixl_agent
 from vllm.distributed.nixl_utils import nixl_agent_config
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import (
+    Locality,
+    LookupResult,
+    Medium,
+    OffloadingEvent,
+    OffloadKey,
+    ReqContext,
+)
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.base import (
-    JobMetadata,
+    JobId,
     JobResult,
     RequestOffloadingContext,
+    ScheduleEndContext,
     SecondaryTierManager,
+    TransferJob,
 )
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
 
@@ -89,6 +98,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     primary tier. Object keys are formed as ``{prefix}/{hash_shard}/{hash}.bin``.
     """
 
+    medium: ClassVar[Medium] = Medium.STORAGE
+
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
@@ -97,8 +108,43 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         store_config: dict,
         prefix: str = "",
         io_threads: int = 4,
+        enable_kv_events: bool = False,
+        locality: str | None = None,
     ):
+        """
+        Args:
+            offloading_spec: Offloading configuration.
+            primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+            tier_type: Tier type identifier, set by SecondaryTierFactory.
+            store_config: Object store connection parameters (see ObjStoreConfig).
+            prefix: Key prefix prepended to all object keys.
+            io_threads: Number of NIXL I/O threads.
+            enable_kv_events: Emit BlockStored KV events for blocks
+                successfully stored to this tier. Effective only when KV
+                cache events are enabled globally (kv_events_config).
+            locality: Whether this tier's storage is LOCAL or REMOTE relative
+                to the publishing vLLM instance.
+        """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
+        self.locality = Locality(locality) if locality is not None else None
+
+        self.events: list[OffloadingEvent] | None = None
+        if enable_kv_events:
+            if offloading_spec.kv_events_config.enable_kv_cache_events:
+                self.events = []
+            else:
+                logger.warning(
+                    "enable_kv_events is set on secondary tier '%s' but KV "
+                    "cache events are disabled globally; the tier will not "
+                    "emit events.",
+                    tier_type,
+                )
+        # Keys of in-flight store jobs, tracked only when events are enabled.
+        self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
+        # Keys of in-flight load (promotion) jobs, so a failed download can
+        # mark its own cached lookup verdicts False (see get_finished_jobs).
+        self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
+
         agent_config = nixl_agent_config(backends=[])
         self._agent = nixl_agent("ObjAgent", agent_config)
         obj_config = ObjStoreConfig(**store_config)
@@ -156,8 +202,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         except Exception as e:
             raise RuntimeError(
                 f"Object store tier connectivity probe failed — check bucket, "
-                f"endpoint_override, access_key, secret_key, and scheme. "
-                f"Error: {e}"
+                f"endpoint_override, and scheme. If using explicit credentials "
+                f"verify access_key and secret_key; otherwise ensure the AWS "
+                f"SDK default credential chain is configured (IAM role, env "
+                f"vars, credential file). Error: {e}"
             ) from e
 
     def _exists(self, obj_key: str) -> bool:
@@ -219,7 +267,11 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             self._pending_results.append(JobResult(job_id=job_id, success=False))
             return
 
-        self._transfers[job_id] = TransferEntry(xfer_handle, files_desc, obj_handle)
+        self._transfers[job_id] = TransferEntry(
+            xfer_handle=xfer_handle,
+            files_desc=files_desc,
+            obj_handle=obj_handle,
+        )
 
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         result = self._lookup_manager.lookup(key, req_context)
@@ -227,13 +279,16 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             return LookupResult.RETRY
         return LookupResult.HIT if result else LookupResult.MISS
 
-    def submit_store(self, job_metadata: JobMetadata) -> None:
+    def submit_store(self, job_metadata: TransferJob) -> None:
+        if self.events is not None:
+            self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
             job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_WRITE
         )
 
-    def submit_load(self, job_metadata: JobMetadata) -> None:
+    def submit_load(self, job_metadata: TransferJob) -> None:
+        self._load_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
             job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_READ
@@ -242,7 +297,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def on_request_finished(self, req_context: ReqContext) -> None:
         self._lookup_manager.cleanup(req_context.req_id)
 
-    def on_schedule_end(self) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         self._lookup_manager.flush()
 
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
@@ -260,23 +315,84 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             else:
                 if state == NIXL_PROC:
                     continue
-                elif state == NIXL_DONE:
+                if state == NIXL_DONE:
                     success = True
                 else:
                     success = False
                     logger.warning("transfer failed job=%d state=%s", job_id, state)
+
+            transfer_time = None
+            if success:
+                telemetry = self._agent.get_xfer_telemetry(entry.xfer_handle)
+                transfer_time = telemetry.xferDuration / 1e6
+
+            try:
+                self._agent.release_xfer_handle(entry.xfer_handle)
+            except Exception as exc:
+                # Keep the entry until NIXL confirms that the transfer handle
+                # can be released. The transfer may still access primary-tier
+                # memory, so publishing its result would allow unsafe reuse.
+                logger.warning("release_xfer_handle failed for job %d: %s", job_id, exc)
+                continue
+
+            # Once the transfer handle is released, these remaining cleanup
+            # failures must not suppress the job completion. They can leak
+            # NIXL metadata, but cannot leave an active data transfer behind.
+            try:
+                self._agent.release_dlist_handle(entry.obj_handle)
+            except Exception as exc:
+                logger.warning(
+                    "release_dlist_handle failed for job %d: %s", job_id, exc
+                )
+            try:
+                self._agent.deregister_memory(entry.files_desc)
+            except Exception as exc:
+                logger.warning("deregister_memory failed for job %d: %s", job_id, exc)
+
             del self._transfers[job_id]
-            self._agent.release_xfer_handle(entry.xfer_handle)
-            self._agent.release_dlist_handle(entry.obj_handle)
-            self._agent.deregister_memory(entry.files_desc)
-            self._pending_results.append(JobResult(job_id=job_id, success=success))
+            self._pending_results.append(
+                JobResult(
+                    job_id=job_id,
+                    success=success,
+                    transfer_time=transfer_time,
+                )
+            )
 
     def get_finished_jobs(self) -> Iterable[JobResult]:
-        """Poll in-flight transfers; return completed (job_id, success) pairs."""
+        """Poll transfers; a failed promotion marks its cached verdicts False
+        here (scheduler thread)."""
         self._poll_active_transfers()
         results = self._pending_results
         self._pending_results = []
+        for result in results:
+            if self.events is not None:
+                keys = self._store_job_keys.pop(result.job_id, None)
+                if result.success and keys:
+                    self.events.append(
+                        OffloadingEvent(
+                            keys=keys,
+                            medium=self.medium,
+                            removed=False,
+                            locality=self.locality,
+                        )
+                    )
+            # Mark only the keys that did not load as a miss; the request
+            # recomputes them. The miss is per-request (cleared when the request
+            # finishes), so other requests still HIT the blocks that loaded
+            # fine. nixl reports the batch as a whole (successful_keys is None),
+            # so today this marks all keys; the subtraction keeps it correct if
+            # partial results are ever reported.
+            load_keys = self._load_job_keys.pop(result.job_id, None)
+            if load_keys is not None and not result.success:
+                successful = set(result.successful_keys or ())
+                failed = [k for k in load_keys if k not in successful]
+                self._lookup_manager.mark_miss(failed)
         return results
+
+    def take_events(self) -> Iterable[OffloadingEvent]:
+        if self.events is not None:
+            yield from self.events
+            self.events.clear()
 
     def drain_jobs(self) -> None:
         """Block until every submitted transfer has completed or failed.
