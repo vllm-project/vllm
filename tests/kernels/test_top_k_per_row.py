@@ -1108,7 +1108,7 @@ def test_workspace_topk_padded_stride(
 
     batch_size = 4
     padded_stride = 163840  # DeepSeek-V3.2 max_model_len
-    actual_seq_lens = [3000, 5000, 8000, 12000]
+    actual_seq_lens = [3001, 5003, 8191, 12001]
 
     # Create padded logits tensor (like fp8_paged_mqa_logits output)
     logits = torch.full(

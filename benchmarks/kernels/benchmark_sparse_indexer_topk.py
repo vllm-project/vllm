@@ -89,8 +89,9 @@ def _selector(
 ) -> tuple[str, Callable[[], None]]:
     use_cooperative = logits.shape[0] <= 32
     use_decode = logits.dtype == torch.float16 and (
-        (max_seq_len <= 32768 and logits.shape[0] >= 512)
-        or (32768 < max_seq_len <= 131072 and logits.shape[0] >= 256)
+        (32768 < max_seq_len <= 65536 and logits.shape[0] >= 768)
+        or (65536 < max_seq_len <= 100000 and logits.shape[0] >= 512)
+        or (100000 < max_seq_len <= 131072 and logits.shape[0] >= 1024)
     )
     backend = (
         ("cooperative" if use_cooperative else "decode" if use_decode else "persistent")

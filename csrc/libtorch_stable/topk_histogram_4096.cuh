@@ -78,9 +78,9 @@ __device__ __forceinline__ uint32_t score_to_ordered(__half x) {
                          : static_cast<uint16_t>(bits | 0x8000);
 }
 
-__device__ __forceinline__ uint32_t fp16_bits_to_ordered(uint16_t bits) {
-  return (bits & 0x8000) ? static_cast<uint16_t>(~bits)
-                         : static_cast<uint16_t>(bits | 0x8000);
+__device__ __forceinline__ uint32_t fp16x2_bits_to_ordered(uint32_t bits) {
+  const uint32_t negative = (bits & 0x80008000u) >> 15;
+  return bits ^ (0x80008000u | negative * 0xFFFFu);
 }
 
 // Converts each score to a 12-bit bin (FP16 sign-magnitude -> top 12 bits ->
@@ -451,7 +451,7 @@ __device__ void histogram_4096_topk(const InputType* __restrict__ scores,
   union InputVec {
     uint4 packed;
     InputType elems[ELEMS_PER_VEC];
-    uint16_t fp16_bits[sizeof(uint4) / sizeof(uint16_t)];
+    uint32_t fp16_pairs[sizeof(uint4) / sizeof(uint32_t)];
   };
 
   // Phase 1: Load all data into RF + build histogram
@@ -499,21 +499,38 @@ __device__ void histogram_4096_topk(const InputType* __restrict__ scores,
 
   // Build histogram from RF via atomic adds into the shared histogram
   bool done = false;
+  if constexpr (std::is_same_v<InputType, __half>) {
 #pragma unroll
-  for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
+    for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
 #pragma unroll
-    for (uint32_t e = 0; e < ELEMS_PER_VEC && !done; e++) {
-      const uint32_t idx = (tx + v * kBlockSize) * ELEMS_PER_VEC + e;
-      if (idx >= length) {
-        done = true;
-      } else {
-        uint32_t bin;
-        if constexpr (std::is_same_v<InputType, __half>) {
-          bin = fp16_bits_to_ordered(vecs[v].fp16_bits[e]) >> (16 - HIST_BITS);
-        } else {
-          bin = extract_input_coarse_bin<HIST_BITS>(vecs[v].elems[e]);
+      for (uint32_t p = 0; p < ELEMS_PER_VEC / 2 && !done; p++) {
+        const uint32_t idx = (tx + v * kBlockSize) * ELEMS_PER_VEC + p * 2;
+        if (idx >= length) {
+          done = true;
+          continue;
         }
-        atomicAdd(&smem->histogram[bin], 1);
+        const uint32_t keys = fp16x2_bits_to_ordered(vecs[v].fp16_pairs[p]);
+        atomicAdd(&smem->histogram[(keys & 0xFFFFu) >> (16 - HIST_BITS)], 1);
+        if (idx + 1 < length) {
+          atomicAdd(&smem->histogram[keys >> (32 - HIST_BITS)], 1);
+        } else {
+          done = true;
+        }
+      }
+    }
+  } else {
+#pragma unroll
+    for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
+#pragma unroll
+      for (uint32_t e = 0; e < ELEMS_PER_VEC && !done; e++) {
+        const uint32_t idx = (tx + v * kBlockSize) * ELEMS_PER_VEC + e;
+        if (idx >= length) {
+          done = true;
+        } else {
+          const uint32_t bin =
+              extract_input_coarse_bin<HIST_BITS>(vecs[v].elems[e]);
+          atomicAdd(&smem->histogram[bin], 1);
+        }
       }
     }
   }
@@ -562,44 +579,58 @@ __device__ void histogram_4096_topk(const InputType* __restrict__ scores,
   const bool need_tie = (num_equal + num_above > TopK);
 
   done = false;
+  if constexpr (std::is_same_v<InputType, __half>) {
 #pragma unroll
-  for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
+    for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
 #pragma unroll
-    for (uint32_t e = 0; e < ELEMS_PER_VEC && !done; e++) {
-      const uint32_t idx = (tx + v * kBlockSize) * ELEMS_PER_VEC + e;
-      if (idx >= length) {
-        done = true;
-      } else {
-        const auto raw_score = vecs[v].elems[e];
-        uint32_t key = 0;
-        uint32_t bin;
-        if constexpr (std::is_same_v<InputType, __half>) {
-          key = fp16_bits_to_ordered(vecs[v].fp16_bits[e]);
-          bin = key >> (16 - HIST_BITS);
-        } else {
-          bin = extract_input_coarse_bin<HIST_BITS>(raw_score);
+      for (uint32_t p = 0; p < ELEMS_PER_VEC / 2 && !done; p++) {
+        const uint32_t base = (tx + v * kBlockSize) * ELEMS_PER_VEC + p * 2;
+        if (base >= length) {
+          done = true;
+          continue;
         }
-        if (bin > thr_bin) {
-          output[atomicAdd(&smem->counter_gt, 1)] = idx;
-        } else if (bin == thr_bin) {
-          const auto pos = atomicAdd(&smem->counter_eq, 1);
-          if (!need_tie) {
-            if (pos + num_above < TopK) {
-              output[pos + num_above] = idx;
-            }
-          } else {
-            if (pos < TopK) {
-              uint32_t tie_key;
-              if constexpr (std::is_same_v<InputType, __half>) {
-                tie_key = key;
-              } else {
-                tie_key = score_to_ordered(raw_score);
-              }
-              smem->tie_buffer[pos] = {idx, tie_key};
+        const uint32_t keys = fp16x2_bits_to_ordered(vecs[v].fp16_pairs[p]);
+#pragma unroll
+        for (uint32_t e = 0; e < 2; e++) {
+          const uint32_t idx = base + e;
+          if (idx >= length) continue;
+          const uint32_t key = (keys >> (e * 16)) & 0xFFFFu;
+          const uint32_t bin = key >> (16 - HIST_BITS);
+          if (bin > thr_bin) {
+            output[atomicAdd(&smem->counter_gt, 1)] = idx;
+          } else if (bin == thr_bin) {
+            const auto pos = atomicAdd(&smem->counter_eq, 1);
+            if (!need_tie) {
+              if (pos + num_above < TopK) output[pos + num_above] = idx;
+            } else if (pos < TopK) {
+              smem->tie_buffer[pos] = {idx, key};
             }
           }
         }
-        // else: bin < thr_bin - discard (not in top-k)
+      }
+    }
+  } else {
+#pragma unroll
+    for (uint32_t v = 0; v < VECS_PER_THREAD && !done; v++) {
+#pragma unroll
+      for (uint32_t e = 0; e < ELEMS_PER_VEC && !done; e++) {
+        const uint32_t idx = (tx + v * kBlockSize) * ELEMS_PER_VEC + e;
+        if (idx >= length) {
+          done = true;
+        } else {
+          const auto raw_score = vecs[v].elems[e];
+          const uint32_t bin = extract_input_coarse_bin<HIST_BITS>(raw_score);
+          if (bin > thr_bin) {
+            output[atomicAdd(&smem->counter_gt, 1)] = idx;
+          } else if (bin == thr_bin) {
+            const auto pos = atomicAdd(&smem->counter_eq, 1);
+            if (!need_tie) {
+              if (pos + num_above < TopK) output[pos + num_above] = idx;
+            } else if (pos < TopK) {
+              smem->tie_buffer[pos] = {idx, score_to_ordered(raw_score)};
+            }
+          }
+        }
       }
     }
   }
