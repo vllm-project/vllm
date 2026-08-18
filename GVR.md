@@ -3565,3 +3565,118 @@ The next optimization ideas, ordered by confidence and likely payoff, are:
 These are hypotheses until benchmarked. The selector correction is the only
 new production change retained from this profiling pass; both experimental
 kernel rewrites were reverted.
+
+## 2026-08-18: Packed FP16 keys close the remaining performance gap
+
+The short-path profile above showed that scalar FP16 key conversion was the
+remaining 10K bottleneck. Although FP16 read half as many bytes as FP32, the
+compiler emitted more integer work for eight separate 16-bit sign/order
+transforms. The retained implementation converts two packed FP16 encodings at
+once with one 32-bit operation and reuses those keys in both histogram and
+scatter. It also retains the earlier exact FP16 refinement: 16 low-bit bins
+after a 12-bit short histogram and 64 low-bit bins after the 10-bit large
+cooperative histogram.
+
+The packed transform is exact for all 65,536 FP16 bit patterns. Odd live
+lengths are handled explicitly and are covered by the padded-stride tests.
+On the same one-row 10K Nsight Compute profile, the change reduced registers
+from 45 to 32, executed instructions from 30,153 to 27,453, elapsed cycles
+from 9.136M to 7.640M, and profiled duration from 12.000 to 10.784 us. The
+unified 1,024-row 50K kernel fell from 57 to 32 registers, raising achieved
+occupancy from 49.7% to 94.9%; its profiled duration fell from 210.944 to
+167.424 us. CUDA-graph timing below is authoritative for latency because NCU
+replays each kernel for 41 counter passes.
+
+### Production-style fixed 256K CUDA graph
+
+This setup allocates a 256K row stride, captures with `max_seq_len=256000`,
+and changes only the live per-row length. It models the stated deployment
+practice of reusing one maximum-length decode graph. Inputs are captured GLM
+selector logits, CUDA graphs contain only GPU top-k launches, and every cell
+is checked against CUDA `torch.topk` before timing. CPU transfers appear only
+in separate pytest diagnostics and are not part of these measurements.
+
+| Rows | KV | FP16 | FP32 | FP16 speedup |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 10K | 4.242 us | 4.609 us | 1.087x |
+| 1 | 50K | 7.527 us | 9.742 us | 1.294x |
+| 1 | 100K | 8.144 us | 10.485 us | 1.287x |
+| 1 | 200K | 9.383 us | 12.028 us | 1.282x |
+| 1 | 256K | 9.820 us | 12.383 us | 1.261x |
+| 8 | 10K | 4.732 us | 5.069 us | 1.071x |
+| 8 | 50K | 7.628 us | 10.008 us | 1.312x |
+| 8 | 100K | 8.941 us | 11.507 us | 1.287x |
+| 8 | 200K | 11.562 us | 14.032 us | 1.214x |
+| 8 | 256K | 12.573 us | 15.349 us | 1.221x |
+| 32 | 10K | 4.838 us | 5.242 us | 1.084x |
+| 32 | 50K | 9.639 us | 12.419 us | 1.288x |
+| 32 | 100K | 13.138 us | 16.068 us | 1.223x |
+| 32 | 200K | 18.901 us | 22.429 us | 1.187x |
+| 32 | 256K | 21.295 us | 25.228 us | 1.185x |
+| 128 | 10K | 5.323 us | 5.549 us | 1.042x |
+| 128 | 50K | 17.500 us | 19.292 us | 1.102x |
+| 128 | 100K | 27.604 us | 29.836 us | 1.081x |
+| 128 | 200K | 47.513 us | 66.983 us | 1.410x |
+| 128 | 256K | 56.910 us | 85.397 us | 1.501x |
+| 1,024 | 10K | 23.967 us | 33.269 us | 1.388x |
+| 1,024 | 50K | 94.387 us | 139.846 us | 1.482x |
+| 1,024 | 100K | 153.163 us | 221.120 us | 1.444x |
+| 1,024 | 200K | 271.360 us | 470.133 us | 1.733x |
+| 1,024 | 256K | 334.933 us | 574.720 us | 1.716x |
+
+FP16 now wins all 25 production-style cells. The smallest margin is 4.2% at
+10K/128; the largest is 73.3% at 200K/1,024. The fixed graph selects the
+unified persistent backend for rows above 32. Before packed conversion that
+backend used 57 registers and FP16 lost at 10K; the new 32-register kernel is
+why the same practical setup now strongly favors FP16.
+
+### Exact-stride matrix and selector retuning
+
+The exact-stride matrix covers the originally requested 1 through 16,384
+rows. The table reports FP32 latency divided by FP16 latency:
+
+| Rows | 10K | 50K | 100K | 200K |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 1.087x | 1.276x | 1.271x | 1.270x |
+| 8 | 1.062x | 1.300x | 1.290x | 1.214x |
+| 32 | 1.088x | 1.294x | 1.240x | 1.191x |
+| 128 | 1.051x | 1.084x | 1.048x | 1.387x |
+| 1,024 | 1.389x | 1.472x | 1.492x | 1.763x |
+| 8,192 | 1.528x | 1.627x | 1.628x | 1.839x |
+| 16,384 | 1.542x | 1.638x | 1.635x | 1.832x |
+
+The register reduction changed the persistent-versus-decode crossover, so the
+old selector tiers were no longer valid. Forced-backend measurements now use
+persistent for all lengths through 32K, decode from 768 rows for 32K-64K,
+decode from 512 rows for 64K-100K, and decode from 1,024 rows for
+100K-131,072. The 10K/1,024 exact-stride choice improves from 30.17 us with
+decode to 24.06 us with persistent. At 50K/512, persistent is 54.31 us versus
+55.84 us for decode; at 100K/512, decode is 88.03 us versus 90.23 us for
+persistent. The new tiers follow those measured crossovers rather than the
+pre-optimization occupancy model.
+
+### Structural experiments not retained
+
+Several alternatives were built, checked, and reverted because they lost to
+the packed-key implementation or the prior kernel:
+
+- dedicated non-cluster short kernels with 1,024 or 512 threads;
+- warp `match_any` aggregation of coarse histogram atomics;
+- warp-reserved scatter using ballots and shuffles;
+- a 13-bit FP16 coarse histogram;
+- adjacent-pair same-bin aggregation;
+- two replicated FP16 shared histograms; and
+- cluster-wide participation in the short histogram.
+
+The common failure is first-principles overhead: real adjacent-bin collision
+rates are only about 5%, while votes, extra reductions, extra CTAs, or larger
+histogram scans are paid for every score. Packing the mandatory key transform
+removes work without adding a data-dependent protocol, so its gain survives
+all row counts and contexts.
+
+Validation for production commit `99e35c9b88` includes a clean CUDA build,
+65 workspace/backend correctness cases, 20 selector-policy tests, full
+1,024-row equality with CUDA `torch.topk` at 10K, 50K, 100K, 200K, and 256K,
+all 56 exact-stride benchmark cells, all 50 fixed-stride benchmark cells, and
+all applicable pre-commit hooks. The benchmark and tests use the repository
+`.venv`; no external environment or CPU top-k implementation is used.
