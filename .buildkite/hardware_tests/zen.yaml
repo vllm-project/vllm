@@ -26,3 +26,24 @@ steps:
     - |
       bash .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh 20m "
       pytest -x -v -s tests/model_executor/test_cpu_unquantized_gemm_dispatch.py"
+
+- label: Zen-CPU-Platform-Detection Tests
+  # Same reuse model as the kernel test: run-zen-cpu-test.sh pulls the shared
+  # image-build-cpu image and layers the zen image on top (from-source fallback).
+  depends_on:
+  - image-build-cpu
+  soft_fail: false
+  device: zen5
+  no_plugin: true
+  source_file_dependencies:
+  - docker/Dockerfile.cpu
+  - docker/Dockerfile.zen
+  - .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh
+  - vllm/platforms/cpu.py
+  - vllm/platforms/zen_cpu.py
+  - vllm/platforms/__init__.py
+  - tests/test_zen_cpu_platform_detection.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh 20m "
+      pytest -x -v -s tests/test_zen_cpu_platform_detection.py"
