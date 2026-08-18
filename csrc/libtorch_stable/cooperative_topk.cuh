@@ -513,8 +513,10 @@ __device__ void cooperative_topk_body(
   if (sl <= static_cast<int32_t>(hist4096::kHist4096MaxLen)) {
     if (rank == 0) {
       extern __shared__ uint8_t sr[];
-      hist4096::histogram_4096_topk<InputType, TopK, 12>(
-          in, out, sl, sr);  // 4096-bin (12-bit) histogram
+      constexpr uint32_t kVecsPerThread =
+          std::is_same_v<InputType, __half> ? 2 : 4;
+      hist4096::histogram_4096_topk<InputType, TopK, 12, kVecsPerThread>(
+          in, out, sl, sr);
     }
     return;
   }

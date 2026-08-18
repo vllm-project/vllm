@@ -83,7 +83,9 @@ def _selector(
             )
 
     elif logits.dtype == torch.float16 and (
-        kv_length <= 65536 or (kv_length <= 131072 and logits.shape[0] >= 256)
+        (kv_length <= 32768 and logits.shape[0] >= 512)
+        or 32768 < kv_length <= 65536
+        or (65536 < kv_length <= 131072 and logits.shape[0] >= 256)
     ):
         backend = "decode"
 

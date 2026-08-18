@@ -55,6 +55,8 @@ def test_auto_indexer_logits_uses_fp32_off_cuda(
 @pytest.mark.parametrize(
     ("dtype", "num_rows", "max_seq_len", "expected"),
     [
+        (torch.float16, 128, 10000, False),
+        (torch.float16, 512, 10000, True),
         (torch.float16, 128, 65536, True),
         (torch.float16, 128, 65537, False),
         (torch.float16, 256, 131072, True),

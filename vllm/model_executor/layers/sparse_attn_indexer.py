@@ -53,9 +53,11 @@ _INDEXER_LOGITS_DTYPES = {
 def _should_use_native_fp16_decode_topk(
     logits_dtype: torch.dtype, num_rows: int, max_seq_len: int
 ) -> bool:
-    return logits_dtype == torch.float16 and (
-        max_seq_len <= 65536 or (max_seq_len <= 131072 and num_rows >= 256)
-    )
+    if logits_dtype != torch.float16:
+        return False
+    if max_seq_len <= 32768:
+        return num_rows >= 512
+    return max_seq_len <= 65536 or (max_seq_len <= 131072 and num_rows >= 256)
 
 
 def _get_indexer_logits_dtype() -> torch.dtype:

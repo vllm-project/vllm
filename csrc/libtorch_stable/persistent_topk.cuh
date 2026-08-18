@@ -1103,8 +1103,9 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
         return;
       }
     } else {
-      hist4096::histogram_4096_topk<DType, MAX_K, 12, 8>(score, dst, length,
-                                                         _smem_reg);
+      constexpr uint32_t kVecsPerThread = std::is_same_v<DType, __half> ? 4 : 8;
+      hist4096::histogram_4096_topk<DType, MAX_K, 12, kVecsPerThread>(
+          score, dst, length, _smem_reg);
       return;
     }
   }
