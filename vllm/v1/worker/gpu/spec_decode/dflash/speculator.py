@@ -17,6 +17,7 @@ from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.cp_utils import cp_local_slot, prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -286,10 +287,21 @@ class DFlashSpeculator(DraftModelSpeculator):
         num_query_per_req: int | None = None,
         causal: bool | Mapping[int, bool] = False,
         query_start_loc_np: np.ndarray | None = None,
+        dcp_local_seq_lens: torch.Tensor | None = None,
     ) -> dict[str, Any] | None:
         if not self.draft_attn_layer_names:
             return None
         assert num_query_per_req is None  # Omitted for DFlash, read from self instead
+        if dcp_local_seq_lens is None and self.block_tables.cp_size > 1:
+            prepare_dcp_local_seq_lens(
+                self.input_buffers.dcp_local_seq_lens,
+                self.input_buffers.seq_lens,
+                num_reqs,
+                self.block_tables.cp_size,
+                self.block_tables.cp_rank,
+                self.block_tables.cp_interleave,
+            )
+            dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens
         return super()._build_draft_attn_metadata(
             num_reqs,
             num_reqs_padded,
@@ -299,6 +311,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_query_per_req=self.num_query_per_req,
             causal=causal,
             query_start_loc_np=query_start_loc_np,
+            dcp_local_seq_lens=dcp_local_seq_lens,
         )
 
     @torch.inference_mode()
@@ -396,6 +409,9 @@ class DFlashSpeculator(DraftModelSpeculator):
                 seeds,
                 self.block_tables.input_block_tables[gid],
                 self.block_tables.kernel_block_sizes[gid],
+                self.block_tables.cp_rank,
+                self.block_tables.cp_size,
+                self.block_tables.cp_interleave,
                 self.parallel_drafting_token_id,
                 self.num_query_per_req,
                 self.num_speculative_steps,
@@ -512,8 +528,11 @@ def _prepare_dflash_inputs_kernel(
     max_num_reqs,
     max_num_tokens,
     max_model_len,
+    cp_rank,
     SAMPLE_FROM_ANCHOR: tl.constexpr,
     PAD_SLOT_ID: tl.constexpr,
+    CP_SIZE: tl.constexpr,
+    CP_INTERLEAVE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
@@ -548,7 +567,7 @@ def _prepare_dflash_inputs_kernel(
     # --- Context positions / slots ---
     ctx_pos_idx = ctx_start + tl.where(is_ctx, j, 0)
     ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_valid_ctx, other=0)
-    ctx_block_num = ctx_pos // block_size
+    ctx_block_num = ctx_pos // (block_size * CP_SIZE)
     ctx_block_num = tl.minimum(ctx_block_num, block_table_stride - 1)
     ctx_block_id = tl.load(
         block_table_ptr + req_idx * block_table_stride + ctx_block_num,
@@ -559,9 +578,12 @@ def _prepare_dflash_inputs_kernel(
     # to it after eviction; rejected suffix rows are invalid context as well.
     # Neither kind of row may write draft KV into physical block 0.
     ctx_resident = is_valid_ctx & (ctx_block_id != 0)
+    local_ctx_slot = cp_local_slot(
+        ctx_pos, ctx_block_id, block_size, cp_rank, CP_SIZE, CP_INTERLEAVE, PAD_SLOT_ID
+    )
     ctx_slot = tl.where(
         ctx_resident,
-        ctx_block_id * block_size + (ctx_pos % block_size),
+        local_ctx_slot,
         PAD_SLOT_ID,
     )
     # Stored over the full [0, num_ctx) span while the loads above are masked to
@@ -578,7 +600,7 @@ def _prepare_dflash_inputs_kernel(
     is_bonus = is_query & (query_off == 0)
     input_id = tl.where(is_bonus, bonus_token, parallel_drafting_token_id)
 
-    q_block_num = query_pos // block_size
+    q_block_num = query_pos // (block_size * CP_SIZE)
     q_block_num = tl.minimum(q_block_num, block_table_stride - 1)
     q_block_id = tl.load(
         block_table_ptr + req_idx * block_table_stride + q_block_num,
@@ -588,9 +610,18 @@ def _prepare_dflash_inputs_kernel(
     # A null block is never a writable cache slot. This can occur when a
     # sliding-window block table contains evicted/global padding entries.
     q_resident = is_query & (q_block_id != 0)
+    local_q_slot = cp_local_slot(
+        query_pos,
+        q_block_id,
+        block_size,
+        cp_rank,
+        CP_SIZE,
+        CP_INTERLEAVE,
+        PAD_SLOT_ID,
+    )
     q_slot = tl.where(
         q_resident,
-        q_block_id * block_size + (query_pos % block_size),
+        local_q_slot,
         PAD_SLOT_ID,
     )
 
@@ -686,6 +717,9 @@ def prepare_dflash_inputs(
     # [max_num_reqs, max_num_blocks]
     block_table: torch.Tensor,
     block_size: int,
+    cp_rank: int,
+    cp_size: int,
+    cp_interleave: int,
     parallel_drafting_token_id: int,
     num_query_per_req: int,
     num_speculative_steps: int,
@@ -733,7 +767,10 @@ def prepare_dflash_inputs(
         max_num_reqs,
         max_num_tokens,
         max_model_len,
+        cp_rank,
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
         PAD_SLOT_ID=PAD_SLOT_ID,
+        CP_SIZE=cp_size,
+        CP_INTERLEAVE=cp_interleave,
         BLOCK_SIZE=BLOCK_SIZE,
     )
