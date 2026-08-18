@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
+import pytest
 import torch
 
+import vllm.v1.worker.gpu.attn_utils as attn_utils_module
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -10,8 +14,110 @@ from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MambaSpec,
 )
-from vllm.v1.worker.gpu.attn_utils import _reshape_kv_cache
+from vllm.v1.worker.gpu.attn_utils import _allocate_kv_cache, _reshape_kv_cache
 from vllm.v1.worker.utils import AttentionGroup
+
+
+class _FakeSharedHostRegion:
+    def __init__(self) -> None:
+        self.cleanup_calls = 0
+
+    def cleanup(self) -> None:
+        self.cleanup_calls += 1
+
+
+def test_allocate_kv_cache_rolls_back_shared_region_on_device_failure(monkeypatch):
+    region = _FakeSharedHostRegion()
+    host_tensor = torch.empty(8, dtype=torch.int8)
+    kv_cache_config = SimpleNamespace(
+        kv_cache_tensors=[
+            SimpleNamespace(
+                size=host_tensor.numel(),
+                shared_by=["host"],
+                host_resident=True,
+                block_pool_id=None,
+                block_stride=0,
+            ),
+            SimpleNamespace(
+                size=8,
+                shared_by=["device"],
+                host_resident=False,
+                block_pool_id=0,
+                block_stride=0,
+            ),
+        ],
+        kv_cache_groups=[
+            SimpleNamespace(layer_names=["host"]),
+            SimpleNamespace(layer_names=["device"]),
+        ],
+        hisparse_host_num_blocks=1,
+        hisparse_host_block_stride=4096,
+        hisparse_shared_host_pool=True,
+    )
+    monkeypatch.setattr(
+        attn_utils_module,
+        "allocate_hisparse_host_pools",
+        lambda *args, **kwargs: ([host_tensor], [], region),
+    )
+
+    def fail_device_allocation(*args, **kwargs):
+        raise RuntimeError("device allocation failed")
+
+    monkeypatch.setattr(attn_utils_module.torch, "zeros", fail_device_allocation)
+
+    with pytest.raises(RuntimeError, match="device allocation failed"):
+        _allocate_kv_cache(
+            kv_cache_config,
+            shared_layers={},
+            device=torch.device("cpu"),
+            vllm_config=SimpleNamespace(),
+        )
+
+    assert region.cleanup_calls == 1
+
+
+def test_init_kv_cache_rolls_back_shared_region_on_worker_failure(monkeypatch):
+    region = _FakeSharedHostRegion()
+    kv_cache_config = SimpleNamespace()
+    vllm_config = SimpleNamespace(
+        attention_config=SimpleNamespace(hisparse_config=SimpleNamespace()),
+        scheduler_config=SimpleNamespace(max_num_seqs=1),
+        model_config=SimpleNamespace(max_model_len=1),
+        max_concurrent_batches=1,
+    )
+    monkeypatch.setattr(attn_utils_module, "get_shared_kv_cache_layers", lambda _: {})
+    monkeypatch.setattr(
+        attn_utils_module,
+        "_allocate_kv_cache",
+        lambda *args, **kwargs: ({}, [], region),
+    )
+    monkeypatch.setattr(
+        attn_utils_module,
+        "_reshape_kv_cache",
+        lambda *args, **kwargs: {},
+    )
+
+    def fail_worker_initialization(**kwargs):
+        raise RuntimeError("worker initialization failed")
+
+    monkeypatch.setattr(
+        attn_utils_module, "init_hisparse_worker", fail_worker_initialization
+    )
+
+    with pytest.raises(RuntimeError, match="worker initialization failed"):
+        attn_utils_module.init_kv_cache(
+            runner_kv_caches=[],
+            forward_context={},
+            kv_cache_config=kv_cache_config,
+            attn_groups=[],
+            device=torch.device("cpu"),
+            cache_dtype="auto",
+            kernel_block_sizes=[],
+            vllm_config=vllm_config,
+            block_tables=SimpleNamespace(),
+        )
+
+    assert region.cleanup_calls == 1
 
 
 class FakeFlashAttentionBackend:

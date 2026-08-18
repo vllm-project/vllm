@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 
 import vllm.v1.kv_offload.sparse.hisparse_runtime as hisparse_runtime_module
@@ -54,6 +55,7 @@ def test_hisparse_shares_host_pool_only_for_local_tp(monkeypatch):
         assert not hisparse_runtime_module.use_shared_hisparse_host_pool(config)
 
 
+@pytest.mark.skip_global_cleanup
 def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     class FakeSharedOffloadRegion:
         BLOCK_SIZE_ALIGNMENT = 4096
@@ -81,22 +83,25 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
             pass
 
     monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
-    )
-    monkeypatch.setattr(
         hisparse_runtime_module, "SharedOffloadRegion", FakeSharedOffloadRegion
     )
     pinned: list[torch.Tensor] = []
     monkeypatch.setattr(hisparse_runtime_module, "pin_tensor", pinned.append)
     config = SimpleNamespace(
         instance_id="instance",
-        parallel_config=_hisparse_parallel_config(),
+        parallel_config=_hisparse_parallel_config(
+            tensor_parallel_size=1,
+            world_size=1,
+            distributed_executor_backend="uni",
+        ),
     )
 
-    pools, private_pools, region = (
-        hisparse_runtime_module.allocate_hisparse_host_pools(
-            config, [24, 40], num_blocks=4
-        )
+    pools, private_pools, region = hisparse_runtime_module.allocate_hisparse_host_pools(
+        config,
+        [24, 40],
+        num_blocks=4,
+        host_block_stride=4096,
+        use_shared_host_pool=True,
     )
 
     assert region is not None
@@ -107,6 +112,7 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
         "rank": 0,
         "kv_bytes_per_block": 4096,
         "cpu_page_size": 16,
+        "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
     }
     assert region.view_sizes == [6, 10]
     assert [pool.shape for pool in pools] == [(4, 6), (4, 10)]
@@ -125,6 +131,33 @@ def test_hisparse_worker_finish_step_counts_each_index_group_once():
     worker.leader_runtimes = [SimpleNamespace(index_group=group)]
 
     assert worker.finish_step() == HiSparseStats(7, 3, 48)
+
+
+def test_hisparse_host_pool_uses_resolved_private_mode(monkeypatch):
+    monkeypatch.setattr(
+        hisparse_runtime_module,
+        "allocate_pinned_host_pool",
+        lambda size: (
+            torch.empty(size, dtype=torch.int8),
+            torch.empty(size, dtype=torch.int8),
+        ),
+    )
+    config = SimpleNamespace(
+        instance_id="instance",
+        parallel_config=_hisparse_parallel_config(),
+    )
+
+    pools, private_pools, region = hisparse_runtime_module.allocate_hisparse_host_pools(
+        config,
+        [24, 40],
+        num_blocks=4,
+        host_block_stride=16,
+        use_shared_host_pool=False,
+    )
+
+    assert region is None
+    assert [pool.shape for pool in pools] == [(24,), (40,)]
+    assert [pool.shape for pool in private_pools] == [(24,), (40,)]
 
 
 def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():

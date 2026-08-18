@@ -11,6 +11,7 @@ import pytest
 import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
+import vllm.v1.kv_offload.sparse.hisparse_runtime as hisparse_runtime_module
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.config.attention import HiSparseConfig
 from vllm.config.kv_events import KVEventsConfig
@@ -85,16 +86,47 @@ def _private_hisparse_parallel_config():
     )
 
 
+def _shared_hisparse_parallel_config():
+    return SimpleNamespace(
+        tensor_parallel_size=2,
+        pipeline_parallel_size=1,
+        prefill_context_parallel_size=1,
+        decode_context_parallel_size=1,
+        world_size=2,
+        distributed_executor_backend="mp",
+        nnodes_within_dp=1,
+        data_parallel_index=0,
+    )
+
+
 @pytest.mark.parametrize(
-    ("block_size", "main_sizes", "indexer_sizes", "gpu_block_size"),
+    (
+        "block_size",
+        "main_sizes",
+        "indexer_sizes",
+        "gpu_block_size",
+        "shared_host_pool",
+        "num_gpu_blocks_override",
+    ),
     [
-        (256, (64,), (64,), 64),
-        (64, (32, 64), (16, 32), 32),
+        (64, (64,), (64,), 64, True, None),
+        (128, (64,), (64,), 64, False, None),
+        (256, (64,), (64,), 64, False, 7),
+        (64, (32, 64), (16, 32), 32, False, 7),
     ],
 )
 def test_hisparse_hma_uses_backend_gpu_block_size(
-    block_size, main_sizes, indexer_sizes, gpu_block_size
+    monkeypatch,
+    block_size,
+    main_sizes,
+    indexer_sizes,
+    gpu_block_size,
+    shared_host_pool,
+    num_gpu_blocks_override,
 ):
+    monkeypatch.setattr(
+        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+    )
     specs = {
         "model.layers.0.self_attn": MLAAttentionSpec(
             block_size=block_size,
@@ -124,9 +156,10 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
             hf_config=SimpleNamespace(index_topk=128),
             max_model_len=block_size,
         ),
-        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
-        parallel_config=_private_hisparse_parallel_config(),
+        cache_config=SimpleNamespace(num_gpu_blocks_override=num_gpu_blocks_override),
+        parallel_config=_shared_hisparse_parallel_config(),
     )
+    host_budget = 2**30
     indexer_spec = specs["model.layers.0.self_attn.indexer"]
     assert kv_cache_utils._hisparse_gpu_memory_usage(config, [group]) == (
         indexer_spec.max_memory_usage_bytes(config)
@@ -136,11 +169,29 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
         config,
         group,
         available_memory=2**30,
-        host_budget=2**30,
+        host_budget=host_budget,
         log_layout=False,
     )
 
     host_group, indexer_group, *auxiliary_groups = cache_config.kv_cache_groups
+    assert cache_config.hisparse_shared_host_pool is shared_host_pool
+    host_page = host_group.kv_cache_spec.page_size_bytes
+    if shared_host_pool:
+        alignment = hisparse_runtime_module.SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+        expected_host_stride = (host_page + alignment - 1) // alignment * alignment
+    else:
+        expected_host_stride = host_page
+    assert cache_config.hisparse_host_block_stride == expected_host_stride
+    if num_gpu_blocks_override is None:
+        assert cache_config.hisparse_host_num_blocks == (
+            host_budget // expected_host_stride
+        )
+        assert cache_config.num_blocks_by_pool[0] > 0
+    else:
+        assert cache_config.num_blocks_by_pool == [num_gpu_blocks_override]
+        assert cache_config.hisparse_host_num_blocks == num_gpu_blocks_override
+    assert host_group.block_pool_id is None
+    assert indexer_group.block_pool_id == 0
     assert host_group.kv_cache_spec.block_size == block_size
     assert indexer_group.kv_cache_spec.block_size == gpu_block_size
     host_specs = host_group.kv_cache_spec.kv_cache_specs

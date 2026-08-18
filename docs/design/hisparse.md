@@ -65,6 +65,11 @@ across TP ranks, so this stores one physical copy instead of one copy per rank.
 Each rank still submits its own identical DMA to preserve its local CUDA stream
 ordering. Other executor and parallel layouts retain private per-rank pools.
 
+The shared layout backs the per-replica logical capacity with one physical pool;
+the private layout allocates one physical pool per rank. Physical pool size
+includes block-stride alignment. `num_gpu_blocks_override`, when set, overrides
+the planned Host block count and can exceed the configured budget.
+
 ## Code boundary
 
 ```text
