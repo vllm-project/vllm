@@ -666,7 +666,12 @@ class SingleDirectionOffloadingHandler:
                         is_src_access_order_any=is_src_access_order_any,
                     )
                 end_event.record(stream)
-        except Exception:
+        except RuntimeError:
+            # Device faults surface as RuntimeError (torch.AcceleratorError and
+            # the STD_TORCH_CHECK in swap_blocks_batch both derive from it).
+            # Deliberately not broader: a missing op or a bad argument is a
+            # programming error and must keep propagating, not be silently
+            # downgraded to a degraded cache.
             # A transfer fault must not take the engine down. Offloading is a
             # best-effort cache (OffloadingConnector.requires_kv_delivery is
             # False), so report the job as failed and let the connector decide:
@@ -717,7 +722,7 @@ class SingleDirectionOffloadingHandler:
                 transfer_time = (
                     transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
                 )  # elapsed_time is in milliseconds
-            except Exception:
+            except RuntimeError:
                 # A device error latched by this transfer (or by earlier work
                 # on its stream) surfaces here rather than at submit time.
                 # Same contract as the submit-time failure above.
@@ -759,7 +764,7 @@ class SingleDirectionOffloadingHandler:
             if event is not None:
                 try:
                     event.synchronize()
-                except Exception:
+                except RuntimeError:
                     # Leave the transfer queued: the next get_finished() poll
                     # hits the same error and reports the job as failed, which
                     # keeps failure handling in one place.
