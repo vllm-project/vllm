@@ -145,29 +145,37 @@ def test_non_uniform_page_sizes():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_packed_segment_zeros_only_its_last_block_page():
-    """A packed KV segment steps by block stride but clears only its page."""
+def test_packed_segment_zeros_whole_block_from_storage_base():
+    """A packed KV segment rooted at the backing storage base clears the
+    whole block stride (every interleaved layer), not just one layer's page.
+
+    This is the route-B behavior: ``seg_addrs`` starts at the storage base
+    (not the layer view's ``data_ptr``, which carries a per-block offset),
+    and ``seg_page_sizes`` equals the whole ``block_stride`` so a single
+    segment clears every layer in one launch.
+    """
     device = torch.device("cuda")
     num_blocks = 4
     block_stride_el = 12
-    page_size_el = 4
     page_offset_el = 3
+    page_size_el = 4
     backing = torch.ones(
         (num_blocks, block_stride_el), dtype=torch.int32, device=device
     )
 
     zeroer = KVBlockZeroer.__new__(KVBlockZeroer)
     zeroer.device = device
+    # Route B: segment rooted at the storage base, clearing the whole block.
     zeroer._meta = (
         torch.tensor(
-            [backing.data_ptr() + page_offset_el * backing.element_size()],
+            [backing.data_ptr()],
             dtype=torch.uint64,
             device=device,
         ),
         torch.tensor([block_stride_el], dtype=torch.int64, device=device),
-        torch.tensor([page_size_el], dtype=torch.int64, device=device),
+        torch.tensor([block_stride_el], dtype=torch.int64, device=device),
         1,
-        page_size_el,
+        block_stride_el,
         1,
     )
 
@@ -175,7 +183,78 @@ def test_packed_segment_zeros_only_its_last_block_page():
     torch.accelerator.synchronize()
 
     expected = torch.ones_like(backing)
-    expected[-1, page_offset_el : page_offset_el + page_size_el] = 0
+    expected[-1, :] = 0
+    assert torch.equal(backing, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_packed_slab_dedup_clears_whole_block():
+    """Multiple layers sharing a packed backing are zeroed exactly once.
+
+    The segment must start at the backing storage base (not each layer's
+    data_ptr, which carries the per-block byte offset) and its cleared span
+    must cover the whole block stride so every interleaved layer is cleared
+    in a single launch.
+    """
+    device = torch.device("cuda")
+    num_blocks = 4
+    page_bytes = 16  # bytes per layer per block
+    block_stride_bytes = 2 * page_bytes  # two layers interleaved per block
+
+    backing = torch.ones(
+        num_blocks * block_stride_bytes, dtype=torch.int8, device=device
+    )
+
+    # Mirror _reshape_attention_kv_cache's packing branch: each layer is a
+    # strided view into the shared backing with a per-block byte offset, and
+    # stride(0) spanning the whole slab.
+    def make_view(offset):
+        return torch.as_strided(
+            backing,
+            size=(num_blocks, page_bytes),
+            stride=(block_stride_bytes, 1),
+            storage_offset=offset,
+        )
+
+    layer0 = make_view(0)
+    layer1 = make_view(page_bytes)
+    assert layer0.data_ptr() != layer1.data_ptr()
+    assert layer0.stride(0) * layer0.element_size() == block_stride_bytes
+
+    spec = SlidingWindowSpec(
+        block_size=1,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.int8,
+        sliding_window=1,
+    )
+    zeroer = KVBlockZeroer(
+        device,
+        attn_groups_iter=[
+            AttentionGroup(_BlockFirstBackend, ["layer0", "layer1"], spec, 0)
+        ],
+        kernel_block_sizes=[1],
+        cache_dtype="auto",
+        static_forward_context={
+            "layer0": SimpleNamespace(kv_cache=layer0),
+            "layer1": SimpleNamespace(kv_cache=layer1),
+        },
+    )
+
+    assert zeroer._meta is not None
+    seg_addrs, seg_block_strides, seg_page_sizes, *_ = zeroer._meta
+    # Both layers alias one backing storage: dedup yields a single segment
+    # rooted at the storage base, clearing the whole block stride.
+    assert seg_addrs.numel() == 1
+    assert int(seg_addrs[0]) == backing.data_ptr()
+    assert seg_block_strides.tolist() == [block_stride_bytes // 4]
+    assert seg_page_sizes.tolist() == [block_stride_bytes // 4]
+
+    zeroer.zero_block_ids([num_blocks - 1])
+    torch.accelerator.synchronize()
+
+    expected = torch.ones_like(backing)
+    expected.view(num_blocks, block_stride_bytes)[-1, :] = 0
     assert torch.equal(backing, expected)
 
 
