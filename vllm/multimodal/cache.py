@@ -39,6 +39,29 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+class MultiModalCacheMissError(RuntimeError):
+    """Raised by the P1 receiver cache when items are requested with no data and
+    are not cached.
+
+    P0 (frontend) keeps a metadata-only shadow of P1 (engine) and sends
+    ``data=None`` on a shadow hit. The two caches are updated in different orders
+    across processes, so they can drift -- leaving P0 referencing items P1 has
+    evicted. Raising (instead of asserting) lets the engine return a retryable
+    response and have P0 drop the stale entries
+    (``BaseMultiModalProcessorCache.invalidate``) so the client resends the data.
+    Carries every drifted ``mm_hash`` in the request so P0 can drop them all in one
+    pass -- one retry then recovers the whole request, not one item per retry.
+    """
+
+    def __init__(self, mm_hashes: list[str]) -> None:
+        super().__init__(
+            f"Multi-modal items {mm_hashes} are not in the receiver (P1) cache and "
+            "no data was provided to recompute them (P0/P1 cache drift); the request "
+            "should be retried with the multi-modal data attached."
+        )
+        self.mm_hashes = mm_hashes
+
+
 class MultiModalProcessorCacheItem:
     """
     The data to store inside `MultiModalProcessorOnlyCache`.
@@ -295,6 +318,13 @@ class BaseMultiModalProcessorCache(
         """
         return [self.is_cached_item(mm_hash) for mm_hash in mm_hashes]
 
+    def invalidate(self, mm_hash: str) -> None:
+        """Drop ``mm_hash`` from this P0 shadow cache to recover from P0/P1 drift.
+
+        No-op by default; shadow caches that can drift from P1 override this.
+        """
+        pass
+
     def close(self) -> None:
         """Close the underlying cache, if needed."""
         pass
@@ -432,6 +462,12 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
     @override
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
         return self._cache.stat(delta=delta)
+
+    @override
+    def invalidate(self, mm_hash: str) -> None:
+        # Drop our stale shadow entry so the next request for this hash re-sends the
+        # data and repopulates P1 (see MultiModalCacheMissError).
+        self._cache.pop(mm_hash, None)
 
 
 class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
@@ -602,9 +638,19 @@ class BaseMultiModalReceiverCache(
             cache_key = feature.mm_hash or feature.identifier
             self.touch_receiver_cache_item(cache_key, feature.data)
 
+        missing_mm_hashes: list[str] = []
         for feature in mm_features:
             cache_key = feature.mm_hash or feature.identifier
-            feature.data = self.get_and_update_item(feature.data, cache_key)
+            try:
+                feature.data = self.get_and_update_item(feature.data, cache_key)
+            except MultiModalCacheMissError as e:
+                # Collect every drifted hash in this request before raising, so the
+                # engine can have P0 invalidate them all at once -- otherwise a
+                # request with k drifted items needs k client retries (each resend
+                # only un-shadows the one reported hash).
+                missing_mm_hashes.extend(e.mm_hashes)
+        if missing_mm_hashes:
+            raise MultiModalCacheMissError(missing_mm_hashes)
         return mm_features
 
     @abstractmethod
@@ -657,7 +703,11 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
         if (cached_item := self._cache.get(mm_hash)) is not None:
             return cached_item
 
-        assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
+        # No data and not cached here: P0 sent data=None trusting its shadow, but
+        # the P0/P1 caches have drifted. Raise a retryable error (not assert) so the
+        # engine can have P0 drop the stale entry and the client resend the data.
+        if mm_item is None:
+            raise MultiModalCacheMissError([mm_hash])
 
         self._cache[mm_hash] = mm_item
         return mm_item

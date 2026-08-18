@@ -2025,12 +2025,27 @@ class rocm_aiter_ops:
 
     @staticmethod
     def register_ops_once() -> None:
+        global _OPS_REGISTERED
+
         if not (
             is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna4()
         ):
+            if not current_platform.is_rocm():
+                return
+
+            from vllm.platforms.rocm import on_gfx11
+
+            if on_gfx11() and not _OPS_REGISTERED:
+                direct_register_custom_op(
+                    op_name="rocm_aiter_sparse_attn_indexer",
+                    op_func=rocm_aiter_sparse_attn_indexer,
+                    mutates_args=["topk_indices_buffer"],
+                    fake_impl=rocm_aiter_sparse_attn_indexer_fake,
+                    dispatch_key=current_platform.dispatch_key,
+                )
+                _OPS_REGISTERED = True
             return
 
-        global _OPS_REGISTERED
         if not _OPS_REGISTERED:
             # register all the custom ops here
             direct_register_custom_op(
@@ -2324,6 +2339,35 @@ class rocm_aiter_ops:
     @staticmethod
     def get_fused_mla_dual_rms_norm_per_token_quant_op() -> OpOverload:
         return torch.ops.vllm.fused_mla_dual_rms_norm_per_token_quant.default
+
+    @staticmethod
+    def rms_norm(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        epsilon: float,
+    ) -> torch.Tensor:
+        """RMSNorm via AITER kernel."""
+        import aiter
+
+        return aiter.rms_norm(x, weight, epsilon)
+
+    @staticmethod
+    def rms_norm2d_with_add(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        weight: torch.Tensor,
+        epsilon: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Fused residual-add + RMSNorm via AITER kernel.
+
+        Returns (normalized_output, residual_sum).
+        """
+        import aiter
+
+        out = torch.empty_like(x)
+        residual_out = torch.empty_like(x)
+        aiter.rmsnorm2d_fwd_with_add(out, x, residual, residual_out, weight, epsilon, 0)
+        return out, residual_out
 
     @staticmethod
     def w8a8_gemm(
