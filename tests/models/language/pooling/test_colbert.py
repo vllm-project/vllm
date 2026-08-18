@@ -11,7 +11,7 @@ from contextlib import contextmanager
 import pytest
 import torch
 
-from tests.utils import wait_for_rocm_memory_to_settle
+from tests.utils import wait_for_memory_to_settle
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 
@@ -165,7 +165,7 @@ def _hf_colbert_model(model_name: str, hf_spec: dict, device: torch.device):
     finally:
         del hf_model, linear_weight
         cleanup_dist_env_and_memory()
-        wait_for_rocm_memory_to_settle()
+        wait_for_memory_to_settle()
 
 
 def _assert_embeddings_close(vllm_outputs, hf_embeddings):
