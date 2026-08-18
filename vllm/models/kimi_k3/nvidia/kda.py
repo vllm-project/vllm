@@ -46,6 +46,7 @@ from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.v1.attention.backend import AttentionBackend
+from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
 
@@ -187,20 +188,12 @@ def _flashkda_prefill(
     lower_bound: float,
     initial_state: torch.Tensor,
     cu_seqlens: torch.Tensor,
+    out: torch.Tensor,
+    final_state: torch.Tensor,
+    workspace: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     import vllm._flashkda_C  # noqa: F401
 
-    out = torch.empty(v.shape, dtype=v.dtype, device=v.device)
-    final_state = torch.empty_like(initial_state)
-    workspace = torch.empty(
-        torch.ops._flashkda_C.get_workspace_size(
-            q.shape[0] * q.shape[1],
-            q.shape[2],
-            cu_seqlens.numel() - 1,
-        ),
-        dtype=torch.uint8,
-        device=q.device,
-    )
     # FlashKDA hardcodes dense Q/K/V/G strides. Beta may be row-strided because
     # FlashKDA materializes its transposed [H, T] layout internally.
     # TODO: Teach FlashKDA to consume beta in [T, H] layout directly instead
@@ -289,31 +282,52 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
 
     def get_state_dtype(
         self,
-    ) -> tuple[torch.dtype, torch.dtype]:
+    ) -> tuple[torch.dtype, ...]:
         if self.model_config is None or self.cache_config is None:
             raise ValueError("model_config and cache_config must be set")
-        return MambaStateDtypeCalculator.kda_state_dtype(
+        base_dtypes = MambaStateDtypeCalculator.kda_state_dtype(
             self.model_config.dtype, self.cache_config.mamba_cache_dtype
         )
+        if self.cache_config.use_kda_recoverssm:
+            return MambaStateDtypeCalculator.append_kda_recoverssm_record(
+                base_dtypes, self.model_config.dtype
+            )
+        return base_dtypes
 
     def get_state_shape(
         self,
-    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
-        return MambaStateShapeCalculator.kda_state_shape(
+    ) -> tuple[tuple[int, ...], ...]:
+        base_shapes = MambaStateShapeCalculator.kda_state_shape(
             self.tp_size,
             self.num_heads,
             self.head_dim,
             conv_kernel_size=self.conv_size,
             num_spec=self.num_spec,
         )
+        if self.cache_config.use_kda_recoverssm:
+            return MambaStateShapeCalculator.append_kda_recoverssm_record(
+                base_shapes,
+                self.num_heads,
+                self.head_dim,
+                tp_world_size=self.tp_size,
+                spec_query_len=1 + self.num_spec,
+            )
+        return base_shapes
 
     def __init__(
         self,
         config: KimiLinearConfig,
         vllm_config: VllmConfig,
         prefix: str = "",
+        run_gemm_rs: bool = False,
     ) -> None:
         super().__init__(config, vllm_config, prefix)
+        self.use_recoverssm = self.cache_config.use_kda_recoverssm
+        if self.cache_config.use_replayssm and not self.use_recoverssm:
+            raise ValueError(
+                "Kimi-K3 supports --use-replayssm only with speculative decoding"
+            )
+        self.spec_query_len = 1 + self.num_spec
 
         kda_config = config.linear_attn_config  # type: ignore[attr-defined]
         assert kda_config is not None, "linear_attn_config must be set"
@@ -377,7 +391,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
         # Keep a width-major copy for fused decode without changing the layout
         # consumed by the prefill and fallback decode kernels.
-        conv_state_dtype, _ = self.get_state_dtype()
+        conv_state_dtype = self.get_state_dtype()[0]
         decode_conv1d_weight = None
         if is_fused_kda_decode_supported(
             self.local_num_heads,
@@ -436,6 +450,21 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             vllm_config.model_config.dtype,
             self.gate_lower_bound,
         )
+        self._flashkda_buffer_specs: (
+            tuple[tuple[tuple[int, ...], torch.dtype], ...] | None
+        ) = None
+        if self.kda_prefill_backend == "flashkda":
+            T = vllm_config.scheduler_config.max_num_batched_tokens
+            N = vllm_config.scheduler_config.max_num_seqs
+            H, D = self.local_num_heads, self.head_dim
+            import vllm._flashkda_C  # noqa: F401
+
+            workspace_size = torch.ops._flashkda_C.get_workspace_size(T, H, N)
+            self._flashkda_buffer_specs = (
+                ((1, T, H, D), self.model_config.dtype),
+                ((N, H, D, D), self.get_state_dtype()[1]),
+                ((workspace_size,), torch.uint8),
+            )
 
         self.o_norm = FusedRMSNormGated(self.head_dim, activation="sigmoid")
         decode_norm_weight = None
@@ -462,7 +491,16 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             quant_config=self.quant_config,
             prefix=f"{prefix}.o_proj",
         )
+        self.run_gemm_rs = run_gemm_rs
+        if self.run_gemm_rs:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
 
+            self.run_gemm_rs = get_gemm_rs().can_run(self.o_proj)
+            if not self.run_gemm_rs:
+                logger.warning_once(
+                    "GEMM-RS is disabled for %s due to an incompatible projection.",
+                    prefix,
+                )
         compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -503,6 +541,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             core_attn_out=core_attn_out,
         )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
+        if self.run_gemm_rs:
+            from vllm.models.kimi_k3.nvidia.ops.cute_dsl.gemm_rs import get_gemm_rs
+
+            gemm_rs = get_gemm_rs()
+            if gemm_rs.should_run(core_attn_out):
+                return gemm_rs(core_attn_out, self.o_proj.weight)
         return self.o_proj(core_attn_out)[0]
 
     @eager_break_during_capture
@@ -543,7 +587,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         g1 = g1[:, :num_actual_tokens]
         beta = beta[:, :num_actual_tokens]
 
-        conv_state, recurrent_state = self.kv_cache
+        conv_state, recurrent_state, *recoverssm_records = self.kv_cache
         # The convolution kernels consume (..., dim, width - 1).
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(-1, -2)
@@ -610,7 +654,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             assert spec_state_indices_tensor is not None
             assert spec_query_start_loc is not None
             spec_conv_indices = spec_state_indices_tensor[:, 0][: m.num_spec_decodes]
-            spec_max_query_len = spec_state_indices_tensor.size(-1)
+            spec_max_query_len = (
+                self.spec_query_len
+                if self.use_recoverssm
+                else spec_state_indices_tensor.size(-1)
+            )
             spec_conv_out = torch.empty_like(mixed_qkv_spec)
             mixed_qkv_spec = causal_conv1d_update(
                 mixed_qkv_spec,
@@ -635,21 +683,48 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 if m.num_prefills == 0 and m.num_decodes == 0
                 else None
             )
-            core_attn_out_spec, _ = fused_recurrent_kda(
-                q=q_spec,
-                k=k_spec,
-                v=v_spec,
-                raw_g=g1_spec,
-                raw_beta=beta_spec,
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
-                lower_bound=self.gate_lower_bound,
-                initial_state=recurrent_state,
-                cu_seqlens=spec_cu_seqlens,
-                ssm_state_indices=spec_state_indices_tensor,
-                num_accepted_tokens=num_accepted_tokens,
-                out=spec_out,
-            )
+            if self.use_recoverssm:
+                from vllm.models.kimi_k3.nvidia.ops.recoverssm import (
+                    kda_recoverssm_verify,
+                )
+
+                if len(recoverssm_records) != 2:
+                    raise ValueError(
+                        "KDA RecoverSSM requires correction and key/gate buffers"
+                    )
+                core_attn_out_spec = kda_recoverssm_verify(
+                    q=q_spec,
+                    k=k_spec,
+                    v=v_spec,
+                    raw_g=g1_spec,
+                    raw_beta=beta_spec,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    lower_bound=self.gate_lower_bound,
+                    checkpoint_state=recurrent_state,
+                    correction_cache=recoverssm_records[0],
+                    kg_cache=recoverssm_records[1],
+                    query_start_loc=spec_cu_seqlens,
+                    state_indices=spec_state_indices_tensor[: m.num_spec_decodes, 0],
+                    spec_query_len=self.spec_query_len,
+                    out=spec_out,
+                )
+            else:
+                core_attn_out_spec, _ = fused_recurrent_kda(
+                    q=q_spec,
+                    k=k_spec,
+                    v=v_spec,
+                    raw_g=g1_spec,
+                    raw_beta=beta_spec,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    lower_bound=self.gate_lower_bound,
+                    initial_state=recurrent_state,
+                    cu_seqlens=spec_cu_seqlens,
+                    ssm_state_indices=spec_state_indices_tensor,
+                    num_accepted_tokens=num_accepted_tokens,
+                    out=spec_out,
+                )
 
         # Prefill or plain-decode path.
         core_attn_out_non_spec = None
@@ -696,6 +771,15 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                 )
                 if self.kda_prefill_backend == "flashkda":
                     assert self.gate_lower_bound is not None
+                    assert self._flashkda_buffer_specs is not None
+                    workspace_out, final_state, workspace = (
+                        current_workspace_manager().get_simultaneous(
+                            *self._flashkda_buffer_specs
+                        )
+                    )
+                    flashkda_out = (
+                        workspace_out if has_spec_decode else core_attn_out
+                    )[:, : q_ns.shape[1]]
                     (
                         core_attn_out_non_spec,
                         last_recurrent_state,
@@ -710,6 +794,9 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         lower_bound=self.gate_lower_bound,
                         initial_state=initial_state,
                         cu_seqlens=non_spec_query_start_loc,
+                        out=flashkda_out,
+                        final_state=final_state[: initial_state.shape[0]],
+                        workspace=workspace,
                     )
                 else:
                     (
@@ -766,10 +853,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             core_attn_out.index_copy_(1, spec_token_indx, core_attn_out_spec)
             core_attn_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
         elif core_attn_out_non_spec is not None:
-            # TODO: prefill and decode kernels write directly to core_attn_out
-            core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
-                0, :num_actual_tokens
-            ]
+            if self.kda_prefill_backend != "flashkda" or m.num_prefills == 0:
+                # TODO: decode kernels write directly to core_attn_out
+                core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
+                    0, :num_actual_tokens
+                ]
         else:
             assert core_attn_out_spec is not None
         # Triton normalizes in place, so this is a self-copy with no device
