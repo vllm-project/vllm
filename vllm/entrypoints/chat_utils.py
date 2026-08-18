@@ -418,11 +418,30 @@ def make_reasoning_parser_chat_template_kwargs(
     if isinstance(content, str):
         final_content = content
     elif isinstance(content, list):
-        final_content = "\n".join(
-            text
-            for part in content
-            if isinstance(part, dict) and isinstance((text := part.get("text")), str)
-        )
+        text_parts: list[str] = []
+        thinking_parts: list[str] = []
+        reasoning_ended: bool | None = None
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "thinking":
+                thinking = part.get("thinking")
+                if isinstance(thinking, str):
+                    thinking_parts.append(thinking)
+                closed = part.get("closed")
+                if isinstance(closed, bool):
+                    reasoning_ended = closed
+                continue
+            text = part.get("text")
+            if isinstance(text, str):
+                text_parts.append(text)
+                if text:
+                    reasoning_ended = True
+        final_content = "\n".join(text_parts)
+        if thinking_parts:
+            kwargs["_vllm_continue_final_message_reasoning"] = "\n".join(thinking_parts)
+        if reasoning_ended is not None:
+            kwargs["_vllm_continue_final_message_reasoning_ended"] = reasoning_ended
     else:
         final_content = ""
 

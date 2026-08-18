@@ -50,6 +50,9 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         self._continue_final_message_reasoning = chat_kwargs.get(
             "_vllm_continue_final_message_reasoning"
         )
+        self._continue_final_message_reasoning_ended = chat_kwargs.get(
+            "_vllm_continue_final_message_reasoning_ended"
+        )
         self._initial_in_reasoning = self._thinking_mode == "enabled"
         self._reasoning_ended_streaming = False
         self._reasoning_active_streaming = self._initial_in_reasoning
@@ -335,7 +338,9 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
             return True
         if self._continue_final_message:
             content = self._continue_final_message_content
-            if isinstance(content, str):
+            if isinstance(self._continue_final_message_reasoning_ended, bool):
+                reasoning_ended = self._continue_final_message_reasoning_ended
+            elif isinstance(content, str):
                 start_index = content.rfind(self.start_token)
                 end_index = content.rfind(self.end_token)
                 if start_index >= 0 or end_index >= 0:

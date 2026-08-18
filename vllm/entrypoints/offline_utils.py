@@ -18,13 +18,16 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    make_reasoning_parser_chat_template_kwargs,
 )
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.reasoning import ReasoningParserManager
 from vllm.renderers import BaseRenderer, ChatParams, merge_kwargs
 from vllm.renderers.inputs.preprocess import (
     conversation_to_seq,
+    extract_prompt_components,
     parse_model_prompt,
     prompt_to_seq,
 )
@@ -181,17 +184,11 @@ class OfflineInferenceMixin:
         chat_params = ChatParams(
             chat_template=chat_template,
             chat_template_content_format=chat_template_content_format,
-            chat_template_kwargs=merge_kwargs(
+            chat_template_kwargs=self._build_chat_template_kwargs(
                 chat_template_kwargs,
-                dict(
-                    add_generation_prompt=add_generation_prompt,
-                    continue_final_message=continue_final_message,
-                    tools=tools,
-                    tokenize=(
-                        is_mistral_tokenizer(renderer.tokenizer)
-                        or self.model_config.enable_prompt_embeds
-                    ),
-                ),
+                add_generation_prompt=add_generation_prompt,
+                continue_final_message=continue_final_message,
+                tools=tools,
             ),
             mm_processor_kwargs=mm_processor_kwargs,
         )
@@ -212,6 +209,59 @@ class OfflineInferenceMixin:
         )
 
         return engine_inputs
+
+    def _build_chat_template_kwargs(
+        self,
+        chat_template_kwargs: dict[str, Any] | None,
+        *,
+        add_generation_prompt: bool,
+        continue_final_message: bool,
+        tools: list[dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        return merge_kwargs(
+            chat_template_kwargs,
+            dict(
+                add_generation_prompt=add_generation_prompt,
+                continue_final_message=continue_final_message,
+                tools=tools,
+                tokenize=(
+                    is_mistral_tokenizer(self.renderer.tokenizer)
+                    or self.model_config.enable_prompt_embeds
+                ),
+            ),
+        )
+
+    def _reasoning_parser_request_options(
+        self,
+        prompt: EngineInput,
+        params: SamplingParams | PoolingParams,
+        chat_template_kwargs: dict[str, Any],
+    ) -> tuple[bool | None, dict[str, Any] | None]:
+        if not isinstance(params, SamplingParams) or params.structured_outputs is None:
+            return None, None
+
+        structured_config = self.llm_engine.vllm_config.structured_outputs_config
+        reasoning_parser = structured_config.reasoning_parser
+        if not reasoning_parser:
+            return None, None
+
+        reasoning_parser_plugin = structured_config.reasoning_parser_plugin
+        if reasoning_parser_plugin and len(reasoning_parser_plugin) > 3:
+            ReasoningParserManager.import_reasoning_parser(reasoning_parser_plugin)
+
+        reasoner_cls = ReasoningParserManager.get_reasoning_parser(reasoning_parser)
+        reasoner = reasoner_cls(
+            tokenizer=self.renderer.get_tokenizer(),
+            chat_template_kwargs=chat_template_kwargs,
+            model_config=self.model_config,
+        )
+        prompt_token_ids = extract_prompt_components(
+            self.model_config, prompt
+        ).token_ids
+        return (
+            reasoner.is_reasoning_end_from_prompt(prompt_token_ids or []),
+            {"chat_template_kwargs": chat_template_kwargs},
+        )
 
     def _preprocess_chat_one(
         self,
@@ -420,6 +470,26 @@ class OfflineInferenceMixin:
         if needs_parsing:
             self._adjust_params_for_parsing(seq_params)
 
+        effective_chat_template_kwargs = self._build_chat_template_kwargs(
+            chat_template_kwargs,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            tools=tools,
+        )
+
+        def reasoning_parser_options(prompt: EngineInput, index: int):
+            conversation = seq_convs[index]
+            parser_chat_template_kwargs = make_reasoning_parser_chat_template_kwargs(
+                effective_chat_template_kwargs,
+                continue_final_message,
+                conversation[-1] if conversation else None,
+            )
+            return self._reasoning_parser_request_options(
+                prompt,
+                seq_params[index],
+                parser_chat_template_kwargs,
+            )
+
         return self._render_and_add_requests(
             prompts=(
                 self._preprocess_chat_one(
@@ -442,6 +512,7 @@ class OfflineInferenceMixin:
             params=seq_params,
             lora_requests=seq_lora_requests,
             priorities=seq_priority,
+            reasoning_parser_options=reasoning_parser_options,
         )
 
     def _adjust_params_for_parsing(
@@ -527,11 +598,20 @@ class OfflineInferenceMixin:
         *,
         lora_requests: Sequence[LoRARequest | None] | None = None,
         priorities: Sequence[int] | None = None,
+        reasoning_parser_options: Callable[
+            [EngineInput, int], tuple[bool | None, dict[str, Any] | None]
+        ]
+        | None = None,
     ) -> list[str]:
         added_request_ids: list[str] = []
 
         try:
             for i, prompt in enumerate(prompts):
+                reasoning_ended, reasoning_parser_kwargs = (
+                    (None, None)
+                    if reasoning_parser_options is None
+                    else reasoning_parser_options(prompt, i)
+                )
                 request_id = self._add_request(
                     prompt,
                     params[i],
@@ -540,6 +620,8 @@ class OfflineInferenceMixin:
                         None if lora_requests is None else lora_requests[i],
                     ),
                     priority=0 if priorities is None else priorities[i],
+                    reasoning_ended=reasoning_ended,
+                    reasoning_parser_kwargs=reasoning_parser_kwargs,
                 )
                 added_request_ids.append(request_id)
         except Exception as e:
@@ -555,6 +637,8 @@ class OfflineInferenceMixin:
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
+        reasoning_ended: bool | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> str:
         if isinstance(params, SamplingParams):
             # We only care about the final output
@@ -568,6 +652,8 @@ class OfflineInferenceMixin:
             params,
             lora_request=lora_request,
             priority=priority,
+            reasoning_ended=reasoning_ended,
+            reasoning_parser_kwargs=reasoning_parser_kwargs,
         )
 
     def _run_engine(
