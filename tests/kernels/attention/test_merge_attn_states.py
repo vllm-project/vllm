@@ -15,6 +15,14 @@ from vllm.v1.attention.ops.triton_merge_attn_states import (
     merge_attn_states as merge_attn_states_triton,
 )
 
+pytestmark = [
+    pytest.mark.skip_global_cleanup,
+    pytest.mark.skipif(
+        not current_platform.is_cuda_alike(),
+        reason="merge_attn_states kernels require CUDA or ROCm.",
+    ),
+]
+
 
 # Naive PyTorch Implements section 2.2 of https://www.arxiv.org/pdf/2501.01005
 # can be used to combine partial attention results (in the split-KV case)
@@ -153,12 +161,6 @@ def test_merge_attn_states(
     input_dtype: torch.dtype,
     use_fp8: bool,
 ):
-    if not current_platform.is_cuda():
-        pytest.skip(
-            "Currently only support compare triton merge_attn_states "
-            "with custom cuda merge_attn_states kernel"
-        )
-
     NUM_TOKENS = num_tokens
     NUM_HEADS = num_query_heads
     HEAD_SIZE = head_size
