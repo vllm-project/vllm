@@ -444,13 +444,17 @@ def maybe_create_adaptive_verification_manager(
     query_start_loc: torch.Tensor,
     num_bonus_tokens: int,
     max_total_logits: int,
+    active_layer_names: set[str] | None = None,
 ) -> AdaptiveVerificationManager | None:
     if not enable_adaptive_verification:
         return None
 
     # The selector rejects unsupported backends, but models that
     # hard-wire theirs (e.g. DeepSeek-V4) never go through it.
-    backend = get_query_lens_mismatch_unsupported_backend(attn_groups)
+    backend = get_query_lens_mismatch_unsupported_backend(
+        attn_groups,
+        active_layer_names=active_layer_names,
+    )
     if backend is not None:
         raise ValueError(
             "Adaptive verification trims verification requests on device, which"
@@ -462,7 +466,7 @@ def maybe_create_adaptive_verification_manager(
     if attn_cg_support.min_cg_support != AttentionCGSupport.ALWAYS:
         raise ValueError(
             "Adaptive verification captures varlen decode cudagraphs, so every"
-            " attention builder must report AttentionCGSupport.ALWAYS, but "
+            " target attention builder must report AttentionCGSupport.ALWAYS, but "
             f"{attn_cg_support.min_cg_attn_backend} reports "
             f"{attn_cg_support.min_cg_support}. Pass "
             "enable_adaptive_verification=false in the speculative config, or "

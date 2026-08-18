@@ -94,6 +94,7 @@ def init_attn_backend(
     vllm_config: VllmConfig,
     device: torch.device,
     active_layer_names: set[str] | None = None,
+    cudagraph_layer_names: set[str] | None = None,
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
     # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
@@ -146,8 +147,6 @@ def init_attn_backend(
 
     # Phase 3: create metadata builders and determine cudagraph support.
     attn_backend_workspace: torch.Tensor | None = None
-    min_cg_support = AttentionCGSupport.ALWAYS
-    min_cg_attn_backend = None
     for kv_cache_group_id, groups in enumerate(attn_groups):
         kernel_block_size = None
         if kv_cache_group_id < len(kernel_block_sizes):
@@ -166,7 +165,29 @@ def init_attn_backend(
             else:
                 if hasattr(builder, "set_workspace_buffer"):
                     builder.set_workspace_buffer(attn_backend_workspace)
-            # Check cudagraph support for the attention backend
+    attn_cg_support_info = get_attn_cg_support(
+        attn_groups,
+        vllm_config,
+        active_layer_names=cudagraph_layer_names,
+    )
+    return attn_groups, attn_cg_support_info, kernel_block_sizes
+
+
+def get_attn_cg_support(
+    attn_groups: list[list[AttentionGroup]],
+    vllm_config: VllmConfig,
+    active_layer_names: set[str] | None = None,
+) -> AttentionCGSupportInfo:
+    """Return the weakest CUDA graph support among active attention layers."""
+    min_cg_support = AttentionCGSupport.ALWAYS
+    min_cg_attn_backend = None
+    for groups in attn_groups:
+        for group in groups:
+            if active_layer_names is not None and active_layer_names.isdisjoint(
+                group.layer_names
+            ):
+                continue
+            builder = group.get_metadata_builder(0)
             cg_support = builder.get_cudagraph_support(
                 vllm_config,
                 group.kv_cache_spec,
@@ -174,15 +195,15 @@ def init_attn_backend(
             if cg_support.value < min_cg_support.value:
                 min_cg_support = cg_support
                 min_cg_attn_backend = group.backend.__name__
-
-    attn_cg_support_info = AttentionCGSupportInfo(
-        min_cg_support=min_cg_support, min_cg_attn_backend=min_cg_attn_backend
+    return AttentionCGSupportInfo(
+        min_cg_support=min_cg_support,
+        min_cg_attn_backend=min_cg_attn_backend,
     )
-    return attn_groups, attn_cg_support_info, kernel_block_sizes
 
 
 def get_query_lens_mismatch_unsupported_backend(
     attn_groups: list[list[AttentionGroup]],
+    active_layer_names: set[str] | None = None,
 ) -> str | None:
     """Name the first backend needing the CPU query lengths to be exact, if any.
 
@@ -192,6 +213,10 @@ def get_query_lens_mismatch_unsupported_backend(
     """
     for groups in attn_groups:
         for group in groups:
+            if active_layer_names is not None and active_layer_names.isdisjoint(
+                group.layer_names
+            ):
+                continue
             if not group.backend.supports_device_cpu_query_lens_mismatch():
                 return group.backend.__name__
     return None

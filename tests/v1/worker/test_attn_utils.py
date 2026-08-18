@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -10,7 +11,11 @@ from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MambaSpec,
 )
-from vllm.v1.worker.gpu.attn_utils import _reshape_kv_cache
+from vllm.v1.worker.gpu.attn_utils import (
+    _reshape_kv_cache,
+    get_attn_cg_support,
+    get_query_lens_mismatch_unsupported_backend,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -40,6 +45,63 @@ class FakeHNDFlashAttentionBackend(FakeFlashAttentionBackend):
     ) -> tuple[int, ...]:
         assert not include_num_layers_dimension
         return (0, 1, 3, 2, 4)
+
+
+class _FakeMetadataBuilder:
+    def __init__(self, support: AttentionCGSupport):
+        self.support = support
+
+    def get_cudagraph_support(self, *_args):
+        return self.support
+
+
+class _TargetBackend:
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        return True
+
+
+class _DraftBackend:
+    @classmethod
+    def supports_device_cpu_query_lens_mismatch(cls) -> bool:
+        return False
+
+
+def test_target_cudagraph_support_ignores_separate_draft_attention():
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+    target_group = AttentionGroup(_TargetBackend, ["target"], spec, 0)  # type: ignore[arg-type]
+    target_group.metadata_builders = [
+        _FakeMetadataBuilder(AttentionCGSupport.ALWAYS)  # type: ignore[list-item]
+    ]
+    draft_group = AttentionGroup(_DraftBackend, ["draft"], spec, 0)  # type: ignore[arg-type]
+    draft_group.metadata_builders = [
+        _FakeMetadataBuilder(AttentionCGSupport.UNIFORM_BATCH)  # type: ignore[list-item]
+    ]
+    groups = [[target_group, draft_group]]
+
+    unfiltered = get_attn_cg_support(groups, None)  # type: ignore[arg-type]
+    assert unfiltered.min_cg_support == AttentionCGSupport.UNIFORM_BATCH
+    assert unfiltered.min_cg_attn_backend == "_DraftBackend"
+
+    target_only = get_attn_cg_support(
+        groups,
+        None,  # type: ignore[arg-type]
+        active_layer_names={"target"},
+    )
+    assert target_only.min_cg_support == AttentionCGSupport.ALWAYS
+    assert target_only.min_cg_attn_backend is None
+    assert (
+        get_query_lens_mismatch_unsupported_backend(
+            groups,
+            active_layer_names={"target"},
+        )
+        is None
+    )
 
 
 def test_reshape_padded_flash_attention_kv_cache_strides_by_page():
