@@ -161,10 +161,12 @@ def test_is_valid_num_heads():
     assert not AiterMLAHelper.is_valid_num_heads(0)
 
 
-def test_nondivisor_and_multitoken_never_use_gluon():
-    # Non-divisor decode always takes the asm path (12 heads/rank at TP8).
-    assert not AiterMLAHelper.use_gluon_decode(12, 1, "auto")
-    assert not AiterMLAHelper.use_gluon_decode(6, 1, "auto")
+def test_nondivisor_single_token_follows_arch_and_multitoken_never_gluon():
+    # Non-divisor single-token decode uses Gluon on gfx950 (avoids padded
+    # asm kernels that may be missing for some dtype combos like bf16/fp8).
+    on_gfx950 = _on_gfx950()
+    assert AiterMLAHelper.use_gluon_decode(12, 1, "auto") is on_gfx950
+    assert AiterMLAHelper.use_gluon_decode(6, 1, "auto") is on_gfx950
     # >=16 heads never pad, never Gluon.
     assert not AiterMLAHelper.use_gluon_decode(16, 1, "auto")
     # Multi-token (verify / qlen>1) is never the single-token Gluon decode.
@@ -208,9 +210,9 @@ def test_asm_padding_env_force_gluon_follows_arch(monkeypatch):
 def test_asm_padding_env_auto_matches_arch_gate(monkeypatch):
     monkeypatch.setenv("VLLM_ROCM_AITER_MLA_ASM_PADDING", "auto")
     on_gfx950 = _on_gfx950()
-    # auto: divisor counts keep Gluon on gfx950, non-divisor counts take asm.
-    assert AiterMLAHelper.use_gluon_decode(8, 1, "auto") is on_gfx950
-    assert not AiterMLAHelper.use_gluon_decode(12, 1, "auto")
+    # auto: all small-head counts prefer Gluon on gfx950.
+    assert AiterMLAHelper.use_gluon_decode(8, 1,"auto") is on_gfx950
+    assert AiterMLAHelper.use_gluon_decode(12, 1, "auto") is on_gfx950
 
 
 @pytest.mark.skipif(
