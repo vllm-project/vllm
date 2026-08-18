@@ -27,6 +27,7 @@ __all__ = [
 
 
 def _aiter_raw(t):
+    """Unwrap the `triton_kernels.tensor.Tensor` that `_swizzle_mxfp4` returns."""
     if t is None or isinstance(t, torch.Tensor):
         return t
     assert hasattr(t, "storage"), (
@@ -59,8 +60,12 @@ def _aiter_w4a16_silu_via_a8w4(
     MXFP4 w4a16 MoE with a SILU (concatenated ``[gate | up]``) activation.
     """
     from aiter.ops.triton.fusions.fused_clamp_act_mul import fused_clamp_act_mul
-    from aiter.ops.triton.moe_op_gemm_a8w4 import moe_gemm_a8w4
     from aiter.ops.triton.quant import dynamic_mxfp8_quant
+
+    try:
+        from aiter.ops.triton.moe.moe_op_gemm_a8w4 import moe_gemm_a8w4
+    except ImportError:
+        from aiter.ops.triton.moe_op_gemm_a8w4 import moe_gemm_a8w4
 
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
         should_use_cdna4_mx_scale_swizzle,
