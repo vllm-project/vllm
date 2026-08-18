@@ -155,8 +155,6 @@ class NgramGPUSpeculator(BaseSpeculator):
 
     supports_mm_inputs = False
     draft_logits = None
-    # Signals that num_valid_drafts holds per-request valid draft counts
-    # for GPU-side verification trimming.
     trims_drafts_on_gpu = True
 
     def __init__(

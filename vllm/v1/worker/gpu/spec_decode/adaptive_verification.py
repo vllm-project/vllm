@@ -25,8 +25,10 @@ logger = init_logger(__name__)
 _PROFILE_REPLAYS = 5
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.v1.worker.gpu.attn_utils import AttentionCGSupportInfo
     from vllm.v1.worker.gpu.input_batch import InputBatch
+    from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
     from vllm.v1.worker.gpu.states import RequestState
     from vllm.v1.worker.utils import AttentionGroup
 
@@ -165,41 +167,44 @@ class VariableDraftTrimmer:
 
 def maybe_create_draft_trimmer(
     *,
-    speculator,
+    vllm_config: "VllmConfig",
+    speculator: "BaseSpeculator | None",
     attn_groups: list[list["AttentionGroup"]],
     attn_cg_support: "AttentionCGSupportInfo",
-    uses_full_cudagraphs: bool,
-    has_lora: bool,
-    uses_pipeline_parallel: bool,
-    uses_context_parallel: bool,
+    req_states: "RequestState",
     query_start_loc: torch.Tensor,
     num_bonus_tokens: int,
-    max_total_logits: int,
-    max_num_reqs: int,
-    device: torch.device,
 ) -> VariableDraftTrimmer | None:
     """Create a VariableDraftTrimmer when the drafter and environment support
     GPU-side trimming; otherwise fall back (with a log) to verifying the full
     padded drafts, which is correct but wastes verification compute."""
-    num_valid_drafts = getattr(speculator, "num_valid_drafts", None)
-    if not getattr(speculator, "trims_drafts_on_gpu", False):
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler import get_max_chunk_logits
+
+    if speculator is None or not speculator.trims_drafts_on_gpu:
         return None
+    num_valid_drafts = speculator.num_valid_drafts
     assert num_valid_drafts is not None
+
+    parallel_config = vllm_config.parallel_config
+    cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
 
     reason = None
     backend = get_query_lens_mismatch_unsupported_backend(attn_groups)
     if backend is not None:
         reason = f"the {backend} attention backend"
     elif (
-        uses_full_cudagraphs
+        cudagraph_mode.has_full_cudagraphs()
         and attn_cg_support.min_cg_support != AttentionCGSupport.ALWAYS
     ):
         reason = f"varlen decode cudagraphs with {attn_cg_support.min_cg_attn_backend}"
-    elif has_lora:
+    elif vllm_config.lora_config is not None:
         reason = "LoRA"
-    elif uses_pipeline_parallel:
+    elif parallel_config.pipeline_parallel_size > 1:
         reason = "pipeline parallelism"
-    elif uses_context_parallel:
+    elif (
+        parallel_config.decode_context_parallel_size > 1
+        or parallel_config.prefill_context_parallel_size > 1
+    ):
         reason = "context parallelism"
 
     if reason is not None:
@@ -215,9 +220,9 @@ def maybe_create_draft_trimmer(
         num_valid_drafts,
         query_start_loc,
         num_bonus_tokens,
-        max_num_reqs,
-        max_total_logits,
-        device,
+        req_states.max_num_reqs,
+        get_max_chunk_logits(req_states.vocab_size),
+        req_states.device,
     )
 
 

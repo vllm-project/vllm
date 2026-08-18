@@ -563,24 +563,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Variable-length drafters (ngram_gpu) trim scheduled draft slots to
         # the drafter's valid counts on GPU, when supported.
         self.draft_trimmer = None
-        if self.speculator is not None and self.adaptive_verification is None:
+        if self.adaptive_verification is None:
             self.draft_trimmer = maybe_create_draft_trimmer(
+                vllm_config=self.vllm_config,
                 speculator=self.speculator,
                 attn_groups=self.attn_groups,
                 attn_cg_support=attn_cg_support,
-                # Unset (auto) mode may resolve to full graphs, so treat it
-                # as full-graph usage.
-                uses_full_cudagraphs=self.compilation_config.cudagraph_mode is None
-                or self.compilation_config.cudagraph_mode.has_full_cudagraphs(),
-                has_lora=self.lora_config is not None,
-                uses_pipeline_parallel=self.use_pp,
-                uses_context_parallel=self.dcp_size > 1
-                or self.parallel_config.prefill_context_parallel_size > 1,
+                req_states=self.req_states,
                 query_start_loc=self.input_buffers.query_start_loc,
                 num_bonus_tokens=self.model_state.num_new_sampled_tokens_per_step,
-                max_total_logits=get_max_chunk_logits(self.vocab_size),
-                max_num_reqs=self.max_num_reqs,
-                device=self.device,
             )
 
         self.block_tables = BlockTables(
@@ -1904,11 +1895,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
         if self.num_speculative_steps > 0:
-            # Spec-decode and diffusion LLMs both use draft tokens but the latter does
-            # not have a speculator (i.e. self.speculator is None)
+            # Spec-decode and diffusion LLMs both use draft tokens.
             self.draft_tokens_handler.set_draft_tokens(
-                input_batch,
-                self.req_states.draft_tokens[input_batch.idx_mapping],
+                input_batch, self.req_states.draft_tokens[input_batch.idx_mapping]
             )
 
         # Post-step KV connector related operations.

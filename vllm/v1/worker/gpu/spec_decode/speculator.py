@@ -30,6 +30,12 @@ logger = init_logger(__name__)
 
 
 class BaseSpeculator(ABC):
+    # Variable-length drafters set this and publish per-request counts of
+    # usable drafts in num_valid_drafts, which the model runner's draft
+    # trimmer reads to shrink verification on device.
+    trims_drafts_on_gpu: bool = False
+    num_valid_drafts: torch.Tensor | None = None
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         return None
 
