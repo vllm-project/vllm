@@ -180,7 +180,7 @@ class RMSNormFuser(BaseFuser):
         if fused is not None and fused.args and peel(fused.args[0]) is x:
             args, kwargs = fused.args, fused.kwargs
             eps = args[3] if len(args) > 3 else kwargs.get("eps")
-            return eps if isinstance(eps, (int, float)) else None
+            return float(eps) if isinstance(eps, (int, float)) else None
         for node in graph.nodes:
             if is_op(node, "rsqrt") and (eps := _variance_eps(node, x)) is not None:
                 return eps
