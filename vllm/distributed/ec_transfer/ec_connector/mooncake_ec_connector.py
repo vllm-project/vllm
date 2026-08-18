@@ -45,6 +45,10 @@ _LEASE_TTL_SECONDS = 300
 _RESERVATION_REFRESH_SECONDS = _LEASE_TTL_SECONDS / 2
 _RESERVATION_REAP_INTERVAL_SECONDS = 1
 _DRAIN_MIN_INTERVAL = 0.005
+# Readiness notifications are advisory: the scheduler also learns from the
+# reserve reply. Cap the queue so a shard nobody subscribed to cannot grow
+# without bound.
+_MAX_PENDING_EVENTS = 4096
 
 _MOONCAKE_IMPORT_ERROR: ImportError | None
 try:
@@ -448,6 +452,17 @@ class ECMooncakeControlServer:
             event_socket = context.socket(zmq.PUSH)
             pending_events: deque[dict[str, Any]] = deque()
             metrics: Counter[str] = Counter()
+
+            def queue_event(event: dict[str, Any]) -> None:
+                # The shard tag lets the scheduler tell each rank's readiness
+                # apart; a transfer is only loadable once every rank has it.
+                event["shard"] = self.port
+                if len(pending_events) >= _MAX_PENDING_EVENTS:
+                    pending_events.popleft()
+                    metrics["events_dropped"] += 1
+                pending_events.append(event)
+                metrics["events_queued"] += 1
+
             metrics_started_at = time.monotonic()
             last_reap_at = metrics_started_at
             socket.setsockopt(zmq.RCVTIMEO, 100)
@@ -483,8 +498,8 @@ class ECMooncakeControlServer:
                     ):
                         logger.info(
                             "EC Mooncake consumer control: requests=%s, "
-                            "events_queued=%d, events_sent=%d, event_backlog=%d, "
-                            "reservations_reaped=%d",
+                            "events_queued=%d, events_sent=%d, events_dropped=%d, "
+                            "event_backlog=%d, reservations_reaped=%d",
                             {
                                 key.removeprefix("request_"): value
                                 for key, value in metrics.items()
@@ -492,6 +507,7 @@ class ECMooncakeControlServer:
                             },
                             metrics["events_queued"],
                             metrics["events_sent"],
+                            metrics["events_dropped"],
                             len(pending_events),
                             metrics["reservations_reaped"],
                         )
@@ -511,10 +527,7 @@ class ECMooncakeControlServer:
                                 transfer_id = str(request["transfer_id"])
                                 status = self._status(transfer_id)
                                 if status is not None:
-                                    pending_events.append(
-                                        {"transfer_id": transfer_id, **status}
-                                    )
-                                    metrics["events_queued"] += 1
+                                    queue_event({"transfer_id": transfer_id, **status})
                         elif op == "status":
                             result = self._status(str(request["transfer_id"]))
                         elif op == "event_port":
@@ -546,10 +559,7 @@ class ECMooncakeControlServer:
                                     continue
                                 status = self._status(transfer_id)
                                 if status is not None:
-                                    pending_events.append(
-                                        {"transfer_id": transfer_id, **status}
-                                    )
-                                    metrics["events_queued"] += 1
+                                    queue_event({"transfer_id": transfer_id, **status})
                             result = (
                                 {"items": completions}
                                 if op == "complete_batch"
@@ -797,6 +807,12 @@ class ECMooncakeConnector(ECConnectorBase):
         self._queued_transfer_batches = 0
         self._event_zmq_ctx: zmq.Context | None = None
         self._event_zmq_socket: zmq.Socket | None = None
+        self._event_shard_count = 1
+        # transfer_id -> shards that reported it ready, oldest first. A sharded
+        # consumer writes one copy per rank, so the item is only loadable once
+        # every rank has reported. Bounded: a transfer whose last rank never
+        # arrives is given up on by the push-wait timeout, not by this map.
+        self._event_ready_shards: OrderedDict[str, set[int]] = OrderedDict()
         self._completed_loads: set[str] = set()
         self._failed_loads: set[str] = set()
         self._shutdown = False
@@ -2200,6 +2216,7 @@ class ECMooncakeConnector(ECConnectorBase):
     def _pop_pending_spec(self, transfer_id: str) -> ECMooncakeLoadSpec | None:
         spec = self._pending_specs.pop(transfer_id, None)
         self._pending_spec_deadlines.pop(transfer_id, None)
+        self._forget_shard_readiness(transfer_id)
         if spec is not None:
             if not self._pending_specs_by_hash.get(spec.mm_hash):
                 self._consumer_pending_since.pop(spec.mm_hash, None)
@@ -2226,6 +2243,36 @@ class ECMooncakeConnector(ECConnectorBase):
         self._pending_specs_by_hash.pop(mm_hash, None)
         self._consumer_pending_since.pop(mm_hash, None)
         return None
+
+    def _note_shard_ready(self, data: dict[str, Any]) -> bool:
+        """Whether every consumer shard has now reported this transfer ready.
+
+        Loading before the last rank has its copy makes that rank miss, which
+        `ECMooncakeWorkerMetadata.aggregate` catches by intersecting `loaded`
+        across ranks -- at the cost of rescheduling the whole load.
+        """
+        if self._event_shard_count <= 1:
+            return True
+        transfer_id = str(data["transfer_id"])
+        if transfer_id in self._pending_specs:
+            # Already indexed; later shards are just confirmations.
+            return False
+        shard = data.get("shard")
+        shards = self._event_ready_shards.setdefault(transfer_id, set())
+        self._event_ready_shards.move_to_end(transfer_id)
+        shards.add(int(shard) if shard is not None else len(shards))
+        if len(shards) < self._event_shard_count:
+            self._consumer_scheduler_metrics["events_awaiting_shards"] += 1
+            while len(self._event_ready_shards) > _MAX_PENDING_EVENTS:
+                self._event_ready_shards.popitem(last=False)
+                self._consumer_scheduler_metrics["events_partial_dropped"] += 1
+            return False
+        self._event_ready_shards.pop(transfer_id, None)
+        self._consumer_scheduler_metrics["events_all_shards_ready"] += 1
+        return True
+
+    def _forget_shard_readiness(self, transfer_id: str) -> None:
+        self._event_ready_shards.pop(transfer_id, None)
 
     def _store_pushed_spec(self, data: dict[str, Any]) -> None:
         transfer_id = str(data["transfer_id"])
@@ -2297,14 +2344,34 @@ class ECMooncakeConnector(ECConnectorBase):
         if self._event_zmq_socket is not None:
             return
         assert self._reservation_zmq_addr is not None
-        event_port = self._send_control(
-            self._reservation_zmq_addr,
-            {"op": "event_port"},
-        )
-        address, _ = self._reservation_zmq_addr.rsplit(":", 1)
-        self._event_zmq_ctx = zmq.Context()
-        self._event_zmq_socket = self._event_zmq_ctx.socket(zmq.PULL)
-        self._event_zmq_socket.connect(f"{address}:{int(event_port)}")
+        shards = self._consumer_shards(self._reservation_zmq_addr)
+        ctx = zmq.Context()
+        socket = ctx.socket(zmq.PULL)
+        # One PULL fair-queues across every shard's PUSH. Subscribing to the
+        # first shard alone leaves the others' notifications queued on their
+        # side forever, and hides their readiness from the scheduler.
+        connected = 0
+        for addr in shards:
+            try:
+                event_port = self._send_control(addr, {"op": "event_port"})
+                address, _ = addr.rsplit(":", 1)
+                socket.connect(f"{address}:{int(event_port)}")
+            except Exception:
+                logger.warning(
+                    "EC Mooncake could not subscribe to the event channel of "
+                    "consumer shard %s; its readiness will only be seen "
+                    "through reserve replies.",
+                    addr,
+                )
+                continue
+            connected += 1
+        if not connected:
+            socket.close(linger=0)
+            ctx.term()
+            return
+        self._event_zmq_ctx = ctx
+        self._event_zmq_socket = socket
+        self._event_shard_count = connected
 
     def _drain_push_notifications(self) -> None:
         # `has_cache_item` and `ensure_cache_available` run once per request
@@ -2337,6 +2404,8 @@ class ECMooncakeConnector(ECConnectorBase):
                     # on to the spec so an eviction does not strand whoever
                     # this transfer belongs to.
                     self._consumer_scheduler_metrics["events_redundant"] += 1
+                if not self._note_shard_ready(data):
+                    continue
                 self._store_pushed_spec(data)
             else:
                 self._consumer_scheduler_metrics["events_not_ready"] += 1

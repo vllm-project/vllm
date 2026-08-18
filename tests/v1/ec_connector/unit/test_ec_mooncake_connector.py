@@ -507,6 +507,55 @@ class TestECMooncakeSchedulerMetadata:
             finally:
                 scheduler.shutdown()
 
+    def test_readiness_needs_every_consumer_shard(self, mock_vllm_config_consumer):
+        """A sharded consumer is only ready once every rank reports.
+
+        Each rank runs its own control channel and pushes its own readiness
+        notifications. Subscribing to the first rank alone strands the other
+        ranks' queues and lets a load be scheduled that the last rank cannot
+        serve, which only `aggregate`'s `loaded` intersection then catches.
+        """
+        ports = [19101, 19102, 19103]
+        event_ports = {port: 19201 + index for index, port in enumerate(ports)}
+
+        def fake_send(addr: str, request: dict):
+            port = int(addr.rsplit(":", 1)[1])
+            if request["op"] == "peers":
+                return {"ports": ports}
+            if request["op"] == "event_port":
+                return event_ports[port]
+            return {}
+
+        with patch_ec_mooncake_deps():
+            scheduler = ECMooncakeConnector(
+                mock_vllm_config_consumer, ECConnectorRole.SCHEDULER
+            )
+            try:
+                scheduler._reservation_zmq_addr = f"tcp://127.0.0.1:{ports[0]}"
+                with patch.object(
+                    scheduler, "_send_control", side_effect=fake_send
+                ) as send_control:
+                    scheduler._ensure_event_channel()
+
+                subscribed = [
+                    call.args[0]
+                    for call in send_control.call_args_list
+                    if call.args[1]["op"] == "event_port"
+                ]
+                assert len(subscribed) == len(ports)
+                assert scheduler._event_shard_count == len(ports)
+
+                event = {"transfer_id": "transfer-0"}
+                assert not scheduler._note_shard_ready({**event, "shard": ports[0]})
+                # The same rank reporting twice is not two ranks.
+                assert not scheduler._note_shard_ready({**event, "shard": ports[0]})
+                assert not scheduler._note_shard_ready({**event, "shard": ports[1]})
+                assert scheduler._note_shard_ready({**event, "shard": ports[2]})
+                # Nothing is retained once the transfer is handed on.
+                assert "transfer-0" not in scheduler._event_ready_shards
+            finally:
+                scheduler.shutdown()
+
     def test_evicted_item_is_reloaded_from_the_pool_without_a_transfer(
         self, mock_vllm_config_consumer, mock_request_with_3_mm
     ):
@@ -875,8 +924,12 @@ class TestECMooncakeWorkerTransfer:
                 ) as send_control:
                     assert not scheduler.has_cache_item("hash")
                     assert not scheduler.has_cache_item("hash")
-                    assert send_control.call_count == 1
-                    assert send_control.call_args.args[1] == {"op": "event_port"}
+                    # The channel is built once, not per call: the roster is
+                    # fetched and every shard subscribed to on the first one.
+                    assert [call.args[1] for call in send_control.call_args_list] == [
+                        {"op": "peers"},
+                        {"op": "event_port"},
+                    ]
                     assert "transfer-1" in consumer._push_reservations
 
                     producer.save_caches({"hash": source}, "hash")
@@ -889,7 +942,9 @@ class TestECMooncakeWorkerTransfer:
                     while not scheduler.has_cache_item("hash"):
                         assert time.monotonic() < deadline
                         time.sleep(0.01)
-                    assert send_control.call_count == 1
+                    # Still just the two setup requests: polling for readiness
+                    # must not re-open the channel.
+                    assert send_control.call_count == 2
                 load = scheduler._pending_specs["transfer-1"]
                 consumer.bind_connector_metadata(
                     ECMooncakeConnectorMetadata(loads=[load])
