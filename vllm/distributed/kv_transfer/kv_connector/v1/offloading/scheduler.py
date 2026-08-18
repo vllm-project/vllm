@@ -757,9 +757,13 @@ class OffloadingConnectorScheduler:
                 )
 
                 # For eagle groups, query one extra chunk that will be popped.
-                # We only need to increase the query size for sliding window groups.
+                # This applies to every eagle group, not only sliding-window
+                # ones: the pop below is unconditional, so without widening the
+                # query a full-attention eagle group loses a chunk that the
+                # caller actually needed. With the all-groups eagle fallback
+                # above, that loss is taken once per group per lookup.
                 query_max = max_hit_size_tokens
-                if is_eagle_unverified and sliding_window_size_in_chunks is not None:
+                if is_eagle_unverified:
                     query_max = min(
                         max_hit_size_tokens + tokens_per_chunk,
                         len(offload_keys) * tokens_per_chunk,
