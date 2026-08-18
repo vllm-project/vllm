@@ -81,7 +81,6 @@ from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
-    maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -144,7 +143,6 @@ from .utils import (
     WeightsMapper,
     _merge_multimodal_embeddings,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -3380,44 +3378,6 @@ class CohereCompassForCausalLM(CohereForCausalLM):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            if name.startswith("lm_head.") or name.endswith("rotary_emb.inv_freq"):
-                continue
-
-            for param_name, shard_name, shard_id in stacked_params_mapping:
-                if shard_name not in name:
-                    continue
-                name = name.replace(shard_name, param_name)
-                if name.endswith(".bias") and name not in params_dict:
-                    break
-                if is_pp_missing_parameter(name, self):
-                    break
-                param = params_dict[name]
-                param.weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(name)
-                break
-            else:
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None or is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-                loaded_params.add(name)
-
-        return loaded_params
 
 
 __all__ = ["CohereCompassForConditionalGeneration"]
