@@ -16,7 +16,6 @@ from vllm.multimodal.inputs import (
 from vllm.utils import random_uuid
 
 from .client import PagedShmClient
-from .client_async import AsyncPagedShmClient
 from .types import PagedShmTensor, ShmItem
 
 
@@ -39,8 +38,7 @@ class PagedShmTensorIPC:
 
         self.pin = pin
         self.block_size = self.multimodal_config.paged_shm_block_size
-        self.client_async: AsyncPagedShmClient | None = None
-        self.client_sync: PagedShmClient | None = None
+        self.client: PagedShmClient | None = None
 
         if connect:
             self.connect()
@@ -48,23 +46,19 @@ class PagedShmTensorIPC:
     def connect(self):
         if not self.is_paged_shm_enabled:
             return
-        if self.client_async is not None:
-            return
 
-        self.client_async = AsyncPagedShmClient.from_model_config(
-            self.model_config, pin=self.pin
-        )
+        self.client = PagedShmClient.from_model_config(self.model_config, pin=self.pin)
 
-        if self.client_async is not None:
-            self.client_sync = self.client_async.sync_client
-            self._resources.callback(self.client_async.close)
+        if self.client is not None:
+            self._resources.callback(self.client.close)
 
     def write(self, mm_inputs: MultiModalInput) -> None:
         if not self.is_paged_shm_enabled:
             return None
-        if self.client_sync is None:
+        if self.client is None:
             return None
 
+        # 1. Get all mm tensors that need to be ipc
         elements: list[MultiModalFieldElem] = []
         mm_kwargs = mm_inputs["mm_kwargs"]
         for modality, mm_items in mm_kwargs.items():
@@ -85,12 +79,16 @@ class PagedShmTensorIPC:
             item = ShmItem(uuid=random_uuid(), size=elem.data.nbytes, use_cache=True)
             items.append(item)
 
+        # 2. Allocate shm for all these mm tensors at once
+        # Refer to the wiki:Dining philosophers problem.
         start = time.perf_counter()
         try:
-            alloc = self.client_sync.open_write(items, timeout=5.0)
+            alloc = self.client.open_write(items, timeout=5.0)
         except RuntimeError:
             return None
 
+        # 3. Write all mm tensors to shm async, and notify other clients
+        # to read the data when the write operation is complete.
         for elem, item in zip(elements, alloc):
             assert isinstance(elem.data, torch.Tensor)
 
@@ -99,7 +97,7 @@ class PagedShmTensorIPC:
                 shape=tuple(elem.data.shape),
                 **asdict(item),
             )
-            self.client_sync.write(
+            self.client.write(
                 uuid=item.uuid,
                 data=elem.data,
                 use_cache=item.use_cache,
@@ -122,9 +120,12 @@ class PagedShmTensorIPC:
     ):
         if not self.is_paged_shm_enabled:
             return None
-        if self.client_sync is None:
+        if self.client is None:
             return None
 
+        # 1. wait for the write operation to complete.
+        # 2. reads the data from the shared memory.
+        # 3. release the shared memory.
         for modality, items in mm_kwargs:
             if "pixel_values" not in items:
                 continue
@@ -134,11 +135,13 @@ class PagedShmTensorIPC:
 
             if pshm_tensor is not None:
                 torch_dtype = getattr(torch, pshm_tensor.dtype)
-                tensor_gpu = self.client_sync.read(
+                print("pshm_tensor.blocks", pshm_tensor.blocks)
+                print("device:", device)
+                tensor_gpu = self.client.read(
                     pshm_tensor.uuid,
-                    pshm_tensor.size,
-                    pshm_tensor.blocks,
-                    device,
+                    # pshm_tensor.size,
+                    # pshm_tensor.blocks,
+                    device=device,
                     timeout=-1,
                 )
                 tensor_gpu = tensor_gpu.view(torch_dtype).view(pshm_tensor.shape)
@@ -146,7 +149,5 @@ class PagedShmTensorIPC:
 
     def shutdown(self):
         if not self.is_paged_shm_enabled:
-            return None
-        if self.client_async is None:
             return None
         self._resources.close()

@@ -855,15 +855,14 @@ class TestAsyncWrite:
     def test_async_write_exception_rollback(self, client):
         """
         Simulate a failure during data writing to verify rollback.
-        We cannot easily force storage.write to fail, so we test the
-        rollback logic by providing an invalid block list.
         """
         uuid = _unique_uuid()
-        invalid_blocks = [-1, -2]  # invalid block indices
-        # Passing blocks will skip allocation, so the write will fail
-        # because the storage will try to write to invalid blocks.
-        with pytest.raises(Exception):
-            client.write(uuid, b"data", blocks=invalid_blocks, async_write=True)
+        blocks = [1, 2]
+
+        invalid_array = np.array([{1: 1}, {2: 2}])
+
+        with pytest.raises(TypeError):
+            client.write(uuid, invalid_array, blocks=blocks, async_write=True)
 
         # The item should have been deleted (rollback) and not be readable
         with pytest.raises(RuntimeError, match="Server error"):
@@ -938,23 +937,5 @@ class TestPreAllocatedBlocks:
         assert result.tobytes() == data
 
         # Must close the read lock we acquired above
-        client.close_read(uuid)
-        client.delete(uuid)
-
-    def test_read_preallocated_zero_size(self, client):
-        uuid = _unique_uuid()
-        data = b""  # empty data
-        client.write(uuid, data)
-
-        # Use open_read to get info
-        item = client.open_read(uuid, timeout=0.0)
-        blocks = item.blocks  # empty list
-        size = item.size  # 0
-
-        # Reading with size=0 should return empty array without using blocks
-        result = client.read(uuid, size=size, blocks=blocks)
-        assert isinstance(result, np.ndarray)
-        assert result.size == 0
-
         client.close_read(uuid)
         client.delete(uuid)

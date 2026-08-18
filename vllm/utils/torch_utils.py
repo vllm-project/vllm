@@ -7,7 +7,7 @@ import random
 import sys
 import threading
 from collections.abc import Callable, Collection
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar, TypeAlias
 
 import numpy as np
 import numpy.typing as npt
@@ -70,8 +70,9 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 
 T = TypeVar("T")
 
-
 PIN_MEMORY = is_pin_memory_available()
+
+DeviceLikeType: TypeAlias = str | torch.device | int
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:

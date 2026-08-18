@@ -105,7 +105,7 @@ class TestWrite:
 
     def test_write_too_large_raises(self):
         store = _create_storage(size=256, block_size=256)
-        with pytest.raises(ValueError, match="Data too large"):
+        with pytest.raises(ValueError, match="exceeds capacity"):
             store.write(np.zeros(257, dtype=np.uint8), blocks=[0])
         _cleanup(store)
 
@@ -139,7 +139,7 @@ class TestRead:
 
     def test_read_exceeds_capacity_raises(self):
         store = _create_storage(size=256, block_size=256)
-        with pytest.raises(ValueError, match="too large"):
+        with pytest.raises(ValueError, match="exceeds capacity"):
             store.read_to_numpy(500, blocks=[0])
         _cleanup(store)
 
@@ -291,15 +291,14 @@ class TestCleanup:
 class TestEdgeCases:
     def test_write_zero_bytes(self):
         store = _create_storage(block_size=64)
-        store.write(b"", blocks=[0])
-        # Should succeed with no effect
+        with pytest.raises(ValueError):
+            store.write(b"", blocks=[0])
         _cleanup(store)
 
     def test_read_zero_bytes(self):
         store = _create_storage(block_size=64)
-        result = store.read_to_numpy(0, blocks=[0])
-        assert isinstance(result, np.ndarray)
-        assert result.size == 0
+        with pytest.raises(ValueError):
+            store.read_to_numpy(0, blocks=[0])
         _cleanup(store)
 
     def test_invalid_block_index_propagates(self):

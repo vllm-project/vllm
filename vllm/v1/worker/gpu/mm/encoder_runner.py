@@ -21,7 +21,6 @@ from vllm.multimodal.utils import (
 )
 from vllm.renderers.paged_shm.tensor_ipc import PagedShmTensorIPC
 from vllm.utils.time_utils import debug_spend_time
-from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import (

@@ -515,7 +515,6 @@ def _zmq_server(size: int, block_size: int, conn):
                     e,
                 )
 
-            # After successful certain commands, immediately try to satisfy queued requests
             if success and command == CLOSE_WRITE:
                 # Wake up open_read waiters for this specific uuid
                 try:

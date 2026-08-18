@@ -9,16 +9,16 @@ transfers.
 """
 
 import weakref
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack
 from multiprocessing import shared_memory
 from unittest.mock import patch
 
 import numpy as np
 import torch
-from torch._prims_common import DeviceLikeType
 
 from vllm import _custom_ops as ops
-from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.utils.torch_utils import PIN_MEMORY, DeviceLikeType
 
 
 class PagedShmStorage:
@@ -31,7 +31,6 @@ class PagedShmStorage:
         self.n_block = size // block_size
         self.size = block_size * self.n_block
         self.dtype = np.uint8
-
         self._created = name is None
 
         self._resources = ExitStack()
@@ -47,7 +46,11 @@ class PagedShmStorage:
             ):
                 try:
                     self._shm = shared_memory.SharedMemory(name=name)
-                    assert self._shm.size >= self.size
+                    if self._shm.size < self.size:
+                        raise ValueError(
+                            f"Existing shared memory segment '{name}' is too small "
+                            f"({self._shm.size} < {self.size})"
+                        )
                 except FileNotFoundError:
                     raise FileNotFoundError(
                         f"Shared memory '{name}' not found"
@@ -68,48 +71,160 @@ class PagedShmStorage:
             self.is_pinned = True
             self._resources.callback(unpin_tensor, self._shm_tensor)
 
-    def get_iterator_numpy(self, size: int, blocks: list[int]):
-        """Return a callable that yields (block_array, valid_length) tuples as numpy
-        arrays."""
+    def _ensure_pinned(self) -> None:
+        """Raise an error if the shared memory is not pinned."""
+        if not self.is_pinned:
+            raise RuntimeError(
+                "Cannot perform GPU transfer: shared memory is not pinned. "
+                "Initialize with pin=True and ensure PIN_MEMORY is enabled."
+            )
+
+    def _validate_blocks(self, size: int, blocks: list[int]) -> None:
+        """
+        Validate size and block indices for a read/write operation.
+        """
+        if size <= 0:
+            raise ValueError(f"Size must be positive, got {size}")
+        if not blocks:
+            raise ValueError("Blocks list cannot be empty")
+        if size > len(blocks) * self.block_size:
+            raise ValueError(
+                f"Requested size {size} exceeds capacity "
+                f"{len(blocks) * self.block_size}"
+            )
+        max_idx = max(blocks)
+        if max_idx >= self.n_block:
+            raise ValueError(
+                f"Block index {max_idx} out of range (max {self.n_block - 1})"
+            )
+
+    def _iterate_blocks(self, size: int, blocks: list[int], as_numpy: bool = True):
+        """
+        Yield (buffer_view, chunk_size, offset_in_data) for each block.
+        `buffer_view` is either a numpy array or a torch tensor.
+        """
+        data = self._shm_np if as_numpy else self._shm_tensor
+        full_blocks = size // self.block_size
+        remainder = size % self.block_size
+
+        for i in range(full_blocks):
+            yield data[blocks[i]], self.block_size, i * self.block_size
+
+        if remainder > 0:
+            yield data[blocks[full_blocks]], remainder, full_blocks * self.block_size
+
+    def _build_address_lists(
+        self, size: int, blocks: list[int], data_ptr: int, is_read: bool
+    ) -> tuple[list[int], list[int], list[int]]:
+        """
+        Build source/destination address lists for batched CUDA transfers.
+        Returns (src_addrs, dst_addrs, sizes).
+        """
+        src_addrs_list: list[int] = []
+        dst_addrs_list: list[int] = []
+        sizes_list: list[int] = []
+
+        for tensor, offset, start in self._iterate_blocks(size, blocks, as_numpy=False):
+            if is_read:  # CPU (shared memory) -> GPU
+                src_addrs_list.append(tensor.data_ptr())
+                dst_addrs_list.append(data_ptr + start)
+            else:  # GPU -> CPU (shared memory)
+                src_addrs_list.append(data_ptr + start)
+                dst_addrs_list.append(tensor.data_ptr())
+            sizes_list.append(offset)
+
+        return src_addrs_list, dst_addrs_list, sizes_list
+
+    def _batched_transfer(
+        self,
+        src_addrs: list[int],
+        dst_addrs: list[int],
+        sizes: list[int],
+    ) -> None:
+        """
+        Execute a batched memcpy using the custom CUDA operation.
+
+        Args:
+            src_addrs: List of source addresses.
+            dst_addrs: List of destination addresses.
+            sizes: List of transfer sizes in bytes.
+        """
+        src_t = torch.tensor(src_addrs, dtype=torch.int64, device="cpu")
+        dst_t = torch.tensor(dst_addrs, dtype=torch.int64, device="cpu")
+        sizes_t = torch.tensor(sizes, dtype=torch.int64, device="cpu")
+
+        current_stream = torch.cuda.current_stream()
+        default_stream = torch.cuda.default_stream()
+        sync = current_stream == default_stream
+        stream = torch.cuda.Stream() if sync else current_stream
+
+        with torch.cuda.stream(stream):
+            ops.swap_blocks_batch(src_t, dst_t, sizes_t)
+
+        if sync:
+            stream.synchronize()
+
+    def get_iterator_numpy(
+        self, size: int, blocks: list[int]
+    ) -> Callable[[], Iterator[tuple[np.ndarray, int]]]:
+        """
+        Return a callable that yields (numpy_view, chunk_size) for each block.
+        The view is a slice of the shared memory buffer.
+        """
+        self._validate_blocks(size, blocks)
 
         def iterator():
-            full_blocks = size // self.block_size
-            remainder = size % self.block_size
-
-            for i in range(full_blocks):
-                blk = blocks[i]
-                yield self._shm_np[blk], self.block_size
-
-            if remainder > 0:
-                blk = blocks[full_blocks]
-                yield self._shm_np[blk], remainder
+            for array, offset, _ in self._iterate_blocks(size, blocks, as_numpy=True):
+                yield array, offset
 
         return iterator
 
-    def get_iterator_tensor(self, size: int, blocks: list[int]):
-        """Return a callable that yields (block_tensor, valid_length) tuples as torch
-        tensors."""
+    def get_iterator_tensor(
+        self, size: int, blocks: list[int]
+    ) -> Callable[[], Iterator[tuple[torch.Tensor, int]]]:
+        """
+        Return a callable that yields (torch_tensor_view, chunk_size) for each block.
+        The view is a slice of the shared memory buffer.
+        """
+        self._validate_blocks(size, blocks)
 
         def iterator():
-            full_blocks = size // self.block_size
-            remainder = size % self.block_size
-
-            for i in range(full_blocks):
-                blk = blocks[i]
-                yield self._shm_tensor[blk], self.block_size
-
-            if remainder > 0:
-                blk = blocks[full_blocks]
-                yield self._shm_tensor[blk], remainder
+            for tensor, offset, _ in self._iterate_blocks(size, blocks, as_numpy=False):
+                yield tensor, offset
 
         return iterator
+
+    def _write_cpu(self, data_np: np.ndarray, blocks: list[int]) -> None:
+        """Write CPU data (as contiguous uint8 numpy array) into blocks."""
+        size = data_np.shape[0]
+        self._validate_blocks(size, blocks)
+        for array, offset, start in self._iterate_blocks(size, blocks, as_numpy=True):
+            array[:offset] = data_np[start : start + offset]
+
+    def _write_gpu(self, data: torch.Tensor, blocks: list[int]) -> None:
+        """Write GPU tensor data into blocks via batched GPU->CPU transfer."""
+        self._ensure_pinned()
+        if data.device.type == "cpu":
+            raise TypeError("_write_gpu() requires a GPU tensor")
+        data = data.contiguous().view(torch.uint8)
+        size = data.numel()
+        self._validate_blocks(size, blocks)
+
+        data_ptr = data.data_ptr()
+        src_addrs, dst_addrs, sizes = self._build_address_lists(
+            size, blocks, data_ptr, is_read=False
+        )
+        self._batched_transfer(src_addrs, dst_addrs, sizes)
 
     def write(self, data: bytes | np.ndarray | torch.Tensor, blocks: list[int]) -> None:
-        """Write data into the given blocks. Supports CPU bytes/numpy/tensor and
-        GPU tensor."""
+        """
+        Write data into the given blocks.
+        - If `data` is a GPU tensor, it is transferred via the GPU path.
+        - Otherwise, CPU data (bytes, numpy array, or CPU tensor) is written directly.
+        """
         if isinstance(data, torch.Tensor):
             if data.device.type != "cpu":
-                self.write_from_device(data, blocks)
+                self._write_gpu(data, blocks)
                 return
             data_np = data.contiguous().view(torch.uint8).numpy()
         elif isinstance(data, bytes):
@@ -118,146 +233,96 @@ class PagedShmStorage:
             data_np = np.ascontiguousarray(data).view(np.uint8)
         else:
             raise TypeError(f"Unsupported data type: {type(data)}")
-
-        data_np = data_np.flatten()
-        size = data_np.shape[0]
-        n_blocks = len(blocks)
-        if size > n_blocks * self.block_size:
-            raise ValueError("Data too large for provided blocks")
-
-        it = self.get_iterator_numpy(size, blocks)()
-        for i, (array, offset) in enumerate(it):
-            start = i * self.block_size
-            array[:offset] = data_np[start : start + offset]
+        self._write_cpu(data_np.flatten(), blocks)
 
     def write_from_device(self, data: torch.Tensor, blocks: list[int]) -> None:
-        """GPU → CPU bulk copy using batched custom CUDA operation (requires pinned memory)."""
-        if not self.is_pinned:
-            raise RuntimeError(
-                "Cannot write from device: shared memory is not pinned. "
-                "Initialize with pin=True and ensure PIN_MEMORY is enabled."
-            )
-
-        if data.device.type == "cpu":
-            raise TypeError("write_from_device() requires a GPU tensor")
-
-        data = data.contiguous().view(torch.uint8)
-        size = data.numel()
-        n_blocks = len(blocks)
-        if size > n_blocks * self.block_size:
-            raise ValueError("Data too large for provided blocks")
-
-        data_ptr = data.data_ptr()
-
-        src_addrs_list = []
-        dst_addrs_list = []
-        sizes_list = []
-
-        it = self.get_iterator_tensor(size, blocks)()
-        for i, (tensor, offset) in enumerate(it):
-            start = i * self.block_size
-            src_addrs_list.append(data_ptr + start)
-            dst_addrs_list.append(tensor.data_ptr())
-            sizes_list.append(offset)
-
-        src_addrs = torch.tensor(src_addrs_list, dtype=torch.int64)
-        dst_addrs = torch.tensor(dst_addrs_list, dtype=torch.int64)
-        sizes = torch.tensor(sizes_list, dtype=torch.int64)
-
-        stream = torch.cuda.Stream()
-        with torch.cuda.stream(stream):
-            ops.swap_blocks_batch(src_addrs, dst_addrs, sizes)
-        torch.cuda.current_stream().wait_stream(stream)
+        """
+        Write a GPU tensor directly into shared memory (GPU -> CPU).
+        The shared memory must be pinned.
+        """
+        self._write_gpu(data, blocks)
 
     def read_to_numpy(self, size: int, blocks: list[int]) -> np.ndarray:
-        """Read data from the given blocks and return as a contiguous numpy array."""
-        if size > len(blocks) * self.block_size:
-            raise ValueError("Requested data too large for provided blocks")
-
-        output_np = np.empty(size, dtype=np.uint8)
-
-        it = self.get_iterator_numpy(size, blocks)()
-        for i, (ndarray, offset) in enumerate(it):
-            output_np[i * self.block_size : i * self.block_size + offset] = ndarray[
-                :offset
-            ]
-
-        return output_np
+        """
+        Read data from blocks and return as a contiguous numpy array (CPU).
+        """
+        self._validate_blocks(size, blocks)
+        out = np.empty(size, dtype=np.uint8)
+        for array, offset, start in self._iterate_blocks(size, blocks, as_numpy=True):
+            out[start : start + offset] = array[:offset]
+        return out
 
     def read_to_tensor(
-        self, size: int, blocks: list[int], device: DeviceLikeType = "cpu"
+        self,
+        size: int,
+        blocks: list[int],
+        device: DeviceLikeType = "cpu",
+        out: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Read data into a torch tensor. If device != 'cpu', a GPU direct transfer
-        is used."""
+        """
+        Read data into a torch tensor.
+        If `device` is not CPU, a batched GPU transfer is used (requires pinned memory).
+        If `out` is provided, it will be used (must have correct size and device);
+        otherwise a new tensor is allocated.
+        """
         if device != "cpu":
-            return self.read_to_device(size, blocks, device)
+            return self.read_to_device(size, blocks, device, out=out)
 
-        if size > len(blocks) * self.block_size:
-            raise ValueError("Requested data too large for provided blocks")
+        self._validate_blocks(size, blocks)
+        if out is None:
+            out = torch.empty(size, dtype=torch.uint8, device="cpu", pin_memory=True)
+        else:
+            if out.numel() != size:
+                raise ValueError(
+                    f"Output tensor size {out.numel()} does not match requested {size}"
+                )
+            if out.device.type != "cpu":
+                raise ValueError("Output tensor must be on CPU for CPU read")
+        for tensor, offset, start in self._iterate_blocks(size, blocks, as_numpy=False):
+            out[start : start + offset] = tensor[:offset]
+        return out
 
-        output_tensor = torch.empty(size, dtype=torch.uint8, device=device)
+    def read_to_device(
+        self,
+        size: int,
+        blocks: list[int],
+        device: DeviceLikeType,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """
+        Read data from blocks into a GPU tensor via batched transfer.
+        Requires pinned shared memory.
+        If `out` is provided, it is used; otherwise a new tensor is allocated.
+        """
+        self._ensure_pinned()
+        self._validate_blocks(size, blocks)
 
-        it = self.get_iterator_tensor(size, blocks)()
-        for i, (tensor, offset) in enumerate(it):
-            output_tensor[i * self.block_size : i * self.block_size + offset] = tensor[
-                :offset
-            ]
-
-        return output_tensor
-
-    def read_to_device(self, size: int, blocks: list[int], device: DeviceLikeType):
-        """CPU → GPU bulk copy using batched custom CUDA operation (requires pinned memory).
-        If the current stream is the default stream, a separate stream is used and synchronized
-        to avoid blocking the default stream unnecessarily."""
-        if not self.is_pinned:
-            raise RuntimeError(
-                "Cannot read to device: shared memory is not pinned. "
-                "Initialize with pin=True and ensure PIN_MEMORY is enabled."
-            )
-
-        if size > len(blocks) * self.block_size:
-            raise ValueError("Requested data too large for provided blocks")
-
-        output_tensor = torch.empty(size, dtype=torch.uint8, device=device)
-
-        if output_tensor.device.type == "cpu":
+        if out is None:
+            out = torch.empty(size, dtype=torch.uint8, device=device)
+        else:
+            if out.numel() != size:
+                raise ValueError(
+                    f"Output tensor size {out.numel()} does not match requested {size}"
+                )
+            if out.device.type != "cuda":
+                raise ValueError("Output tensor must be on GPU for read_to_device")
+        if out.device.type == "cpu":
             raise TypeError("read_to_device() requires a GPU tensor")
 
-        data_ptr = output_tensor.data_ptr()
+        data_ptr = out.data_ptr()
+        src_addrs, dst_addrs, sizes = self._build_address_lists(
+            size, blocks, data_ptr, is_read=True
+        )
+        self._batched_transfer(src_addrs, dst_addrs, sizes)
+        return out
 
-        src_addrs_list = []
-        dst_addrs_list = []
-        sizes_list = []
-
-        it = self.get_iterator_tensor(size, blocks)()
-        for i, (tensor, offset) in enumerate(it):
-            start = i * self.block_size
-            src_addrs_list.append(tensor.data_ptr())
-            dst_addrs_list.append(data_ptr + start)
-            sizes_list.append(offset)
-
-        src_addrs = torch.tensor(src_addrs_list, dtype=torch.int64)
-        dst_addrs = torch.tensor(dst_addrs_list, dtype=torch.int64)
-        sizes = torch.tensor(sizes_list, dtype=torch.int64)
-
-        # Determine whether we need a separate stream to avoid blocking the default stream
-        current_stream = torch.cuda.current_stream()
-        default_stream = torch.cuda.default_stream()
-        sync = current_stream == default_stream
-        stream = torch.cuda.Stream() if sync else current_stream
-
-        with torch.cuda.stream(stream):
-            ops.swap_blocks_batch(src_addrs, dst_addrs, sizes)
-
-        if sync:
-            stream.synchronize()
-        return output_tensor
-
-    def close(self):
+    def close(self) -> None:
+        """Release the shared memory segment and any pinned resources."""
         self._resources.close()
 
 
-def _close_shm(shm: shared_memory.SharedMemory, created: bool = False):
+def _close_shm(shm: shared_memory.SharedMemory, created: bool = False) -> None:
+    """Close and (if created) unlink the shared memory segment."""
     if created:
         shm.unlink()
     shm.close()
