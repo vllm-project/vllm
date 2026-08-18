@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import functools
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import torch
 import torch.distributed as dist
@@ -14,10 +14,13 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group
-from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.ops.cp_common import (
+    DirectCPWorkspace,
+    direct_cp_enabled,
+    direct_cp_multicast_enabled,
+)
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
@@ -26,139 +29,6 @@ if TYPE_CHECKING:
     from torch.distributed import ProcessGroup
 
     from vllm.distributed.parallel_state import GroupCoordinator
-
-try:
-    import torch.distributed._symmetric_memory as symm_mem
-
-    symm_mem_available = True
-except ImportError:
-    symm_mem = None  # type: ignore[assignment]
-    symm_mem_available = False
-
-
-@functools.cache
-def _symm_mem_spans_group(group: GroupCoordinator) -> bool:
-    """Probe whether the group has NVLS symmetric memory."""
-    if not symm_mem_available:
-        return False
-    try:
-        from torch._C._autograd import DeviceType
-        from torch._C._distributed_c10d import _SymmetricMemory
-
-        device = torch.device("cuda", torch.accelerator.current_device_index())
-        if not _SymmetricMemory.has_multicast_support(DeviceType.CUDA, device.index):
-            return False
-        probe = symm_mem.empty(8, dtype=torch.uint8, device=device)
-        probe.zero_()
-        torch.accelerator.synchronize()
-        handle = symm_mem.rendezvous(probe, group.device_group.group_name)
-        spans = handle is not None and handle.multicast_ptr != 0
-    except Exception as error:
-        logger.debug("Direct CP symmetric-memory probe failed: %s", error)
-        return False
-    logger.debug_once(
-        "Direct CP symmetric memory across %d ranks: %s",
-        group.world_size,
-        "available" if spans else "unavailable",
-    )
-    return spans
-
-
-def _direct_dcp_enabled(
-    group: GroupCoordinator,
-    dtype: torch.dtype,
-    use_direct: bool | None,
-    supported_dtypes: tuple[torch.dtype, ...] | None = None,
-) -> bool:
-    if use_direct is not None:
-        return use_direct
-    return (
-        symm_mem_available
-        and current_platform.is_cuda()
-        and (supported_dtypes is None or dtype in supported_dtypes)
-        and (
-            all(in_the_same_node_as(group.cpu_group, source_rank=0))
-            or _symm_mem_spans_group(group)
-        )
-    )
-
-
-def _direct_dcp_multicast_enabled(
-    group: GroupCoordinator,
-    dtype: torch.dtype,
-    use_direct: bool | None,
-    supported_dtypes: tuple[torch.dtype, ...] | None = None,
-) -> bool:
-    return _direct_dcp_enabled(
-        group, dtype, use_direct, supported_dtypes
-    ) and _symm_mem_spans_group(group)
-
-
-class _DirectDCPWorkspace:
-    def __init__(
-        self,
-        group: ProcessGroup,
-        device: torch.device,
-        num_ubatches: int,
-    ) -> None:
-        self.group = group
-        self.world_size = group.size()
-        self.rank = group.rank()
-        self.device = torch.device(device)
-        self.num_ubatches = num_ubatches
-        self.epoch = torch.zeros(num_ubatches, dtype=torch.int64, device=self.device)
-        self._allocations: list[tuple[torch.Tensor, Any, list[torch.Tensor]]] = []
-
-    def _allocate(
-        self, shape: tuple[int, ...], dtype: torch.dtype
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        storage = symm_mem.empty(shape, device=self.device, dtype=dtype)
-        storage.zero_()
-        torch.accelerator.synchronize()
-        handle = symm_mem.rendezvous(storage, self.group.group_name)
-        assert handle is not None, "CP symmetric memory rendezvous returned None"
-        handle.barrier()
-        views = [
-            handle.get_buffer(peer, list(shape), dtype, 0)
-            for peer in range(self.world_size)
-        ]
-        self.device = storage.device
-        peer_ptrs = torch.tensor(
-            [
-                [view[ubatch].data_ptr() for view in views]
-                for ubatch in range(self.num_ubatches)
-            ],
-            dtype=torch.int64,
-            device=self.device,
-        )
-        self._allocations.append((storage, handle, views))
-        return storage, peer_ptrs
-
-    def _multicast_ptrs(self, storage: torch.Tensor) -> list[int]:
-        disabled = [0] * self.num_ubatches
-        for allocated, handle, _ in self._allocations:
-            if allocated is storage:
-                break
-        else:
-            return disabled
-        try:
-            from torch._C._autograd import DeviceType
-            from torch._C._distributed_c10d import _SymmetricMemory
-
-            if not _SymmetricMemory.has_multicast_support(
-                DeviceType.CUDA, storage.device.index
-            ):
-                return disabled
-            multicast_base = handle.multicast_ptr
-        except Exception:
-            return disabled
-        if not multicast_base:
-            return disabled
-        storage_base = storage.data_ptr()
-        return [
-            multicast_base + (storage[ubatch].data_ptr() - storage_base)
-            for ubatch in range(self.num_ubatches)
-        ]
 
 
 # LSE/output combine
@@ -945,7 +815,7 @@ def reserve_query_head_storage(
 _A2A_SUPPORTED_DTYPES = (torch.float16, torch.bfloat16)
 
 
-class DirectDCPA2AWorkspace(_DirectDCPWorkspace):
+class DirectDCPA2AWorkspace(DirectCPWorkspace):
     """Persistent symmetric buffers for direct DCP output exchange."""
 
     def __init__(
@@ -1037,7 +907,7 @@ def get_direct_dcp_a2a_workspace(
     dtype: torch.dtype,
     num_ubatches: int,
 ) -> DirectDCPA2AWorkspace | None:
-    if not _direct_dcp_enabled(
+    if not direct_cp_enabled(
         group, dtype, envs.VLLM_USE_DIRECT_DCP_A2A, _A2A_SUPPORTED_DTYPES
     ):
         return None
@@ -1075,7 +945,7 @@ def _q_gather_layout_supported(
     )
 
 
-class DirectDCPQGatherWorkspace(_DirectDCPWorkspace):
+class DirectDCPQGatherWorkspace(DirectCPWorkspace):
     """Publish query shards directly into the consumer-final symmetric buffer.
 
     The final buffer is reusable after the downstream DCP output combine. That
@@ -1197,9 +1067,7 @@ def get_direct_dcp_q_gather_workspace(
     num_ubatches: int,
     padded_num_heads: int | None = None,
 ) -> DirectDCPQGatherWorkspace | None:
-    if not _direct_dcp_multicast_enabled(
-        group, dtype, envs.VLLM_USE_DIRECT_DCP_Q_GATHER
-    ):
+    if not direct_cp_multicast_enabled(group, dtype, envs.VLLM_USE_DIRECT_DCP_Q_GATHER):
         return None
     if not _q_gather_layout_supported(
         group.world_size, heads_per_rank, head_dim, dtype, padded_num_heads
@@ -1233,7 +1101,7 @@ def _kv_gather_layout_supported(token_dim: int, dtype: torch.dtype) -> bool:
     return token_dim * torch.empty((), dtype=dtype).element_size() % 16 == 0
 
 
-class DirectDCPKVGatherWorkspace(_DirectDCPWorkspace):
+class DirectDCPKVGatherWorkspace(DirectCPWorkspace):
     """Persistent symmetric buffers for direct DCP KV gather."""
 
     def __init__(
@@ -1316,7 +1184,7 @@ def get_direct_dcp_kv_gather_workspace(
     dtype: torch.dtype,
     num_ubatches: int,
 ) -> DirectDCPKVGatherWorkspace | None:
-    if not _direct_dcp_multicast_enabled(
+    if not direct_cp_multicast_enabled(
         group,
         dtype,
         envs.VLLM_USE_DIRECT_DCP_KV_GATHER,

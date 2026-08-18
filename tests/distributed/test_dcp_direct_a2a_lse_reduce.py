@@ -10,6 +10,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
+import vllm.v1.attention.ops.cp_common as cp_common
 import vllm.v1.attention.ops.dcp as dcp
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
@@ -194,7 +195,7 @@ class TestDirectDCPGating:
     def test_q_gather_flag_is_independent(self, monkeypatch):
         monkeypatch.setenv("VLLM_USE_DIRECT_DCP_Q_GATHER", "1")
         monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "0")
-        monkeypatch.setattr(dcp, "_symm_mem_spans_group", lambda group: True)
+        monkeypatch.setattr(cp_common, "_symm_mem_spans_group", lambda group: True)
         dcp.get_direct_dcp_q_gather_workspace.cache_clear()
         workspace = object()
         init_workspace = MagicMock(return_value=workspace)
@@ -229,7 +230,7 @@ class TestDirectDCPGating:
     def test_kv_gather_flag_is_independent(self, monkeypatch):
         monkeypatch.setenv("VLLM_USE_DIRECT_DCP_KV_GATHER", "1")
         monkeypatch.setenv("VLLM_USE_DIRECT_DCP_A2A", "0")
-        monkeypatch.setattr(dcp, "_symm_mem_spans_group", lambda group: True)
+        monkeypatch.setattr(cp_common, "_symm_mem_spans_group", lambda group: True)
         dcp.get_direct_dcp_kv_gather_workspace.cache_clear()
         workspace = object()
         init_workspace = MagicMock(return_value=workspace)
@@ -269,7 +270,7 @@ class TestDirectDCPGating:
     ):
         factory = getattr(dcp, factory_name)
         monkeypatch.setenv(flag_name, "1")
-        monkeypatch.setattr(dcp, "_symm_mem_spans_group", lambda group: False)
+        monkeypatch.setattr(cp_common, "_symm_mem_spans_group", lambda group: False)
         factory.cache_clear()
 
         assert (
