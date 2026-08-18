@@ -15,7 +15,7 @@ Use `VLLM_USE_RUST_FRONTEND=0` to disable the Rust frontend. Python frontend wil
 
 ## Working log
 
-Last updated: 2026-08-13. This is a living record; measurements below are kept
+Last updated: 2026-08-18. This is a living record; measurements below are kept
 even when an approach was rejected.
 
 ### Scope and environment
@@ -3903,3 +3903,103 @@ downstream-accuracy claim. Request latency was intentionally excluded because
 the FP8 control absorbed first-use JIT compilation, so the elapsed times are
 not a controlled performance comparison. The NIAH result and caveat were also
 added to pull request 52696.
+
+## 2026-08-18: top-512 and top-1024 selector microbenchmarks
+
+The FP16-native and original FP32 top-k paths were compared at the top-512
+used by the released DeepSeek-V4 Flash configuration and at top-1024. The
+input was real selector data reused from the GLM-5.2 capture: selector calls
+21 and 0 each supplied a 32 x 100,032 FP32 matrix. The matrices were joined
+along the KV dimension for 200K and repeated only when a 256K row stride was
+required. Larger row counts repeat those 32 real rows.
+
+The primary setup matches production decode graph capture: row stride and
+captured `max_seq_len` are fixed at 256,000 while each row's live length is
+10K, 50K, 100K, or 200K. The graph contains only selector launches. CUDA
+events bracket warmed graph replays and are not captured inside the graph.
+Each cell below is `FP16 us / FP32 us (FP32/FP16 speedup)` and is the mean of
+two seven-sample median runs with reversed dtype order.
+
+### Fixed 256K capture, top-512
+
+| Rows | 10K KV | 50K KV | 100K KV | 200K KV |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 4.028 / 4.619 (1.147x) | 7.870 / 9.104 (1.157x) | 8.413 / 9.779 (1.162x) | 9.582 / 11.279 (1.177x) |
+| 8 | 4.110 / 4.705 (1.145x) | 7.492 / 8.910 (1.189x) | 8.703 / 10.398 (1.195x) | 11.126 / 12.713 (1.143x) |
+| 32 | 4.169 / 4.789 (1.149x) | 9.283 / 11.271 (1.214x) | 12.703 / 14.760 (1.162x) | 18.180 / 20.883 (1.149x) |
+| 128 | 4.684 / 5.032 (1.074x) | 15.903 / 18.097 (1.138x) | 25.264 / 27.850 (1.102x) | 44.258 / 62.453 (1.411x) |
+| 1,024 | 20.398 / 29.925 (1.467x) | 82.582 / 128.924 (1.561x) | 136.571 / 204.683 (1.499x) | 251.029 / 449.616 (1.791x) |
+| 8,192 | 147.520 / 242.896 (1.647x) | 589.296 / 937.765 (1.591x) | 989.418 / 1,509.520 (1.526x) | 1,846.656 / 3,411.792 (1.848x) |
+| 16,384 | 286.698 / 476.645 (1.663x) | 1,164.576 / 1,857.642 (1.595x) | 1,961.909 / 2,990.613 (1.524x) | 3,678.661 / 6,802.021 (1.849x) |
+
+### Fixed 256K capture, top-1024
+
+| Rows | 10K KV | 50K KV | 100K KV | 200K KV |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 4.321 / 5.000 (1.157x) | 7.386 / 8.652 (1.171x) | 7.964 / 9.457 (1.187x) | 9.296 / 10.991 (1.182x) |
+| 8 | 4.481 / 5.082 (1.134x) | 7.466 / 9.031 (1.210x) | 8.619 / 10.340 (1.200x) | 11.024 / 12.664 (1.149x) |
+| 32 | 4.492 / 5.181 (1.153x) | 9.518 / 11.539 (1.212x) | 12.854 / 14.927 (1.161x) | 18.331 / 21.102 (1.151x) |
+| 128 | 5.059 / 5.480 (1.083x) | 16.298 / 18.668 (1.145x) | 25.916 / 28.833 (1.113x) | 44.693 / 63.427 (1.419x) |
+| 1,024 | 22.015 / 32.684 (1.485x) | 86.381 / 133.574 (1.546x) | 142.245 / 210.282 (1.478x) | 254.976 / 455.750 (1.787x) |
+| 8,192 | 160.752 / 263.504 (1.639x) | 617.510 / 968.938 (1.569x) | 1,026.170 / 1,554.352 (1.515x) | 1,879.904 / 3,464.491 (1.843x) |
+| 16,384 | 314.299 / 517.690 (1.647x) | 1,220.298 / 1,920.005 (1.573x) | 2,033.947 / 3,080.949 (1.515x) | 3,744.922 / 6,908.229 (1.845x) |
+
+FP16 was faster in all 56 fixed-capture comparisons. Its range was
+1.074x--1.849x for top-512 and 1.083x--1.845x for top-1024. Top-1024 cost
+only 2.6% more than top-512 at the median for FP16 and 3.0% for FP32. The
+scan over the live KV length dominates; doubling the number of final outputs
+does not double the scan.
+
+For completeness, an exact-stride graph was also captured independently for
+each live KV length. It changes dispatch for some large FP16 50K and 100K
+cases, so these are separate production-policy measurements rather than just
+an allocation control.
+
+### Exact live-length capture, top-512
+
+| Rows | 10K KV | 50K KV | 100K KV | 200K KV |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 4.027 / 4.603 (1.143x) | 7.091 / 8.318 (1.173x) | 7.580 / 8.992 (1.186x) | 8.756 / 10.483 (1.197x) |
+| 8 | 4.110 / 4.693 (1.142x) | 7.493 / 8.938 (1.193x) | 8.678 / 10.421 (1.201x) | 11.123 / 12.756 (1.147x) |
+| 32 | 4.229 / 4.781 (1.131x) | 8.489 / 10.325 (1.216x) | 11.105 / 13.073 (1.177x) | 18.215 / 20.971 (1.151x) |
+| 128 | 4.720 / 5.030 (1.065x) | 16.693 / 18.363 (1.100x) | 25.951 / 28.002 (1.079x) | 44.192 / 63.762 (1.443x) |
+| 1,024 | 20.497 / 30.038 (1.465x) | 90.141 / 129.450 (1.436x) | 148.298 / 205.296 (1.384x) | 251.344 / 454.811 (1.810x) |
+| 8,192 | 148.480 / 243.178 (1.638x) | 620.640 / 941.269 (1.517x) | 1,003.872 / 1,513.594 (1.508x) | 1,849.696 / 3,489.749 (1.887x) |
+| 16,384 | 288.384 / 478.261 (1.658x) | 1,224.235 / 1,864.757 (1.523x) | 1,977.834 / 2,999.445 (1.517x) | 3,685.110 / 6,924.491 (1.879x) |
+
+### Exact live-length capture, top-1024
+
+| Rows | 10K KV | 50K KV | 100K KV | 200K KV |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 4.314 / 4.992 (1.157x) | 7.683 / 8.958 (1.166x) | 8.285 / 9.793 (1.182x) | 9.604 / 11.316 (1.178x) |
+| 8 | 4.513 / 5.063 (1.122x) | 7.471 / 9.033 (1.209x) | 8.621 / 10.353 (1.201x) | 11.019 / 12.661 (1.149x) |
+| 32 | 4.532 / 5.210 (1.149x) | 8.785 / 10.535 (1.199x) | 11.290 / 13.202 (1.169x) | 18.334 / 21.125 (1.152x) |
+| 128 | 5.083 / 5.516 (1.085x) | 17.209 / 18.977 (1.103x) | 26.799 / 28.877 (1.078x) | 44.658 / 63.939 (1.432x) |
+| 1,024 | 22.186 / 32.887 (1.482x) | 93.053 / 133.738 (1.437x) | 152.571 / 211.152 (1.384x) | 255.093 / 461.034 (1.807x) |
+| 8,192 | 161.157 / 263.824 (1.637x) | 638.784 / 972.875 (1.523x) | 1,047.200 / 1,557.168 (1.487x) | 1,881.360 / 3,540.427 (1.882x) |
+| 16,384 | 315.232 / 519.259 (1.647x) | 1,260.832 / 1,927.755 (1.529x) | 2,068.272 / 3,087.226 (1.493x) | 3,746.949 / 7,027.504 (1.876x) |
+
+FP16 was faster in all 56 exact-stride comparisons as well. The speedup
+ranges were 1.065x--1.887x for top-512 and 1.078x--1.882x for top-1024.
+At one to 32 rows, fixed launch and refinement costs limit the benefit to
+roughly 1.1x--1.2x. At large row and KV counts, scanning logits dominates;
+halving the input bytes then moves the result toward the 2x bandwidth ceiling.
+
+All 448 pre-timing checks across both capture modes, both top-k values, both
+dtypes, and both dtype orders matched the selected values from CUDA
+`torch.topk` for that dtype and returned only in-range indices. The largest
+normal-versus-reversed order difference was 1.734%; it was below 1% for the
+other three sweep pairs.
+
+FP16-versus-FP32 index recall on the original 32 captured rows remained high:
+
+| Top-k | 10K KV | 50K KV | 100K KV | 200K KV |
+| ---: | ---: | ---: | ---: | ---: |
+| 512 | 99.9939% | 99.9756% | 99.9451% | 99.9084% |
+| 1,024 | 99.9756% | 99.9298% | 99.9969% | 99.9390% |
+
+This recall measures changes caused by rounding the real FP32 logits to FP16;
+it is distinct from kernel correctness. The production-style result is the
+appropriate latency expectation for a fixed 256K decode graph: FP16 saves
+about 7%--18% at small row counts and 32%--44% at 1,024 rows, with larger
+bandwidth-bound batches approaching the 2x input-width ceiling.
