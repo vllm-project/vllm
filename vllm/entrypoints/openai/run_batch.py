@@ -836,8 +836,7 @@ async def run_batch(
                     error_msg=f"URL {request.url} was used. "
                     "Supported endpoints: /v1/chat/completions, /v1/embeddings,"
                     " /v1/audio/transcriptions, /v1/audio/translations, /score, "
-                    " /rerank. See vllm/entrypoints/openai/api_server.py "
-                    "for supported score/rerank versions.",
+                    " /rerank.",
                 )
             )
 

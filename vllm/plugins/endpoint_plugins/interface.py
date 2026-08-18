@@ -20,7 +20,7 @@ for the loading/gating rules and `docs/usage/security.md` for the security
 posture of exposing plugin defined routes.
 
 The CPU only render server (see `build_and_serve_renderer` in
-`vllm/entrypoints/openai/api_server.py`) has no `EngineClient`. A plugin
+`vllm/entrypoints/launchers/render`) has no `EngineClient`. A plugin
 eligible for the `render` task (`required_tasks` is `None` or includes
 `"render"`) still gets `attach_router` called but `init_state` receives
 `engine_client=None`. Plugins that cannot function without an engine should
@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from fastapi import FastAPI
 from starlette.datastructures import State
+
 from vllm.engine.protocol import EngineClient
 
 if TYPE_CHECKING:

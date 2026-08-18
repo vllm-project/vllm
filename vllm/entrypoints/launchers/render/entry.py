@@ -10,7 +10,7 @@ from vllm import AsyncEngineArgs, envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 
-from ..app_state import build_app
+from ..app import build_app
 from ..launcher import serve_http, setup_server
 from ..utils.server_utils import get_uvicorn_log_config
 from .app_state import init_render_app_state
