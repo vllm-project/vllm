@@ -1850,7 +1850,7 @@ class ModelConfig:
         # actually contain any non-attention layers.
         layer_types = getattr(self.hf_config, "layer_types", None)
         return layer_types is None or not all(
-            layer == "attention" for layer in layer_types
+            layer in ("attention", "full_attention") for layer in layer_types
         )
 
     @property
