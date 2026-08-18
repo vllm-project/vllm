@@ -81,6 +81,7 @@ from vllm.transformers_utils.configs.hunyuan_vl import (
     HunYuanVLVisionConfig,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -540,7 +541,10 @@ class HunYuanVisionTransformer(nn.Module):
             max_seqlen = torch.tensor(max_seqlen_override, dtype=torch.int32)
 
         return {
-            "cu_seqlens": cu_seqlens.to(device=device, non_blocking=True),
+            # async_tensor_h2d pins the source first; a plain
+            # .to(non_blocking=True) from pageable memory silently
+            # degrades to a blocking copy.
+            "cu_seqlens": async_tensor_h2d(cu_seqlens, device),
             "max_seqlen": max_seqlen,
         }
 
@@ -554,11 +558,12 @@ class HunYuanVisionTransformer(nn.Module):
         per-image (needs each image's real (h, w)), so this step is not
         CUDA-graph capturable.
         """
-        seq_len = x.size(0)
-        hidden_states = x.to(device=self.device, dtype=self.dtype)
-        # embeddings = patch_embeds + patch_pos_embed
-        hidden_states = self.embeddings(hidden_states, grid_thw)
-        return hidden_states.reshape(seq_len, -1)
+        with torch.cuda.nvtx.range("hyvl_vit_embed"):
+            seq_len = x.size(0)
+            hidden_states = x.to(device=self.device, dtype=self.dtype)
+            # embeddings = patch_embeds + patch_pos_embed
+            hidden_states = self.embeddings(hidden_states, grid_thw)
+            return hidden_states.reshape(seq_len, -1)
 
     def run_layers(
         self,
@@ -570,14 +575,19 @@ class HunYuanVisionTransformer(nn.Module):
         pure function of the total packed token count (no per-image Python
         control flow), so this is the CUDA-graph-capturable portion.
         """
-        # hidden_states: (1, T_total, D), packed across all images in the
-        # batch. cu_seqlens keeps attention scoped to each image.
-        hidden_states = embeddings.unsqueeze(0)
-        for layer in self.layers:
-            hidden_states = layer(
-                hidden_states, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
-            )
-        return hidden_states.squeeze(0)
+        # NOTE: this range only shows up in eager mode and during graph
+        # capture. On the cudagraph path the replay is a single
+        # cudaGraphLaunch, so this Python body never runs -- which is
+        # exactly how you tell the two apart in a profile.
+        with torch.cuda.nvtx.range("hyvl_vit_run_layers"):
+            # hidden_states: (1, T_total, D), packed across all images in the
+            # batch. cu_seqlens keeps attention scoped to each image.
+            hidden_states = embeddings.unsqueeze(0)
+            for layer in self.layers:
+                hidden_states = layer(
+                    hidden_states, cu_seqlens=cu_seqlens, max_seqlen=max_seqlen
+                )
+            return hidden_states.squeeze(0)
 
     def merge(
         self,
@@ -588,6 +598,14 @@ class HunYuanVisionTransformer(nn.Module):
         each image's real (h, w) spatial layout, so this always runs
         eagerly outside the CUDA graph.
         """
+        with torch.cuda.nvtx.range("hyvl_vit_merge"):
+            return self._merge_impl(hidden_states, grid_thw)
+
+    def _merge_impl(
+        self,
+        hidden_states: torch.Tensor,
+        grid_thw: list[list[int]],
+    ) -> list[torch.Tensor]:
         split_lengths = [int(h) * int(w) for (_, h, w) in grid_thw]
         split_items = hidden_states.split(split_lengths, dim=0)
         return [
