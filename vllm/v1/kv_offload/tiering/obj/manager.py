@@ -92,7 +92,7 @@ class ObjAsyncLookupManager(AsyncLookupManager):
 
 
 class ObjectStoreSecondaryTierManager(SecondaryTierManager):
-    """Secondary tier that offloads KV cache blocks to an S3-compatible store.
+    """Secondary tier that offloads KV cache chunks to an S3-compatible store.
 
     Handles CPU DRAM <-> S3 transfers only. GPU <-> CPU is managed by the
     primary tier. Object keys are formed as ``{prefix}/{hash_shard}/{hash}.bin``.
@@ -119,7 +119,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             store_config: Object store connection parameters (see ObjStoreConfig).
             prefix: Key prefix prepended to all object keys.
             io_threads: Number of NIXL I/O threads.
-            enable_kv_events: Emit BlockStored KV events for blocks
+            enable_kv_events: Emit BlockStored KV events for chunks
                 successfully stored to this tier. Effective only when KV
                 cache events are enabled globally (kv_events_config).
             locality: Whether this tier's storage is LOCAL or REMOTE relative
@@ -156,9 +156,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         # during drain_jobs().
         self._pending_results: list[JobResult] = []
         self._primary_reg = None
-        self._block_size_bytes: int = 0
+        self._chunk_size_bytes: int = 0
         root_dir = f"{prefix}/" if prefix else ""
-        # Opt in; FileMapper enables it only for a parallelism-invariant block.
+        # Opt in; FileMapper enables it only for a parallelism-invariant chunk.
         self._file_mapper = FileMapper.from_offloading_spec(
             root_dir, offloading_spec, parallel_agnostic=True
         )
@@ -172,8 +172,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._primary_reg = self._agent.register_memory(
             [(base_addr, primary_kv_view.nbytes, NIXL_DEV_ID, "")], "DRAM"
         )
-        self._block_size_bytes = stride
-        all_blocks = [
+        self._chunk_size_bytes = stride
+        all_chunks = [
             (base_addr + i * stride, stride, NIXL_DEV_ID)
             for i in range(len(primary_kv_view))
         ]
@@ -181,7 +181,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         # local_xfer_side tagged with NIXL_INIT_AGENT and remote_xfer_side tagged
         # with the peer agent name ("ObjAgent").
         self._dram_prepped_handle: nixl_prepped_dlist_handle = (
-            self._agent.prep_xfer_dlist("NIXL_INIT_AGENT", all_blocks, "DRAM")
+            self._agent.prep_xfer_dlist("NIXL_INIT_AGENT", all_chunks, "DRAM")
         )
 
         self._lookup_manager = ObjAsyncLookupManager(
@@ -217,16 +217,16 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def _submit_transfer(
         self,
         job_id: int,
-        block_ids: Iterable[int],
+        chunk_slot_ids: Iterable[int],
         obj_keys: Iterable[str],
         op: str,
     ) -> None:
         """Submit an async transfer. op is 'WRITE' (store) or 'READ' (load)."""
-        block_ids_list = [int(bid) for bid in block_ids]
+        chunk_slot_ids_list = [int(sid) for sid in chunk_slot_ids]
         # The OBJ backend maps devId -> obj_key. All descriptors must have
         # unique devIds or later registrations overwrite earlier ones.
         nixl_files = [
-            (0, self._block_size_bytes, dev_id, key)
+            (0, self._chunk_size_bytes, dev_id, key)
             for dev_id, key in enumerate(obj_keys, self._next_obj_dev_id)
         ]
         self._next_obj_dev_id += len(nixl_files)
@@ -247,7 +247,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         xfer_handle = self._agent.make_prepped_xfer(
             op,
             self._dram_prepped_handle,
-            block_ids_list,
+            chunk_slot_ids_list,
             obj_handle,
             list(range(len(nixl_files))),
         )
@@ -284,14 +284,14 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
-            job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_WRITE
+            job_metadata.job_id, job_metadata.chunk_slot_ids, obj_keys, NIXL_WRITE
         )
 
     def submit_load(self, job_metadata: TransferJob) -> None:
         self._load_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
-            job_metadata.job_id, job_metadata.block_ids, obj_keys, NIXL_READ
+            job_metadata.job_id, job_metadata.chunk_slot_ids, obj_keys, NIXL_READ
         )
 
     def on_request_finished(self, req_context: ReqContext) -> None:

@@ -21,7 +21,7 @@ logger = init_logger(__name__)
 
 class JobState:
     """
-    Thread-safe completion tracker for a set of per-block I/O tasks.
+    Thread-safe completion tracker for a set of per-chunk I/O tasks.
 
     Each task calls task_done(success) when it finishes.
     """
@@ -182,7 +182,7 @@ class DualQueueThreadPool:
             except Exception as exc:
                 transfer_time = time.monotonic() - start_time
                 logger.error(
-                    "Job %s block I/O failed: %s",
+                    "Job %s chunk I/O failed: %s",
                     state.job_id,
                     exc,
                 )

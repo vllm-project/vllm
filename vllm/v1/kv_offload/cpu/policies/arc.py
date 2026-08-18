@@ -6,7 +6,7 @@ from collections.abc import Iterable, Iterator
 from typing_extensions import override
 
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
-from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
+from vllm.v1.kv_offload.cpu.policies.base import CachePolicy, ChunkSlotStatus
 
 
 class ARCCachePolicy(CachePolicy):
@@ -14,15 +14,15 @@ class ARCCachePolicy(CachePolicy):
     ARC (Adaptive Replacement Cache) cache policy.
 
     Data Structures:
-        T1: Recent cache containing blocks accessed once.
-        T2: Frequent cache containing blocks accessed multiple times.
-        B1/B2: Ghost lists tracking recently evicted blocks from T1/T2.
+        T1: Recent cache containing chunks accessed once.
+        T2: Frequent cache containing chunks accessed multiple times.
+        B1/B2: Ghost lists tracking recently evicted chunks from T1/T2.
         target_t1_size: Adaptive target size for the T1 partition.
 
     Algorithm Flow:
         1. Cache lookup (lookup):
-           Searches T1 and T2 for block hashes and counts consecutive hits
-           until a miss or non-ready block is encountered.
+           Searches T1 and T2 for chunk hashes and counts consecutive hits
+           until a miss or non-ready chunk is encountered.
 
         2. Cache touch (touch) - Adaptive Learning:
            For each key (in reverse order):
@@ -31,15 +31,15 @@ class ARCCachePolicy(CachePolicy):
            - If in B1 ghost list: Increase target_t1_size.
            - If in B2 ghost list: Decrease target_t1_size.
 
-        3. Block eviction (evict) - Adaptive Replacement:
+        3. Chunk eviction (evict) - Adaptive Replacement:
            Determines eviction source based on adaptive target:
            - If T1 size >= target_t1_size: Evict from T1, add to B1.
            - Otherwise: Evict from T2, add to B2.
            Finally, bound each ghost list size.
 
-        4. Block insertion (insert):
-           New blocks are always inserted into T1 and removed from B1/B2 if
-           present. Blocks may later be promoted to T2 during touch operations.
+        4. Chunk insertion (insert):
+           New chunks are always inserted into T1 and removed from B1/B2 if
+           present. Chunks may later be promoted to T2 during touch operations.
 
     Adaptive Behavior:
         The algorithm self-tunes the recency vs. frequency trade-off:
@@ -50,19 +50,19 @@ class ARCCachePolicy(CachePolicy):
     def __init__(self, cache_capacity: int):
         super().__init__(cache_capacity)
         self.target_t1_size: float = 0.0
-        self.t1: OrderedDict[OffloadKey, BlockStatus] = OrderedDict()
-        self.t2: OrderedDict[OffloadKey, BlockStatus] = OrderedDict()
+        self.t1: OrderedDict[OffloadKey, ChunkSlotStatus] = OrderedDict()
+        self.t2: OrderedDict[OffloadKey, ChunkSlotStatus] = OrderedDict()
         # key -> None (only care about presence)
         self.b1: OrderedDict[OffloadKey, None] = OrderedDict()
         self.b2: OrderedDict[OffloadKey, None] = OrderedDict()
 
     @override
-    def get(self, key: OffloadKey) -> BlockStatus | None:
+    def get(self, key: OffloadKey) -> ChunkSlotStatus | None:
         return self.t1.get(key) or self.t2.get(key)
 
     @override
-    def insert(self, key: OffloadKey, block: BlockStatus) -> None:
-        self.t1[key] = block
+    def insert(self, key: OffloadKey, chunk: ChunkSlotStatus) -> None:
+        self.t1[key] = chunk
         self.b1.pop(key, None)
         self.b2.pop(key, None)
 
@@ -75,13 +75,13 @@ class ARCCachePolicy(CachePolicy):
     def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
         for key in reversed(list(keys)):
             if key in self.t1:
-                block = self.t1.pop(key)
-                if not block.is_ready:
-                    # block was just prepared to be stored, not really touched
+                chunk = self.t1.pop(key)
+                if not chunk.is_ready:
+                    # chunk was just prepared to be stored, not really touched
                     # twice — keep it in T1 and mark as most recently used
-                    self.t1[key] = block
+                    self.t1[key] = chunk
                 else:
-                    self.t2[key] = block
+                    self.t2[key] = chunk
 
             elif key in self.t2:
                 self.t2.move_to_end(key)
@@ -111,31 +111,31 @@ class ARCCachePolicy(CachePolicy):
     @override
     def evict(
         self, n: int, protected: set[OffloadKey]
-    ) -> list[tuple[OffloadKey, BlockStatus]] | None:
+    ) -> list[tuple[OffloadKey, ChunkSlotStatus]] | None:
         if n == 0:
             return []
 
         # Collect candidates atomically: simulate T1 size changes as we select,
         # but do not modify actual data structures until all n are found.
         candidates: list[
-            tuple[OffloadKey, BlockStatus, bool]
-        ] = []  # (key, block, from_t1)
+            tuple[OffloadKey, ChunkSlotStatus, bool]
+        ] = []  # (key, chunk, from_t1)
         virtual_t1_size = len(self.t1)
         # Keep the scans monotonic: restarting from the LRU end after every
-        # selection makes a batch eviction quadratic in the number of blocks.
+        # selection makes a batch eviction quadratic in the number of chunks.
         t1_iter = iter(self.t1.items())
         t2_iter = iter(self.t2.items())
 
         def next_candidate(
-            entries: Iterator[tuple[OffloadKey, BlockStatus]],
-        ) -> tuple[OffloadKey, BlockStatus] | None:
-            for key, block in entries:
-                if block.ref_cnt == 0 and key not in protected:
-                    return key, block
+            entries: Iterator[tuple[OffloadKey, ChunkSlotStatus]],
+        ) -> tuple[OffloadKey, ChunkSlotStatus] | None:
+            for key, chunk in entries:
+                if chunk.ref_cnt == 0 and key not in protected:
+                    return key, chunk
             return None
 
         for _ in range(n):
-            candidate: tuple[OffloadKey, BlockStatus, bool] | None = None
+            candidate: tuple[OffloadKey, ChunkSlotStatus, bool] | None = None
 
             if virtual_t1_size >= int(self.target_t1_size):
                 entry = next_candidate(t1_iter)
@@ -152,15 +152,15 @@ class ARCCachePolicy(CachePolicy):
             candidates.append(candidate)
 
         # Apply all evictions now that we know n candidates exist.
-        result: list[tuple[OffloadKey, BlockStatus]] = []
-        for key, block, from_t1 in candidates:
+        result: list[tuple[OffloadKey, ChunkSlotStatus]] = []
+        for key, chunk, from_t1 in candidates:
             if from_t1:
                 del self.t1[key]
                 self.b1[key] = None
             else:
                 del self.t2[key]
                 self.b2[key] = None
-            result.append((key, block))
+            result.append((key, chunk))
 
         # Trim ghost lists to cache_capacity.
         for ghost in (self.b1, self.b2):

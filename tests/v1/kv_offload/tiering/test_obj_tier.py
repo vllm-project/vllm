@@ -93,7 +93,7 @@ _STORE_CONFIG = {
     "secret_key": "mock-secret",
 }
 
-_BLOCK_ELEMENTS = 256
+_CHUNK_ELEMENTS = 256
 _DTYPE = torch.float32
 _RUN_PREFIX = f"test/{uuid.uuid4().hex[:8]}"
 _CTX = ReqContext(req_id="test-req")
@@ -106,14 +106,14 @@ def key(n: int) -> OffloadKey:
 def make_job(
     job_id: int,
     keys: list[OffloadKey],
-    block_ids: list[int] | None = None,
+    chunk_slot_ids: list[int] | None = None,
 ) -> TransferJob:
-    if block_ids is None:
-        block_ids = list(range(len(keys)))
+    if chunk_slot_ids is None:
+        chunk_slot_ids = list(range(len(keys)))
     return TransferJob(
         job_id=job_id,
         keys=keys,
-        block_ids=np.array(block_ids, dtype=np.int64),
+        chunk_slot_ids=np.array(chunk_slot_ids, dtype=np.int64),
         is_promotion=False,
         req_context=_CTX,
     )
@@ -227,7 +227,7 @@ def _make_events_spec(enable_kv_cache_events: bool) -> SimpleNamespace:
 
 
 def _make_tier(
-    num_blocks: int = 4,
+    num_chunks: int = 4,
     offloading_spec: SimpleNamespace = _OFFLOADING_SPEC,
     primary_kv_view: memoryview | None = None,
     **tier_kwargs,
@@ -235,7 +235,7 @@ def _make_tier(
     """Create a tier backed by a fresh MockNixlAgent."""
     mock_agent = MockNixlAgent()
     if primary_kv_view is None:
-        tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
+        tensor = torch.zeros((num_chunks, _CHUNK_ELEMENTS), dtype=_DTYPE)
         primary_kv_view = memoryview(tensor.numpy())
     with (
         patch("vllm.v1.kv_offload.tiering.obj.manager.nixl_agent_config"),
@@ -298,7 +298,7 @@ def test_invalid_locality_raises_at_construction(locality):
 
 class TestMockObjTierBasic:
     def setup_method(self):
-        self.tier, self.agent = _make_tier(num_blocks=4)
+        self.tier, self.agent = _make_tier(num_chunks=4)
 
     def test_lookup_empty_tier(self):
         assert lookup_and_wait(self.tier, [key(1)]) == [LookupResult.MISS]
@@ -410,9 +410,9 @@ class TestMockObjTierBasic:
         assert results[0].success
 
 
-class TestMockObjTierMultiBlock:
-    def test_store_multiple_blocks(self):
-        tier, _ = _make_tier(num_blocks=8)
+class TestMockObjTierMultiChunk:
+    def test_store_multiple_chunks(self):
+        tier, _ = _make_tier(num_chunks=8)
         keys = [key(i) for i in range(8)]
         tier.submit_store(make_job(1, keys, list(range(8))))
         results = drain(tier)
@@ -420,8 +420,8 @@ class TestMockObjTierMultiBlock:
         assert results[0].success
         assert lookup_and_wait(tier, keys) == [LookupResult.HIT] * 8
 
-    def test_partial_block_lookup(self):
-        tier, _ = _make_tier(num_blocks=4)
+    def test_partial_chunk_lookup(self):
+        tier, _ = _make_tier(num_chunks=4)
         tier.submit_store(make_job(1, [key(0), key(1)], [0, 1]))
         drain(tier)
         assert lookup_and_wait(tier, [key(0), key(1), key(2)]) == [
@@ -433,14 +433,14 @@ class TestMockObjTierMultiBlock:
 
 class TestMockObjTierFailures:
     def test_lookup_exception_returns_false(self):
-        tier, agent = _make_tier(num_blocks=4)
+        tier, agent = _make_tier(num_chunks=4)
         agent.query_memory = lambda *a, **k: (_ for _ in ()).throw(
             RuntimeError("backend error")
         )
         assert lookup_and_wait(tier, [key(1)]) == [LookupResult.MISS]
 
     def test_submit_store_register_memory_failure_reported_in_get_finished(self):
-        tier, agent = _make_tier(num_blocks=4)
+        tier, agent = _make_tier(num_chunks=4)
         agent.register_memory = lambda *a, **k: None
         tier.submit_store(make_job(1, [key(1)], [0]))
         results = list(tier.get_finished_jobs())
@@ -449,7 +449,7 @@ class TestMockObjTierFailures:
         assert not results[0].success
 
     def test_submit_load_register_memory_failure_reported_in_get_finished(self):
-        tier, agent = _make_tier(num_blocks=4)
+        tier, agent = _make_tier(num_chunks=4)
         agent.register_memory = lambda *a, **k: None
         tier.submit_load(make_job(2, [key(1)], [0]))
         results = list(tier.get_finished_jobs())
@@ -458,7 +458,7 @@ class TestMockObjTierFailures:
         assert not results[0].success
 
     def test_submit_store_make_prepped_xfer_failure_reported_in_get_finished(self):
-        tier, agent = _make_tier(num_blocks=4)
+        tier, agent = _make_tier(num_chunks=4)
         agent.make_prepped_xfer = lambda *a, **k: None
         tier.submit_store(make_job(3, [key(1)], [0]))
         results = list(tier.get_finished_jobs())
@@ -468,7 +468,7 @@ class TestMockObjTierFailures:
 
     def test_failure_and_success_both_returned_by_get_finished(self):
         # One job fails at submission, another succeeds in flight.
-        tier, agent = _make_tier(num_blocks=4)
+        tier, agent = _make_tier(num_chunks=4)
         original_register = agent.register_memory
         call_count = [0]
 
@@ -487,7 +487,7 @@ class TestMockObjTierFailures:
         assert by_id[2].success
 
     def test_release_xfer_failure_retries_without_losing_result(self, monkeypatch):
-        tier, agent = _make_tier(num_blocks=4)
+        tier, agent = _make_tier(num_chunks=4)
         agent.check_xfer_state = MagicMock(side_effect=RuntimeError("poll failed"))
         release_xfer = MagicMock(
             side_effect=[RuntimeError("transfer is still active"), None]
@@ -518,7 +518,7 @@ class TestMockObjTierFailures:
     def test_post_transfer_cleanup_failure_does_not_lose_result(
         self, monkeypatch, cleanup_method
     ):
-        tier, agent = _make_tier(num_blocks=4)
+        tier, agent = _make_tier(num_chunks=4)
         monkeypatch.setattr(
             agent,
             cleanup_method,
@@ -535,16 +535,16 @@ class TestMockObjTierFailures:
         assert list(tier.get_finished_jobs()) == []
 
     def test_xfer_cleanup_retry_finalizes_parent_job_and_primary_pin(self, monkeypatch):
-        num_blocks = 4
-        tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
+        num_chunks = 4
+        tensor = torch.zeros((num_chunks, _CHUNK_ELEMENTS), dtype=_DTYPE)
         primary_kv_view = memoryview(tensor.numpy())
         mmap_region = MagicMock()
         mmap_region.create_kv_memoryview.return_value = primary_kv_view
         primary_tier = CPUPrimaryTierOffloadingManager(
-            num_blocks=num_blocks, mmap_region=mmap_region
+            num_chunks=num_chunks, mmap_region=mmap_region
         )
         obj_tier, agent = _make_tier(
-            num_blocks=num_blocks, primary_kv_view=primary_kv_view
+            num_chunks=num_chunks, primary_kv_view=primary_kv_view
         )
         manager = TieringOffloadingManager(
             primary_tier=primary_tier, secondary_tiers=[obj_tier]
@@ -557,9 +557,9 @@ class TestMockObjTierFailures:
         job = manager.create_store_job(keys, _CTX)
         obj_tier.submit_store(job)
 
-        block = primary_tier._policy.get(keys[0])
-        assert block is not None
-        assert block.ref_cnt == 1
+        chunk_slot = primary_tier._policy.get(keys[0])
+        assert chunk_slot is not None
+        assert chunk_slot.ref_cnt == 1
         assert len(manager._transfer_jobs) == 1
 
         agent.check_xfer_state = MagicMock(side_effect=RuntimeError("poll failed"))
@@ -572,14 +572,14 @@ class TestMockObjTierFailures:
         manager.on_schedule_end(schedule_context)
 
         assert len(manager._transfer_jobs) == 1
-        assert block.ref_cnt == 1
+        assert chunk_slot.ref_cnt == 1
         assert len(obj_tier._transfers) == 1
         assert manager.has_pending_work()
 
         manager.on_schedule_end(schedule_context)
 
         assert manager._transfer_jobs == {}
-        assert block.ref_cnt == 0
+        assert chunk_slot.ref_cnt == 0
         assert obj_tier._transfers == {}
         assert not manager.has_pending_work()
         assert agent.check_xfer_state.call_count == 2
@@ -588,7 +588,7 @@ class TestMockObjTierFailures:
 
 class TestMockObjTierShutdown:
     def test_shutdown_clears_in_flight_transfers(self):
-        tier, agent = _make_tier(num_blocks=4)
+        tier, agent = _make_tier(num_chunks=4)
         # Keep transfer in flight by never completing it
         agent.check_xfer_state = lambda h: "PROC"
         tier.submit_store(make_job(1, [key(1)], [0]))
@@ -599,7 +599,7 @@ class TestMockObjTierShutdown:
         assert tier._primary_reg is None
 
     def test_shutdown_idempotent(self):
-        tier, _ = _make_tier(num_blocks=4)
+        tier, _ = _make_tier(num_chunks=4)
         tier.shutdown()
         tier.shutdown()  # must not raise
 

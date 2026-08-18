@@ -257,7 +257,8 @@ class SingleDirectionOffloadingHandler:
             gpu_tensors: list of GPU KV cache tensors.
                 Each of shape (num_gpu_blocks, gpu_page_size_bytes) with dtype int8.
             cpu_tensors: list of CPU KV cache tensors.
-                Each of shape (num_cpu_blocks, cpu_page_size_bytes) with dtype int8.
+                Each of shape (num_cpu_chunks, cpu_page_size_bytes)
+                with dtype int8.
                 Order should match gpu_tensors.
             layer_refs_per_group: list of CanonicalKVCacheRef per group.
             gpu_to_cpu: if True, transfer from GPU to CPU; otherwise CPU to GPU.
@@ -527,20 +528,20 @@ class SingleDirectionOffloadingHandler:
         # 1. GPU -> CPU
         # 2. CPU -> GPU
         #
-        # transfers are also to CPU blocks, EXCEPT MAYBE for the first and last block.
-        # i.e. the first and last CPU blocks in src_blocks can match against
+        # transfers are also to CPU chunks, EXCEPT MAYBE for the first and last chunk.
+        # i.e. the first and last CPU chunks in src_blocks can match against
         # a smaller (byte-wise) set of GPU blocks in dst_blocks.
         # In such cases, we may need to skip some gpu-sized sub-blocks,
-        # and start reading/writing from the middle of the first CPU block.
+        # and start reading/writing from the middle of the first CPU chunk.
         # If we have multiple KV cache groups (when using HMA with hybrid models),
-        # we may have a partial first/last CPU block per each group.
+        # we may have a partial first/last CPU chunk per each group.
         # The group_sizes parameter encodes the size of each group of blocks
         # in the GPU dst_blocks.
         # If group_sizes is None, we assume all blocks belong to a single group.
         # The logical_offset parameter maps each group of blocks to its logical
         # offset inside the request, counting in GPU blocks.
         # This allows us to find the correct starting position
-        # in the matching first CPU block.
+        # in the matching first CPU chunk.
 
         # extract group_sizes from the GPU spec
         gpu_spec = src_spec if self.gpu_to_cpu else dst_spec
@@ -749,7 +750,7 @@ class CPUOffloadingWorker(OffloadingWorker):
         self,
         kv_caches: CanonicalKVCaches,
         blocks_per_chunk: int,
-        num_cpu_blocks: int,
+        num_cpu_chunks: int,
         mmap_region: SharedOffloadRegion | None = None,
         canonical_layout: bool = False,
     ):
@@ -788,16 +789,16 @@ class CPUOffloadingWorker(OffloadingWorker):
             else:
                 t0 = time.monotonic()
                 cpu_tensor = torch.zeros(
-                    (num_cpu_blocks, cpu_page_size_bytes),
+                    (num_cpu_chunks, cpu_page_size_bytes),
                     dtype=torch.int8,
                     device="cpu",
                     pin_memory=pin_memory,
                 )
                 logger.debug(
                     "torch.zeros pinned tensor %d×%d (%.2f GB): %.3f s",
-                    num_cpu_blocks,
+                    num_cpu_chunks,
                     cpu_page_size_bytes,
-                    num_cpu_blocks * cpu_page_size_bytes / 1e9,
+                    num_cpu_chunks * cpu_page_size_bytes / 1e9,
                     time.monotonic() - t0,
                 )
 

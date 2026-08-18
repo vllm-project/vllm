@@ -8,7 +8,7 @@ Store path:
     then os.replace'd to the final path (without .tmp).
 
 Load path:
-    Data is read from the block file directly via os.readv into the
+    Data is read from the chunk file directly via os.readv into the
     provided memoryview slice.
 
 File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
@@ -50,8 +50,8 @@ from vllm.v1.kv_offload.tiering.base import (
     TransferJob,
 )
 from vllm.v1.kv_offload.tiering.fs.io import (
-    batch_load_block,
-    batch_store_block,
+    batch_load_chunks,
+    batch_store_chunks,
     probe_o_direct,
 )
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
@@ -100,7 +100,7 @@ class FileSystemTierManager(SecondaryTierManager):
         variable ``PYTHONHASHSEED`` must be set to the same fixed value
         (e.g., "0") on all instances. Without this, each process initializes
         ``NONE_HASH`` (the chain-hash seed for block content hashes) with
-        random bytes, producing different block filenames for identical token
+        random bytes, producing different chunk filenames for identical token
         content.
     """
 
@@ -123,10 +123,10 @@ class FileSystemTierManager(SecondaryTierManager):
                 blocks_per_chunk.
             primary_kv_view: Memoryview of the primary tier's CPU KV cache.
             tier_type: Tier type identifier, set by SecondaryTierFactory.
-            root_dir: Root directory for block files.
+            root_dir: Root directory for chunk files.
             n_read_threads: Number of read-priority I/O threads.
             n_write_threads: Number of write-priority I/O threads.
-            enable_kv_events: Emit BlockStored KV events for blocks
+            enable_kv_events: Emit BlockStored KV events for chunks
                 successfully stored to this tier. Effective only when KV
                 cache events are enabled globally (kv_events_config).
             locality: Whether this tier's storage is LOCAL or REMOTE relative
@@ -159,13 +159,13 @@ class FileSystemTierManager(SecondaryTierManager):
         # write, so no extra lock is needed (get_finished is itself lock-free).
         self._load_progress: dict[JobId, int] = {}
 
-        # Extract block size from primary view
+        # Extract chunk size from primary view
         assert primary_kv_view.strides is not None, (
             "primary_kv_view.strides cannot be None"
         )
-        self._block_size: int = primary_kv_view.strides[0]
+        self._chunk_byte_size: int = primary_kv_view.strides[0]
 
-        # Opt in; FileMapper enables it only for a parallelism-invariant block.
+        # Opt in; FileMapper enables it only for a parallelism-invariant chunk.
         self.file_mapper = FileMapper.from_offloading_spec(
             root_dir=root_dir,
             offloading_spec=offloading_spec,
@@ -184,7 +184,7 @@ class FileSystemTierManager(SecondaryTierManager):
 
         # Prefer O_DIRECT to bypass the page cache, but fall back to buffered
         # I/O on filesystems that reject it (e.g. overlayfs, some NFS mounts)
-        # rather than failing every block.
+        # rather than failing every chunk.
         self._use_o_direct = probe_o_direct(os.path.dirname(config_path))
         if not self._use_o_direct:
             logger.warning(
@@ -219,11 +219,11 @@ class FileSystemTierManager(SecondaryTierManager):
         if self.events is not None:
             self._store_job_keys[job_metadata.job_id] = keys
         task = functools.partial(
-            batch_store_block,
+            batch_store_chunks,
             [self.file_mapper.get_file_name(key) for key in keys],
             self._primary_kv_view,
-            [int(bid) * self._block_size for bid in job_metadata.block_ids],
-            self._block_size,
+            [int(sid) * self._chunk_byte_size for sid in job_metadata.chunk_slot_ids],
+            self._chunk_byte_size,
             self._use_o_direct,
         )
         self._pool.enqueue_store(job_metadata.job_id, 1, [task])
@@ -236,19 +236,22 @@ class FileSystemTierManager(SecondaryTierManager):
         keys = list(job_metadata.keys)
         self._load_job_keys[job_id] = keys
         paths = [self.file_mapper.get_file_name(key) for key in keys]
-        offsets = [int(bid) * self._block_size for bid in job_metadata.block_ids]
+        offsets = [
+            int(sid) * self._chunk_byte_size
+            for sid in job_metadata.chunk_slot_ids
+        ]
 
         def load_task() -> None:
             try:
-                batch_load_block(
+                batch_load_chunks(
                     paths,
                     self._primary_kv_view,
                     offsets,
-                    self._block_size,
+                    self._chunk_byte_size,
                     self._use_o_direct,
                 )
             except OSError as exc:
-                # Runs on the pool worker thread. Record how many blocks loaded
+                # Runs on the pool worker thread. Record how many chunks loaded
                 # before the failure so get_finished_jobs can keep them; this
                 # write precedes task_done, so the scheduler reads it safely
                 # under the GIL once the finished queue hands back this job.
@@ -257,7 +260,7 @@ class FileSystemTierManager(SecondaryTierManager):
                 # Surfaces errno (e.g. EMFILE "Too many open files") for both
                 # the C and Python load paths.
                 logger.debug(
-                    "Load of %d blocks for job %s failed at block %d: %s",
+                    "Load of %d chunks for job %s failed at chunk %d: %s",
                     len(paths),
                     job_id,
                     num_succeeded,

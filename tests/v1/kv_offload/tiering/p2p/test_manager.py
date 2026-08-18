@@ -94,7 +94,7 @@ def _job_metadata(
     return TransferJob(
         job_id=job_id,
         keys=keys,
-        block_ids=np.array(block_ids),
+        chunk_slot_ids=np.array(block_ids),
         is_promotion=False,
         req_context=_req_context(kv_params),
     )
@@ -332,7 +332,7 @@ class TestSubmitStore:
         assert (
             batches[0].job_id,
             list(batches[0].keys),
-            list(batches[0].block_ids),
+            list(batches[0].chunk_slot_ids),
         ) == (
             1,
             [b"k1", b"k2"],
@@ -515,8 +515,8 @@ class TestOnRequestFinished:
 
         mgr = _make_manager()
         mgr._unbound_stores["req-1"] = [
-            _UnboundStoreBatch(job_id=10, keys=[b"k"], block_ids=[0]),
-            _UnboundStoreBatch(job_id=11, keys=[b"k2"], block_ids=[1]),
+            _UnboundStoreBatch(job_id=10, keys=[b"k"], chunk_slot_ids=[0]),
+            _UnboundStoreBatch(job_id=11, keys=[b"k2"], chunk_slot_ids=[1]),
         ]
         ctx = _req_context(kv_params=_remote_decoder_kv_params(kv_request_id="req-1"))
         mgr.on_request_finished(ctx)
@@ -707,7 +707,7 @@ class TestGetFinished:
         from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
 
         mgr._unbound_stores["req-fresh"] = [
-            _UnboundStoreBatch(job_id=99, keys=[b"k"], block_ids=[0])
+            _UnboundStoreBatch(job_id=99, keys=[b"k"], chunk_slot_ids=[0])
         ]
         list(mgr.get_finished_jobs())
         assert "req-fresh" in mgr._unbound_stores
@@ -719,12 +719,12 @@ class TestGetFinished:
         from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
 
         mgr = self._make()
-        stale = _UnboundStoreBatch(job_id=10, keys=[b"k"], block_ids=[0])
+        stale = _UnboundStoreBatch(job_id=10, keys=[b"k"], chunk_slot_ids=[0])
         # Backdate the submission so the head batch is past the deadline.
         stale.submitted_at = time.monotonic() - _UNBOUND_STORE_TIMEOUT_S - 1.0
         mgr._unbound_stores["req-stale"] = [
             stale,
-            _UnboundStoreBatch(job_id=11, keys=[b"k2"], block_ids=[1]),
+            _UnboundStoreBatch(job_id=11, keys=[b"k2"], chunk_slot_ids=[1]),
         ]
 
         results = list(mgr.get_finished_jobs())
@@ -1315,8 +1315,8 @@ class TestPollOnce:
         )
         mgr._sessions[peer] = sess  # type: ignore[assignment]
         mgr._unbound_stores["req-1"] = [
-            _UnboundStoreBatch(job_id=5, keys=[b"k1"], block_ids=[0]),
-            _UnboundStoreBatch(job_id=6, keys=[b"k2"], block_ids=[1]),
+            _UnboundStoreBatch(job_id=5, keys=[b"k1"], chunk_slot_ids=[0]),
+            _UnboundStoreBatch(job_id=6, keys=[b"k2"], chunk_slot_ids=[1]),
         ]
 
         class _Ctrl:

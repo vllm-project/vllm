@@ -33,11 +33,11 @@ inline int ensure_parent_dirs(const std::string& path) {
   return ec ? ec.value() : 0;
 }
 
-// Core single-block store: src/size are raw pointer + byte count. Returns 0
+// Core single-chunk store: src/size are raw pointer + byte count. Returns 0
 // on success, or the errno of the failing step on failure -- captured
 // before any subsequent cleanup call can overwrite it. On failure, the temp
 // file is removed.
-inline int _store_block(const char* tmp_path, const char* dest_path,
+inline int _store_chunk(const char* tmp_path, const char* dest_path,
                         const char* src, size_t size, bool use_o_direct) {
   if (access(dest_path, F_OK) == 0) {
     return 0;  // Already present.
@@ -77,14 +77,14 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
   return 0;
 }
 
-// Core single-block load: dst/size are raw pointer + byte count. Returns 0
+// Core single-chunk load: dst/size are raw pointer + byte count. Returns 0
 // on success, or the errno of the failing step on failure. Removes the source
 // file ONLY on a provable short read (the read completed but returned fewer
 // bytes than requested): stores are atomic, so a too-short file is genuine
 // corruption. Open failures and read errors (bytes_read < 0) are
 // transient/ambiguous and leave the file untouched; a close failure after a
 // full read is harmless and does not fail the load.
-inline int _load_block(const char* source_path, char* dst, size_t size,
+inline int _load_chunk(const char* source_path, char* dst, size_t size,
                        bool use_o_direct) {
   const int o_direct_flag = use_o_direct ? kODirectFlag : 0;
   const int fd = open(source_path, O_RDONLY | o_direct_flag, 0);
@@ -192,15 +192,15 @@ static PyObject* batch_lookup(PyObject* /*self*/, PyObject* args) {
   return result;
 }
 
-/// @brief Store a batch of blocks, each from its own buffer, to disk.
-/// @param tmp_paths    list[str] – one temp path per block.
-/// @param dest_paths   list[str] – one destination path per block.
-/// @param buffers      list[bytes-like] – one source buffer per block.
+/// @brief Store a batch of chunks, each from its own buffer, to disk.
+/// @param tmp_paths    list[str] – one temp path per chunk.
+/// @param dest_paths   list[str] – one destination path per chunk.
+/// @param buffers      list[bytes-like] – one source buffer per chunk.
 /// @param use_o_direct bool – whether to open files with O_DIRECT
 ///                     (default True). Ignored where O_DIRECT is unsupported
 ///                     by the platform.
 /// @note Releases the GIL for the entire batch. Raises on first error.
-static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
+static PyObject* batch_store_chunks(PyObject* /*self*/, PyObject* args) {
   PyObject* tmp_paths_obj = nullptr;
   PyObject* dest_paths_obj = nullptr;
   PyObject* buffers_obj = nullptr;
@@ -238,7 +238,7 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
     Py_BEGIN_ALLOW_THREADS for (Py_ssize_t i = 0; i < n; i++) {
       const char* buf = static_cast<const char*>(buffers[i].buf);
       const int err =
-          _store_block(tmp_paths[i], dest_paths[i], buf,
+          _store_chunk(tmp_paths[i], dest_paths[i], buf,
                        static_cast<size_t>(buffers[i].len), use_o_direct);
       if (err != 0) {
         failed_index = i;
@@ -261,15 +261,15 @@ static PyObject* batch_store_block(PyObject* /*self*/, PyObject* args) {
   Py_RETURN_NONE;
 }
 
-/// @brief Load a batch of blocks from disk, each into its own buffer.
-/// @param source_paths list[str] – one source path per block.
+/// @brief Load a batch of chunks from disk, each into its own buffer.
+/// @param source_paths list[str] – one source path per chunk.
 /// @param buffers      list[writable bytes-like] – one destination buffer
-///                     per block.
+///                     per chunk.
 /// @param use_o_direct bool – whether to open files with O_DIRECT
 ///                     (default True). Ignored where O_DIRECT is unsupported
 ///                     by the platform.
 /// @note Releases the GIL for the entire batch. Raises on first error.
-static PyObject* batch_load_block(PyObject* /*self*/, PyObject* args) {
+static PyObject* batch_load_chunks(PyObject* /*self*/, PyObject* args) {
   PyObject* source_paths_obj = nullptr;
   PyObject* buffers_obj = nullptr;
   int use_o_direct = 1;
@@ -301,7 +301,7 @@ static PyObject* batch_load_block(PyObject* /*self*/, PyObject* args) {
     Py_BEGIN_ALLOW_THREADS for (Py_ssize_t i = 0; i < n; i++) {
       char* buf = static_cast<char*>(buffers[i].buf);
       const int err =
-          _load_block(source_paths[i], buf, static_cast<size_t>(buffers[i].len),
+          _load_chunk(source_paths[i], buf, static_cast<size_t>(buffers[i].len),
                       use_o_direct);
       if (err != 0) {
         failed_index = i;
@@ -342,19 +342,19 @@ static PyMethodDef fs_io_C_methods[] = {
      "batch_lookup(paths: list[str]) -> list[bool]\n"
      "\n"
      "Check file existence for a batch of paths."},
-    {"batch_store_block", batch_store_block, METH_VARARGS,
-     "batch_store_block(tmp_paths: list[str], dest_paths: list[str],\n"
-     "                  buffers: list[bytes-like],\n"
+    {"batch_store_chunks", batch_store_chunks, METH_VARARGS,
+     "batch_store_chunks(tmp_paths: list[str], dest_paths: list[str],\n"
+     "                   buffers: list[bytes-like],\n"
+     "                   use_o_direct: bool = True) -> None\n"
+     "\n"
+     "Store a batch of chunks, each from its own buffer, to disk. Raises on "
+     "first error."},
+    {"batch_load_chunks", batch_load_chunks, METH_VARARGS,
+     "batch_load_chunks(source_paths: list[str],\n"
+     "                  buffers: list[writable bytes-like],\n"
      "                  use_o_direct: bool = True) -> None\n"
      "\n"
-     "Store a batch of blocks, each from its own buffer, to disk. Raises on "
-     "first error."},
-    {"batch_load_block", batch_load_block, METH_VARARGS,
-     "batch_load_block(source_paths: list[str],\n"
-     "                 buffers: list[writable bytes-like],\n"
-     "                 use_o_direct: bool = True) -> None\n"
-     "\n"
-     "Load a batch of blocks from disk into corresponding buffers. "
+     "Load a batch of chunks from disk into corresponding buffers. "
      "Raises on first error."},
     {nullptr, nullptr, 0, nullptr},
 };

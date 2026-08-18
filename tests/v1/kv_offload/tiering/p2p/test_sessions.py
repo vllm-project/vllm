@@ -259,13 +259,13 @@ class FakeParent:
     ) -> TransferJob:
         keys_list = list(keys)
         self.calls.append(("create_store_job", tuple(keys_list), ctx.req_id))
-        block_ids = np.array([self.stored[k] for k in keys_list], dtype=np.int32)
+        chunk_slot_ids = np.array([self.stored[k] for k in keys_list], dtype=np.int32)
         job_id = self._next_job_id
         self._next_job_id += 1
         return TransferJob(
             job_id=job_id,
             keys=keys_list,
-            block_ids=block_ids,
+            chunk_slot_ids=chunk_slot_ids,
             is_promotion=False,
             req_context=ctx,
         )

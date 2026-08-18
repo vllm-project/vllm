@@ -56,8 +56,8 @@ class CPUOffloadingSpec(OffloadingSpec):
             ),
             CPUOffloadingMetrics.CPU_ALLOCATION_SIZE: OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of the number of CPU blocks requested by each "
-                    "KV offload prepare_store call."
+                    "Histogram of the number of CPU chunks requested by "
+                    "each KV offload prepare_store call."
                 ),
                 buckets=(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144),
             ),
@@ -84,7 +84,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
 
         world_size = config.parallel.world_size
-        self.num_blocks = 0
+        self.num_chunks = 0
         self.kv_bytes_per_chunk = 0
         self.cpu_page_size_per_worker = 0
         self.replicated_layout = config.replicated_layout and self._uses_shared_region()
@@ -96,15 +96,15 @@ class CPUOffloadingSpec(OffloadingSpec):
             # calculate cpu_page_size_per_worker
             self.cpu_page_size_per_worker = kv_bytes_per_chunk // num_copies
 
-            # calculate num_blocks
+            # calculate num_chunks
             aligned_kv_bytes_per_chunk = round_up(
                 kv_bytes_per_chunk, self.BLOCK_SIZE_ALIGNMENT
             )
-            self.num_blocks = int(cpu_bytes_to_use) // aligned_kv_bytes_per_chunk
+            self.num_chunks = int(cpu_bytes_to_use) // aligned_kv_bytes_per_chunk
 
             # Expose aligned_kv_bytes_per_chunk as
             # kv_bytes_per_chunk. Note that this might contain
-            # some padding. i.e. each offloaded block is of the form,
+            # some padding. i.e. each offloaded chunk is of the form,
             # |--- W0-B0---|---- W1-B0---| ... |---- Wn-B0---| *** maybe-pad *** |
             # or |--- B0 (single copy) ---| *** maybe-pad *** |
             self.kv_bytes_per_chunk = aligned_kv_bytes_per_chunk
@@ -123,7 +123,7 @@ class CPUOffloadingSpec(OffloadingSpec):
     @override
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
-            # store_threshold: how many times a block must appear in lookup()
+            # store_threshold: how many times a chunk must appear in lookup()
             # before it is eligible for CPU offloading.  Values < 2 disable
             # filtering (a threshold of 1 equals no filter; 0 is the default).
             store_threshold = int(self.extra_config.get("store_threshold", 0))
@@ -132,7 +132,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             max_tracker_size = int(self.extra_config.get("max_tracker_size", 64_000))
 
             self._manager = CPUOffloadingManager(
-                num_blocks=self.num_blocks,
+                num_chunks=self.num_chunks,
                 cache_policy=self.eviction_policy,
                 cache_policy_module_path=self.cache_policy_module_path,
                 enable_events=self.kv_events_config.enable_kv_cache_events,
@@ -148,9 +148,9 @@ class CPUOffloadingSpec(OffloadingSpec):
 
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         mmap_region: SharedOffloadRegion | None = None
-        # num_blocks == 0 would size the region to zero bytes, which cannot be
+        # num_chunks == 0 would size the region to zero bytes, which cannot be
         # mmap'd; fall back to the tensor path (empty tensors) as before.
-        if self._uses_shared_region() and self.num_blocks > 0:
+        if self._uses_shared_region() and self.num_chunks > 0:
             # Replicated layout puts all ranks on slot 0 (single MLA copy);
             # otherwise each rank takes its own slot by physical device index.
             if self.replicated_layout:
@@ -160,16 +160,16 @@ class CPUOffloadingSpec(OffloadingSpec):
                 rank = torch.accelerator.current_device_index() % world_size
             mmap_region = SharedOffloadRegion(
                 engine_id=self.config.engine_id,
-                num_blocks=self.num_blocks,
+                num_chunks=self.num_chunks,
                 rank=rank,
-                kv_bytes_per_block=self.kv_bytes_per_chunk,
+                kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
             )
         try:
             return CPUOffloadingWorker(
                 kv_caches=kv_caches,
                 blocks_per_chunk=self.blocks_per_chunk,
-                num_cpu_blocks=self.num_blocks,
+                num_cpu_chunks=self.num_chunks,
                 mmap_region=mmap_region,
             )
         except Exception:
