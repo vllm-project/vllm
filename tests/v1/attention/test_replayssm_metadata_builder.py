@@ -293,31 +293,6 @@ def test_spec_decode_single_token_chunk_synthesizes_acceptance_metadata():
     assert meta.num_accepted_tokens.tolist() == [1]
 
 
-def test_flashinfer_replayssm_state_indices_are_contiguous():
-    builder = _create_replayssm_builder(
-        16,
-        mamba_backend=MambaBackendEnum.FLASHINFER,
-        num_speculative_tokens=3,
-    )
-    case = ReplaySSMBuildCase(
-        seq_lens=[106, 106],
-        query_lens=[1, 1],
-        is_prefilling=[False, False],
-        decode_base=[100, 100],
-        buffer_len=16,
-        expected_write_pos=[],
-        expected_is_flush=[],
-    )
-
-    meta = _build(builder, case)
-
-    assert meta.replayssm_state_indices_d is not None
-    assert meta.replayssm_state_indices_d.is_contiguous()
-    assert torch.equal(
-        meta.replayssm_state_indices_d, meta.state_indices_tensor_d[:, 0]
-    )
-
-
 def test_flashinfer_replayssm_state_indices_are_stable_for_full_cudagraph():
     builder = _create_replayssm_builder(
         16,
@@ -340,6 +315,7 @@ def test_flashinfer_replayssm_state_indices_are_stable_for_full_cudagraph():
     )
     first_indices = first.replayssm_state_indices_d
     assert first_indices is not None
+    assert first_indices.is_contiguous()
     first_ptr = first_indices.data_ptr()
 
     second = _build(
