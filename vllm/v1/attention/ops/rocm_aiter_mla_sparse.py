@@ -20,9 +20,19 @@ from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950
+    from aiter.ops.topk import top_k_per_row_decode as _aiter_top_k_per_row_decode
+    from aiter.ops.triton.gemm.batched.batched_gemm_bf16 import (
+        batched_gemm_bf16 as _aiter_batched_gemm_bf16,
+    )
 else:
     _ON_GFX942 = False
     _ON_GFX950 = False
+    _aiter_top_k_per_row_decode = None
+    _aiter_batched_gemm_bf16 = None
+
+# log2(e): folded into qk_scale so the decode softmax can use tl.exp2 instead
+# of tl.exp. AMD hardware executes exp2 faster than natural exp.
+_LOG2E = 1.4426950408889634
 
 
 @triton.jit
@@ -882,7 +892,7 @@ def rocm_aiter_sparse_attn_indexer(
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
         num_rows = logits.shape[0]
 
-        torch.ops._C.top_k_per_row_decode(
+        _aiter_top_k_per_row_decode(
             logits,
             next_n,
             decode_metadata.seq_lens,
@@ -1071,15 +1081,36 @@ def rocm_inv_rope_einsum(
 
     Fuses the inverse GPT-J RoPE into one Triton kernel and caches the bf16
     wo_a weight so the per-step dequant disappears.
+
+    For small T (decode regime, T≤32) uses aiter's Triton batched GEMM which
+    is tuned for these shapes. For larger T falls back to torch.einsum
+    (rocBLAS gemm_strided_batched) which is more efficient at high parallelism.
     """
     o_ref = _fused_inverse_rope_gptj(
         o, positions, rotary_emb.cos_sin_cache, rope_head_dim
     )
-    o_ref = o_ref.view(o.shape[0], n_local_groups, -1)
+    num_tokens = o_ref.shape[0]
+    o_ref = o_ref.view(num_tokens, n_local_groups, -1)
 
     wo_a_weight = _get_cached_wo_a_bf16(
         wo_a, n_local_groups, o_lora_rank, o_ref.shape[-1]
     )
+
+    if _aiter_batched_gemm_bf16 is not None and num_tokens <= 32:
+        # CUDA-graph safe: during graph capture Python runs once with the
+        # captured T, so this branch is resolved at capture time and the
+        # selected kernel is what gets recorded. All decode CUDA graph sizes
+        # (T=1..512) take the Triton path; prefill (T>512) falls through to
+        # einsum. The Triton kernel accepts non-contiguous inputs via strides,
+        # so no .contiguous() copy is needed on the transposed tensor.
+        #
+        # o_ref: [T, G, D_in] → transpose to [G, T, D_in] for batched GEMM
+        # wo_a_weight: [G, o_lora_rank, D_in]
+        # result: [G, T, o_lora_rank] → transpose back to [T, G, o_lora_rank]
+        return _aiter_batched_gemm_bf16(
+            o_ref.transpose(0, 1),
+            wo_a_weight,
+        ).transpose(0, 1)
 
     return torch.einsum("tgd,grd->tgr", o_ref, wo_a_weight)
 
@@ -1408,7 +1439,8 @@ def _sparse_attn_decode_ragged_kernel(
     extra_num_rows,
     main_block_size,
     extra_block_size,
-    scale,
+    qk_scale,
+    log2e,
     num_heads,
     HAS_ATTN_SINK: tl.constexpr,
     HAS_EXTRA: tl.constexpr,
@@ -1499,13 +1531,13 @@ def _sparse_attn_decode_ragged_kernel(
         k_rope = tl.where(k_rope == k_rope, k_rope, zero_rope)
 
         scores = tl.dot(q_nope, tl.trans(k_nope)) + tl.dot(q_rope, tl.trans(k_rope))
-        scores *= scale
+        scores *= qk_scale
         scores = tl.where(head_mask[:, None] & valid[None, :], scores, neg_large)
 
         m_block = tl.max(scores, axis=1)
         m_new = tl.maximum(m_i, m_block)
-        alpha = tl.exp(m_i - m_new)
-        p = tl.exp(scores - m_new[:, None])
+        alpha = tl.exp2(m_i - m_new)
+        p = tl.exp2(scores - m_new[:, None])
         p = tl.where(head_mask[:, None] & valid[None, :], p, 0.0)
         l_new = l_i * alpha + tl.sum(p, axis=1)
 
@@ -1570,13 +1602,13 @@ def _sparse_attn_decode_ragged_kernel(
                 q_rope,
                 tl.trans(k_rope),
             )
-            scores *= scale
+            scores *= qk_scale
             scores = tl.where(head_mask[:, None] & valid[None, :], scores, neg_large)
 
             m_block = tl.max(scores, axis=1)
             m_new = tl.maximum(m_i, m_block)
-            alpha = tl.exp(m_i - m_new)
-            p = tl.exp(scores - m_new[:, None])
+            alpha = tl.exp2(m_i - m_new)
+            p = tl.exp2(scores - m_new[:, None])
             p = tl.where(head_mask[:, None] & valid[None, :], p, 0.0)
             l_new = l_i * alpha + tl.sum(p, axis=1)
 
@@ -1589,9 +1621,10 @@ def _sparse_attn_decode_ragged_kernel(
         sink = tl.load(
             attn_sink_ptr + head_offsets, mask=head_mask, other=neg_large
         ).to(tl.float32)
-        m_final = tl.maximum(m_i, sink)
-        alpha = tl.exp(m_i - m_final)
-        l_final = l_i * alpha + tl.exp(sink - m_final)
+        sink_log2 = sink * log2e
+        m_final = tl.maximum(m_i, sink_log2)
+        alpha = tl.exp2(m_i - m_final)
+        l_final = l_i * alpha + tl.exp2(sink_log2 - m_final)
         denom = tl.maximum(l_final, 1.0e-30)
         out_nope = tl.where(
             l_final[:, None] > 0.0,
@@ -1648,7 +1681,8 @@ def _sparse_attn_decode_partial_kernel(
     extra_num_rows,
     main_block_size,
     extra_block_size,
-    scale,
+    qk_scale,
+    log2e,
     num_heads,
     HAS_EXTRA: tl.constexpr,
     NOPE_DIM: tl.constexpr,
@@ -1749,13 +1783,13 @@ def _sparse_attn_decode_partial_kernel(
         k_rope = tl.where(k_rope == k_rope, k_rope, zero_rope)
 
         scores = tl.dot(q_nope, tl.trans(k_nope)) + tl.dot(q_rope, tl.trans(k_rope))
-        scores *= scale
+        scores *= qk_scale
         scores = tl.where(head_mask[:, None] & valid[None, :], scores, neg_large)
 
         m_block = tl.max(scores, axis=1)
         m_new = tl.maximum(m_i, m_block)
-        alpha = tl.exp(m_i - m_new)
-        p = tl.exp(scores - m_new[:, None])
+        alpha = tl.exp2(m_i - m_new)
+        p = tl.exp2(scores - m_new[:, None])
         p = tl.where(head_mask[:, None] & valid[None, :], p, 0.0)
         l_new = l_i * alpha + tl.sum(p, axis=1)
 
@@ -1823,13 +1857,13 @@ def _sparse_attn_decode_partial_kernel(
                 q_rope,
                 tl.trans(k_rope),
             )
-            scores *= scale
+            scores *= qk_scale
             scores = tl.where(head_mask[:, None] & valid[None, :], scores, neg_large)
 
             m_block = tl.max(scores, axis=1)
             m_new = tl.maximum(m_i, m_block)
-            alpha = tl.exp(m_i - m_new)
-            p = tl.exp(scores - m_new[:, None])
+            alpha = tl.exp2(m_i - m_new)
+            p = tl.exp2(scores - m_new[:, None])
             p = tl.where(head_mask[:, None] & valid[None, :], p, 0.0)
             l_new = l_i * alpha + tl.sum(p, axis=1)
 
@@ -2276,6 +2310,7 @@ def _sparse_attn_decode_reduce_kernel(
     pa_stride0,
     pa_stride_s,
     pa_stride_h,
+    log2e,
     num_heads,
     HAS_ATTN_SINK: tl.constexpr,
     ADAPTIVE_SPLITS: tl.constexpr,
@@ -2321,18 +2356,19 @@ def _sparse_attn_decode_reduce_kernel(
 
     m_comb = tl.max(m_all, axis=0)  # [H]
     if HAS_ATTN_SINK:
-        sink = tl.load(
+        sink_raw = tl.load(
             attn_sink_ptr + head_offsets, mask=head_mask, other=neg_large
         ).to(tl.float32)
-        m_final = tl.maximum(m_comb, sink)
+        sink_log2 = sink_raw * log2e
+        m_final = tl.maximum(m_comb, sink_log2)
     else:
         m_final = m_comb
 
-    w_all = tl.exp(m_all - m_final[None, :])  # [S, H]
+    w_all = tl.exp2(m_all - m_final[None, :])  # [S, H]
     w_all = tl.where(load_mask, w_all, 0.0)
     l_final = tl.sum(w_all * l_all, axis=0)  # [H]
     if HAS_ATTN_SINK:
-        l_final = l_final + tl.exp(sink - m_final)
+        l_final = l_final + tl.exp2(sink_log2 - m_final)
     denom = tl.maximum(l_final, 1.0e-30)
 
     # Phase 2: weighted sum of the per-split accumulators. The combine weight
@@ -2346,7 +2382,7 @@ def _sparse_attn_decode_reduce_kernel(
             mask=head_mask,
             other=neg_large,
         )
-        w_s = tl.exp(m_s - m_final)
+        w_s = tl.exp2(m_s - m_final)
         if ADAPTIVE_SPLITS:
             active_split = m_s > neg_large
             w_s = tl.where(head_mask & active_split, w_s, 0.0)
@@ -2697,6 +2733,10 @@ def _rocm_sparse_attn_decode_ragged_triton(
         extra_indptr = torch.zeros(num_queries + 1, device=q.device, dtype=torch.int32)
 
     block_h = 16
+    num_warps_partial = 4
+    num_stages_partial = 1
+    block_k = 32 if (_ON_GFX942 or _ON_GFX950) else (16 if head_dim >= 256 else 32)
+
     if out is None:
         out = torch.empty_like(q, dtype=torch.bfloat16)
     else:
@@ -2712,8 +2752,9 @@ def _rocm_sparse_attn_decode_ragged_triton(
     comb_dim = nope_head_dim + rope_head_dim
     is_fnuz = current_platform.is_fp8_fnuz()
 
+    qk_scale = float(scale) * _LOG2E
+
     if not (_ON_GFX942 or _ON_GFX950):  # Fallback path for un-tuned architectures.
-        block_k = 16 if head_dim >= 256 else 32
         _sparse_attn_decode_ragged_kernel[(num_queries, heads_blocks)](
             q,
             main_cache,
@@ -2734,7 +2775,8 @@ def _rocm_sparse_attn_decode_ragged_triton(
             extra_cache.shape[0] * extra_cache.shape[1],
             main_cache.shape[1],
             extra_cache.shape[1],
-            scale,
+            qk_scale,
+            _LOG2E,
             num_heads,
             HAS_ATTN_SINK=has_attn_sink,
             HAS_EXTRA=has_extra,
@@ -2749,27 +2791,12 @@ def _rocm_sparse_attn_decode_ragged_triton(
         )
         return out
 
-    block_k = 32  # KV tokens walked per split-K iteration. Tuned on gfx950.
-    if _ON_GFX950:
-        inv_q = 1.0 / max(1, num_queries)
-        avg_main_len = main_indices.numel() * inv_q
-        avg_extra_len = (extra_indices.numel() * inv_q) if has_extra else 0.0
-        num_splits = _decode_gfx950_num_splits(
-            num_queries,
-            heads_blocks,
-            avg_main_len,
-            avg_extra_len,
-            block_k,
-        )
-    else:
-        # Average per-query segment lengths, read sync-free from the ragged
-        # index sizes, let the split heuristic avoid over-splitting.
-        inv_q = 1.0 / max(1, num_queries)
-        avg_main_len = main_indices.numel() * inv_q
-        avg_extra_len = (extra_indices.numel() * inv_q) if has_extra else 0.0
-        num_splits = _decode_num_splits(
-            num_queries, heads_blocks, avg_main_len, avg_extra_len, block_k
-        )
+    inv_q = 1.0 / max(1, num_queries)
+    avg_main_len = main_indices.numel() * inv_q
+    avg_extra_len = (extra_indices.numel() * inv_q) if has_extra else 0.0
+    num_splits = _decode_num_splits(
+        num_queries, heads_blocks, avg_main_len, avg_extra_len, block_k
+    )
 
     base_workgroups = num_queries * heads_blocks
     adaptive_splits = (
@@ -2826,8 +2853,8 @@ def _rocm_sparse_attn_decode_ragged_triton(
             BLOCK_H=block_h,
             BLOCK_K=block_k,
             NUM_SPLITS=num_splits,
-            NUM_STAGES=1,
-            num_warps=4,
+            NUM_STAGES=num_stages_partial,
+            num_warps=num_warps_partial,
             waves_per_eu=0,
         )
     else:
@@ -2855,7 +2882,8 @@ def _rocm_sparse_attn_decode_ragged_triton(
             extra_cache.shape[0] * extra_cache.shape[1],
             main_cache.shape[1],
             extra_cache.shape[1],
-            scale,
+            qk_scale,
+            _LOG2E,
             num_heads,
             HAS_EXTRA=has_extra,
             NOPE_DIM=nope_head_dim,
@@ -2870,8 +2898,8 @@ def _rocm_sparse_attn_decode_ragged_triton(
             BLOCK_H=block_h,
             BLOCK_K=block_k,
             NUM_SPLITS=num_splits,
-            NUM_STAGES=1,
-            num_warps=4,
+            NUM_STAGES=num_stages_partial,
+            num_warps=num_warps_partial,
         )
 
     _sparse_attn_decode_reduce_kernel[(num_queries, num_heads)](
@@ -2887,6 +2915,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         part_acc.stride(0),
         part_acc.stride(1),
         part_acc.stride(2),
+        _LOG2E,
         num_heads,
         HAS_ATTN_SINK=has_attn_sink,
         ADAPTIVE_SPLITS=adaptive_splits,
