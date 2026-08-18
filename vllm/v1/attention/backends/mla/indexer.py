@@ -248,7 +248,7 @@ class BuildPrefillChunkMetadataKernel(
         input_variant: TritonPointerInputVariant
 
     @staticmethod
-    @triton.jit(do_not_specialize=["query_slice_start", "query_slice_stop", "DCP_RANK"])
+    @triton.jit(do_not_specialize=["query_slice_start", "query_slice_stop"])
     def kernel(
         # Inputs
         query_start_loc_ptr,

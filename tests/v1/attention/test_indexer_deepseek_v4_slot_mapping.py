@@ -46,7 +46,6 @@ def test_prefill_chunk_slice_bounds_do_not_specialize():
 
     assert "query_slice_start" not in specialization_args
     assert "query_slice_stop" not in specialization_args
-    assert "DCP_RANK" not in specialization_args
 
 
 def test_deepseek_v4_indexer_enables_prefill_metadata_warmup():
