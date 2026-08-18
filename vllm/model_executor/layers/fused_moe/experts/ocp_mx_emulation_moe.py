@@ -57,7 +57,7 @@ def activation_quant_dtype(
         OCP_MX_Scheme.w_mxfp6_e2m3,
     }:
         return None
-    elif ocp_mx_scheme in {OCP_MX_Scheme.w_mxfp4_a_mxfp4}:
+    elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp4_a_mxfp4:
         return "mxfp4"
     elif ocp_mx_scheme in {
         OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
