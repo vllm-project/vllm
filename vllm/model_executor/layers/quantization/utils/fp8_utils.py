@@ -41,18 +41,30 @@ logger = init_logger(__name__)
 
 
 @functools.cache
-def _load_ds4_alignment_library(path: str) -> None:
+def _load_batch_invariant_kernel_library(path: str) -> None:
     library = Path(path).expanduser().resolve()
     if not library.is_file():
-        raise RuntimeError(f"DS4 alignment kernel library does not exist: {library}")
-    torch.ops.load_library(str(library))
+        raise RuntimeError(
+            f"batch-invariant kernel library does not exist: {library}"
+        )
+    try:
+        torch.ops.load_library(str(library))
+        torch.ops.vllm_batch_invariant.fused_silu_mul_per_token_group_quant
+    except (OSError, RuntimeError, AttributeError) as exc:
+        raise RuntimeError(
+            f"failed to load the batch-invariant kernel library: {library}"
+        ) from exc
 
 
-def is_ds4_alignment_quant_enabled() -> bool:
-    return bool(os.environ.get("VLLM_DS4_ALIGNMENT_KERNEL_LIB"))
+def is_batch_invariant_quant_kernel_enabled() -> bool:
+    path = os.environ.get("VLLM_BATCH_INVARIANT_KERNEL_LIB")
+    if not path:
+        return False
+    _load_batch_invariant_kernel_library(path)
+    return True
 
 
-def ds4_silu_mul_quant_fp8(
+def fused_silu_mul_per_token_group_quant_fp8(
     input: torch.Tensor,
     *,
     use_ue8m0: bool,
@@ -61,20 +73,24 @@ def ds4_silu_mul_quant_fp8(
     output_q: torch.Tensor | None = None,
     group_size: int = 128,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run Slime's dual-layout SiLU*up + per-token FP8 quant kernel."""
-    path = os.environ.get("VLLM_DS4_ALIGNMENT_KERNEL_LIB")
+    """Run the batch-invariant fused SiLU*up and per-token FP8 quant kernel."""
+    path = os.environ.get("VLLM_BATCH_INVARIANT_KERNEL_LIB")
     if not path:
-        raise RuntimeError("VLLM_DS4_ALIGNMENT_KERNEL_LIB is not set")
-    _load_ds4_alignment_library(path)
+        raise RuntimeError("VLLM_BATCH_INVARIANT_KERNEL_LIB is not set")
+    _load_batch_invariant_kernel_library(path)
     if round_scale is None:
         round_scale = use_ue8m0
     if use_ue8m0 and not round_scale:
         raise ValueError("packed UE8M0 scales require round_scale=True")
 
     if input.ndim not in (2, 3) or input.shape[-1] % (2 * group_size):
-        raise ValueError(f"invalid DS4 activation shape: {tuple(input.shape)}")
+        raise ValueError(
+            f"invalid batch-invariant activation shape: {tuple(input.shape)}"
+        )
     if not input.is_contiguous() or input.dtype != torch.bfloat16:
-        raise ValueError("DS4 alignment activation input must be contiguous BF16")
+        raise ValueError(
+            "batch-invariant activation input must be contiguous BF16"
+        )
 
     hidden = input.shape[-1] // 2
     groups = hidden // group_size
@@ -87,7 +103,7 @@ def ds4_silu_mul_quant_fp8(
 
     if masked_m is None:
         if input.ndim != 2:
-            raise ValueError("contiguous DS4 alignment input must be 2D")
+            raise ValueError("contiguous batch-invariant input must be 2D")
         tokens = input.shape[0]
         packed_groups = (groups + 3) // 4 if use_ue8m0 else groups
         output_s = torch.empty_strided(
@@ -98,7 +114,7 @@ def ds4_silu_mul_quant_fp8(
         )
     else:
         if input.ndim != 3:
-            raise ValueError("masked DS4 alignment input must be 3D")
+            raise ValueError("masked batch-invariant input must be 3D")
         experts, tokens = input.shape[:2]
         if masked_m.shape != (experts,) or masked_m.dtype != torch.int32:
             raise ValueError("masked_m must be int32 with one count per expert")
@@ -111,7 +127,7 @@ def ds4_silu_mul_quant_fp8(
         )
     output_s.zero_()
 
-    torch.ops.ds4_alignment.per_token_group_quant_8bit_v2(
+    torch.ops.vllm_batch_invariant.fused_silu_mul_per_token_group_quant(
         input,
         output_q,
         output_s,

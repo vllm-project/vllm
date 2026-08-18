@@ -2,7 +2,9 @@
 
 #include <optional>
 
-void sgl_per_token_group_quant_8bit_v2(
+namespace vllm::batch_invariant {
+
+void fused_silu_mul_per_token_group_quant(
     torch::Tensor input,
     torch::Tensor output_q,
     torch::Tensor output_s,
@@ -15,16 +17,18 @@ void sgl_per_token_group_quant_8bit_v2(
     bool fuse_silu_and_mul,
     const std::optional<torch::Tensor>& masked_m);
 
-TORCH_LIBRARY(ds4_alignment, ops) {
+}  // namespace vllm::batch_invariant
+
+TORCH_LIBRARY(vllm_batch_invariant, ops) {
   ops.def(
-      "per_token_group_quant_8bit_v2(Tensor input, Tensor! output_q, "
+      "fused_silu_mul_per_token_group_quant(Tensor input, Tensor! output_q, "
       "Tensor! output_s, int group_size, float eps, float min_8bit, "
       "float max_8bit, bool round_scale, bool scale_ue8m0, "
-      "bool fuse_silu_and_mul, "
-      "Tensor? masked_m) -> ()");
+      "bool fuse_silu_and_mul, Tensor? masked_m) -> ()");
 }
 
-TORCH_LIBRARY_IMPL(ds4_alignment, CUDA, ops) {
-  ops.impl("per_token_group_quant_8bit_v2",
-           &sgl_per_token_group_quant_8bit_v2);
+TORCH_LIBRARY_IMPL(vllm_batch_invariant, CUDA, ops) {
+  ops.impl(
+      "fused_silu_mul_per_token_group_quant",
+      &vllm::batch_invariant::fused_silu_mul_per_token_group_quant);
 }

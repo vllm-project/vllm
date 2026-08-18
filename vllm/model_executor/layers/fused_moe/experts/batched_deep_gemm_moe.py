@@ -20,8 +20,8 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    ds4_silu_mul_quant_fp8,
-    is_ds4_alignment_quant_enabled,
+    fused_silu_mul_per_token_group_quant_fp8,
+    is_batch_invariant_quant_kernel_enabled,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -243,17 +243,18 @@ def persistent_masked_m_silu_mul_quant(
     assert group_size == 128, "H must be divisible by 8"
     assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E
 
-    if is_ds4_alignment_quant_enabled():
+    if is_batch_invariant_quant_kernel_enabled():
         if quant_scale_fmt not in (
             DeepGemmQuantScaleFMT.FLOAT32,
             DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
             DeepGemmQuantScaleFMT.UE8M0,
         ):
             raise RuntimeError(
-                "DS4 alignment kernel supports FLOAT32 or packed UE8M0 scales, "
+                "batch-invariant kernel supports FLOAT32 or packed UE8M0 "
+                "scales, "
                 f"got {quant_scale_fmt}"
             )
-        return ds4_silu_mul_quant_fp8(
+        return fused_silu_mul_per_token_group_quant_fp8(
             y,
             use_ue8m0=quant_scale_fmt == DeepGemmQuantScaleFMT.UE8M0,
             round_scale=quant_scale_fmt != DeepGemmQuantScaleFMT.FLOAT32,
