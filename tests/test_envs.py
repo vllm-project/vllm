@@ -146,6 +146,14 @@ def test_precompiled_install_flags_are_orthogonal() -> None:
         assert environment_variables["VLLM_USE_PRECOMPILED_RUST"]() is True
 
 
+def test_flashinfer_gemm_allreduce_defaults_enabled() -> None:
+    name = "VLLM_USE_FLASHINFER_GEMM_ALLREDUCE"
+    with patch.dict(os.environ, {}, clear=True):
+        assert environment_variables[name]() is True
+    with patch.dict(os.environ, {name: "0"}, clear=True):
+        assert environment_variables[name]() is False
+
+
 def test_rust_bench_auto_path_missing_fails_fast() -> None:
     with (
         patch.dict(os.environ, {"VLLM_USE_RUST_BENCH": "1"}, clear=True),

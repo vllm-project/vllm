@@ -210,9 +210,13 @@ def should_use_fused_gemm_ar(
 
         enabled = has_flashinfer_cutedsl_gemm_allreduce()
 
-    logger.info_once(
-        "CuTe DSL fused GEMM-AR is %s.", "enabled" if enabled else "disabled"
-    )
+    if enabled:
+        logger.info_once(
+            "CuTe DSL fused GEMM-AR is enabled. To disable it, set "
+            "VLLM_USE_FLASHINFER_GEMM_ALLREDUCE=0."
+        )
+    else:
+        logger.info_once("CuTe DSL fused GEMM-AR is disabled.")
     return enabled
 
 

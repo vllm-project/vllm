@@ -209,7 +209,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_RS: bool = False
-    VLLM_USE_FLASHINFER_GEMM_ALLREDUCE: bool = False
+    VLLM_USE_FLASHINFER_GEMM_ALLREDUCE: bool = True
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
@@ -1613,7 +1613,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use FlashInfer's SM100 BF16 GEMM with fused tensor-parallel all-reduce
     # for eligible row-parallel projections.
     "VLLM_USE_FLASHINFER_GEMM_ALLREDUCE": lambda: bool(
-        int(os.getenv("VLLM_USE_FLASHINFER_GEMM_ALLREDUCE", "0"))
+        int(os.getenv("VLLM_USE_FLASHINFER_GEMM_ALLREDUCE", "1"))
     ),
     # Allow use of FlashInfer FP8 block-scale GEMM for linear layers.
     # This uses TensorRT-LLM kernels and requires SM90+ (Hopper).
