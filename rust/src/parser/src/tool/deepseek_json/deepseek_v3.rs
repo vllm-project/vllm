@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use super::{DeepSeekJsonFormat, DeepSeekJsonToolParser};
-use crate::tool::{Result, StructuralTagModel, Tool, ToolParser, ToolParserOutput};
+use crate::tool::{Result, StructuralTagBuilder, Tool, ToolParser, ToolParserOutput};
 
 /// Tool parser for DeepSeek V3 JSON-fenced tool calls.
 ///
@@ -35,8 +35,8 @@ impl ToolParser for DeepSeekV3ToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-        Some(StructuralTagModel::DeepSeekR1)
+    fn structural_tag_builder(&self) -> Option<&dyn StructuralTagBuilder> {
+        Some(xgrammar_structural_tag::Model::DeepSeekR1.builder())
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {

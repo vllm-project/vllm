@@ -20,9 +20,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-)
+from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
@@ -71,12 +69,25 @@ from .utils import (
     extract_layer_index,
     make_empty_intermediate_tensors_factory,
     make_layers,
+    maybe_fuse_shared_experts,
     maybe_prefix,
 )
 
 logger = init_logger(__name__)
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
+
+
+def _should_use_sequence_parallel(vllm_config: VllmConfig) -> bool:
+    config = vllm_config.model_config.hf_text_config
+    parallel_config = vllm_config.parallel_config
+    return (
+        parallel_config.use_sequence_parallel_moe
+        and parallel_config.pipeline_parallel_size == 1
+        and getattr(config, "num_experts", 0) > 0
+        and not getattr(config, "mlp_only_layers", [])
+        and getattr(config, "decoder_sparse_step", 1) == 1
+    )
 
 
 def _is_shared_expert_fse_compatible(quant_config) -> bool:
@@ -110,7 +121,6 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
 
@@ -130,11 +140,6 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
 
         self.gate = ReplicatedLinear(
             config.hidden_size,
@@ -174,7 +179,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 prefix=f"{prefix}.shared_expert",
             )
 
-        self.experts = FusedMoE(
+        self.experts = FusedMoEFactory(
             shared_experts=self.shared_expert,
             gate=self.gate,
             num_experts=self.n_routed_experts,
@@ -206,17 +211,9 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         if self.is_sequence_parallel and not already_sequence_parallel:
             hidden_states = sequence_parallel_chunk(hidden_states)
 
-        if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoE class
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states, router_logits=hidden_states
-            )
-        else:
-            # router_logits: (num_tokens, n_experts)
-            router_logits, _ = self.gate(hidden_states)
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states, router_logits=router_logits
-            )
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states, router_logits=hidden_states
+        )
 
         if self.is_sequence_parallel and not already_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
@@ -412,7 +409,6 @@ class Qwen3NextDecoderLayer(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        parallel_config = vllm_config.parallel_config
 
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
@@ -424,10 +420,8 @@ class Qwen3NextDecoderLayer(nn.Module):
             config.num_experts > 0
             and (self.layer_idx + 1) % config.decoder_sparse_step == 0
         )
-        self.use_attn_reduce_scatter_for_moe = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
-            and is_moe_layer
+        self.use_attn_reduce_scatter_for_moe = _should_use_sequence_parallel(
+            vllm_config
         )
 
         if self.layer_type == "linear_attention":
@@ -496,11 +490,6 @@ class Qwen3NextDecoderLayer(nn.Module):
         **kwargs: object,
     ):
         full_num_tokens = positions.shape[-1]
-        input_is_sequence_parallel = (
-            self.use_attn_reduce_scatter_for_moe
-            and residual is not None
-            and hidden_states.shape[0] != full_num_tokens
-        )
 
         if residual is None:
             residual = hidden_states
@@ -508,7 +497,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        if input_is_sequence_parallel:
+        if self.use_attn_reduce_scatter_for_moe:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
             hidden_states = hidden_states[:full_num_tokens]
 
@@ -539,8 +528,6 @@ class Qwen3NextDecoderLayer(nn.Module):
             # pad if not divisible by world size
             hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
             hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
-            if not input_is_sequence_parallel:
-                residual = sequence_parallel_chunk(residual)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -567,24 +554,6 @@ class Qwen3NextDecoderLayer(nn.Module):
                 )
 
         return hidden_states, residual
-
-
-def _all_gather_hidden_and_residual(
-    hidden_states: torch.Tensor,
-    residual: torch.Tensor | None,
-    full_num_tokens: int,
-    hidden_size: int,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if residual is None:
-        hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-        hidden_states = hidden_states[:full_num_tokens]
-        return hidden_states, None
-
-    combined_states = torch.cat([hidden_states, residual], dim=-1)
-    combined_states = tensor_model_parallel_all_gather(combined_states, 0)
-    combined_states = combined_states[:full_num_tokens]
-    hidden_states, residual = combined_states.split([hidden_size, hidden_size], dim=-1)
-    return hidden_states, residual
 
 
 @support_torch_compile
@@ -644,6 +613,10 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    @property
+    def use_sequence_parallel(self) -> bool:
+        return self.layers[self.start_layer].use_attn_reduce_scatter_for_moe
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -663,35 +636,20 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         full_num_tokens = positions.shape[-1]
+        if self.use_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states)
+            assert residual is None
+
         aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
-            if (
-                hidden_states.shape[0] != full_num_tokens
-                and not layer.use_attn_reduce_scatter_for_moe
-            ):
-                hidden_states, residual = _all_gather_hidden_and_residual(
-                    hidden_states,
-                    residual,
-                    full_num_tokens,
-                    self.config.hidden_size,
-                )
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
             )
-            if (layer_idx + 1) in self.aux_hidden_state_layers and hidden_states.shape[
-                0
-            ] != full_num_tokens:
-                hidden_states, residual = _all_gather_hidden_and_residual(
-                    hidden_states,
-                    residual,
-                    full_num_tokens,
-                    self.config.hidden_size,
-                )
             self._maybe_add_hidden_state(
                 aux_hidden_states, layer_idx + 1, hidden_states, residual
             )
@@ -700,30 +658,32 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
-        if hidden_states.shape[0] != full_num_tokens:
-            hidden_states, residual = _all_gather_hidden_and_residual(
-                hidden_states,
-                residual,
-                full_num_tokens,
-                self.config.hidden_size,
-            )
         hidden_states, _ = self.norm(hidden_states, residual)
+        if self.use_sequence_parallel:
+            if aux_hidden_states:
+                hidden_size = hidden_states.shape[-1]
+                hidden_states = torch.cat([hidden_states, *aux_hidden_states], dim=-1)
+                hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+                hidden_states = hidden_states[:full_num_tokens]
+                hidden_states, *aux_hidden_states = hidden_states.split(
+                    hidden_size, dim=-1
+                )
+            else:
+                hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+                hidden_states = hidden_states[:full_num_tokens]
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        mapper = self.hf_to_vllm_mapper
-        if rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
-            # AITER fused-shared-experts: route the shared_expert checkpoint
-            # weights into the extra fused expert slot. Merge (not mutate) so the
-            # shared class mapper isn't permanently altered.
-            num_routed = getattr(self.config, "num_experts", 0)
-            mapper = mapper | WeightsMapper(
-                orig_to_new_substr={"mlp.shared_expert.": f"mlp.experts.{num_routed}."}
-            )
+        weights = maybe_fuse_shared_experts(
+            weights,
+            n_routed_experts=getattr(self.config, "num_experts", 0),
+            n_shared_experts=1,
+            ckpt_prefix="mlp.shared_expert",
+        )
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class QwenNextMixtureOfExperts(MixtureOfExperts):

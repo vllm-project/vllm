@@ -4,6 +4,8 @@
 
 from abc import ABC, abstractmethod
 
+import torch
+
 from vllm.config import VllmConfig
 from vllm.v1.attention.backend import AttentionBackend, AttentionImpl
 from vllm.v1.kv_cache_interface import KVCacheSpec
@@ -20,6 +22,14 @@ class AttentionLayerBase(ABC):
 
     impl: "AttentionImpl"
     supports_dcp: bool = True
+
+    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
+        """Bind the allocated KV cache tensor to this layer.
+
+        The default stores the cache view as-is; subclasses (e.g. Mamba)
+        override this to unpack the raw buffer into per-state views.
+        """
+        self.kv_cache = kv_cache
 
     @abstractmethod
     def get_attn_backend(self) -> type[AttentionBackend]:
