@@ -184,6 +184,10 @@ async def test_generate_defaults_max_tokens_when_omitted(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="parallel sampling (n > 1) is not supported by the Rust frontend",
+)
 async def test_generate_returns_all_choices_when_n_greater_than_one(client):
     """Regression: ``n > 1`` must return ``n`` choices.
 
