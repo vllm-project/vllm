@@ -317,6 +317,14 @@ steps:
   - pytest -v -s detokenizer
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
+  mirror:
+    amd:
+      label: ":amd: (MI355) Async Engine, Inputs, Utils, Worker"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 40
+      depends_on:
+      - image-build-amd
 
 - label: ":computer: (CPU) Async Engine, Inputs, Utils, Worker, Config"
   key: async-engine-inputs-utils-worker-config-cpu

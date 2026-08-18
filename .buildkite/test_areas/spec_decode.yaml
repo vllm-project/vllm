@@ -223,6 +223,14 @@ steps:
   commands:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
     - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
+  mirror:
+    amd:
+      label: ":amd: (MI300) Speculators Correctness Nightly"
+      dind: false
+      device: mi300_1
+      timeout_in_minutes: 40
+      depends_on:
+      - image-build-amd
 
 - label: ":nvidia: (B200) Spec Decode DeepSeek MTP Parallel Load"
   key: spec-decode-deepseek-mtp-parallel-load-2xb200-2xmi300
