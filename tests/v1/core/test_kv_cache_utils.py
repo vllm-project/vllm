@@ -20,7 +20,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.sampling_params import SamplingParams
-from vllm.utils.hashing import sha256, sha256_cbor
+from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
@@ -199,14 +199,20 @@ def new_mamba_spec(
 def test_none_hash(monkeypatch, hash_fn):
     import vllm.v1.core.kv_cache_utils
 
-    # case 1: PYTHONHASHSEED is not set, use random
+    # case 1: PYTHONHASHSEED is not set -> deterministic default seed so that
+    # independent processes compute identical block hashes for identical
+    # content (e.g. for KV cache reuse across nodes).
     with monkeypatch.context() as m:
         m.delenv("PYTHONHASHSEED", raising=False)
         reloaded_kv_cache_utils = importlib.reload(vllm.v1.core.kv_cache_utils)
         reloaded_kv_cache_utils.init_none_hash(hash_fn)
-        assert reloaded_kv_cache_utils.NONE_HASH is not None
-        assert isinstance(reloaded_kv_cache_utils.NONE_HASH, bytes)
-        assert reloaded_kv_cache_utils.NONE_HASH != b""
+        none_hash = reloaded_kv_cache_utils.NONE_HASH
+        assert isinstance(none_hash, bytes)
+        assert none_hash != b""
+        assert none_hash == hash_fn(reloaded_kv_cache_utils.DEFAULT_NONE_HASH_SEED)
+        # deterministic across re-initialization within the same environment
+        reloaded_kv_cache_utils.init_none_hash(hash_fn)
+        assert none_hash == reloaded_kv_cache_utils.NONE_HASH
 
     # case 2: PYTHONHASHSEED is set, use the seed and hash_fn
     with monkeypatch.context() as m:
@@ -216,6 +222,58 @@ def test_none_hash(monkeypatch, hash_fn):
         assert reloaded_kv_cache_utils.NONE_HASH is not None
         assert isinstance(reloaded_kv_cache_utils.NONE_HASH, bytes)
         assert hash_fn("python hash seed") == reloaded_kv_cache_utils.NONE_HASH
+
+
+@pytest.mark.parametrize("non_crypto_fn", [xxhash, xxhash_cbor])
+def test_none_hash_seed_random_for_non_crypto(monkeypatch, non_crypto_fn):
+    """Non-cryptographic algorithms keep the per-process random seed.
+
+    A deterministic seed is safe for SHA-256, whose collision resistance does
+    not depend on a secret, but xxHash is not collision resistant: a known seed
+    would let an attacker precompute colliding blocks offline. Keep the
+    unpredictable seed there unless the operator opts into a shared one.
+    """
+    # PYTHONHASHSEED unset -> unpredictable, differs per resolution.
+    with monkeypatch.context() as m:
+        m.delenv("PYTHONHASHSEED", raising=False)
+        seeds = {kv_cache_utils.resolve_none_hash_seed(non_crypto_fn) for _ in range(5)}
+        assert len(seeds) == 5
+        assert kv_cache_utils.DEFAULT_NONE_HASH_SEED not in seeds
+
+    # PYTHONHASHSEED set -> operator opt-in wins, so peers can share a cache.
+    with monkeypatch.context() as m:
+        m.setenv("PYTHONHASHSEED", "12345")
+        assert kv_cache_utils.resolve_none_hash_seed(non_crypto_fn) == "12345"
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_none_hash_seed_deterministic_for_crypto(monkeypatch, hash_fn):
+    with monkeypatch.context() as m:
+        m.delenv("PYTHONHASHSEED", raising=False)
+        seed = kv_cache_utils.resolve_none_hash_seed(hash_fn)
+        assert seed == kv_cache_utils.DEFAULT_NONE_HASH_SEED
+        assert seed == kv_cache_utils.resolve_none_hash_seed(hash_fn)
+
+
+def test_get_none_hash_seed_reports_effective_seed(monkeypatch):
+    """P2P advertises the seed NONE_HASH was actually derived from.
+
+    The P2P tier is constructed before init_none_hash runs, so it must read the
+    resolved seed lazily rather than re-deriving it.
+    """
+    import vllm.v1.core.kv_cache_utils
+
+    with monkeypatch.context() as m:
+        m.delenv("PYTHONHASHSEED", raising=False)
+        reloaded = importlib.reload(vllm.v1.core.kv_cache_utils)
+        reloaded.init_none_hash(sha256)
+        assert reloaded.get_none_hash_seed() == reloaded.DEFAULT_NONE_HASH_SEED
+
+    with monkeypatch.context() as m:
+        m.setenv("PYTHONHASHSEED", "12345")
+        reloaded = importlib.reload(vllm.v1.core.kv_cache_utils)
+        reloaded.init_none_hash(sha256)
+        assert reloaded.get_none_hash_seed() == "12345"
 
 
 def test_kv_cache_block():
