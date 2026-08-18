@@ -13,6 +13,11 @@ from vllm._aiter_ops import (
     is_aiter_found_and_supported,
     rocm_aiter_ops,
 )
+from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+    activation_quant_dtype,
+)
+from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
@@ -1838,3 +1843,27 @@ def test_select_mxfp4_moe_backend_raises_with_unsupported_reasons(
 
     with pytest.raises(NotImplementedError, match="Unsupported reasons"):
         mxfp4_oracle.select_mxfp4_moe_backend(moe_config)
+
+
+# Every activation-quantizing OCP MX scheme must map to a `quant_dtype` that
+# `moe_kernel_quantize_input` actually dispatches on. Its final `else` returns
+# the activation untouched, so a name it does not know (e.g. "mxfp6" instead of
+# "mxfp6_e3m2") silently skips the fake-quantization the emulation exists for.
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
+@pytest.mark.parametrize("ocp_mx_scheme", list(OCP_MX_Scheme))
+def test_emulation_activation_quant_dtype_is_dispatchable(ocp_mx_scheme):
+    quant_dtype = activation_quant_dtype(ocp_mx_scheme)
+
+    if "_a_" not in ocp_mx_scheme.value:
+        assert quant_dtype is None, "weight-only schemes must not quantize activations"
+        return
+
+    a = torch.randn(64, 128, dtype=torch.bfloat16, device="cuda")
+    a_scale = torch.ones(1, dtype=torch.float32, device="cuda")
+    out, _ = moe_kernel_quantize_input(
+        a, a_scale, quant_dtype, False, None, quantization_emulation=True
+    )
+    assert not torch.equal(out, a), (
+        f"{ocp_mx_scheme.value} -> quant_dtype={quant_dtype!r} left the activation"
+        " unquantized; moe_kernel_quantize_input does not dispatch on it"
+    )
