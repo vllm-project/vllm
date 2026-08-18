@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import torch
@@ -70,6 +70,12 @@ class BaseSpeculator(ABC):
 
 
 class DraftModelSpeculator(BaseSpeculator):
+    # Whether init_cudagraph_manager sizes the draft's mode from the draft's
+    # own attn_cg_support. Subclasses that do are self-contained, so their
+    # layers can be left out of the target runner's cudagraph decision; the
+    # rest still rely on the target being downgraded on their behalf.
+    sizes_own_cudagraph_mode: ClassVar[bool] = False
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.device = device

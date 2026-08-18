@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import torch
 
+from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -10,8 +14,115 @@ from vllm.v1.kv_cache_interface import (
     KVQuantMode,
     MambaSpec,
 )
+from vllm.v1.worker.gpu import attn_utils
 from vllm.v1.worker.gpu.attn_utils import _reshape_kv_cache
 from vllm.v1.worker.utils import AttentionGroup
+
+
+def test_draft_only_group_does_not_constrain_target_cudagraph_support(monkeypatch):
+    class TargetBackend:
+        cg_support = AttentionCGSupport.ALWAYS
+
+        @staticmethod
+        def full_cls_name():
+            return "TargetBackend"
+
+    class DraftBackend:
+        cg_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+
+        @staticmethod
+        def full_cls_name():
+            return "DraftBackend"
+
+    layers = {
+        "target": SimpleNamespace(get_attn_backend=lambda: TargetBackend),
+        "draft": SimpleNamespace(get_attn_backend=lambda: DraftBackend),
+    }
+
+    def get_layers(*args):
+        return {name: layers[name] for name in args[-1]}
+
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", get_layers)
+    monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda config: {})
+    monkeypatch.setattr(
+        attn_utils, "add_kv_sharing_layers_to_kv_cache_groups", lambda *args: None
+    )
+    monkeypatch.setattr(attn_utils, "prepare_kernel_block_sizes", lambda *args: [1])
+    monkeypatch.setattr(
+        AttentionGroup, "create_metadata_builders", lambda self, **kwargs: None
+    )
+    monkeypatch.setattr(
+        AttentionGroup,
+        "get_metadata_builder",
+        lambda self, index: SimpleNamespace(
+            get_cudagraph_support=lambda *args: self.backend.cg_support
+        ),
+    )
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(layer_names=["target", "draft"], kv_cache_spec=object())
+        ]
+    )
+
+    groups, support, _ = attn_utils.init_attn_backend(
+        kv_cache_config,
+        SimpleNamespace(),
+        torch.device("cpu"),
+        cg_support_exclude_layers={"draft"},
+    )
+
+    assert {group.layer_names[0] for group in groups[0]} == {"target", "draft"}
+    # The runner's cudagraph mode ignores the draft-only group...
+    assert support.graph_min_cg_support == AttentionCGSupport.ALWAYS
+    assert support.graph_min_cg_attn_backend is None
+    # ...while min_cg_support still answers for every builder, so callers that
+    # need all of them (adaptive verification) keep seeing the draft.
+    assert support.min_cg_support == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    assert support.min_cg_attn_backend == "DraftBackend"
+
+    _, unfiltered_support, _ = attn_utils.init_attn_backend(
+        kv_cache_config, SimpleNamespace(), torch.device("cpu")
+    )
+    assert (
+        unfiltered_support.graph_min_cg_support
+        == AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
+
+
+def test_only_a_self_sizing_speculator_is_excluded():
+    """The other half of the fix: which layers the runner actually passes.
+
+    `test_draft_only_group_does_not_constrain_target_cudagraph_support` hands
+    `init_attn_backend` an exclusion set directly, so it cannot see a caller
+    that stops producing one. Only a draft that sizes its own cudagraph mode
+    may be left out; one that follows the target's resolved mode still needs
+    the target downgraded on its behalf.
+    """
+    from vllm.v1.worker.gpu.model_runner import _cg_support_exclusions
+    from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+    from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+
+    self_sizing = Mock(spec=DraftModelSpeculator)
+    self_sizing.sizes_own_cudagraph_mode = True
+    self_sizing.draft_attn_layer_names = {"draft.0", "draft.1"}
+    assert _cg_support_exclusions(self_sizing) == {"draft.0", "draft.1"}
+
+    # Eagle/MTP follow the target's mode, so they must keep constraining it.
+    follower = Mock(spec=DraftModelSpeculator)
+    follower.sizes_own_cudagraph_mode = False
+    follower.draft_attn_layer_names = {"eagle.0"}
+    assert _cg_support_exclusions(follower) is None
+
+    # Not a DraftModelSpeculator, and no speculator at all, exclude nothing.
+    other = SimpleNamespace(
+        sizes_own_cudagraph_mode=True, draft_attn_layer_names={"other.0"}
+    )
+    assert _cg_support_exclusions(other) is None
+    assert _cg_support_exclusions(None) is None
+
+    # The classes as shipped: DFlash (and DSpark) self-size, the base does not.
+    assert DFlashSpeculator.sizes_own_cudagraph_mode is True
+    assert DraftModelSpeculator.sizes_own_cudagraph_mode is False
 
 
 class FakeFlashAttentionBackend:

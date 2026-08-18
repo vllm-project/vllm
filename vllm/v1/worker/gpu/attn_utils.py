@@ -44,6 +44,11 @@ logger = init_logger(__name__)
 class AttentionCGSupportInfo:
     min_cg_support: AttentionCGSupport = AttentionCGSupport.ALWAYS
     min_cg_attn_backend: str | None = None
+    # The same reduction, minus groups owned by a model part that captures its
+    # own graphs. Only the runner's cudagraph mode may use it; anything that
+    # needs every builder's answer keeps min_cg_support.
+    graph_min_cg_support: AttentionCGSupport = AttentionCGSupport.ALWAYS
+    graph_min_cg_attn_backend: str | None = None
 
     def narrow(
         self, support: AttentionCGSupport, backend: str | None
@@ -53,9 +58,18 @@ class AttentionCGSupportInfo:
         Lets attention groups built outside ``init_attn_backend`` (e.g.
         encoder-only layers) contribute to the runner's cudagraph decision.
         """
-        if support.value < self.min_cg_support.value:
-            return AttentionCGSupportInfo(support, backend)
-        return self
+        narrowed = self
+        if support.value < narrowed.min_cg_support.value:
+            narrowed = replace(
+                narrowed, min_cg_support=support, min_cg_attn_backend=backend
+            )
+        if support.value < narrowed.graph_min_cg_support.value:
+            narrowed = replace(
+                narrowed,
+                graph_min_cg_support=support,
+                graph_min_cg_attn_backend=backend,
+            )
+        return narrowed
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -93,6 +107,7 @@ def init_attn_backend(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
     device: torch.device,
+    cg_support_exclude_layers: set[str] | None = None,
     active_layer_names: set[str] | None = None,
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
     # Phase 1: discover attention groups for each kv cache group.
@@ -148,6 +163,8 @@ def init_attn_backend(
     attn_backend_workspace: torch.Tensor | None = None
     min_cg_support = AttentionCGSupport.ALWAYS
     min_cg_attn_backend = None
+    graph_min_cg_support = AttentionCGSupport.ALWAYS
+    graph_min_cg_attn_backend = None
     for kv_cache_group_id, groups in enumerate(attn_groups):
         kernel_block_size = None
         if kv_cache_group_id < len(kernel_block_sizes):
@@ -174,9 +191,24 @@ def init_attn_backend(
             if cg_support.value < min_cg_support.value:
                 min_cg_support = cg_support
                 min_cg_attn_backend = group.backend.__name__
+            # A group owned entirely by a model part that captures its own
+            # graphs must not constrain this runner's cudagraph mode. It stays
+            # in min_cg_support, which callers needing every builder's answer
+            # (adaptive verification) use.
+            if (
+                cg_support_exclude_layers is not None
+                and set(group.layer_names) <= cg_support_exclude_layers
+            ):
+                continue
+            if cg_support.value < graph_min_cg_support.value:
+                graph_min_cg_support = cg_support
+                graph_min_cg_attn_backend = group.backend.__name__
 
     attn_cg_support_info = AttentionCGSupportInfo(
-        min_cg_support=min_cg_support, min_cg_attn_backend=min_cg_attn_backend
+        min_cg_support=min_cg_support,
+        min_cg_attn_backend=min_cg_attn_backend,
+        graph_min_cg_support=graph_min_cg_support,
+        graph_min_cg_attn_backend=graph_min_cg_attn_backend,
     )
     return attn_groups, attn_cg_support_info, kernel_block_sizes
 
