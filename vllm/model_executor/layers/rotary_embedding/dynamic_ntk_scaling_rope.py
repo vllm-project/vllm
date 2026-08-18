@@ -55,14 +55,21 @@ class DynamicNTKScalingRotaryEmbedding(RotaryEmbedding):
         # maximum length before applying the rope scaling.
         # Thus, the maximum length after applying the rope scaling is
         # self.max_position_embeddings * self.scaling_factor.
-        base = self.base * (
-            (
-                self.scaling_factor
-                * self.max_position_embeddings
-                / self.max_trained_positions
-            )
-            - (self.scaling_factor - 1)
-        ) ** (self.rotary_dim / (self.rotary_dim - 2))
+        if self.max_position_embeddings <= self.max_trained_positions:
+            # Serving at or below the trained length is ordinary truncation:
+            # keep the original base. Applying the NTK formula here can drive
+            # its base negative, producing a complex (and effectively
+            # unbounded) cache once raised to a fractional power.
+            base = self.base
+        else:
+            base = self.base * (
+                (
+                    self.scaling_factor
+                    * self.max_position_embeddings
+                    / self.max_trained_positions
+                )
+                - (self.scaling_factor - 1)
+            ) ** (self.rotary_dim / (self.rotary_dim - 2))
         inv_freq = self._compute_inv_freq(base)
         t = torch.arange(self.max_position_embeddings, dtype=torch.float)
 
