@@ -207,6 +207,15 @@ fn factory_new_resolves_default_patterns() {
         factory.resolve_name_for_model("ByteDance-Seed/Seed-OSS-36B-Instruct"),
         Some(names::SEED_OSS)
     );
+    assert_eq!(
+        factory.resolve_name_for_model("baidu/ERNIE-4.5-21B-A3B-Thinking"),
+        Some(names::ERNIE45)
+    );
+    // The `*-PT` ERNIE text checkpoints have no tool-call template.
+    assert_eq!(
+        factory.resolve_name_for_model("baidu/ERNIE-4.5-21B-A3B-PT"),
+        None
+    );
 
     // InternLM2 positive: both dashed and underscored versioned names route.
     assert_eq!(
