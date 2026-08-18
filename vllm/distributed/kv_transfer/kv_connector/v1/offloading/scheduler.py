@@ -228,7 +228,21 @@ class SchedulerOffloadConfig(NamedTuple):
             and vllm_config.speculative_config.use_eagle()
         )
         if use_eagle and not eagle_groups:
-            eagle_groups = set(range(len(kv_cache_config.kv_cache_groups)))
+            # No group is annotated as holding drafter layers. This happens
+            # for shared-group MTP models (e.g. Qwen3.5-style), whose drafter
+            # is a regular decoder layer merged into the target's
+            # full-attention group, and for separate-draft models that miss
+            # annotation. Treating every group as a drafter group here makes
+            # the volatile-tail pop apply to ALL groups, which can zero the
+            # whole request's offload hit whenever any group's servable
+            # window is a single chunk (issue #52735). Drafter KV served one
+            # chunk stale can only lower speculative acceptance rates — the
+            # target model verifies every draft — so fail toward serving.
+            logger.info_once(
+                "KV offloading: speculative decoding is enabled but no "
+                "KV-cache group is annotated as a drafter group; treating "
+                "all groups as non-draft for offloading."
+            )
 
         if eagle_groups:
             logger.info(
@@ -392,15 +406,18 @@ class RequestOffloadState:
         accepted position may be rewritten after spec-token rejection. During
         prefill the trailing chunk is stable (the draft input for a chunk's
         last position is the next prompt token), so it is stored immediately.
-        The exclusion must be applied consistently everywhere
-        ``next_stored_chunk_idx`` is derived: otherwise the trailing chunk of
-        each step is skipped on collection but jumped over by
-        ``next_stored_chunk_idx``, so it is never re-considered and a
-        permanent hole breaks prefix-reuse lookup.
+        Once the request has finished, no further spec-token rejection can
+        rewrite the tail, so the exclusion is lifted and the final chunk
+        becomes storable (issue #52735). The exclusion must be applied
+        consistently everywhere ``next_stored_chunk_idx`` is derived:
+        otherwise the trailing chunk of each step is skipped on collection but
+        jumped over by ``next_stored_chunk_idx``, so it is never re-considered
+        and a permanent hole breaks prefix-reuse lookup. ``is_finished`` is
+        monotonic, so the finish-time calls all see the lifted exclusion.
         """
         num_chunks = num_offloadable_tokens // group_config.tokens_per_chunk
         is_decoding = num_offloadable_tokens > self.req.num_prompt_tokens
-        if group_config.is_eagle_group and is_decoding:
+        if group_config.is_eagle_group and is_decoding and not self.req.is_finished():
             num_chunks = max(0, num_chunks - 1)
         num_allocated_chunks = (
             len(group_state.block_ids) // self.config.blocks_per_chunk
@@ -757,9 +774,13 @@ class OffloadingConnectorScheduler:
                 )
 
                 # For eagle groups, query one extra chunk that will be popped.
-                # We only need to increase the query size for sliding window groups.
+                # Widening applies to every group type: without it, the pop
+                # below shrinks max_hit_size_tokens past what was queried,
+                # which can push the confirmed boundary under a coarser
+                # sibling group's chunk granularity and zero the whole
+                # request's hit (issue #52735).
                 query_max = max_hit_size_tokens
-                if is_eagle_unverified and sliding_window_size_in_chunks is not None:
+                if is_eagle_unverified:
                     query_max = min(
                         max_hit_size_tokens + tokens_per_chunk,
                         len(offload_keys) * tokens_per_chunk,
