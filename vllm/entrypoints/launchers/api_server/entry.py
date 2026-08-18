@@ -21,10 +21,10 @@ from vllm.tool_parsers import ToolParserManager
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.system_utils import decorate_logs
 
-from ..api_server.app_state import init_app_state
 from ..app import build_app
 from ..launcher import serve_http, setup_server
 from ..utils.server_utils import get_uvicorn_log_config
+from .app_state import init_app_state
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
