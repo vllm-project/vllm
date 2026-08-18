@@ -8,10 +8,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
-from vllm.model_executor.warmup.jit_warmup import (
-    VllmJitKernel,
-    WarmupIntRange,
-)
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonPointerInputVariant,
     TritonWarmupTensor,
@@ -251,7 +248,7 @@ class BuildPrefillChunkMetadataKernel(
         input_variant: TritonPointerInputVariant
 
     @staticmethod
-    @triton.jit
+    @triton.jit(do_not_specialize=["query_slice_start", "query_slice_stop", "DCP_RANK"])
     def kernel(
         # Inputs
         query_start_loc_ptr,
@@ -351,7 +348,6 @@ class BuildPrefillChunkMetadataKernel(
         )
 
     def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
-        max_tokens = max(1, min(vllm_config.scheduler_config.max_num_batched_tokens, 8))
         hf_config = vllm_config.model_config.hf_config
         parallel_config = vllm_config.parallel_config
         dcp_world = parallel_config.decode_context_parallel_size
@@ -362,8 +358,8 @@ class BuildPrefillChunkMetadataKernel(
             for ratio in (getattr(hf_config, "compress_ratios", None) or (1,))
         )
         return self._trace_dispatch(self.dispatch)(
-            query_slice_start=WarmupIntRange(0, 2),
-            query_slice_stop=(1, 2 * max_tokens - 1, 2 * max_tokens),
+            query_slice_start=0,
+            query_slice_stop=1,
             DCP_RANK=dcp_rank,
             DCP_WORLD=dcp_world,
             DCP_INTERLEAVE=dcp_interleave,

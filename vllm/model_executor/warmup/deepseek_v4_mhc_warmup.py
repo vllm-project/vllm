@@ -61,6 +61,24 @@ def _select_mhc_warmup_token_sizes(
     return _normalize_token_sizes(candidates, max_tokens=max_auto_tokens)
 
 
+def _select_split_warmup_token_sizes(
+    *,
+    max_tokens: int,
+    k_values: Iterable[int],
+    block_k: int = 64,
+) -> list[int]:
+    """Select one token count for every split-k specialization."""
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import compute_num_split
+    from vllm.utils.math_utils import cdiv
+
+    selected: dict[tuple[int, ...], int] = {}
+    for num_tokens in range(1, max_tokens + 1, block_k):
+        grid_size = cdiv(num_tokens, block_k)
+        splits = tuple(compute_num_split(block_k, k, grid_size) for k in k_values)
+        selected.setdefault(splits, num_tokens)
+    return sorted(selected.values())
+
+
 def _find_first_mhc_layer(model: torch.nn.Module) -> torch.nn.Module | None:
     for module in model.modules():
         if module.__class__.__name__ != "DeepseekV4DecoderLayer":
@@ -123,6 +141,44 @@ def _warmup_layer_mhc(
                 base,
             )
             layer.hc_post(layer_input, residual_slice, post_mix, comb_mix)
+
+
+def _warmup_broadcast_mhc(
+    layer: torch.nn.Module,
+    token_sizes: list[int],
+) -> None:
+    fn_broadcast = getattr(layer, "hc_attn_fn_broadcast", None)
+    if fn_broadcast is None:
+        return
+
+    from vllm.model_executor.kernels.mhc.tilelang import mhc_pre_broadcast_tilelang
+
+    max_tokens = max(token_sizes)
+    hidden_size = int(layer.hidden_size)
+    device = layer.hc_attn_fn.device
+    residual = torch.zeros(
+        max_tokens,
+        hidden_size,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    norm_weight = layer.attn_norm.weight.data
+    norm_eps = layer.attn_norm.variance_epsilon
+    for size in token_sizes:
+        mhc_pre_broadcast_tilelang(
+            residual[:size],
+            layer.hc_attn_fn,
+            layer.hc_attn_scale,
+            layer.hc_attn_base,
+            layer.rms_norm_eps,
+            layer.hc_eps,
+            layer.hc_eps,
+            layer.hc_post_alpha,
+            layer.hc_sinkhorn_iters,
+            norm_weight=norm_weight,
+            norm_eps=norm_eps,
+            fn_broadcast=fn_broadcast,
+        )
 
 
 def _warmup_hc_head(
@@ -192,6 +248,15 @@ def deepseek_v4_mhc_warmup(
     if not token_sizes:
         return
 
+    max_warmup_tokens = max(token_sizes)
+    hidden_size = int(layer.hidden_size)
+    hc_mult = int(layer.hc_mult)
+    split_token_sizes = _select_split_warmup_token_sizes(
+        max_tokens=max_warmup_tokens,
+        k_values=(hidden_size, hc_mult * hidden_size),
+    )
+    token_sizes = sorted(set(token_sizes).union(split_token_sizes))
+
     started = time.perf_counter()
     logger.info(
         "Warming up DeepSeek V4 mHC TileLang kernels for token sizes: %s",
@@ -199,6 +264,7 @@ def deepseek_v4_mhc_warmup(
     )
     with torch.inference_mode():
         _warmup_layer_mhc(layer, token_sizes)
+        _warmup_broadcast_mhc(layer, split_token_sizes)
         if deepseek_model is not None:
             _warmup_hc_head(deepseek_model, token_sizes)
         torch.accelerator.synchronize()

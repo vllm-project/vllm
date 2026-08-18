@@ -7,6 +7,12 @@ import pytest
 import torch
 
 from tests.v1.attention.utils import create_vllm_config
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    trace_triton_kernel_specialization_args,
+)
+from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
+    _INDEXER_PREFILL_CHUNK_METADATA_BACKENDS,
+)
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
     BuildPrefillChunkMetadataKernel,
@@ -31,6 +37,20 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
     keys = BuildPrefillChunkMetadataKernel().get_warmup_keys(config)
 
     assert {key.COMPRESS_RATIO for key in keys} == {1, 4, 128}
+
+
+def test_prefill_chunk_slice_bounds_do_not_specialize():
+    specialization_args = trace_triton_kernel_specialization_args(
+        BuildPrefillChunkMetadataKernel.kernel
+    )
+
+    assert "query_slice_start" not in specialization_args
+    assert "query_slice_stop" not in specialization_args
+    assert "DCP_RANK" not in specialization_args
+
+
+def test_deepseek_v4_indexer_enables_prefill_metadata_warmup():
+    assert "DEEPSEEK_V4_INDEXER" in _INDEXER_PREFILL_CHUNK_METADATA_BACKENDS
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
