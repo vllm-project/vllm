@@ -3754,3 +3754,66 @@ A second sweep used two real selector positions and 64 rows per live length:
 The combined evidence is internally consistent: FP16 perturbs only scores at
 the selection boundary (roughly one or two of 2,048 indices on real 200K
 rows), while the tested end-to-end retrieval answers remain unchanged.
+
+## 2026-08-18: CUDA-graph E2E serving benchmark at 8K input
+
+The final PR code was compared end to end with the real
+`nvidia/GLM-5.2-NVFP4` checkpoint and SPEED-Bench
+`throughput_16k/low_entropy` samples truncated to 8,192 input tokens. Each
+request generated at most 1,024 tokens with seed 420, temperature zero, and
+top-p one. The local `../glm_bench.sh` was parameterized to accept the model,
+tokenizer, result directory, label, run count, concurrency list, and prompt
+factor, and to retain detailed per-request results.
+
+Both arms used TP4, production CUDA graphs, no MTP, a 16,384-token model
+limit, FP8 E4M3 KV cache, `max_num_batched_tokens=8192`,
+`max_num_seqs=256`, disabled prefix caching, and disabled FlashInfer
+autotuning. KV storage was fixed at 40 GiB/GPU in both arms, yielding exactly
+900,352 cache tokens, so FP16 could not win by receiving more cache capacity.
+The only changed engine setting was `indexer_logits_dtype=float32` versus
+`float16`.
+
+Concurrency 1--256 used three prompts per offered slot. The original factor-3
+concurrency-1,024 point was stopped after confirming saturation because it
+would repeat the same capacity-limited queue for 3,072 requests. Both dtypes
+instead used one prompt per slot for that point. This still offered all 1,024
+requests concurrently while reducing redundant steady-state work. All 1,915
+requests per dtype succeeded.
+
+The table reports FP16 relative to FP32. Negative latency and positive
+throughput deltas are improvements:
+
+|Offered concurrency|Median TTFT, ms (delta)|Median TPOT, ms (delta)|Output tok/s (delta)|Total tok/s (delta)|
+|---:|---:|---:|---:|---:|
+|1|348.378 -> 344.632 (-1.08%)|8.284 -> 8.262 (-0.27%)|116.059 -> 116.400 (+0.29%)|1,044.530 -> 1,047.601 (+0.29%)|
+|8|1,294.737 -> 1,282.733 (-0.93%)|12.768 -> 12.727 (-0.32%)|561.009 -> 567.051 (+1.08%)|5,117.867 -> 5,140.494 (+0.44%)|
+|32|1,276.529 -> 1,578.623 (+23.67%)|26.479 -> 26.133 (-1.31%)|1,143.876 -> 1,152.735 (+0.77%)|10,373.189 -> 10,443.707 (+0.68%)|
+|256|79,622.375 -> 79,212.563 (-0.51%)|56.911 -> 57.040 (+0.23%)|1,699.292 -> 1,706.394 (+0.42%)|15,385.793 -> 15,461.366 (+0.49%)|
+|1,024|272,043.108 -> 272,104.163 (+0.02%)|57.102 -> 56.618 (-0.85%)|1,736.203 -> 1,749.513 (+0.77%)|15,778.412 -> 15,848.640 (+0.45%)|
+
+The fixed-input total-throughput result is the most stable summary: FP16
+improved it by 0.29%--0.68%, and reduced complete wall duration by
+0.29%--0.66% at every point. Output-token counts differed by -0.08% to
++0.71%, so raw output tok/s is slightly confounded by different early-stop
+behavior. The generated texts were not identical, as expected from the FP16
+selector approximation; the separate NIAH evaluation above is the accuracy
+check.
+
+TTFT needs workload-aware interpretation. At concurrency 32, FP16's median
+shifted later by one roughly 300 ms prefill scheduling wave even though p90
+TTFT improved from 7,523.88 to 7,461.77 ms and complete duration fell 0.66%.
+At offered concurrency 256 and 1,024, only about 100 8K-plus-generation
+sequences fit in the fixed cache; the remaining requests queue, so 79--272 s
+median TTFT is capacity waiting rather than model prefill latency.
+
+The small E2E gain follows first principles. At 10K KV and 128 rows, the
+production-style selector improves only from 5.549 to 5.323 us (1.042x), and
+the prior decode measurement put all 21 top-k calls at 0.83% of forward time.
+A top-k-only Amdahl estimate is therefore about
+`0.83% * (1 - 1 / 1.042) = 0.033%`. The observed 0.3%--0.7% serving delta also
+contains the native FP16 producer/output path and ordinary single-run system
+variation. It should be read as a consistent small non-regression/gain at 8K,
+not as evidence of a large serving speedup.
+
+Detailed results are in `/tmp/glm52_fp16_e2e_20260818`. The description for
+pull request 52696 contains the same serving table and caveats.
