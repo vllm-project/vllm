@@ -653,7 +653,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # per-tensor fp8 writes a separately-allocated fp8 q and quantizes the
         # KV row.
         block_size = swa_metadata.block_size
-        swa_kv_cache_3d = swa_kv_cache.view(-1, block_size, self.head_dim)
+        assert swa_kv_cache.shape[1:] == (block_size, self.head_dim)
+        swa_kv_cache_3d = swa_kv_cache
         if cache_dtype == torch.bfloat16:
             torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
                 q,

@@ -813,7 +813,7 @@ def test_flashmla_forward_bf16_kv_slices_req_id_to_mqa_tokens():
     assert attn_metadata.req_id_per_token.shape[0] == num_batch_tokens
 
     q = torch.zeros(num_mqa_tokens, 4, 576, dtype=torch.bfloat16, device=device)
-    kv_cache = torch.zeros(40 * block_size, 576, dtype=torch.bfloat16, device=device)
+    kv_cache = torch.zeros(40, block_size, 576, dtype=torch.bfloat16, device=device)
     topk_indices = torch.randint(
         0,
         block_size * 10,
