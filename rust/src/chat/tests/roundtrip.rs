@@ -736,6 +736,7 @@ fn decoded_completion_stream(
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    routed_experts: None,
                 }),
             }
         });
@@ -747,6 +748,7 @@ fn decoded_completion_stream(
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                routed_experts: None,
             });
             events.push(DecodedTextEvent::TextDelta {
                 delta: chunk.delta,

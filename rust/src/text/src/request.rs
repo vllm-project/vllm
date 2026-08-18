@@ -118,6 +118,8 @@ pub struct SamplingParams {
     pub skip_reading_prefix_cache: Option<bool>,
     /// Additional request parameters for custom extensions.
     pub vllm_xargs: Option<HashMap<String, Value>>,
+    /// Number of prompt-token routing rows already returned to the caller.
+    pub routed_experts_prompt_start: Option<u32>,
 }
 
 #[allow(clippy::derivable_impls)] // more explicit
@@ -147,6 +149,7 @@ impl Default for SamplingParams {
             structured_outputs: None,
             skip_reading_prefix_cache: None,
             vllm_xargs: None,
+            routed_experts_prompt_start: None,
         }
     }
 }

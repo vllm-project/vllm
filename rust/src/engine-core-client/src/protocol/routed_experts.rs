@@ -20,6 +20,28 @@ pub struct RoutedExperts {
     pub data: Vec<u8>,
 }
 
+impl RoutedExperts {
+    pub fn append(&mut self, mut other: Self) -> std::result::Result<(), String> {
+        if self.dtype != other.dtype {
+            return Err(format!(
+                "routed-experts dtype changed across output chunks: {} != {}",
+                self.dtype, other.dtype
+            ));
+        }
+        if self.shape.len() != 3 || other.shape.len() != 3 || self.shape[1..] != other.shape[1..] {
+            return Err(format!(
+                "routed-experts trailing shape changed across output chunks: {:?} != {:?}",
+                self.shape, other.shape
+            ));
+        }
+        self.shape[0] = self.shape[0]
+            .checked_add(other.shape[0])
+            .ok_or_else(|| "routed-experts token dimension overflowed usize".to_string())?;
+        self.data.append(&mut other.data);
+        Ok(())
+    }
+}
+
 /// Routed-experts output is initially decoded from Python's ndarray wire
 /// tuple and resolved against optional multipart frames before it is exposed.
 #[derive(Debug, Clone, PartialEq, EnumAsInner)]

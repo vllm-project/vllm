@@ -109,6 +109,8 @@ message ResponseOptions {
   optional CandidateTokens output_candidates = 7;
   // Defaults to true when omitted.
   optional bool skip_special_tokens = 8;
+  // Skip routing rows for this already-returned prompt prefix.
+  optional uint32 routed_experts_prompt_start = 9;
 }
 
 message KVCacheParameters {
@@ -154,6 +156,15 @@ message SequenceOutput {
 
   // Only present in final output for this sequence
   optional FinishInfo finish_info = 8;
+  // Only present in final output when routed-experts capture is enabled.
+  optional RoutedExperts routed_experts = 9;
+}
+
+message RoutedExperts {
+  bytes data = 1;
+  repeated uint32 shape = 2;
+  string dtype = 3;
+  uint32 start = 4;
 }
 
 // Prompt info, returned in the first response

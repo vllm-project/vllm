@@ -678,6 +678,7 @@ mod tests {
                     ))),
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    routed_experts: None,
                 }),
             }),
         ]);
@@ -783,6 +784,7 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    routed_experts: None,
                 }),
             }),
         ]);
@@ -835,6 +837,7 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    routed_experts: None,
                 }),
             }),
         ]);
@@ -890,6 +893,7 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    routed_experts: None,
                 }),
             }),
         ]);
@@ -962,6 +966,7 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    routed_experts: None,
                 }),
             }),
         ]);
@@ -1036,6 +1041,7 @@ mod tests {
                     finish_reason: FinishReason::Length,
                     kv_transfer_params: None,
                     ec_transfer_params: None,
+                    routed_experts: None,
                 }),
             }),
         ]);

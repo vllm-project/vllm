@@ -38,6 +38,7 @@ use vllm_engine_core_client::protocol::output::{
     UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::routed_experts::{MaybeWireRoutedExperts, RoutedExperts};
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task_with_ready};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
@@ -624,6 +625,131 @@ async fn unary_generate_returns_collected_text() {
     assert_eq!(prompt.num_prompt_tokens, 5); // "hello" = 5 bytes
 
     engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_generate_round_trips_routed_experts() {
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-routed-experts",
+            default_ready_response(),
+            Arc::new(FakeTextBackend),
+            |dealer, push| {
+                boxed_test_future(async move {
+                    let add = recv_engine_message(dealer).await;
+                    let request: EngineCoreRequest =
+                        rmp_serde::from_slice(&add[1]).expect("decode request");
+                    assert_eq!(
+                        request
+                            .sampling_params
+                            .as_ref()
+                            .expect("sampling params")
+                            .routed_experts_prompt_start,
+                        2
+                    );
+                    let routed = |shape, data| {
+                        Some(MaybeWireRoutedExperts::Direct(RoutedExperts {
+                            dtype: "uint8".to_string(),
+                            shape,
+                            data,
+                        }))
+                    };
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            outputs: vec![
+                                EngineCoreOutput {
+                                    request_id: request.request_id.clone(),
+                                    new_token_ids: vec![b'h' as u32],
+                                    routed_experts: routed(vec![2, 1, 2], vec![1, 2, 3, 4]),
+                                    ..Default::default()
+                                },
+                                EngineCoreOutput {
+                                    request_id: request.request_id,
+                                    new_token_ids: vec![b'i' as u32],
+                                    finish_reason: Some(EngineCoreFinishReason::Length),
+                                    routed_experts: routed(vec![1, 1, 2], vec![5, 6]),
+                                    ..Default::default()
+                                },
+                            ],
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                })
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+
+    let response = client
+        .generate(pb::GenerateRequest {
+            request_id: "test-routed-experts".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::Text("hello".to_string())),
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 2,
+                ..Default::default()
+            }),
+            response: Some(pb::ResponseOptions {
+                routed_experts_prompt_start: Some(2),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("unary routed-experts generate")
+        .into_inner();
+
+    let routed = response.outputs.expect("outputs").routed_experts.expect("routed experts");
+    assert_eq!(routed.dtype, "uint8");
+    assert_eq!(routed.shape, [3, 1, 2]);
+    assert_eq!(routed.data, [1, 2, 3, 4, 5, 6]);
+    assert_eq!(routed.start, 2);
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_generate_rejects_routed_experts_start_at_prompt_end() {
+    let (mut client, server_task, engine_task) = grpc_test_server(
+        b"engine-grpc-routed-start-invalid",
+        default_stream_output_specs(),
+    )
+    .await;
+
+    let status = client
+        .generate(pb::GenerateRequest {
+            request_id: "test-routed-start-invalid".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: vec![11, 22],
+            })),
+            response: Some(pb::ResponseOptions {
+                routed_experts_prompt_start: Some(2),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect_err("start at prompt end must fail");
+
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert!(status.message().contains("routed_experts_prompt_start"));
+
+    drop(engine_task);
     server_task.abort();
 }
 
