@@ -1024,6 +1024,10 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w13.is_shuffled = True
             w2.is_shuffled = True
 
+            if w13_bias is not None:
+                from aiter.ops.shuffle import interleave_gate_up_rows
+                w13_bias = interleave_gate_up_rows(w13_bias)
+
             return (w13, w2, w13_scale, w2_scale, w13_bias, w2_bias)
 
         from vllm._aiter_ops import rocm_aiter_ops
@@ -1539,6 +1543,9 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
         if w13_bias is not None:
             w13_bias = w13_bias.data.to(torch.float32)
+            if guinterleave:
+                from aiter.ops.shuffle import interleave_gate_up_rows
+                w13_bias = interleave_gate_up_rows(w13_bias)
         if w2_bias is not None:
             w2_bias = w2_bias.data.to(torch.float32)
 
