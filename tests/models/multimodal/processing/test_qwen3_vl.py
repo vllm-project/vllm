@@ -184,3 +184,79 @@ def test_processor_multi_video_list_kwargs(
     assert len(video_phs) == 2, (
         f"Expected exactly 2 video placeholders, got {len(video_phs)}"
     )
+
+
+def _build_presampled_video_mm_data(
+    num_frames: int,
+    width: int = 1280,
+    height: int = 720,
+) -> dict[str, Any]:
+    """Create synthetic presampled video data (``do_sample_frames=False``),
+    matching the metadata vLLM's own video loader produces."""
+    video = np.zeros((num_frames, height, width, 3), dtype=np.uint8)
+    metadata = {
+        "fps": 2.0,
+        "duration": num_frames / 2.0,
+        "total_num_frames": num_frames,
+        "frames_indices": list(range(num_frames)),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    return {"video": [(video, metadata)]}
+
+
+def _video_placeholder_length(
+    model_id: str,
+    num_frames: int,
+    video_max_pixels_per_frame: int | None,
+) -> int:
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 0, "video": 1},
+        model_config_kwargs={"video_max_pixels_per_frame": video_max_pixels_per_frame},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>"
+    mm_data = _build_presampled_video_mm_data(num_frames=num_frames)
+
+    processed = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={},
+    )
+    video_phs = processed["mm_placeholders"].get("video", [])
+    assert len(video_phs) == 1
+    return video_phs[0].length
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+def test_video_max_pixels_per_frame(model_id: str) -> None:
+    """`video_max_pixels_per_frame` must cap a short clip's pixel budget at
+    `num_frames * cap` so prompt cost scales with clip duration.
+
+    The HF processor spreads `size["longest_edge"]` across all sampled
+    frames, so without the cap a short clip keeps near-native per-frame
+    resolution and its token count is duration-independent.
+    """
+    # 128 patches/frame: comfortably above the min-pixel floor, far below
+    # the native 1280x720 frame, so the cap is the binding constraint.
+    cap = 128 * 32 * 32
+
+    uncapped = _video_placeholder_length(model_id, 8, None)
+    capped_8 = _video_placeholder_length(model_id, 8, cap)
+    capped_16 = _video_placeholder_length(model_id, 16, cap)
+
+    assert capped_8 < uncapped, (
+        f"cap not applied: capped={capped_8} uncapped={uncapped}"
+    )
+
+    # Same per-frame budget => identical per-frame resize => token count
+    # scales exactly with the frame count.
+    assert capped_16 == 2 * capped_8, (
+        f"cost not duration-proportional: 8f={capped_8} 16f={capped_16}"
+    )
+
+    # A cap above the total budget must be a no-op.
+    unbound = _video_placeholder_length(model_id, 8, 10**9)
+    assert unbound == uncapped, f"oversized cap changed output: {unbound} != {uncapped}"

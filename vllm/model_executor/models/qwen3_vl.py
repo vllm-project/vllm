@@ -111,7 +111,7 @@ from vllm.tokenizers.protocol import TokenizerLike
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.collection_utils import is_list_of
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
@@ -1137,6 +1137,21 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
             "temporal_patch_size", video_processor.temporal_patch_size
         )
 
+        # With video_max_pixels_per_frame set, a 2-frame dummy would be
+        # processed at only 2 * cap pixels and memory profiling would
+        # underestimate the true maximum item (a fully sampled video still
+        # reaches the full budget). Spread the same total budget over enough
+        # frames that the cap is not binding for the dummy.
+        per_frame_cap = self.info.ctx.get_mm_config().video_max_pixels_per_frame
+        if per_frame_cap is not None:
+            target_num_frames = max(
+                target_num_frames,
+                min(
+                    video_processor.max_frames,
+                    cdiv(video_size["longest_edge"], per_frame_cap),
+                ),
+            )
+
         # video_max_pixels contains the temporal compression factor,
         # so we divide by 2 to get the maximum number of image pixels.
         video_max_pixels = video_size["longest_edge"]
@@ -1341,6 +1356,27 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     video_mm_kwargs["do_sample_frames"] = metadata.get(
                         "do_sample_frames", False
                     )
+
+                # The HF processor spreads size["longest_edge"] across all
+                # sampled frames, so under a large budget a short clip keeps
+                # near-native per-frame resolution and can cost nearly as
+                # many tokens as an hour-long video. When configured, cap the
+                # per-item budget at num_frames * video_max_pixels_per_frame
+                # so prompt cost scales with clip duration. Only possible for
+                # presampled videos (frame count known here).
+                per_frame_cap = self.info.ctx.get_mm_config().video_max_pixels_per_frame
+                if (
+                    per_frame_cap is not None
+                    and not video_mm_kwargs["do_sample_frames"]
+                ):
+                    video_size = video_mm_kwargs.get(
+                        "size", dict(self.info.get_video_processor().size)
+                    )
+                    scaled_budget = len(video_array) * per_frame_cap
+                    if scaled_budget < video_size["longest_edge"]:
+                        video_mm_kwargs["size"] = video_size | {
+                            "longest_edge": scaled_budget
+                        }
 
                 metadata = VideoMetadata(
                     **{k: metadata[k] for k in metadata if k != "do_sample_frames"}

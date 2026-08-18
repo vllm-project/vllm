@@ -231,6 +231,17 @@ class MultiModalConfig:
     - "evs": Efficient Video Sampling.
     - "vidcom2": Video Compression Commander.
     """
+    video_max_pixels_per_frame: int | None = Field(default=None, gt=0)
+    """If set, cap each video's total pixel budget at
+    `num_sampled_frames * video_max_pixels_per_frame` (never raising it above
+    the processor's own budget).
+
+    Video processors that spread a single total pixel budget across the
+    sampled frames (e.g. Qwen3-VL) give short clips near-native per-frame
+    resolution, so a short clip can cost nearly as many tokens as an
+    hour-long video under a large budget. This cap makes prompt cost scale
+    with clip duration instead. Only consulted by models whose processors
+    support it (currently Qwen3-VL)."""
     mm_tensor_ipc: MMTensorIPC = "direct_rpc"
     """IPC (inter-process communication) method for multimodal tensors.
     - "direct_rpc": Use msgspec serialization via RPC

@@ -601,6 +601,7 @@ class EngineArgs:
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     video_pruning_method: str = MultiModalConfig.video_pruning_method
+    video_max_pixels_per_frame: int | None = MultiModalConfig.video_max_pixels_per_frame
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
     mm_processor_device: MMProcessorDevice = "auto"
     mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
@@ -1369,6 +1370,10 @@ class EngineArgs:
             **multimodal_kwargs["video_pruning_method"],
         )
         multimodal_group.add_argument(
+            "--video-max-pixels-per-frame",
+            **multimodal_kwargs["video_max_pixels_per_frame"],
+        )
+        multimodal_group.add_argument(
             "--mm-tensor-ipc", **multimodal_kwargs["mm_tensor_ipc"]
         )
         multimodal_group.add_argument(
@@ -1793,6 +1798,7 @@ class EngineArgs:
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             video_pruning_method=self.video_pruning_method,
+            video_max_pixels_per_frame=self.video_max_pixels_per_frame,
             mm_tensor_ipc=self.mm_tensor_ipc,
             mm_ipc_gpu_memory_gb=self.mm_ipc_gpu_memory_gb,
             mm_device_do_normalize=self.mm_device_do_normalize,
