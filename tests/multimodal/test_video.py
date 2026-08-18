@@ -1408,3 +1408,40 @@ def test_glm46v_duration_estimation_from_fps():
     assert len(indices) > 0
     assert len(indices) % 2 == 0
     assert all(0 <= idx < 90 for idx in indices)
+
+
+def test_torchcodec_decode_failure_is_client_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """TorchCodec decode failures on user bytes must surface as ValueError
+    (-> HTTP 400), not RuntimeError (-> 500), mirroring the pynvvideocodec
+    backend. With seek_mode="approximate" the message must point the user
+    at "exact", since metadata-overstated frame counts are the common cause.
+    """
+    monkeypatch.setattr(
+        "vllm.multimodal.video.check_torchcodec_available", lambda: None
+    )
+
+    def raise_runtime_error(cls, data, **kwargs):
+        raise RuntimeError(
+            "Requested next frame while there are no more frames left to decode."
+        )
+
+    monkeypatch.setattr(
+        VideoBackend, "make_torchcodec_decoder", classmethod(raise_runtime_error)
+    )
+
+    with pytest.raises(
+        ValueError, match=r"Failed to decode video with the torchcodec backend"
+    ) as exc_info:
+        VideoBackend.load_bytes(b"fake video", num_frames=4, backend="torchcodec")
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert "seek_mode" not in str(exc_info.value)
+
+    with pytest.raises(ValueError, match=r"retry with seek_mode='exact'"):
+        VideoBackend.load_bytes(
+            b"fake video",
+            num_frames=4,
+            backend="torchcodec",
+            seek_mode="approximate",
+        )

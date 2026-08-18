@@ -872,11 +872,19 @@ The following parameters only apply to the `torchcodec` backend:
 
 - `num_ffmpeg_threads`: Number of FFmpeg decoding threads. `0` (default) relies
   on the FFmpeg default, which is `min(cpu_count + 1, 16)`. This allows you to
-  control thread over-subscription.
+  control thread over-subscription. The default maximizes single-video decode
+  throughput and is the right choice when the server handles few concurrent
+  video requests (on a 16-core machine, decoding 768 frames of 1080p H.264
+  takes ~10 s at `0` vs ~49 s at `1`); on servers decoding many videos
+  concurrently, set `1` so each request uses one core instead of
+  oversubscribing all of them.
 - `seek_mode`: Seek mode for the decoder. `"exact"` (default) guarantees
   frame-accurate sampling by scanning the file when the decoder is created.
   `"approximate"` skips that scan for faster decoder creation, at the cost of
   relying on the file's metadata (which may yield less accurate seeking).
+  Files whose container metadata overstates the decodable frame count (common
+  with stream-copied cuts, e.g. `ffmpeg -c copy`) fail to decode in this mode;
+  vLLM reports this as a client error suggesting `"exact"`.
 
 ```bash
 # Example: TorchCodec with approximate seek mode and 4 FFmpeg threads
