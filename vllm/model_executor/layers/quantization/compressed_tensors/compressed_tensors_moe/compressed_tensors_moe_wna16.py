@@ -196,9 +196,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 "Marlin": (
                     num_experts,
                     num_groups_w13,
-                    self._packed_dim(
-                        w13_num_shards * intermediate_size_per_partition
-                    ),
+                    self._packed_dim(w13_num_shards * intermediate_size_per_partition),
                 ),
             },
             "w2_weight": {
