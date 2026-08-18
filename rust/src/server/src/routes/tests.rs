@@ -704,14 +704,13 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
 /// stays alive for the duration of the test.
 async fn test_dev_mode_app_with_ready(
     ready_response: vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse,
-    data_parallel_size: usize,
 ) -> (axum::Router, MockEngineTask) {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-world-size".to_vec();
     let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
         handshake_address.clone(),
-        engine_id.clone(),
+        engine_id,
         ready_response,
         |_dealer, _push| boxed_test_future(async {}),
     ));
@@ -729,10 +728,10 @@ async fn test_dev_mode_app_with_ready(
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     let app = build_router_with_dev_mode(
-        Arc::new(
-            AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
-                .with_data_parallel_size(data_parallel_size),
-        ),
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
         true,
     );
     (app, engine_task)
@@ -1746,7 +1745,7 @@ async fn version_returns_engine_vllm_version() {
         json,
         json!({
             "version": "test-vllm-version",
-            "rust_frontend_version": env!("CARGO_PKG_VERSION"),
+            "rust_frontend_version": vllm_build_info::VERSION,
         })
     );
 }
@@ -6292,7 +6291,7 @@ async fn tokenize_allows_prompts_at_or_above_max_model_len() {
         max_model_len: 4,
         ..default_ready_response()
     };
-    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready, 1).await;
+    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
 
     let (completion_status, completion_json) = post_json(
         &mut app,
@@ -6541,58 +6540,6 @@ async fn world_size_endpoint_is_dev_mode_only() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn world_size_includes_data_parallelism_by_default() {
-    let ready = vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
-        world_size: 2,
-        data_parallel_size: 1,
-        ..default_ready_response()
-    };
-    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready, 4).await;
-
-    let response = app
-        .call(
-            Request::builder()
-                .uri("/get_world_size")
-                .body(Body::empty())
-                .expect("build request"),
-        )
-        .await
-        .expect("call app");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json, json!({"world_size": 8}));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn world_size_excludes_data_parallelism_when_include_dp_false() {
-    let ready = vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
-        world_size: 2,
-        data_parallel_size: 4,
-        ..default_ready_response()
-    };
-    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready, 4).await;
-
-    let response = app
-        .call(
-            Request::builder()
-                .uri("/get_world_size?include_dp=false")
-                .body(Body::empty())
-                .expect("build request"),
-        )
-        .await
-        .expect("call app");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json, json!({"world_size": 2}));
 }
 
 // ========================= Profiler route tests =========================
