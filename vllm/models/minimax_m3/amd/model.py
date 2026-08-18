@@ -34,6 +34,7 @@ from vllm.config import (
 )
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import set_default_quant_scales
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -113,6 +114,8 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
     is_quantized_kv_cache,
 )
+
+logger = init_logger(__name__)
 
 
 def _sparse_attention_layer_ids(config: PretrainedConfig) -> set[int]:
@@ -382,11 +385,13 @@ class MiniMaxM3MoE(nn.Module):
                 f"{prefix}.shared_experts",
             )
             if not fse_compatible:
-                raise ValueError(
+                logger.warning(
                     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
-                    f"cannot be enabled: {fse_reason}."
+                    "cannot be enabled: %s.",
+                    fse_reason,
                 )
-            self.is_fused_shared_expert_enabled = True
+            else:
+                self.is_fused_shared_expert_enabled = True
 
         # When additionally on gfx950 with an active aiter MoE backend, the shared
         # expert is appended inside aiter's an active aiter MoE backend, the shared

@@ -3,6 +3,8 @@
 
 from typing import TYPE_CHECKING
 
+import regex as re
+
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 
@@ -48,12 +50,12 @@ def is_shared_expert_quant_fse_compatible(
         # TODO: This is adapted from former `_shared_experts_are_fp4`, and
         # needs to be cleaned up this . There should not be Quark-specific
         # logic in DeepseekV4FP8Config.
-        if not quant_config._is_quark_mxfp4_ocp(hf_config):
-            return False, "DeepSeek-v4 FSE is only implemented/tested with Quark MXFP4"
-
         quantization_config = getattr(hf_config, "quantization_config", None)
         if quantization_config is None:
             return False, "DeepSeek-V4 has no quantization configuration"
+
+        if not quant_config._is_quark_mxfp4_ocp(quantization_config):
+            return False, "DeepSeek-v4 FSE is only implemented/tested with Quark MXFP4"
 
         layer_idx = extract_layer_index(shared_expert_prefix)
         if layer_idx >= hf_config.num_hidden_layers:
@@ -73,9 +75,22 @@ def is_shared_expert_quant_fse_compatible(
                 f"DeepSeek-V4 excludes shared experts at {shared_expert_prefix}",
             )
 
-        layer_config = (quantization_config.get("layer_quant_config") or {}).get(
-            f"{shared_expert_prefix}.w1"
-        )
+        shared_expert_weight_name = f"{shared_expert_prefix}.w1"
+        layer_quant_config = quantization_config.get("layer_quant_config") or {}
+        layer_config = layer_quant_config.get(shared_expert_weight_name)
+        if layer_config is None:
+            layer_config = next(
+                (
+                    config
+                    for pattern, config in layer_quant_config.items()
+                    if isinstance(pattern, str)
+                    and pattern.startswith("re:")
+                    and re.fullmatch(
+                        pattern.removeprefix("re:"), shared_expert_weight_name
+                    )
+                ),
+                None,
+            )
         shared_weight_config = (
             layer_config or quantization_config.get("global_quant_config") or {}
         ).get("weight") or {}
@@ -128,6 +143,7 @@ def is_shared_expert_quant_fse_compatible(
         )
 
     if isinstance(quant_config, QuarkConfig):
+        # TODO: layer_type_quant_config is not taken into account here.
         assert "exclude" in quant_config.quant_config
         assert "global_quant_config" in quant_config.quant_config
 

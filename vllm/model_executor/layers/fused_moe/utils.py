@@ -84,9 +84,10 @@ def resolve_fused_shared_expert_fusion(
     )
     is_fused_shared_expert_enabled = fse_requested and fse_compatible
     if fse_requested and not is_fused_shared_expert_enabled:
-        raise ValueError(
+        logger.warning(
             "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
-            f"cannot be enabled: {fse_reason}."
+            "cannot be enabled: %s.",
+            fse_reason,
         )
     return is_fused_shared_expert_enabled
 
@@ -98,16 +99,19 @@ def resolve_model_fused_shared_expert_fusion(
 ) -> bool:
     """Resolve one fused-shared-expert state for a model's MoE layers."""
 
-    def get_moe_layer(layer: nn.Module) -> nn.Module:
+    def get_moe_layer(layer: nn.Module) -> nn.Module | None:
         for name in moe_name.split("."):
-            layer = getattr(layer, name)
+            layer = getattr(layer, name, None)
+            if layer is None:
+                return None
         return layer
 
     moe_layers = (
         moe_layer
         for layer in layers
         if not isinstance(layer, PPMissingLayer)
-        and isinstance(moe_layer := get_moe_layer(layer), moe_cls)
+        and (moe_layer := get_moe_layer(layer)) is not None
+        and isinstance(moe_layer, moe_cls)
     )
 
     enabled = [

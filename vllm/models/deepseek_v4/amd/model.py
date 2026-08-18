@@ -16,6 +16,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -65,6 +66,8 @@ from vllm.model_executor.models.utils import (
 from vllm.models.deepseek_v4.amd.rocm import DeepseekV4ROCMAiterMLAAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+
+logger = init_logger(__name__)
 
 
 class DeepseekV4MLP(nn.Module):
@@ -235,11 +238,12 @@ class DeepseekV4MoE(nn.Module):
                 f"{prefix}.shared_experts",
             )
             if not fse_compatible:
-                raise ValueError(
+                logger.warning(
                     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
-                    f"cannot be enabled: {fse_reason}."
+                    "cannot be enabled: %s.",
+                    fse_reason,
                 )
-        self.is_fused_shared_expert_enabled = fse_requested
+        self.is_fused_shared_expert_enabled = fse_requested and fse_compatible
 
         if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
             self.shared_experts = None
