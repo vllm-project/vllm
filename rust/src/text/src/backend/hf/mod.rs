@@ -178,6 +178,7 @@ fn build_sampling_hints(
         default_min_p: sampling_config.and_then(|config| config.min_p),
         default_repetition_penalty: sampling_config.and_then(|config| config.repetition_penalty),
         default_max_tokens: sampling_config.and_then(|config| config.max_new_tokens),
+        default_post_thinking: self.generation_config.post_thinking.clone(),
     }
 }
 

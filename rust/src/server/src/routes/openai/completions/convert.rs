@@ -122,6 +122,7 @@ pub(super) fn prepare_completion_request(
             max_tokens,
             min_tokens: request.min_tokens,
             thinking_token_budget: request.thinking_token_budget,
+            post_thinking: request.post_thinking,
             logprobs,
             prompt_logprobs,
             min_p: request.min_p,

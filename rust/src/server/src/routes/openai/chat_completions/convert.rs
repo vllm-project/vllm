@@ -149,6 +149,7 @@ pub(super) fn prepare_chat_request(
             max_tokens: request.max_completion_tokens,
             min_tokens: request.min_tokens,
             thinking_token_budget: request.thinking_token_budget,
+            post_thinking: request.post_thinking,
             logprobs: request.logprobs.then_some(top_logprobs),
             prompt_logprobs,
             min_p: request.min_p,
@@ -753,6 +754,34 @@ mod tests {
         assert_eq!(prepare(Some(64)), Some(64));
         assert_eq!(prepare(Some(-1)), Some(-1));
         assert_eq!(prepare(None), None);
+    }
+
+    #[test]
+    fn prepare_chat_request_passes_through_post_thinking() {
+        use vllm_engine_core_client::protocol::sampling::PostThinkingParams;
+
+        let prepared = prepare_chat_request(
+            ChatCompletionRequest {
+                post_thinking: Some(PostThinkingParams {
+                    temperature: Some(0.4),
+                    top_p: Some(0.95),
+                    top_k: Some(20),
+                    ..PostThinkingParams::default()
+                }),
+                ..base_request()
+            },
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+        let overlay = prepared
+            .chat_request
+            .sampling_params
+            .post_thinking
+            .expect("post_thinking forwarded");
+        assert_eq!(overlay.temperature, Some(0.4));
+        assert_eq!(overlay.top_p, Some(0.95));
+        assert_eq!(overlay.top_k, Some(20));
     }
 
     #[test]
