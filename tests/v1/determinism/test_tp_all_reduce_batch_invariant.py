@@ -23,7 +23,10 @@ from tests.utils import (
 )
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tp_group, set_custom_all_reduce
-from vllm.model_executor.layers.batch_invariant import override_envs_for_invariance
+from vllm.model_executor.layers.batch_invariant import (
+    all_reduce_batch_invariant,
+    override_envs_for_invariance,
+)
 
 from .utils import order_sensitive_elements, skip_if_not_rocm
 
@@ -173,8 +176,6 @@ def _check_implementations_agree(
     torch.accelerator.set_device_index(device)
     set_custom_all_reduce(True)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
-
-    from vllm.model_executor.layers.batch_invariant import all_reduce_batch_invariant
 
     ca_comm = get_tp_group().device_communicator.ca_comm
     assert ca_comm is not None and not ca_comm.disabled, (

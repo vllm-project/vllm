@@ -23,7 +23,10 @@ from tests.utils import (
     multi_process_parallel,
 )
 from vllm.distributed.parallel_state import get_tp_group, set_custom_all_reduce
-from vllm.model_executor.layers.batch_invariant import override_envs_for_invariance
+from vllm.model_executor.layers.batch_invariant import (
+    override_envs_for_invariance,
+    reduce_scatter_batch_invariant,
+)
 
 from .utils import order_sensitive_elements, skip_if_not_rocm
 
@@ -242,10 +245,6 @@ def _check_implementations_agree(
     set_custom_all_reduce(True)
     init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
     group = get_tp_group()
-
-    from vllm.model_executor.layers.batch_invariant import (
-        reduce_scatter_batch_invariant,
-    )
 
     ca_comm = group.device_communicator.ca_comm
     assert ca_comm is not None and not ca_comm.disabled, (

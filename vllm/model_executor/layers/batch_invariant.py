@@ -7,6 +7,7 @@ from functools import lru_cache
 from typing import Any
 
 import torch
+import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
@@ -1029,8 +1030,6 @@ def all_reduce_batch_invariant(
     Instead, all-gather the contributions -- pure data movement, so bitwise
     reproducible at any size -- and reduce them with ``_fixed_order_sum_kernel``.
     """
-    import torch.distributed as dist
-
     world_size = dist.get_world_size(group)
     if world_size == 1:
         return input_
@@ -1081,8 +1080,6 @@ def reduce_scatter_batch_invariant(
     Returns:
         This rank's shard of the sum.
     """
-    import torch.distributed as dist
-
     world_size = dist.get_world_size(group)
     if world_size == 1:
         return input_

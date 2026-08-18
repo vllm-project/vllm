@@ -6,7 +6,9 @@ from typing import NamedTuple
 
 import pytest
 import torch
+import torch.distributed as dist
 
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
@@ -106,10 +108,6 @@ def order_sensitive_elements(probe: torch.Tensor) -> torch.Tensor:
 
     The all-gather is pure data movement, so every rank computes the same mask.
     """
-    import torch.distributed as dist
-
-    from vllm.distributed.parallel_state import get_tp_group
-
     world_size = get_tp_group().world_size
     gathered = torch.empty(
         (world_size * probe.shape[0], *probe.shape[1:]),

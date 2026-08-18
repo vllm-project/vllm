@@ -191,10 +191,10 @@ def test_scale_spread_exposes_reordering(fmt: str):
 @requires_mx
 @pytest.mark.parametrize("n,k,use_asm_gemm", MXFP4_CASES)
 def test_mxfp4_linear_is_batch_invariant(n: int, k: int, use_asm_gemm: bool):
+    pytest.importorskip("aiter")
+
     # Importing the module registers torch.ops.vllm.gemm_with_dynamic_quant.
     import vllm.model_executor.kernels.linear.mxfp4.aiter  # noqa: F401
-
-    pytest.importorskip("aiter")
 
     set_random_seed(SEED)
     weight, weight_scale = _mxfp4_weights(n, k, use_asm_gemm)
