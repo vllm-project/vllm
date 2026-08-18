@@ -220,9 +220,9 @@ def use_shared_hisparse_host_pool(vllm_config: VllmConfig) -> bool:
 
 
 def get_hisparse_host_block_stride(
-    vllm_config: VllmConfig, page_size_bytes: int
+    page_size_bytes: int, *, use_shared_host_pool: bool
 ) -> int:
-    if use_shared_hisparse_host_pool(vllm_config):
+    if use_shared_host_pool:
         return round_up(page_size_bytes, SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT)
     return page_size_bytes
 
@@ -231,9 +231,12 @@ def allocate_hisparse_host_pools(
     vllm_config: VllmConfig,
     tensor_sizes: list[int],
     num_blocks: int,
+    host_block_stride: int,
+    *,
+    use_shared_host_pool: bool,
 ) -> tuple[list[torch.Tensor], SharedOffloadRegion | None]:
     """Allocate private host tensors or one mmap shared by local TP ranks."""
-    if not use_shared_hisparse_host_pool(vllm_config):
+    if not use_shared_host_pool:
         check_hisparse_host_memory(sum(tensor_sizes))
         return [allocate_pinned_host_pool(size) for size in tensor_sizes], None
 
@@ -253,8 +256,9 @@ def allocate_hisparse_host_pools(
         ),
         num_blocks=num_blocks,
         rank=0,
-        kv_bytes_per_block=get_hisparse_host_block_stride(vllm_config, page_size),
+        kv_bytes_per_block=host_block_stride,
         cpu_page_size=page_size,
+        creator_memory_check=check_hisparse_host_memory,
     )
     try:
         pin_tensor(region.base_tensor)
@@ -265,6 +269,16 @@ def allocate_hisparse_host_pools(
         raise
     _SHARED_HOST_REGIONS.append(region)
     return pools, region
+
+
+def rollback_hisparse_shared_region(
+    region: SharedOffloadRegion | None,
+) -> None:
+    if region is None or region not in _SHARED_HOST_REGIONS:
+        return
+    _INDEXER_SOURCES.clear()
+    region.cleanup()
+    _SHARED_HOST_REGIONS.remove(region)
 
 
 def register_indexer_source(

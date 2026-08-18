@@ -33,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_offload.sparse.hisparse_runtime import (
     allocate_hisparse_host_pools,
+    rollback_hisparse_shared_region,
 )
 from vllm.v1.kv_offload.sparse.hisparse_worker import (
     HiSparseWorker,
@@ -218,42 +219,53 @@ def _allocate_kv_cache(
     host_tensors: list[torch.Tensor] = []
     if host_tensor_configs:
         host_num_blocks = kv_cache_config.hisparse_host_num_blocks
+        host_block_stride = kv_cache_config.hisparse_host_block_stride
         assert host_num_blocks is not None
+        assert host_block_stride is not None
         host_tensors, shared_host_region = allocate_hisparse_host_pools(
             vllm_config,
             [tensor.size for tensor in host_tensor_configs],
             host_num_blocks,
+            host_block_stride,
+            use_shared_host_pool=kv_cache_config.hisparse_shared_host_pool,
         )
-    host_tensor_iter = iter(host_tensors)
-
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
     packed_backings: dict[int, torch.Tensor] = {}
-    for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        if kv_cache_tensor.host_resident:
-            tensor = next(host_tensor_iter)
-        elif kv_cache_tensor.block_stride > 0:
-            assert kv_cache_tensor.block_pool_id is not None
-            # Allocate once; all packed tensors alias the same backing.
-            packed_backing = packed_backings.get(kv_cache_tensor.block_pool_id)
-            if packed_backing is None:
-                packed_backing = torch.zeros(
+    allocation_complete = False
+    try:
+        host_tensor_iter = iter(host_tensors)
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            if kv_cache_tensor.host_resident:
+                tensor = next(host_tensor_iter)
+            elif kv_cache_tensor.block_stride > 0:
+                assert kv_cache_tensor.block_pool_id is not None
+                # Allocate once; all packed tensors alias the same backing.
+                packed_backing = packed_backings.get(kv_cache_tensor.block_pool_id)
+                if packed_backing is None:
+                    packed_backing = torch.zeros(
+                        kv_cache_tensor.size, dtype=torch.int8, device=device
+                    )
+                    packed_backings[kv_cache_tensor.block_pool_id] = packed_backing
+                tensor = packed_backing
+            else:
+                tensor = torch.zeros(
                     kv_cache_tensor.size, dtype=torch.int8, device=device
                 )
-                packed_backings[kv_cache_tensor.block_pool_id] = packed_backing
-            tensor = packed_backing
-        else:
-            tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
-        for layer_name in kv_cache_tensor.shared_by:
-            kv_cache_raw_tensors[layer_name] = tensor
+            for layer_name in kv_cache_tensor.shared_by:
+                kv_cache_raw_tensors[layer_name] = tensor
 
-    layer_names = set()
-    for group in kv_cache_config.kv_cache_groups:
-        for layer_name in group.layer_names:
-            layer_names.add(layer_name)
-    assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
-        "Some layers are not correctly initialized"
-    )
-    return kv_cache_raw_tensors, shared_host_region
+        layer_names = set()
+        for group in kv_cache_config.kv_cache_groups:
+            for layer_name in group.layer_names:
+                layer_names.add(layer_name)
+        assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
+            "Some layers are not correctly initialized"
+        )
+        allocation_complete = True
+        return kv_cache_raw_tensors, shared_host_region
+    finally:
+        if not allocation_complete:
+            rollback_hisparse_shared_region(shared_host_region)
 
 
 def _reshape_attention_kv_cache(
@@ -514,45 +526,58 @@ def init_kv_cache(
     kv_cache_raw_tensors, shared_host_region = _allocate_kv_cache(
         kv_cache_config, shared_kv_cache_layers, device, vllm_config
     )
-    flattened_attn_groups = list(group for groups in attn_groups for group in groups)
-    kv_caches = _reshape_kv_cache(
-        attn_groups=flattened_attn_groups,
-        kv_cache_raw_tensors=kv_cache_raw_tensors,
-        kernel_block_sizes=kernel_block_sizes,
-        cache_dtype=cache_dtype,
-        shared_kv_cache_layers=shared_kv_cache_layers,
-        kv_cache_config=kv_cache_config,
-    )
     hisparse_worker = None
-    if vllm_config.attention_config.hisparse_config is not None:
-        hisparse_worker = init_hisparse_worker(
-            forward_context=forward_context,
-            kv_cache_config=kv_cache_config,
-            raw_tensors=kv_cache_raw_tensors,
-            kv_caches=kv_caches,
-            block_tables=block_tables,
-            max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
-            max_model_len=vllm_config.model_config.max_model_len,
-            max_concurrent_batches=vllm_config.max_concurrent_batches,
-            device=device,
-            shared_host_region=shared_host_region,
+    initialized = False
+    try:
+        flattened_attn_groups = list(
+            group for groups in attn_groups for group in groups
         )
-    # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
-    # decoder layer, so a layer name carries two integers (layer + module index).
-    num_attn_module = (
-        2
-        if vllm_config.model_config.hf_config.model_type
-        in ("longcat_flash", "longcat_flash_ngram")
-        else 1
-    )
-    bindable_caches = {
-        name: cache for name, cache in kv_caches.items() if name in forward_context
-    }
-    bind_kv_cache(bindable_caches, forward_context, runner_kv_caches, num_attn_module)
-    runner_kv_caches.extend(
-        cache for name, cache in kv_caches.items() if name not in forward_context
-    )
-    return kv_caches, hisparse_worker
+        kv_caches = _reshape_kv_cache(
+            attn_groups=flattened_attn_groups,
+            kv_cache_raw_tensors=kv_cache_raw_tensors,
+            kernel_block_sizes=kernel_block_sizes,
+            cache_dtype=cache_dtype,
+            shared_kv_cache_layers=shared_kv_cache_layers,
+            kv_cache_config=kv_cache_config,
+        )
+        if vllm_config.attention_config.hisparse_config is not None:
+            hisparse_worker = init_hisparse_worker(
+                forward_context=forward_context,
+                kv_cache_config=kv_cache_config,
+                raw_tensors=kv_cache_raw_tensors,
+                kv_caches=kv_caches,
+                block_tables=block_tables,
+                max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
+                max_model_len=vllm_config.model_config.max_model_len,
+                max_concurrent_batches=vllm_config.max_concurrent_batches,
+                device=device,
+                shared_host_region=shared_host_region,
+            )
+        # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
+        # decoder layer, so a layer name carries two integers (layer + module index).
+        num_attn_module = (
+            2
+            if vllm_config.model_config.hf_config.model_type
+            in ("longcat_flash", "longcat_flash_ngram")
+            else 1
+        )
+        bindable_caches = {
+            name: cache for name, cache in kv_caches.items() if name in forward_context
+        }
+        bind_kv_cache(
+            bindable_caches, forward_context, runner_kv_caches, num_attn_module
+        )
+        runner_kv_caches.extend(
+            cache for name, cache in kv_caches.items() if name not in forward_context
+        )
+        initialized = True
+        return kv_caches, hisparse_worker
+    finally:
+        if not initialized and shared_host_region is not None:
+            if hisparse_worker is None:
+                rollback_hisparse_shared_region(shared_host_region)
+            else:
+                hisparse_worker.shutdown()
 
 
 def build_slot_mappings_by_layer(

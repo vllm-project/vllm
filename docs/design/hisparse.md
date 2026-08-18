@@ -57,6 +57,12 @@ across TP ranks, so this stores one physical copy instead of one copy per rank.
 Each rank still submits its own identical DMA to preserve its local CUDA stream
 ordering. Other executor and parallel layouts retain private per-rank pools.
 
+`host_pool_gib` remains the logical capacity budget visible to each rank. A
+shared layout backs that capacity with one physical pool per DP replica; a
+private layout allocates one physical pool per rank. Physical pool size includes
+block-stride alignment. `num_gpu_blocks_override`, when set, overrides the
+planned Host block count and can exceed this budget.
+
 ## Code boundary
 
 ```text

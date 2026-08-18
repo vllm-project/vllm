@@ -1077,6 +1077,12 @@ class KVCacheConfig:
     hisparse_host_num_blocks: int | None = None
     """Capacity of the dedicated HiSparse host-block manager, when enabled."""
 
+    hisparse_host_block_stride: int | None = None
+    """Physical bytes between consecutive HiSparse host blocks."""
+
+    hisparse_shared_host_pool: bool = False
+    """Whether local TP ranks share one physical HiSparse host pool."""
+
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
         """IDs of cache groups that participate in external KV transfer."""
@@ -1122,6 +1128,17 @@ class KVCacheConfig:
             self.hisparse_host_num_blocks < 0
         ):
             raise ValueError("HiSparse host block-pool size must be non-negative.")
+        if self.hisparse_host_block_stride is not None and (
+            self.hisparse_host_block_stride <= 0
+        ):
+            raise ValueError("HiSparse host block stride must be positive.")
+        if self.hisparse_shared_host_pool and (
+            self.hisparse_host_num_blocks is None
+            or self.hisparse_host_block_stride is None
+        ):
+            raise ValueError(
+                "A shared HiSparse host pool requires host blocks and block stride."
+            )
         if self.num_blocks != self.num_blocks_by_pool[0]:
             raise ValueError(
                 "KVCacheConfig.num_blocks must equal num_blocks_by_pool[0]."
