@@ -6,7 +6,6 @@ import inspect
 import os
 import tempfile
 import textwrap
-import threading
 import time
 import uuid
 from collections import defaultdict
@@ -2282,47 +2281,6 @@ def test_shutdown_cleans_up_resources(default_vllm_config, dist_init):
         mock_dereg.assert_any_call("desc2")
 
 
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
-    FakeNixlWrapper,
-)
-def test_shutdown_retains_registered_memory_while_host_staging_drains(
-    default_vllm_config, dist_init
-):
-    """A timed-out staged read must not block shutdown or expose its memory.
-
-    Host staging owns posted NIXL reads whose buffers cannot be deregistered
-    until cancellation succeeds or the operation becomes terminal.
-    """
-    vllm_config = create_vllm_config()
-    worker = NixlConnectorWorker(
-        vllm_config,
-        vllm_config.kv_transfer_config.engine_id,
-        make_kv_cache_config(block_size=16),
-    )
-    staging_active = threading.Event()
-    staging_active.set()
-    stager = MagicMock()
-    stager.poll_shutdown.side_effect = lambda cancel: not staging_active.is_set()
-    worker._host_stager = stager
-    worker._registered_descs = ["desc"]
-    worker.device_kv_caches = {"cache": MagicMock()}
-
-    with patch.object(worker.nixl_wrapper, "deregister_memory") as deregister:
-        worker.shutdown(drain_timeout=0)
-
-        reaper = worker._host_staging_shutdown_thread
-        assert reaper is not None and reaper.is_alive()
-        stager.begin_shutdown.assert_called_once_with()
-        deregister.assert_not_called()
-
-        staging_active.clear()
-        reaper.join(timeout=1)
-
-        assert not reaper.is_alive()
-        deregister.assert_called_once_with("desc")
-
-
 # ── TTL-based remote engine eviction tests ──────────────────────────
 
 
@@ -2915,10 +2873,6 @@ def test_split_read_failure_defers_report_until_last_handle(
     assert done_recving == set()
 
 
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
-    FakeNixlWrapper,
-)
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,

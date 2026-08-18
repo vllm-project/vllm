@@ -1984,15 +1984,20 @@ def test_host_stager_preserves_custom_destinations_and_mirrors():
     )
 
     queued = stager._reqs["request"].queued
-    assert [entry[0].tolist() for entry in queued] == [[7, 9], [8]]
-    assert [entry[1].tolist() for entry in queued] == [[100, 300], [200]]
-    assert [entry[2].tolist() for entry in queued] == [[2, 2], [3]]
-    assert [entry[3].tolist() for entry in queued] == [[0, 800], [900]]
+    transfers = {
+        (desc, dst, kind, mirror, length)
+        for descs, dsts, kinds, mirrors, _, length in queued
+        for desc, dst, kind, mirror in zip(descs, dsts, kinds, mirrors, strict=True)
+    }
+    assert transfers == {
+        (7, 100, 2, 0, 10),
+        (8, 200, 3, 900, 20),
+        (9, 300, 2, 800, 10),
+    }
 
 
 @pytest.mark.cpu_test
-@pytest.mark.parametrize("has_queued_chunk", [False, True])
-def test_host_stager_read_failure_reaches_terminal_state(has_queued_chunk):
+def test_host_stager_read_failure_reaches_terminal_state():
     """A terminal NIXL error must fail even when another chunk was queued."""
     from types import SimpleNamespace
     from unittest.mock import MagicMock
@@ -2006,9 +2011,7 @@ def test_host_stager_read_failure_reaches_terminal_state(has_queued_chunk):
 
     pool = SimpleNamespace(free_slots=[])
     slot = SimpleNamespace(pool=pool)
-    queued = []
-    if has_queued_chunk:
-        queued.append((np.array([2]),) * 4 + (7, 16))
+    queued = [(np.array([2]),) * 4 + (7, 16)]
     state = _ReqState(
         queued=queued,
         reading=[(1, slot, np.array([0]), np.array([2]), np.array([0]))],

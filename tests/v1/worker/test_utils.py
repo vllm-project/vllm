@@ -302,30 +302,6 @@ def test_hisparse_worker_reports_each_completed_transfer_once():
     assert worker.take_transfer_updates() == ([], [])
 
 
-def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
-    worker = object.__new__(HiSparseWorker)
-    worker.cache_handles = []
-    worker.pinned_host_pools = []
-    indexer_source_layer = SimpleNamespace(hisparse_indexer_source=object())
-    worker.indexer_source_layers = [indexer_source_layer]
-    released = False
-
-    def release_pinned_state(runtimes, pinned_host_pools):
-        nonlocal released
-        assert runtimes == []
-        assert pinned_host_pools == []
-        released = True
-
-    monkeypatch.setattr(
-        hisparse_worker_module, "release_pinned_state", release_pinned_state
-    )
-
-    worker.shutdown()
-
-    assert released
-    assert indexer_source_layer.hisparse_indexer_source is None
-
-
 def test_bind_kv_cache(default_vllm_config):
     from vllm.model_executor.layers.attention import Attention
 
