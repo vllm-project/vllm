@@ -17,6 +17,7 @@ prompt cache salt, and truncation are out of scope for this file.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock
@@ -101,6 +102,7 @@ class CapturedRenderInputs:
 
     messages: list[Any]
     chat_params: ChatParams
+    tool_dicts: list[dict[str, Any]] | None
 
 
 class RenderCapture:
@@ -121,7 +123,8 @@ class RenderCapture:
             assert len(conversations) == 1
             self.captured = CapturedRenderInputs(
                 messages=list(conversations[0]),
-                chat_params=chat_params,
+                chat_params=deepcopy(chat_params),
+                tool_dicts=deepcopy(chat_params.chat_template_kwargs.get("tools")),
             )
             return [list(conversations[0])], [
                 tokens_input(prompt_token_ids=[0]),
@@ -400,6 +403,42 @@ class TestToolsRenderParity:
                 "tool_choice": "auto",
             },
         )
+
+    @pytest.mark.parametrize("strict", [False, True])
+    async def test_strict_is_not_passed_to_chat_template(
+        self, online_renderer, serving_responses, strict: bool
+    ):
+        """The server-only strict directive must not become model-visible."""
+        chat_tools, responses_tools = _weather_tools(
+            overrides={
+                "strict": strict,
+                "defer_loading": False,
+                "unrelated_extra": "should_be_ignored",
+            }
+        )
+        chat = await _capture_chat(
+            online_renderer,
+            ChatCompletionRequest(
+                model=_MODEL,
+                messages=_USER,
+                tools=chat_tools,
+                tool_choice="auto",
+            ),
+        )
+        responses = await _capture_responses(
+            serving_responses,
+            ResponsesRequest(
+                model=_MODEL,
+                input=_USER,
+                tools=responses_tools,
+                tool_choice="auto",
+            ),
+        )
+
+        for captured in (chat, responses):
+            assert captured.tool_dicts is not None
+            assert "strict" not in captured.tool_dicts[0]["function"]
+            assert captured.tool_dicts[0]["function"]["defer_loading"] is False
 
 
 @pytest.mark.asyncio

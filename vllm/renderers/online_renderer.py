@@ -60,6 +60,25 @@ def _reused_prompt_token_ids(request: Any) -> list[int] | None:
     return kv.pop("prompt_token_ids", None) or None
 
 
+def _strip_tool_strict(
+    tool_dicts: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]] | None:
+    if tool_dicts is None:
+        return None
+
+    return [
+        {
+            **tool,
+            "function": {
+                key: value for key, value in tool["function"].items() if key != "strict"
+            },
+        }
+        if isinstance(tool.get("function"), dict)
+        else tool
+        for tool in tool_dicts
+    ]
+
+
 class OnlineRenderer:
     def __init__(
         self,
@@ -390,6 +409,7 @@ class OnlineRenderer:
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         """Copied from GenerateBaseServing._preprocess_chat."""
         renderer = self.renderer
+        tool_dicts = _strip_tool_strict(tool_dicts)
         mm_config = self.model_config.multimodal_config
 
         default_template_kwargs = merge_kwargs(
