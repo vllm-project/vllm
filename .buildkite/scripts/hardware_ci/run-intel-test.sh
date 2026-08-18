@@ -18,7 +18,9 @@ if [[ "${1:-}" == "--dry-run" ]]; then
 fi
 
 # Export Python path
+# Remove VLLM_DISABLE_COMPILE_CACHE=1 once intel/intel-xpu-backend-for-triton#7682 is fixed
 export PYTHONPATH=".."
+export VLLM_DISABLE_COMPILE_CACHE=1
 
 ###############################################################################
 # Helper Functions
@@ -342,7 +344,7 @@ if [[ -z "${ZE_AFFINITY_MASK:-}" ]]; then
 fi
 
 export CMDS="${commands}"
-export HF_TOKEN ZE_AFFINITY_MASK
+export HF_TOKEN ZE_AFFINITY_MASK VLLM_DISABLE_COMPILE_CACHE
 
 {
   flock 9
@@ -364,12 +366,13 @@ export HF_TOKEN ZE_AFFINITY_MASK
     --entrypoint='' \
     -e HF_TOKEN \
     -e ZE_AFFINITY_MASK \
+    -e VLLM_DISABLE_COMPILE_CACHE \
     -e BUILDKITE_PARALLEL_JOB \
     -e BUILDKITE_PARALLEL_JOB_COUNT \
     -e CMDS \
     --name "${container_name}" \
     "${IMAGE}" \
-    bash -c 'set -e; source /opt/intel/oneapi/setvars.sh --force; source /opt/intel/oneapi/ccl/2021.15/env/vars.sh --force; echo "ZE_AFFINITY_MASK is ${ZE_AFFINITY_MASK:-}"; eval "$CMDS"' \
+    bash -c 'set -e; echo "ZE_AFFINITY_MASK is ${ZE_AFFINITY_MASK:-}"; eval "$CMDS"' \
     >/dev/null
 } 9>/tmp/docker-pull.lock
 

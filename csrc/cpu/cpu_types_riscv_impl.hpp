@@ -427,7 +427,10 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
   explicit FP32Vec8(const float* ptr)
       : reg(RVVI(__riscv_vle32_v_f32, LMUL_256)(ptr, VEC_ELEM_NUM)) {};
   explicit FP32Vec8(fixed_fp32x8_t data) : reg(data) {};
-  explicit FP32Vec8(const FP32Vec8& data) : reg(data.reg) {};
+  // Not explicit: copy-initialisation (`auto v = pair.first`) in
+  // cpu_attn_vec.hpp requires a converting copy constructor, and every other
+  // CPU backend leaves this implicit.
+  FP32Vec8(const FP32Vec8& data) : reg(data.reg) {};
   explicit FP32Vec8(const FP16Vec8& v)
       : reg(RVVI(__riscv_vfwcvt_f_f_v_f32, LMUL_256)(v.reg, VEC_ELEM_NUM)) {};
   explicit FP32Vec8(fixed_fp16x8_t v)
@@ -628,7 +631,8 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   explicit FP32Vec16(const FP32Vec8& data)
       : reg(RVVI4(__riscv_vcreate_v_f32, LMUL_256, _f32, LMUL_512)(
             data.reg, data.reg)) {};
-  explicit FP32Vec16(const FP32Vec16& data) : reg(data.reg) {};
+  // Not explicit: see FP32Vec8's copy constructor.
+  FP32Vec16(const FP32Vec16& data) : reg(data.reg) {};
   explicit FP32Vec16(int64_t value, const FP32Vec16& lut) {
     // Split into two 32-bit halves to avoid u64 @ LMUL_1024 (m8 on
     // VLEN=128 / m4 on VLEN=256), which causes heavy register spilling.
@@ -677,6 +681,9 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   FP32Vec16 operator-(const FP32Vec16& b) const {
     return FP32Vec16(
         RVVI(__riscv_vfsub_vv_f32, LMUL_512)(reg, b.reg, VEC_ELEM_NUM));
+  }
+  FP32Vec16 operator-() const {
+    return FP32Vec16(RVVI(__riscv_vfneg_v_f32, LMUL_512)(reg, VEC_ELEM_NUM));
   }
   FP32Vec16 operator*(const FP32Vec16& b) const {
     return FP32Vec16(
@@ -896,6 +903,25 @@ struct INT8Vec16 : public Vec<INT8Vec16> {
   void save(int8_t* ptr, int elem_num) const {
     RVVI(__riscv_vse8_v_i8, LMUL_128)(ptr, reg, elem_num);
   }
+};
+
+// Reference implementation for vector operations missing from some backends.
+struct INT8Vec64 {
+  constexpr static int VEC_ELEM_NUM = 64;
+
+  explicit INT8Vec64(const int8_t* ptr) {
+    std::memcpy(data_, ptr, sizeof(data_));
+  }
+
+  void save(int8_t* ptr) const { std::memcpy(ptr, data_, sizeof(data_)); }
+
+  void save(int8_t* ptr, const int elem_num) const {
+    TORCH_CHECK(elem_num > 0 && elem_num <= VEC_ELEM_NUM);
+    std::memcpy(ptr, data_, elem_num);
+  }
+
+ private:
+  int8_t data_[VEC_ELEM_NUM];
 };
 
 // ============================================================================

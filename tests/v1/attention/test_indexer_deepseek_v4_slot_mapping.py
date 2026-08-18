@@ -1,13 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from tests.v1.attention.utils import create_vllm_config
 from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadataBuilder
+from vllm.v1.attention.backends.mla.indexer import (
+    BuildPrefillChunkMetadataKernel,
+    DeepseekV32IndexerMetadataBuilder,
+)
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.worker.block_table import get_block_table_width
+
+
+def test_indexer_warmup_normalizes_zero_compress_ratios():
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(compress_ratios=[0, 0, 4, 128, 0])
+        ),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
+    )
+
+    keys = BuildPrefillChunkMetadataKernel().get_warmup_keys(config)
+
+    assert {key.COMPRESS_RATIO for key in keys} == {1, 4, 128}
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
@@ -26,11 +49,14 @@ def test_indexer_builder_deepseek_v4_compressed_slot_mapping_uses_storage_block_
         compress_ratio=4,
     )
     vllm_config = create_vllm_config(max_model_len=1024)
+    max_num_blocks = kv_cache_spec.max_num_blocks_per_req(vllm_config, 1024)
+    block_table_width = get_block_table_width(max_num_blocks, kv_cache_spec.block_size)
     builder = DeepseekV32IndexerMetadataBuilder(
         kv_cache_spec=kv_cache_spec,
         layer_names=["dummy"],
         vllm_config=vllm_config,
         device=device,
+        block_table_width=block_table_width,
     )
 
     # Construct a single request where:
