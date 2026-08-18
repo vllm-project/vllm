@@ -1428,8 +1428,6 @@ class VllmConfig:
                     "slower than a normal GPU prefill; PD decode-only "
                     "instances avoid this cost."
                 )
-            if self.speculative_config is not None:
-                raise ValueError("HiSparse does not support speculative decoding.")
             if self.parallel_config.decode_context_parallel_size > 1:
                 raise ValueError(
                     "HiSparse does not support decode context parallelism."
