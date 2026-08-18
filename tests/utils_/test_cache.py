@@ -123,3 +123,18 @@ def test_lru_cache():
     assert 2 in cache
     assert 4 in cache
     assert 6 in cache
+
+
+def test_cache_info_hit_ratio():
+    # No queries yet: ratio should be a float 0.0, not int 0, to match the
+    # `-> float` return type of the property.
+    empty_info = CacheInfo(hits=0, total=0)
+    assert empty_info.hit_ratio == 0.0
+    assert isinstance(empty_info.hit_ratio, float)
+
+    # Regular case: ratio is computed as hits / total.
+    partial_info = CacheInfo(hits=1, total=4)
+    assert partial_info.hit_ratio == 0.25
+
+    full_info = CacheInfo(hits=3, total=3)
+    assert full_info.hit_ratio == 1.0
