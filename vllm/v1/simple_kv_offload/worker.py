@@ -194,7 +194,6 @@ class SimpleCPUOffloadWorker:
             self.store_stream,
             rank_path,
             num_disk_slots,
-            total_bytes_per_block,
             self.disk_buffer_slots,
             self.use_page_cache,
         )
