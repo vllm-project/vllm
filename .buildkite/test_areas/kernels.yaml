@@ -14,7 +14,7 @@ steps:
     - pytest -v -s tests/ir
     - pytest -v -s tests/kernels/ir
 
-- label: ":nvidia: (H200) Core Operation Kernels"
+- label: ":nvidia: (H200) Core Operation Kernels Shard %N"
   device: h200_35gb
   key: kernels-core-operation-test
   timeout_in_minutes: 120
@@ -364,7 +364,7 @@ steps:
       model_executor/test_b12x_warmup.py
       kernels/quantization/test_block_fp8.py -k b12x
 
-- label: ":nvidia: (H100) Helion Kernels"
+- label: ":nvidia: (H100) Helion Kernels Shard %N"
   key: kernels-helion-test
   timeout_in_minutes: 115
   device: h100
