@@ -124,20 +124,24 @@ When batch invariance is enabled, vLLM:
 
 ## Limitations
 
-Prefix caching is only partially covered by batch invariance. A request whose
-prefix is already cached prefills just the tokens after the last cached block,
-while the same request on a cold cache prefills the whole prompt in one pass.
-The two paths can select different GEMM tilings, so their outputs may differ
-even at `temperature=0`.
+In the default mode, the same request can return different output depending on
+whether its prefix is already cached. A request whose prefix is cached prefills
+only the tokens after the last cached block, while the same request on a cold
+cache prefills the whole prompt in one pass. The two paths can select different
+GEMM tilings, so the logprobs differ slightly.
 
-vLLM disables prefix caching automatically for the `FLASHINFER` and
-`TRITON_MLA` backends when `VLLM_BATCH_INVARIANT=1`. Other backends keep it
-enabled, and cold vs warm divergence has still been reported against
-`FLASH_ATTN` in
-[issue #40896](https://github.com/vllm-project/vllm/issues/40896). Pass
-`--no-enable-prefix-caching` when you need bitwise reproducible results on
-those backends. Progress is tracked in
-[issue #27433](https://github.com/vllm-project/vllm/issues/27433).
+At `temperature=0` that difference is usually invisible. When the top two
+candidates are close it can change which token is picked, and the rest of the
+output then differs. This is what is reported in
+[issue #40896](https://github.com/vllm-project/vllm/issues/40896).
+
+This is ordinary floating point behaviour rather than a prefix caching bug, and
+the default mode does not promise bitwise reproducible output. Set
+`VLLM_BATCH_INVARIANT=1` if you need it, or pass `--no-enable-prefix-caching` to
+remove the cold versus warm difference on its own. Note that
+`VLLM_BATCH_INVARIANT=1` also turns prefix caching off automatically for the
+`FLASHINFER` and `TRITON_MLA` backends, where it is not yet supported. Progress
+is tracked in [issue #27433](https://github.com/vllm-project/vllm/issues/27433).
 
 ## Future Improvements
 

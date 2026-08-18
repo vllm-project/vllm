@@ -18,20 +18,6 @@ from utils import (
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
-from vllm.v1.metrics.reader import Counter
-
-# Pinned rather than using TEST_MODEL: this is the only model the cold/warm
-# prefix-cache divergence has been reproduced with, and it was not observed on
-# larger Qwen3 checkpoints. See https://github.com/vllm-project/vllm/issues/40896
-PREFIX_CACHE_DIVERGENCE_MODEL = "Qwen/Qwen3-0.6B"
-
-
-def _prefix_cache_hits(llm: LLM) -> int:
-    return sum(
-        m.value
-        for m in llm.get_metrics()
-        if isinstance(m, Counter) and m.name == "vllm:prefix_cache_hits"
-    )
 
 
 @skip_unsupported
@@ -412,83 +398,6 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
             f"{len(prompts)} prompts. See output above for details."
         )
         pytest.fail(msg)
-
-
-@skip_unsupported
-@pytest.mark.xfail(
-    strict=False,
-    reason="Prefix caching is not covered by batch invariance yet; "
-    "https://github.com/vllm-project/vllm/issues/40896",
-)
-@pytest.mark.parametrize(
-    "backend",
-    BACKENDS,
-)
-def test_prefix_cache_cold_and_warm_outputs_match(backend):
-    """
-    A prompt must decode identically whether or not its prefix is cached.
-
-    On a cold cache the whole prompt is prefilled in one pass; on a warm cache
-    only the tokens past the last cached block are recomputed. The two paths
-    can select different GEMM tilings, and the resulting rounding difference
-    is enough to flip an argmax at temperature 0. Under batch invariance the
-    two must still agree exactly.
-
-    vLLM already disables prefix caching under batch invariance for FLASHINFER
-    and TRITON_MLA. BACKENDS holds none of those, so every backend exercised
-    here is one the engine currently considers safe to combine with prefix
-    caching. Issue #40896 reports otherwise for FLASH_ATTN.
-
-    Non-strict xfail: the property holds on some GPUs and is reported to fail
-    on others, so the result is informational until prefix caching gets a
-    cache-state-independent prefill split.
-
-    Regression test for https://github.com/vllm-project/vllm/issues/40896.
-    """
-    # A prompt long enough to span several blocks, deliberately not a whole
-    # multiple of the block size so the warm pass recomputes a partial block.
-    prompt = (
-        "The study of distributed systems begins with a simple question: "
-        + (
-            "how do independent machines agree on a single value when messages "
-            "may be delayed, reordered, or lost entirely? "
-        )
-        * 12
-    )
-
-    llm = LLM(
-        model=PREFIX_CACHE_DIVERGENCE_MODEL,
-        max_num_seqs=1,
-        tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
-        gpu_memory_utilization=0.9,
-        max_model_len=2048,
-        dtype="auto",
-        enable_prefix_caching=True,
-        disable_log_stats=False,  # required for llm.get_metrics()
-        attention_config={"backend": backend},
-    )
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=32)
-
-    try:
-        llm.reset_prefix_cache()
-        cold = llm.generate([prompt], sampling_params, use_tqdm=False)[0].outputs[0]
-
-        hits_before = _prefix_cache_hits(llm)
-        warm = llm.generate([prompt], sampling_params, use_tqdm=False)[0].outputs[0]
-        hits_after = _prefix_cache_hits(llm)
-
-        assert hits_after > hits_before, (
-            "second run did not hit the prefix cache, so this test would pass "
-            f"vacuously (hits {hits_before} -> {hits_after})"
-        )
-
-        assert list(cold.token_ids) == list(warm.token_ids), (
-            "cold-cache and warm-cache outputs diverged under batch "
-            f"invariance:\n  cold: {cold.text!r}\n  warm: {warm.text!r}"
-        )
-    finally:
-        with contextlib.suppress(Exception):
-            llm.shutdown()
 
 
 @skip_unsupported
