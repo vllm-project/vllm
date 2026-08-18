@@ -20,6 +20,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 XPU_WNA16_SUPPORTED_BITS = {2, 4}
+# On CUDA the Marlin/GPTQ/AWQ kernels only cover 4/8-bit; 2/3-bit have no CUDA
+# kernel there, so they are dispatched to the humming kernel instead.
+CUDA_HUMMING_SUPPORTED_BITS = {2, 3}
 
 
 class INCWna16Scheme(INCScheme):
@@ -84,6 +87,14 @@ class INCWna16Scheme(INCScheme):
                 return INCLinearMethod(INCWNA16LinearScheme(layer_config))
             raise NotImplementedError(f"INC on CPU: unsupported config {layer_config}")
 
+        # CUDA low-bit (2/3): no Marlin/GPTQ/AWQ kernel, route to humming so a
+        # single model can mix 4/8-bit (Marlin) and 2/3-bit (humming) layers.
+        if (
+            current_platform.is_cuda()
+            and layer_config.bits in CUDA_HUMMING_SUPPORTED_BITS
+        ):
+            return _build_humming_linear_method(layer_config)
+
         from .inc_wna16_linear import INCWNA16LinearScheme
 
         return INCLinearMethod(INCWNA16LinearScheme(layer_config))
@@ -103,6 +114,12 @@ class INCWna16Scheme(INCScheme):
             )
 
             return UnquantizedFusedMoEMethod(layer.moe_config)
+        # CUDA low-bit (2/3): route to the humming MoE kernel (see above).
+        if (
+            current_platform.is_cuda()
+            and layer_config.bits in CUDA_HUMMING_SUPPORTED_BITS
+        ):
+            return _build_humming_moe_method(layer, layer_config)
         if layer_config.is_gptq:
             return _resolve_gptq_moe(layer, layer_config)
         if layer_config.is_awq:
@@ -194,3 +211,53 @@ def _resolve_awq_moe(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
         }
     )
     return MoeWNA16Method(moe_config, layer.moe_config)
+
+
+def _humming_weight_config(layer_config: "INCLayerConfig") -> dict:
+    """Build the humming weight-schema config for a WNA16 int checkpoint."""
+    if layer_config.is_gptq:
+        return {
+            "quant_method": "gptq",
+            "bits": layer_config.bits,
+            "group_size": layer_config.group_size,
+            "desc_act": False,
+            "sym": layer_config.sym,
+        }
+    if layer_config.is_awq:
+        return {
+            "quant_method": "awq",
+            "bits": layer_config.bits,
+            "group_size": layer_config.group_size,
+            "zero_point": not layer_config.sym,
+        }
+    raise NotImplementedError(
+        "INC humming dispatch only supports gptq/awq packed int checkpoints, "
+        f"but found {layer_config}."
+    )
+
+
+def _build_humming_quant_config(layer_config: "INCLayerConfig"):
+    from vllm.model_executor.layers.quantization.humming import (
+        HummingLayerQuantizationConfig,
+    )
+    from vllm.utils.humming import BaseWeightSchema
+
+    weight_schema = BaseWeightSchema.from_config(_humming_weight_config(layer_config))
+    return HummingLayerQuantizationConfig(weight_schema=weight_schema)
+
+
+def _build_humming_linear_method(layer_config: "INCLayerConfig"):
+    from vllm.model_executor.layers.quantization.humming import HummingLinearMethod
+
+    return HummingLinearMethod(_build_humming_quant_config(layer_config))
+
+
+def _build_humming_moe_method(
+    layer: "torch.nn.Module", layer_config: "INCLayerConfig"
+):
+    from vllm.model_executor.layers.quantization.humming import HummingMoEMethod
+
+    return HummingMoEMethod(
+        _build_humming_quant_config(layer_config), layer.moe_config
+    )
+
