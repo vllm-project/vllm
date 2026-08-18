@@ -637,6 +637,16 @@ def resolve_kv_cache_block_sizes(
         for g in groups
     ]
     scheduler_block_size = math.lcm(*group_block_sizes)
+    if scheduler_block_size > max(group_block_sizes):
+        logger.warning(
+            "KV cache group block sizes %s are not commensurate (no group's "
+            "block size is a multiple of all the others), so "
+            "scheduler_block_size (their LCM) is %d tokens. Prefix-cache "
+            "hits align to this granularity, which can severely reduce the "
+            "prefix-cache hit rate.",
+            group_block_sizes,
+            scheduler_block_size,
+        )
 
     # Block hashes are only consumed by prefix caching and KV connectors
     # (P/D, offloading); when neither is active, keep hash_block_size equal
@@ -1033,6 +1043,23 @@ def _get_kv_cache_groups_uniform_type(
     return [KVCacheGroupSpec(list(spec.kv_cache_specs.keys()), spec)]
 
 
+def _commensurate_padded_block_size(
+    layer_spec: AttentionSpec,
+    max_page_size: int,
+    base_block_lcm: int,
+) -> int | None:
+    """Largest block size that divides ``base_block_lcm`` (so the LCM of all
+    group block sizes is unchanged), is a multiple of the layer's current
+    kernel-aligned block size, and whose natural page fits in
+    ``max_page_size``. ``None`` if no such size exists."""
+    per_token_bytes = layer_spec.real_page_size_bytes // layer_spec.block_size
+    cap = min(base_block_lcm, max_page_size // per_token_bytes)
+    for candidate in range(cap, 0, -1):
+        if base_block_lcm % candidate == 0 and candidate % layer_spec.block_size == 0:
+            return candidate
+    return None
+
+
 def unify_kv_cache_spec_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> dict[str, KVCacheSpec]:
@@ -1060,6 +1087,18 @@ def unify_kv_cache_spec_page_size(
         return kv_cache_spec
 
     max_page_size = max(page_sizes)
+    # Layers already at the max page keep their block sizes. Smaller-page
+    # layers must end up token-commensurate with them: the scheduler block
+    # size is the LCM of all group block sizes and prefix-cache hits align to
+    # it, so an incommensurate block size (e.g. a draft model's SWA layers
+    # over an MLA + mamba target) multiplies the hit granularity.
+    max_page_block_lcm = math.lcm(
+        *(
+            spec.block_size
+            for spec in kv_cache_spec.values()
+            if spec.page_size_bytes == max_page_size
+        )
+    )
     new_kv_cache_spec = {}
     for layer_name, layer_spec in kv_cache_spec.items():
         if layer_spec.page_size_bytes == max_page_size:
@@ -1079,7 +1118,45 @@ def unify_kv_cache_spec_page_size(
             if max_page_size % layer_page_size == 0:
                 ratio = max_page_size // layer_page_size
                 new_block_size = layer_spec.block_size * ratio
-                new_spec = replace(layer_spec, block_size=new_block_size)
+                padded_spec: KVCacheSpec | None = None
+                if (
+                    new_block_size % max_page_block_lcm != 0
+                    and max_page_block_lcm % new_block_size != 0
+                    and isinstance(layer_spec, AttentionSpec)
+                    and layer_spec.indexes_kv_by_block_stride
+                ):
+                    # Byte-exact scaling would break token commensurability.
+                    # Prefer a commensurate block size with a padded page.
+                    commensurate_block_size = _commensurate_padded_block_size(
+                        layer_spec, max_page_size, max_page_block_lcm
+                    )
+                    if commensurate_block_size is not None:
+                        per_token_bytes = (
+                            layer_spec.real_page_size_bytes // layer_spec.block_size
+                        )
+                        wasted_bytes = (
+                            max_page_size - commensurate_block_size * per_token_bytes
+                        )
+                        logger.info(
+                            "Layer %s: using block size %d instead of the "
+                            "page-exact %d to keep KV cache group block sizes "
+                            "commensurate; page padding wastes %d bytes (%.2f%%) "
+                            "per block.",
+                            layer_name,
+                            commensurate_block_size,
+                            new_block_size,
+                            wasted_bytes,
+                            wasted_bytes / max_page_size * 100,
+                        )
+                        padded_spec = replace(
+                            layer_spec,
+                            block_size=commensurate_block_size,
+                            page_size_padded=max_page_size,
+                        )
+                if padded_spec is not None:
+                    new_spec = padded_spec
+                else:
+                    new_spec = replace(layer_spec, block_size=new_block_size)
             elif (
                 isinstance(layer_spec, AttentionSpec)
                 and layer_spec.indexes_kv_by_block_stride
