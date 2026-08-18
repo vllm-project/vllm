@@ -31,6 +31,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import (
     KVCacheLayoutType,
+    get_num_attention_heads_from_layers,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -151,13 +152,15 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
 
         parallel_config = vllm_config.parallel_config
         self.num_kv_heads = kv_cache_spec.num_kv_heads
-        self.num_heads = vllm_config.model_config.get_num_attention_heads(
-            parallel_config
-        )
+        # The scheduler metadata built here sizes a scratchpad from the query
+        # head count, so it must come from this group's layers: the model-wide
+        # count is wrong for models that vary it per layer (e.g. Laguna).
+        self.num_heads = get_num_attention_heads_from_layers(
+            vllm_config, layer_names
+        ) or vllm_config.model_config.get_num_attention_heads(parallel_config)
         self.head_dim = kv_cache_spec.head_size
         self.dtype = vllm_config.model_config.dtype
-        # Resolved from the layers on the first build(), once they exist.
-        self.window_size: int | None = None
+        self.window_size = self._group_sliding_window()
         self.block_size = vllm_config.cache_config.block_size
         self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
         self.isa = _get_attn_isa(
@@ -198,9 +201,6 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> CPUAttentionMetadata:
-        if self.window_size is None:
-            self.window_size = self._group_sliding_window()
-
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
