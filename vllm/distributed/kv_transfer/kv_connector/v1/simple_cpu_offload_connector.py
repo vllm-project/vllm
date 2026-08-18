@@ -18,6 +18,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.simple_kv_offload.disk_backend import (
+    _DEFAULT_DIRECT_IO_ALIGNMENT,
+)
 from vllm.v1.simple_kv_offload.manager import (
     SimpleCPUOffloadScheduler,
 )
@@ -48,7 +51,17 @@ _DISK_ONLY_KEYS = (
     "disk_capacity_bytes",
     "disk_buffer_slots",
     "use_page_cache",
+    "direct_io_alignment",
 )
+
+
+def _get_direct_io_alignment(extra_config: dict[str, Any]) -> int:
+    direct_io_alignment = int(
+        extra_config.get("direct_io_alignment", _DEFAULT_DIRECT_IO_ALIGNMENT)
+    )
+    if direct_io_alignment <= 0:
+        raise ValueError("direct_io_alignment must be greater than 0")
+    return direct_io_alignment
 
 
 class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
@@ -105,6 +118,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         )
         disk_buffer_slots = max(1, int(extra_config.get("disk_buffer_slots", 2)))
         use_page_cache = bool(extra_config.get("use_page_cache", False))
+        direct_io_alignment = _get_direct_io_alignment(extra_config)
 
         if disk_mode:
             if disk_path is None:
@@ -157,6 +171,8 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 hash_block_size=hash_block_size,
                 lazy_offload=lazy_offload,
                 disk_capacity_bytes=disk_capacity_bytes if disk_mode else 0,
+                direct_io_alignment=direct_io_alignment,
+                use_page_cache=use_page_cache,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = SimpleCPUOffloadWorker(
@@ -168,6 +184,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 disk_capacity_bytes=disk_capacity_bytes,
                 disk_buffer_slots=disk_buffer_slots,
                 use_page_cache=use_page_cache,
+                direct_io_alignment=direct_io_alignment,
             )
 
     # --- Worker-side methods ---

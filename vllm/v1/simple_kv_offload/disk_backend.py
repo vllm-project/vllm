@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Disk I/O backend for GPU<->NVMe block transfers via pinned staging buffers.
 
-Each slot is one flat buffer holding all tensors back-to-back. The total 
-bytes per block is rounded up to 4096 for O_DIRECT (the default path); the 
-page-cache path doesn't need alignment but inherits the rounding.
+Each slot is one flat buffer holding all tensors back-to-back. The disk
+backend uses a configurable direct-I/O alignment, with 4096 bytes as the
+default. Page-cache mode uses the raw packed block size.
 
 Uses separate IO threads for store and load so that loads (latency-critical)
 never block behind stores (background work). Each thread owns its own pinned
@@ -34,11 +34,40 @@ from vllm.v1.simple_kv_offload.cuda_mem_ops import (
 logger = init_logger(__name__)
 
 O_DIRECT = getattr(os, "O_DIRECT", 0)
-_ALIGNMENT = 4096
+_DEFAULT_DIRECT_IO_ALIGNMENT = 4096
 
 
-def _alloc_aligned(num_slots: int, bpb: int) -> torch.Tensor:
-    """Allocate a staging buffer whose base address is O_DIRECT aligned.
+def _align_up(value: int, alignment: int) -> int:
+    return ((value + alignment - 1) // alignment) * alignment
+
+
+def get_padded_slot_size(
+    total_bpb: int,
+    direct_io_alignment: int = _DEFAULT_DIRECT_IO_ALIGNMENT,
+    use_page_cache: bool = False,
+) -> int:
+    """Return the on-disk slot size for a packed KV block."""
+    if direct_io_alignment <= 0:
+        raise ValueError("direct_io_alignment must be greater than 0")
+    effective_alignment = 1 if use_page_cache else direct_io_alignment
+    return _align_up(total_bpb, effective_alignment)
+
+
+def get_num_disk_slots(
+    disk_capacity_bytes: int,
+    total_bpb: int,
+    direct_io_alignment: int = _DEFAULT_DIRECT_IO_ALIGNMENT,
+    use_page_cache: bool = False,
+) -> int:
+    """Return the number of slots that fit in the configured capacity."""
+    padded_slot_size = get_padded_slot_size(
+        total_bpb, direct_io_alignment, use_page_cache
+    )
+    return max(1, disk_capacity_bytes // padded_slot_size)
+
+
+def _alloc_aligned(num_slots: int, bpb: int, alignment: int) -> torch.Tensor:
+    """Allocate a staging buffer whose base address meets ``alignment``.
 
     The CPU allocator only guarantees 64-byte alignment, so over-allocate by
     one alignment unit and return an aligned view. The view keeps the backing
@@ -47,8 +76,8 @@ def _alloc_aligned(num_slots: int, bpb: int) -> torch.Tensor:
     # Must stay zero-initialized: pad bytes are written to disk via pwritev.
     # torch.empty would leak adjacent tensor data through the pad.
     nbytes = num_slots * bpb
-    raw = torch.zeros(nbytes + _ALIGNMENT, dtype=torch.int8, device="cpu")
-    offset = -raw.data_ptr() % _ALIGNMENT
+    raw = torch.zeros(nbytes + alignment, dtype=torch.int8, device="cpu")
+    offset = -raw.data_ptr() % alignment
     return raw[offset : offset + nbytes].view(num_slots, bpb)
 
 
@@ -85,6 +114,8 @@ class DiskBackend:
         self._tensor_names: list[str] = []
         self._tensor_offsets: list[int] = []
         self._padded_total: int = 0
+        self._direct_io_alignment: int = _DEFAULT_DIRECT_IO_ALIGNMENT
+        self._effective_alignment: int = _DEFAULT_DIRECT_IO_ALIGNMENT
 
     def init(
         self,
@@ -96,7 +127,10 @@ class DiskBackend:
         num_disk_slots: int,
         num_buffer_slots: int = 2,
         use_page_cache: bool = False,
+        direct_io_alignment: int = _DEFAULT_DIRECT_IO_ALIGNMENT,
     ) -> None:
+        self._direct_io_alignment = direct_io_alignment
+        self._effective_alignment = 1 if use_page_cache else direct_io_alignment
         self._load_stream = load_stream
         self._store_stream = store_stream
         self._num_buffer_slots = num_buffer_slots
@@ -106,7 +140,11 @@ class DiskBackend:
         ]
 
         total_bpb = sum(self._per_tensor_bpb)
-        self._padded_total = (total_bpb + _ALIGNMENT - 1) & ~(_ALIGNMENT - 1)
+        self._padded_total = get_padded_slot_size(
+            total_bpb,
+            direct_io_alignment,
+            use_page_cache,
+        )
         self._total_block_bytes = self._padded_total
 
         self._tensor_offsets = []
@@ -115,13 +153,21 @@ class DiskBackend:
             self._tensor_offsets.append(cum)
             cum += bpb
 
-        store_flat = _alloc_aligned(num_buffer_slots, self._padded_total)
+        store_flat = _alloc_aligned(
+            num_buffer_slots,
+            self._padded_total,
+            self._effective_alignment,
+        )
         pin_tensor(store_flat)
-        load_flat = _alloc_aligned(num_buffer_slots, self._padded_total)
+        load_flat = _alloc_aligned(
+            num_buffer_slots,
+            self._padded_total,
+            self._effective_alignment,
+        )
         pin_tensor(load_flat)
 
-        # Non-contiguous views: stride(0) = padded_total > bpb, so build_params 
-        # reports dst_bpb = padded_total. copy_blocks transfers min(src_bpb, 
+        # Non-contiguous views: stride(0) = padded_total > bpb, so build_params
+        # reports dst_bpb = padded_total. copy_blocks transfers min(src_bpb,
         # dst_bpb) = real_bpb bytes - only real data, not the trailing pad.
         self._store_buffer_caches = {}
         self._load_buffer_caches = {}
@@ -165,8 +211,7 @@ class DiskBackend:
             flags |= O_DIRECT
         self._fd = os.open(disk_path, flags, 0o600)
         self._disk_path = disk_path
-        # ftruncate uses padded_total; the file may exceed the raw slot sum
-        # by up to num_disk_slots * (_ALIGNMENT - 1).
+        # ftruncate uses the padded slot size.
         os.ftruncate(self._fd, num_disk_slots * self._padded_total)
 
         logger.info(

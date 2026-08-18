@@ -24,6 +24,10 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.simple_kv_offload.disk_backend import (
+    _DEFAULT_DIRECT_IO_ALIGNMENT,
+    get_num_disk_slots,
+)
 from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
@@ -76,6 +80,8 @@ class SimpleCPUOffloadScheduler:
         hash_block_size: int,
         lazy_offload: bool = False,
         disk_capacity_bytes: int = 0,
+        direct_io_alignment: int = _DEFAULT_DIRECT_IO_ALIGNMENT,
+        use_page_cache: bool = False,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -83,6 +89,24 @@ class SimpleCPUOffloadScheduler:
         offload_capacity = (
             disk_capacity_bytes if disk_capacity_bytes > 0 else cpu_capacity_bytes
         )
+        if disk_capacity_bytes > 0:
+            assert kv_cache_config is not None
+            is_packed = any(
+                tensor.block_stride for tensor in kv_cache_config.kv_cache_tensors
+            )
+            gpu_total_bytes = (
+                kv_cache_config.kv_cache_tensors[0].size
+                if is_packed
+                else sum(tensor.size for tensor in kv_cache_config.kv_cache_tensors)
+            )
+            total_bytes_per_block = gpu_total_bytes // kv_cache_config.num_blocks
+            num_disk_slots = get_num_disk_slots(
+                disk_capacity_bytes,
+                total_bytes_per_block,
+                direct_io_alignment,
+                use_page_cache,
+            )
+            offload_capacity = num_disk_slots * total_bytes_per_block
         self.enable_kv_cache_events = (
             vllm_config.kv_events_config is not None
             and vllm_config.kv_events_config.enable_kv_cache_events
