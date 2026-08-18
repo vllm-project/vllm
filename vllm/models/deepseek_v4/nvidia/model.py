@@ -24,6 +24,7 @@ from vllm.model_executor.kernels.mhc.tilelang import (
     mhc_post_tilelang,
     mhc_pre_broadcast_tilelang,
     mhc_pre_tilelang,
+    register_mhc_pre_with_norm_warmup,
 )
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import (
@@ -893,6 +894,16 @@ class DeepseekV4DecoderLayer(nn.Module):
                 dtype=torch.float32,
             ),
             requires_grad=False,
+        )
+        register_mhc_pre_with_norm_warmup(
+            max_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+            hidden_size=self.hidden_size,
+            rms_eps=self.rms_norm_eps,
+            hc_eps=self.hc_eps,
+            hc_post_mult_value=self.hc_post_alpha,
+            sinkhorn_repeat=self.hc_sinkhorn_iters,
+            norm_eps=self.attn_norm.variance_epsilon,
+            hc_mult=self.hc_mult,
         )
 
     def forward(

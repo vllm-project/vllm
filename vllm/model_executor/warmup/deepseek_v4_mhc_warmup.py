@@ -14,6 +14,7 @@ from collections.abc import Iterable
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.tracing import instrument
 
 logger = init_logger(__name__)
@@ -114,11 +115,6 @@ def _warmup_layer_mhc(
     layer: torch.nn.Module,
     token_sizes: list[int],
 ) -> None:
-    from vllm.model_executor.kernels.mhc.tilelang import (
-        mhc_post_tilelang,
-        mhc_pre_tilelang,
-    )
-
     max_tokens = max(token_sizes)
     hidden_size = int(layer.hidden_size)
     hc_mult = int(layer.hc_mult)
@@ -130,6 +126,14 @@ def _warmup_layer_mhc(
         dtype=torch.bfloat16,
         device=device,
     )
+
+    hc_pre = getattr(layer, "hc_pre", None)
+    hc_post = getattr(layer, "hc_post", None)
+    if not callable(hc_pre) or not callable(hc_post):
+        from vllm.model_executor.kernels.mhc.tilelang import (
+            mhc_post_tilelang,
+            mhc_pre_tilelang,
+        )
 
     for size in token_sizes:
         residual_slice = residual[:size]
@@ -147,6 +151,13 @@ def _warmup_layer_mhc(
                 layer.ffn_norm,
             ),
         ):
+            if callable(hc_pre) and callable(hc_post):
+                layer_input, post_mix, comb_mix = hc_pre(
+                    residual_slice, fn, scale, base
+                )
+                hc_post(layer_input, residual_slice, post_mix, comb_mix)
+                continue
+
             post_mix, comb_mix, layer_input = mhc_pre_tilelang(
                 residual_slice,
                 fn,
@@ -244,6 +255,10 @@ def deepseek_v4_mhc_warmup(
     max_tokens: int,
     cudagraph_capture_sizes: list[int] | None = None,
 ) -> None:
+    # CUDA mHC kernels use compile-only wrappers registered by the model.
+    if current_platform.is_cuda():
+        return
+
     # Cheap model-type gate before walking ``model.modules()``. The class
     # walk below is O(num_layers) and shows up in startup time on very
     # large checkpoints; bail out for any model that is not DeepSeek V4.

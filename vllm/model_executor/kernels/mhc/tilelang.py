@@ -1,8 +1,225 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.utils.torch_utils import direct_register_custom_op
+
+
+class _MHCPreWithNormKernel(VllmJitKernel["_MHCPreWithNormKernel.CompileKey"]):
+    @dataclass(frozen=True)
+    class CompileKey:
+        hidden_size: int
+        rms_eps: float
+        hc_pre_eps: float
+        hc_sinkhorn_eps: float
+        hc_post_mult_value: float
+        sinkhorn_repeat: int
+        norm_eps: float
+        n_splits: int
+        hc_mult: int
+        gemm_last_dim: int
+
+    def __init__(self, *, broadcast: bool) -> None:
+        self.broadcast = broadcast
+        super().__init__()
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        hidden_size: int,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        norm_eps: float,
+        n_splits: int,
+        hc_mult: int,
+        gemm_last_dim: int = -1,
+    ) -> CompileKey:
+        return self.CompileKey(
+            hidden_size=hidden_size,
+            rms_eps=rms_eps,
+            hc_pre_eps=hc_pre_eps,
+            hc_sinkhorn_eps=hc_sinkhorn_eps,
+            hc_post_mult_value=hc_post_mult_value,
+            sinkhorn_repeat=sinkhorn_repeat,
+            norm_eps=norm_eps,
+            n_splits=n_splits,
+            hc_mult=hc_mult,
+            gemm_last_dim=gemm_last_dim,
+        )
+
+    def get_warmup_keys(
+        self,
+        *,
+        max_tokens: int,
+        hidden_size: int,
+        rms_eps: float,
+        hc_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+        norm_eps: float,
+        hc_mult: int,
+    ) -> list[CompileKey]:
+        from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+            compute_num_split,
+        )
+        from vllm.utils.math_utils import cdiv
+
+        k = hidden_size if self.broadcast else hc_mult * hidden_size
+        n_splits = {
+            compute_num_split(64, k, grid_size)
+            for grid_size in range(1, cdiv(max_tokens, 64) + 1)
+        }
+        return self._trace_dispatch(self.dispatch)(
+            hidden_size=hidden_size,
+            rms_eps=rms_eps,
+            hc_pre_eps=hc_eps,
+            hc_sinkhorn_eps=hc_eps,
+            hc_post_mult_value=hc_post_mult_value,
+            sinkhorn_repeat=sinkhorn_repeat,
+            norm_eps=norm_eps,
+            n_splits=sorted(n_splits),
+            hc_mult=hc_mult,
+            gemm_last_dim=-1,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        from vllm.model_executor.kernels.mhc import tilelang_kernels
+
+        num_tokens = 1
+        hc_mult3 = compile_key.hc_mult * (2 + compile_key.hc_mult)
+        gemm_last_dim = (
+            hc_mult3 if compile_key.gemm_last_dim < 0 else compile_key.gemm_last_dim
+        )
+        meta = torch.device("meta")
+        common_args = (
+            torch.empty(
+                compile_key.n_splits,
+                num_tokens,
+                gemm_last_dim,
+                dtype=torch.float32,
+                device=meta,
+            ),
+            torch.empty(
+                compile_key.n_splits,
+                num_tokens,
+                dtype=torch.float32,
+                device=meta,
+            ),
+            torch.empty(3, dtype=torch.float32, device=meta),
+            torch.empty(hc_mult3, dtype=torch.float32, device=meta),
+        )
+        output_args = (
+            torch.empty(
+                num_tokens, compile_key.hc_mult, dtype=torch.float32, device=meta
+            ),
+            torch.empty(
+                num_tokens,
+                compile_key.hc_mult**2,
+                dtype=torch.float32,
+                device=meta,
+            ),
+            torch.empty(
+                num_tokens,
+                compile_key.hidden_size,
+                dtype=torch.bfloat16,
+                device=meta,
+            ),
+        )
+        norm_weight = torch.empty(
+            compile_key.hidden_size, dtype=torch.bfloat16, device=meta
+        )
+        tensor_args: tuple[Any, ...]
+        tilelang_kernel: Any
+        if self.broadcast:
+            residual = torch.empty(
+                num_tokens,
+                compile_key.hidden_size,
+                dtype=torch.bfloat16,
+                device=meta,
+            )
+            residual_out = torch.empty(
+                num_tokens,
+                compile_key.hc_mult,
+                compile_key.hidden_size,
+                dtype=torch.bfloat16,
+                device=meta,
+            )
+            tensor_args = (
+                *common_args,
+                residual,
+                residual_out,
+                *output_args,
+                norm_weight,
+            )
+            tilelang_kernel = (
+                tilelang_kernels.mhc_pre_big_fuse_broadcast_with_norm_tilelang
+            )
+        else:
+            residual = torch.empty(
+                num_tokens,
+                compile_key.hc_mult,
+                compile_key.hidden_size,
+                dtype=torch.bfloat16,
+                device=meta,
+            )
+            tensor_args = (*common_args, residual, *output_args, norm_weight)
+            tilelang_kernel = tilelang_kernels.mhc_pre_big_fuse_with_norm_tilelang
+
+        compiled = tilelang_kernel.compile(
+            *tensor_args,
+            compile_key.hidden_size,
+            compile_key.rms_eps,
+            compile_key.hc_pre_eps,
+            compile_key.hc_sinkhorn_eps,
+            compile_key.hc_post_mult_value,
+            compile_key.sinkhorn_repeat,
+            compile_key.norm_eps,
+            compile_key.n_splits,
+            compile_key.hc_mult,
+            compile_key.gemm_last_dim,
+        )
+        self._compiled_cache[compile_key] = compiled
+
+    def __call__(self, *tensor_args, **compile_args) -> None:
+        compile_key = self.compile_key(compile_args)
+        kernel = self._get_or_compile(compile_key)
+        kernel(*tensor_args)
+
+
+_MHC_PRE_WITH_NORM_KERNEL = _MHCPreWithNormKernel(broadcast=False)
+_MHC_PRE_BROADCAST_WITH_NORM_KERNEL = _MHCPreWithNormKernel(broadcast=True)
+
+
+def register_mhc_pre_with_norm_warmup(
+    *,
+    max_tokens: int,
+    hidden_size: int,
+    rms_eps: float,
+    hc_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    norm_eps: float,
+    hc_mult: int,
+) -> None:
+    registration = dict(
+        max_tokens=max_tokens,
+        hidden_size=hidden_size,
+        rms_eps=rms_eps,
+        hc_eps=hc_eps,
+        hc_post_mult_value=hc_post_mult_value,
+        sinkhorn_repeat=sinkhorn_repeat,
+        norm_eps=norm_eps,
+        hc_mult=hc_mult,
+    )
+    _MHC_PRE_WITH_NORM_KERNEL.register_warmup(**registration)
+    _MHC_PRE_BROADCAST_WITH_NORM_KERNEL.register_warmup(**registration)
 
 
 def _torch_hc_prenorm_gemm(
@@ -129,7 +346,6 @@ def mhc_pre_tilelang(
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         compute_num_split,
         mhc_pre_big_fuse_tilelang,
-        mhc_pre_big_fuse_with_norm_tilelang,
     )
     from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
     from vllm.utils.math_utils import cdiv
@@ -229,7 +445,7 @@ def mhc_pre_tilelang(
             hc_mult,
         )
     else:
-        mhc_pre_big_fuse_with_norm_tilelang(
+        _MHC_PRE_WITH_NORM_KERNEL(
             gemm_out_mul,
             gemm_out_sqrsum,
             hc_scale,
@@ -239,15 +455,16 @@ def mhc_pre_tilelang(
             comb_mix,
             layer_input,
             norm_weight,
-            hidden_size,
-            rms_eps,
-            hc_pre_eps,
-            hc_sinkhorn_eps,
-            hc_post_mult_value,
-            sinkhorn_repeat,
-            norm_eps,
-            n_splits,
-            hc_mult,
+            hidden_size=hidden_size,
+            rms_eps=rms_eps,
+            hc_pre_eps=hc_pre_eps,
+            hc_sinkhorn_eps=hc_sinkhorn_eps,
+            hc_post_mult_value=hc_post_mult_value,
+            sinkhorn_repeat=sinkhorn_repeat,
+            norm_eps=norm_eps,
+            n_splits=n_splits,
+            hc_mult=hc_mult,
+            gemm_last_dim=-1,
         )
 
     return (
@@ -318,7 +535,6 @@ def mhc_pre_broadcast_tilelang(
     """First-layer mHC pre for a residual broadcast from ``(T, H)``."""
     from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         compute_num_split,
-        mhc_pre_big_fuse_broadcast_with_norm_tilelang,
     )
     from vllm.utils.math_utils import cdiv
 
@@ -378,7 +594,7 @@ def mhc_pre_broadcast_tilelang(
         gemm_out_sqrsum,
         n_splits,
     )
-    mhc_pre_big_fuse_broadcast_with_norm_tilelang(
+    _MHC_PRE_BROADCAST_WITH_NORM_KERNEL(
         gemm_out_mul,
         gemm_out_sqrsum,
         hc_scale,
@@ -389,15 +605,16 @@ def mhc_pre_broadcast_tilelang(
         comb_mix,
         layer_input,
         norm_weight,
-        hidden_size,
-        rms_eps,
-        hc_pre_eps,
-        hc_sinkhorn_eps,
-        hc_post_mult_value,
-        sinkhorn_repeat,
-        norm_eps,
-        n_splits,
-        hc_mult,
+        hidden_size=hidden_size,
+        rms_eps=rms_eps,
+        hc_pre_eps=hc_pre_eps,
+        hc_sinkhorn_eps=hc_sinkhorn_eps,
+        hc_post_mult_value=hc_post_mult_value,
+        sinkhorn_repeat=sinkhorn_repeat,
+        norm_eps=norm_eps,
+        n_splits=n_splits,
+        hc_mult=hc_mult,
+        gemm_last_dim=-1,
     )
     return (
         residual_out,
@@ -467,7 +684,6 @@ def mhc_fused_post_pre_tilelang(
         mhc_fused_tilelang,
         mhc_post_tilelang,
         mhc_pre_big_fuse_tilelang,
-        mhc_pre_big_fuse_with_norm_tilelang,
     )
     from vllm.utils.math_utils import cdiv
 
@@ -632,7 +848,7 @@ def mhc_fused_post_pre_tilelang(
             hc_mult,
         )
     else:
-        mhc_pre_big_fuse_with_norm_tilelang(
+        _MHC_PRE_WITH_NORM_KERNEL(
             gemm_out_mul,
             gemm_out_sqrsum,
             hc_scale,
@@ -642,15 +858,16 @@ def mhc_fused_post_pre_tilelang(
             comb_mix_cur,
             layer_input_cur,
             norm_weight,
-            hidden_size,
-            rms_eps,
-            hc_pre_eps,
-            hc_sinkhorn_eps,
-            hc_post_mult_value,
-            sinkhorn_repeat,
-            norm_eps,
-            n_splits,
-            hc_mult,
+            hidden_size=hidden_size,
+            rms_eps=rms_eps,
+            hc_pre_eps=hc_pre_eps,
+            hc_sinkhorn_eps=hc_sinkhorn_eps,
+            hc_post_mult_value=hc_post_mult_value,
+            sinkhorn_repeat=sinkhorn_repeat,
+            norm_eps=norm_eps,
+            n_splits=n_splits,
+            hc_mult=hc_mult,
+            gemm_last_dim=-1,
         )
 
     return (

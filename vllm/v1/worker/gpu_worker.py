@@ -453,6 +453,7 @@ class Worker(WorkerBase):
             set_current_vllm_config(self.vllm_config),
             # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
             self._scoped_allocator_max_split(max_split_size_mb=20),
+            self.model_runner.jit_warmup_registry.activate(),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
