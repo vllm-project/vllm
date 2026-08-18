@@ -474,6 +474,7 @@ def test_models_fse_init(
         hf_text_config=config,
         dtype=torch.bfloat16,
         max_model_len=128,
+        is_diffusion=False,
         head_dtype=None,
         is_mm_prefix_lm=False,
         multimodal_config=None,
