@@ -15,7 +15,7 @@ use tracing::{debug, info, trace};
 
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
 use crate::coordinator::CoordinatorHandle;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, bail_invalid_client_config};
 use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
@@ -68,9 +68,68 @@ pub enum TransportMode {
         engine_start_index: u32,
         /// Total number of engines expected to register on this transport.
         engine_count: usize,
+        /// Deployment-wide data-parallel size. This may be larger than
+        /// `engine_count` when a supervisor partitions ranks across frontends.
+        data_parallel_size: usize,
         /// Maximum time to wait for all expected engines to register.
         ready_timeout: Duration,
     },
+}
+
+impl TransportMode {
+    /// Return the deployment-wide data-parallel size for this transport.
+    pub fn data_parallel_size(&self) -> usize {
+        match self {
+            Self::HandshakeOwner { engine_count, .. } => *engine_count,
+            Self::Bootstrapped {
+                data_parallel_size, ..
+            } => *data_parallel_size,
+        }
+    }
+
+    /// Validate the transport topology before opening any sockets.
+    pub fn validate(&self) -> Result<()> {
+        let data_parallel_size = self.data_parallel_size();
+        if data_parallel_size == 0 {
+            bail_invalid_client_config!("data parallel size must be at least 1");
+        }
+        if data_parallel_size > usize::from(u16::MAX) + 1 {
+            bail_invalid_client_config!(
+                "data parallel size ({data_parallel_size}) exceeds the two-byte engine identity limit"
+            );
+        }
+
+        match self {
+            Self::HandshakeOwner { .. } => {}
+            Self::Bootstrapped {
+                engine_start_index,
+                engine_count,
+                ..
+            } => {
+                if *engine_count == 0 {
+                    bail_invalid_client_config!("engine count must be at least 1");
+                }
+                let engine_start_index = usize::try_from(*engine_start_index).map_err(|_| {
+                    Error::InvalidClientConfig {
+                        message: "engine start index does not fit usize".to_string(),
+                    }
+                })?;
+                let engine_end_index =
+                    engine_start_index.checked_add(*engine_count).ok_or_else(|| {
+                        Error::InvalidClientConfig {
+                            message: "engine start index + engine count overflows".to_string(),
+                        }
+                    })?;
+                if engine_end_index > data_parallel_size {
+                    bail_invalid_client_config!(
+                        "connected engine range [{engine_start_index}, {engine_end_index}) exceeds data parallel size ({data_parallel_size})"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Which coordinator implementation should be active when one is present for a
@@ -115,6 +174,11 @@ impl EngineCoreClientConfig {
             model_name: String::new(),
             client_index: 0,
         }
+    }
+
+    /// Validate the client topology before opening any transport sockets.
+    pub fn validate(&self) -> Result<()> {
+        self.transport_mode.validate()
     }
 
     /// Set the model name used by frontend-side metrics and diagnostics.
@@ -226,6 +290,7 @@ impl EngineCoreClient {
     /// handshake. In bootstrapped mode it binds the provided frontend
     /// sockets and waits for the expected engine registration frames.
     pub async fn connect(config: EngineCoreClientConfig) -> Result<Self> {
+        config.validate()?;
         let connected = match &config.transport_mode {
             TransportMode::HandshakeOwner {
                 handshake_address,
@@ -261,6 +326,7 @@ impl EngineCoreClient {
                 engine_start_index,
                 engine_count,
                 ready_timeout,
+                ..
             } => {
                 if let Some(CoordinatorMode::InProc) = config.coordinator_mode {
                     panic!("cannot use in-process coordinator with bootstrapped transport mode")
@@ -376,6 +442,12 @@ impl EngineCoreClient {
     /// Return the number of engines connected to this client.
     pub fn engine_count(&self) -> usize {
         self.engines.len()
+    }
+
+    /// Return the deployment-wide data-parallel size configured for this
+    /// client.
+    pub fn data_parallel_size(&self) -> usize {
+        self.config.transport_mode.data_parallel_size()
     }
 
     /// Return the engine-side indices connected to this client.
