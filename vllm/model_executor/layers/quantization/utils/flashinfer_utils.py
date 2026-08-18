@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from enum import Enum
 from typing import TYPE_CHECKING
 
 import torch
@@ -15,18 +14,26 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class FlashinferMoeBackend(Enum):
-    TENSORRT_LLM = "TensorRT-LLM"
-    CUTLASS = "CUTLASS"
-    CUTEDSL = "CUTEDSL"
-
-
 def activation_to_flashinfer_int(activation: MoEActivation) -> int:
     return activation_to_flashinfer_type(activation).value
 
 
+def has_flashinfer_situ_activation() -> bool:
+    try:
+        from flashinfer.fused_moe.core import ActivationType
+    except ImportError:
+        return False
+    return hasattr(ActivationType, "Situ")
+
+
 def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType":
     from flashinfer.fused_moe.core import ActivationType
+
+    if activation == MoEActivation.SITU:
+        situ = getattr(ActivationType, "Situ", None)
+        if situ is None:
+            raise ValueError("The installed FlashInfer does not support SITU")
+        return situ
 
     # silu and gelu are mapped to their gated versions SwiGLU and GeGLU respectively
     ACTIVATION_TO_FI_ACTIVATION = {
@@ -34,11 +41,11 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         MoEActivation.GELU_NO_MUL: ActivationType.Gelu,
         MoEActivation.SILU: ActivationType.Swiglu,
         # SwiGLU-OAI uses Swiglu; the OAI alpha/beta/clamp come from gemm1_* args.
+        MoEActivation.SWIGLUOAI: ActivationType.Swiglu,
         MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
         MoEActivation.GELU: ActivationType.Geglu,
         MoEActivation.GELU_TANH: ActivationType.Geglu,
         MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
-        MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
     }
     return ACTIVATION_TO_FI_ACTIVATION[activation]
 
@@ -95,16 +102,6 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     gemm2_weights.data = torch.stack(gemm2_weights_fp8_shuffled).view(
         torch.float8_e4m3fn
     )
-
-
-def is_flashinfer_supporting_global_sf(backend: FlashinferMoeBackend | None) -> bool:
-    # TODO(shuw@nvidia): Update when new backends are added.
-    backends_supporting_global_sf = (
-        FlashinferMoeBackend.CUTLASS,
-        FlashinferMoeBackend.TENSORRT_LLM,
-        FlashinferMoeBackend.CUTEDSL,
-    )
-    return backend in backends_supporting_global_sf
 
 
 def convert_moe_weights_to_flashinfer_trtllm_block_layout(

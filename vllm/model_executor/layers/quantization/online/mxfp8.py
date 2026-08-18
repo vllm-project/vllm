@@ -226,6 +226,7 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
+            layer=layer,
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:

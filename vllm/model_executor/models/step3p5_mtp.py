@@ -15,11 +15,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .step3p5 import Step3p5DecoderLayer, get_spec_layer_idx_from_weight_name
-from .utils import maybe_prefix
+from .step3p5 import Step3p5DecoderLayer
+from .utils import get_spec_layer_idx_from_weight_name, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -29,11 +32,18 @@ class SharedHead(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.norm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
+        # Give the head its prefix so the quant config's exclude_modules matcher
+        # can skip it; without one it defaults to "" and never matches, so a
+        # checkpoint-excluded (BF16) MTP head gets quantized -> load crash.
         self.head = ParallelLMHead(
-            config.vocab_size, config.hidden_size, quant_config=quant_config
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.head",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -52,7 +62,9 @@ class Step3p5AMultiTokenPredictorLayer(nn.Module):
         self.enorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.hnorm = GemmaRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
-        self.shared_head = SharedHead(config=config, quant_config=quant_config)
+        self.shared_head = SharedHead(
+            config=config, quant_config=quant_config, prefix=f"{prefix}.shared_head"
+        )
         self.mtp_block = Step3p5DecoderLayer(
             vllm_config,
             prefix=f"{prefix}.mtp_block",
@@ -283,7 +295,7 @@ class Step3p5MTP(nn.Module):
             and getattr(param, "requires_grad", False) is False
         }
         params_need_to_load -= optional_params
-        if params_need_to_load != loaded_params:
+        if params_need_to_load != loaded_params and is_mtp_completeness_check_enabled():
             missing_params = list(params_need_to_load - loaded_params)
             param_name_example = missing_params[0]
             raise RuntimeError(

@@ -4,6 +4,7 @@ import contextlib
 import importlib.metadata
 import os
 import random
+import sys
 import threading
 from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -49,6 +50,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "turboquant_k3v4_nc": torch.uint8,
     "turboquant_3bit_nc": torch.uint8,
     "nvfp4": torch.uint8,
+    "nvfp4_4over6": torch.uint8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -76,7 +78,7 @@ def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return (
         kv_cache_dtype.startswith("fp8")
         or kv_cache_dtype.endswith("per_token_head")
-        or kv_cache_dtype == "nvfp4"
+        or kv_cache_dtype.startswith("nvfp4")
     )
 
 
@@ -148,6 +150,121 @@ def set_default_torch_dtype(dtype: torch.dtype):
     torch.set_default_dtype(dtype)
     yield
     torch.set_default_dtype(old_dtype)
+
+
+def _cgroup_cpu_limit() -> float | None:
+    """Effective CPU quota of this process's cgroup, None if unlimited.
+
+    Resolves the process's own cgroup from /proc/self/cgroup and takes the
+    tightest cpu.max (v2) or cfs quota (v1) along the hierarchy.
+    """
+    limit: float | None = None
+    try:
+        with open("/proc/self/cgroup") as f:
+            entries = [line.strip().split(":", 2) for line in f]
+
+        def visit(base: str, rel_path: str, read_quota) -> None:
+            nonlocal limit
+            path = rel_path
+            while path:
+                quota = read_quota(os.path.join(base, path.lstrip("/")))
+                if quota is not None:
+                    limit = quota if limit is None else min(limit, quota)
+                path = path.rsplit("/", 1)[0]
+
+        def read_v2(cg_dir: str) -> float | None:
+            try:
+                with open(os.path.join(cg_dir, "cpu.max")) as f:
+                    quota, period = f.read().split()
+                return None if quota == "max" else float(quota) / float(period)
+            except (OSError, ValueError):
+                return None
+
+        def read_v1(cg_dir: str) -> float | None:
+            try:
+                with open(os.path.join(cg_dir, "cpu.cfs_quota_us")) as f:
+                    quota = int(f.read())
+                if quota <= 0:
+                    return None
+                with open(os.path.join(cg_dir, "cpu.cfs_period_us")) as f:
+                    return quota / int(f.read())
+            except (OSError, ValueError):
+                return None
+
+        for entry in entries:
+            if len(entry) != 3:
+                continue
+            _, controllers, rel_path = entry
+            if controllers == "":  # cgroup v2
+                visit("/sys/fs/cgroup", rel_path, read_v2)
+            elif "cpu" in controllers.split(","):  # cgroup v1
+                visit("/sys/fs/cgroup/cpu", rel_path, read_v1)
+    except OSError:
+        pass
+    return limit
+
+
+def available_cpu_count() -> int:
+    """CPUs actually usable by this process: scheduling affinity capped by
+    the cgroup CPU quota (unlike `os.cpu_count()`, which is quota-blind)."""
+    if sys.platform != "linux":
+        return os.cpu_count() or 1
+    count = len(os.sched_getaffinity(0))
+    limit = _cgroup_cpu_limit()
+    if limit is not None:
+        count = min(count, int(limit))
+    return max(1, count)
+
+
+# Marks OMP_NUM_THREADS as chosen by vLLM for its worker processes rather than
+# set by the user, so a worker knows it may drop the value once startup is done.
+OMP_NUM_THREADS_SET_BY_VLLM = "VLLM_OMP_NUM_THREADS_SET_BY_VLLM"
+
+
+def startup_omp_num_threads(num_local_procs: int) -> int:
+    """Thread count for a worker process's startup work (weight loading).
+
+    Weight loading does CPU-parallel work, so workers benefit from more than
+    one thread, but only a bounded share of the CPUs this node's workers may
+    actually use: torch's default is the host core count, which ignores both
+    scheduling affinity and any cgroup CPU quota, and doesn't account for the
+    other workers sharing the node.
+    """
+    return max(1, available_cpu_count() // max(1, num_local_procs))
+
+
+def set_torch_threads_for_runtime() -> None:
+    """Set torch intra-op threads to 1 for steady-state serving.
+
+    Any multi-threaded torch CPU op in the engine hot loop leaves the OMP
+    workers spin-waiting after each parallel region, stealing cycles from the
+    step's serial code (and burning cgroup CPU quota in containers). No
+    steady-state CPU op benefits from intra-op parallelism.
+    Respects an externally-set OMP_NUM_THREADS.
+    """
+    if (
+        omp_num_threads := os.environ.get("OMP_NUM_THREADS")
+    ) is not None and os.environ.get(OMP_NUM_THREADS_SET_BY_VLLM) != "1":
+        try:
+            if int(omp_num_threads) > 1:
+                logger.warning_once(
+                    "OMP_NUM_THREADS=%s is set; leaving Torch threads at %d "
+                    "for serving. Multi-threaded torch CPU ops during serving "
+                    "can degrade performance through spin-wait contention and "
+                    "cgroup CPU-quota throttling.",
+                    omp_num_threads,
+                    torch.get_num_threads(),
+                )
+        except ValueError:
+            pass
+        return
+    if torch.get_num_threads() != 1:
+        logger.info_once(
+            "Reducing Torch threads from %d to 1 for serving. Set "
+            "OMP_NUM_THREADS in the external environment to override.",
+            torch.get_num_threads(),
+        )
+        torch.set_num_threads(1)
 
 
 @contextlib.contextmanager
@@ -416,26 +533,24 @@ def nvfp4_kv_cache_full_dim(head_size: int) -> int:
     return head_size // 2 + head_size // 16
 
 
-def _nvfp4_split_data_scale(
+def nvfp4_split_data_scale(
     kv_side: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Split a single NVFP4 KV-side buffer into data and scale views.
+    """Split one side (K or V) of an NVFP4 KV cache into data and scale.
 
-    The input is a 4D tensor for one KV side (K or V) whose last
-    dimension is ``full_dim = data_dim + scale_dim``.  The physical
-    layout within each side is [data | scale], both packed contiguously.
+    The input is a 4D uint8 tensor whose last dimension is
+    ``full_dim = data_dim + scale_dim``.  The physical layout within each
+    side is ``[data | scale]``, both packed contiguously.
+
+    The caller is responsible for slicing K and V from the combined cache
+    first (e.g. ``kv_cache.split(num_kv_heads, dim=1)``).
 
     Args:
-        kv_side: 4D uint8 tensor with shape
-            ``(num_pages, dim_1, dim_2, full_dim)``.
-            May be in any permutation order (NHD or HND).
+        kv_side: 4D uint8 tensor ``(B, H, N, full_dim)``.
 
     Returns:
-        ``(data, scale)`` where
-        ``data`` is a uint8 view with shape
-        ``(num_pages, dim_1, dim_2, data_dim)``.
-        ``scale`` is a float8_e4m3fn view with shape
-        ``(num_pages, dim_1, dim_2, scale_dim)``.
+        ``(data, scale)`` where *data* is uint8 and *scale* is
+        float8_e4m3fn, both views of the same storage.
     """
     num_pages = kv_side.shape[0]
     dim_1, dim_2 = kv_side.shape[1], kv_side.shape[2]
@@ -468,38 +583,6 @@ def _nvfp4_split_data_scale(
     return data, scale
 
 
-def nvfp4_kv_cache_split_views(kv_cache: torch.Tensor) -> tuple[tuple, tuple]:
-    """Split an NVFP4 KV cache tensor into data and scale views.
-
-    Accepts either a 5D tensor ``(num_pages, 2, dim_2, dim_3, full_dim)``
-    or a 4D single-side tensor ``(num_pages, dim_2, dim_3, full_dim)``.
-
-    Per-page layout: [K_data | K_scale | V_data | V_scale].
-    Each KV side is self-contained (data followed by its scale), so the
-    5D case simply splits each side independently.
-
-    The returned views are in the same dim order as the input (NHD or
-    HND), so callers get views matching whichever order they passed in.
-
-    Args:
-        kv_cache: 5D or 4D uint8 tensor where the last dimension is
-            ``full_dim = data_dim + scale_dim = 9 * head_size / 16``.
-
-    Returns:
-        For 5D input:
-            ``(k_data, v_data), (k_scale, v_scale)``
-        For 4D input (single KV side):
-            ``(data,), (scale,)``
-    """
-    if kv_cache.dim() == 4:
-        data, scale = _nvfp4_split_data_scale(kv_cache)
-        return (data,), (scale,)
-
-    k_data, k_scale = _nvfp4_split_data_scale(kv_cache[:, 0])
-    v_data, v_scale = _nvfp4_split_data_scale(kv_cache[:, 1])
-    return (k_data, v_data), (k_scale, v_scale)
-
-
 def create_kv_caches_with_random_flash(
     num_blocks: int,
     block_size: int,
@@ -526,7 +609,7 @@ def create_kv_caches_with_random_flash(
     value_caches: list[torch.Tensor] = []
 
     for _ in range(num_layers):
-        if cache_dtype == "nvfp4":
+        if isinstance(cache_dtype, str) and cache_dtype.startswith("nvfp4"):
             # Full page dim: fp4 data + fp8 block scales per head.
             # Per page layout: [K_data | K_scale | V_data | V_scale]
             # Returns [:, 0] and [:, 1] like all other dtypes.
@@ -804,7 +887,15 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
     from vllm.platforms import current_platform
 
     if current_platform.is_xpu():
-        assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
+        # Remove once the vllm-xpu-kernels fix for empty and non-pinned inputs
+        # (vllm-project/vllm-xpu-kernels#513) is in a released package.
+        if cpu_tensor.numel() == 0:
+            return torch.empty(cpu_tensor.shape, dtype=cpu_tensor.dtype, device="xpu")
+        if not cpu_tensor.is_pinned():
+            contiguous_cpu = cpu_tensor.contiguous()
+            pinned = torch.empty_like(contiguous_cpu, pin_memory=True)
+            pinned.copy_(contiguous_cpu)
+            cpu_tensor = pinned
         return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
     elif current_platform.is_cuda_alike():
         return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)

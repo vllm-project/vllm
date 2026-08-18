@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use vllm_parser::tool::{Result, ToolParserOutput};
 
 use super::{ToolParser, ToolParserFactory, names};
@@ -172,6 +175,10 @@ fn factory_new_resolves_default_patterns() {
     assert_eq!(
         factory.resolve_name_for_model("org/mm-m2-base"),
         Some(names::MINIMAX_M2)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("ByteDance-Seed/Seed-OSS-36B-Instruct"),
+        Some(names::SEED_OSS)
     );
 
     // InternLM2 positive: both dashed and underscored versioned names route.

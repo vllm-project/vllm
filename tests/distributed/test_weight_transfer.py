@@ -7,6 +7,8 @@ Integration tests for NCCL and IPC weight transfer between processes using Ray.
 """
 
 import pickle
+import threading
+import time
 from unittest.mock import MagicMock
 
 import pybase64 as base64
@@ -17,18 +19,43 @@ from torch.multiprocessing.reductions import reduce_tensor
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
-from vllm.distributed.weight_transfer import WeightTransferEngineFactory
+from vllm.distributed.weight_transfer import (
+    HTTPVLLMWeightSyncClient,
+    ModuleSource,
+    ParamMeta,
+    RayVLLMWeightSyncClient,
+    TrainerWeightTransferEngine,
+    VLLMWeightSyncClient,
+    WeightSource,
+    WeightTransferEngineFactory,
+    WeightTransferTrainerFactory,
+)
+from vllm.distributed.weight_transfer.base import (
+    TrainerInitInfo,
+    WeightTransferInitRequest,
+    WeightTransferUpdateRequest,
+)
 from vllm.distributed.weight_transfer.ipc_engine import (
+    IPCTrainerInitInfo,
+    IPCTrainerWeightTransferEngine,
     IPCWeightTransferEngine,
     IPCWeightTransferInitInfo,
     IPCWeightTransferUpdateInfo,
 )
 from vllm.distributed.weight_transfer.nccl_engine import (
+    NCCLTrainerInitInfo,
+    NCCLTrainerWeightTransferEngine,
     NCCLWeightTransferEngine,
     NCCLWeightTransferInitInfo,
     NCCLWeightTransferUpdateInfo,
 )
+from vllm.distributed.weight_transfer.packed_tensor import (
+    DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    DEFAULT_PACKED_NUM_BUFFERS,
+)
 from vllm.distributed.weight_transfer.sparse_nccl_engine import (
+    SparseNCCLTrainerInitInfo,
+    SparseNCCLTrainerWeightTransferEngine,
     SparseNCCLWeightTransferEngine,
     SparseNCCLWeightTransferUpdateInfo,
     SparseWeightPatch,
@@ -191,7 +218,7 @@ class TestNCCLEngineParsing:
         return NCCLWeightTransferEngine(
             config,
             create_mock_vllm_config(),
-            "cuda",
+            torch.device("cuda"),
             MagicMock(spec=torch.nn.Module),
         )
 
@@ -240,21 +267,30 @@ class TestEngineRegistry:
     def test_create_engine_nccl(self):
         config = WeightTransferConfig(backend="nccl")
         engine = WeightTransferEngineFactory.create_engine(
-            config, create_mock_vllm_config(), "cuda", MagicMock(spec=torch.nn.Module)
+            config,
+            create_mock_vllm_config(),
+            torch.device("cuda"),
+            MagicMock(spec=torch.nn.Module),
         )
         assert isinstance(engine, NCCLWeightTransferEngine)
 
     def test_create_engine_ipc(self):
         config = WeightTransferConfig(backend="ipc")
         engine = WeightTransferEngineFactory.create_engine(
-            config, create_mock_vllm_config(), "cuda", MagicMock(spec=torch.nn.Module)
+            config,
+            create_mock_vllm_config(),
+            torch.device("cuda"),
+            MagicMock(spec=torch.nn.Module),
         )
         assert isinstance(engine, IPCWeightTransferEngine)
 
     def test_create_engine_sparse_nccl(self):
         config = WeightTransferConfig(backend="sparse_nccl")
         engine = WeightTransferEngineFactory.create_engine(
-            config, create_mock_vllm_config(), "cuda", MagicMock(spec=torch.nn.Module)
+            config,
+            create_mock_vllm_config(),
+            torch.device("cuda"),
+            MagicMock(spec=torch.nn.Module),
         )
         assert isinstance(engine, SparseNCCLWeightTransferEngine)
 
@@ -264,7 +300,7 @@ class TestEngineRegistry:
             WeightTransferEngineFactory.create_engine(
                 config,
                 create_mock_vllm_config(),
-                "cuda",
+                torch.device("cuda"),
                 MagicMock(spec=torch.nn.Module),
             )
 
@@ -284,7 +320,7 @@ class TestSparseNCCLPatchApplication:
     def _make_engine(self, model):
         config = WeightTransferConfig(backend="sparse_nccl")
         return SparseNCCLWeightTransferEngine(
-            config, create_mock_vllm_config(), "cpu", model
+            config, create_mock_vllm_config(), torch.device("cpu"), model
         )
 
     def _make_model(self, numel: int = 8):
@@ -382,7 +418,10 @@ def test_nccl_receive_weights_without_init_raises():
 
     config = WeightTransferConfig(backend="nccl")
     engine = NCCLWeightTransferEngine(
-        config, create_mock_vllm_config(), "cuda", MagicMock(spec=torch.nn.Module)
+        config,
+        create_mock_vllm_config(),
+        torch.device("cuda"),
+        MagicMock(spec=torch.nn.Module),
     )
 
     update_info = NCCLWeightTransferUpdateInfo(
@@ -400,7 +439,10 @@ def test_sparse_nccl_receive_weights_without_init_raises():
 
     config = WeightTransferConfig(backend="sparse_nccl")
     engine = SparseNCCLWeightTransferEngine(
-        config, create_mock_vllm_config(), "cuda", MagicMock(spec=torch.nn.Module)
+        config,
+        create_mock_vllm_config(),
+        torch.device("cuda"),
+        MagicMock(spec=torch.nn.Module),
     )
 
     update_info = SparseNCCLWeightTransferUpdateInfo(
@@ -495,7 +537,9 @@ def inference_receive_tensor(
     vllm_config.model_config = MagicMock()
 
     recorder = Recorder()
-    engine = NCCLWeightTransferEngine(config, vllm_config, "cuda", recorder)
+    engine = NCCLWeightTransferEngine(
+        config, vllm_config, torch.device("cuda"), recorder
+    )
     # Transport-only test: bypass the set_current_vllm_config context that
     # receive_weights enters, since vllm_config here is a mock.
     import vllm.config as _vllm_config_mod
@@ -503,11 +547,15 @@ def inference_receive_tensor(
     _vllm_config_mod.set_current_vllm_config = lambda cfg: contextlib.nullcontext()
 
     # Initialize the engine (joins as rank 1)
+    # Trainer broadcasts a single tensor unpacked, so the worker must not
+    # expect the packed wire format (packed is a must-agree wire param shipped
+    # on the init info).
     init_info = NCCLWeightTransferInitInfo(
         master_address=master_address,
         master_port=master_port,
         rank_offset=1,  # Trainer is rank 0, we become rank 1
         world_size=world_size,
+        packed=False,
     )
     engine.init_transfer_engine(init_info)
 
@@ -584,39 +632,53 @@ def trainer_broadcast_sparse_tensor(
     master_port: int,
     world_size: int,
 ) -> bool:
-    """Trainer task that broadcasts sparse patches via NCCL."""
+    """Trainer task that broadcasts sparse patches via the trainer engine.
+
+    The worker task drives its own init/receive directly (it is not an RPC
+    endpoint), so the engine gets a no-op control-plane client; the NCCL
+    rendezvous and the patch broadcasts are the real thing.
+    """
     import torch
 
     device = _set_ray_assigned_device()
 
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-    from vllm.distributed.utils import StatelessProcessGroup
-    from vllm.distributed.weight_transfer.nccl_engine import (
-        NCCLTrainerSendWeightsArgs,
-    )
+    from vllm.distributed.weight_transfer import WeightTransferTrainerFactory
     from vllm.distributed.weight_transfer.sparse_nccl_engine import (
-        SparseNCCLWeightTransferEngine,
+        SparseNCCLTrainerInitInfo,
         SparseWeightPatch,
     )
 
-    pg = StatelessProcessGroup.create(
-        host=master_address,
-        port=master_port,
-        rank=0,
-        world_size=world_size,
-    )
-    comm = PyNcclCommunicator(pg, device=device.index)
+    class NoopClient:
+        def init_weight_transfer_engine(self, init_info):
+            pass
+
+        def start_weight_update(self):
+            pass
+
+        def update_weights(self, update_info):
+            pass
+
+        def finish_weight_update(self):
+            pass
 
     patch = SparseWeightPatch(
         name="test.weight",
         indices=torch.tensor([1, 7, 25], dtype=torch.int32, device=device),
         values=torch.tensor([10.0, 20.0, 30.0], dtype=torch.float32, device=device),
+        full_shape=(10, 10),
     )
-    SparseNCCLWeightTransferEngine.trainer_send_weights(
-        iter([patch]),
-        NCCLTrainerSendWeightsArgs(group=comm),
+    engine = WeightTransferTrainerFactory.trainer_init(
+        init_info=SparseNCCLTrainerInitInfo(
+            master_address=master_address,
+            master_port=master_port,
+            world_size=world_size,
+            rank=0,
+        ),
+        client=NoopClient(),
     )
+    engine.send_weights([patch])
     torch.accelerator.synchronize()
+    engine.shutdown()
     return True
 
 
@@ -664,7 +726,9 @@ def inference_receive_sparse_tensor(
         num_updates_list=[3],
     )
 
-    engine = SparseNCCLWeightTransferEngine(config, vllm_config, "cuda", model)
+    engine = SparseNCCLWeightTransferEngine(
+        config, vllm_config, torch.device("cuda"), model
+    )
     from vllm.distributed.weight_transfer.nccl_common import (
         NCCLWeightTransferInitInfo,
     )
@@ -879,7 +943,7 @@ class TestIPCEngineParsing:
         return IPCWeightTransferEngine(
             config,
             create_mock_vllm_config(),
-            "cuda",
+            torch.device("cuda"),
             MagicMock(spec=torch.nn.Module),
         )
 
@@ -1040,7 +1104,7 @@ def inference_receive_ipc_tensor(
 
     import torch
 
-    _set_ray_assigned_device()
+    device = _set_ray_assigned_device()
 
     from vllm.config.parallel import ParallelConfig
     from vllm.config.weight_transfer import WeightTransferConfig
@@ -1057,6 +1121,8 @@ def inference_receive_ipc_tensor(
             for name, tensor in weights:
                 self.received.append((name, tensor.clone()))
 
+    # Trainer sends unpacked IPC handles; the worker learns packed=False from
+    # the init handshake below (IPCWeightTransferInitInfo defaults to False).
     config = WeightTransferConfig(backend="ipc")
     vllm_config = MagicMock()
     parallel_config = MagicMock(spec=ParallelConfig)
@@ -1068,7 +1134,7 @@ def inference_receive_ipc_tensor(
     vllm_config.model_config = MagicMock()
 
     recorder = Recorder()
-    engine = IPCWeightTransferEngine(config, vllm_config, "cuda", recorder)
+    engine = IPCWeightTransferEngine(config, vllm_config, device, recorder)
     # Transport-only test: bypass the set_current_vllm_config context that
     # receive_weights enters, since vllm_config here is a mock.
     import vllm.config as _vllm_config_mod
@@ -1173,8 +1239,12 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
 
     config = WeightTransferConfig(backend="ipc")
     engine = IPCWeightTransferEngine(
-        config, create_mock_vllm_config(), "cuda", MagicMock(spec=torch.nn.Module)
+        config,
+        create_mock_vllm_config(),
+        torch.device("cuda:0"),
+        MagicMock(spec=torch.nn.Module),
     )
+    # No init handshake here, so the engine keeps its default packed=False.
 
     dummy_tensor = torch.ones(10, 10, device="cuda:0")
     _, ipc_handle = reduce_tensor(dummy_tensor)
@@ -1190,3 +1260,671 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
 
     with pytest.raises(ValueError, match="IPC handle not found"):
         engine.receive_weights(update_info)
+
+
+class RecordingClient:
+    """A fake VLLMWeightSyncClient that records the order of calls."""
+
+    def __init__(self):
+        self.order: list[str] = []
+        self.last_init_info: dict | None = None
+        self.last_update_info: dict | None = None
+
+    def init_weight_transfer_engine(self, init_info: dict) -> None:
+        self.order.append("init")
+        self.last_init_info = init_info
+
+    def start_weight_update(self) -> None:
+        self.order.append("start")
+
+    def update_weights(self, update_info: dict) -> None:
+        self.order.append("update")
+        self.last_update_info = update_info
+
+    def finish_weight_update(self, weight_version: str | None = None) -> None:
+        self.order.append("finish")
+
+
+def _module_with(*pairs):
+    """A tiny nn.Module exposing the given (name, tensor) pairs as parameters,
+    so trainer tests can build a ModuleSource without a real model."""
+    module = torch.nn.Module()
+    for name, tensor in pairs:
+        module.register_parameter(name, torch.nn.Parameter(tensor, requires_grad=False))
+    return module
+
+
+class _DummyTrainerEngine(TrainerWeightTransferEngine):
+    """Minimal concrete trainer engine to exercise base-class + factory."""
+
+    @classmethod
+    def trainer_init(cls, init_info, *, client, source):
+        return cls(client=client, source=source)
+
+    def send_weights(self):
+        pass
+
+
+class TestTrainerClients:
+    """Structural protocol conformance for the built-in clients."""
+
+    def test_recording_client_is_protocol(self):
+        assert isinstance(RecordingClient(), VLLMWeightSyncClient)
+
+    def test_http_client_is_protocol(self):
+        assert isinstance(
+            HTTPVLLMWeightSyncClient("http://localhost:8000"), VLLMWeightSyncClient
+        )
+
+    def test_ray_client_is_protocol(self):
+        assert isinstance(RayVLLMWeightSyncClient(MagicMock()), VLLMWeightSyncClient)
+
+    def test_ray_client_sends_typed_requests(self, monkeypatch):
+        """Ray client must hand the actor typed Request objects, not raw dicts."""
+        import ray
+
+        monkeypatch.setattr(ray, "get", lambda refs: None)
+        handle = MagicMock()
+        client = RayVLLMWeightSyncClient(handle)
+
+        client.init_weight_transfer_engine({"master_addr": "x"})
+        (init_req,), _ = handle.init_weight_transfer_engine.remote.call_args
+        assert isinstance(init_req, WeightTransferInitRequest)
+        assert init_req.init_info == {"master_addr": "x"}
+
+        client.update_weights({"names": ["w"]})
+        (update_req,), _ = handle.update_weights.remote.call_args
+        assert isinstance(update_req, WeightTransferUpdateRequest)
+        assert update_req.update_info == {"names": ["w"]}
+
+        client.finish_weight_update("step-42")
+        handle.finish_weight_update.remote.assert_called_once_with()
+        handle.update_weight_version.remote.assert_called_once_with("step-42")
+
+    def test_http_client_pickles_ipc_handles_for_json(self, monkeypatch):
+        """HTTP update_weights must encode raw ipc_handles as a base64 pickle."""
+        captured = {}
+
+        def fake_post(self, path, json=None):
+            captured["path"] = path
+            captured["json"] = json
+
+        monkeypatch.setattr(HTTPVLLMWeightSyncClient, "_post", fake_post)
+        client = HTTPVLLMWeightSyncClient("http://localhost:8000")
+        client.update_weights({"names": ["w"], "ipc_handles": [{"gpu": ("args",)}]})
+        sent = captured["json"]["update_info"]
+        assert "ipc_handles" not in sent
+        assert "ipc_handles_pickled" in sent
+        assert pickle.loads(base64.b64decode(sent["ipc_handles_pickled"])) == [
+            {"gpu": ("args",)}
+        ]
+
+    def test_http_client_passes_through_nccl_update_info(self, monkeypatch):
+        """NCCL update_info has only JSON-native fields and passes unchanged."""
+        captured = {}
+
+        def fake_post(self, path, json=None):
+            captured["json"] = json
+
+        monkeypatch.setattr(HTTPVLLMWeightSyncClient, "_post", fake_post)
+        client = HTTPVLLMWeightSyncClient("http://localhost:8000")
+        update_info = {"names": ["w"], "dtype_names": ["float32"], "shapes": [[4]]}
+        client.update_weights(update_info)
+        assert captured["json"]["update_info"] == update_info
+
+        client.finish_weight_update("step-42")
+        assert captured["json"] == {"weight_version": "step-42"}
+
+
+class TestModuleSource:
+    """`ModuleSource` metadata vs. materialized iteration (dense, no GPU)."""
+
+    def test_metadata_reads_shape_and_dtype(self):
+        source = ModuleSource(
+            _module_with(("w", torch.zeros(2, 3)), ("b", torch.zeros(3)))
+        )
+        meta = source.metadata()
+        assert [m.name for m in meta] == ["w", "b"]
+        assert [m.shape for m in meta] == [(2, 3), (3,)]
+        assert all(m.dtype == torch.float32 for m in meta)
+
+    def test_iteration_yields_materialized_tensors(self):
+        w = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+        source = ModuleSource(_module_with(("w", w)))
+        pairs = list(source)
+        assert [name for name, _ in pairs] == ["w"]
+        assert torch.equal(pairs[0][1], w)
+
+    def test_source_is_reiterable(self):
+        source = ModuleSource(_module_with(("w", torch.zeros(2))))
+        assert [n for n, _ in source] == [n for n, _ in source] == ["w"]
+
+    def test_metadata_agrees_with_iteration(self):
+        """The two channels must line up element-for-element: engines declare
+        the round from `metadata()` and then send what iteration yields."""
+        source = ModuleSource(
+            _module_with(("w", torch.zeros(2, 3)), ("b", torch.zeros(3)))
+        )
+        meta = source.metadata()
+        pairs = list(source)
+        assert [m.name for m in meta] == [name for name, _ in pairs]
+        assert [m.dtype for m in meta] == [t.dtype for _, t in pairs]
+        assert [m.shape for m in meta] == [tuple(t.shape) for _, t in pairs]
+
+
+class TestTrainerFactory:
+    """WeightTransferTrainerFactory registry mechanics."""
+
+    def test_registry_has_all_backends(self):
+        assert "nccl" in WeightTransferTrainerFactory._registry
+        assert "ipc" in WeightTransferTrainerFactory._registry
+        assert "sparse_nccl" in WeightTransferTrainerFactory._registry
+
+    def test_register_and_dispatch(self):
+        saved = dict(WeightTransferTrainerFactory._registry)
+        try:
+            WeightTransferTrainerFactory.register_engine("dummy", _DummyTrainerEngine)
+            engine = WeightTransferTrainerFactory.trainer_init(
+                MagicMock(backend="dummy"),  # backend read from the init info
+                client=RecordingClient(),
+                source=ModuleSource(_module_with(("w", torch.zeros(2)))),
+            )
+            assert isinstance(engine, _DummyTrainerEngine)
+            with pytest.raises(ValueError, match="already registered"):
+                WeightTransferTrainerFactory.register_engine(
+                    "dummy", _DummyTrainerEngine
+                )
+        finally:
+            WeightTransferTrainerFactory._registry = saved
+
+    def test_unknown_backend_raises(self):
+        with pytest.raises(ValueError, match="Invalid weight transfer backend"):
+            WeightTransferTrainerFactory.trainer_init(
+                MagicMock(backend="nope"),
+                client=RecordingClient(),
+                source=ModuleSource(_module_with(("w", torch.zeros(2)))),
+            )
+
+    def test_ipc_init_info_declares_backend(self):
+        assert IPCTrainerInitInfo.backend == "ipc"
+
+    def test_nccl_init_info_declares_backend(self):
+        assert NCCLTrainerInitInfo.backend == "nccl"
+
+    def test_sparse_nccl_init_info_declares_backend(self):
+        assert SparseNCCLTrainerInitInfo.backend == "sparse_nccl"
+
+    def test_trainer_init_info_subclass_must_set_backend(self):
+        with pytest.raises(TypeError, match="class-level `backend`"):
+
+            class _NoBackend(TrainerInitInfo):
+                pass
+
+
+class TestTrainerEngineBase:
+    """Base-class construction (no GPU)."""
+
+    def test_source_stored_and_sender_by_default(self):
+        engine = _DummyTrainerEngine(
+            client=RecordingClient(),
+            source=ModuleSource(_module_with(("w", torch.zeros(2)))),
+        )
+        assert engine.is_sender is True
+        assert [name for name, _ in engine.source] == ["w"]
+
+    def test_shutdown_default_is_noop(self):
+        engine = _DummyTrainerEngine(
+            client=RecordingClient(),
+            source=ModuleSource(_module_with(("w", torch.zeros(2)))),
+            is_sender=False,
+        )
+        assert engine.is_sender is False
+        engine.shutdown()  # must not raise
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 1,
+    reason="Need at least 1 GPU (CUDA IPC handles).",
+)
+def test_ipc_trainer_send_weights_drives_client_in_order():
+    """send_weights issues start -> update -> finish and ships per-round metadata;
+    the packed wire param rides the init info, not the per-round update_info."""
+    client = RecordingClient()
+    engine = IPCTrainerWeightTransferEngine(
+        client=client,
+        source=ModuleSource(_module_with(("w", torch.ones(4, device="cuda")))),
+        packed=False,
+    )
+
+    engine.send_weights()
+
+    assert client.order == ["start", "update", "finish"]
+    assert client.last_update_info is not None
+    assert client.last_update_info["names"] == ["w"]
+    assert client.last_update_info["shapes"] == [[4]]
+    assert "packed" not in client.last_update_info
+
+
+def test_ipc_trainer_init_ships_packed_to_worker():
+    """trainer_init drives the inference-side init handshake and propagates the
+    must-agree `packed` flag to the worker."""
+    if torch.accelerator.device_count() < 1:
+        pytest.skip("Need at least 1 GPU (CUDA IPC handles).")
+
+    client = RecordingClient()
+    engine = WeightTransferTrainerFactory.trainer_init(
+        init_info=IPCTrainerInitInfo(rank=0, packed=True),  # backend from init info
+        client=client,
+        source=ModuleSource(_module_with(("w", torch.ones(4, device="cuda")))),
+    )
+
+    assert isinstance(engine, IPCTrainerWeightTransferEngine)
+    assert engine.is_sender is True
+    assert engine.packed is True
+    assert client.order == ["init"]
+    assert client.last_init_info == {"packed": True}
+
+
+def test_nccl_trainer_init_ships_worker_init_info(monkeypatch):
+    """The sender's trainer_init drives the inference-side init handshake with
+    the worker-shaped init info (rank_offset=1) while opening its own endpoint,
+    and propagates the must-agree wire params to the worker."""
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+    # Bypass the real NCCL rendezvous.
+    monkeypatch.setattr(
+        nccl_engine_mod, "open_trainer_endpoint", lambda info: MagicMock()
+    )
+
+    client = RecordingClient()
+    engine = WeightTransferTrainerFactory.trainer_init(
+        init_info=NCCLTrainerInitInfo(
+            master_address="127.0.0.1",
+            master_port=29500,
+            world_size=3,
+            rank=0,
+            packed=True,
+            packed_buffer_size_bytes=1024,
+            packed_num_buffers=3,
+        ),
+        client=client,
+        source=ModuleSource(_module_with(("w", torch.zeros(4)))),
+    )
+
+    assert isinstance(engine, NCCLTrainerWeightTransferEngine)
+    assert engine.is_sender is True
+    assert engine.packed is True
+    assert client.order == ["init"]
+    assert client.last_init_info == {
+        "master_address": "127.0.0.1",
+        "master_port": 29500,
+        "rank_offset": 1,
+        "world_size": 3,
+        "packed": True,
+        "packed_buffer_size_bytes": 1024,
+        "packed_num_buffers": 3,
+    }
+
+
+def test_nccl_worker_learns_wire_params_from_init_handshake(monkeypatch):
+    """The worker engine reads packed + buffer geometry from the
+    trainer-supplied init info at the handshake, not from the config or the
+    per-round update info."""
+    import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
+
+    monkeypatch.setattr(
+        nccl_engine_mod, "worker_init_process_group", lambda info, pc: MagicMock()
+    )
+
+    engine = NCCLWeightTransferEngine(
+        WeightTransferConfig(backend="nccl"),
+        create_mock_vllm_config(),
+        torch.device("cuda:0"),
+        MagicMock(spec=torch.nn.Module),
+    )
+    assert engine.packed is False  # pre-handshake default (legacy unpacked)
+    engine.init_transfer_engine(
+        NCCLWeightTransferInitInfo(
+            master_address="127.0.0.1",
+            master_port=29500,
+            rank_offset=1,
+            world_size=2,
+            packed=True,
+            packed_buffer_size_bytes=2048,
+            packed_num_buffers=4,
+        )
+    )
+
+    assert engine.packed is True
+    assert engine.packed_buffer_size_bytes == 2048
+    assert engine.packed_num_buffers == 4
+
+
+def test_nccl_trainer_init_non_sender_skips_rendezvous_and_client():
+    """Non-sender trainer ranks build an engine without opening an endpoint or
+    touching the client; they only join the collectives in send_weights."""
+    client = RecordingClient()
+    engine = WeightTransferTrainerFactory.trainer_init(
+        init_info=NCCLTrainerInitInfo(
+            master_address="127.0.0.1",
+            master_port=29500,
+            world_size=3,
+            rank=1,
+        ),
+        client=client,
+        source=ModuleSource(_module_with(("w", torch.zeros(4)))),
+    )
+
+    assert engine.is_sender is False
+    assert engine.model_update_group is None
+    assert client.order == []
+
+    # send_weights on a non-sender only iterates the source (packed mode needs
+    # no CUDA stream on non-senders), never the client.
+    engine.send_weights()
+    assert client.order == []
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 1,
+    reason="Need at least 1 GPU (NCCL broadcast / CUDA stream).",
+)
+def test_nccl_trainer_send_weights_drives_client_in_order():
+    """send_weights issues start -> update -> finish and ships per-round
+    metadata; the packed wire params ride the init handshake, not the
+    per-round update_info."""
+    client = RecordingClient()
+    engine = NCCLTrainerWeightTransferEngine(
+        client=client,
+        source=ModuleSource(_module_with(("w", torch.zeros(4, device="cuda")))),
+        packed=False,
+    )
+    # Bypass the real NCCL rendezvous; broadcast is a no-op.
+    engine.model_update_group = MagicMock()
+
+    engine.send_weights()
+
+    assert client.order == ["start", "update", "finish"]
+    assert client.last_update_info is not None
+    assert client.last_update_info["names"] == ["w"]
+    assert client.last_update_info["shapes"] == [[4]]
+    assert "packed" not in client.last_update_info
+
+
+class _ScriptedSource(WeightSource):
+    """Declares `meta` but yields whatever `pairs` says — used to drive the
+    metadata/iteration agreement checks."""
+
+    def __init__(self, meta, pairs):
+        self._meta = meta
+        self._pairs = pairs
+
+    def metadata(self):
+        return list(self._meta)
+
+    def __iter__(self):
+        yield from self._pairs
+
+
+def _mock_group_engine(source, monkeypatch, **kwargs):
+    """Unpacked trainer engine with a mocked group and stream (no GPU needed)."""
+    engine = NCCLTrainerWeightTransferEngine(
+        client=RecordingClient(), source=source, packed=False, **kwargs
+    )
+    engine.model_update_group = MagicMock()
+    monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
+    return engine
+
+
+def test_nccl_trainer_init_requires_source():
+    """NCCL is a full-resync backend: it cannot run without a WeightSource."""
+    with pytest.raises(ValueError, match="requires a WeightSource"):
+        NCCLTrainerWeightTransferEngine.trainer_init(
+            NCCLTrainerInitInfo(
+                master_address="127.0.0.1", master_port=29500, world_size=2, rank=0
+            ),
+            client=RecordingClient(),
+        )
+
+
+def test_nccl_trainer_send_weights_rejects_reordered_source(monkeypatch):
+    """The worker sizes its buffers (and cuts packed chunks) from metadata(), so
+    iteration disagreeing with it must raise rather than corrupt the stream."""
+    meta = [
+        ParamMeta("w", torch.float32, (4,)),
+        ParamMeta("b", torch.float32, (2,)),
+    ]
+    reordered = [("b", torch.zeros(2)), ("w", torch.zeros(4))]
+    engine = _mock_group_engine(_ScriptedSource(meta, reordered), monkeypatch)
+
+    with pytest.raises(ValueError, match="disagrees with iteration at index 0"):
+        engine.send_weights()
+
+
+def test_nccl_trainer_send_weights_rejects_dtype_disagreement(monkeypatch):
+    """A source that declares one wire dtype and materializes another would make
+    the two sides disagree on every byte offset."""
+    meta = [ParamMeta("w", torch.float32, (4,))]
+    engine = _mock_group_engine(
+        _ScriptedSource(meta, [("w", torch.zeros(4, dtype=torch.bfloat16))]),
+        monkeypatch,
+    )
+
+    with pytest.raises(ValueError, match="disagrees with iteration"):
+        engine.send_weights()
+
+
+def test_nccl_trainer_send_weights_rejects_truncated_source(monkeypatch):
+    """Yielding fewer parameters than declared leaves the worker waiting."""
+    meta = [
+        ParamMeta("w", torch.float32, (4,)),
+        ParamMeta("b", torch.float32, (2,)),
+    ]
+    engine = _mock_group_engine(
+        _ScriptedSource(meta, [("w", torch.zeros(4))]), monkeypatch
+    )
+
+    with pytest.raises(ValueError, match="yielded 1 parameters"):
+        engine.send_weights()
+
+
+def test_nccl_trainer_send_weights_broadcasts_contiguous(monkeypatch):
+    """NCCL sends numel elements from data_ptr(), so a non-contiguous view must
+    be linearized first or the worker receives unrelated memory."""
+    base = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    view = base.t()  # non-contiguous
+    meta = [ParamMeta("w", torch.float32, tuple(view.shape))]
+    engine = _mock_group_engine(_ScriptedSource(meta, [("w", view)]), monkeypatch)
+
+    engine.send_weights()
+
+    sent = engine.model_update_group.broadcast.call_args.args[0]
+    assert sent.is_contiguous()
+    assert torch.equal(sent, view)
+
+
+def test_nccl_trainer_send_weights_raises_instead_of_hanging(monkeypatch):
+    """A failed broadcast must surface even while the inference-side
+    update_weights is still blocked in its matching NCCL call.
+
+    Joining the RPC thread there would deadlock: the worker only returns once
+    the broadcast it is waiting for arrives, which never happens.
+    """
+    rpc_entered = threading.Event()
+    release_rpc = threading.Event()
+
+    class _BlockingClient(RecordingClient):
+        def update_weights(self, update_info):
+            rpc_entered.set()
+            release_rpc.wait(timeout=30)  # stands in for a wedged NCCL recv
+            super().update_weights(update_info)
+
+    class _FailingSource(WeightSource):
+        def metadata(self):
+            return [ParamMeta("w", torch.float32, (4,))]
+
+        def __iter__(self):
+            # Fail only once the RPC is provably in flight.
+            rpc_entered.wait(timeout=60)
+            raise RuntimeError("broadcast blew up")
+
+    engine = NCCLTrainerWeightTransferEngine(
+        client=_BlockingClient(), source=_FailingSource(), packed=False
+    )
+    engine.model_update_group = MagicMock()
+    monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
+
+    started = time.perf_counter()
+    try:
+        with pytest.raises(RuntimeError, match="broadcast blew up"):
+            engine.send_weights()
+        elapsed = time.perf_counter() - started
+        assert rpc_entered.is_set(), "the RPC was never in flight"
+        assert not release_rpc.is_set(), "send_weights waited for the wedged RPC"
+        # Regression guard: joining the RPC thread would park here until the
+        # client's own timeout expires instead of raising immediately.
+        assert elapsed < 5.0, f"send_weights blocked {elapsed:.1f}s on the RPC"
+    finally:
+        release_rpc.set()
+
+
+def _sparse_patch(device: str = "cpu") -> SparseWeightPatch:
+    return SparseWeightPatch(
+        name="w",
+        indices=torch.tensor([1, 3], dtype=torch.int32, device=device),
+        values=torch.tensor([1.0, 2.0], dtype=torch.float32, device=device),
+        full_shape=(4, 4),
+    )
+
+
+def test_sparse_nccl_trainer_init_ships_worker_init_info(monkeypatch):
+    """The sender's trainer_init drives the init handshake with the
+    worker-shaped init info; sparse ships no packed wire params, so the worker
+    keeps its unpacked defaults. Sparse takes no `source`."""
+    import vllm.distributed.weight_transfer.sparse_nccl_engine as sparse_mod
+
+    monkeypatch.setattr(sparse_mod, "open_trainer_endpoint", lambda info: MagicMock())
+
+    client = RecordingClient()
+    engine = WeightTransferTrainerFactory.trainer_init(
+        init_info=SparseNCCLTrainerInitInfo(
+            master_address="127.0.0.1",
+            master_port=29500,
+            world_size=2,
+            rank=0,
+        ),
+        client=client,
+    )
+
+    assert isinstance(engine, SparseNCCLTrainerWeightTransferEngine)
+    assert client.order == ["init"]
+    assert client.last_init_info == {
+        "master_address": "127.0.0.1",
+        "master_port": 29500,
+        "rank_offset": 1,
+        "world_size": 2,
+        "packed": False,
+        "packed_buffer_size_bytes": DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+        "packed_num_buffers": DEFAULT_PACKED_NUM_BUFFERS,
+    }
+
+
+def test_sparse_nccl_trainer_send_weights_drives_client_in_order(monkeypatch):
+    """send_weights takes the round's patches and ships per-patch metadata
+    (names / shapes / num_updates_list) + broadcasts indices + values each."""
+    client = RecordingClient()
+    engine = SparseNCCLTrainerWeightTransferEngine(client=client)
+    engine.model_update_group = MagicMock()
+    # The group is a mock, so the stream is just a handle it is handed (and a
+    # handle _post_send_sync can synchronize).
+    monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
+
+    engine.send_weights([_sparse_patch()])
+
+    assert client.order == ["start", "update", "finish"]
+    assert client.last_update_info is not None
+    assert client.last_update_info["names"] == ["w"]
+    assert client.last_update_info["shapes"] == [[4, 4]]
+    assert client.last_update_info["num_updates_list"] == [2]
+    # One broadcast for indices + one for values per patch.
+    assert engine.model_update_group.broadcast.call_count == 2
+
+
+def test_sparse_nccl_trainer_send_weights_empty_round_is_noop():
+    """A round with no patches must not touch the client (an empty sparse
+    update info is invalid by construction)."""
+    client = RecordingClient()
+    engine = SparseNCCLTrainerWeightTransferEngine(client=client)
+    engine.model_update_group = MagicMock()
+
+    engine.send_weights([])
+    engine.send_weights()  # no argument is also a no-op round
+
+    assert client.order == []
+
+
+def test_sparse_nccl_trainer_send_weights_requires_full_shape():
+    patch = _sparse_patch()
+    patch.full_shape = None
+    engine = SparseNCCLTrainerWeightTransferEngine(client=RecordingClient())
+    engine.model_update_group = MagicMock()
+
+    with pytest.raises(ValueError, match="full_shape"):
+        engine.send_weights([patch])
+
+
+def test_sparse_nccl_trainer_rejects_source():
+    """Sparse is a delta backend; a WeightSource would silently never be sent."""
+    with pytest.raises(ValueError, match="takes no WeightSource"):
+        SparseNCCLTrainerWeightTransferEngine(
+            client=RecordingClient(),
+            source=ModuleSource(_module_with(("w", torch.zeros(2)))),
+        )
+
+
+def test_sparse_nccl_trainer_validates_patch_before_any_rpc():
+    """Malformed patches must fail on the trainer, before start_weight_update:
+    the worker's own checks only run once the broadcasts are already in flight,
+    where a size mismatch wedges both sides instead of raising."""
+    client = RecordingClient()
+    engine = SparseNCCLTrainerWeightTransferEngine(client=client)
+    engine.model_update_group = MagicMock()
+
+    mismatched = SparseWeightPatch(
+        name="w",
+        indices=torch.tensor([1, 3], dtype=torch.int32),
+        values=torch.tensor([1.0], dtype=torch.float32),
+        full_shape=(4, 4),
+    )
+    with pytest.raises(ValueError, match="matching lengths"):
+        engine.send_weights([mismatched])
+
+    wrong_index_dtype = SparseWeightPatch(
+        name="w",
+        indices=torch.tensor([1, 3], dtype=torch.int64),
+        values=torch.tensor([1.0, 2.0], dtype=torch.float32),
+        full_shape=(4, 4),
+    )
+    with pytest.raises(ValueError, match="int32 indices"):
+        engine.send_weights([wrong_index_dtype])
+
+    assert client.order == []
+
+
+def test_sparse_nccl_trainer_non_sender_skips_client():
+    client = RecordingClient()
+    engine = WeightTransferTrainerFactory.trainer_init(
+        init_info=SparseNCCLTrainerInitInfo(
+            master_address="127.0.0.1",
+            master_port=29500,
+            world_size=2,
+            rank=1,
+        ),
+        client=client,
+    )
+
+    assert engine.is_sender is False
+    assert engine.model_update_group is None
+    assert isinstance(engine, SparseNCCLTrainerWeightTransferEngine)
+    engine.send_weights([_sparse_patch()])
+    assert client.order == []

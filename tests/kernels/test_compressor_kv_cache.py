@@ -9,24 +9,125 @@ These tests cover:
   C) Indexer:       head_dim=128 (all FP8), quant_block=128
   D) DeepseekV4 Attention magnitude range: correctness across small/large values
   E) Indexer fused Triton kernel: compress+norm+rope+quant+insert
+  F) Indexer fused two-stage Triton kernel: head=512 cr>=128 (no-overlap)
 """
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 from vllm import _custom_ops as ops
 from vllm.models.deepseek_v4.common.ops import (
+    compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
     quantize_and_insert_k_cache,
 )
 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
     _fused_kv_compress_norm_rope_insert_indexer_attn,
     _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn,
+    _launch_two_stage_sparse_attn_compressor,
+    compress_norm_rope_store_triton,
+)
+from vllm.models.deepseek_v4.compressor import _get_c128_boundary
+from vllm.platforms import current_platform
+from vllm.v1.attention.backends.mla.compressor_utils import (
+    get_dspark_swa_index_width,
+)
+from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    cp_gather_indexer_k_quant_cache_triton,
+    indexer_k_quant_and_cache_triton,
 )
 
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
+
+
+def _on_gfx950() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    try:
+        from vllm.platforms.rocm import _ON_GFX950
+
+        return _ON_GFX950
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only dispatch")
+def test_cp_gather_despecialized_kernel_is_gfx950_only(monkeypatch):
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    class FakeKernel:
+        def __init__(self):
+            self.calls = []
+
+        def __getitem__(self, grid):
+            def launch(*args):
+                self.calls.append((grid, args))
+
+            return launch
+
+    legacy_kernel = FakeKernel()
+    gfx950_kernel = FakeKernel()
+    monkeypatch.setattr(mod, "_cp_gather_indexer_quant_cache_kernel", legacy_kernel)
+    monkeypatch.setattr(
+        mod,
+        "_cp_gather_indexer_quant_cache_gfx950_kernel",
+        gfx950_kernel,
+    )
+
+    k_cache = torch.zeros((4, 1, 132), dtype=torch.uint8)
+    k_fp8 = torch.empty((5, 128), dtype=current_platform.fp8_dtype())
+    k_scale = torch.empty((5, 4), dtype=torch.uint8)
+    block_table = torch.zeros((2, 7), dtype=torch.int32)
+    cu_seqlen = torch.tensor([0, 2, 5], dtype=torch.int32)
+    token_to_seq = torch.tensor([0, 0, 1, 1, 1], dtype=torch.int32)
+    args = (k_cache, k_fp8, k_scale, block_table, cu_seqlen, token_to_seq)
+
+    monkeypatch.setattr(mod, "_ON_GFX950", True)
+    mod.cp_gather_indexer_k_quant_cache_triton(*args)
+    assert len(gfx950_kernel.calls) == 1
+    assert not legacy_kernel.calls
+    gfx950_grid, gfx950_args = gfx950_kernel.calls[0]
+    assert gfx950_grid == (5,)
+    assert len(gfx950_args) == 18
+    assert gfx950_args[-3:] == (2, 7, 4)
+
+    monkeypatch.setattr(mod, "_ON_GFX950", False)
+    mod.cp_gather_indexer_k_quant_cache_triton(*args)
+    assert len(legacy_kernel.calls) == 1
+    legacy_grid, legacy_args = legacy_kernel.calls[0]
+    assert legacy_grid == (5,)
+    assert len(legacy_args) == 19
+    assert legacy_args[-4:] == (5, 2, 7, 4)
+
+
+@pytest.mark.parametrize(
+    ("window_size", "num_speculative_tokens", "expected"),
+    [(128, 5, 192), (512, 5, 576), (1024, 0, 1024)],
+)
+def test_get_dspark_swa_index_width(
+    window_size: int, num_speculative_tokens: int, expected: int
+):
+    assert get_dspark_swa_index_width(window_size, num_speculative_tokens) == expected
+
+
+def test_compute_global_topk_reuses_output_buffers():
+    device = "cuda"
+    topk_indices = torch.tensor(
+        [[0, 3, -1], [1, 2, -1]], dtype=torch.int32, device=device
+    )
+    token_to_req = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    block_table = torch.tensor([[5, 7], [11, 13]], dtype=torch.int32, device=device)
+    is_valid = torch.tensor([True, False], device=device)
+    args = (topk_indices, token_to_req, block_table, 2, is_valid)
+    expected = compute_global_topk_indices_and_lens(*args)
+    outputs = tuple(torch.empty_like(tensor) for tensor in expected)
+    actual = compute_global_topk_indices_and_lens(*args, output_buffers=outputs)
+    for result, output, reference in zip(actual, outputs, expected):
+        assert result.data_ptr() == output.data_ptr()
+        torch.testing.assert_close(result, reference)
 
 
 def _ue8m0_reference(x: torch.Tensor, block_size: int, fp8_max: float):
@@ -53,6 +154,148 @@ def _ue8m0_reference(x: torch.Tensor, block_size: int, fp8_max: float):
         x_fp8[start:end] = quantized.to(torch.float8_e4m3fn)
 
     return x_fp8, scales
+
+
+def _decode_dsv4_cache_row(
+    cache: torch.Tensor, block_size: int, scrub_nan: bool
+) -> torch.Tensor:
+    flat = cache.flatten()
+    nope = flat[:448].view(torch.float8_e4m3fn).to(torch.bfloat16)
+    encoded = flat[block_size * 576 : block_size * 576 + 7]
+    scales = torch.exp2(encoded.to(torch.float32) - 127.0).to(torch.bfloat16)
+    nope = nope * scales.repeat_interleave(64)
+    rope = flat[448:576].view(torch.bfloat16)
+    decoded = torch.cat((nope, rope))
+    if scrub_nan:
+        decoded = torch.where(decoded == decoded, decoded, 0.0)
+    return decoded
+
+
+def _assert_nan_free_cache_matches_legacy_scrub(
+    cache: torch.Tensor, block_size: int
+) -> None:
+    flat = cache.flatten()
+    scale_base = block_size * 576
+    scale_codes = flat[scale_base : scale_base + 8]
+    assert scale_codes[0].item() == 254
+    assert scale_codes[1].item() == 247
+    assert scale_codes[:7].max().item() <= 254
+    nope_bytes = flat[:448]
+    assert not ((nope_bytes == 0x7F) | (nope_bytes == 0xFF)).any()
+
+    rope = flat[448:576].view(torch.bfloat16)
+    assert not torch.isnan(rope).any()
+    assert torch.isposinf(rope[0])
+    assert torch.equal(rope[1:4], torch.zeros_like(rope[1:4]))
+
+    legacy_cache = cache.clone()
+    legacy_flat = legacy_cache.flatten()
+    legacy_flat[scale_base] = 255
+    legacy_rope = legacy_flat[448:576].view(torch.bfloat16)
+    legacy_rope[1:4] = float("nan")
+    canonical = _decode_dsv4_cache_row(cache, block_size, scrub_nan=False)
+    legacy = _decode_dsv4_cache_row(legacy_cache, block_size, scrub_nan=True)
+    torch.testing.assert_close(canonical, legacy, rtol=0, atol=0)
+    assert torch.isinf(canonical[0])
+    assert torch.isposinf(canonical[64])
+
+
+@pytest.mark.skipif(
+    not _on_gfx950(),
+    reason="NaN-free fp8_ds_mla compressed-cache contract is gfx950-only",
+)
+@pytest.mark.parametrize("writer", ["single_pass", "two_stage_finalizer"])
+def test_gfx950_compressed_cache_canonicalizes_nonfinite(writer: str) -> None:
+    head_dim = 512
+    rope_dim = 64
+    block_size = 4
+    device = "cuda"
+
+    positions = torch.zeros(1, dtype=torch.int64, device=device)
+    slot_mapping = torch.zeros(1, dtype=torch.int64, device=device)
+    rms_weight = torch.ones(head_dim, dtype=torch.bfloat16, device=device)
+    rms_weight[0] = float("inf")
+    rms_weight[64] = torch.finfo(torch.bfloat16).max
+    rms_weight[448] = float("inf")
+    rms_weight[450] = float("nan")
+    cos_sin_cache = torch.zeros(1, rope_dim, dtype=torch.float32, device=device)
+    cos_sin_cache[:, : rope_dim // 2] = 1.0
+    cache = torch.zeros(1, block_size, 584, dtype=torch.uint8, device=device)
+
+    state_cache = torch.zeros(1, 1, 2 * head_dim, dtype=torch.float32, device=device)
+    state_cache[..., :head_dim] = 1.0
+    token_to_req = torch.zeros(1, dtype=torch.int32, device=device)
+    block_table = torch.zeros(1, 1, dtype=torch.int32, device=device)
+
+    if writer == "single_pass":
+        compress_norm_rope_store_triton(
+            state_cache=state_cache,
+            num_actual=1,
+            token_to_req_indices=token_to_req,
+            positions=positions,
+            slot_mapping=slot_mapping,
+            block_table=block_table,
+            block_size=1,
+            state_width=head_dim,
+            cos_sin_cache=cos_sin_cache,
+            kv_cache=cache,
+            k_cache_metadata=SimpleNamespace(slot_mapping=slot_mapping),
+            pdl_kwargs={},
+            head_dim=head_dim,
+            rope_head_dim=rope_dim,
+            compress_ratio=1,
+            overlap=False,
+            use_fp4_cache=False,
+            rms_norm_weight=rms_weight,
+            rms_norm_eps=1e-6,
+            quant_block=64,
+            token_stride=576,
+            scale_dim=8,
+        )
+    else:
+        _launch_two_stage_sparse_attn_compressor(
+            state_cache,
+            token_to_req,
+            positions,
+            slot_mapping,
+            block_table,
+            1,
+            head_dim,
+            1,
+            cos_sin_cache,
+            cache,
+            slot_mapping,
+            rms_weight,
+            1e-6,
+            64,
+            576,
+            8,
+            head_dim,
+            rope_dim,
+            1,
+            torch.empty(1, head_dim, dtype=torch.float32, device=device),
+        )
+
+    _assert_nan_free_cache_matches_legacy_scrub(cache, block_size)
+
+
+@pytest.mark.parametrize(
+    ("starts", "query_start_loc", "expected"),
+    [
+        ([0], [0, 127], False),
+        ([0], [0, 128], True),
+        ([127], [0, 1], True),
+        ([128], [0, 127], False),
+        ([1, 255], [0, 1, 2], True),
+        (None, [0, 1], None),
+    ],
+)
+def test_get_c128_boundary(starts, query_start_loc, expected):
+    metadata = SimpleNamespace(
+        _num_computed_tokens_cpu=None if starts is None else torch.tensor(starts),
+        query_start_loc_cpu=torch.tensor(query_start_loc),
+    )
+    assert _get_c128_boundary(metadata) is expected
 
 
 # ── Test A: DeepseekV4 Attention path ──────────────────────────────────────────────
@@ -347,7 +590,8 @@ def test_indexer_gather_accepts_upper_bound_output():
     valid_tokens = 9
     upper_bound_tokens = 13
     block_size = 16
-    num_blocks = 2
+    num_seqs = 3
+    num_blocks = num_seqs
     sentinel = 123
     device = "cuda"
 
@@ -355,13 +599,15 @@ def test_indexer_gather_accepts_upper_bound_output():
     kv_cache = torch.zeros(
         num_blocks, block_size, cache_stride, dtype=torch.uint8, device=device
     )
-    slot_mapping = torch.arange(valid_tokens, dtype=torch.int64, device=device)
+    slot_mapping = torch.tensor(
+        [0, 1, 2, 16, 17, 18, 32, 33, 34], dtype=torch.int64, device=device
+    )
     ops.indexer_k_quant_and_cache(k, kv_cache, slot_mapping, quant_block_size, "ue8m0")
 
     block_table = torch.arange(num_blocks, dtype=torch.int32, device=device).unsqueeze(
-        0
+        1
     )
-    cu_seq_lens = torch.tensor([0, valid_tokens], dtype=torch.int32, device=device)
+    cu_seq_lens = torch.tensor([0, 3, 6, 9], dtype=torch.int32, device=device)
     dst_k = torch.full(
         (upper_bound_tokens, head_dim), sentinel, dtype=torch.uint8, device=device
     )
@@ -376,8 +622,52 @@ def test_indexer_gather_accepts_upper_bound_output():
     ops.cp_gather_indexer_k_quant_cache(
         kv_cache, dst_k, dst_scale, block_table, cu_seq_lens
     )
+
+    if current_platform.is_rocm():
+        triton_kv_cache = torch.zeros_like(kv_cache)
+        indexer_k_quant_and_cache_triton(
+            k,
+            triton_kv_cache,
+            slot_mapping,
+            quant_block_size,
+            "ue8m0",
+        )
+        triton_dst_k = torch.full_like(dst_k, sentinel)
+        triton_dst_scale = torch.full_like(dst_scale, sentinel)
+        token_to_seq = torch.cat(
+            (
+                torch.repeat_interleave(
+                    torch.arange(num_seqs, dtype=torch.int32, device=device), 3
+                ),
+                torch.full(
+                    (upper_bound_tokens - valid_tokens,),
+                    -1,
+                    dtype=torch.int32,
+                    device=device,
+                ),
+            )
+        )
+        cp_gather_indexer_k_quant_cache_triton(
+            triton_kv_cache,
+            triton_dst_k.view(current_platform.fp8_dtype()),
+            triton_dst_scale,
+            block_table,
+            cu_seq_lens,
+            token_to_seq,
+        )
     torch.accelerator.synchronize()
 
+    if current_platform.is_rocm():
+        triton_recovered = triton_dst_k[:valid_tokens].view(
+            current_platform.fp8_dtype()
+        ).float() * triton_dst_scale[:valid_tokens].view(torch.float32)
+        triton_error = (triton_recovered - k.float()).abs().amax(dim=1)
+        max_triton_error = (
+            16.0 * triton_dst_scale[:valid_tokens].view(torch.float32).flatten()
+        )
+        assert torch.all(triton_error <= max_triton_error)
+        assert torch.all(triton_dst_k[valid_tokens:] == sentinel)
+        assert torch.all(triton_dst_scale[valid_tokens:] == sentinel)
     k_recovered = dst_k[:valid_tokens].view(torch.float8_e4m3fn).float() * dst_scale[
         :valid_tokens
     ].view(torch.float32)
@@ -816,3 +1106,130 @@ def test_cutedsl_full_cache_store(compress_ratio: int, store_fp8: bool):
         torch.testing.assert_close(actual.float(), ref_fp8.float(), rtol=0.0, atol=0.3)
     else:
         torch.testing.assert_close(actual.float(), ref.float(), rtol=3e-2, atol=3e-2)
+
+
+# ── Test F: DeepseekV4 Attention two-stage split compressor (Triton) ─────────
+#
+# Same full pipeline as Test E (state-cache gather -> softmax-weighted compress
+# -> RMSNorm -> GPT-J RoPE -> quant -> paged insert), but for the head=512
+# fp8_ds_mla layout via the two-stage split
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="two-stage split compressor is only enabled for ROCm at the moment",
+)
+@pytest.mark.parametrize("num_tokens", [1, 4, 8, 17])
+@pytest.mark.parametrize("kv_block_size", [16, 64])
+def test_fused_kv_insert_split(num_tokens: int, kv_block_size: int):
+    """Two-stage split compress+norm+rope+quant+insert for the head=512 KV cache."""
+    HEAD_DIM = 512
+    NOPE_DIM = 448
+    ROPE_DIM = 64
+    HEAD_BYTES = 584  # 448 fp8 + 128 bf16 + 8 uint8 scale
+    RMS_EPS = 1e-6
+    FP8_MAX = 448.0
+    QUANT_BLOCK = 64
+    TOKEN_STRIDE = 576
+    SCALE_DIM = 8
+    STATE_BLOCK_SIZE = 8  # CompressorStateCache block_size for cr=128
+
+    device = "cuda"
+    torch.manual_seed(42)
+    compress_ratio = 128
+    overlap = 0  # no overlap for cr=128
+    coff = 1 + overlap
+
+    num_pages = (compress_ratio * num_tokens - 1) // STATE_BLOCK_SIZE + 2
+    state_cache = torch.randn(
+        num_pages,
+        STATE_BLOCK_SIZE,
+        2 * coff * HEAD_DIM,  # kv_state + score_state
+        dtype=torch.float32,
+        device=device,
+    )
+    block_table = torch.arange(num_pages, dtype=torch.int32, device=device).unsqueeze(0)
+    token_to_req = torch.zeros(num_tokens, dtype=torch.int32, device=device)
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    positions = torch.arange(
+        compress_ratio - 1,
+        compress_ratio * num_tokens,
+        compress_ratio,
+        dtype=torch.int64,
+        device=device,
+    )
+    rms_weight = torch.randn(HEAD_DIM, dtype=torch.bfloat16, device=device)
+    cos_sin_cache = torch.randn(
+        compress_ratio * num_tokens, ROPE_DIM, dtype=torch.float32, device=device
+    )
+
+    kv_n_blocks = (num_tokens + kv_block_size - 1) // kv_block_size + 1
+    kv_cache = torch.zeros(
+        kv_n_blocks, kv_block_size, HEAD_BYTES, dtype=torch.uint8, device=device
+    )
+    compress_scratch = torch.empty(
+        num_tokens, HEAD_DIM, dtype=torch.float32, device=device
+    )
+
+    _launch_two_stage_sparse_attn_compressor(
+        state_cache,
+        token_to_req,
+        positions,
+        slot_mapping,
+        block_table,
+        STATE_BLOCK_SIZE,
+        coff * HEAD_DIM,
+        compress_ratio,
+        cos_sin_cache,
+        kv_cache,
+        slot_mapping,
+        rms_weight,
+        RMS_EPS,
+        QUANT_BLOCK,
+        TOKEN_STRIDE,
+        SCALE_DIM,
+        HEAD_DIM,
+        ROPE_DIM,
+        num_tokens,
+        compress_scratch,
+    )
+
+    # PyTorch reference: compress -> RMSNorm -> GPT-J RoPE (pre-quant bf16 row).
+    ref = _reference_kv_compress_norm_rope(
+        state_cache,
+        block_table,
+        positions,
+        rms_weight,
+        cos_sin_cache,
+        compress_ratio,
+        overlap,
+        rms_eps=RMS_EPS,
+        fp8_max=FP8_MAX,
+        return_full_cache=True,
+    )  # [num_tokens, HEAD_DIM] bf16
+
+    # Dequant + gather the fp8_ds_mla cache back to bf16 (Test B op).
+    out = torch.zeros(1, num_tokens, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    seq_lens = torch.tensor([num_tokens], dtype=torch.int32, device=device)
+    gather_block_table = torch.arange(
+        kv_n_blocks, dtype=torch.int32, device=device
+    ).unsqueeze(0)
+    dequantize_and_gather_k_cache(
+        out, kv_cache, seq_lens, None, gather_block_table, kv_block_size, offset=0
+    )
+    recovered = out[0, :num_tokens]
+
+    # NoPE (first 448): FP8 quantized, expect UE8M0 error (same bound as Test A).
+    nope_diff = (recovered[:, :NOPE_DIM].float() - ref[:, :NOPE_DIM].float()).abs()
+    for t in range(num_tokens):
+        _, scales = _ue8m0_reference(ref[t, :NOPE_DIM].float(), QUANT_BLOCK, FP8_MAX)
+        max_allowed = 16.0 * scales.max().item()
+        token_diff = nope_diff[t].max().item()
+        assert token_diff <= max_allowed, (
+            f"Token {t} nope diff {token_diff} exceeds max_allowed "
+            f"{max_allowed} (scale={scales.max().item()})"
+        )
+
+    # RoPE (last 64): stored as bf16. The kernel recomputes the rotation, so it
+    # is bf16-close to the reference rather than bit-exact (cf. test_cutedsl).
+    torch.testing.assert_close(recovered[:, NOPE_DIM:], ref[:, NOPE_DIM:])

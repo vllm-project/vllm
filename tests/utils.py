@@ -33,7 +33,6 @@ import pytest
 import requests
 import torch
 import torch.nn.functional as F
-from huggingface_hub import hf_hub_download
 from huggingface_hub.constants import HF_HUB_OFFLINE
 from openai.types.completion import Completion
 from typing_extensions import ParamSpec
@@ -57,6 +56,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
+from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
@@ -77,7 +77,7 @@ def prewarm_hf_cache(assets: list[tuple[str, str]]) -> None:
         return
     for repo_id, filename in assets:
         try:
-            hf_hub_download(repo_id=repo_id, filename=filename)
+            hf_api().hf_hub_download(repo_id=repo_id, filename=filename)
         except Exception as e:
             logger.warning(
                 "Failed to prefetch %s/%s: %r. Tests depending on this asset may fail.",
@@ -108,6 +108,7 @@ if current_platform.is_rocm():
 elif current_platform.is_cuda():
     from vllm.third_party.pynvml import (
         nvmlDeviceGetHandleByIndex,
+        nvmlDeviceGetHandleByUUID,
         nvmlDeviceGetMemoryInfo,
         nvmlInit,
         nvmlShutdown,
@@ -130,12 +131,6 @@ else:
 VLLM_PATH = Path(__file__).parent.parent
 """Path to root of the vLLM repository."""
 
-# ROCm: disable skinny GEMM to avoid non-deterministic results from
-# atomic reductions in wvSplitKrc kernel.
-# See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
-ROCM_ENV_OVERRIDES = (
-    {"VLLM_ROCM_USE_SKINNY_GEMM": "0"} if current_platform.is_rocm() else {}
-)
 # ROCm: disable prefix caching and eliminate batch variance to reduce
 # test flakiness.
 ROCM_EXTRA_ARGS = (
@@ -1459,6 +1454,46 @@ def multi_process_parallel(
         ray.shutdown()
 
 
+def assert_rocm_custom_allreduce_backend_state(
+    use_aiter_custom_ar: bool,
+    quick_reduce_quantization: str,
+) -> None:
+    from vllm.distributed.parallel_state import get_tp_group
+
+    device_communicator = get_tp_group().device_communicator
+    aiter_ar_comm = device_communicator.aiter_ar_comm
+    if use_aiter_custom_ar:
+        assert aiter_ar_comm is not None, "AITER CustomAllreduce was not initialized."
+        assert not aiter_ar_comm.disabled, "AITER CustomAllreduce is disabled."
+        assert device_communicator.ca_comm is None, (
+            "vLLM CustomAllreduce should not be initialized when AITER CA is used."
+        )
+    else:
+        assert aiter_ar_comm is None, (
+            "AITER CustomAllreduce should not be initialized when disabled."
+        )
+        assert device_communicator.ca_comm is not None, (
+            "vLLM CustomAllreduce should be initialized when AITER CA is disabled."
+        )
+
+    qr_comm = device_communicator.qr_comm
+    assert qr_comm is not None, "QuickReduce communicator was not initialized."
+    if quick_reduce_quantization == "NONE":
+        assert qr_comm.disabled, "QuickReduce should be disabled."
+    else:
+        assert not qr_comm.disabled, "QuickReduce should be enabled."
+
+
+def assert_rocm_custom_allreduce_backend_state_on_worker(
+    _worker,
+    use_aiter_custom_ar: bool,
+    quick_reduce_quantization: str,
+) -> None:
+    assert_rocm_custom_allreduce_backend_state(
+        use_aiter_custom_ar, quick_reduce_quantization
+    )
+
+
 @contextmanager
 def error_on_warning(category: type[Warning] = Warning):
     """
@@ -1481,6 +1516,18 @@ def get_physical_device_indices(devices: list[int]):
     return [index_mapping[i] for i in devices if i in index_mapping]
 
 
+def get_nvml_device_handle(device: int):
+    visible_devices = os.environ.get("NVIDIA_VISIBLE_DEVICES")
+    if visible_devices is not None:
+        identifiers = visible_devices.split(",")
+        if device < len(identifiers):
+            identifier = identifiers[device]
+            if identifier.startswith(("GPU-", "MIG-")):
+                return nvmlDeviceGetHandleByUUID(identifier)
+
+    return nvmlDeviceGetHandleByIndex(device)
+
+
 @_nvml()
 def record_gpu_memory_usage_stats(
     *,
@@ -1493,8 +1540,15 @@ def record_gpu_memory_usage_stats(
             mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
             gb_used = mem_info["vram_used"] / 2**10
             gb_total = mem_info["vram_total"] / 2**10
+        elif current_platform.is_xpu():
+            # nvml/amdsmi are unavailable on XPU. Query device memory through
+            # torch.accelerator.get_memory_info, which the XPU platform patches
+            # to return (free, total) bytes via Level Zero.
+            free_b, total_b = torch.accelerator.get_memory_info(device)
+            gb_used = (total_b - free_b) / 2**30
+            gb_total = total_b / 2**30
         else:
-            dev_handle = nvmlDeviceGetHandleByIndex(device)
+            dev_handle = get_nvml_device_handle(device)
             mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
             gb_used = mem_info.used / 2**30
             gb_total = mem_info.total / 2**30
@@ -1633,19 +1687,19 @@ def wait_for_gpu_memory_to_clear(
         time.sleep(poll_interval_s)
 
 
-def wait_for_rocm_memory_to_settle(
+def wait_for_memory_to_settle(
     *,
     threshold_ratio: float | dict[int, float] | None = 0.1,
     timeout_s: float = 240,
 ) -> None:
-    """Block until ROCm device VRAM usage drops below ``threshold_ratio``.
+    """Block until ROCm or XPU device VRAM usage drops below ``threshold_ratio``.
 
-    ROCm reclaims GPU memory more lazily than CUDA, so back-to-back model
+    ROCm and XPU reclaims GPU memory more lazily than CUDA, so back-to-back model
     loads in a single test process can OOM the *next* engine/model startup
     even after ``cleanup_dist_env_and_memory``. This gives the driver time to
     actually release VRAM before the next allocation. No-op off ROCm.
     """
-    if not current_platform.is_rocm():
+    if not current_platform.is_rocm() and not current_platform.is_xpu():
         return
 
     num_gpus = current_platform.device_count()
@@ -1930,7 +1984,10 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
 
     return pytest.mark.skipif(
         memory_gb < min_gb,
-        reason=f"Need at least {min_gb}GB GPU memory to run the test.",
+        reason=(
+            f"Need at least {min_gb}GB GPU memory to run the test "
+            f"(found {memory_gb}GB)."
+        ),
     )
 
 

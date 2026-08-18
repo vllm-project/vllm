@@ -533,6 +533,16 @@ def get_cpu_distributed_timeout_or_none() -> timedelta | None:
     return timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
 
 
+def get_distributed_timeout_or_none() -> timedelta | None:
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return None
+    timeout_seconds = vllm_config.parallel_config.distributed_timeout_seconds
+    return timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
+
+
 def init_gloo_process_group(
     prefix_store: PrefixStore,
     group_rank: int,
@@ -616,6 +626,10 @@ def stateless_init_torch_distributed_process_group(
         gloo_timeout = get_cpu_distributed_timeout_or_none()
         if gloo_timeout is not None:
             timeout = gloo_timeout
+    else:
+        device_timeout = get_distributed_timeout_or_none()
+        if device_timeout is not None:
+            timeout = device_timeout
 
     if listen_socket is not None:
         store = create_tcp_store(
