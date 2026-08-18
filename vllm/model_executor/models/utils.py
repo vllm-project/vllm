@@ -18,6 +18,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
@@ -169,18 +170,17 @@ class WeightsMapper:
         return replace(self, orig_to_new_stacked={})
 
 
-def _get_aliased_params(module: nn.Module) -> dict[str, str]:
-    """Map each duplicate parameter qualname to the first name it aliases.
-
-    Parameters shared between modules (such as tied word embeddings) appear
-    under several qualnames. `named_parameters` keeps the first name reached by
-    module traversal, which is treated as the canonical one here.
-    """
+def _get_tied_embedding_params(module: nn.Module) -> dict[str, str]:
+    """Map each tied word embedding qualname to the first name it aliases."""
     canonical = dict[int, str]()
     aliased = dict[str, str]()
-    for name, param in module.named_parameters(remove_duplicate=False):
-        if (first_name := canonical.setdefault(id(param), name)) != name:
-            aliased[name] = first_name
+    for prefix, submodule in module.named_modules(remove_duplicate=False):
+        if not isinstance(submodule, VocabParallelEmbedding):
+            continue
+        for name, param in submodule.named_parameters(remove_duplicate=False):
+            qualname = f"{prefix}.{name}" if prefix else name
+            if (first_name := canonical.setdefault(id(param), qualname)) != qualname:
+                aliased[qualname] = first_name
     return aliased
 
 
@@ -232,7 +232,7 @@ class AutoWeightsLoader:
         # (e.g. `lm_head.weight` and `model.embed_tokens.weight`). Loading both
         # would write the same storage twice, so only the first name reached by
         # module traversal is loaded and the rest are skipped.
-        self.aliased_params = _get_aliased_params(module)
+        self.aliased_params = _get_tied_embedding_params(module)
         self._skipped_aliases = dict[str, str]()
         self._loaded_params_are_complete = True
 
