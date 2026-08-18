@@ -107,6 +107,11 @@ class GateLinear(ReplicatedLinear):
             vllm_config is not None
             and vllm_config.kernel_config.enable_bf16x3_router_gemm
         )
+        self._hpc_workspace_max_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+            if vllm_config is not None
+            else _HPC_GEMM_DEFAULT_MAX_TOKENS
+        )
         self.allow_fp32_router_gemm = (
             not bias
             and self.weight.dtype == torch.float32
@@ -155,21 +160,30 @@ class GateLinear(ReplicatedLinear):
                 and is_available()
             )
 
-        self.allow_hpc_router_gemm = (
-            envs.VLLM_ENABLE_HPC_ROUTER_GEMM
-            and not bias
-            and self.weight.dtype == torch.float32
-            and current_platform.is_cuda()
-            and is_hopper
-            and input_size % 8 == 0
-            and output_size % 64 == 0
-            and has_hpc_bf16xfp32_gemm()
-            and out_dtype == torch.float32
-        )
+        self._is_hopper = is_hopper
+        self.allow_hpc_router_gemm = self._compute_allow_hpc_router_gemm()
 
         if self.allow_hpc_router_gemm:
             self.quant_method = GateLinearWeightProcess()
             logger.info_once("Enabled HPC BF16xFP32 router GEMM.")
+
+    def _compute_allow_hpc_router_gemm(self) -> bool:
+        """HPC BF16xFP32 router GEMM eligibility.
+
+        Shared by __init__ and set_out_dtype() since out_dtype may only be
+        known after construction.
+        """
+        return (
+            envs.VLLM_ENABLE_HPC_ROUTER_GEMM
+            and self._router_gemm_no_bias
+            and self.weight.dtype == torch.float32
+            and current_platform.is_cuda()
+            and self._is_hopper
+            and self.input_size % 8 == 0
+            and self.output_size % 64 == 0
+            and has_hpc_bf16xfp32_gemm()
+            and self.out_dtype == torch.float32
+        )
 
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
         """Set output dtype for the router logits after init.
@@ -203,17 +217,34 @@ class GateLinear(ReplicatedLinear):
                 and is_available()
             )
 
-    def _process_gate_weights_after_loading(self):
+        # out_dtype may start as None -> recompute HPC eligibility here too
+        self.allow_hpc_router_gemm = self._compute_allow_hpc_router_gemm()
         if self.allow_hpc_router_gemm:
-            import hpc
+            self.quant_method = GateLinearWeightProcess()
+            logger.info_once("Enabled HPC BF16xFP32 router GEMM.")
 
-            with torch.no_grad():
-                y = self.weight.data
-                self.hpc_w_high = y.to(torch.bfloat16)
-                self.hpc_w_low = (
-                    (y - self.hpc_w_high.float()) / _HPC_GEMM_WEIGHT_SCALE
-                ).to(torch.bfloat16)
-                self.hpc_split_flag = hpc.get_gemm_bf16xfp32_workspace(y.shape[0])
+    def _process_gate_weights_after_loading(self):
+        if not self.allow_hpc_router_gemm:
+            return
+
+        import hpc
+
+        with torch.no_grad():
+            y = self.weight.data
+            w_high = y.to(torch.bfloat16)
+            w_low = ((y - w_high.float()) / _HPC_GEMM_WEIGHT_SCALE).to(torch.bfloat16)
+
+            if getattr(self, "hpc_w_high", None) is None:
+                # Allocate once: CUDA graph capture and weight-reload flows
+                # depend on these storage addresses staying stable.
+                self.hpc_w_high = w_high
+                self.hpc_w_low = w_low
+                self.hpc_split_flag = hpc.get_gemm_bf16xfp32_workspace(
+                    y.shape[0], max_tokens=self._hpc_workspace_max_tokens
+                )
+            else:
+                self.hpc_w_high.copy_(w_high)
+                self.hpc_w_low.copy_(w_low)
 
     def forward(
         self, x: torch.Tensor
@@ -242,6 +273,7 @@ class GateLinear(ReplicatedLinear):
             and x.ndim == 2
             and x.dtype == torch.bfloat16
             and x.shape[0] > _FP32_ROUTER_GEMM_MAX_TOKENS
+            and x.shape[0] <= self._hpc_workspace_max_tokens
         ):
             output = hpc_gemm_bf16xfp32(
                 x=x,
@@ -334,3 +366,7 @@ direct_register_custom_op(
 # bf16 halves: w_high = w.bf16 and w_low = ((w - w_high) / scale).bf16 with
 # scale = 1/256, so that w ~= w_high + scale * w_low.
 _HPC_GEMM_WEIGHT_SCALE = 1.0 / 256.0
+
+# hpc.get_gemm_bf16xfp32_workspace()'s own default when no vLLM config is
+# available to size the split-K workspace from.
+_HPC_GEMM_DEFAULT_MAX_TOKENS = 131072
