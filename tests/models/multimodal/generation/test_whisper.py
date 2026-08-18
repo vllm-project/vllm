@@ -20,6 +20,7 @@ VLLM_PROMPT = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
 HF_PROMPT = ""
 # Whisper expects 16kHz audio
 WHISPER_SAMPLE_RATE = 16000
+BEAM_WIDTHS = (1, 2)
 
 
 @pytest.fixture(autouse=True)
@@ -127,13 +128,11 @@ def check_model_available(model: str) -> None:
 
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [64])
-@pytest.mark.parametrize("beam_width", [1, 2])
 def test_beam_search_encoder_decoder(
     hf_runner,
     vllm_runner,
     dtype: str,
     max_tokens: int,
-    beam_width: int,
     resampled_assets,
 ) -> None:
     """Test beam search with encoder-decoder models (Whisper)."""
@@ -146,12 +145,15 @@ def test_beam_search_encoder_decoder(
     ]
 
     with hf_runner(model, dtype=dtype, auto_cls=AutoModelForSpeechSeq2Seq) as hf_model:
-        hf_outputs = hf_model.generate_beam_search(
-            hf_prompts,
-            beam_width=beam_width,
-            max_tokens=max_tokens,
-            audios=resampled_assets,
-        )
+        hf_outputs_by_beam_width = [
+            hf_model.generate_beam_search(
+                hf_prompts,
+                beam_width=beam_width,
+                max_tokens=max_tokens,
+                audios=resampled_assets,
+            )
+            for beam_width in BEAM_WIDTHS
+        ]
 
     # Test both explicit encoder/decoder prompts
     vllm_prompts = [
@@ -179,38 +181,46 @@ def test_beam_search_encoder_decoder(
         limit_mm_per_prompt={"audio": 2},
         enforce_eager=True,
     ) as vllm_model:
-        vllm_outputs = vllm_model.generate_beam_search(
-            vllm_prompts,
-            beam_width=beam_width,
-            max_tokens=max_tokens,
-        )
-
-    for i in range(len(vllm_prompts)):
-        hf_output_ids, hf_output_texts = hf_outputs[i]
-        vllm_output_ids, vllm_output_texts = vllm_outputs[i]
-
-        for j, (hf_text, vllm_text) in enumerate(
-            zip(hf_output_texts, vllm_output_texts)
-        ):
-            print(f">>>{j}-th hf output [NOTE: special tokens are filtered]:")
-            print(hf_text)
-            print(f">>>{j}-th vllm output:")
-            print(vllm_text)
-
-        # Check that we got the same number of beams
-        assert len(hf_output_ids) == len(vllm_output_ids)
-
-        # For encoder-decoder models, we primarily want to verify that:
-        # 1. Beam search completes without errors
-        # 2. We get the expected number of beams
-        # 3. Outputs are reasonable (non-empty, diverse beams)
-        for j in range(len(vllm_output_ids)):
-            # Check that outputs are not empty
-            assert len(vllm_output_ids[j]) > 0, f"Prompt {i}, beam {j}: empty output"
-            # Check that decoded text is not empty
-            assert len(vllm_output_texts[j].strip()) > 0, (
-                f"Prompt {i}, beam {j}: empty text output"
+        vllm_outputs_by_beam_width = [
+            vllm_model.generate_beam_search(
+                vllm_prompts,
+                beam_width=beam_width,
+                max_tokens=max_tokens,
             )
+            for beam_width in BEAM_WIDTHS
+        ]
+
+    for beam_width, hf_outputs, vllm_outputs in zip(
+        BEAM_WIDTHS, hf_outputs_by_beam_width, vllm_outputs_by_beam_width
+    ):
+        for i in range(len(vllm_prompts)):
+            hf_output_ids, hf_output_texts = hf_outputs[i]
+            vllm_output_ids, vllm_output_texts = vllm_outputs[i]
+
+            for j, (hf_text, vllm_text) in enumerate(
+                zip(hf_output_texts, vllm_output_texts)
+            ):
+                print(f">>>{j}-th hf output [NOTE: special tokens are filtered]:")
+                print(hf_text)
+                print(f">>>{j}-th vllm output:")
+                print(vllm_text)
+
+            # Check that we got the same number of beams
+            assert len(hf_output_ids) == len(vllm_output_ids) == beam_width
+
+            # For encoder-decoder models, we primarily want to verify that:
+            # 1. Beam search completes without errors
+            # 2. We get the expected number of beams
+            # 3. Outputs are reasonable (non-empty, diverse beams)
+            for j in range(len(vllm_output_ids)):
+                # Check that outputs are not empty
+                assert len(vllm_output_ids[j]) > 0, (
+                    f"Prompt {i}, beam {j}: empty output"
+                )
+                # Check that decoded text is not empty
+                assert len(vllm_output_texts[j].strip()) > 0, (
+                    f"Prompt {i}, beam {j}: empty text output"
+                )
 
 
 def test_parse_language_detection_output():

@@ -23,9 +23,13 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if current_platform.has_device_capability(100):
-            return True, None
-        return False, "requires >=sm_100 (Blackwell)"
+        if not (
+            current_platform.is_cuda() and current_platform.has_device_capability(100)
+        ):
+            return False, "requires >=sm_100 (Blackwell)"
+        if not has_flashinfer():
+            return False, "requires FlashInfer"
+        return True, None
 
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:

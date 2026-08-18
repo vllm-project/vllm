@@ -125,7 +125,6 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
 
         # if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
         #     llm.apply_model(check_model)
-
         output = llm.generate_greedy("Today I am in the French Alps and", max_tokens=20)
         assert output
 
@@ -187,6 +186,16 @@ def mxfp8_dequantize(x, scale):
     return x_float * scale
 
 
+def mxfp4_quant_dequant(x: torch.Tensor) -> torch.Tensor:
+    shape = x.shape
+    quantized, scale = dynamic_mxfp4_quant(x.to(torch.bfloat16).flatten(0, -2))
+    return (
+        upcast_from_mxfp(quantized.view(torch.uint8), scale, torch.bfloat16, axis=-1)
+        .reshape(shape)
+        .float()
+    )
+
+
 def reference_moe(
     roouting_logits,
     topk,
@@ -219,6 +228,8 @@ def reference_moe(
     expert_weights = torch.nn.functional.softmax(experts.values, dim=1)
     expert_indices = experts.indices
     t = hidden_states.clone()
+    if act_type == "mxfp4":
+        t = mxfp4_quant_dequant(t)
     # MLP #1
     mlp1_weight = w13[expert_indices, ...]
     mlp1_bias = bias13[expert_indices, ...]
@@ -244,6 +255,8 @@ def reference_moe(
             t.to(torch.bfloat16), is_sf_swizzled_layout=False
         )
         t = mxfp8_dequantize(t_quantized, t_scale)
+    elif act_type == "mxfp4":
+        t = mxfp4_quant_dequant(t)
     # MLP #2
     mlp2_weight = w2[expert_indices, ...]
     mlp2_bias = bias2[expert_indices, ...]
@@ -1095,6 +1108,101 @@ def test_convert_standard_mxfp4_weights_for_flashinfer_cutlass(
     torch.testing.assert_close(interleaved_scales[1], w2_scale)
 
 
+def test_gpt_oss_quant_config_supplies_clamped_swiglu_params():
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.model_executor.layers.quantization.mxfp4 import GptOssMxfp4MoEMethod
+
+    fake_method = types.SimpleNamespace(
+        mxfp4_backend=Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
+        w13_precision_config=None,
+        w2_precision_config=None,
+    )
+    fake_layer = types.SimpleNamespace(
+        w13_weight_scale=torch.zeros(2, 4, 2, dtype=torch.uint8),
+        w2_weight_scale=torch.zeros(2, 4, 2, dtype=torch.uint8),
+    )
+
+    quant_config = GptOssMxfp4MoEMethod.get_fused_moe_quant_config(
+        fake_method, fake_layer
+    )
+
+    assert quant_config is not None
+    assert quant_config.gemm1_alpha == 1.702
+    assert quant_config.gemm1_beta == 1.0
+    assert quant_config.gemm1_clamp_limit == 7.0
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="CUDA is required for FlashInferExperts parameter storage",
+)
+@pytest.mark.parametrize("supplied", [False, True])
+def test_flashinfer_experts_swiglu_params_follow_quant_config(supplied: bool):
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+        mxfp4_w4a16_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
+        FlashInferExperts,
+    )
+
+    num_experts, intermediate_size, hidden_size = 2, 128, 256
+    w1_scale = torch.zeros(
+        (num_experts, 2 * intermediate_size, hidden_size // 32),
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    w2_scale = torch.zeros(
+        (num_experts, hidden_size, intermediate_size // 32),
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    extra = (
+        {"gemm1_alpha": 0.5, "gemm1_beta": 0.25, "gemm1_clamp_limit": 3.0}
+        if supplied
+        else {}
+    )
+    quant_config = mxfp4_w4a16_moe_quant_config(
+        w1_scale=w1_scale, w2_scale=w2_scale, **extra
+    )
+    moe_config = FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=1,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        num_local_experts=num_experts,
+        num_logical_experts=num_experts,
+        activation=MoEActivation.SILU,
+        device="cuda",
+        routing_method=RoutingMethodType.TopK,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=torch.bfloat16,
+    )
+    experts = FlashInferExperts(moe_config=moe_config, quant_config=quant_config)
+
+    if supplied:
+        for name, value in (
+            ("gemm1_alpha", 0.5),
+            ("gemm1_beta", 0.25),
+            ("gemm1_clamp_limit", 3.0),
+        ):
+            parameter = getattr(experts, name)
+            assert isinstance(parameter, torch.Tensor)
+            assert parameter.dtype == torch.float32
+            assert parameter.shape == (num_experts,)
+            torch.testing.assert_close(
+                parameter.cpu(),
+                torch.full((num_experts,), value, dtype=torch.float32),
+            )
+    else:
+        assert experts.gemm1_alpha is None
+        assert experts.gemm1_beta is None
+        assert experts.gemm1_clamp_limit is None
+
+
 @pytest.mark.parametrize("topk", [1, 4])
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("num_tokens", [1, 128])
@@ -1294,6 +1402,14 @@ ROCM_BACKEND_CONFIGS = {
         "activation": "SWIGLUOAI",
         "rtol": 0.5,
         "percent": 0.9,
+        "requires_aiter": True,
+        "requires_gfx950": True,
+    },
+    "AITER_MXFP4_MXFP4": {
+        "activation": "SILU",
+        "act_type": "mxfp4",
+        "rtol": 1.0,
+        "percent": 0.8,
         "requires_aiter": True,
         "requires_gfx950": True,
     },
@@ -1567,7 +1683,7 @@ def test_rocm_mxfp4_moe_oracle(
         alpha=1.702 if activation == MoEActivation.SWIGLUOAI else 1.0,
         beta=1.0 if activation == MoEActivation.SWIGLUOAI else 0.0,
         limit=7.0 if activation == MoEActivation.SWIGLUOAI else None,
-        act_type="bf16",
+        act_type=str(config.get("act_type", "bf16")),
         activation=act_name,
         use_interleaved_layout=use_interleaved,
     )
