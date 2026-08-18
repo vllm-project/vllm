@@ -24,6 +24,7 @@ from vllm.model_executor.kernels.mhc.tilelang import (
     mhc_post_tilelang,
     mhc_pre_broadcast_tilelang,
     mhc_pre_tilelang,
+    register_mhc_pre_broadcast_with_norm_warmup,
     register_mhc_pre_with_norm_warmup,
 )
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
@@ -1011,6 +1012,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
+        self.max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
         self.use_mega_moe = (
             vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         )
@@ -1392,6 +1396,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 layer.hc_attn_fn_broadcast = broadcast
             else:
                 layer.hc_attn_fn_broadcast.copy_(broadcast)
+            register_mhc_pre_broadcast_with_norm_warmup(
+                max_tokens=self.max_num_batched_tokens,
+                hidden_size=layer.hidden_size,
+                rms_eps=layer.rms_norm_eps,
+                hc_eps=layer.hc_eps,
+                hc_post_mult_value=layer.hc_post_alpha,
+                sinkhorn_repeat=layer.hc_sinkhorn_iters,
+                norm_eps=layer.attn_norm.variance_epsilon,
+                hc_mult=layer.hc_mult,
+            )
 
 
 def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:

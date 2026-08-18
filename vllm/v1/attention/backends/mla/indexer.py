@@ -359,7 +359,7 @@ class BuildPrefillChunkMetadataKernel(
             for ratio in (getattr(hf_config, "compress_ratios", None) or (1,))
         )
         scalar_specialization_reps = tuple(
-            triton_scalar_specialization_rep(value) for value in (1, 2, 16)
+            triton_scalar_specialization_rep(value) for value in (0, 1, 2)
         )
         return self._trace_dispatch(self.dispatch)(
             query_slice_start=scalar_specialization_reps,

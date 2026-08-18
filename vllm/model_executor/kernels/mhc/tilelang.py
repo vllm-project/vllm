@@ -208,7 +208,7 @@ def register_mhc_pre_with_norm_warmup(
     norm_eps: float,
     hc_mult: int,
 ) -> None:
-    registration = dict(
+    _MHC_PRE_WITH_NORM_KERNEL.register_warmup(
         max_tokens=max_tokens,
         hidden_size=hidden_size,
         rms_eps=rms_eps,
@@ -218,8 +218,29 @@ def register_mhc_pre_with_norm_warmup(
         norm_eps=norm_eps,
         hc_mult=hc_mult,
     )
-    _MHC_PRE_WITH_NORM_KERNEL.register_warmup(**registration)
-    _MHC_PRE_BROADCAST_WITH_NORM_KERNEL.register_warmup(**registration)
+
+
+def register_mhc_pre_broadcast_with_norm_warmup(
+    *,
+    max_tokens: int,
+    hidden_size: int,
+    rms_eps: float,
+    hc_eps: float,
+    hc_post_mult_value: float,
+    sinkhorn_repeat: int,
+    norm_eps: float,
+    hc_mult: int,
+) -> None:
+    _MHC_PRE_BROADCAST_WITH_NORM_KERNEL.register_warmup(
+        max_tokens=max_tokens,
+        hidden_size=hidden_size,
+        rms_eps=rms_eps,
+        hc_eps=hc_eps,
+        hc_post_mult_value=hc_post_mult_value,
+        sinkhorn_repeat=sinkhorn_repeat,
+        norm_eps=norm_eps,
+        hc_mult=hc_mult,
+    )
 
 
 def _torch_hc_prenorm_gemm(
