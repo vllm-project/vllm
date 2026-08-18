@@ -168,17 +168,20 @@ class InputProcessor:
                 f"but got {type(params).__name__}"
             )
 
-    @staticmethod
-    def _normalize_trace_replay_params(sampling_params: SamplingParams) -> None:
+    def _normalize_trace_replay_params(
+        self, sampling_params: SamplingParams, prompt_len: int
+    ) -> None:
         """Apply trace replay's generation semantics to request-local params."""
         trace_token_ids = sampling_params.trace_decode_token_ids
-        if not trace_token_ids:
-            return
+        assert trace_token_ids
         assert sampling_params.max_tokens is not None
 
+        max_trace_len = max(self.model_config.max_model_len - prompt_len, 1)
+        trace_token_ids = trace_token_ids[:max_trace_len]
+        sampling_params.trace_decode_token_ids = trace_token_ids
+
         # Apply this after the generation config so its EOS token cannot stop
-        # replay before the trace is exhausted. max_tokens is already bounded by
-        # the remaining context length, so keep whichever is smaller.
+        # replay before the trace is exhausted.
         sampling_params.max_tokens = min(
             len(trace_token_ids), sampling_params.max_tokens
         )
@@ -373,7 +376,13 @@ class InputProcessor:
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
-            self._normalize_trace_replay_params(sampling_params)
+            if sampling_params.trace_decode_token_ids:
+                self._normalize_trace_replay_params(
+                    sampling_params,
+                    length_from_prompt_token_ids_or_embeds(
+                        prompt_token_ids, prompt_embeds
+                    ),
+                )
         else:
             pooling_params = params.clone()
 

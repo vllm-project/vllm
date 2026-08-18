@@ -27,6 +27,13 @@ def _make_request(params: SamplingParams) -> Request:
     )
 
 
+def _normalize(params: SamplingParams, prompt_len: int, max_model_len: int) -> None:
+    processor = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=max_model_len)
+    )
+    InputProcessor._normalize_trace_replay_params(processor, params, prompt_len)
+
+
 def test_normalize_trace_replay_params():
     params = SamplingParams(
         max_tokens=16,
@@ -36,7 +43,7 @@ def test_normalize_trace_replay_params():
     )
     params.update_from_generation_config({}, eos_token_id=20)
 
-    InputProcessor._normalize_trace_replay_params(params)
+    _normalize(params, prompt_len=3, max_model_len=128)
 
     assert params.max_tokens == 3
     assert params.min_tokens == 0
@@ -52,25 +59,17 @@ def test_normalize_trace_replay_params():
     assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
 
 
-def test_normalize_is_noop_without_trace():
-    """Requests that do not replay a trace must be left untouched."""
-    params = SamplingParams(max_tokens=16, min_tokens=10, stop_token_ids=[20])
+def test_trace_longer_than_remaining_context_is_truncated():
+    """The trace is staged into a max_model_len-wide row, so it must be cut.
 
-    InputProcessor._normalize_trace_replay_params(params)
+    An explicitly set max_tokens is never clamped to max_model_len, so it cannot
+    bound the staged write.
+    """
+    params = SamplingParams(max_tokens=100, trace_decode_token_ids=list(range(20)))
 
-    assert params.max_tokens == 16
-    assert params.min_tokens == 10
-    assert params.ignore_eos is False
-    assert params.stop_token_ids == [20]
+    _normalize(params, prompt_len=6, max_model_len=10)
 
-
-def test_trace_longer_than_remaining_context_keeps_max_tokens():
-    """max_tokens already reflects the context limit, so it wins over the trace."""
-    # max_tokens as derived by process_inputs from max_model_len - prompt_len.
-    params = SamplingParams(max_tokens=4, trace_decode_token_ids=list(range(20)))
-
-    InputProcessor._normalize_trace_replay_params(params)
-
+    assert params.trace_decode_token_ids == [0, 1, 2, 3]
     assert params.max_tokens == 4
 
 
