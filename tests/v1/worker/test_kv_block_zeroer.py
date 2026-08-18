@@ -157,8 +157,6 @@ def test_packed_segment_zeros_whole_block_from_storage_base():
     device = torch.device("cuda")
     num_blocks = 4
     block_stride_el = 12
-    page_offset_el = 3
-    page_size_el = 4
     backing = torch.ones(
         (num_blocks, block_stride_el), dtype=torch.int32, device=device
     )
