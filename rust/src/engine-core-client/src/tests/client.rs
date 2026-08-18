@@ -304,6 +304,7 @@ fn bootstrapped_test_config(
             output_address,
             engine_start_index: 0,
             engine_count,
+            data_parallel_size: engine_count,
             ready_timeout,
         },
         coordinator_mode,
@@ -331,13 +332,45 @@ fn bootstrapped_test_config_with_start_index(
     );
     let TransportMode::Bootstrapped {
         engine_start_index: start,
+        data_parallel_size,
         ..
     } = &mut config.transport_mode
     else {
         unreachable!("bootstrapped_test_config returns bootstrapped transport")
     };
     *start = engine_start_index;
+    *data_parallel_size = usize::try_from(engine_start_index)
+        .expect("test start index fits usize")
+        .checked_add(engine_count)
+        .expect("test engine range fits usize");
     config
+}
+
+#[test]
+fn client_config_validates_bootstrapped_dp_range() {
+    let mut config = bootstrapped_test_config_with_start_index(
+        "ipc://unused-input".to_string(),
+        "ipc://unused-output".to_string(),
+        1,
+        2,
+        Duration::from_secs(1),
+        0,
+        None,
+    );
+    config.validate().expect("frontend may own a subset of global DP ranks");
+
+    let TransportMode::Bootstrapped {
+        data_parallel_size, ..
+    } = &mut config.transport_mode
+    else {
+        unreachable!("expected bootstrapped transport")
+    };
+    *data_parallel_size = 2;
+    let error = config.validate().expect_err("engine range above DP size must fail");
+    expect_test::expect![[
+        "invalid engine-core client configuration: connected engine range [1, 3) exceeds data parallel size (2)"
+    ]]
+    .assert_eq(&error.to_string());
 }
 
 async fn recv_xpub_message(xpub: &mut XPubSocket) -> Vec<bytes::Bytes> {
@@ -2688,6 +2721,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
 
     let ready_response: EngineCoreReadyResponse =
         rmp_serde::from_slice(&hex::decode(ready_response_hex).unwrap()).unwrap();
+    assert!(ready_response.supports_lora);
+    assert_eq!(ready_response.max_loras, 8);
     assert_eq!(
         ready_response.weight_transfer_backend.as_deref(),
         Some("nccl")
