@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
+from fractions import Fraction
 from typing import Any
 
 import torch
@@ -40,7 +42,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     QuantKey,
+    ScaleDesc,
     kInt4Static32GroupScale,
     kInt4StaticGroupScale,
     kInt8StaticGroupScale,
@@ -64,7 +68,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         # Extract properties from weight_quant
         self.symmetric = weight_quant.symmetric
         self.num_bits = weight_quant.num_bits
-        self.packed_factor = 32 // weight_quant.num_bits
+        self.packed_factor = Fraction(32, weight_quant.num_bits)
         self.strategy = weight_quant.strategy
         self.group_size = weight_quant.group_size
         self.actorder = weight_quant.actorder
@@ -82,11 +86,16 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             else:
                 scale = kInt4StaticGroupScale
         elif self.num_bits == 8:
-            assert self.group_size == -1
             scale = kInt8StaticGroupScale
         else:
-            raise ValueError(
-                "CompressedTensorsWNA16MoEMethod only supports int4 and int8 now."
+            scale = ScaleDesc(
+                dtype=torch.float16,
+                static=True,
+                group_shape=(
+                    GroupShape.PER_CHANNEL
+                    if self.group_size == -1
+                    else GroupShape(row=1, col=self.group_size)
+                ),
             )
 
         weight_key = QuantKey(self.quant_type, scale, symmetric=self.symmetric)
@@ -126,8 +135,13 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             # grouped actorder isn't supported by this kernel
             assert weight_quant.actorder != "group"
 
+            assert self.symmetric, "Only symmetric quantization is supported for MoE"
+
             # Non-Marlin WNA16 always uses bf16/fp16 inputs
             self.input_dtype = torch.bfloat16
+
+    def _packed_dim(self, dim: int) -> int:
+        return math.ceil(dim * self.num_bits / 32)
 
     def get_weight_shape(
         self,
@@ -156,18 +170,18 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         w13_num_shards = 2 if self.moe.is_act_and_mul else 1
         w13_n = w13_num_shards * intermediate_size_per_partition
         shape_map: dict[str, tuple[int, int, int]] = {
-            "w13_weight": (num_experts, w13_n, hidden_size // self.packed_factor),
+            "w13_weight": (num_experts, w13_n, self._packed_dim(hidden_size)),
             "w13_scale": (num_experts, w13_n, num_groups_w13),
-            "w13_zp": (num_experts, w13_n // self.packed_factor, num_groups_w13),
+            "w13_zp": (num_experts, self._packed_dim(w13_n), num_groups_w13),
             "w2_weight": (
                 num_experts,
                 hidden_size,
-                intermediate_size_per_partition // self.packed_factor,
+                self._packed_dim(intermediate_size_per_partition),
             ),
             "w2_scale": (num_experts, hidden_size, num_groups_w2),
             "w2_zp": (
                 num_experts,
-                hidden_size // self.packed_factor,
+                self._packed_dim(hidden_size),
                 num_groups_w2,
             ),
         }
@@ -443,6 +457,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
+            backend=self.wna16_backend,
             routing_tables=layer._expert_routing_tables(),
             **marlin_args,
         )
@@ -546,6 +561,17 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
+        if self.wna16_backend == WNA16MoEBackend.HUMMING:
+            from vllm.model_executor.layers.quantization.utils.humming_utils import (
+                get_humming_moe_quant_config,
+            )
+
+            return get_humming_moe_quant_config(
+                layer,
+                gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+                gemm1_beta=getattr(layer, "swiglu_beta", None),
+                gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+            )
         return make_wna16_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
