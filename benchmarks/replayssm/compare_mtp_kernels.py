@@ -69,10 +69,10 @@ def _make_inputs(args: argparse.Namespace, batch: int, spec_len: int) -> dict:
 
     A_base = -torch.rand(args.nheads, device=device) - 0.5
     A = A_base[:, None, None].expand(args.nheads, args.head_dim, args.dstate)
-    D = torch.randn(args.nheads, device=device)[:, None].expand(
+    D = torch.randn(args.nheads, device=device, dtype=dtype)[:, None].expand(
         args.nheads, args.head_dim
     )
-    dt_bias = torch.randn(args.nheads, device=device)[:, None].expand(
+    dt_bias = torch.randn(args.nheads, device=device, dtype=dtype)[:, None].expand(
         args.nheads, args.head_dim
     )
     dt_base = torch.randn(batch, spec_len, args.nheads, device=device, dtype=dtype)
