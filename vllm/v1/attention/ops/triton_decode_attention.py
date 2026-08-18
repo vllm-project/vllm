@@ -614,11 +614,16 @@ def _fwd_kernel_stage2(
                 Mid_O + offs_v + split_kv_id * stride_mid_os, mask=mask_d, other=0.0
             )
             tlogic = tl.load(Mid_O + offs_logic + split_kv_id * stride_mid_os)
+            # Skip empty splits branchlessly. Under DCP a leading split can be
+            # all -1 (tlogic=-inf) while running e_max is still -inf; then
+            # exp(e_max - n_e_max) = exp(-inf - (-inf)) = NaN and poisons LSE.
+            # For finite lse this is identical to the original
+            # (old_scale==1 only when e_max==-inf, where acc/e_sum are still 0).
+            active = tlogic > -float("inf")
             n_e_max = tl.maximum(tlogic, e_max)
-
-            old_scale = tl.exp(e_max - n_e_max)
+            old_scale = tl.where(e_max > -float("inf"), tl.exp(e_max - n_e_max), 1.0)
             acc *= old_scale
-            exp_logic = tl.exp(tlogic - n_e_max)
+            exp_logic = tl.where(active, tl.exp(tlogic - n_e_max), 0.0)
             acc += exp_logic * tv
 
             e_sum = e_sum * old_scale + exp_logic

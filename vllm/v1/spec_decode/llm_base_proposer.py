@@ -68,6 +68,85 @@ from vllm.v1.worker.utils import AttentionGroup
 logger = init_logger(__name__)
 
 
+def _get_mtp_embed_tokens(model: nn.Module) -> nn.Module | None:
+    """Extract the embed_tokens module from an MTP draft model."""
+    _inner = getattr(model, "model", model)
+    _emb = getattr(_inner, "embed_tokens", None)
+    if _emb is None:
+        _emb = getattr(_inner, "embedding", None)
+    return _emb
+
+
+def _load_embedding_from_target_checkpoint(
+    vllm_config: "VllmConfig",
+    mtp_embed_tokens: nn.Module,
+    device: torch.device,
+) -> None:
+    """Load target model embedding weights from safetensors into MTP model."""
+    import glob
+    import json
+    import os as _os
+
+    from safetensors import safe_open
+
+    model_path = vllm_config.model_config.model
+    weight_map: dict[str, str] | None = None
+    index_path = _os.path.join(model_path, "model.safetensors.index.json")
+    if _os.path.exists(index_path):
+        with open(index_path) as _f:
+            weight_map = json.load(_f).get("weight_map", {})
+
+    emb_key = "model.embed_tokens.weight"
+    shard_path: str | None = None
+    if weight_map and emb_key in weight_map:
+        shard_path = _os.path.join(model_path, weight_map[emb_key])
+    else:
+        st_files = sorted(glob.glob(_os.path.join(model_path, "*.safetensors")))
+        shard_path = st_files[0] if st_files else None
+
+    if shard_path is None:
+        raise FileNotFoundError(f"No safetensors found in {model_path}")
+
+    with safe_open(shard_path, framework="pt") as _f:
+        if emb_key not in _f:
+            for _alt in (
+                "language_model.model.embed_tokens.weight",
+                "transformer.embed_tokens.weight",
+                "transformer.wte.weight",
+            ):
+                if _alt in _f:
+                    emb_key = _alt
+                    break
+            else:
+                raise KeyError(f"Embedding key not found in {shard_path}")
+        _emb_weight = _f.get_tensor(emb_key)
+
+    import torch.distributed as dist
+
+    from vllm.distributed.parallel_state import get_tp_group
+
+    tp_size = get_tp_group().world_size
+    tp_rank = dist.get_rank() % tp_size
+    vocab_size = _emb_weight.shape[0]
+    if vocab_size % tp_size != 0:
+        raise ValueError(f"vocab_size {vocab_size} not divisible by tp_size {tp_size}")
+    chunk = vocab_size // tp_size
+    _tp_weight = _emb_weight[tp_rank * chunk : (tp_rank + 1) * chunk]
+    _tp_weight = _tp_weight.to(device=device, dtype=mtp_embed_tokens.weight.dtype)
+
+    mtp_embed_tokens.weight = torch.nn.Parameter(_tp_weight.contiguous())
+    if hasattr(mtp_embed_tokens, "num_embeddings"):
+        mtp_embed_tokens.num_embeddings = chunk
+    logger.info(
+        "Loaded draft model embedding from target checkpoint: "
+        "shape=%s tp_rank=%d/%d norm=%.4f",
+        list(_tp_weight.shape),
+        tp_rank,
+        tp_size,
+        _tp_weight.float().norm().item(),
+    )
+
+
 class SpecDecodeBaseProposer:
     def __init__(
         self,
@@ -1515,10 +1594,26 @@ class SpecDecodeBaseProposer:
                     del self.model.model.embed_tokens
                 self.model.model.embed_tokens = target_embed_tokens
         else:
+            # PP+MTP port: PP>1 -> target embedding lives on a different PP rank.
+            # MTP models have no standalone embedding checkpoint (embed_tokens
+            # loaded as zeros), so reload the real weights from the target
+            # model's safetensors on the local GPU.
             logger.info(
-                "The draft model's vocab embedding will be loaded separately"
-                " from the target model."
+                "The draft model's vocab embedding will be loaded from"
+                " the target model checkpoint for PP>1."
             )
+            try:
+                _mtp_emb = _get_mtp_embed_tokens(self.model)
+                if _mtp_emb is not None and _mtp_emb.weight is not None:
+                    _load_embedding_from_target_checkpoint(
+                        self.vllm_config, _mtp_emb, self.device
+                    )
+            except Exception as _e:
+                logger.warning(
+                    "Failed to reload embedding weights for draft model: %s."
+                    " Draft token quality may be degraded.",
+                    str(_e),
+                )
 
     def _maybe_share_lm_head(self, target_language_model: nn.Module) -> None:
         """

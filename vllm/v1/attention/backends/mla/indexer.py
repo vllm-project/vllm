@@ -71,6 +71,7 @@ def _prepare_uniform_decode_kernel(
     block_table_stride,
     expanded_block_table_ptr,
     expanded_bt_stride,
+    block_table_width: tl.constexpr,
     decode_lens_ptr,
     max_decode_len,
     BLOCK_SIZE: tl.constexpr,
@@ -90,9 +91,9 @@ def _prepare_uniform_decode_kernel(
     # Copy block table row.
     src = block_table_ptr + req_id * block_table_stride
     dst = expanded_block_table_ptr + idx * expanded_bt_stride
-    for i in tl.range(0, expanded_bt_stride, BLOCK_SIZE):
+    for i in tl.range(0, block_table_width, BLOCK_SIZE):
         off = i + tl.arange(0, BLOCK_SIZE)
-        mask = off < expanded_bt_stride
+        mask = off < block_table_width
         src_block = tl.load(src + off, mask=mask)
         tl.store(dst + off, src_block, mask=mask)
 
@@ -226,6 +227,10 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     local_cu_seq_lens: torch.Tensor | None = None
     local_total_seq_lens: int = 0
     max_local_total_seq_lens: int = 0
+    # Per-request padded local lengths and original global lengths used to
+    # reconstruct the full index-K after the DCP all-gather.
+    padded_local_seq_lens: list[int] | None = None
+    global_seq_lens_lst: list[int] | None = None
 
 
 _BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS = (
@@ -445,12 +450,17 @@ class DeepSeekV32IndexerDecodeMetadata:
     #   - flatten path / plain decode: 1D (batch_size,)
     #   - native MTP path: 2D (B, next_n) where [b,j] = L_b - next_n + j + 1
     # Both fp8_fp4_paged_mqa_logits and the topk kernels accept both shapes.
+    # Under DCP this holds the per-rank LOCAL context lengths used to read this
+    # rank's KV shard; the global lengths used for top-k are in global_seq_lens.
     seq_lens: torch.Tensor
     decode_lens: torch.Tensor
     requires_padding: bool
     schedule_metadata: torch.Tensor
     global_seq_lens: torch.Tensor | None = None
     indices: torch.Tensor | None = None
+    dcp_world_size: int = 1
+    dcp_rank: int = 0
+    cp_interleave_size: int = 1
 
 
 @dataclass
@@ -567,6 +577,26 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         sm_count = num_compute_units(self.device.index)
         self.num_sms = sm_count
 
+        # DCP: the indexer's KV cache is sharded across dcp ranks, so each rank
+        # can only compute logits over its local shard. We read with local
+        # seq_lens, then scatter the per-rank logits back to global positions
+        # and all-reduce so every rank selects the same global top-k. See
+        # sparse_attn_indexer._dcp_allgather_indexer_logits.
+        parallel_config = self.vllm_config.parallel_config
+        self.dcp_world_size = parallel_config.decode_context_parallel_size
+        dcp_interleave_size = getattr(
+            parallel_config, "dcp_kv_cache_interleave_size", 1
+        )
+        self.cp_interleave_size = (
+            dcp_interleave_size
+            if self.dcp_world_size > 1 and dcp_interleave_size > 1
+            else parallel_config.cp_kv_cache_interleave_size
+        )
+        if self.dcp_world_size > 1:
+            self.dcp_rank = get_dcp_group().rank_in_group
+        else:
+            self.dcp_rank = 0
+
         self.offsets_buffer = torch.arange(
             next_n, device=self.device, dtype=torch.int32
         )
@@ -601,6 +631,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
+
         self.expanded_block_table_buffer = torch.zeros(
             (scheduler_config.max_num_batched_tokens, block_table_width),
             dtype=torch.int32,
@@ -611,6 +642,22 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         # build() narrows it to whatever the kernel actually schedules.
         self.scheduler_metadata_buffer = torch.empty(
             (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
+        )
+
+        # DCP + FULL cudagraph fix: under DCP the per-rank local seq_lens
+        # (context_lens consumed by the paged_mqa_logits kernel) are derived
+        # fresh each step via get_dcp_local_seq_lens(), so the tensor is NOT a
+        # static buffer. When the kernel is captured into a FULL cudagraph the
+        # baked context_lens pointer can read stale (capture-time) values at
+        # replay, which becomes inconsistent with the (persistent, refreshed)
+        # schedule_metadata_buffer and deadlocks the warpgroup mbarrier pipeline
+        # at batch>1 + long context. Copy the local seq_lens into this static
+        # buffer so the kernel always reads address-stable, up-to-date values.
+        next_n = 1 + self.num_speculative_tokens
+        self.dcp_local_seq_lens_buffer = torch.zeros(
+            (scheduler_config.max_num_batched_tokens,),
+            dtype=torch.int32,
+            device=self.device,
         )
 
         # KV compression. Default to 1 for no compression.
@@ -683,20 +730,29 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 and num_decodes * max_decode_len == num_decode_tokens
             ):
                 # Uniform decode lengths with no cudagraph token padding.
+                expanded_block_table = self.expanded_block_table_buffer[
+                    :num_decode_tokens
+                ]
+                copy_block_table_width = min(
+                    block_table.shape[1], expanded_block_table.shape[1]
+                )
                 _prepare_uniform_decode_kernel[(num_decode_tokens,)](
                     seq_lens,
                     self.decode_seq_lens_buffer,
                     block_table,
                     block_table.stride(0),
-                    self.expanded_block_table_buffer,
-                    self.expanded_block_table_buffer.stride(0),
+                    expanded_block_table,
+                    expanded_block_table.stride(0),
+                    copy_block_table_width,
                     self.decode_lens_buffer,
                     max_decode_len,
                     BLOCK_SIZE=1024,
                 )
+                if copy_block_table_width < expanded_block_table.shape[1]:
+                    expanded_block_table[:, copy_block_table_width:] = 0
                 self.decode_seq_lens_buffer[num_decode_tokens:] = 0
                 seq_lens = self.decode_seq_lens_buffer[:num_decode_tokens]
-                block_table = self.expanded_block_table_buffer[:num_decode_tokens]
+                block_table = expanded_block_table
                 decode_lens = self.decode_lens_buffer[:num_decode_tokens]
                 return seq_lens, block_table, decode_lens, num_decode_tokens, False
             else:
@@ -731,16 +787,31 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
                 # Give each of the flattened entries the same block table row as the
                 # original request.
-                self.expanded_block_table_buffer[:actual_expanded] = (
+                # B (DCP/TQ4bit): dynamically sized target buffer, width ==
+                # block_table.shape[1].
+                expanded_block_table = self.expanded_block_table_buffer[
+                    :num_decode_tokens
+                ]
+                # A (PP+MTP): clamp the repeat_interleave to the target buffer
+                # width. Under B's sizing this equals the full width, so the
+                # column slices below are full-width and the tail zero-fill is a
+                # no-op; kept as a defensive guard against a narrower buffer.
+                copy_block_table_width = min(
+                    block_table.shape[1], expanded_block_table.shape[1]
+                )
+                expanded_block_table[:actual_expanded, :copy_block_table_width] = (
                     torch.repeat_interleave(
-                        block_table, decode_lens, dim=0, output_size=actual_expanded
+                        block_table[:, :copy_block_table_width],
+                        decode_lens,
+                        dim=0,
+                        output_size=actual_expanded,
                     )
                 )
+                if copy_block_table_width < expanded_block_table.shape[1]:
+                    expanded_block_table[:actual_expanded, copy_block_table_width:] = 0
                 if actual_expanded < num_decode_tokens:
-                    self.expanded_block_table_buffer[
-                        actual_expanded:num_decode_tokens, 0
-                    ] = 0
-                block_table = self.expanded_block_table_buffer[:num_decode_tokens]
+                    expanded_block_table[actual_expanded:num_decode_tokens, 0] = 0
+                block_table = expanded_block_table
 
                 # All reqs now have decode_len=1
                 self.decode_lens_buffer[:num_decode_tokens] = 1
@@ -786,8 +857,20 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     ) -> torch.Tensor | None:
         if global_seq_lens is None:
             return None
-        if use_native or max_decode_len <= 1:
+        if max_decode_len <= 1:
             return global_seq_lens
+        if use_native:
+            num_decodes = global_seq_lens.shape[0]
+            global_buffer = self.global_decode_seq_lens_buffer[
+                : num_decodes * max_decode_len
+            ].view(num_decodes, max_decode_len)
+            global_buffer[:] = (
+                global_seq_lens.unsqueeze(1)
+                - max_decode_len
+                + 1
+                + self.offsets_buffer[:max_decode_len]
+            )
+            return global_buffer
 
         actual_expanded = int(decode_lens_cpu.sum().item())
         if actual_expanded > 0:
@@ -852,6 +935,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         compressed_slot_mapping = slot_mapping
         compressed_seq_lens = seq_lens
+        compressed_cp_interleave_size = self.cp_interleave_size
         if self.compress_ratio > 1:
             padded_num_tokens = num_tokens
             if self.pcp_world_size > 1:
@@ -1024,11 +1108,33 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if seq_lens.dim() == 1:
                 seq_lens = seq_lens.unsqueeze(-1)
 
+            # `seq_lens` here are the GLOBAL (full) context lengths. Under DCP
+            # the indexer KV cache is sharded, so the paged-MQA-logits kernel
+            # must read with this rank's LOCAL lengths (it then produces logits
+            # for the local tokens in local order); the GLOBAL lengths are kept
+            # for the top-k selection after the cross-rank logits all-gather.
+            kernel_seq_lens = seq_lens
+            if self.dcp_world_size > 1:
+                local_flat = get_dcp_local_seq_lens(
+                    seq_lens.reshape(-1),
+                    self.dcp_world_size,
+                    self.dcp_rank,
+                    compressed_cp_interleave_size,
+                )
+                # Copy into a static buffer so the paged_mqa_logits kernel's
+                # context_lens has an address-stable, up-to-date source under
+                # FULL cudagraph capture/replay (see __init__ for rationale).
+                numel = seq_lens.numel()
+                self.dcp_local_seq_lens_buffer[:numel] = local_flat.reshape(-1)
+                kernel_seq_lens = self.dcp_local_seq_lens_buffer[:numel].view(
+                    seq_lens.shape
+                )
+
             # DeepGEMM is required for the paged MQA logits on CUDA devices
             schedule_metadata = self.scheduler_metadata_buffer
             if current_platform.is_cuda() and has_deep_gemm():
                 metadata = get_paged_mqa_logits_metadata(
-                    seq_lens,
+                    kernel_seq_lens,
                     self.kv_cache_spec.storage_block_size,
                     self.num_sms,
                     indices=decode_indices,
@@ -1038,12 +1144,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=block_table,
-                seq_lens=seq_lens,
+                seq_lens=kernel_seq_lens,
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
                 schedule_metadata=schedule_metadata,
                 indices=decode_indices,
                 global_seq_lens=global_seq_lens_for_decode,
+                dcp_world_size=self.dcp_world_size,
+                dcp_rank=self.dcp_rank,
+                cp_interleave_size=self.cp_interleave_size,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(
@@ -1154,6 +1263,28 @@ def build_prefill_chunk_metadata(
     else:
         token_end = query_start_loc_cpu[end_idx].item()
 
+    # DCP: build the metadata needed to (1) gather this rank's LOCAL index-K
+    # with a padded length identical across ranks, and (2) reorg the
+    # all-gathered shards back into global token order. With interleave size 1
+    # the per-request padded local length is ceil(ctx / dcp_world_size); the
+    # reorg in the op is a transpose-reshape interleave trimmed to ctx.
+    local_cu_seq_lens = None
+    padded_local_seq_lens = None
+    global_seq_lens_lst = None
+    if dcp_world_size > 1:
+        ctx_lens_cpu = compressed_seq_lens_cpu[start_idx:end_idx].to(torch.int32)
+        dcp_virtual_block = dcp_world_size * cp_kv_cache_interleave_size
+        padded_local_cpu = (
+            (ctx_lens_cpu + dcp_virtual_block - 1)
+            // dcp_virtual_block
+            * cp_kv_cache_interleave_size
+        ).to(torch.int32)
+        local_cu_cpu = torch.zeros(num_reqs + 1, dtype=torch.int32)
+        torch.cumsum(padded_local_cpu, dim=0, out=local_cu_cpu[1:])
+        local_cu_seq_lens = local_cu_cpu.to(device, non_blocking=True)
+        padded_local_seq_lens = padded_local_cpu.tolist()
+        global_seq_lens_lst = ctx_lens_cpu.tolist()
+
     return DeepseekV32IndexerPrefillChunkMetadata(
         cu_seqlen_ks=cu_seq_len_ks,
         cu_seqlen_ke=cu_seq_len_ke,
@@ -1168,4 +1299,6 @@ def build_prefill_chunk_metadata(
         local_cu_seq_lens=local_cu_seq_lens,
         local_total_seq_lens=local_total_seq_lens,
         max_local_total_seq_lens=max_local_total_seq_lens,
+        padded_local_seq_lens=padded_local_seq_lens,
+        global_seq_lens_lst=global_seq_lens_lst,
     )

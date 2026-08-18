@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+import os
+
 import torch
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.forward_context import get_forward_context
@@ -35,9 +35,302 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
+from vllm.v1.attention.ops.indexer_turboquant import (
+    INDEXER_FP8_SLOT_BYTES,
+    indexer_tq_store_and_cache,
+    is_indexer_tq_4bit_enabled,
+    sync_fp8_workspace_for_decode,
+    tq4_paged_mqa_logits_triton,
+    use_indexer_tq_fused_decode,
+)
 from vllm.v1.worker.workspace import current_workspace_manager
 
+if current_platform.is_cuda_alike():
+    from vllm import _custom_ops as ops
+elif current_platform.is_xpu():
+    from vllm._xpu_ops import xpu_ops
+
 logger = init_logger(__name__)
+
+
+@triton.jit
+def _dcp_scatter_indexer_logits_kernel(
+    local_ptr,
+    local_row_stride,
+    global_ptr,
+    global_row_stride,
+    seq_lens_local_ptr,  # int32 [num_rows], per-row LOCAL context length
+    N: tl.constexpr,  # dcp_world_size
+    RANK: tl.constexpr,  # dcp_rank
+    S: tl.constexpr,  # cp_kv_cache_interleave_size
+    max_local_cols,  # cdiv(global_width, N)
+    global_width,
+    BLOCK: tl.constexpr,
+):
+    # Scatter this rank's local-order logits to their global positions.
+    # The KV cache is sharded across `N` ranks by an interleaved round-robin at
+    # granularity `S` (mirrors block_table._compute_slot_mapping_kernel). The
+    # L-th local token on rank RANK lives in interleave-block ``L // S`` at
+    # offset ``L % S``, whose global position is
+    #     (L // S) * (N * S) + RANK * S + (L % S).
+    # With S == 1 this reduces to ``L * N + RANK`` (per-token round-robin).
+    row = tl.program_id(0)
+    llen = tl.load(seq_lens_local_ptr + row)
+    for i in range(0, max_local_cols, BLOCK):
+        L = i + tl.arange(0, BLOCK)
+        valid = llen > L
+        val = tl.load(local_ptr + row * local_row_stride + L, mask=valid, other=0.0)
+        gcol = (L // S) * (N * S) + RANK * S + (L % S)
+        gvalid = valid & (gcol < global_width)
+        tl.store(global_ptr + row * global_row_stride + gcol, val, mask=gvalid)
+
+
+def _dcp_allgather_indexer_logits(
+    local_logits: torch.Tensor,
+    local_seq_lens: torch.Tensor,
+    dcp_world_size: int,
+    dcp_rank: int,
+    cp_interleave_size: int = 1,
+) -> torch.Tensor:
+    """Reconstruct full-sequence indexer logits from per-rank shards under DCP.
+
+    Each rank computed ``local_logits`` over the KV tokens it physically holds
+    (local order). We scatter them back to their global sequence positions into
+    a zero-filled buffer (same shape/layout as the kernel output, so the
+    downstream top-k kernels see the exact layout they expect) and SUM-reduce
+    across the DCP group. Every global position is owned by exactly one rank
+    (the round-robin partition), so the other ranks contribute 0 and the sum
+    equals that rank's real logit; positions beyond the sequence are 0 on every
+    rank and are masked out by the global seq_lens in the top-k. The reduce uses
+    the DCP group coordinator (not a raw torch.distributed call) so it is issued
+    on vLLM's collective stream and stays compatible with CUDA graph capture.
+    """
+    from vllm.distributed import get_dcp_group
+
+    num_rows, width = local_logits.shape
+    global_logits = torch.zeros_like(local_logits)
+    seq_lens_local_flat = local_seq_lens.reshape(-1).to(torch.int32).contiguous()
+    max_local_cols = (width + dcp_world_size - 1) // dcp_world_size
+    _dcp_scatter_indexer_logits_kernel[(num_rows,)](
+        local_logits,
+        local_logits.stride(0),
+        global_logits,
+        global_logits.stride(0),
+        seq_lens_local_flat,
+        dcp_world_size,
+        dcp_rank,
+        cp_interleave_size,
+        max_local_cols,
+        width,
+        BLOCK=1024,
+    )
+    return get_dcp_group().all_reduce(global_logits)
+
+
+def indexer_dcp_distributed_topk_enabled() -> bool:
+    """Distributed indexer top-k under DCP (decode path only).
+
+    When enabled, replaces the full-width ``all_reduce`` + global top-k
+    (``_dcp_allgather_indexer_logits`` + ``persistent_topk`` over the whole
+    ``[R, max_model_len]`` buffer) with: per-rank local top-k -> all_gather of
+    only the ``k * dcp_world_size`` (global_col, value) candidates -> an N-way
+    merge. This turns the DCP indexer glue from O(max_model_len) traffic into
+    O(k * dcp_world_size), the dominant win at dcp>=4 / long context.
+
+    Correctness: the global top-k is a subset of the union of the per-rank
+    local top-k. Each rank returns k candidates and every globally-selected
+    column, on its owning rank, ranks among that rank's local top-k (its rank
+    only holds a subset of the sequence), so no winner is ever dropped. All
+    ranks all_gather the same candidate set and run an identical merge, so every
+    rank writes a bit-identical ``topk_indices_buffer`` -- exactly what the
+    downstream per-rank ``triton_convert_req_index_to_global_index`` filtering
+    and the LSE combine require.
+
+    Default off; falls back to the ``all_reduce`` path when unset.
+    """
+    return os.environ.get("VLLM_INDEXER_DCP_DISTRIBUTED_TOPK", "0") == "1"
+
+
+def _dcp_distributed_topk_indexer(
+    local_logits: torch.Tensor,
+    local_seq_lens: torch.Tensor,
+    topk_indices_buffer: torch.Tensor,
+    num_padded_tokens: int,
+    topk_tokens: int,
+    max_seq_len: int,
+    dcp_world_size: int,
+    dcp_rank: int,
+    cp_interleave_size: int,
+) -> None:
+    """Fill ``topk_indices_buffer[:R, :topk_tokens]`` with the GLOBAL top-k
+    column indices under DCP, without materializing the full-width all_reduce.
+
+    ``local_logits`` is ``[R, max_model_len]`` in this rank's LOCAL order (the
+    paged-MQA kernel wrote only this rank's KV shard, bounded by
+    ``local_seq_lens``); tail columns are stale and excluded by the per-row
+    seq_lens in the local top-k. See ``indexer_dcp_distributed_topk_enabled``
+    for the correctness argument.
+    """
+    from vllm.distributed import get_dcp_group
+
+    R = num_padded_tokens
+    N = dcp_world_size
+    S = cp_interleave_size
+    logits = local_logits[:R]
+    seq_lens_local = local_seq_lens.reshape(-1)[:R].to(torch.int32).contiguous()
+
+    # (1) local top-k -> local column indices [R, k] (int32; -1 pads short rows).
+    #     Reuse the same radix persistent_topk, but over this rank's shard only
+    #     (bounded by the LOCAL seq_lens), so it scans ~ctx/N per row. Pre-fill
+    #     with -1: persistent_topk writes only the valid entries and leaves the
+    #     pad slots (rows whose local context < topk_tokens) untouched, so the
+    #     -1 must already be there for the `valid` mask below to be correct.
+    local_topk = torch.full(
+        (R, topk_tokens), -1, dtype=torch.int32, device=logits.device
+    )
+    workspace_manager = current_workspace_manager()
+    (topk_workspace,) = workspace_manager.get_simultaneous(
+        ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+    )
+    torch.ops._C.persistent_topk(
+        logits,
+        seq_lens_local,
+        local_topk,
+        topk_workspace,
+        topk_tokens,
+        max_seq_len,
+    )
+
+    # (2) re-gather the local top-k VALUES from the local logits (persistent_topk
+    #     emits indices only). A -1 index (short row) -> most-negative so it never
+    #     wins the merge.
+    valid = local_topk >= 0
+    local_vals = torch.gather(logits, 1, local_topk.clamp_min(0).to(torch.int64))
+    neg_inf = torch.finfo(local_vals.dtype).min
+    local_vals = torch.where(valid, local_vals, neg_inf)
+
+    # (3) local column -> global column (round-robin the scatter kernel uses:
+    #     gcol=(L//S)*(N*S)+RANK*S+(L%S)); -1 for pads.
+    L = local_topk.to(torch.int64)
+    gcol = torch.where(
+        valid,
+        (L // S) * (N * S) + dcp_rank * S + (L % S),
+        torch.full_like(L, -1),
+    )
+
+    # (4) Build a DETERMINISTIC total-order key per candidate and exchange it in a
+    #     SINGLE all_gather (matches upstream #46076 FLASHINFER_MLA_SPARSE /
+    #     #46145). A plain value-only torch.topk breaks ties nondeterministically
+    #     per launch; DCP decode runs the fp8 indexer whose scores tie heavily,
+    #     so ranks could keep different tied candidates from the (identical)
+    #     all_gathered set -> each rank's downstream sparse filter sees a
+    #     different global token set -> inconsistent LSE merge -> intermittent
+    #     garbled output. The key packs a strict order into one int64: the
+    #     score's monotone-uint32 bits in the high 32 and ~global_col in the low
+    #     32 (lowest global column wins ties). Global columns are unique across
+    #     ranks (disjoint round-robin), so the key is a strict order -> topk has
+    #     no ties to break -> identical selection on every rank. Packing (score,
+    #     col) into this one key lets us all_gather ONE tensor instead of two
+    #     (value + column) and recover the column straight from the winning key.
+    sign64 = -9223372036854775808  # 1<<63: flip so signed topk sorts unsigned
+    sc_u32 = local_vals.contiguous().view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+    # IEEE-754 fp32 bits -> order-preserving uint32: flip all bits if negative
+    # (sign set), else flip just the sign bit.
+    ordered = torch.where(
+        (sc_u32 >> 31) & 1 == 1,
+        (~sc_u32) & 0xFFFFFFFF,
+        sc_u32 ^ 0x80000000,
+    )
+    key_local = (ordered << 32) | ((~gcol) & 0xFFFFFFFF)
+    key_local = key_local ^ torch.full_like(key_local, sign64)
+    all_keys = get_dcp_group().all_gather(key_local.contiguous(), dim=1)  # [R, N*k]
+
+    # (5) merge = global top-k over the exchanged keys; recover the global column
+    #     from each winning key's low 32 bits (col = ~low; pads decode to -1).
+    top_keys, _ = torch.topk(all_keys, topk_tokens, dim=1)
+    recovered_low = (top_keys ^ torch.full_like(top_keys, sign64)) & 0xFFFFFFFF
+    topk_indices_buffer[:R, :topk_tokens] = (~recovered_low).to(torch.int32)
+
+
+def _dcp_reconstruct_full_indexer_k(
+    kv_cache: torch.Tensor,
+    chunk,
+    values_width: int,
+    values_dtype: torch.dtype,
+    scales_width: int,
+    scales_dtype: torch.dtype,
+    device: torch.device,
+    cp_interleave_size: int = 1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Reconstruct the full prefill context index-K from per-rank DCP shards.
+
+    Mirrors the dense MLA prefill path
+    (mla_attention._context_parallel_compute_prefill_context): each rank gathers
+    its LOCAL index-K (padded so every rank gathers the same number of tokens),
+    we all-gather across the DCP group, then reorg the shards back into global
+    token order. The KV cache is sharded by an interleaved round-robin at
+    granularity ``S = cp_kv_cache_interleave_size``: global position ``p`` is held
+    by rank ``(p // S) % n`` at local index ``(p // (n*S)) * S + (p % S)``. The
+    reorg therefore regroups the all-gathered shards ``[n, padded_len, W]`` into
+    ``[padded_len // S, n, S, W]`` (interleave-block major) before flattening to
+    global order. With S == 1 this is the original transpose-reshape
+    (rank-major -> per-token round-robin). Returns (k_quant, k_scale) over the
+    full context, in the same layout cp_gather_indexer_k_quant_cache produces
+    without DCP.
+    """
+    from vllm.distributed import get_dcp_group
+
+    n = chunk.dcp_world_size
+    s = cp_interleave_size
+    sum_padded = int(chunk.local_cu_seq_lens[-1].item())
+    local_k = torch.empty((sum_padded, values_width), dtype=values_dtype, device=device)
+    local_scale = torch.empty(
+        (sum_padded, scales_width), dtype=scales_dtype, device=device
+    )
+    # Local gather: padded local cu_seq_lens -> this rank's compact local tokens
+    # (plus a little block padding) for each request.
+    ops.cp_gather_indexer_k_quant_cache(
+        kv_cache, local_k, local_scale, chunk.block_table, chunk.local_cu_seq_lens
+    )
+    # All-gather across the DCP group (rank-major concatenation along dim 0).
+    ag_k = (
+        get_dcp_group()
+        .all_gather(local_k.view(torch.uint8), dim=0)
+        .view(values_dtype)
+        .view(n, sum_padded, values_width)
+    )
+    ag_scale = (
+        get_dcp_group().all_gather(local_scale, dim=0).view(n, sum_padded, scales_width)
+    )
+
+    # Reorg per request back into global token order, trimmed to ctx.
+    def _reorg(ag, width, padded_len, ctx_len):
+        seg = ag[:, offset : offset + padded_len, :]
+        if s == 1:
+            return seg.transpose(0, 1).reshape(padded_len * n, width)[:ctx_len]
+        assert padded_len % s == 0, (
+            f"padded local seq len {padded_len} must be a multiple of "
+            f"cp_kv_cache_interleave_size {s}"
+        )
+        return (
+            seg.reshape(n, padded_len // s, s, width)
+            .permute(1, 0, 2, 3)
+            .reshape(padded_len * n, width)[:ctx_len]
+        )
+
+    k_segments = []
+    s_segments = []
+    offset = 0
+    for padded_len, ctx_len in zip(
+        chunk.padded_local_seq_lens, chunk.global_seq_lens_lst
+    ):
+        k_segments.append(_reorg(ag_k, values_width, padded_len, ctx_len))
+        s_segments.append(_reorg(ag_scale, scales_width, padded_len, ctx_len))
+        offset += padded_len
+    k_full = torch.cat(k_segments, dim=0)
+    s_full = torch.cat(s_segments, dim=0)
+    return k_full, s_full
+
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
@@ -292,7 +585,6 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
-@eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,
@@ -334,6 +626,12 @@ def sparse_attn_indexer(
             scales_spec,
             ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
         )
+        if is_indexer_tq_4bit_enabled() and kv_cache.numel() > 0:
+            # Decode paged DeepGEMM reads FP8-shaped workspace synced from TQ cache.
+            fp8_ws_shape = tuple(kv_cache.shape[:-1]) + (INDEXER_FP8_SLOT_BYTES,)
+            current_workspace_manager().get_simultaneous(
+                (fp8_ws_shape, torch.uint8),
+            )
 
         # Dummy allocation to simulate for peak logits tensor memory during inference.
         # FP8 elements so elements == bytes
@@ -361,6 +659,11 @@ def sparse_attn_indexer(
             use_pcp,
             dense_mha_metadata_layer_name,
             use_fp4_cache,
+        )
+    # torch.compile warmup when DSA disabled (buffer is None).
+    if topk_indices_buffer is None:
+        return torch.empty(
+            0, topk_tokens, dtype=torch.int32, device=hidden_states.device
         )
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata_narrowed, DeepseekV32IndexerMetadata)
@@ -394,16 +697,19 @@ def sparse_attn_indexer(
             num_decode_tokens,
             use_pcp,
         )
-        # scale_fmt can be None, but the function expects str
-        assert scale_fmt is not None
-        assert not use_fp4_cache, "Unfused FP4 Insert is not supported yet"
-        ops.indexer_k_quant_and_cache(
-            k,
-            kv_cache,
-            slot_mapping_for_cache,
-            quant_block_size,
-            scale_fmt,
-        )
+        if is_indexer_tq_4bit_enabled():
+            indexer_tq_store_and_cache(k, kv_cache, slot_mapping_for_cache)
+        else:
+            # scale_fmt can be None, but the function expects str.
+            assert scale_fmt is not None
+            assert not use_fp4_cache, "Unfused FP4 Insert is not supported yet"
+            ops.indexer_k_quant_and_cache(
+                k,
+                kv_cache,
+                slot_mapping_for_cache,
+                quant_block_size,
+                scale_fmt,
+            )
 
     # The indexer and main MLA may classify the same short extend differently
     # because they use independent decode thresholds. Only the main MLA route
@@ -467,6 +773,7 @@ def sparse_attn_indexer(
                 if q_scale is not None
                 else None
             )
+
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
@@ -530,7 +837,6 @@ def sparse_attn_indexer(
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
         assert decode_metadata is not None
-        kv_cache = kv_cache_as_quant_view(kv_cache, head_dim, use_fp4_cache)
         decode_lens = decode_metadata.decode_lens
         if num_decode_tokens == 0:
             padded_q_quant_decode_tokens = q_quant[:1].reshape(1, 1, *q_quant.shape[1:])
@@ -579,30 +885,52 @@ def sparse_attn_indexer(
         # seq_lens is always 2D: (B, next_n) for native spec decode, (B, 1)
         # otherwise. deep_gemm fp8_fp4_paged_mqa_logits requires 2D context_lens;
         # the downstream topk kernels accept both 1D and 2D.
-        padded_q_quant_cast = (
-            padded_q_quant_decode_tokens.view(torch.int8)
-            if use_fp4_cache
-            else padded_q_quant_decode_tokens
+        use_tq_fused_decode = (
+            is_indexer_tq_4bit_enabled()
+            and use_indexer_tq_fused_decode()
+            and not use_fp4_cache
+            and next_n == 1
+            and q_scale is None
         )
-        if current_platform.is_xpu():
-            if padded_q_scale is not None:
-                raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
-            seq_lens_xpu = (
-                seq_lens[:, -1].contiguous() if seq_lens.ndim == 2 else seq_lens
-            )
-            logits = torch.ops.vllm.xpu_fp8_paged_mqa_logits(
-                padded_q_quant_cast,
+        if use_tq_fused_decode:
+            q_decode = padded_q_quant_decode_tokens[:, 0]
+            seq_lens_logits = seq_lens.squeeze(-1) if seq_lens.dim() > 1 else seq_lens
+            logits = tq4_paged_mqa_logits_triton(
+                q_decode,
+                weights[:batch_size],
                 kv_cache,
-                weights[:num_padded_tokens],
-                seq_lens_xpu,
                 decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
+                seq_lens_logits,
                 max_model_len,
             )
         else:
+            decode_kv_cache = kv_cache
+            if is_indexer_tq_4bit_enabled():
+                num_blocks, block_size, _ = kv_cache.shape
+                workspace_manager = current_workspace_manager()
+                (fp8_workspace,) = workspace_manager.get_simultaneous(
+                    ((num_blocks, block_size, INDEXER_FP8_SLOT_BYTES), torch.uint8),
+                )
+                decode_kv_cache = sync_fp8_workspace_for_decode(
+                    kv_cache,
+                    fp8_workspace,
+                    decode_metadata.block_table,
+                    decode_metadata.seq_lens,
+                    scale_fmt,
+                    max_model_len=max_model_len,
+                    schedule_metadata=decode_metadata.schedule_metadata,
+                )
+            kv_cache_view = kv_cache_as_quant_view(
+                decode_kv_cache, head_dim, use_fp4_cache
+            )
+            padded_q_quant_cast = (
+                padded_q_quant_decode_tokens.view(torch.int8)
+                if use_fp4_cache
+                else padded_q_quant_decode_tokens
+            )
             logits = fp8_fp4_paged_mqa_logits(
                 (padded_q_quant_cast, padded_q_scale),
-                kv_cache,
+                kv_cache_view,
                 weights[:num_padded_tokens],
                 seq_lens,
                 decode_metadata.block_table,
@@ -611,6 +939,40 @@ def sparse_attn_indexer(
                 clean_logits=False,
                 indices=decode_metadata.indices,
             )
+
+        # Under DCP the logits kernels above read only this rank's KV shard (with
+        # local seq_lens), producing per-rank logits in local order. Scatter them
+        # back to global positions and reduce across the DCP group so every rank
+        # holds the full logits and selects an identical GLOBAL top-k, using the
+        # global seq_lens. DCP forces the FP8 indexer path (TQ4 fused decode is
+        # disabled under DCP, matching the prefill assert), so the cooperative TMA
+        # top-k -- already dropped by TQ in favor of persistent_topk -- is not a
+        # concern here.
+        # Distributed top-k (flag-gated): keep the per-rank LOCAL logits, do a
+        # local top-k, exchange only the k*N candidates, and merge -- instead of
+        # the full-width all_reduce below. Only the CUDA radix persistent_topk
+        # path is supported (topk_tokens in {512,1024,2048}); anything else falls
+        # back to the all_reduce path.
+        dcp_distributed_topk = (
+            decode_metadata.dcp_world_size > 1
+            and indexer_dcp_distributed_topk_enabled()
+            and current_platform.is_cuda()
+            and topk_tokens in (512, 1024, 2048)
+        )
+
+        if decode_metadata.dcp_world_size > 1 and not dcp_distributed_topk:
+            assert decode_metadata.global_seq_lens is not None
+            topk_seq_lens = decode_metadata.global_seq_lens[:batch_size]
+            logits = _dcp_allgather_indexer_logits(
+                logits,
+                seq_lens,
+                decode_metadata.dcp_world_size,
+                decode_metadata.dcp_rank,
+                decode_metadata.cp_interleave_size,
+            )
+        else:
+            topk_seq_lens = seq_lens
+
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
@@ -622,7 +984,7 @@ def sparse_attn_indexer(
             and current_platform.has_device_capability(90)
             and not current_platform.is_device_capability_family(120)
         )
-        use_persistent_topk = current_platform.is_cuda() and topk_tokens in (
+        current_platform.is_cuda() and topk_tokens in (
             512,
             1024,
             2048,
@@ -634,38 +996,50 @@ def sparse_attn_indexer(
             )
             torch.ops._C.cooperative_topk(
                 logits,
-                seq_lens,
+                topk_seq_lens,
                 topk_indices,
                 topk_workspace,
                 topk_tokens,
                 attn_metadata_narrowed.max_seq_len,
             )
-        elif use_persistent_topk:
+        elif current_platform.is_cuda() and topk_tokens in (512, 1024, 2048):
             workspace_manager = current_workspace_manager()
             (topk_workspace,) = workspace_manager.get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
             )
             torch.ops._C.persistent_topk(
                 logits,
-                seq_lens,
+                topk_seq_lens,
                 topk_indices,
                 topk_workspace,
                 topk_tokens,
                 logits.shape[1],
             )
         else:
-            ops.top_k_per_row_decode(
-                logits,
-                next_n,
-                seq_lens,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
-            )
+            if current_platform.is_xpu():
+                xpu_ops.top_k_per_row_decode(  # type: ignore[attr-defined]
+                    logits,
+                    next_n,
+                    topk_seq_lens,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
+            else:
+                torch.ops._C.top_k_per_row_decode(
+                    logits,
+                    next_n,
+                    topk_seq_lens,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
 
-        if decode_metadata.global_seq_lens is not None:
+        if dcp_distributed_topk:
             _merge_dcp_topk_global(
                 logits,
                 topk_indices,
@@ -773,8 +1147,7 @@ class SparseAttnIndexer(CustomOp):
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
-                "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
-                "the current vLLM environment."
+                "Sparse Attention Indexer CUDA op requires DeepGEMM to be installed."
             )
 
     def forward_native(
@@ -831,15 +1204,6 @@ class SparseAttnIndexer(CustomOp):
             self.cp_kv_cache_interleave_size,
         )
 
-    def forward_xpu(
-        self,
-        hidden_states: torch.Tensor,
-        q_fp8: torch.Tensor,
-        k: torch.Tensor,
-        weights: torch.Tensor,
-    ):
-        return self.forward_cuda(hidden_states, q_fp8, k, weights)
-
     def forward_hip(
         self,
         hidden_states: torch.Tensor,
@@ -847,6 +1211,9 @@ class SparseAttnIndexer(CustomOp):
         k: torch.Tensor,
         weights: torch.Tensor,
     ):
+        assert not self.skip_k_cache_insert, (
+            "AMD platform doesn't support skip cache insert yet"
+        )
         assert not self.use_fp4_cache, "AMD platform doesn't support fp4 cache yet"
         assert isinstance(q_quant, torch.Tensor), (
             "AMD sparse_attn_indexer expects a single FP8 q_quant tensor"
@@ -872,9 +1239,9 @@ class SparseAttnIndexer(CustomOp):
                 self.max_model_len,
                 self.max_total_seq_len,
                 self.topk_indices_buffer,
-                skip_k_cache_insert=self.skip_k_cache_insert,
             )
-        raise RuntimeError(
-            "Sparse attention indexer ROCm path is only supported on AITER. "
-            "Please enable aiter with VLLM_ROCM_USE_AITER=1"
-        )
+        else:
+            raise RuntimeError(
+                "Sparse attention indexer ROCm custom op requires ROCm "
+                "Aiter ops to be enabled."
+            )

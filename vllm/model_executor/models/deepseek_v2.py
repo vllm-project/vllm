@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only DeepseekV2/DeepseekV3 model."""
 
+import os
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -98,6 +99,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
+from vllm.v1.attention.ops.indexer_turboquant import indexer_packed_head_dim
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 from .interfaces import (
@@ -683,7 +685,7 @@ class Indexer(nn.Module):
         #       per self.quant_block_size element
         assert cache_config is not None
         self.k_cache = DeepseekV32IndexerCache(
-            head_dim=self.head_dim + self.head_dim // self.quant_block_size * 4,
+            head_dim=indexer_packed_head_dim(),
             dtype=torch.uint8,
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,
@@ -703,6 +705,21 @@ class Indexer(nn.Module):
             self.max_total_seq_len,
             self.topk_indices_buffer,
         )
+        if current_platform.is_cuda():
+            from vllm.v1.attention.ops.indexer_turboquant import (
+                is_indexer_tq_4bit_enabled,
+                warmup_indexer_tq_kernels,
+            )
+
+            disable_dsa = os.getenv("VLLM_FORCE_DISABLE_DSA", "0") == "1"
+            if is_indexer_tq_4bit_enabled() and not disable_dsa:
+                block_size = cache_config.block_size if cache_config else 64
+                warmup_indexer_tq_kernels(
+                    torch.accelerator.current_device_index(),
+                    self.max_model_len,
+                    self.n_head,
+                    block_size,
+                )
 
         self.is_inplace_rope = is_inplace_rope
         self.n_head_scale = self.n_head**-0.5
@@ -713,6 +730,25 @@ class Indexer(nn.Module):
             and self.rope_dim == 64
             and self.scale_fmt is not None
         )
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        """Fold Hadamard Pi into wq_b for TQ4 indexer (Q pre-rotated at score time)."""
+        del act_dtype  # unused; signature matches model loader hook
+        if not current_platform.is_cuda():
+            return
+        from vllm.v1.attention.ops.indexer_turboquant import (
+            fold_indexer_pi_at_load,
+            is_indexer_tq_4bit_enabled,
+            use_indexer_tq_hadamard,
+        )
+
+        if is_indexer_tq_4bit_enabled() and use_indexer_tq_hadamard():
+            fold_indexer_pi_at_load(self)
+            logger.info_once(
+                "Indexer TQ4: folded Hadamard Pi into wq_b (%d heads, D=%d).",
+                self.n_head,
+                self.head_dim,
+            )
 
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb

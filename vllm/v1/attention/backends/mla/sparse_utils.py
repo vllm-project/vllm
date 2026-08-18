@@ -162,6 +162,9 @@ def triton_convert_req_index_to_global_index(
     prefill_workspace_request_ids: torch.Tensor | None = None,
     prefill_workspace_starts: torch.Tensor | None = None,
     return_valid_counts: bool = False,
+    dcp_world_size: int = 1,
+    dcp_rank: int = 0,
+    dcp_interleave_size: int = 1,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     out[token_id, indice_id] =
@@ -322,7 +325,6 @@ def triton_filter_and_convert_dcp_index(
             BLOCK_N=BLOCK_N,
             return_valid_counts=return_valid_counts,
         )
-
     num_tokens = req_id.shape[0]
     max_num_blocks_per_req = block_table.shape[1]
 
