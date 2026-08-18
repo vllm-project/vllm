@@ -247,6 +247,15 @@ class CompletionRequest(OpenAIBaseModel):
             "-1 means unlimited (treated as unset)."
         ),
     )
+    thinking_loop_break: bool | None = Field(
+        default=None,
+        description=(
+            "Per-request control for server-configured reasoning loop "
+            "breaking. null follows the server configuration; false opts "
+            "this request out. true cannot enable the feature on a server "
+            "that has not configured it."
+        ),
+    )
 
     stream_interval: Annotated[int, Field(ge=1)] | None = Field(
         default=None,
@@ -399,6 +408,7 @@ class CompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
             thinking_token_budget=self.thinking_token_budget,
+            thinking_loop_break=self.thinking_loop_break,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
         )
 
