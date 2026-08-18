@@ -3,18 +3,46 @@
 """Unit tests for NixlConnectorScheduler with HMA and Mamba N-1 prefill."""
 
 import gc
+import threading
+from collections import defaultdict
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import msgspec
+import numpy as np
 import pytest
 import torch
 
 from tests.v1.attention.utils import MockMambaBuilder
 from vllm import LLM, SamplingParams
-from vllm.config import KVTransferConfig
+from vllm.config import KVTransferConfig, set_current_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
+    HostReadStager,
+    _load_cudart,
+    _ReqState,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    NixlAgentMetadata,
+    RemoteMeta,
+    ReqMeta,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+    NixlConnectorWorker,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SlidingWindowManager,
+)
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    HiSparseHotSpec,
+    HiSparseResidentSpec,
+    KVCacheConfig,
+    KVCacheGroupRole,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    MLAAttentionSpec,
 )
 
 from .utils import (
@@ -740,8 +768,6 @@ def test_get_block_descs_ids_hybrid_ssm():
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_selects_attention_regions_by_group():
     """Each attention group's blocks address only that group's regions."""
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
-
     worker = _make_mock_worker_for_desc_ids(
         num_regions=3,
         has_mamba=False,
@@ -763,8 +789,6 @@ def test_get_block_descs_ids_selects_attention_regions_by_group():
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_uses_per_region_pool_capacity():
     """Independent host and device pools use cumulative descriptor offsets."""
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
-
     worker = _make_mock_worker_for_desc_ids(
         num_regions=2,
         has_mamba=False,
@@ -787,11 +811,6 @@ def test_get_block_descs_ids_uses_per_region_pool_capacity():
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_aligns_different_group_partitions_by_region():
     """Equivalent layer regions may come from different cache groups."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
-    )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
-
     worker = _make_mock_worker_for_desc_ids(
         num_regions=3,
         has_mamba=False,
@@ -826,16 +845,6 @@ def test_get_block_descs_ids_aligns_different_group_partitions_by_region():
 @pytest.mark.cpu_test
 def test_build_remote_descriptors_splits_only_larger_peer_regions():
     """A 256-token producer region is split for a 64-token consumer region."""
-    from unittest.mock import MagicMock
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
-        NixlAgentMetadata,
-    )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
-    )
-    from vllm.v1.kv_cache_interface import FullAttentionSpec
-
     worker = object.__new__(NixlConnectorWorker)
     worker.transfer_topo = MagicMock()
     worker._group_spec_types = (FullAttentionSpec,)
@@ -1681,21 +1690,6 @@ def _make_hybrid_mla_kv_cache_config(num_blocks: int = 4):
 
 @pytest.mark.cpu_test
 def test_nixl_keeps_device_block_count_with_hisparse_host_pool():
-    from unittest.mock import MagicMock
-
-    from vllm.config import set_current_vllm_config
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
-    )
-    from vllm.v1.kv_cache_interface import (
-        KVCacheConfig,
-        KVCacheGroupRole,
-        KVCacheGroupSpec,
-        KVCacheTensor,
-        MLAAttentionSpec,
-    )
-
     host_num_blocks = 4
     gpu_num_blocks = 9
     spec = MLAAttentionSpec(
@@ -1773,16 +1767,6 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool():
 @pytest.mark.cpu_test
 def test_hisparse_host_import_metadata_keeps_source_blocks_separate():
     """The CPU destination IDs must not enter the ordinary GPU transfer list."""
-    from unittest.mock import MagicMock
-
-    from vllm.v1.kv_cache_interface import (
-        HiSparseHotSpec,
-        HiSparseResidentSpec,
-        KVCacheConfig,
-        KVCacheGroupRole,
-        KVCacheGroupSpec,
-    )
-
     source_spec = make_kv_cache_config(block_size=16).kv_cache_groups[0].kv_cache_spec
     sched = make_nixl_scheduler(heartbeat=True)
     sched._is_hma_required = False
@@ -1839,17 +1823,6 @@ def test_hisparse_host_import_metadata_keeps_source_blocks_separate():
 @pytest.mark.cpu_test
 def test_hisparse_host_import_subdivides_scheduler_blocks_for_staging():
     """Two 4-way CPU blocks become eight kernel pages per NIXL region."""
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
-        RemoteMeta,
-        ReqMeta,
-    )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
-    )
-
     worker = object.__new__(NixlConnectorWorker)
     worker._has_mamba = False
     worker.use_mla = True
@@ -1921,14 +1894,6 @@ def test_hisparse_host_import_subdivides_scheduler_blocks_for_staging():
 @pytest.mark.cpu_test
 def test_host_stager_preserves_custom_destinations_and_mirrors():
     """Custom mixed-tier geometry must survive descriptor-length grouping."""
-    from types import SimpleNamespace
-
-    import numpy as np
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
-        HostReadStager,
-    )
-
     stager = object.__new__(HostReadStager)
     stager.desc_lens = np.array([10, 20, 10])
     stager.host_addrs = np.array([1_000, 2_000, 3_000], dtype=np.uint64)
@@ -1965,16 +1930,6 @@ def test_host_stager_preserves_custom_destinations_and_mirrors():
 @pytest.mark.cpu_test
 def test_host_stager_read_failure_reaches_terminal_state():
     """A terminal NIXL error must fail even when another chunk was queued."""
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
-
-    import numpy as np
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
-        HostReadStager,
-        _ReqState,
-    )
-
     pool = SimpleNamespace(free_slots=[])
     slot = SimpleNamespace(pool=pool)
     queued = [(np.array([2]),) * 4 + (7, 16)]
@@ -1998,16 +1953,6 @@ def test_host_stager_read_failure_reaches_terminal_state():
 @pytest.mark.cpu_test
 def test_host_stager_abort_drains_read_before_reusing_slot():
     """Aborting a posted read must not return its slot while NIXL says PROC."""
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
-
-    import numpy as np
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
-        HostReadStager,
-        _ReqState,
-    )
-
     pool = SimpleNamespace(free_slots=[])
     slot = SimpleNamespace(pool=pool)
     state = _ReqState(reading=[(1, slot, np.array([0]), np.array([2]), np.array([0]))])
@@ -2027,16 +1972,6 @@ def test_host_stager_abort_drains_read_before_reusing_slot():
 @pytest.mark.cpu_test
 def test_host_stager_copy_failure_waits_for_recorded_event():
     """A partial CUDA enqueue failure must keep its slot until the stream drains."""
-    from types import SimpleNamespace
-    from unittest.mock import MagicMock
-
-    import numpy as np
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
-        HostReadStager,
-        _ReqState,
-    )
-
     pool = SimpleNamespace(free_slots=[])
     event = MagicMock()
     event.query.side_effect = [False, True]
@@ -2057,14 +1992,6 @@ def test_host_stager_copy_failure_waits_for_recorded_event():
 @pytest.mark.cpu_test
 def test_staged_failure_without_sibling_transfer_is_reported():
     """A staging-only failure must not wait for a nonexistent NIXL sibling."""
-    import threading
-    from collections import defaultdict
-    from unittest.mock import MagicMock
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
-    )
-
     worker = object.__new__(NixlConnectorWorker)
     worker._host_stager = MagicMock()
     worker._host_stager.advance.return_value = (set(), {"request"})
@@ -2084,15 +2011,6 @@ def test_staged_failure_without_sibling_transfer_is_reported():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_host_stager_copies_to_host_and_gpu_mirror():
     """A completed staged page must reach both final tiers before its event."""
-    from types import SimpleNamespace
-
-    import numpy as np
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.host_staging import (
-        HostReadStager,
-        _load_cudart,
-    )
-
     page_bytes = 256
     source = torch.arange(page_bytes, dtype=torch.uint8, device="cuda")
     host_destination = torch.empty(page_bytes, dtype=torch.uint8, pin_memory=True)
@@ -2173,7 +2091,13 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
         worker.use_mla = True  # opt-125m test config is not MLA; force the flag
         worker.nixl_wrapper.get_agent_metadata.return_value = b"fake-agent-metadata"
 
-        tensors = [torch.zeros(4 * unified_page, dtype=torch.uint8) for _ in range(2)]
+        kernel_page = unified_page // 3
+        block_stride = 2 * kernel_page
+        backing = torch.zeros(12, block_stride, dtype=torch.uint8)
+        tensors = [
+            backing[:, :kernel_page],
+            backing[:, kernel_page:],
+        ]
         # KDA layer first per tensor: exercises the dual-purpose flag merge.
         worker.register_kv_caches(
             {
@@ -2190,6 +2114,7 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     assert worker._physical_blocks_per_logical_kv_block == 3
     assert worker.block_size == 4 and worker.num_blocks == 12
     assert worker.region_block_sizes == [4, 4]
+    assert worker.region_strides == [block_stride, block_stride]
     # Both shared tensors are dual-purpose: their FA view is MLA even though
     # a KDA layer registered them first.
     assert worker._region_is_mla == [True, True]
@@ -2202,8 +2127,20 @@ def test_register_kv_caches_hybrid_mla_dual_purpose_regions():
     # Mamba descs: 2 regions x (3 conv sub-projections + 1 ssm) x 4 blocks.
     assert worker.src_blocks_data.shape == (24 + 32, 3)
     fa_descs = worker.src_blocks_data[:24]
-    assert fa_descs[1][0] - fa_descs[0][0] == unified_page // 3
+    expected_addrs = [
+        tensor.data_ptr() + block * block_stride
+        for tensor in tensors
+        for block in range(12)
+    ]
+    assert fa_descs[:, 0].tolist() == expected_addrs
     assert all(size == unified_page // 3 for size in fa_descs[:, 1])
+    worker.nixl_wrapper.register_memory.assert_called_once()
+    metadata = msgspec.msgpack.decode(
+        worker.xfer_handshake_metadata.agent_metadata_bytes,
+        type=NixlAgentMetadata,
+    )
+    assert metadata.region_strides == [block_stride, block_stride]
+    assert metadata.region_num_blocks == [12, 12]
 
 
 @pytest.mark.cpu_test

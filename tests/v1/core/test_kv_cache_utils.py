@@ -165,21 +165,14 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
         source_spec.page_size_bytes
         == kernel_pages_per_host_block * gpu_indexer_spec.page_size_bytes
     )
-    resident_groups = [
-        group
-        for group in auxiliary_groups
-        if isinstance(group.kv_cache_spec, HiSparseResidentSpec)
-    ]
-    hot_groups = [
-        group
-        for group in auxiliary_groups
-        if isinstance(group.kv_cache_spec, HiSparseHotSpec)
-    ]
-    assert resident_groups and hot_groups
+    auxiliary_specs = [group.kv_cache_spec for group in auxiliary_groups]
+    assert any(isinstance(spec, HiSparseResidentSpec) for spec in auxiliary_specs)
+    assert any(isinstance(spec, HiSparseHotSpec) for spec in auxiliary_specs)
     assert all(
-        group.kv_cache_spec.block_size == gpu_block_size for group in resident_groups
+        spec.block_size == gpu_block_size
+        for spec in auxiliary_specs
+        if isinstance(spec, (HiSparseResidentSpec, HiSparseHotSpec))
     )
-    assert all(group.kv_cache_spec.block_size == gpu_block_size for group in hot_groups)
 
 
 def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
@@ -187,48 +180,37 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
     c4_indexer = f"{c4_main}.indexer.k_cache"
     c128_main = "model.layers.3.attn"
     c128_indexer = f"{c128_main}.indexer.k_cache"
+
+    def main_spec(compress_ratio: int, *, leader: bool = False):
+        return MLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.uint8,
+            cache_dtype_str="fp8_ds_mla",
+            compress_ratio=compress_ratio,
+            model_version="deepseek_v4",
+            alignment=576,
+            supported_kernel_block_sizes=(256,),
+            is_index_group_leader=leader,
+        )
+
+    def indexer_spec(compress_ratio: int):
+        return MLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=132,
+            dtype=torch.uint8,
+            compress_ratio=compress_ratio,
+            supported_kernel_block_sizes=(256,),
+            cache_role=MLACacheRole.INDEXER,
+        )
+
     full_specs = {
-        c4_main: MLAAttentionSpec(
-            block_size=256,
-            num_kv_heads=1,
-            head_size=512,
-            dtype=torch.uint8,
-            cache_dtype_str="fp8_ds_mla",
-            compress_ratio=4,
-            model_version="deepseek_v4",
-            alignment=576,
-            supported_kernel_block_sizes=(256,),
-            is_index_group_leader=True,
-        ),
-        c4_indexer: MLAAttentionSpec(
-            block_size=256,
-            num_kv_heads=1,
-            head_size=132,
-            dtype=torch.uint8,
-            compress_ratio=4,
-            supported_kernel_block_sizes=(256,),
-            cache_role=MLACacheRole.INDEXER,
-        ),
-        c128_main: MLAAttentionSpec(
-            block_size=256,
-            num_kv_heads=1,
-            head_size=512,
-            dtype=torch.uint8,
-            cache_dtype_str="fp8_ds_mla",
-            compress_ratio=128,
-            model_version="deepseek_v4",
-            alignment=576,
-            supported_kernel_block_sizes=(256,),
-        ),
-        c128_indexer: MLAAttentionSpec(
-            block_size=256,
-            num_kv_heads=1,
-            head_size=132,
-            dtype=torch.uint8,
-            compress_ratio=128,
-            supported_kernel_block_sizes=(256,),
-            cache_role=MLACacheRole.INDEXER,
-        ),
+        c4_main: main_spec(4, leader=True),
+        c4_indexer: indexer_spec(4),
+        c128_main: main_spec(128),
+        c128_indexer: indexer_spec(128),
     }
     full_uniform = UniformTypeKVCacheSpecs.from_specs(full_specs)
     assert full_uniform is not None

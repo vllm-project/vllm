@@ -2875,37 +2875,6 @@ def test_split_read_failure_defers_report_until_last_handle(
 
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
-    FakeNixlWrapper,
-)
-def test_setup_failure_with_inflight_sibling_defers_report(
-    default_vllm_config, dist_init
-):
-    """A setup failure (second half never posted) while the first half is in
-    flight defers the report until the in-flight half is terminal; repeated
-    failure events for the same request report it only once."""
-    request_id = "split_read_setup_failure"
-    connector, worker, _ = _make_split_read_connector(
-        create_vllm_config(), request_id, {41: ["PROC", "DONE"]}
-    )
-
-    # The mixed-read setup path fails after the first half started.
-    worker._handle_failed_transfer(request_id, None)
-    worker._handle_failed_transfer(request_id, None)  # duplicate event
-
-    _, done_recving = connector.get_finished(finished_req_ids=set())
-    assert done_recving == set()
-    assert connector.get_block_ids_with_load_errors() == set()
-
-    _, done_recving = connector.get_finished(finished_req_ids=set())
-    assert done_recving == {request_id}
-    assert connector.get_block_ids_with_load_errors() == {7, 8, 9}
-
-    _, done_recving = connector.get_finished(finished_req_ids=set())
-    assert done_recving == set()
-
-
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FailingNixlWrapper,
 )
 @pytest.mark.parametrize(

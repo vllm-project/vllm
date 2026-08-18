@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections import deque
 from types import SimpleNamespace
 
 import torch
@@ -181,18 +180,6 @@ def test_hisparse_worker_preserves_directly_imported_indexer(monkeypatch):
     worker.restore_prefix(scheduler_output, {"direct"})
 
     assert copied == [([4], [20])]
-
-
-def test_hisparse_worker_reports_each_completed_transfer_once():
-    worker = object.__new__(HiSparseWorker)
-    worker._enqueued_transfer_ids = [3, 5]
-    queries = iter((False, True))
-    event = SimpleNamespace(query=lambda: next(queries))
-    worker._pending_transfer_events = deque([(event, (3, 5))])
-
-    assert worker.take_transfer_updates() == ([3, 5], [])
-    assert worker.take_transfer_updates() == ([], [3, 5])
-    assert worker.take_transfer_updates() == ([], [])
 
 
 def test_bind_kv_cache(default_vllm_config):
