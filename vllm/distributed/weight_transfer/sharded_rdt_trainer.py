@@ -1168,6 +1168,13 @@ class ShardedRDTTrainerWeightTransferEngine(
                     refs.update(rf)
                 del small
                 del tensors
+                # The loop leaves its last `tensor` / `ust` / `base` bound
+                # through the credit gate and into the next gather, and `base`
+                # is a whole-storage view -- so one tensor and its entire
+                # allocation stay alive past `_drop_inflight`, unseen by the
+                # `_inflight` accounting the residency bound rests on.
+                # Assignment, not `del`: unbound if no direct-path tensor.
+                tensor = ust = base = None
                 if not refs:
                     # A group with nothing held here cannot occur (every group
                     # carries replicated names), but publishing an empty group
