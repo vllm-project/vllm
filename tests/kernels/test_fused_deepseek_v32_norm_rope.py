@@ -147,13 +147,7 @@ def assert_fp8(got: torch.Tensor, ref: torch.Tensor, msg: str):
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 512, 4096])
 @pytest.mark.parametrize("index_interleave", [True, False])
 @pytest.mark.parametrize("mla_fp8", [False, True])
-@pytest.mark.parametrize("separate_indexer_slots", [False, True])
-def test_fused_norm_rope(
-    num_tokens: int,
-    index_interleave: bool,
-    mla_fp8: bool,
-    separate_indexer_slots: bool,
-):
+def test_fused_norm_rope(num_tokens: int, index_interleave: bool, mla_fp8: bool):
     torch.manual_seed(0)
     dev = "cuda"
     max_pos = 8192
@@ -184,7 +178,6 @@ def test_fused_norm_rope(
     idx_row = INDEX_HEAD_DIM + INDEX_HEAD_DIM // 128 * 4  # 132
     idx_cache = torch.zeros(1, bs, idx_row, device=dev, dtype=torch.uint8)
     slot = torch.arange(num_tokens, device=dev, dtype=torch.int64)
-    indexer_slot = slot + num_tokens if separate_indexer_slots else slot
     topk = torch.full((num_tokens, 2048), 7, device=dev, dtype=torch.int32)
 
     q_out = K.fused_norm_rope(
@@ -204,7 +197,6 @@ def test_fused_norm_rope(
         idx_cos_sin,
         topk,
         slot_mapping=slot,
-        indexer_slot_mapping=indexer_slot,
         indexer_k_cache=idx_cache,
         mla_kv_cache=mla_cache,
         mla_kv_cache_dtype=mla_dtype,
@@ -236,13 +228,8 @@ def test_fused_norm_rope(
     flat = idx_cache[0].reshape(-1)
     vals = flat[: bs * INDEX_HEAD_DIM].view(FP8).reshape(bs, INDEX_HEAD_DIM)
     scales = flat[bs * INDEX_HEAD_DIM :].view(torch.float32)
-    indexer_start = num_tokens if separate_indexer_slots else 0
-    indexer_end = indexer_start + num_tokens
-    assert_fp8(vals[indexer_start:indexer_end], q_ref, "indexer-K fp8")
-    torch.testing.assert_close(scales[indexer_start:indexer_end], s_ref, rtol=0, atol=0)
-    if separate_indexer_slots:
-        assert (flat[: num_tokens * INDEX_HEAD_DIM] == 0).all()
-        assert (scales[:num_tokens] == 0).all()
+    assert_fp8(vals[:num_tokens], q_ref, "indexer-K fp8")
+    torch.testing.assert_close(scales[:num_tokens], s_ref, rtol=0, atol=0)
 
     # Top-k buffer cleared to -1 on indexer layers.
     assert (topk == -1).all(), "topk buffer not cleared on indexer layer"

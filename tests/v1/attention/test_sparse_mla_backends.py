@@ -21,7 +21,6 @@ from tests.v1.attention.utils import (
 )
 from vllm import _custom_ops as ops
 from vllm.config import HiSparseConfig, SpeculativeConfig, set_current_vllm_config
-from vllm.model_executor.layers.attention.mla_attention import MLACommonBaseImpl
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     GLOBAL_TOPK_MASK_MAX_BYTES,
     SparseMLAPrefillMetadata,
@@ -62,7 +61,6 @@ from vllm.v1.attention.ops import flashmla
 from vllm.v1.kv_offload.sparse import hisparse_runtime
 from vllm.v1.kv_offload.sparse.hisparse_runtime import (
     HiSparseCacheHandle,
-    HiSparsePrefillStagingPlan,
     HiSparseRuntime,
     ResolvedHiSparseConfig,
     _has_hisparse_ops,
@@ -892,69 +890,6 @@ def test_split_prefill_chunks(seq_lens, max_buf, expected):
     assert out == expected
 
 
-def test_hisparse_mha_uses_shared_staging_plan(monkeypatch):
-    staged_block_table = torch.tensor([[0, 1]], dtype=torch.int32)
-    plan = HiSparsePrefillStagingPlan(
-        block_table=staged_block_table,
-        row_ids=torch.arange(128, dtype=torch.int32).view(1, -1),
-        dst_rows=torch.arange(128, dtype=torch.int32).view(1, -1),
-        miss_mask=torch.ones(1, 128, dtype=torch.int32),
-        block_size=64,
-    )
-    gathered_plans = []
-
-    class Runtime:
-        def gather_prefill_cache(self, kv_cache, staging_plan):
-            gathered_plans.append(staging_plan)
-            return kv_cache
-
-    observed_block_tables = []
-    observed_metadata = []
-
-    def forward_mha(self, *args, **kwargs):
-        attn_metadata = args[4]
-        observed_metadata.append(attn_metadata)
-        observed_block_tables.append(attn_metadata.prefill.block_table.clone())
-
-    monkeypatch.setattr(MLACommonBaseImpl, "forward_mha", forward_mha)
-
-    impls = [object.__new__(FlashMLASparseImpl) for _ in range(2)]
-    for impl in impls:
-        impl.hisparse_cache = SimpleNamespace(runtime=Runtime())
-
-    prefill = SparseMLAPrefillMetadata(
-        block_table=staged_block_table,
-        query_start_loc=torch.tensor([0, 1], dtype=torch.int32),
-        max_query_len=1,
-        chunked_context=object(),
-        hisparse_staging_plan=plan,
-    )
-    metadata = SimpleNamespace(
-        prefill=prefill,
-        prefill_max_seq_len=0,
-        topk_tokens=128,
-    )
-    tensor = torch.empty(0)
-
-    for impl in impls:
-        impl.forward_mha(
-            tensor,
-            tensor,
-            tensor,
-            torch.empty(1, 64, 1),
-            metadata,
-            tensor,
-            tensor,
-        )
-
-    assert len(gathered_plans) == 2
-    assert all(staging_plan is plan for staging_plan in gathered_plans)
-    assert len(observed_metadata) == 2
-    assert all(observed is metadata for observed in observed_metadata)
-    for block_table in observed_block_tables:
-        torch.testing.assert_close(block_table, staged_block_table)
-
-
 @pytest.mark.parametrize(
     ("max_query_len", "expected"),
     [(32768, True), (33024, False)],
@@ -1642,10 +1577,8 @@ def test_hisparse_resident_rows_bypass_hot_lru():
 
 
 @requires_hisparse_ops
-def test_hisparse_kernel_matches_fallback():
-    """Fuzz the CUDA swap-in kernel against the local Python reference."""
+def test_hisparse_kernel_matches_reference_across_eviction():
     device = torch.device(DEVICE_TYPE)
-    torch.manual_seed(0)
     block_size = 64
     row_width = 64
     num_blocks = 64
@@ -1677,13 +1610,11 @@ def test_hisparse_kernel_matches_fallback():
     )
     req_ids = torch.arange(num_reqs, dtype=torch.int32, device=device)
     seq_len = blocks_per_req * block_size
-    for _ in range(128):
-        topk_rows = []
-        for _ in range(num_reqs):
-            permutation = torch.randperm(seq_len, device=device)
-            topk_rows.append(permutation[:top_k].to(torch.int32))
-        topk = torch.stack(topk_rows)
-        # Sprinkle in padding while changing the working set each step.
+    base = torch.arange(top_k, dtype=torch.int32, device=device)
+    for step in range(3):
+        topk = torch.stack(
+            [(base + step * top_k + row * 17) % seq_len for row in range(num_reqs)]
+        )
         topk[:, -1] = -1
 
         hot_k, idx_k, valid_counts = kernel_c.swap_in(

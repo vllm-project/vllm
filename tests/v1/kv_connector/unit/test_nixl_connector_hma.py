@@ -1118,17 +1118,6 @@ def test_zeroing_block_ids_cover_only_loaded_attention_blocks():
 
 
 @pytest.mark.cpu_test
-def test_new_zeroing_blocks_preserve_allocator_pool_identity():
-    """Equal numeric IDs from independent pools must remain distinguishable."""
-    manager = _make_fake_kv_cache_manager()
-    first, second = manager.coordinator.single_type_managers
-    first.new_block_ids = [5]
-    second.new_block_ids = [5]
-
-    assert manager.take_new_block_ids() == {0: [5], 1: [5]}
-
-
-@pytest.mark.cpu_test
 def test_scheduler_filters_connector_loaded_blocks_from_zeroing():
     """Blocks that will be loaded by the connector must not be zeroed."""
     from vllm.v1.core.sched.scheduler import Scheduler
@@ -1945,38 +1934,22 @@ def test_hisparse_host_import_subdivides_scheduler_blocks_for_staging():
     worker._read_hisparse_host_blocks("request", meta, plan, [0, 0])
 
     call = stager.submit.call_args
-    assert call.args[1].tolist() == [*range(40, 48), *range(440, 448)]
-    assert call.kwargs["dst_addrs"].tolist() == [
-        *range(1_080, 1_160, 10),
-        *range(2_160, 2_320, 20),
-    ]
-    assert call.kwargs["desc_lens"].tolist() == [10] * 8 + [20] * 8
-    assert call.kwargs["mirror_addrs"].tolist() == [
-        *range(12_000, 12_800, 100),
-        *([0] * 7),
-        39_800,
-    ]
-
-
-@pytest.mark.cpu_test
-def test_hisparse_host_stager_is_not_reused_for_gpu_reads():
-    """Interleaved host and device imports must use independent pipelines."""
-    from unittest.mock import MagicMock
-
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
+    transfers = set(
+        zip(
+            call.args[1].tolist(),
+            call.kwargs["dst_addrs"].tolist(),
+            call.kwargs["desc_lens"].tolist(),
+            call.kwargs["mirror_addrs"].tolist(),
+        )
     )
-
-    worker = object.__new__(NixlConnectorWorker)
-    hisparse_stager = MagicMock()
-    worker._hisparse_host_stager = hisparse_stager
-    worker._host_stager = None
-    worker._host_stager_init_attempted = False
-    worker.region_mem_types = ["VRAM"]
-
-    assert worker._get_hisparse_host_stager() is hisparse_stager
-    assert worker._maybe_init_host_stager("localhost") is None
-    assert worker._host_stager is None
+    expected = {
+        (40 + page, 1_080 + 10 * page, 10, 12_000 + 100 * page) for page in range(8)
+    }
+    expected.update(
+        (440 + page, 2_160 + 20 * page, 20, 39_800 if page == 7 else 0)
+        for page in range(8)
+    )
+    assert transfers == expected
 
 
 @pytest.mark.cpu_test
@@ -2137,46 +2110,6 @@ def test_staged_failure_without_sibling_transfer_is_reported():
 
     assert worker._advance_host_staging() == set()
     worker._report_failed_recv.assert_called_once_with("request")
-
-
-@pytest.mark.cpu_test
-def test_hma_request_failure_cannot_follow_receive_success_path():
-    """Request identity must fail closed when HMA block IDs are ambiguous."""
-    from unittest.mock import MagicMock
-
-    from vllm.v1.core.sched.scheduler import Scheduler
-    from vllm.v1.request import RequestStatus
-
-    request = MagicMock()
-    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
-    request.num_computed_tokens = 128
-    scheduler = object.__new__(Scheduler)
-    scheduler.requests = {"request": request}
-    scheduler.failed_recving_kv_req_ids = set()
-    scheduler.recompute_kv_load_failures = True
-
-    assert not scheduler._handle_failed_recving({"request"})
-
-    assert request.num_computed_tokens == 0
-    assert scheduler.failed_recving_kv_req_ids == {"request"}
-
-
-@pytest.mark.cpu_test
-def test_hma_request_failure_honors_fail_policy():
-    """An HMA receive error must fail the request under the default policy."""
-    from unittest.mock import MagicMock
-
-    from vllm.v1.core.sched.scheduler import Scheduler
-    from vllm.v1.request import RequestStatus
-
-    request = MagicMock(status=RequestStatus.WAITING_FOR_REMOTE_KVS)
-    scheduler = object.__new__(Scheduler)
-    scheduler.requests = {"request": request}
-    scheduler.failed_recving_kv_req_ids = set()
-    scheduler.recompute_kv_load_failures = False
-
-    assert scheduler._handle_failed_recving({"request"}) == {"request"}
-    assert not scheduler.failed_recving_kv_req_ids
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")

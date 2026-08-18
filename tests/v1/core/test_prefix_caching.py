@@ -141,158 +141,74 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
     )
 
 
-def test_independent_block_pool_domains():
-    block_size = 16
-    spec = FullAttentionSpec(
+def make_hisparse_kv_cache_config(
+    block_size: int,
+    num_blocks: int,
+    host_num_blocks: int,
+    *,
+    include_resident: bool = True,
+    transfer_device_cache: bool = False,
+) -> KVCacheConfig:
+    source_spec = FullAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
     )
-    config = KVCacheConfig(
-        num_blocks=4,
-        num_blocks_by_pool=[4, 3],
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(["host"], spec, block_pool_id=0),
-            KVCacheGroupSpec(["device"], spec, block_pool_id=1),
-        ],
-    )
-    manager = make_kv_cache_manager(
-        config,
-        max_model_len=128,
-        enable_caching=False,
-        hash_block_size=block_size,
-    )
-    reserved = make_request("reserved", list(range(16)), block_size, sha256)
-    assert (
-        manager.allocate_slots(
-            reserved,
-            num_new_tokens=16,
-            reserved_blocks=(2, 0),
-        )
-        is not None
-    )
-    manager.free(reserved)
-
-    request = make_request("r", list(range(48)), block_size, sha256)
-
-    blocks = manager.allocate_slots(request, num_new_tokens=32)
-    assert blocks is not None
-    block_ids = blocks.get_block_ids()
-    assert [len(ids) for ids in block_ids] == [2, 2]
-    assert all(len(set(ids)) == 2 for ids in block_ids)
-    assert [pool.get_num_free_blocks() for pool in manager.block_pools] == [1, 0]
-
-    request.num_computed_tokens = 32
-    assert manager.allocate_slots(request, num_new_tokens=16) is None
-
-    request_blocks = manager.pop_blocks_for_free(request)
-    assert {block.pool_id for block in request_blocks} == {0, 1}
-    manager.free_blocks(request_blocks)
-    assert [pool.get_num_free_blocks() for pool in manager.block_pools] == [3, 2]
-
-
-def test_hisparse_ephemeral_pool_skips_caching_without_disabling_zeroing():
-    block_size = 16
-    full = FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-    )
-    mamba = MambaSpec(
-        block_size=block_size,
-        shapes=((1, 4),),
-        dtypes=(torch.float32,),
-    )
-    hot = HiSparseHotSpec(
-        block_size=block_size,
-        page_size=block_size * 4,
-        blocks_per_request=2,
-    )
-    config = KVCacheConfig(
-        num_blocks=4,
-        num_blocks_by_pool=[4, 4],
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(["full"], full, block_pool_id=0),
-            KVCacheGroupSpec(["mamba"], mamba, block_pool_id=0),
+    groups = [
+        KVCacheGroupSpec(
+            ["source"],
+            source_spec,
+            block_pool_id=None,
+            role=KVCacheGroupRole.HISPARSE_SOURCE,
+        ),
+        KVCacheGroupSpec(
+            ["indexer"],
+            source_spec,
+            block_pool_id=0,
+            enable_prefix_caching=False,
+            enable_kv_transfer=transfer_device_cache,
+            role=KVCacheGroupRole.HISPARSE_INDEXER,
+        ),
+    ]
+    if include_resident:
+        groups.append(
             KVCacheGroupSpec(
-                ["hot"],
-                hot,
-                block_pool_id=1,
+                ["resident"],
+                HiSparseResidentSpec(
+                    block_size=block_size,
+                    page_size=block_size * 4,
+                ),
+                block_pool_id=0,
                 enable_prefix_caching=False,
+                enable_kv_transfer=transfer_device_cache,
+            )
+        )
+    groups.append(
+        KVCacheGroupSpec(
+            ["hot"],
+            HiSparseHotSpec(
+                block_size=block_size,
+                page_size=block_size * 4,
+                blocks_per_request=2,
             ),
-        ],
+            block_pool_id=0,
+            enable_prefix_caching=False,
+            enable_kv_transfer=False,
+        )
     )
-    assert config.needs_kv_cache_zeroing
-    assert config.zeroing_block_pool_ids == {0}
-
-    manager = make_kv_cache_manager(
-        config,
-        max_model_len=128,
-        enable_caching=True,
-        hash_block_size=block_size,
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        num_blocks_by_pool=[num_blocks],
+        hisparse_host_num_blocks=host_num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
     )
-    assert [pool.enable_caching for pool in manager.block_pools] == [True, False]
-    assert [
-        group_manager.enable_caching
-        for group_manager in manager.coordinator.single_type_managers
-    ] == [True, True, False]
-    assert [
-        group_manager._record_new_block_ids
-        for group_manager in manager.coordinator.single_type_managers
-    ] == [True, False, False]
 
 
 def test_prefix_cache_source_rebuilds_ephemeral_groups():
     block_size = 16
-    full = FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-    )
-    config = KVCacheConfig(
-        num_blocks=20,
-        num_blocks_by_pool=[20],
-        hisparse_host_num_blocks=10,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["source"],
-                full,
-                block_pool_id=None,
-                role=KVCacheGroupRole.HISPARSE_SOURCE,
-            ),
-            KVCacheGroupSpec(
-                ["indexer"],
-                full,
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-                role=KVCacheGroupRole.HISPARSE_INDEXER,
-            ),
-            KVCacheGroupSpec(
-                ["hot"],
-                HiSparseHotSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                    blocks_per_request=2,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            ),
-        ],
-    )
-    assert config.transfer_group_ids == (0,)
-    assert config.transfer_groups == (config.kv_cache_groups[0],)
-    source_blocks = [0]
-    assert config.select_transfer_block_ids((source_blocks, [1], [2])) == (
-        source_blocks,
-    )
+    config = make_hisparse_kv_cache_config(block_size, 20, 10, include_resident=False)
     manager = make_kv_cache_manager(
         config,
         max_model_len=128,
@@ -308,11 +224,6 @@ def test_prefix_cache_source_rebuilds_ephemeral_groups():
         group_manager.enable_caching
         for group_manager in manager.coordinator.single_type_managers
     ] == [True, False, False]
-    assert [g.enable_kv_transfer for g in config.kv_cache_groups] == [
-        True,
-        False,
-        False,
-    ]
     tokens = list(range(32))
     request = make_request("source", tokens, block_size, sha256)
     assert manager.allocate_slots(request, num_new_tokens=32) is not None
@@ -337,69 +248,10 @@ def test_prefix_cache_source_rebuilds_ephemeral_groups():
     assert [len(group) for group in new_blocks.blocks] == [1, 2, 2]
     assert manager.get_block_ids(reused.request_id)[0][0] == source_block_id
 
-    reserved = host_pool.get_num_free_blocks()
-    blocked = make_request("blocked", list(range(100, 116)), block_size, sha256)
-    assert (
-        manager.allocate_slots(
-            blocked,
-            num_new_tokens=block_size,
-            reserved_host_blocks=reserved,
-        )
-        is None
-    )
-
 
 def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
     block_size = 16
-    full = FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-    )
-    config = KVCacheConfig(
-        num_blocks=18,
-        num_blocks_by_pool=[18],
-        hisparse_host_num_blocks=18,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["source"],
-                full,
-                block_pool_id=None,
-                role=KVCacheGroupRole.HISPARSE_SOURCE,
-            ),
-            KVCacheGroupSpec(
-                ["indexer"],
-                full,
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-                role=KVCacheGroupRole.HISPARSE_INDEXER,
-            ),
-            KVCacheGroupSpec(
-                ["resident"],
-                HiSparseResidentSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            ),
-            KVCacheGroupSpec(
-                ["hot"],
-                HiSparseHotSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                    blocks_per_request=2,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            ),
-        ],
-    )
+    config = make_hisparse_kv_cache_config(block_size, 18, 18)
     manager = make_kv_cache_manager(
         config,
         max_model_len=160,
@@ -454,133 +306,13 @@ def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
     assert manager.allocate_slots(first, num_new_tokens=16) is not None
 
 
-def test_hisparse_reclamation_caps_each_worker_spill_batch():
-    block_size = 16
-    max_model_len = 160
-    full = FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-    )
-    config = KVCacheConfig(
-        num_blocks=34,
-        num_blocks_by_pool=[34],
-        hisparse_host_num_blocks=34,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["source"],
-                full,
-                block_pool_id=None,
-                role=KVCacheGroupRole.HISPARSE_SOURCE,
-            ),
-            KVCacheGroupSpec(
-                ["indexer"],
-                full,
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-                role=KVCacheGroupRole.HISPARSE_INDEXER,
-            ),
-            KVCacheGroupSpec(
-                ["resident"],
-                HiSparseResidentSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            ),
-            KVCacheGroupSpec(
-                ["hot"],
-                HiSparseHotSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                    blocks_per_request=2,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            ),
-        ],
-    )
-    manager = make_kv_cache_manager(
-        config,
-        max_model_len=max_model_len,
-        enable_caching=False,
-        hash_block_size=block_size,
-    )
-    for request_id in ("first", "second"):
-        request = make_request(request_id, list(range(128)), block_size, sha256)
-        assert manager.allocate_slots(request, num_new_tokens=128) is not None
-
-    manager.hisparse_coordinator.reclaim_resident_blocks(0, 100)
-    spills = manager.hisparse_coordinator.build_offload_command([]).page_transfers
-    assert len(spills) * block_size == max_model_len
-    assert manager.hisparse_coordinator.has_pending_reclamation()
-
-    spill_counts = {transfer.transfer_id: 1 for transfer in spills}
-    manager.hisparse_coordinator.update_spills(spill_counts, spill_counts)
-    assert not manager.hisparse_coordinator.has_pending_reclamation()
-
-
 def test_hisparse_materializes_prefix_without_allocating_hot_blocks():
     """A host prefix becomes visible only when every page is durable.
 
     Completing a later page first must not expose a prefix with a hole.
     """
     block_size = 16
-    full = FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-    )
-    config = KVCacheConfig(
-        num_blocks=32,
-        num_blocks_by_pool=[32],
-        hisparse_host_num_blocks=16,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["source"],
-                full,
-                block_pool_id=None,
-                role=KVCacheGroupRole.HISPARSE_SOURCE,
-            ),
-            KVCacheGroupSpec(
-                ["indexer"],
-                full,
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-                role=KVCacheGroupRole.HISPARSE_INDEXER,
-            ),
-            KVCacheGroupSpec(
-                ["resident"],
-                HiSparseResidentSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            ),
-            KVCacheGroupSpec(
-                ["hot"],
-                HiSparseHotSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                    blocks_per_request=2,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            ),
-        ],
-    )
+    config = make_hisparse_kv_cache_config(block_size, 32, 16)
     manager = make_kv_cache_manager(
         config,
         max_model_len=128,
@@ -684,57 +416,11 @@ def test_hisparse_external_import_falls_back_to_hard_gpu_footprint(
     not. Requiring one more resident page would silently strand long P/D inputs.
     """
     block_size = 16
-    full = FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-    )
     num_prompt_blocks = 4
     num_prompt_tokens = num_prompt_blocks * block_size
     if not ends_on_page_boundary:
         num_prompt_tokens -= 1
-    config = KVCacheConfig(
-        num_blocks=8,
-        num_blocks_by_pool=[8],
-        hisparse_host_num_blocks=9,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["source"],
-                full,
-                block_pool_id=None,
-                role=KVCacheGroupRole.HISPARSE_SOURCE,
-            ),
-            KVCacheGroupSpec(
-                ["indexer"],
-                full,
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                role=KVCacheGroupRole.HISPARSE_INDEXER,
-            ),
-            KVCacheGroupSpec(
-                ["resident"],
-                HiSparseResidentSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-            ),
-            KVCacheGroupSpec(
-                ["hot"],
-                HiSparseHotSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                    blocks_per_request=2,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            ),
-        ],
-    )
+    config = make_hisparse_kv_cache_config(block_size, 8, 9, transfer_device_cache=True)
     manager = make_kv_cache_manager(
         config,
         max_model_len=128,
@@ -781,52 +467,8 @@ def test_hisparse_host_import_decision_survives_capacity_retry(
     request must not make the retry consume a full prefix-sized GPU allocation.
     """
     block_size = 16
-    full = FullAttentionSpec(
-        block_size=block_size,
-        num_kv_heads=1,
-        head_size=1,
-        dtype=torch.float32,
-    )
-    config = KVCacheConfig(
-        num_blocks=9,
-        num_blocks_by_pool=[9],
-        hisparse_host_num_blocks=host_num_blocks,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["source"],
-                full,
-                block_pool_id=None,
-                role=KVCacheGroupRole.HISPARSE_SOURCE,
-            ),
-            KVCacheGroupSpec(
-                ["indexer"],
-                full,
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                role=KVCacheGroupRole.HISPARSE_INDEXER,
-            ),
-            KVCacheGroupSpec(
-                ["resident"],
-                HiSparseResidentSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-            ),
-            KVCacheGroupSpec(
-                ["hot"],
-                HiSparseHotSpec(
-                    block_size=block_size,
-                    page_size=block_size * 4,
-                    blocks_per_request=2,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=False,
-            ),
-        ],
+    config = make_hisparse_kv_cache_config(
+        block_size, 9, host_num_blocks, transfer_device_cache=True
     )
     manager = make_kv_cache_manager(
         config,

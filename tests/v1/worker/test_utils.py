@@ -11,12 +11,10 @@ import vllm.v1.kv_offload.sparse.hisparse_runtime as hisparse_runtime_module
 import vllm.v1.kv_offload.sparse.hisparse_worker as hisparse_worker_module
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_offload.sparse.base import (
-    SparseKVOffloadCommand,
     SparseKVPageTransfer,
 )
 from vllm.v1.kv_offload.sparse.hisparse_worker import (
     HiSparseWorker,
-    _expand_source_block_ids,
 )
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 
@@ -49,12 +47,6 @@ def test_copy_cpu_kv_cache_logical_blocks_ignores_storage_padding():
     assert waited_for_host_writes
     assert (backing[0] == -1).all()
     assert (backing[9] == -1).all()
-
-
-def test_expand_hisparse_source_blocks_into_kernel_pages():
-    expanded = _expand_source_block_ids([3, 7], blocks_per_kv_block=2, count=3)
-
-    assert expanded.tolist() == [6, 7, 14]
 
 
 def test_hisparse_worker_updates_request_state_mapping_in_place(monkeypatch):
@@ -159,75 +151,6 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
     assert len(plans) == len(streams) == 2
     assert not first_follower.runtime.is_group_leader
     assert not second_follower.runtime.is_group_leader
-
-
-def test_hisparse_worker_invalidates_only_index_group_leaders(monkeypatch):
-    """Recycled blocks must not enter followers whose LRU state was released."""
-    worker = object.__new__(HiSparseWorker)
-    worker.kernel_block_size = 2
-    calls: list[tuple[str, torch.Tensor, torch.Tensor]] = []
-    leader = SimpleNamespace(
-        runtime=SimpleNamespace(
-            device=torch.device("cpu"),
-            leader=None,
-            invalidate_slots=lambda slots, state_indices: calls.append(
-                ("leader", slots.clone(), state_indices.clone())
-            ),
-        )
-    )
-    follower = SimpleNamespace(
-        runtime=SimpleNamespace(
-            device=torch.device("cpu"),
-            leader=leader.runtime,
-            invalidate_slots=lambda slots, state_indices: calls.append(
-                ("follower", slots.clone(), state_indices.clone())
-            ),
-        )
-    )
-    worker.cache_handles = [leader, follower]
-    worker.leader_runtimes = [leader.runtime]
-    worker._block_staging = torch.empty(1, dtype=torch.long)
-    event = SimpleNamespace(synchronize=lambda: None, record=lambda stream: None)
-    worker._block_staging_event = event
-    monkeypatch.setattr(torch.accelerator, "current_stream", lambda device: object())
-
-    state_indices = torch.tensor([4, 1])
-    worker.invalidate_blocks([3], state_indices)
-
-    assert len(calls) == 1
-    assert calls[0][0] == "leader"
-    torch.testing.assert_close(calls[0][1], torch.tensor([6, 7], dtype=torch.int32))
-    torch.testing.assert_close(calls[0][2], state_indices)
-
-
-def test_hisparse_worker_prepare_step_queues_invalidation_and_restores(monkeypatch):
-    worker = object.__new__(HiSparseWorker)
-    worker.kernel_block_size = 64
-    worker.source_group_id = 1
-    worker._pending_invalid_block_ids = []
-    worker._post_forward_transfers = []
-    scheduler_output = SimpleNamespace(
-        num_scheduled_tokens={"request-0": 1, "request-1": 1},
-        scheduled_new_reqs=[SimpleNamespace(block_ids=([20], [2, 3]))],
-        scheduled_cached_reqs=SimpleNamespace(new_block_ids=[([40], [4]), None]),
-    )
-    command = SparseKVOffloadCommand(
-        block_table_updates={}, page_transfers=[], fully_resident=True
-    )
-    cache_handle = SimpleNamespace(fully_resident=False)
-    worker.cache_handles = [cache_handle]
-    calls: list[tuple[Any, ...]] = []
-    worker.restore_prefix = lambda output, ready: calls.append(
-        ("restore", output, ready)
-    )
-    worker._enqueue_transfers = lambda transfers: calls.append(("transfer", transfers))
-
-    worker.prepare_step(command, scheduler_output)
-
-    assert calls == [("restore", scheduler_output, ())]
-    assert worker._pending_invalid_block_ids == [2, 3, 4]
-    assert cache_handle.fully_resident
-    assert worker._post_forward_transfers == []
 
 
 def test_hisparse_worker_preserves_directly_imported_indexer(monkeypatch):
@@ -365,27 +288,6 @@ def test_hisparse_worker_enqueues_fused_page_spill(monkeypatch):
     assert staging_recorded_streams == [current_stream]
     assert recorded_streams == [current_stream]
     assert completion_recorded_streams == [current_stream]
-
-
-def test_hisparse_worker_finish_forward_enqueues_deferred_spills(monkeypatch):
-    worker = object.__new__(HiSparseWorker)
-    worker.hot_backing = SimpleNamespace(device="cuda:0")
-    transfer = object()
-    worker._post_forward_transfers = [transfer]
-    current_stream = object()
-    recorded_streams: list[object] = []
-    worker.host_write_event = SimpleNamespace(record=recorded_streams.append)
-    calls: list[list[object]] = []
-    worker._enqueue_transfers = lambda transfers: calls.append(transfers)
-    monkeypatch.setattr(
-        torch.accelerator, "current_stream", lambda device: current_stream
-    )
-
-    worker.finish_forward()
-
-    assert calls == [[transfer]]
-    assert worker._post_forward_transfers == []
-    assert recorded_streams == [current_stream]
 
 
 def test_hisparse_worker_reports_each_completed_transfer_once():

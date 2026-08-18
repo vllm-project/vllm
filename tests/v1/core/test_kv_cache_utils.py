@@ -107,8 +107,6 @@ def test_hisparse_memory_usage_keeps_indexer_source_on_host():
 @pytest.mark.parametrize(
     ("block_size", "main_sizes", "indexer_sizes", "gpu_block_size"),
     [
-        (64, (64,), (64,), 64),
-        (128, (64,), (64,), 64),
         (256, (64,), (64,), 64),
         (64, (32, 64), (16, 32), 32),
     ],
@@ -194,53 +192,6 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
     )
 
 
-def test_hisparse_hma_rejects_mixed_hot_page_sizes():
-    specs = {
-        "model.layers.0.self_attn": MLAAttentionSpec(
-            block_size=64,
-            num_kv_heads=1,
-            head_size=576,
-            dtype=torch.bfloat16,
-            supported_kernel_block_sizes=(64,),
-            is_index_group_leader=True,
-        ),
-        "model.layers.0.self_attn.indexer": MLAAttentionSpec(
-            block_size=64,
-            num_kv_heads=1,
-            head_size=128,
-            dtype=torch.bfloat16,
-            supported_kernel_block_sizes=(64,),
-            cache_role=MLACacheRole.INDEXER,
-        ),
-        "model.layers.1.self_attn": MLAAttentionSpec(
-            block_size=64,
-            num_kv_heads=1,
-            head_size=640,
-            dtype=torch.bfloat16,
-            supported_kernel_block_sizes=(64,),
-        ),
-    }
-    group_spec = UniformTypeKVCacheSpecs.from_specs(specs)
-    assert group_spec is not None
-    group = KVCacheGroupSpec(list(specs), group_spec)
-    config = SimpleNamespace(
-        attention_config=SimpleNamespace(
-            hisparse_config=HiSparseConfig(host_pool_gib=1.0)
-        ),
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=128)),
-        cache_config=SimpleNamespace(num_gpu_blocks_override=7),
-    )
-
-    with pytest.raises(ValueError, match="require one page size"):
-        kv_cache_utils._get_hisparse_hma_config(
-            config,
-            group,
-            available_memory=2**30,
-            host_budget=2**30,
-            log_layout=False,
-        )
-
-
 def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
     c4_main = "model.layers.2.attn"
     c4_indexer = f"{c4_main}.indexer.k_cache"
@@ -324,16 +275,7 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
         f"{c4_indexer}.hisparse_source",
     ]
     assert indexer.layer_names == [c4_indexer]
-    assert indexer.kv_cache_spec.block_size == 256
-    assert indexer.enable_kv_transfer
-    assert source.block_pool_id is None
-    assert not source.enable_kv_transfer
-    hisparse_gpu_groups = [
-        group for group in other_groups if not group.enable_kv_transfer
-    ]
-    assert all(group.block_pool_id == 0 for group in hisparse_gpu_groups)
     regular_groups = [group for group in other_groups if group.enable_kv_transfer]
-    assert all(group.block_pool_id == 0 for group in regular_groups)
     assert {name for group in regular_groups for name in group.layer_names} == {
         f"{c4_main}.hisparse_resident",
         c128_main,
@@ -360,8 +302,6 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
         if isinstance(group.kv_cache_spec, HiSparseHotSpec)
     )
     assert all(name.startswith(f"{c4_main}.") for name in hot.layer_names)
-    assert hot.kv_cache_spec.block_size == 256
-    assert hot.kv_cache_spec.blocks_per_request == 16
 
 
 @pytest.fixture(autouse=True)

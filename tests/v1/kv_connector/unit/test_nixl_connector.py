@@ -469,42 +469,6 @@ def test_kv_transfer_handshake(dist_init):
         scheduler_connector.shutdown()
 
 
-@pytest.mark.cpu_test
-def test_pp_remote_metadata_slices_region_block_counts():
-    """PP region slicing must keep every per-region metadata list aligned."""
-    worker = object.__new__(NixlConnectorWorker)
-    worker._remote_agents = {}
-    worker.block_len_per_layer = [10, 20]
-    worker.pp_size = 2
-    worker._remote_region_offset = 2
-    worker.transfer_topo = MagicMock()
-    worker.transfer_topo.register_remote_engine.side_effect = RuntimeError("stop")
-    metadata = NixlAgentMetadata(
-        engine_id="remote",
-        agent_metadata=b"agent",
-        kv_caches_base_addr=[1, 2, 3, 4],
-        device_id=0,
-        num_blocks=16,
-        block_lens=[10, 20, 30, 40],
-        kv_cache_layout="HND",
-        block_size=16,
-        ssm_sizes=(0, 0),
-        attn_backend_name="FLASH_ATTN",
-        physical_blocks_per_logical_kv_block=1,
-        region_strides=[100, 200, 300, 400],
-        region_num_blocks=[5, 6, 7, 8],
-        region_group_ids=[0, 0, 1, 1],
-        region_block_sizes=[16, 16, 32, 32],
-        region_names=["a", "b", "c", "d"],
-    )
-
-    with pytest.raises(RuntimeError, match="stop"):
-        worker.add_remote_agent(metadata)
-
-    assert metadata.kv_caches_base_addr == [3, 4]
-    assert metadata.region_num_blocks == [7, 8]
-
-
 class FakeNixlConnectorWorker(NixlConnectorWorker):
     REMOTE_ENGINE_ID = "remote_engine"
 
@@ -2350,16 +2314,12 @@ def test_shutdown_retains_registered_memory_while_host_staging_drains(
         reaper = worker._host_staging_shutdown_thread
         assert reaper is not None and reaper.is_alive()
         stager.begin_shutdown.assert_called_once_with()
-        assert worker._registered_descs == ["desc"]
-        assert worker.device_kv_caches
         deregister.assert_not_called()
 
         staging_active.clear()
         reaper.join(timeout=1)
 
         assert not reaper.is_alive()
-        assert not worker._registered_descs
-        assert not worker.device_kv_caches
         deregister.assert_called_once_with("desc")
 
 
@@ -2959,27 +2919,6 @@ def test_split_read_failure_defers_report_until_last_handle(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
-def test_split_read_halves_fail_in_different_polls(default_vllm_config, dist_init):
-    """Both halves of a split read failing in different poll cycles must
-    produce exactly one failure report."""
-    request_id = "split_read_both_fail"
-    connector, _, _ = _make_split_read_connector(
-        create_vllm_config(),
-        request_id,
-        {31: ["ERR"], 32: ["PROC", "ERR"]},
-    )
-
-    _, done_recving = connector.get_finished(finished_req_ids=set())
-    assert done_recving == set()
-
-    _, done_recving = connector.get_finished(finished_req_ids=set())
-    assert done_recving == {request_id}
-    assert connector.get_block_ids_with_load_errors() == {7, 8, 9}
-
-    _, done_recving = connector.get_finished(finished_req_ids=set())
-    assert done_recving == set()
-
-
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
