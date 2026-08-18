@@ -79,6 +79,25 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         self._fp8_kv = is_quantized_kv_cache(self.kv_cache_dtype)
         self._fp8_kv_needs_view = self._fp8_kv and self.kv_cache_dtype != "fp8_ds_mla"
 
+    @property
+    def _active_indexer(self) -> DeepseekV32Indexer | None:
+        # skip_topk is flipped at runtime by the MTP proposer (see mtp.py
+        # set_skip_topk), so this cannot be cached into a flag.
+        return None if self.skip_topk else self.indexer
+
+    def get_layer_forward_context(self):
+        """This layer's (attn_metadata, mla_slot) view of the forward context."""
+        forward_context = get_forward_context()
+        raw = forward_context.attn_metadata
+        if isinstance(raw, dict):
+            attn_metadata = raw.get(self.layer_name)
+        elif isinstance(raw, list):
+            attn_metadata = raw[0].get(self.layer_name)
+        else:
+            attn_metadata = raw
+        assert isinstance(forward_context.slot_mapping, dict)
+        return attn_metadata, forward_context.slot_mapping.get(self.layer_name)
+
     def forward(  # type: ignore[override]
         self,
         positions: torch.Tensor,
@@ -89,10 +108,10 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
-        if self.indexer is not None and not self.skip_topk:
-            kw = self.indexer.wk_weights_proj(hidden_states)[0]
-            index_k = kw[:, : self.indexer.head_dim]
-            index_weights = kw[:, self.indexer.head_dim :]
+        if (idx := self._active_indexer) is not None:
+            kw = idx.wk_weights_proj(hidden_states)[0]
+            index_k = kw[:, : idx.head_dim]
+            index_weights = kw[:, idx.head_dim :]
         else:
             index_k = None
             index_weights = None
@@ -188,29 +207,18 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         index_weights: torch.Tensor | None,
         output: torch.Tensor,
     ) -> None:
-        forward_context = get_forward_context()
-        attn_metadata_raw = forward_context.attn_metadata
-        if isinstance(attn_metadata_raw, dict):
-            attn_metadata = attn_metadata_raw.get(self.layer_name)
-        elif isinstance(attn_metadata_raw, list):
-            attn_metadata = attn_metadata_raw[0].get(self.layer_name)
-        else:
-            attn_metadata = attn_metadata_raw
+        attn_metadata, mla_slot = self.get_layer_forward_context()
 
-        slot_mapping = forward_context.slot_mapping
-        assert isinstance(slot_mapping, dict)
-        mla_slot = slot_mapping.get(self.layer_name)
-
-        if self.indexer is not None and not self.skip_topk:
+        if (idx := self._active_indexer) is not None:
             has_indexer = True
-            indexer_k_norm_w = self.indexer.k_norm.weight
-            indexer_k_norm_bias = self.indexer.k_norm.bias
-            indexer_k_norm_eps = self.indexer.k_norm.eps
+            indexer_k_norm_w = idx.k_norm.weight
+            indexer_k_norm_bias = idx.k_norm.bias
+            indexer_k_norm_eps = idx.k_norm.eps
             indexer_k_rope_cos_sin_cache = self.indexer_rope_emb.cos_sin_cache
-            indexer_k_cache = self.indexer.k_cache.kv_cache
-            indexer_cache_shuffled = self.indexer.k_cache.uses_shuffled_layout
-            indexer_softmax_scale = self.indexer.softmax_scale
-            indexer_n_head_scale = self.indexer.n_head**-0.5
+            indexer_k_cache = idx.k_cache.kv_cache
+            indexer_cache_shuffled = idx.k_cache.uses_shuffled_layout
+            indexer_softmax_scale = idx.softmax_scale
+            indexer_n_head_scale = idx.n_head**-0.5
         else:
             has_indexer = False
             indexer_k_norm_w = None
@@ -259,9 +267,9 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
 
         ql_nope, q_pe = self._compute_ql_nope(q_c)
 
-        if self.indexer is not None and not self.skip_topk:
-            index_q = self.indexer.wq_b(q_c)[0]
-            index_q = index_q.view(-1, self.indexer.n_head, self.indexer.head_dim)
+        if (idx := self._active_indexer) is not None:
+            index_q = idx.wq_b(q_c)[0]
+            index_q = index_q.view(-1, idx.n_head, idx.head_dim)
         else:
             index_q = None
 
@@ -281,7 +289,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             quantize_mqa=self._fp8_kv,
         )
 
-        if self.indexer is not None and not self.skip_topk:
+        if self._active_indexer is not None:
             self._run_indexer(q_c, index_q_fp8, index_weights_out)
 
         if attn_metadata is None:
