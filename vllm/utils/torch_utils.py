@@ -65,6 +65,7 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
 
 MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
     "fp8": "fp8_e4m3",
+    "mixed_precision": "auto",
     "nvfp4": "nvfp4",
 }
 
