@@ -168,6 +168,10 @@ class KVCacheSpec:
     def storage_block_size(self) -> int:
         return self.block_size
 
+    @property
+    def block_table_token_alignment(self) -> int | None:
+        return 128
+
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """
         The maximum possible memory usage of this KV cache in bytes.
@@ -231,6 +235,10 @@ class HiSparseHotSpec(KVCacheSpec):
     @property
     def page_size_bytes(self) -> int:
         return self.page_size
+
+    @property
+    def block_table_token_alignment(self) -> int | None:
+        return None
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         return self.blocks_per_request * self.page_size
@@ -313,6 +321,8 @@ class AttentionSpec(KVCacheSpec):
     def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
         parallel_config = vllm_config.parallel_config
         kv_shard_count = parallel_config.decode_context_parallel_size
+        # Each rank's blocks cover the corresponding shards of the global
+        # sequence.
         return cdiv(max_len, self.block_size * kv_shard_count)
 
 
@@ -741,6 +751,10 @@ class MambaSpec(KVCacheSpec):
             return self.page_size_padded
         return page_size
 
+    @property
+    def block_table_token_alignment(self) -> int | None:
+        return None
+
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         if vllm_config.cache_config.mamba_cache_mode == "all":
             max_model_len = vllm_config.model_config.max_model_len
@@ -865,6 +879,10 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     @property
     def page_size_bytes(self) -> int:
         return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
+
+    @property
+    def block_table_token_alignment(self) -> int | None:
+        return next(iter(self.kv_cache_specs.values())).block_table_token_alignment
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_num_pages = max(
