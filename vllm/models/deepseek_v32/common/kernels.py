@@ -182,13 +182,9 @@ def _fused_norm_rope_kernel(
     if slot_mapping_ptr is None:
         if kv_out_ptr is None and kpe_out_ptr is None and index_k_out_ptr is None:
             return
-        # Unused in the materialize-only path because cache writes are disabled.
-        slot_idx = 0
-    else:
-        slot_idx = tl.load(slot_mapping_ptr + tok_idx)
-        if slot_idx < 0:
-            # Padding
-            return
+    elif tl.load(slot_mapping_ptr + tok_idx) < 0:
+        # Padding
+        return
 
     if pid == 2:
         # Q RMS norm
@@ -226,6 +222,7 @@ def _fused_norm_rope_kernel(
         r1 = x1 * cos - x2 * sin
         r2 = x2 * cos + x1 * sin
 
+        # PCP materializes K for the cross-rank gather, then inserts it into cache.
         if kv_out_ptr is not None:
             tl.store(kv_out_ptr + tok_idx * kv_out_stride + kv_block, kv_c)
         if kpe_out_ptr is not None:
@@ -238,63 +235,68 @@ def _fused_norm_rope_kernel(
                 r2.to(kpe_out_ptr.dtype.element_ty),
             )
 
-        # MLA concat_and_cache: write [kv_c_normed, k_pe_roped] to cache.
-        if mla_cache_entry_stride == 0:
-            return
+        if slot_mapping_ptr is not None:
+            # MLA concat_and_cache: write [kv_c_normed, k_pe_roped] to cache.
+            if mla_cache_entry_stride == 0:
+                return
 
-        mla_block_size = mla_cache_block_stride // mla_cache_entry_stride
-        mla_block_idx = slot_idx // mla_block_size
-        mla_block_off = slot_idx % mla_block_size
+            slot_idx = tl.load(slot_mapping_ptr + tok_idx)
+            mla_block_size = mla_cache_block_stride // mla_cache_entry_stride
+            mla_block_idx = slot_idx // mla_block_size
+            mla_block_off = slot_idx % mla_block_size
 
-        if MLA_CACHE_DS_MLA:
-            # fp8_ds_mla layout (DeepSeek-V3.2, KV_DIM == 512): per-128-element
-            # tile of the NoPE is dynamically quantized to fp8 with its own
-            # float32 scale; the RoPE tail is stored unquantized in bf16.
-            #   bytes [0, KV_DIM)            : KV_DIM fp8 NoPE values
-            #   bytes [KV_DIM, KV_DIM + 16)  : MLA_NUM_TILES float32 scales
-            #   bytes [KV_DIM + 16, ...)     : 2 * KPE_HALF_ROT_DIM bf16 RoPE
-            # mla_cache_block_stride / mla_cache_entry_stride are byte strides
-            # (mla_cache_ptr is the 1-byte fp8 view of the uint8 cache).
-            byte_base = (
-                mla_block_idx * mla_cache_block_stride
+            if MLA_CACHE_DS_MLA:
+                # fp8_ds_mla layout (DeepSeek-V3.2, KV_DIM == 512): per-128-element
+                # tile of the NoPE is dynamically quantized to fp8 with its own
+                # float32 scale; the RoPE tail is stored unquantized in bf16.
+                #   bytes [0, KV_DIM)            : KV_DIM fp8 NoPE values
+                #   bytes [KV_DIM, KV_DIM + 16)  : MLA_NUM_TILES float32 scales
+                #   bytes [KV_DIM + 16, ...)     : 2 * KPE_HALF_ROT_DIM bf16 RoPE
+                # mla_cache_block_stride / mla_cache_entry_stride are byte strides
+                # (mla_cache_ptr is the 1-byte fp8 view of the uint8 cache).
+                byte_base = (
+                    mla_block_idx * mla_cache_block_stride
+                    + mla_block_off * mla_cache_entry_stride
+                )
+                kv_2d = tl.reshape(kv_c, (MLA_NUM_TILES, MLA_TILE_DIM))
+                tile_amax = tl.max(tl.abs(kv_2d), axis=1, keep_dims=True)
+                # scale = amax / 448 (fp8 e4m3 max), matching the reference
+                # concat_and_cache_ds_mla kernel; floored to FLT_MIN.
+                tile_scale = tl.maximum(tile_amax * (1.0 / 448.0), 1.1754944e-38)
+                kv_c_fp8 = tl.reshape((kv_2d / tile_scale).to(tl.float8e4nv), (KV_DIM,))
+                tl.store(mla_cache_ptr + byte_base + kv_block, kv_c_fp8)
+                tile_off = tl.arange(0, MLA_NUM_TILES)
+                tl.store(
+                    mla_cache_ds_scale_ptr + byte_base // 4 + KV_DIM // 4 + tile_off,
+                    tl.reshape(tile_scale, (MLA_NUM_TILES,)),
+                )
+                rope_dst = mla_cache_ds_rope_ptr + byte_base // 2 + (KV_DIM // 2 + 8)
+                tl.store(rope_dst + dim_off * 2, r1.to(tl.bfloat16))
+                tl.store(rope_dst + dim_off * 2 + 1, r2.to(tl.bfloat16))
+                return
+
+            dst = (
+                mla_cache_ptr
+                + mla_block_idx * mla_cache_block_stride
                 + mla_block_off * mla_cache_entry_stride
             )
-            kv_2d = tl.reshape(kv_c, (MLA_NUM_TILES, MLA_TILE_DIM))
-            tile_amax = tl.max(tl.abs(kv_2d), axis=1, keep_dims=True)
-            # scale = amax / 448 (fp8 e4m3 max), matching the reference
-            # concat_and_cache_ds_mla kernel; floored to FLT_MIN.
-            tile_scale = tl.maximum(tile_amax * (1.0 / 448.0), 1.1754944e-38)
-            kv_c_fp8 = tl.reshape((kv_2d / tile_scale).to(tl.float8e4nv), (KV_DIM,))
-            tl.store(mla_cache_ptr + byte_base + kv_block, kv_c_fp8)
-            tile_off = tl.arange(0, MLA_NUM_TILES)
-            tl.store(
-                mla_cache_ds_scale_ptr + byte_base // 4 + KV_DIM // 4 + tile_off,
-                tl.reshape(tile_scale, (MLA_NUM_TILES,)),
-            )
-            rope_dst = mla_cache_ds_rope_ptr + byte_base // 2 + (KV_DIM // 2 + 8)
-            tl.store(rope_dst + dim_off * 2, r1.to(tl.bfloat16))
-            tl.store(rope_dst + dim_off * 2 + 1, r2.to(tl.bfloat16))
-            return
-
-        dst = (
-            mla_cache_ptr
-            + mla_block_idx * mla_cache_block_stride
-            + mla_block_off * mla_cache_entry_stride
-        )
-        # kv_c_normed (KV_DIM elements)
-        if MLA_CACHE_FP8:
-            scale = tl.load(mla_cache_scale_ptr)
-            kv_c_fp8 = (kv_c.to(tl.float32) / scale).to(tl.float8e4nv)
-            tl.store(dst + kv_block, kv_c_fp8)
-        else:
-            tl.store(dst + kv_block, kv_c)
-        # k_pe_roped (from registers, interleaved layout)
-        if MLA_CACHE_FP8:
-            tl.store(dst + KV_DIM + dim_off * 2, (r1 / scale).to(tl.float8e4nv))
-            tl.store(dst + KV_DIM + dim_off * 2 + 1, (r2 / scale).to(tl.float8e4nv))
-        else:
-            tl.store(dst + KV_DIM + dim_off * 2, r1)
-            tl.store(dst + KV_DIM + dim_off * 2 + 1, r2)
+            # kv_c_normed (KV_DIM elements)
+            if MLA_CACHE_FP8:
+                scale = tl.load(mla_cache_scale_ptr)
+                kv_c_fp8 = (kv_c.to(tl.float32) / scale).to(tl.float8e4nv)
+                tl.store(dst + kv_block, kv_c_fp8)
+            else:
+                tl.store(dst + kv_block, kv_c)
+            # k_pe_roped (from registers, interleaved layout)
+            if MLA_CACHE_FP8:
+                tl.store(dst + KV_DIM + dim_off * 2, (r1 / scale).to(tl.float8e4nv))
+                tl.store(
+                    dst + KV_DIM + dim_off * 2 + 1,
+                    (r2 / scale).to(tl.float8e4nv),
+                )
+            else:
+                tl.store(dst + KV_DIM + dim_off * 2, r1)
+                tl.store(dst + KV_DIM + dim_off * 2 + 1, r2)
     elif pid == 0:
         if not HAS_INDEXER:
             # Shared layer: no indexer K to process.
@@ -383,7 +385,8 @@ def _fused_norm_rope_kernel(
             )
 
         # PCP inserts index K after gathering; other paths write it directly.
-        if indexer_cache_ptr is not None:
+        if indexer_cache_ptr is not None and slot_mapping_ptr is not None:
+            slot_idx = tl.load(slot_mapping_ptr + tok_idx)
             _fp8_quant_and_cache_write(
                 result,
                 index_k_mask,
