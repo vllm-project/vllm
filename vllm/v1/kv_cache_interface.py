@@ -275,10 +275,10 @@ class KVCacheLayout(Enum):
 def compute_layer_kv_cache_shape_bytes(
     spec: KVCacheSpec,
     num_blocks: int,
-    block_size: int | None = None,
+    kernel_block_size: int | None = None,
 ) -> tuple[int, ...]:
     """Return the 4D logical shape ``(B, H, N, C)`` where C is in bytes."""
-    bs = block_size if block_size is not None else spec.block_size
+    bs = kernel_block_size if kernel_block_size is not None else spec.block_size
     num_states = spec.num_states * bs // spec.block_size
     return (num_blocks, spec.num_heads, num_states, spec.state_content_size_bytes)
 
@@ -288,13 +288,13 @@ def compute_layout_strides(
     num_blocks: int,
     num_layers: int,
     layout: KVCacheLayout,
-    block_size: int | None = None,
+    kernel_block_size: int | None = None,
     packed_block_stride: int | None = None,
 ) -> tuple[int, ...]:
     """Byte strides in logical ``[L, B, H, N, C]`` axis order."""
     shape = (
         num_layers,
-        *compute_layer_kv_cache_shape_bytes(spec, num_blocks, block_size),
+        *compute_layer_kv_cache_shape_bytes(spec, num_blocks, kernel_block_size),
     )
     stride_order = layout.stride_order
     physical_shape = tuple(shape[i] for i in stride_order)
@@ -302,7 +302,7 @@ def compute_layout_strides(
 
     padded = getattr(spec, "page_size_padded", None)
     if padded is not None:
-        assert block_size is None or block_size == spec.block_size, (
+        assert kernel_block_size is None or kernel_block_size == spec.block_size, (
             "Padded KV pages do not support kernel block splitting."
         )
         lb = (inv_order[_DIM_L], inv_order[_DIM_B])
@@ -336,22 +336,20 @@ def reshape_kv_cache(
     offset: int,
     layer_stride: int,
     block_stride: int,
-    block_size: int | None = None,
+    kernel_block_size: int | None = None,
 ) -> list[torch.Tensor]:
     """View a flat int8 buffer as one 4D ``[B, H, N, C]`` view per layer.
 
-    Layer ``l``'s page for block ``b`` starts at
-    ``offset + l * layer_stride + b * block_stride``; the page interior is
-    dense in ``layout`` order.
+    block ``b`` starts at ``offset + l * layer_stride + b * block_stride``.
     """
-    shape_bytes = compute_layer_kv_cache_shape_bytes(spec, num_blocks, block_size)
+    shape_bytes = compute_layer_kv_cache_shape_bytes(spec, num_blocks, kernel_block_size)
     # Everything inside the layer and block dims is dense in layout order (so
     # e.g. BHLNC's head stride spans the layers it interleaves); the caller's
     # strides place the layers and blocks themselves.
     logical_shape = (num_layers, *shape_bytes)
     strides = list(
         compute_layout_strides(
-            spec, num_blocks, num_layers, layout, block_size=block_size
+            spec, num_blocks, num_layers, layout, kernel_block_size
         )
     )
     strides[_DIM_L] = layer_stride

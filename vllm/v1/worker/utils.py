@@ -420,10 +420,7 @@ def allocate_and_reshape_kv_cache(
             ratio = spec.block_size // kernel_block_size
             if ratio > 1:
                 # Kernel blocks subdivide a manager block into `ratio` equal
-                # pieces, so they are a constant stride apart only if a
-                # manager block's bytes are dense: no padding at the end of
-                # the page (alignment or page_size_padded) and no other
-                # layers' pages in between.
+                # pieces, so they are a constant stride apart
                 dense_block = prod(
                     compute_layer_kv_cache_shape_bytes(spec, 1, spec.block_size)[1:]
                 )
