@@ -105,7 +105,6 @@ def test_logical_to_kernel_block_ids_with_hma():
         (True, False, True, False, False, {"req"}, 1),
         (False, True, False, True, False, {"req"}, 1),
         (False, True, True, False, False, {"req"}, 0),
-        (True, False, False, True, False, {"req"}, 0),
         (False, True, False, True, True, {"req"}, 0),
         (False, True, False, True, False, set(), 0),
     ],

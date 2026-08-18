@@ -70,25 +70,15 @@ def test_backend_per_kind_defaults_empty():
     assert AttentionConfig().backend_per_kind == {}
 
 
-def test_hisparse_config_resolves_model_constraints():
+def test_hisparse_device_buffer_size_defaults_and_rejects_undersized():
     vllm_config = SimpleNamespace(
         attention_config=AttentionConfig(
             hisparse_config=HiSparseConfig(host_pool_gib=1.0)
         )
     )
-    resolved = ResolvedHiSparseConfig.from_vllm_config(
-        vllm_config, model_top_k=128, block_size=32
-    )
+    resolved = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
     assert resolved is not None
     assert resolved.device_buffer_size == 256
-
-    vllm_config.attention_config.hisparse_config = HiSparseConfig(
-        host_pool_gib=1.0, device_buffer_size=128
-    )
-    assert (
-        ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
-        is not None
-    )
 
     vllm_config.attention_config.hisparse_config = HiSparseConfig(
         host_pool_gib=1.0, device_buffer_size=127

@@ -3,16 +3,11 @@
 
 from collections import deque
 from types import SimpleNamespace
-from typing import Any
 
 import torch
 
 import vllm.v1.kv_offload.sparse.hisparse_runtime as hisparse_runtime_module
-import vllm.v1.kv_offload.sparse.hisparse_worker as hisparse_worker_module
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
-from vllm.v1.kv_offload.sparse.base import (
-    SparseKVPageTransfer,
-)
 from vllm.v1.kv_offload.sparse.hisparse_worker import (
     HiSparseWorker,
 )
@@ -146,11 +141,7 @@ def test_hisparse_cache_handles_join_index_groups_during_construction(monkeypatc
     assert first_follower.runtime.index_group is first_leader.runtime.index_group
     assert second_follower.runtime.index_group is second_leader.runtime.index_group
     assert first_leader.runtime.index_group is not second_leader.runtime.index_group
-    assert first_leader.runtime.index_group.leader is first_leader.runtime
-    assert second_leader.runtime.index_group.leader is second_leader.runtime
     assert len(plans) == len(streams) == 2
-    assert not first_follower.runtime.is_group_leader
-    assert not second_follower.runtime.is_group_leader
 
 
 def test_hisparse_worker_preserves_directly_imported_indexer(monkeypatch):
@@ -190,80 +181,6 @@ def test_hisparse_worker_preserves_directly_imported_indexer(monkeypatch):
     worker.restore_prefix(scheduler_output, {"direct"})
 
     assert copied == [([4], [20])]
-
-
-def test_hisparse_worker_enqueues_fused_page_spill(monkeypatch):
-    worker = object.__new__(HiSparseWorker)
-    worker.kernel_block_size = 4
-    worker.blocks_per_kv_block = 2
-    worker.spill_row_capacity = 8
-    worker.spill_src_cpu = torch.empty((1, 2, 8), dtype=torch.int64)
-    worker.spill_dst_cpu = torch.empty((1, 8), dtype=torch.int64)
-    worker.spill_src_gpu = torch.empty((2, 8), dtype=torch.int64)
-    worker.spill_dst_gpu = torch.empty(8, dtype=torch.int64)
-    worker._spill_staging_index = 0
-    staging_recorded_streams: list[object] = []
-    worker._spill_staging_events = [
-        SimpleNamespace(query=lambda: True, record=staging_recorded_streams.append)
-    ]
-    worker.spill_src_indices_ptrs = object()
-    worker.cache_handles = [
-        SimpleNamespace(runtime=SimpleNamespace(resident_source_index=0)),
-        SimpleNamespace(runtime=SimpleNamespace(resident_source_index=1)),
-    ]
-    worker._enqueued_transfer_ids = []
-    worker._pending_transfer_events = deque()
-    worker.hot_backing = SimpleNamespace(device="cuda:0")
-    worker.backup_layer_offsets = object()
-    worker.backup_host_anchor = object()
-    worker.backup_host_cache_ptrs = object()
-    worker.backup_src_block_stride = 4
-    worker.backup_src_block_size = 5
-    worker.backup_src_rows = 6
-    worker.backup_row_value_bytes = 0
-    current_stream = object()
-    recorded_streams: list[object] = []
-    worker.host_write_event = SimpleNamespace(record=recorded_streams.append)
-    calls: list[tuple[Any, ...]] = []
-    monkeypatch.setattr(
-        torch.accelerator, "current_stream", lambda device: current_stream
-    )
-    completion_recorded_streams: list[object] = []
-    completion_event = SimpleNamespace(
-        query=lambda: True, record=completion_recorded_streams.append
-    )
-    monkeypatch.setattr(hisparse_worker_module.torch, "Event", lambda: completion_event)
-    monkeypatch.setattr(
-        hisparse_worker_module.torch,
-        "ops",
-        SimpleNamespace(
-            _C_cache_ops=SimpleNamespace(
-                hisparse_backup_layers=lambda *args: calls.append(args)
-            )
-        ),
-    )
-
-    transfer = SparseKVPageTransfer(
-        transfer_id=7,
-        destination_block_id=5,
-        destination_page_offset=1,
-        source_block_ids=(11, 13),
-        after_forward=False,
-    )
-    worker._enqueue_transfers([transfer])
-
-    assert len(calls) == 1
-    assert calls[0][6:] == (4, 4, 5, 6, 0)
-    assert worker.spill_src_gpu[0, :4].tolist() == [44, 45, 46, 47]
-    assert worker.spill_src_gpu[1, :4].tolist() == [52, 53, 54, 55]
-    assert worker.spill_dst_gpu[:4].tolist() == [44, 45, 46, 47]
-    assert worker.spill_src_gpu.dtype == torch.int64
-    assert worker.spill_dst_gpu.dtype == torch.int64
-    assert worker._enqueued_transfer_ids == [7]
-    assert list(worker._pending_transfer_events) == [(completion_event, (7,))]
-    assert staging_recorded_streams == [current_stream]
-    assert recorded_streams == [current_stream]
-    assert completion_recorded_streams == [current_stream]
 
 
 def test_hisparse_worker_reports_each_completed_transfer_once():

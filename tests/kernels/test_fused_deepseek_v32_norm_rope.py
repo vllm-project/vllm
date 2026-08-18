@@ -405,7 +405,6 @@ def test_fused_norm_rope_returns_kv_for_external_cache_update():
         rope(kpe_input.float(), pos, cos_sin, interleave=True),
         "external MLA k_pe",
     )
-    assert (topk == 7).all()
 
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 512])

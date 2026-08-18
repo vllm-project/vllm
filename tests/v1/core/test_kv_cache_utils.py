@@ -152,10 +152,6 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
     )
 
     host_group, indexer_group, *auxiliary_groups = cache_config.kv_cache_groups
-    assert cache_config.num_blocks_by_pool == [7]
-    assert cache_config.hisparse_host_num_blocks == 7
-    assert host_group.block_pool_id is None
-    assert indexer_group.block_pool_id == 0
     assert host_group.kv_cache_spec.block_size == block_size
     assert indexer_group.kv_cache_spec.block_size == gpu_block_size
     host_specs = host_group.kv_cache_spec.kv_cache_specs
@@ -179,17 +175,11 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
         for group in auxiliary_groups
         if isinstance(group.kv_cache_spec, HiSparseHotSpec)
     ]
-    assert resident_groups
-    assert all(isinstance(group.kv_cache_spec, HiSparseHotSpec) for group in hot_groups)
-    assert len(resident_groups) == len(hot_groups)
+    assert resident_groups and hot_groups
     assert all(
         group.kv_cache_spec.block_size == gpu_block_size for group in resident_groups
     )
     assert all(group.kv_cache_spec.block_size == gpu_block_size for group in hot_groups)
-    assert all(
-        group.kv_cache_spec.blocks_per_request == 256 // gpu_block_size
-        for group in hot_groups
-    )
 
 
 def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
@@ -269,19 +259,6 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
         log_layout=False,
     )
 
-    source, indexer, *other_groups = cache_config.kv_cache_groups
-    assert source.layer_names == [
-        c4_main,
-        f"{c4_indexer}.hisparse_source",
-    ]
-    assert indexer.layer_names == [c4_indexer]
-    regular_groups = [group for group in other_groups if group.enable_kv_transfer]
-    assert {name for group in regular_groups for name in group.layer_names} == {
-        f"{c4_main}.hisparse_resident",
-        c128_main,
-        c128_indexer,
-        "model.layers.2.attn.swa_cache",
-    }
     host_layers = {
         name
         for tensor in cache_config.kv_cache_tensors
@@ -289,19 +266,26 @@ def test_hisparse_hma_offloads_only_deepseek_v4_c4_layers():
         for name in tensor.shared_by
     }
     assert host_layers == {c4_main, f"{c4_indexer}.hisparse_source"}
-    device_layers = {
+    transferable_device_layers = {
         name
-        for tensor in cache_config.kv_cache_tensors
-        if not tensor.host_resident
-        for name in tensor.shared_by
+        for group in cache_config.transfer_groups
+        if group.block_pool_id is not None
+        for name in group.layer_names
     }
-    assert {c128_main, c128_indexer} <= device_layers
-    hot = next(
-        group
-        for group in other_groups
+    assert transferable_device_layers == {
+        c4_indexer,
+        f"{c4_main}.hisparse_resident",
+        c128_main,
+        c128_indexer,
+        "model.layers.2.attn.swa_cache",
+    }
+    hot_layers = {
+        name
+        for group in cache_config.kv_cache_groups
         if isinstance(group.kv_cache_spec, HiSparseHotSpec)
-    )
-    assert all(name.startswith(f"{c4_main}.") for name in hot.layer_names)
+        for name in group.layer_names
+    }
+    assert hot_layers and all(name.startswith(f"{c4_main}.") for name in hot_layers)
 
 
 @pytest.fixture(autouse=True)

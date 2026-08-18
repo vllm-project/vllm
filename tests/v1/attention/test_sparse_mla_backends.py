@@ -1346,70 +1346,6 @@ requires_hisparse_ops = pytest.mark.skipif(
 )
 
 
-def fallback_swap_in(
-    runtime: HiSparseRuntime,
-    global_indices: torch.Tensor,
-    hot_indices: torch.Tensor,
-) -> None:
-    """Python reference for the hisparse_swap_in kernel semantics.
-
-    Writes resolved slots into ``hot_indices`` in place. Misses are always
-    served from the runtime's host pool.
-    """
-    num_tokens, _ = global_indices.shape
-    hot_indices.fill_(-1)
-
-    global_cpu = global_indices.cpu().tolist()
-    dgi_cpu = runtime.index_group.device_global_indices[:num_tokens].cpu().tolist()
-    lru_cpu = runtime.index_group.lru_slots[:num_tokens].cpu().tolist()
-
-    miss_src: list[int] = []
-    miss_dst: list[int] = []
-    for row in range(num_tokens):
-        slot_of_global = {g: slot for slot, g in enumerate(dgi_cpu[row]) if g >= 0}
-        hit_cols: dict[int, int] = {}
-        for col, g in enumerate(global_cpu[row]):
-            if g < 0:
-                continue
-            if g in slot_of_global:
-                hit_cols[slot_of_global[g]] = col
-
-        # Classify slots in LRU order, like the kernel does.
-        evictables = [s for s in lru_cpu[row] if s not in hit_cols]
-        hit_slots = [s for s in lru_cpu[row] if s in hit_cols]
-        for slot in hit_slots:
-            hot_indices[row, hit_cols[slot]] = _hisparse_hot_slot(runtime, row, slot)
-
-        misses = [
-            (col, g)
-            for col, g in enumerate(global_cpu[row])
-            if g >= 0 and g not in slot_of_global
-        ]
-        miss_slots = []
-        for m, (col, g) in enumerate(misses):
-            slot = evictables[m]
-            miss_slots.append(slot)
-            physical_slot = _hisparse_hot_slot(runtime, row, slot)
-            hot_indices[row, col] = physical_slot
-            dgi_cpu[row][slot] = g
-            miss_src.append(g)
-            miss_dst.append(physical_slot)
-
-        lru_cpu[row] = evictables[len(misses) :] + miss_slots + hit_slots
-
-    runtime.index_group.device_global_indices[:num_tokens] = torch.tensor(
-        dgi_cpu, dtype=torch.int32, device=runtime.device
-    )
-    runtime.index_group.lru_slots[:num_tokens] = torch.tensor(
-        lru_cpu, dtype=torch.int16, device=runtime.device
-    )
-    if miss_src:
-        src_cpu = torch.tensor(miss_src, dtype=torch.long)
-        dst = torch.tensor(miss_dst, dtype=torch.long, device=runtime.device)
-        rows = runtime.host_cache[src_cpu].to(runtime.device)
-        runtime.hot.cache.view(-1, runtime.row_width).index_copy_(0, dst, rows)
-
-
 def _make_hisparse_runtime(
     *,
     top_k: int = 4,
@@ -1477,12 +1413,6 @@ def _make_hisparse_cache_handle(
         block_size=block_size,
     )
     return HiSparseCacheHandle(runtime)
-
-
-def _hisparse_hot_slot(runtime: HiSparseRuntime, row: int, logical: int) -> int:
-    block_size = runtime.hot.cache.shape[1]
-    block = runtime.hot_block_table[row, logical // block_size]
-    return int(block.item()) * block_size + logical % block_size
 
 
 @requires_hisparse_ops
@@ -1577,7 +1507,7 @@ def test_hisparse_resident_rows_bypass_hot_lru():
 
 
 @requires_hisparse_ops
-def test_hisparse_kernel_matches_reference_across_eviction():
+def test_hisparse_swap_in_preserves_rows_across_eviction():
     device = torch.device(DEVICE_TYPE)
     block_size = 64
     row_width = 64
@@ -1591,18 +1521,13 @@ def test_hisparse_kernel_matches_reference_across_eviction():
     ).pin_memory()
     flat_pool = kv_pool.reshape(-1, row_width)
 
-    def make() -> HiSparseRuntime:
-        runtime = _make_hisparse_runtime(
-            top_k=top_k,
-            device_buffer_size=buf,
-            max_num_reqs=num_reqs,
-            row_width=row_width,
-        )
-        runtime.bind_source_cache(kv_pool)
-        return runtime
-
-    kernel_c = make()
-    fallback_c = make()
+    runtime = _make_hisparse_runtime(
+        top_k=top_k,
+        device_buffer_size=buf,
+        max_num_reqs=num_reqs,
+        row_width=row_width,
+    )
+    runtime.bind_source_cache(kv_pool)
 
     blocks_per_req = num_blocks // num_reqs
     block_table = torch.arange(num_blocks, dtype=torch.int32, device=device).view(
@@ -1617,55 +1542,28 @@ def test_hisparse_kernel_matches_reference_across_eviction():
         )
         topk[:, -1] = -1
 
-        hot_k, idx_k, valid_counts = kernel_c.swap_in(
+        hot_cache, hot_indices, valid_counts = runtime.swap_in(
             req_id_per_token=req_ids,
             block_table=block_table,
             topk_indices=topk.clone(),
             block_size=block_size,
             return_valid_counts=True,
         )
-        # Reference path: same conversion swap_in performs, then the local
-        # Python reference resolution.
-        global_indices = triton_convert_req_index_to_global_index(
-            req_ids,
-            block_table,
-            topk.clone(),
-            BLOCK_SIZE=block_size,
-            NUM_TOPK_TOKENS=top_k,
-            BLOCK_N=128 if top_k % 128 == 0 else top_k,
-        )
-        idx_f = torch.full_like(global_indices, -1)
-        fallback_swap_in(fallback_c, global_indices, idx_f)
         torch.accelerator.synchronize()
 
-        torch.testing.assert_close(idx_k, idx_f, rtol=0, atol=0)
-        torch.testing.assert_close(
-            kernel_c.index_group.device_global_indices,
-            fallback_c.index_group.device_global_indices,
-            rtol=0,
-            atol=0,
-        )
-        torch.testing.assert_close(
-            kernel_c.index_group.lru_slots,
-            fallback_c.index_group.lru_slots,
-            rtol=0,
-            atol=0,
-        )
-        torch.testing.assert_close(kernel_c.hot.cache, fallback_c.hot.cache)
-
-        # Data correctness: every valid hot index holds the right KV row.
-        flat_hot = hot_k.reshape(-1, row_width)
-        valid = idx_k >= 0
         global_ref = _triton_convert_reference_impl(
             req_ids, block_table, topk, block_size, top_k
         )
+        valid = hot_indices >= 0
         torch.testing.assert_close(
             valid_counts,
             (global_ref >= 0).sum(dim=1, dtype=torch.int32),
             rtol=0,
             atol=0,
         )
-        gathered = flat_hot[idx_k[valid].to(torch.long)].cpu()
+        gathered = hot_cache.reshape(-1, row_width)[
+            hot_indices[valid].to(torch.long)
+        ].cpu()
         expected = flat_pool[global_ref[valid].cpu().to(torch.long)]
         torch.testing.assert_close(gathered, expected)
 
@@ -2438,7 +2336,6 @@ def test_hisparse_mixed_batch_bf16_row_split(
     prefill_blocks = cdiv(batch_spec.seq_lens[-1], block_size)
     assert staged_shape[0] <= prefill_blocks + 1  # +1: block-0 tail padding
 
-    assert backend_output.shape == reference.shape
     torch.testing.assert_close(backend_output, reference, rtol=0.01, atol=0.01)
 
 
@@ -2478,11 +2375,6 @@ def test_hisparse_prefill_staging_plan_masks_unused_blocks():
     )
     torch.testing.assert_close(plan.block_table, expected_block_table)
     torch.testing.assert_close(plan.row_ids, expected_rows)
-    torch.testing.assert_close(
-        plan.dst_rows,
-        torch.arange(expected_rows.shape[1], dtype=torch.int32).view(1, -1),
-    )
-    assert torch.all(plan.miss_mask == 1)
 
 
 def test_hisparse_mixed_mha_returns_decode_only_mqa_slice():

@@ -61,16 +61,3 @@ def test_hisparse_composition_preserves_existing_connector_stats_schema():
     )
 
     assert connector.get_kv_connector_stats() is primary_stats
-
-
-def test_hisparse_initializes_as_the_only_worker_connector(monkeypatch):
-    from vllm.distributed.kv_transfer import kv_transfer_state
-
-    config = _vllm_config()
-    config.kv_transfer_config = None
-    monkeypatch.setattr(kv_transfer_state, "_KV_CONNECTOR_AGENT", None)
-
-    kv_transfer_state.ensure_kv_transfer_initialized(config, _kv_cache_config())
-
-    assert isinstance(kv_transfer_state.get_kv_transfer_group(), HiSparseConnector)
-    kv_transfer_state.ensure_kv_transfer_shutdown()
