@@ -56,8 +56,21 @@ class OffloadingConnectorWorker:
             not self.spec.replicated_layout or self.spec.config.parallel.rank == 0
         )
 
+        # Block-level load-failure recovery reports GPU block IDs to the
+        # scheduler, whose _update_requests_with_invalid_blocks currently
+        # assumes a single KV cache group.
+        self._supports_load_failure_recovery = len(kv_cache_config.kv_cache_groups) <= 1
+
         # job_id -> req_id for in-flight loads.
         self._load_jobs: dict[int, ReqId] = {}
+
+        # job_id -> GPU block IDs written by an in-flight load. Needed to tell
+        # the scheduler which blocks to recompute when a load fails.
+        self._load_dst_block_ids: dict[int, list[int]] = {}
+
+        # GPU block IDs whose contents failed to load, drained by
+        # get_block_ids_with_load_errors().
+        self._invalid_block_ids: set[int] = set()
         self._unsubmitted_store_jobs: list[
             tuple[int, GPULoadStoreSpec, LoadStoreSpec]
         ] = []
@@ -326,6 +339,7 @@ class OffloadingConnectorWorker:
         for job_id, entry in metadata.load_jobs.items():
             self._load_jobs[job_id] = entry.req_id
             assert isinstance(entry.dst_spec, GPULoadStoreSpec)
+            self._load_dst_block_ids[job_id] = list(entry.dst_spec.block_ids)
             success = self.worker.submit_load(job_id, entry.src_spec, entry.dst_spec)
             assert success
 
@@ -356,10 +370,22 @@ class OffloadingConnectorWorker:
         assert self.worker is not None
         finished_recving: set[str] = set()
         for transfer_result in self.worker.get_finished():
-            # we currently do not support job failures
             job_id = transfer_result.job_id
-            assert transfer_result.success
             is_load = job_id in self._load_jobs
+            if not transfer_result.success:
+                self._handle_failed_transfer(job_id, is_load)
+                # A failed job must still be marked completed, or the
+                # scheduler's per-job pending count never reaches zero and
+                # the request is never resumed.
+                self._connector_worker_meta.mark_completed(job_id)
+                self._load_dst_block_ids.pop(job_id, None)
+                req_id = self._load_jobs.pop(job_id, None)
+                if req_id is not None:
+                    # The contract in KVConnectorBase_V1 requires a request to
+                    # be reported here even when its load failed; the invalid
+                    # blocks are reported alongside it.
+                    finished_recving.add(req_id)
+                continue
             if (
                 transfer_result.transfer_time is not None
                 and transfer_result.transfer_size is not None
@@ -374,11 +400,63 @@ class OffloadingConnectorWorker:
                 )
 
             self._connector_worker_meta.mark_completed(job_id)
+            self._load_dst_block_ids.pop(job_id, None)
             req_id = self._load_jobs.pop(job_id, None)
             if req_id is not None:
                 finished_recving.add(req_id)
 
         return set(), finished_recving
+
+    def _handle_failed_transfer(self, job_id: int, is_load: bool) -> None:
+        """Decide what a failed transfer costs.
+
+        A failed store is dropped: this connector is a best-effort cache
+        (``requires_kv_delivery`` is False), so the chunk is simply not
+        cached and the tokens are recomputed or re-stored later.
+
+        A failed load is not droppable. Its destination GPU blocks hold
+        undefined data while the scheduler has already advanced the request's
+        ``num_computed_tokens`` past them, so resuming the request would read
+        garbage KV. The blocks are reported to the scheduler for recomputation.
+        """
+        if not is_load:
+            logger.warning(
+                "KV offload store job %d failed; the chunk was not cached. "
+                "Serving is unaffected: the tokens will be recomputed or "
+                "re-stored on a later step.",
+                job_id,
+            )
+            return
+
+        block_ids = self._load_dst_block_ids.get(job_id)
+        if not self._supports_load_failure_recovery:
+            # Continuing would let the request read undefined KV, and there is
+            # no safe narrower recovery: block-level recomputation needs the
+            # single-group assumption the scheduler still makes.
+            raise RuntimeError(
+                f"KV offload load job {job_id} failed and its destination GPU "
+                "blocks now hold undefined data. Block-level recovery is not "
+                "available for models with multiple KV cache groups (hybrid "
+                "attention/recurrent models), so the engine cannot continue "
+                "safely. Disable KV offloading to avoid this failure mode."
+            )
+
+        if block_ids:
+            self._invalid_block_ids.update(block_ids)
+        logger.warning(
+            "KV offload load job %d failed; reporting %d GPU block(s) for "
+            "recomputation.",
+            job_id,
+            len(block_ids) if block_ids else 0,
+        )
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        """Drain the GPU block IDs whose external load failed."""
+        if not self._invalid_block_ids:
+            return set()
+        invalid_block_ids = self._invalid_block_ids
+        self._invalid_block_ids = set()
+        return invalid_block_ids
 
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
         """Return completed transfer job IDs since the last call."""
@@ -391,6 +469,8 @@ class OffloadingConnectorWorker:
     def shutdown(self) -> None:
         self._unsubmitted_store_jobs.clear()
         self._load_jobs.clear()
+        self._load_dst_block_ids.clear()
+        self._invalid_block_ids.clear()
         self._connector_worker_meta = OffloadingWorkerMetadata()
         if self.worker is not None:
             self.worker.shutdown()
