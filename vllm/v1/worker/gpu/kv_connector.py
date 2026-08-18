@@ -168,6 +168,8 @@ class ActiveKVConnector(KVConnector):
     def set_disabled(self, disabled: bool) -> None:
         # Ensure that layer-wise connector hooks aren't called when disabled.
         kv_transfer_state._KV_CONNECTOR_AGENT = None if disabled else self.kv_connector
+        if self.hisparse_connector is not None:
+            self.hisparse_connector.set_fully_resident_kv(disabled)
         self._disabled = disabled
 
 
