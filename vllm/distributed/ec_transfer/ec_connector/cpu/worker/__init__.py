@@ -70,6 +70,12 @@ class ECCPUWorker:
     Every batched copy runs on a stream drawn from a pool so it overlaps the
     compute stream, bracketed by a start/end event pair. The stream, events,
     and descriptor buffers are recycled once the end event fires.
+
+    Both paths move memory between the two streams, so each buffer is registered
+    against the stream that is not its own: save sources against the save stream,
+    load destinations against the compute stream. Without that, the caching
+    allocator would be free to reissue memory a copy or a queued read still
+    needs, since it only tracks the stream a buffer was allocated on.
     """
 
     def __init__(self, vllm_config: "VllmConfig") -> None:
@@ -95,6 +101,9 @@ class ECCPUWorker:
         self._save_count: int = 0
         # mm_hashes accumulated into the active save buffer this step.
         self._save_mm_hashes: list[str] = []
+        # Stream the active save buffer's copy will run on, held from the moment
+        # the buffer opens so `save_caches` can register its sources against it.
+        self._save_stream: torch.Stream | None = None
 
         # Batched copies whose end event has not yet fired. Buffers and stream
         # stay held until the event fires; the mm_hashes are reported to the
@@ -154,7 +163,14 @@ class ECCPUWorker:
         mm_hash: str,
         connector_metadata: ECCPUConnectorMetadata,
     ) -> None:
-        """Fill descriptor buffers directly for batched flush."""
+        """Fill descriptor buffers directly for batched flush.
+
+        Registers `encoder_cache[mm_hash]` against the stream the copy will run
+        on, so the caching allocator will not hand that memory to another
+        allocation before the copy has read it. The descriptor buffers hold raw
+        addresses, and the caller is free to evict the entry as soon as this
+        step's saves are dispatched.
+        """
         if not self._is_save_rank:
             return
         block_ids = connector_metadata.saves.get(mm_hash)
@@ -175,11 +191,14 @@ class ECCPUWorker:
         if self._save_bufs is None:
             total = sum(len(v) for v in connector_metadata.saves.values())
             self._save_bufs = self._buf_pool.acquire(total)
+            self._save_stream = self._acquire_stream()
             self._save_mm_hashes = []
 
         assert self._save_count + len(block_ids) <= self._save_bufs.src_ptrs.numel()
 
         src_ptrs, dst_ptrs, sizes = self._save_bufs
+        assert self._save_stream is not None
+        src.record_stream(self._save_stream)
         src_base = src.view(-1).view(torch.uint8).data_ptr()
         dst_base = self._region.blocks.data_ptr()
         idx = self._save_count
@@ -197,10 +216,10 @@ class ECCPUWorker:
     def flush_saves(self) -> None:
         """Flush all accumulated saves in a single swap_blocks_batch call.
 
-        Runs the copy on a pooled stream gated behind the compute stream that
-        produced the encoder outputs, brackets it with start/end events, and
-        enqueues the batch as in-flight. The stream, events, and descriptor
-        buffers are recycled only once the end event fires (see
+        Runs the copy on the stream the batch acquired when it opened, gated
+        behind the compute stream that produced the encoder outputs, brackets it
+        with start/end events, and enqueues the batch as in-flight. The stream,
+        events, and descriptor buffers are recycled once the end event fires (see
         `_collect_finished`), which is also when the saved mm_hashes become
         safe to mark ready.
         """
@@ -208,12 +227,12 @@ class ECCPUWorker:
             return
 
         bufs = self._save_bufs
-        assert bufs is not None
+        stream = self._save_stream
+        assert bufs is not None and stream is not None
         src_ptrs, dst_ptrs, sizes = bufs
         n = self._save_count
         num_bytes = int(sizes[:n].sum().item())
 
-        stream = self._acquire_stream()
         # Gate the GPU→CPU copy behind the compute stream: it reads the encoder
         # outputs the model just produced there.
         stream.wait_stream(current_platform.current_stream())
@@ -236,6 +255,7 @@ class ECCPUWorker:
         )
 
         self._save_bufs = None
+        self._save_stream = None
         self._save_count = 0
         self._save_mm_hashes = []
 
@@ -244,7 +264,12 @@ class ECCPUWorker:
         encoder_cache: dict[str, torch.Tensor],
         connector_metadata: ECCPUConnectorMetadata,
     ) -> None:
-        """Consumer path: single batched copy of all loads from mmap→GPU."""
+        """Consumer path: single batched copy of all loads from mmap→GPU.
+
+        The destination is registered against the compute stream that consumes
+        it, so the caching allocator will not hand that memory to a later load
+        while reads of it are still queued there.
+        """
         if not connector_metadata.loads:
             return
 
@@ -262,6 +287,7 @@ class ECCPUWorker:
         total_blocks = sum(len(idxs) for idxs in load_items.values())
 
         stream = self._acquire_stream()
+        compute_stream = current_platform.current_stream()
         start_event = self._acquire_event()
         end_event = self._acquire_event()
         with current_platform.stream(stream):
@@ -269,6 +295,7 @@ class ECCPUWorker:
             dst_buf = torch.empty(
                 total_blocks, block_size, dtype=torch.int8, device=device_type
             )
+            dst_buf.record_stream(compute_stream)
             dst_buf_base = dst_buf.data_ptr()
 
             bufs = self._buf_pool.acquire(total_blocks)
@@ -327,6 +354,7 @@ class ECCPUWorker:
         for transfer in (*self._inflight_saves, *self._inflight_loads):
             transfer.end_event.synchronize()
         self._save_bufs = None
+        self._save_stream = None
         self._save_count = 0
         self._save_mm_hashes = []
         self._inflight_saves.clear()
