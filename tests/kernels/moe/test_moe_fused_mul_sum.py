@@ -8,7 +8,10 @@ Run `pytest tests/kernels/moe/test_moe_fused_mul_sum.py`.
 import pytest
 import torch
 
-from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import moe_fused_mul_sum
+from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import (
+    _heuristic_config,
+    moe_fused_mul_sum,
+)
 from vllm.utils.torch_utils import set_random_seed
 
 NUM_TOKENS = [1, 17, 256]
@@ -78,3 +81,145 @@ def test_invalid_slots_excluded(num_tokens: int, top_k: int, use_expert_map: boo
     assert not out.isnan().any(), "invalid slots leaked into the reduction"
     ref = _reference(inputs.nan_to_num(), topk_weights, topk_ids, expert_map)
     torch.testing.assert_close(out.float(), ref, atol=1e-2, rtol=1e-2)
+
+
+def _local_expert_map(device: str) -> torch.Tensor:
+    """First half of the experts is local, second half maps to -1 (non-local)."""
+    expert_map = torch.full((NUM_EXPERTS,), -1, dtype=torch.int32, device=device)
+    local = NUM_EXPERTS // 2
+    expert_map[:local] = torch.arange(local, dtype=torch.int32, device=device)
+    return expert_map
+
+
+SENTINEL = 42.0  # exact in bf16; marks output the kernel must leave untouched
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_nonlocal_row_is_zeroed():
+    """A real row whose positive ids all map to non-local experts is written 0.
+
+    Such a row is not padding (its ids are >= 0, so row_valid > 0 and the block
+    is not early-returned). Every slot is then masked out by expert_map, so the
+    accumulator stays 0 and 0 is stored -- the row must not be left holding stale
+    buffer data, because downstream reduction treats it as a real token.
+    """
+    set_random_seed(0)
+    device = "cuda"
+    num_tokens, top_k = 17, 8
+    local = NUM_EXPERTS // 2
+    expert_map = _local_expert_map(device)
+
+    # Poison inputs so any failure to mask the non-local slots surfaces as NaN.
+    inputs = torch.full(
+        (num_tokens, top_k, HIDDEN_SIZE),
+        float("nan"),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    topk_weights = torch.rand(num_tokens, top_k, dtype=torch.bfloat16, device=device)
+    # Every id lands in the non-local half [local, NUM_EXPERTS).
+    topk_ids = torch.randint(
+        local, NUM_EXPERTS, (num_tokens, top_k), dtype=torch.int32, device=device
+    )
+
+    outputs = torch.full(
+        (num_tokens, HIDDEN_SIZE), SENTINEL, dtype=torch.bfloat16, device=device
+    )
+    out = moe_fused_mul_sum(
+        inputs=inputs,
+        topk_weights=topk_weights,
+        outputs=outputs,
+        topk_ids=topk_ids,
+        expert_map=expert_map,
+    )
+
+    assert not out.isnan().any(), "non-local row leaked NaN into the output"
+    torch.testing.assert_close(out.float(), torch.zeros_like(out.float()))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_padding_row_left_untouched():
+    """An all -1 padding row is skipped: its output row is left untouched.
+
+    This is the CUDA-graph decode contract -- padding rows past num_recv are
+    never read downstream, so the kernel elides them (whole-padding blocks
+    early-return) rather than zeroing. The behavior relies on expert_map being
+    present (has_expert_map); we pin it so a regression is visible.
+    """
+    set_random_seed(0)
+    device = "cuda"
+    num_tokens, top_k = 17, 8
+    expert_map = _local_expert_map(device)
+
+    inputs = torch.full(
+        (num_tokens, top_k, HIDDEN_SIZE),
+        float("nan"),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    topk_weights = torch.rand(num_tokens, top_k, dtype=torch.bfloat16, device=device)
+    topk_ids = torch.full((num_tokens, top_k), -1, dtype=torch.int32, device=device)
+
+    outputs = torch.full(
+        (num_tokens, HIDDEN_SIZE), SENTINEL, dtype=torch.bfloat16, device=device
+    )
+    out = moe_fused_mul_sum(
+        inputs=inputs,
+        topk_weights=topk_weights,
+        outputs=outputs,
+        topk_ids=topk_ids,
+        expert_map=expert_map,
+    )
+
+    assert torch.all(out == SENTINEL), "padding row output was modified"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_nonlocal_and_padding_share_tile():
+    """A non-local real row and an all -1 padding row in the same BLOCK_M tile.
+
+    The real row keeps the tile alive (no early-return), so the non-local row is
+    zeroed while the padding row beside it is left untouched. Guards against a
+    future change that skips the whole tile and corrupts the real row.
+    """
+    set_random_seed(0)
+    device = "cuda"
+    num_tokens, top_k = 17, 8
+    local = NUM_EXPERTS // 2
+    expert_map = _local_expert_map(device)
+
+    block_m = _heuristic_config(num_tokens, top_k, HIDDEN_SIZE, 2)[0]
+    if block_m < 2:
+        pytest.skip(f"BLOCK_M={block_m} < 2: rows cannot share a tile")
+
+    inputs = torch.full(
+        (num_tokens, top_k, HIDDEN_SIZE),
+        float("nan"),
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    topk_weights = torch.rand(num_tokens, top_k, dtype=torch.bfloat16, device=device)
+    # All rows are non-local real rows except row 1, an all -1 padding row that
+    # shares tile 0 (rows [0, BLOCK_M)) with the non-local row 0.
+    topk_ids = torch.randint(
+        local, NUM_EXPERTS, (num_tokens, top_k), dtype=torch.int32, device=device
+    )
+    topk_ids[1] = -1
+
+    outputs = torch.full(
+        (num_tokens, HIDDEN_SIZE), SENTINEL, dtype=torch.bfloat16, device=device
+    )
+    out = moe_fused_mul_sum(
+        inputs=inputs,
+        topk_weights=topk_weights,
+        outputs=outputs,
+        topk_ids=topk_ids,
+        expert_map=expert_map,
+    )
+
+    padding = torch.zeros(num_tokens, dtype=torch.bool, device=device)
+    padding[1] = True
+    assert torch.all(out[1] == SENTINEL), "padding row in shared tile was modified"
+    written = out[~padding].float()
+    assert not written.isnan().any(), "non-local row leaked NaN into the output"
+    torch.testing.assert_close(written, torch.zeros_like(written))
