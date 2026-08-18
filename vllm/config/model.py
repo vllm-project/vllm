@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
 from functools import cached_property
@@ -349,8 +348,6 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation.
     - "terratorch" will use the TerraTorch model implementation.
     """
-    override_attention_dtype: str | None = None
-    """Override dtype for attention"""
     logits_processors: list[str | type[LogitsProcessor]] | None = None
     """One or more logits processors' fully-qualified class names or class
     definitions"""
@@ -433,7 +430,6 @@ class ModelConfig:
             "config_format",
             "hf_token",
             "hf_overrides",
-            "override_attention_dtype",
             "logits_processors",
             "io_processor_plugin",
             "pooler_config",
@@ -593,12 +589,6 @@ class ModelConfig:
                 self.tokenizer,
                 self.tokenizer_revision,
                 self.hf_token,
-            )
-
-        if self.override_attention_dtype is not None and not current_platform.is_rocm():
-            warnings.warn(
-                "override-attention-dtype is set but not using ROCm platform",
-                stacklevel=2,
             )
 
         if self.enable_sleep_mode:
@@ -935,6 +925,12 @@ class ModelConfig:
                 f"max_model_len must be a positive integer, "
                 f"got {type(self.max_model_len).__name__}: {self.max_model_len!r}. "
                 "Example: max_model_len=2048"
+            )
+        if self.enable_prompt_embeds and self.is_encoder_decoder:
+            # No encoder-decoder model accepts `inputs_embeds`; their decoders
+            # embed `input_ids` internally.
+            raise ValueError(
+                "--enable-prompt-embeds is not supported with encoder-decoder models."
             )
         return self
 
