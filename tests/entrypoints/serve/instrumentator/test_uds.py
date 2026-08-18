@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import httpx
 import pytest
 
+from tests.utils import RemoteOpenAIServer
 from vllm import envs
 from vllm.version import __version__ as VLLM_VERSION
 
