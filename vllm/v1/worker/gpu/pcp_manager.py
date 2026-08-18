@@ -357,7 +357,7 @@ class PCPManager:
 
         local_to_global_batch_req_idx_np = np.fromiter(
             (segment.global_batch_req_idx for segment in local_segments),
-            dtype=np.int32,
+            dtype=np.intp,
             count=num_local_reqs,
         )
         local_start_pos_np = np.fromiter(
@@ -529,6 +529,7 @@ class PCPManager:
             prefill_len_np=local_prefill_len_np,
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
             is_prefilling_np=local_is_prefilling_np,
+            has_prefill=bool(local_is_prefilling_np.any()),
             max_seq_len_np=global_batch.max_seq_len_np[local_to_global_batch_req_idx_np]
             if global_batch.max_seq_len_np is not None
             else None,

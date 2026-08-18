@@ -292,7 +292,7 @@ class AutoAWQConfig(QuantizationConfig):
                 prefix,
                 self.modules_to_not_convert,
                 self.packed_modules_mapping,
-                skip_with_substr=True,
+                match_mode="substring",
             ):
                 return UnquantizedLinearMethod()
 
@@ -335,7 +335,7 @@ class AutoAWQConfig(QuantizationConfig):
             if is_layer_skipped(
                 prefix,
                 getattr(self, "modules_to_not_convert", []),
-                skip_with_substr=True,
+                match_mode="substring",
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
 
@@ -357,31 +357,6 @@ class AutoAWQConfig(QuantizationConfig):
             return AutoAWQMoEMethod(self, layer.moe_config)
 
         return None
-
-    @classmethod
-    def is_awq_marlin_compatible(cls, quant_config: dict[str, Any]):
-        # Extract data from quant config.
-        quant_method = quant_config.get("quant_method", "").lower()
-        num_bits = quant_config.get("bits")
-        group_size = quant_config.get("group_size")
-        zero_point = quant_config.get("zero_point")
-
-        if not (current_platform.is_cuda_alike() or current_platform.is_cpu()):
-            return False
-
-        if quant_method != "awq":
-            return False
-
-        # If we cannot find the info needed in the config, cannot convert.
-        if num_bits is None or group_size is None or zero_point is None:
-            return False
-
-        if num_bits not in cls.TYPE_MAP:
-            return False
-
-        return check_marlin_supported(
-            quant_type=cls.TYPE_MAP[num_bits], group_size=group_size, has_zp=zero_point
-        )
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
         if self.modules_to_not_convert:
@@ -751,7 +726,6 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             moe_config=self.moe,
             experts_cls=self.experts_cls,
             backend=self.wna16_moe_backend,
-            layer=layer,
             is_k_full=self.is_k_full,
             w13_g_idx=getattr(layer, "w13_g_idx", None),
             w2_g_idx=getattr(layer, "w2_g_idx", None),
@@ -766,7 +740,12 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
                 get_humming_moe_quant_config,
             )
 
-            return get_humming_moe_quant_config(layer)
+            return get_humming_moe_quant_config(
+                layer,
+                gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+                gemm1_beta=getattr(layer, "swiglu_beta", None),
+                gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+            )
         return make_wna16_moe_quant_config(
             w1_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,

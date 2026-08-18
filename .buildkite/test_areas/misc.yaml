@@ -9,6 +9,7 @@ steps:
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/
+    - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
     - vllm/inputs/
     - vllm/logger.py
@@ -45,6 +46,7 @@ steps:
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/
+    - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
     - vllm/entrypoints/pooling/
     - vllm/inputs/
@@ -101,6 +103,7 @@ steps:
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/
+    - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
     - vllm/inputs/
     - vllm/lora/
@@ -124,6 +127,7 @@ steps:
     - pytest -v -s v1/test_kv_cache_spec_registry.py
     - pytest -v -s v1/cudagraph/test_cudagraph_manager.py
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
+    - pytest -v -s -m 'cpu_test' v1/ec_connector/unit
     - pytest -v -s -m 'cpu_test' v1/metrics
 
 - label: Extract Hidden States Integration
@@ -161,6 +165,7 @@ steps:
   source_file_dependencies:
   - vllm/config/
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/inputs/
   - vllm/model_executor/
@@ -228,6 +233,7 @@ steps:
   source_file_dependencies:
   - vllm/config/
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/inputs/
   - vllm/model_executor/
@@ -269,7 +275,8 @@ steps:
   - bash standalone_tests/python_only_compile.sh
   mirror:
     amd:
-      device: mi250_1
+      dind: false
+      device: mi300_1
       timeout_in_minutes: 55
       soft_fail: true
       depends_on:
@@ -287,6 +294,7 @@ steps:
   - vllm/assets/
   - vllm/config/
   - vllm/distributed/
+  - "!vllm/distributed/kv_transfer/"
   - vllm/engine/
   - vllm/inputs/
   - vllm/model_executor/
