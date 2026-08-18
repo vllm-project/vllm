@@ -15,7 +15,8 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from vllm.v1.core.kv_cache_utils import DEFAULT_NONE_HASH_SEED
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import DEFAULT_NONE_HASH_SEED, init_none_hash
 from vllm.v1.kv_offload.base import LookupResult, ReqContext, ScheduleEndContext
 from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
@@ -129,37 +130,47 @@ def _init_offloading_spec() -> SimpleNamespace:
 
 
 class TestInitHashSeed:
+    def _build(self, monkeypatch) -> P2PSecondaryTierManager:
+        monkeypatch.setattr(manager_module, "NixlTransport", lambda *a, **k: object())
+        monkeypatch.setattr(manager_module, "ZmqTransport", lambda *a, **k: object())
+        monkeypatch.setattr(
+            manager_module.FileMapper,
+            "from_offloading_spec",
+            lambda **k: SimpleNamespace(get_run_config=lambda: {}),
+        )
+        return P2PSecondaryTierManager(
+            offloading_spec=_init_offloading_spec(),
+            primary_kv_view=memoryview(bytearray(16)),
+        )
+
     def test_missing_pythonhashseed_uses_default(self, monkeypatch):
         """P2P falls back to the deterministic default seed when unset."""
         monkeypatch.delenv("PYTHONHASHSEED", raising=False)
-        monkeypatch.setattr(manager_module, "NixlTransport", lambda *a, **k: object())
-        monkeypatch.setattr(manager_module, "ZmqTransport", lambda *a, **k: object())
-        monkeypatch.setattr(
-            manager_module.FileMapper,
-            "from_offloading_spec",
-            lambda **k: SimpleNamespace(get_run_config=lambda: {}),
-        )
-        mgr = P2PSecondaryTierManager(
-            offloading_spec=_init_offloading_spec(),
-            primary_kv_view=memoryview(bytearray(16)),
-        )
-        assert mgr._hash_seed == DEFAULT_NONE_HASH_SEED
+        mgr = self._build(monkeypatch)
+        init_none_hash(sha256)
+        assert mgr._get_hash_seed() == DEFAULT_NONE_HASH_SEED
 
     def test_pythonhashseed_set_succeeds(self, monkeypatch):
-        """With PYTHONHASHSEED set, __init__ records it for the handshake."""
+        """With PYTHONHASHSEED set, the handshake advertises it."""
         monkeypatch.setenv("PYTHONHASHSEED", "12345")
-        monkeypatch.setattr(manager_module, "NixlTransport", lambda *a, **k: object())
-        monkeypatch.setattr(manager_module, "ZmqTransport", lambda *a, **k: object())
+        mgr = self._build(monkeypatch)
+        init_none_hash(sha256)
+        assert mgr._get_hash_seed() == "12345"
+
+    def test_seed_resolved_after_init_none_hash(self, monkeypatch):
+        """The seed is read lazily, not at construction time.
+
+        This tier is built before init_none_hash runs, and a non-cryptographic
+        hash algorithm seeds NONE_HASH randomly, so resolving in __init__ would
+        advertise a value that does not match the NONE_HASH actually in use.
+        """
+        monkeypatch.delenv("PYTHONHASHSEED", raising=False)
+        mgr = self._build(monkeypatch)
+        assert mgr._hash_seed is None
         monkeypatch.setattr(
-            manager_module.FileMapper,
-            "from_offloading_spec",
-            lambda **k: SimpleNamespace(get_run_config=lambda: {}),
+            manager_module, "get_none_hash_seed", lambda: "random-seed-abc"
         )
-        mgr = P2PSecondaryTierManager(
-            offloading_spec=_init_offloading_spec(),
-            primary_kv_view=memoryview(bytearray(16)),
-        )
-        assert mgr._hash_seed == "12345"
+        assert mgr._get_hash_seed() == "random-seed-abc"
 
 
 # ---------------------------------------------------------------------------

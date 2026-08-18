@@ -100,7 +100,9 @@ class FileSystemTierManager(SecondaryTierManager):
         (the chain-hash seed for block content hashes) is derived from a fixed
         default seed, so identical token content produces identical block
         filenames across instances. Setting the ``PYTHONHASHSEED`` environment
-        variable to the same value on all instances overrides the default seed.
+        variable to the same value on all instances overrides the default seed,
+        and is required to share a cache when using a non-cryptographic
+        prefix-caching hash algorithm, which seeds ``NONE_HASH`` randomly.
     """
 
     medium: ClassVar[Medium] = Medium.STORAGE
