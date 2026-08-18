@@ -9,6 +9,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     KVQuantMode,
     MambaSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.worker.gpu.attn_utils import _reshape_kv_cache
 from vllm.v1.worker.utils import AttentionGroup
@@ -134,6 +135,63 @@ def test_reshape_padded_hnd_flash_attention_kv_cache_strides_by_page():
         )
         // 4
     )
+
+
+def test_reshape_padded_kv_cache_with_kernel_block_split():
+    """Padded pages + kernel-block splitting must distribute the padding.
+
+    A padded spec whose block_size exceeds the kernel block size (e.g. a
+    draft SWA group whose block size was raised for commensurability with the
+    target's groups) is viewed at kernel-block granularity. Striding each
+    kernel block by the full manager padded page overshoots the allocation by
+    the split factor (observed as a storage-size RuntimeError / illegal
+    memory access at init); the padding must be split evenly across the
+    kernel blocks instead.
+    """
+    num_blocks = 4
+    kernel_block_size = 4
+    split = 3
+    spec = SlidingWindowSpec(
+        block_size=split * kernel_block_size,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=torch.float32,
+        sliding_window=8,
+        page_size_padded=288,
+    )
+    # 16 B/token: real page 192 B, padded to 288 B (96 B per kernel block).
+    assert spec.real_page_size_bytes == 192
+
+    raw_tensors = {
+        "layer": torch.zeros(spec.page_size_bytes * num_blocks, dtype=torch.int8)
+    }
+    attn_groups = [
+        AttentionGroup(
+            backend=FakeFlashAttentionBackend,
+            layer_names=["layer"],
+            kv_cache_spec=spec,
+            kv_cache_group_id=0,
+        )
+    ]
+
+    kv_cache = _reshape_kv_cache(
+        attn_groups,
+        raw_tensors,
+        "auto",
+        [kernel_block_size],
+        {},
+    )["layer"]
+
+    kernel_page_bytes = spec.page_size_bytes // split
+    assert kv_cache.shape == (num_blocks * split, 2, kernel_block_size, 1, 2)
+    assert kv_cache.stride(0) == kernel_page_bytes // 4
+    for kernel_block_id in range(num_blocks * split):
+        assert (
+            kv_cache[kernel_block_id].storage_offset()
+            == kernel_block_id * kernel_page_bytes // 4
+        )
+    # Manager block b starts exactly at its padded page boundary.
+    assert kv_cache[split].storage_offset() == spec.page_size_bytes // 4
 
 
 class FakeDiffKVBackend:
