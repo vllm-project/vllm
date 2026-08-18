@@ -141,20 +141,25 @@ MoEBackend = Literal[
     "emulation",
 ]
 
-# Backends that run the DeepSeek-V4 mega-MoE model path (fused expert module
-# plus prepare_megamoe routing), whether the experts compute natively
-# (deep_gemm) or through the flashinfer moe_ep runtime.
-MEGA_MOE_BACKENDS = frozenset(
+# Backends that run the mega-MoE model path through the flashinfer moe_ep
+# runtime. Only architectures in FLASHINFER_MOE_EP_ARCHITECTURES wire up
+# these experts.
+FLASHINFER_MOE_EP_BACKENDS = frozenset(
     {
-        "deep_gemm_mega_moe",
         "flashinfer_moe_ep_mega_deep_gemm",
         "flashinfer_moe_ep_mega_cutedsl",
     }
 )
 
-# Architectures whose model code implements the mega-MoE path. MTP and DSpark
-# draft variants inherit the setting from these target models.
-MEGA_MOE_ARCHITECTURES = frozenset(
+# Backends that run a mega-MoE model path (fused expert module plus
+# prepare_megamoe routing): vLLM's native deep_gemm path, which any model
+# with a mega-MoE module may use (DeepSeek-V4, Kimi K3), plus the flashinfer
+# moe_ep variants.
+MEGA_MOE_BACKENDS = frozenset({"deep_gemm_mega_moe"}) | FLASHINFER_MOE_EP_BACKENDS
+
+# Architectures whose model code wires up the flashinfer moe_ep experts. MTP
+# and DSpark draft variants inherit the setting from these target models.
+FLASHINFER_MOE_EP_ARCHITECTURES = frozenset(
     {
         "DeepseekV4ForCausalLM",
         "DeepSeekV4MTPModel",
@@ -162,15 +167,17 @@ MEGA_MOE_ARCHITECTURES = frozenset(
 )
 
 
-def validate_mega_moe_model(moe_backend: str, architectures: Iterable[str]) -> None:
-    """Reject mega-MoE backends for models that lack the mega-MoE path."""
-    if moe_backend not in MEGA_MOE_BACKENDS:
+def validate_flashinfer_moe_ep_model(
+    moe_backend: str, architectures: Iterable[str]
+) -> None:
+    """Reject flashinfer moe_ep backends for models that lack the FI path."""
+    if moe_backend not in FLASHINFER_MOE_EP_BACKENDS:
         return
-    if not any(arch in MEGA_MOE_ARCHITECTURES for arch in architectures):
+    if not any(arch in FLASHINFER_MOE_EP_ARCHITECTURES for arch in architectures):
         raise ValueError(
             f"moe_backend={moe_backend!r} is only supported for DeepSeek-V4 "
-            f"models ({sorted(MEGA_MOE_ARCHITECTURES)}), but the model is "
-            f"{list(architectures)}."
+            f"models ({sorted(FLASHINFER_MOE_EP_ARCHITECTURES)}), but the "
+            f"model is {list(architectures)}."
         )
 
 
@@ -328,7 +335,7 @@ class KernelConfig:
         from vllm.platforms import current_platform
 
         if vllm_config.model_config is not None:
-            validate_mega_moe_model(
+            validate_flashinfer_moe_ep_model(
                 self.moe_backend, vllm_config.model_config.architectures
             )
 

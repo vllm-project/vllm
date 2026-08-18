@@ -14,10 +14,14 @@ from typing import Any
 import pytest
 import torch
 
-from vllm.config.kernel import MEGA_MOE_BACKENDS, validate_mega_moe_model
+from vllm.config.kernel import (
+    FLASHINFER_MOE_EP_BACKENDS,
+    MEGA_MOE_BACKENDS,
+    validate_flashinfer_moe_ep_model,
+)
 from vllm.utils.flashinfer_moe_ep import (
     _E2M1_LUT,
-    FI_MOE_EP_BACKENDS,
+    FI_MOE_EP_BACKEND_SPECS,
     _dequant_fp4_ue8m0_gran32,
     build_fi_mega_config,
     fi_moe_ep_backend_spec,
@@ -88,24 +92,35 @@ def fake_flashinfer(monkeypatch):
 
 
 def test_fi_backend_strings_are_registered_mega_moe_backends():
-    assert set(FI_MOE_EP_BACKENDS) <= MEGA_MOE_BACKENDS
+    assert set(FI_MOE_EP_BACKEND_SPECS) == FLASHINFER_MOE_EP_BACKENDS
+    assert FLASHINFER_MOE_EP_BACKENDS < MEGA_MOE_BACKENDS
 
 
-@pytest.mark.parametrize("moe_backend", sorted(MEGA_MOE_BACKENDS))
-def test_mega_moe_backend_rejected_for_non_dsv4(moe_backend):
-    """A mega-MoE backend with a non-DSv4 model must fail at config time
+@pytest.mark.parametrize("moe_backend", sorted(FLASHINFER_MOE_EP_BACKENDS))
+def test_fi_moe_ep_backend_rejected_for_non_dsv4(moe_backend):
+    """An FI moe_ep backend with a non-DSv4 model must fail at config time
     instead of silently falling through to the generic FusedMoE path."""
     with pytest.raises(ValueError, match="only supported for DeepSeek-V4"):
-        validate_mega_moe_model(moe_backend, ["MixtralForCausalLM"])
+        validate_flashinfer_moe_ep_model(moe_backend, ["MixtralForCausalLM"])
 
 
-@pytest.mark.parametrize("moe_backend", sorted(MEGA_MOE_BACKENDS))
-def test_mega_moe_backend_accepted_for_dsv4(moe_backend):
-    validate_mega_moe_model(moe_backend, ["DeepseekV4ForCausalLM"])
+@pytest.mark.parametrize("moe_backend", sorted(FLASHINFER_MOE_EP_BACKENDS))
+def test_fi_moe_ep_backend_accepted_for_dsv4(moe_backend):
+    validate_flashinfer_moe_ep_model(moe_backend, ["DeepseekV4ForCausalLM"])
 
 
-def test_non_mega_backend_ignores_architectures():
-    validate_mega_moe_model("auto", ["MixtralForCausalLM"])
+@pytest.mark.parametrize(
+    "architectures",
+    [["KimiK3ForConditionalGeneration"], ["MixtralForCausalLM"]],
+)
+def test_native_deep_gemm_mega_moe_not_arch_gated(architectures):
+    """vLLM's own deep_gemm mega path is not DSv4-only (Kimi K3 uses it);
+    models validate their own constraints at construction time."""
+    validate_flashinfer_moe_ep_model("deep_gemm_mega_moe", architectures)
+
+
+def test_non_fi_backend_ignores_architectures():
+    validate_flashinfer_moe_ep_model("auto", ["MixtralForCausalLM"])
 
 
 @pytest.mark.parametrize("moe_backend", sorted(MEGA_MOE_BACKENDS))

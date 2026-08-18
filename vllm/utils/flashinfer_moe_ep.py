@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 import torch.nn as nn
 
+from vllm.config.kernel import FLASHINFER_MOE_EP_BACKENDS
 from vllm.distributed import get_ep_group
 from vllm.platforms import current_platform
 
@@ -39,7 +40,7 @@ class FiMoeEpBackendSpec:
     needs_nvshmem: bool
 
 
-FI_MOE_EP_BACKENDS: dict[str, FiMoeEpBackendSpec] = {
+FI_MOE_EP_BACKEND_SPECS: dict[str, FiMoeEpBackendSpec] = {
     # Consumes an MXFP4 checkpoint verbatim (e2m1 weights + E8M0 per-32
     # scales) -- the same recipe the native deep_gemm mega path uses.
     "flashinfer_moe_ep_mega_deep_gemm": FiMoeEpBackendSpec(
@@ -56,20 +57,22 @@ FI_MOE_EP_BACKENDS: dict[str, FiMoeEpBackendSpec] = {
     ),
 }
 
+assert set(FI_MOE_EP_BACKEND_SPECS) == FLASHINFER_MOE_EP_BACKENDS
+
 _FI_RUNTIME_HANDLE: Any = None
 
 
 def is_fi_moe_ep_backend(moe_backend: str) -> bool:
-    return moe_backend in FI_MOE_EP_BACKENDS
+    return moe_backend in FI_MOE_EP_BACKEND_SPECS
 
 
 def fi_moe_ep_backend_spec(moe_backend: str) -> FiMoeEpBackendSpec:
     try:
-        return FI_MOE_EP_BACKENDS[moe_backend]
+        return FI_MOE_EP_BACKEND_SPECS[moe_backend]
     except KeyError:
         raise ValueError(
             f"{moe_backend!r} is not a flashinfer moe_ep backend; expected "
-            f"one of {sorted(FI_MOE_EP_BACKENDS)}"
+            f"one of {sorted(FI_MOE_EP_BACKEND_SPECS)}"
         ) from None
 
 
@@ -321,7 +324,7 @@ def build_fi_mega_layer(
 
 
 __all__ = [
-    "FI_MOE_EP_BACKENDS",
+    "FI_MOE_EP_BACKEND_SPECS",
     "FiMoeEpBackendSpec",
     "build_fi_mega_config",
     "build_fi_mega_layer",
