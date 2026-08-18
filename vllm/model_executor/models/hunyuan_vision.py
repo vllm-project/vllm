@@ -541,9 +541,6 @@ class HunYuanVisionTransformer(nn.Module):
             max_seqlen = torch.tensor(max_seqlen_override, dtype=torch.int32)
 
         return {
-            # async_tensor_h2d pins the source first; a plain
-            # .to(non_blocking=True) from pageable memory silently
-            # degrades to a blocking copy.
             "cu_seqlens": async_tensor_h2d(cu_seqlens, device),
             "max_seqlen": max_seqlen,
         }
