@@ -11,6 +11,7 @@ import vllm.envs
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
+from vllm.tokenizers.mistral import mistral_common_tekkenizer
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (
@@ -40,19 +41,32 @@ class XgrammarBackend(StructuredOutputBackend):
             self.vllm_config.structured_outputs_config.disable_any_whitespace
         )
 
-        if is_mistral_tokenizer(self.tokenizer):
+        tokenizer = self.tokenizer
+        if not is_mistral_tokenizer(tokenizer) and (
+            mistral_common_tekkenizer(tokenizer) is not None
+        ):
+            # transformers>=5.5 returns a `MistralCommonBackend` for Mistral
+            # repos under the default `tokenizer_mode="auto"`. xgrammar cannot
+            # classify that class, so wrap it in vLLM's `MistralTokenizer` and
+            # take the Mistral path below instead of failing in
+            # `TokenizerInfo.from_huggingface`.
+            from vllm.tokenizers.mistral import MistralTokenizer
+
+            tokenizer = MistralTokenizer(tokenizer)
+
+        if is_mistral_tokenizer(tokenizer):
             # NOTE: ideally, xgrammar should handle this accordingly.
             # refer to https://github.com/mlc-ai/xgrammar/blob/d77c0a0173ef14779c918e3be7966ba852f7910f/python/xgrammar/tokenizer_info.py#L98
-            stop_token_ids = [self.tokenizer.eos_token_id]
+            stop_token_ids = [tokenizer.eos_token_id]
 
-            # not self.tokenizer.vocab_size as self.tokenizer.vocab
+            # not tokenizer.vocab_size as tokenizer.vocab
             # collapses all decoded errors into a single token.
-            self.vocab_size = len(self.tokenizer.vocab)
+            self.vocab_size = len(tokenizer.vocab)
             tokenizer_info = xgr.TokenizerInfo(  # type: ignore
-                encoded_vocab=self.tokenizer.vocab,
+                encoded_vocab=tokenizer.vocab,
                 # NOTE: https://github.com/mlc-ai/xgrammar/blob/5e141f6ff1ca02bc31f9e512e68b61f2a8ae88e5/tests/python/test_tokenizer_info.py#L43 # noqa: E501
                 vocab_type=xgr.VocabType.RAW
-                if self.tokenizer.is_tekken
+                if tokenizer.is_tekken
                 else xgr.VocabType.BYTE_FALLBACK,
                 vocab_size=self.vocab_size,
                 stop_token_ids=stop_token_ids,
