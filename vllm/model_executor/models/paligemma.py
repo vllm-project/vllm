@@ -378,8 +378,6 @@ class PaliGemmaForConditionalGeneration(
         if image_input is None:
             return []
         vision_embeddings = self._process_image_input(image_input)
-        # https://github.com/huggingface/transformers/blob/main/src/transformers/models/paligemma/modeling_paligemma.py#L294 # noqa
-        vision_embeddings = vision_embeddings * (self.config.hidden_size**-0.5)
         return vision_embeddings
 
     def forward(
