@@ -589,6 +589,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self._saved_offset: dict[str, int] = {}
 
         # Session API state
+        # Keys whose put session opened this step (set by start_put_sessions,
+        # consumed by the per-layer range-put handler). None/empty until then.
         self._active_put_keys: set[str] | None = None
 
     def add_request(self, request: ReqMeta) -> None:
@@ -853,10 +855,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
         per-layer tasks are constructed.  Once a session is open, subsequent
         ``batch_put_from_multi_buffer_ranges()`` calls can write data at
         layer offsets without additional Master communication.
+
+        The set of keys whose session actually opened is recorded in
+        ``_active_put_keys`` so the per-layer range-put handler only writes
+        live sessions and skips any whose start failed.
         """
         if not self._use_session_api:
             return
         if not keys:
+            self._active_put_keys = set()
             return
 
         sizes = [object_size] * len(keys)
@@ -867,6 +874,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         except Exception as exc:
             logger.error("batch_put_session_start failed: %s", exc)
             self._revoke_range_keys(keys)
+            self._active_put_keys = set()
             return
 
         failed = [k for k, r in zip(keys, results) if r != 0]
@@ -875,6 +883,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 "batch_put_session_start failed for keys: %s", failed
             )
             self._revoke_range_keys(failed)
+
+        # Only keys whose session opened are writable this batch.
+        self._active_put_keys = {k for k, r in zip(keys, results) if r == 0}
 
     def _revoke_range_keys(self, keys: list[str]) -> None:
         """Cancel unfinished put sessions (cleanup on failure)."""
@@ -973,8 +984,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
         start_time = time.perf_counter()
 
         try:
-            # Init the active-key set on the first layer
-            if self._active_put_keys is None or layer_id == 0:
+            # _active_put_keys is seeded by start_put_sessions() before the
+            # forward with the keys whose session actually opened. If a step
+            # reached the range-put handler without that (e.g. session start
+            # was skipped), fall back to treating all keys as active.
+            if self._active_put_keys is None:
                 self._active_put_keys = set(keys)
 
             # Only write keys whose session is still alive
@@ -1369,15 +1383,19 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         # Session API state
         self._active_load_indices: set[int] | None = None
 
-    def start_get_sessions(self, keys: list[str]) -> None:
+    def start_get_sessions(self, keys: list[str]) -> list[str]:
         """Start get sessions for load keys (one Master RPC).
 
         Called by ``MooncakeStoreWorker._start_layerwise_sessions()``.
+
+        Returns the keys whose session actually opened. Fails gracefully on
+        partial failure: errored sessions are revoked and excluded from later
+        layers so the surviving sessions remain usable.
         """
         if not self._use_session_api:
-            return
+            return []
         if not keys:
-            return
+            return []
         try:
             results = self.store.batch_get_session_start(keys)
         except Exception as exc:
@@ -1386,12 +1404,21 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 self.store.batch_get_session_end(keys)
             except Exception:
                 pass
-            return
+            return []
         failed = [k for k, r in zip(keys, results) if r != 0]
+        opened = [k for k, r in zip(keys, results) if r == 0]
         if failed:
             logger.warning(
                 "batch_get_session_start missed/errored keys: %s", failed
             )
+            # Revoke sessions that failed to open so a fresh start_get_sessions
+            # on the next step cannot collide with a stale partial lease.
+            try:
+                self.store.batch_get_session_end(failed)
+            except Exception:
+                pass
+
+        return opened
 
     def end_get_sessions(self, keys: list[str]) -> None:
         """Release get sessions (one shot per step).
@@ -1994,12 +2021,13 @@ class MooncakeStoreWorker:
         self._current_load_layer: int = 0
         self._next_load_layer_to_submit: int = 0
         self._num_prefetch_layers: int = 1
+        self._save_finalized: bool = False
 
         # Read layerwise parameters from the extra config.
         kvc_extra = vllm_config.kv_transfer_config.kv_connector_extra_config
         if kvc_extra:
             self._layerwise_enabled = str(kvc_extra.get("use_layerwise", "False")).lower() == "true"
-            self._num_prefetch_layers = int(kvc_extra.get("layerwise_prefetch_layers", 1))
+            self._num_prefetch_layers = int(kvc_extra.get("layerwise_prefetch_layers", 2))
 
         # Layerwise mode embeds KV load into the model forward pass.
         # load_async (which reports finished_recving to the scheduler,
@@ -2061,7 +2089,11 @@ class MooncakeStoreWorker:
             self._load_sessions_closed = False
             self._load_session_lock = threading.Lock()
             self._opened_load_keys: list[str] = []
-            self._page_size_bytes = self._compute_page_size_bytes()
+            # Placeholder: block_len is empty at __init__ time (it is filled
+            # later in register_kv_caches), so _compute_page_size_bytes() would
+            # return 0 here. The real value is (re)computed in register_kv_caches
+            # once the kv-cache layout is known.
+            self._page_size_bytes = 0
 
         logger.info(
             "Layerwise mode enabled: num_layers=%d, prefetch_layers=%d%s",
@@ -2116,10 +2148,12 @@ class MooncakeStoreWorker:
                 continue
             for group_id in range(len(req_meta.block_ids)):
                 db = self.token_dbs[group_id]
-                put_step_rank = (self.tp_rank + group_id) % self._group_tp_replication_factors[group_id]
+                put_step = self._group_tp_replication_factors[group_id]
+                put_step_rank = (self.tp_rank + group_id) % put_step
                 for _, _, block_hash in db.process_tokens(
                     req_meta.token_len_chunk,
                     req_meta.block_hashes,
+                    put_step=put_step,
                     put_step_rank=put_step_rank,
                 ):
                     key = db.key_for(block_hash)
@@ -2129,6 +2163,10 @@ class MooncakeStoreWorker:
 
         if save_keys and self.kv_send_thread is not None:
             self.kv_send_thread.start_put_sessions(save_keys, object_size)
+        elif self.kv_send_thread is not None:
+            # No session phase this step — clear any stale active-key set so
+            # the range-put handler cannot reuse keys from a previous step.
+            self.kv_send_thread._active_put_keys = set()
 
         # ---- Collect load keys (deduplicated across requests) ----
         load_keys: list[str] = []
@@ -2321,6 +2359,12 @@ class MooncakeStoreWorker:
                 self.num_layers,
                 len(addrs),
             )
+            # block_len is only populated here, so the Session-API page size
+            # cannot be computed in __init__. Recompute it now that the kv-cache
+            # layout is known; otherwise object_size stays 0 and every
+            # batch_put_session_start fails (rc=-600).
+            if self._use_session_api:
+                self._page_size_bytes = self._compute_page_size_bytes()
 
         # Start transfer threads
         if self.kv_role in ["kv_producer", "kv_both"]:
@@ -2401,6 +2445,20 @@ class MooncakeStoreWorker:
         per-layer _ranges calls operate on open sessions.
         """
         if self._layerwise_enabled:
+            # Backfill load_spec.token_len before starting sessions. It defaults
+            # to 0 and _start_layerwise_sessions() reads it to decide which
+            # blocks to lease via batch_get_session_start(); leaving it empty
+            # means no get session is opened and the later
+            # batch_get_into_multi_buffer_ranges returns rc=-600 for every key.
+            for req_meta in metadata.requests:
+                load_spec = req_meta.load_spec
+                if (
+                    load_spec is not None
+                    and load_spec.can_load
+                    and not load_spec.token_len
+                ):
+                    load_spec.token_len = load_spec.kvpool_cached_tokens
+
             self._start_layerwise_sessions(metadata.requests)
             self._build_layer_tasks_from_requests(metadata.requests)
 
@@ -2592,7 +2650,7 @@ class MooncakeStoreWorker:
             return
 
         # Submit up to prefetch_layers layers per call.
-        submit_count = self._num_prefetch_layers
+        submit_count = self._num_prefetch_layers if self._next_load_layer_to_submit == 0 else 1
         submitted = 0
 
         while (submitted < submit_count
@@ -2649,7 +2707,12 @@ class MooncakeStoreWorker:
                 event.set()
 
         # Last layer: wait for all saves to complete.
-        if layer_id == self._num_layers - 1:
+        # Guard: finalize only once per step. If save_kv_layer fires twice for
+        # the last layer (e.g. both the @maybe_transfer_kv_layer decorator and
+        # an explicit hook), the second call would otherwise hit the
+        # _reset_layer_state()-replaced events and hang in _wait_for_all_layer_saves.
+        if layer_id == self._num_layers - 1 and not self._save_finalized:
+            self._save_finalized = True
             self._wait_for_all_layer_saves()
             # Session API: release get-session leases now that all layers are done.
             self._close_load_sessions_once()
@@ -2714,6 +2777,7 @@ class MooncakeStoreWorker:
         self._current_save_layer = 0
         self._current_load_layer = 0
         self._next_load_layer_to_submit = 0
+        self._save_finalized = False
 
         for layer_id in range(self._num_layers):
             self._layer_save_tasks[layer_id] = []
