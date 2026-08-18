@@ -341,6 +341,8 @@ def test_apply_ready_response_syncs_engine_metadata():
             max_num_seqs=256,
             max_num_batched_tokens=8192,
             instance_id="test-instance",
+            supports_lora=False,
+            max_loras=0,
             coord_store_port=1234,
             coordinator_input_address="tcp://127.0.0.1:1235",
             coordinator_output_address="tcp://127.0.0.1:1236",
