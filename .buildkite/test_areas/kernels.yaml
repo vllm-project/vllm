@@ -282,9 +282,6 @@ steps:
   - vllm/v1/attention/backends/mla/flashinfer_mla.py
   - vllm/v1/attention/selector.py
   - vllm/platforms/cuda.py
-  - vllm/model_executor/kernels/linear/cute_dsl/ll_bf16.py
-  - vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_dotprod.py
-  - vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_splitk.py
   - vllm/cute_utils/
   - vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl/
   - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_cutedsl.py
@@ -302,7 +299,6 @@ steps:
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
   - tests/kernels/attention/test_minimax_m3.py
-  - tests/kernels/test_ll_bf16_gemm.py
   - tests/kernels/test_top_k_per_row.py
   commands:
     - nvidia-smi
@@ -336,10 +332,29 @@ steps:
     - pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
     - pytest -v -s tests/kernels/test_bf16x3_router_gemm_cutedsl.py
     - pytest -v -s tests/kernels/attention/test_minimax_m3.py
-    - pytest -v -s tests/kernels/test_ll_bf16_gemm.py
     # e2e
     - pytest -v -s tests/models/quantization/test_nvfp4.py
 
+- label: Kernels Gate Linear CuTeDSL (B200)
+  key: kernels-gate-linear-cutedsl-b200
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/"
+  device: b200-k8s
+  source_file_dependencies:
+  - vllm/cute_utils/
+  - vllm/platforms/cuda.py
+  - vllm/model_executor/layers/fused_moe/router/gate_linear.py
+  - vllm/model_executor/kernels/linear/cute_dsl/ll_bf16.py
+  - vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_dotprod.py
+  - vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_splitk.py
+  - tests/kernels/test_ll_bf16_gemm.py
+  - vllm/model_executor/kernels/linear/cute_dsl/ll_fp32w.py
+  - vllm/model_executor/kernels/linear/cute_dsl/_ll_fp32w_dotprod.py
+  - tests/kernels/test_ll_fp32w_gemm.py
+  commands:
+    - nvidia-smi
+    - pytest -v -s tests/kernels/test_ll_bf16_gemm.py
+    - pytest -v -s tests/kernels/test_ll_fp32w_gemm.py
 - label: B12X Linear Kernels (DGX Spark) Nightly
   key: b12x-linear-kernels-dgx-spark-nightly
   timeout_in_minutes: 30
