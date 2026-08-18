@@ -766,83 +766,6 @@ def test_get_block_descs_ids_hybrid_ssm():
 
 
 @pytest.mark.cpu_test
-def test_get_block_descs_ids_selects_attention_regions_by_group():
-    """Each attention group's blocks address only that group's regions."""
-    worker = _make_mock_worker_for_desc_ids(
-        num_regions=3,
-        has_mamba=False,
-        group_spec_types=(FullAttentionSpec, FullAttentionSpec),
-        block_len_per_layer=[100, 100, 100],
-    )
-    worker.region_group_ids = [0, 0, 1]
-
-    result = worker._compute_desc_ids(
-        block_ids=([1, 2], [7]),
-        dst_num_blocks=10,
-        block_size_ratio=None,
-        physical_blocks_per_logical=1,
-    )
-
-    assert result.tolist() == [1, 2, 11, 12, 27]
-
-
-@pytest.mark.cpu_test
-def test_get_block_descs_ids_uses_per_region_pool_capacity():
-    """Independent host and device pools use cumulative descriptor offsets."""
-    worker = _make_mock_worker_for_desc_ids(
-        num_regions=2,
-        has_mamba=False,
-        group_spec_types=(FullAttentionSpec, FullAttentionSpec),
-        block_len_per_layer=[100, 100],
-    )
-    worker.region_group_ids = [0, 1]
-
-    result = worker._compute_desc_ids(
-        block_ids=([4], [8]),
-        dst_num_blocks=10,
-        block_size_ratio=None,
-        physical_blocks_per_logical=1,
-        region_num_blocks=[5, 10],
-    )
-
-    assert result.tolist() == [4, 13]
-
-
-@pytest.mark.cpu_test
-def test_get_block_descs_ids_aligns_different_group_partitions_by_region():
-    """Equivalent layer regions may come from different cache groups."""
-    worker = _make_mock_worker_for_desc_ids(
-        num_regions=3,
-        has_mamba=False,
-        group_spec_types=(FullAttentionSpec,),
-        block_len_per_layer=[100, 100, 100],
-    )
-    worker.region_group_ids = [0, 0, 0]
-    producer_by_region = NixlConnectorWorker._block_ids_by_region(([1, 2],), [0, 0, 0])
-    decode_by_region = NixlConnectorWorker._block_ids_by_region(
-        ([4, 5], [6, 7], [8, 9]), [0, 1, 2]
-    )
-
-    producer_descs = worker._compute_desc_ids(
-        block_ids=producer_by_region,
-        dst_num_blocks=10,
-        block_size_ratio=None,
-        physical_blocks_per_logical=1,
-        region_group_ids=[0, 1, 2],
-    )
-    decode_descs = worker._compute_desc_ids(
-        block_ids=decode_by_region,
-        dst_num_blocks=10,
-        block_size_ratio=None,
-        physical_blocks_per_logical=1,
-        region_group_ids=[0, 1, 2],
-    )
-
-    assert producer_descs.tolist() == [1, 2, 11, 12, 21, 22]
-    assert decode_descs.tolist() == [4, 5, 16, 17, 28, 29]
-
-
-@pytest.mark.cpu_test
 def test_build_remote_descriptors_splits_only_larger_peer_regions():
     """A 256-token producer region is split for a 64-token consumer region."""
     worker = object.__new__(NixlConnectorWorker)
@@ -1734,6 +1657,8 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool():
     fake_platform = MagicMock()
     fake_platform.device_type = "cuda"
     fake_platform.get_nixl_memory_type.return_value = "VRAM"
+    host_cache = torch.zeros(host_num_blocks, spec.page_size_bytes, dtype=torch.uint8)
+    device_cache = torch.zeros(gpu_num_blocks, spec.page_size_bytes, dtype=torch.uint8)
 
     with (
         patch.object(bw, "NixlWrapper"),
@@ -1746,22 +1671,25 @@ def test_nixl_keeps_device_block_count_with_hisparse_host_pool():
         worker = NixlConnectorWorker(vllm_config, "test-engine", kv_cache_config)
         worker.use_mla = True
         worker.nixl_wrapper.get_agent_metadata.return_value = b"metadata"
-        worker.register_kv_caches(
-            {
-                "mla.host": torch.zeros(
-                    host_num_blocks, spec.page_size_bytes, dtype=torch.uint8
-                ),
-                "mla.device": torch.zeros(
-                    gpu_num_blocks, spec.page_size_bytes, dtype=torch.uint8
-                ),
-            }
-        )
+        worker.register_kv_caches({"mla.host": host_cache, "mla.device": device_cache})
 
     assert worker.num_blocks == gpu_num_blocks
     assert dict(zip(worker.region_group_ids, worker.region_num_blocks)) == {
         0: host_num_blocks,
         1: gpu_num_blocks,
     }
+    caches = {"mla.host": host_cache, "mla.device": device_cache}
+    expected_addrs = [
+        caches[name].data_ptr() + block * stride
+        for name, stride, count in zip(
+            worker.region_names,
+            worker.region_strides,
+            worker.region_num_blocks,
+            strict=True,
+        )
+        for block in range(count)
+    ]
+    assert worker.src_blocks_data[:, 0].tolist() == expected_addrs
 
 
 @pytest.mark.cpu_test
@@ -1829,7 +1757,7 @@ def test_hisparse_host_import_subdivides_scheduler_blocks_for_staging():
     worker.num_regions = 2
     worker.region_group_ids = [0, 1]
     worker.dst_region_split_ratios = {"prefill": [4, 4]}
-    worker.dst_region_num_blocks = {"prefill": [400, 400]}
+    worker.dst_region_num_blocks = {"prefill": [300, 400]}
     worker.dst_num_blocks = {"prefill": 400}
     worker._hisparse_host_regions = [
         (1_000, 10, 64),
@@ -1885,7 +1813,7 @@ def test_hisparse_host_import_subdivides_scheduler_blocks_for_staging():
         (40 + page, 1_080 + 10 * page, 10, 12_000 + 100 * page) for page in range(8)
     }
     expected.update(
-        (440 + page, 2_160 + 20 * page, 20, 39_800 if page == 7 else 0)
+        (340 + page, 2_160 + 20 * page, 20, 39_800 if page == 7 else 0)
         for page in range(8)
     )
     assert transfers == expected

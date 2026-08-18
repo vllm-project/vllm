@@ -71,39 +71,6 @@ from vllm.v1.request import Request
 pytestmark = pytest.mark.cpu_test
 
 
-def test_hisparse_memory_usage_keeps_indexer_source_on_host():
-    specs = {
-        "main": MLAAttentionSpec(
-            block_size=1,
-            num_kv_heads=1,
-            head_size=300,
-            dtype=torch.uint8,
-            is_index_group_leader=True,
-        ),
-        "selection": MLAAttentionSpec(
-            block_size=1,
-            num_kv_heads=1,
-            head_size=50,
-            dtype=torch.uint8,
-            cache_role=MLACacheRole.INDEXER,
-        ),
-    }
-    group = KVCacheGroupSpec(
-        layer_names=list(specs),
-        kv_cache_spec=UniformTypeKVCacheSpecs(
-            block_size=1,
-            kv_cache_specs=specs,
-        ),
-    )
-    config = SimpleNamespace(
-        attention_config=SimpleNamespace(hisparse_config=object()),
-        model_config=SimpleNamespace(max_model_len=1),
-        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-    )
-
-    assert kv_cache_utils._hisparse_gpu_memory_usage(config, [group]) == 50
-
-
 @pytest.mark.parametrize(
     ("block_size", "main_sizes", "indexer_sizes", "gpu_block_size"),
     [
@@ -139,8 +106,16 @@ def test_hisparse_hma_uses_backend_gpu_block_size(
         attention_config=SimpleNamespace(
             hisparse_config=HiSparseConfig(host_pool_gib=1.0)
         ),
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(index_topk=128)),
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(index_topk=128),
+            max_model_len=block_size,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         cache_config=SimpleNamespace(num_gpu_blocks_override=7),
+    )
+    indexer_spec = specs["model.layers.0.self_attn.indexer"]
+    assert kv_cache_utils._hisparse_gpu_memory_usage(config, [group]) == (
+        indexer_spec.max_memory_usage_bytes(config)
     )
 
     cache_config = kv_cache_utils._get_hisparse_hma_config(

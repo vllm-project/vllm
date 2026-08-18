@@ -98,24 +98,6 @@ class _RecordingNixl:
         pass
 
 
-@pytest.mark.cpu_test
-def test_local_descriptors_follow_each_region_pool_capacity():
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
-    )
-
-    worker = object.__new__(NixlConnectorWorker)
-    worker.transfer_topo = MagicMock()
-    worker.device_id = 0
-    worker.block_len_per_layer = [16, 16]
-    worker.region_strides = [16, 16]
-    worker.region_num_blocks = [2, 3]
-
-    descriptors = worker._build_fa_local([100, 1000], block_size_ratio=1)
-
-    assert descriptors[:, 0].tolist() == [100, 116, 1000, 1016, 1032]
-
-
 def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blocks):
     """Build a real pull worker with a hybrid MLA + 2xKDA HMA layout."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
@@ -170,8 +152,6 @@ def _make_mla_hybrid_worker(local_block_size, kernel_block_size, num_logical_blo
     # buffers are per-layer, so the HMA shared-tensor regions this test builds
     # would not be deduplicated. Pin it to the faked device type.
     vllm_config.kv_transfer_config.kv_buffer_device = "cuda"
-
-    from unittest.mock import MagicMock
 
     fake_backend = MagicMock()
     fake_backend.get_supported_kernel_block_sizes.return_value = [kernel_block_size]

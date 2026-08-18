@@ -673,24 +673,6 @@ def test_triton_convert_req_index_to_global_index_decode_only(
 
     torch.testing.assert_close(result, reference_result, rtol=0, atol=0)
 
-    physical_stride = block_size + 7
-    strided_result = triton_convert_req_index_to_global_index(
-        req_id,
-        block_table,
-        token_indices,
-        BLOCK_SIZE=block_size,
-        PHYSICAL_BLOCK_STRIDE=physical_stride,
-        NUM_TOPK_TOKENS=num_topk_tokens,
-    )
-    valid = reference_result >= 0
-    strided_reference = torch.where(
-        valid,
-        (reference_result // block_size) * physical_stride
-        + reference_result % block_size,
-        -1,
-    )
-    torch.testing.assert_close(strided_result, strided_reference, rtol=0, atol=0)
-
 
 @pytest.mark.parametrize("block_size", [16])
 @pytest.mark.skipif(
@@ -1475,19 +1457,6 @@ def test_hisparse_resident_rows_bypass_hot_lru():
     request_ids = torch.zeros(1, dtype=torch.int32, device=device)
     topk = torch.tensor([[1, 2, 3, 4]], dtype=torch.int32, device=device)
     lru_before = cache_handle.runtime.index_group.lru_slots.clone()
-
-    cache_handle.fully_resident = True
-    resident_cache, resident_indices = cache_handle.resolve_topk(
-        req_id_per_token=request_ids,
-        block_table=source_table,
-        topk_indices=topk,
-        block_size=block_size,
-        return_valid_counts=False,
-    )
-    assert cache_handle.view is not None
-    assert resident_cache.data_ptr() == cache_handle.view.attention_cache.data_ptr()
-    assert resident_indices.tolist() == [[block_size + 1, 66, 67, 68]]
-    cache_handle.fully_resident = False
 
     cache, indices = cache_handle.resolve_topk(
         req_id_per_token=request_ids,

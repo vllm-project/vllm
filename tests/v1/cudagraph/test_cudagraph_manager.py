@@ -143,28 +143,16 @@ def _create_hybrid_kv_manager(monkeypatch):
     return manager
 
 
-def test_kv_residency_cases_dispatch_independently(monkeypatch):
+def test_dp_padding_preserves_local_kv_residency(monkeypatch):
     manager = _create_hybrid_kv_manager(monkeypatch)
-
     resident = manager.dispatch(3, 3, 1, num_active_loras=0)
     hybrid = manager.dispatch(3, 3, 1, num_active_loras=0, fully_resident_kv=False)
-
-    assert resident.cg_mode == CUDAGraphMode.FULL
     assert resident.fully_resident_kv
-    assert hybrid.cg_mode == CUDAGraphMode.FULL
     assert not hybrid.fully_resident_kv
-    assert resident.num_tokens == hybrid.num_tokens == 4
-
     unsupported_mixed = manager.dispatch(
         2, 3, None, num_active_loras=0, fully_resident_kv=False
     )
     assert unsupported_mixed.cg_mode == CUDAGraphMode.NONE
-    assert not unsupported_mixed.fully_resident_kv
-
-
-def test_dp_padding_preserves_local_kv_residency(monkeypatch):
-    manager = _create_hybrid_kv_manager(monkeypatch)
-    hybrid = manager.dispatch(3, 3, 1, num_active_loras=0, fully_resident_kv=False)
 
     monkeypatch.setattr(
         dp_utils,

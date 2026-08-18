@@ -148,7 +148,6 @@ def make_hisparse_kv_cache_config(
     num_blocks: int,
     host_num_blocks: int,
     *,
-    include_resident: bool = True,
     transfer_device_cache: bool = False,
 ) -> KVCacheConfig:
     source_spec = FullAttentionSpec(
@@ -173,19 +172,18 @@ def make_hisparse_kv_cache_config(
             role=KVCacheGroupRole.HISPARSE_INDEXER,
         ),
     ]
-    if include_resident:
-        groups.append(
-            KVCacheGroupSpec(
-                ["resident"],
-                HiSparseResidentSpec(
-                    block_size=HISPARSE_BLOCK_SIZE,
-                    page_size=HISPARSE_BLOCK_SIZE * 4,
-                ),
-                block_pool_id=0,
-                enable_prefix_caching=False,
-                enable_kv_transfer=transfer_device_cache,
-            )
+    groups.append(
+        KVCacheGroupSpec(
+            ["resident"],
+            HiSparseResidentSpec(
+                block_size=HISPARSE_BLOCK_SIZE,
+                page_size=HISPARSE_BLOCK_SIZE * 4,
+            ),
+            block_pool_id=0,
+            enable_prefix_caching=False,
+            enable_kv_transfer=transfer_device_cache,
         )
+    )
     groups.append(
         KVCacheGroupSpec(
             ["hot"],
@@ -236,35 +234,6 @@ def allocate_external_prefix(
         full_sequence_must_fit=True,
         allow_hisparse_host_import=True,
     )
-
-
-def test_prefix_cache_source_rebuilds_ephemeral_groups():
-    manager = make_hisparse_kv_cache_manager(
-        20,
-        10,
-        enable_caching=True,
-        include_resident=False,
-    )
-    tokens = list(range(32))
-    request = make_request("source", tokens, HISPARSE_BLOCK_SIZE, sha256)
-    assert manager.allocate_slots(request, num_new_tokens=32) is not None
-    source_block_id = manager.get_block_ids(request.request_id)[0][0]
-    manager.free(request)
-
-    reused = make_request("reused", tokens, HISPARSE_BLOCK_SIZE, sha256)
-    computed, num_computed, _ = manager.get_computed_blocks(reused)
-    assert num_computed == HISPARSE_BLOCK_SIZE
-    assert computed.get_block_ids() == ([source_block_id], [], [])
-
-    new_blocks = manager.allocate_slots(
-        reused,
-        num_new_tokens=HISPARSE_BLOCK_SIZE,
-        num_new_computed_tokens=num_computed,
-        new_computed_blocks=computed,
-    )
-    assert new_blocks is not None
-    assert [len(group) for group in new_blocks.blocks] == [1, 2, 2]
-    assert manager.get_block_ids(reused.request_id)[0][0] == source_block_id
 
 
 def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():

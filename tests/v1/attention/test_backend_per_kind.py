@@ -70,7 +70,7 @@ def test_backend_per_kind_defaults_empty():
     assert AttentionConfig().backend_per_kind == {}
 
 
-def test_hisparse_device_buffer_size_defaults_and_rejects_undersized():
+def test_hisparse_device_buffer_size_boundaries():
     vllm_config = SimpleNamespace(
         attention_config=AttentionConfig(
             hisparse_config=HiSparseConfig(host_pool_gib=1.0)
@@ -86,12 +86,8 @@ def test_hisparse_device_buffer_size_defaults_and_rejects_undersized():
     with pytest.raises(ValueError, match="expected at least 128"):
         ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
 
-
-def test_hisparse_config_rejects_slot_indices_larger_than_int16():
-    vllm_config = SimpleNamespace(
-        attention_config=AttentionConfig(
-            hisparse_config=HiSparseConfig(host_pool_gib=1.0, device_buffer_size=32768)
-        )
+    vllm_config.attention_config.hisparse_config = HiSparseConfig(
+        host_pool_gib=1.0, device_buffer_size=32768
     )
     resolved = ResolvedHiSparseConfig.from_vllm_config(vllm_config, model_top_k=128)
     assert resolved is not None

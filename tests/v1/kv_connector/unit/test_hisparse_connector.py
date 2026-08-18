@@ -24,15 +24,12 @@ def _kv_cache_config() -> KVCacheConfig:
     )
 
 
-def _vllm_config():
-    return create_vllm_config(disable_hybrid_kv_cache_manager=True)
-
-
 def test_hisparse_connector_composes_without_replacing_existing_connector():
-    config = _vllm_config()
+    config = create_vllm_config(disable_hybrid_kv_cache_manager=True)
     kv_cache_config = _kv_cache_config()
     primary = MagicMock()
     primary._kv_transfer_config = config.kv_transfer_config
+    primary_stats = primary.get_kv_connector_stats.return_value
 
     connector = attach_hisparse_connector(
         primary, config, KVConnectorRole.WORKER, kv_cache_config
@@ -47,17 +44,4 @@ def test_hisparse_connector_composes_without_replacing_existing_connector():
     worker = MagicMock()
     bind_hisparse_worker(connector, worker)
     assert hisparse._worker is worker
-
-
-def test_hisparse_composition_preserves_existing_connector_stats_schema():
-    config = _vllm_config()
-    primary = MagicMock()
-    primary._kv_transfer_config = config.kv_transfer_config
-    primary_stats = MagicMock()
-    primary.get_kv_connector_stats.return_value = primary_stats
-
-    connector = attach_hisparse_connector(
-        primary, config, KVConnectorRole.WORKER, _kv_cache_config()
-    )
-
     assert connector.get_kv_connector_stats() is primary_stats
