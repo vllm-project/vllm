@@ -194,12 +194,12 @@ def _check_kernel_tuned(N: int, K: int, q_dtype_w: torch.dtype, csv_path: str) -
 
 def if_aiter_supported(func: Callable) -> Callable:
     """Decorator that only executes the function if
-    ROCm AITER package is supported and enabled on gfx9 archs.
+    ROCm AITER package is supported.
     """
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        if is_aiter_found_and_supported():
+        if is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna4():
             return func(*args, **kwargs)
 
         return None
@@ -249,6 +249,10 @@ def _rocm_aiter_fused_moe_impl(
         extra_kwargs["beta"] = beta
         extra_kwargs["linear_beta"] = linear_beta
 
+    # Keep the custom-op schema as a float. AITER uses None to mean no
+    # activation clamp, while vLLM's wrapper default is 0.0.
+    swiglu_limit_arg = None if swiglu_limit == 0.0 else swiglu_limit
+
     return fused_moe(
         hidden_states,
         w1,
@@ -270,7 +274,7 @@ def _rocm_aiter_fused_moe_impl(
         bias1=bias1,
         bias2=bias2,
         moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
-        swiglu_limit=swiglu_limit,
+        swiglu_limit=swiglu_limit_arg,
         **extra_kwargs,
     )
 
