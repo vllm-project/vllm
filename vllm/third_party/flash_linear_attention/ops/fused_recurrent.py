@@ -103,15 +103,30 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
             if IS_SPEC_DECODING:
-                i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
+                # A zero (stale or padded batch row) num_accepted entry must
+                # read the state slot at offset 0, exactly like an entry of 1
+                # (upstream PR #48475 pattern), instead of out-of-bounds -1.
+                i_t = tl.maximum(
+                    tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1, 0
+                )
             else:
                 i_t = 0
-            # Load state index and check for invalid entries
-            state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
-                tl.int64
-            )
-            # Skip if state index is invalid (NULL_BLOCK_ID=0)
+            # ``i_t`` indexes a ``stride_indices_seq``-column row; mask the
+            # load to the row so a stale/too-large count falls into
+            # ``other=0`` instead of reading garbage past the row
+            # (upstream PR #50021 pattern).
+            idx_in_row = (i_t >= 0) & (i_t < stride_indices_seq)
+            state_idx = tl.load(
+                ssm_state_indices + i_n * stride_indices_seq + i_t,
+                mask=idx_in_row,
+                other=0,
+            ).to(tl.int64)
+            # Skip invalid state indices without exposing uninitialized output.
             if state_idx <= 0:
+                zero = tl.zeros([BV], dtype=tl.float32).to(p_o.dtype.element_ty)
+                for _ in range(0, T):
+                    tl.store(p_o, zero, mask=mask_v)
+                    p_o += HV * V
                 return
             p_h0 = h0 + state_idx * stride_init_state_token
         else:
