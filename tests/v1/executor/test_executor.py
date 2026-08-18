@@ -10,6 +10,7 @@ from unittest.mock import Mock as UnitTestMock
 
 import pytest
 
+from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.sampling_params import SamplingParams
@@ -149,6 +150,7 @@ class CustomMultiprocExecutor(MultiprocExecutor):
         non_block: bool = False,
         unique_reply_rank: int | None = None,
         kv_output_aggregator: KVOutputAggregator = None,
+        ec_output_aggregator: ECOutputAggregator | None = None,
     ) -> Any | list[Any] | Future[Any | list[Any]]:
         # Drop marker to show that this was run
         with open(".marker", "w"):
@@ -161,6 +163,7 @@ class CustomMultiprocExecutor(MultiprocExecutor):
             non_block,
             unique_reply_rank,
             kv_output_aggregator,
+            ec_output_aggregator,
         )
 
 
