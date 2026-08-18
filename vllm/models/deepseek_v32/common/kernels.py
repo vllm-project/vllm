@@ -158,8 +158,8 @@ def _fused_norm_rope_kernel(
     INDEX_ROPE_INTERLEAVE: tl.constexpr,
     USE_PDL: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    tok_idx = tl.program_id(1)
+    tok_idx = tl.program_id(0).to(tl.int64)
+    pid = tl.program_id(1)
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
@@ -519,7 +519,7 @@ def fused_norm_rope(
         assert index_k_out.shape == index_k.shape
         index_k_out_stride = index_k_out.stride(0)
     use_pdl = current_platform.is_arch_support_pdl()
-    _fused_norm_rope_kernel[(4, num_tokens)](
+    _fused_norm_rope_kernel[(num_tokens, 4)](
         positions,
         # Q RMS norm
         q_c,
@@ -640,8 +640,8 @@ def _fused_q_kernel(
     QUANTIZE_MQA: tl.constexpr,
     USE_PDL: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    tok_idx = tl.program_id(1)
+    tok_idx = tl.program_id(0).to(tl.int64)
+    pid = tl.program_id(1)
     head_idx = tl.program_id(2)
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
@@ -914,7 +914,7 @@ def fused_q(
         return index_q_fp8, index_weights_out, mqa_q
 
     use_pdl = current_platform.is_arch_support_pdl()
-    _fused_q_kernel[(3, num_tokens, grid_heads)](
+    _fused_q_kernel[(num_tokens, 3, grid_heads)](
         positions,
         q_pe,
         q_pe.stride(0),

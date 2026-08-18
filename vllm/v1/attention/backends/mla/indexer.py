@@ -21,6 +21,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     get_paged_mqa_logits_metadata,
     has_deep_gemm,
+    native_next_n_supported,
 )
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
@@ -39,6 +40,28 @@ from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
 
+# The DSA indexer K cache is always quantized; "auto" means fp8 (V3.2 layout)
+# and mxfp4 is the opt-in Blackwell path.
+DSA_INDEXER_KV_DTYPES = ("fp8", "mxfp4")
+
+
+def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
+    """Whether the DeepSeek sparse indexer should use the MXFP4 K cache."""
+    kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype("fp8")
+    if kv_dtype not in DSA_INDEXER_KV_DTYPES:
+        raise ValueError(
+            f"indexer_kv_dtype={kv_dtype!r} is not supported by the DeepSeek "
+            f"sparse indexer (expected one of {DSA_INDEXER_KV_DTYPES})."
+        )
+    use_fp4 = kv_dtype == "mxfp4"
+    if use_fp4 and not current_platform.is_device_capability_family(100):
+        raise ValueError(
+            "indexer_kv_dtype='mxfp4' requires Blackwell datacenter GPUs "
+            "(sm_10x, e.g. B200/GB200); sm_120 (consumer Blackwell) and "
+            "earlier architectures are not supported."
+        )
+    return use_fp4
+
 
 @triton.jit
 def _prepare_uniform_decode_kernel(
@@ -56,9 +79,12 @@ def _prepare_uniform_decode_kernel(
     req_id = idx // max_decode_len
     local_idx = idx % max_decode_len
 
-    # Compute number of KVs attended to by this token.
+    # Compute number of KVs attended to by this token. Padding requests have
+    # seq_len == 0, which would otherwise make the first token of each padded
+    # request negative (e.g. next_n=2 gives 0-2+0+1 = -1). Downstream kernels
+    # read these as uint32, turning -1 into ~4e9.
     seq_len = tl.load(seq_lens_ptr + req_id)
-    per_token_seq_len = seq_len - max_decode_len + local_idx + 1
+    per_token_seq_len = tl.maximum(seq_len - max_decode_len + local_idx + 1, 0)
     tl.store(decode_seq_lens_ptr + idx, per_token_seq_len)
 
     # Copy block table row.
@@ -140,7 +166,7 @@ class DeepseekV32IndexerBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [1, 64] if current_platform.is_rocm() else [64]
+        return [1, MultipleOf(16)] if current_platform.is_rocm() else [64]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -467,6 +493,20 @@ def _supports_varlen_paged_mqa_logits() -> bool:
     )
 
 
+def _supports_native_decode(next_n: int) -> bool:
+    """Whether decode can pass `next_n` Q rows per request to the kernel
+    instead of flattening to one single-token row per query, which re-reads
+    the KV tile once per row.
+    """
+    if not (current_platform.is_cuda() and has_deep_gemm()):
+        return next_n in (1, 2)
+    if current_platform.is_device_capability_family(100):
+        return True
+    if current_platform.is_device_capability_family(90):
+        return native_next_n_supported(next_n)
+    return next_n in (1, 2)
+
+
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     # The indexer opts out of the shared reorder-threshold vote (see __init__),
     # so this is None; its own split uses self.decode_threshold.
@@ -508,34 +548,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if self.vllm_config.speculative_config
             else 0
         )
-        self.use_fp4_indexer_cache = (
-            self.vllm_config.attention_config.use_fp4_indexer_cache
-        )
-
-        assert (
-            current_platform.is_device_capability_family(100)
-            or not self.use_fp4_indexer_cache
-        ), (
-            "use_fp4_indexer_cache requires Blackwell datacenter GPUs "
-            "(sm_10x, e.g. B200/GB200); sm_120 (consumer Blackwell) and "
-            "earlier architectures are not supported."
-        )
+        self.use_fp4_indexer_cache = dsa_indexer_uses_fp4(self.vllm_config)
 
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
         self.reorder_batch_threshold = None
-        # NOTE: SM100 datacenter GPUs support any next_n natively via the
-        # multi-atom paged MQA logits kernels (FP8 and FP4 indexer
-        # caches). Outside the SM100 family the FP8
-        # paged MQA logits kernel only supports next_n in (1, 2)
-        # (deepgemm smxx_fp8_fp4_paged_mqa_logits.hpp:233), so flatten there.
-        self.use_flattening = not current_platform.is_device_capability_family(
-            100
-        ) and next_n not in (1, 2)
+        self.use_flattening = not _supports_native_decode(next_n)
         self.supports_varlen = _supports_varlen_paged_mqa_logits()
         logger.info_once(
             "DSA indexer decode path: use_flattening=%s supports_varlen=%s "
-            "(next_n=%d, use_fp4_indexer_cache=%s)",
+            "(next_n=%d, use_fp4_cache=%s)",
             self.use_flattening,
             self.supports_varlen,
             next_n,
@@ -585,7 +607,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             device=self.device,
         )
 
-        # See: DeepGMM/csrc/apis/attention.hpp
+        # See: DeepGMM/csrc/apis/attention.hpp. Sized for one slot per SM;
+        # build() narrows it to whatever the kernel actually schedules.
         self.scheduler_metadata_buffer = torch.empty(
             (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
         )
@@ -739,12 +762,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 seq_lens_buffer = self.decode_seq_lens_buffer[
                     : num_decodes * max_decode_len
                 ].view(num_decodes, max_decode_len)
+                # Clamp at 0: padding requests have seq_len == 0, which would
+                # otherwise make token 0 negative (next_n=2 gives 0-2+1+0 = -1).
+                # Downstream kernels read these as uint32, turning -1 into ~4e9.
                 seq_lens_buffer[:] = (
                     seq_lens.unsqueeze(1)
                     - max_decode_len
                     + 1
                     + self.offsets_buffer[:max_decode_len]
-                )
+                ).clamp_(min=0)
                 seq_lens = seq_lens_buffer
             return seq_lens, block_table, decode_lens, num_decodes, requires_padding
 
@@ -924,9 +950,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             max_decode_len = int(decode_lens_cpu.max().item())
             next_n = 1 + self.num_speculative_tokens
+            # The kernel sees max_decode_len Q rows, not the configured next_n,
+            # so legality is per-step: on SM90 a uniformly 3-deep batch has no
+            # native kernel. max_decode_len <= 1 always has one.
+            step_next_n_ok = max_decode_len <= 1 or _supports_native_decode(
+                max_decode_len
+            )
             use_native = (
                 not (self.use_flattening or self.supports_varlen)
                 and max_decode_len <= next_n
+                and step_next_n_ok
             )
 
             global_seq_lens_for_decode = self._prepare_global_decode_seq_lens(
@@ -992,20 +1025,23 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 seq_lens = seq_lens.unsqueeze(-1)
 
             # DeepGEMM is required for the paged MQA logits on CUDA devices
+            schedule_metadata = self.scheduler_metadata_buffer
             if current_platform.is_cuda() and has_deep_gemm():
-                self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
+                metadata = get_paged_mqa_logits_metadata(
                     seq_lens,
                     self.kv_cache_spec.storage_block_size,
                     self.num_sms,
                     indices=decode_indices,
                 )
+                schedule_metadata = self.scheduler_metadata_buffer[: metadata.shape[0]]
+                schedule_metadata[:] = metadata
 
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=block_table,
                 seq_lens=seq_lens,
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
-                schedule_metadata=self.scheduler_metadata_buffer,
+                schedule_metadata=schedule_metadata,
                 indices=decode_indices,
                 global_seq_lens=global_seq_lens_for_decode,
             )

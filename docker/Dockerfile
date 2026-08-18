@@ -279,11 +279,16 @@ ENV CARGO_BUILD_JOBS=4
 # separate local sccache daemon while sharing the same remote cache backend.
 ENV SCCACHE_SERVER_PORT=4227
 
+# Only Rust inputs are present, so suppress the artificial dirty state caused
+# by other tracked files being absent from this build stage.
+ENV SETUPTOOLS_SCM_PRETEND_METADATA={dirty=false}
+
 # Build the release artifacts. Cache cargo registry/git, but not target/,
 # because stale target metadata can outlive source updates across BuildKit
 # cache reuse.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
+    --mount=type=bind,source=.git,target=.git \
     --mount=type=secret,id=aws-credentials,target=/root/.aws/credentials,required=false \
     if [ "$USE_SCCACHE" = "1" ]; then \
         if [ -n "${SCCACHE_ENDPOINT}" ]; then export SCCACHE_ENDPOINT="${SCCACHE_ENDPOINT}"; fi; \
@@ -964,6 +969,9 @@ ENV HF_XET_HIGH_PERFORMANCE 1
 
 # increase timeout for hf downloads (for testing)
 ENV HF_HUB_DOWNLOAD_TIMEOUT 60
+
+# Catch GPU<->CPU syncs in execute_model/sample_tokens
+ENV VLLM_GPU_SYNC_CHECK=error
 
 # Copy in the v1 package for testing (it isn't distributed yet)
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1

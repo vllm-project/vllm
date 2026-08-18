@@ -8,7 +8,7 @@ import pytest
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.entrypoints.serve.utils.error_response import create_error_response
+from vllm.entrypoints.serve import create_error_response
 from vllm.multimodal.parse import parse_mm_uuids
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
