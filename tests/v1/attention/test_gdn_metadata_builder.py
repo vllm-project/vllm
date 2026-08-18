@@ -129,7 +129,7 @@ def _create_gdn_builder(
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
     vllm_config = create_vllm_config(
-        model_name="Qwen/Qwen3.5-0.8B",
+        model_name="/data/models/Qwen3.5-0.8B",
         block_size=BLOCK_SIZE,
     )
     if full_cuda_graph:

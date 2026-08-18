@@ -103,12 +103,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
             if IS_SPEC_DECODING:
-                # A zero (stale or padded batch row) num_accepted entry must
-                # read the state slot at offset 0, exactly like an entry of 1
-                # (upstream PR #48475 pattern), instead of out-of-bounds -1.
-                i_t = tl.maximum(
-                    tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1, 0
-                )
+                i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
             else:
                 i_t = 0
             # ``i_t`` indexes a ``stride_indices_seq``-column row; mask the

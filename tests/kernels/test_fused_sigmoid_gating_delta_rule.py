@@ -397,7 +397,9 @@ def test_spec_decoding_zero_accepted_tokens_is_in_bounds(dtype: torch.dtype) -> 
     zeros = torch.zeros(num_reqs, dtype=torch.int32)
     ones = torch.ones(num_reqs, dtype=torch.int32)
 
-    # A clamped 0 must behave exactly like 1: both read slot 0 of the row.
+    # Fail-closed (PR #50021 semantics): a raw 0 that bypasses the builder
+    # must produce zero output and leave state untouched, never index at -1.
+    initial = ssm_state.clone()
     out_zero, state_zero = fused_sigmoid_gating_delta_rule_update(
         A_log=A_log,
         a=a,
@@ -413,23 +415,8 @@ def test_spec_decoding_zero_accepted_tokens_is_in_bounds(dtype: torch.dtype) -> 
         num_accepted_tokens=zeros,
         use_qk_l2norm_in_kernel=True,
     )
-    out_one, state_one = fused_sigmoid_gating_delta_rule_update(
-        A_log=A_log,
-        a=a,
-        b=b,
-        dt_bias=dt_bias,
-        q=query,
-        k=key,
-        v=value,
-        initial_state=ssm_state.clone(),
-        inplace_final_state=True,
-        ssm_state_indices=state_indices,
-        cu_seqlens=cu_seqlens,
-        num_accepted_tokens=ones,
-        use_qk_l2norm_in_kernel=True,
-    )
-    torch.testing.assert_close(out_zero, out_one, atol=0, rtol=0)
-    torch.testing.assert_close(state_zero, state_one, atol=0, rtol=0)
+    torch.testing.assert_close(out_zero, torch.zeros_like(out_zero))
+    torch.testing.assert_close(state_zero, initial)
 
     out_zero, state_zero = fused_recurrent_gated_delta_rule(
         q=query,
@@ -444,18 +431,5 @@ def test_spec_decoding_zero_accepted_tokens_is_in_bounds(dtype: torch.dtype) -> 
         num_accepted_tokens=zeros,
         use_qk_l2norm_in_kernel=True,
     )
-    out_one, state_one = fused_recurrent_gated_delta_rule(
-        q=query,
-        k=key,
-        v=value,
-        g=g.unsqueeze(0),
-        beta=beta.unsqueeze(0),
-        initial_state=ssm_state.clone(),
-        inplace_final_state=True,
-        ssm_state_indices=state_indices,
-        cu_seqlens=cu_seqlens,
-        num_accepted_tokens=ones,
-        use_qk_l2norm_in_kernel=True,
-    )
-    torch.testing.assert_close(out_zero, out_one, atol=0, rtol=0)
-    torch.testing.assert_close(state_zero, state_one, atol=0, rtol=0)
+    torch.testing.assert_close(out_zero, torch.zeros_like(out_zero))
+    torch.testing.assert_close(state_zero, initial)
