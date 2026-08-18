@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import hashlib
 import uuid
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -8,8 +10,10 @@ import pytest
 import torch
 from PIL import Image, ImageDraw
 
+from vllm.config.multimodal import MMHasherAlgorithm
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.media.base import MediaWithBytes
+from vllm.multimodal.media.image import ImageMediaIO
 from vllm.multimodal.parse import MultiModalDataParser
 
 pytestmark = pytest.mark.cpu_test
@@ -18,12 +22,26 @@ ASSETS_DIR = Path(__file__).parent / "assets"
 assert ASSETS_DIR.exists()
 
 
+@pytest.mark.parametrize("algorithm", ["sha256", "sha512"])
+def test_hash_algorithm(algorithm: MMHasherAlgorithm):
+    hasher = getattr(hashlib, algorithm)()
+    for bytes_ in MultiModalHasher.iter_item_to_bytes("value", "test"):
+        hasher.update(bytes_)
+
+    assert MultiModalHasher.hash_kwargs(algorithm, value="test") == hasher.hexdigest()
+
+
+def test_hash_algorithm_required():
+    with pytest.raises(TypeError, match="algorithm"):
+        MultiModalHasher.hash_kwargs(value="test")  # type: ignore[call-arg]
+
+
 def test_hash_single_item_different_shape():
     x1 = torch.zeros(())
     x2 = torch.zeros((1,))
 
     hasher = MultiModalHasher
-    assert hasher.hash_kwargs(x=x1) != hasher.hash_kwargs(x=x2)
+    assert hasher.hash_kwargs("blake3", x=x1) != hasher.hash_kwargs("blake3", x=x2)
 
 
 def test_hash_key_order_invariant():
@@ -31,7 +49,9 @@ def test_hash_key_order_invariant():
     y = torch.ones((5, 10))
 
     hasher = MultiModalHasher
-    assert hasher.hash_kwargs(x=x, y=y) == hasher.hash_kwargs(y=y, x=x)
+    assert hasher.hash_kwargs("blake3", x=x, y=y) == hasher.hash_kwargs(
+        "blake3", y=y, x=x
+    )
 
 
 # NOTE: Images that are the same visually are allowed to have the same hash
@@ -42,7 +62,9 @@ def test_hash_collision_image_mode(mode_pair):
     image2 = Image.new(mode2, size=(10, 10), color=1)
 
     hasher = MultiModalHasher
-    assert hasher.hash_kwargs(image=image1) != hasher.hash_kwargs(image=image2)
+    assert hasher.hash_kwargs("blake3", image=image1) != hasher.hash_kwargs(
+        "blake3", image=image2
+    )
 
 
 def test_hash_collision_image_palette():
@@ -51,7 +73,9 @@ def test_hash_collision_image_palette():
     image2 = Image.open(ASSETS_DIR / "image2.png")
 
     hasher = MultiModalHasher
-    assert hasher.hash_kwargs(image=image1) != hasher.hash_kwargs(image=image2)
+    assert hasher.hash_kwargs("blake3", image=image1) != hasher.hash_kwargs(
+        "blake3", image=image2
+    )
 
 
 def test_hash_collision_image_transpose():
@@ -62,7 +86,9 @@ def test_hash_collision_image_transpose():
     ImageDraw.Draw(image2).line([(0, 0), (0, 10)])
 
     hasher = MultiModalHasher
-    assert hasher.hash_kwargs(image=image1) != hasher.hash_kwargs(image=image2)
+    assert hasher.hash_kwargs("blake3", image=image1) != hasher.hash_kwargs(
+        "blake3", image=image2
+    )
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -72,7 +98,9 @@ def test_hash_collision_tensor_shape(dtype):
     arr2 = torch.zeros((10, 20, 5, 3), dtype=dtype)
 
     hasher = MultiModalHasher
-    assert hasher.hash_kwargs(data=arr1) != hasher.hash_kwargs(data=arr2)
+    assert hasher.hash_kwargs("blake3", data=arr1) != hasher.hash_kwargs(
+        "blake3", data=arr2
+    )
 
 
 def test_hash_collision_array_shape():
@@ -81,7 +109,9 @@ def test_hash_collision_array_shape():
     arr2 = np.zeros((10, 20, 5, 3))
 
     hasher = MultiModalHasher
-    assert hasher.hash_kwargs(data=arr1) != hasher.hash_kwargs(data=arr2)
+    assert hasher.hash_kwargs("blake3", data=arr1) != hasher.hash_kwargs(
+        "blake3", data=arr2
+    )
 
 
 def test_hash_collision_video_num_frames():
@@ -102,8 +132,8 @@ def test_hash_collision_video_num_frames():
         return items.get_all_items_for_hash()[0]
 
     hasher = MultiModalHasher
-    assert hasher.hash_kwargs(video=item_for_hash(2)) != hasher.hash_kwargs(
-        video=item_for_hash(4)
+    assert hasher.hash_kwargs("blake3", video=item_for_hash(2)) != hasher.hash_kwargs(
+        "blake3", video=item_for_hash(4)
     )
 
 
@@ -116,7 +146,9 @@ def test_hash_non_contiguous_array():
 
     hasher = MultiModalHasher
     # Both should be hashable and produce the same hashes
-    assert hasher.hash_kwargs(data=arr) == hasher.hash_kwargs(data=arr_c)
+    assert hasher.hash_kwargs("blake3", data=arr) == hasher.hash_kwargs(
+        "blake3", data=arr_c
+    )
 
 
 def test_hash_image_exif_id():
@@ -131,6 +163,52 @@ def test_hash_image_exif_id():
 
     hasher = MultiModalHasher
     # first image has UUID in ImageID, so it should hash to that UUID
-    assert hasher.hash_kwargs(image=image1) == hasher.hash_kwargs(image=id.bytes)
+    assert hasher.hash_kwargs("blake3", image=image1) == hasher.hash_kwargs(
+        "blake3", image=id.bytes
+    )
     # second image has non-UUID in ImageID, so it should hash to the image data
-    assert hasher.hash_kwargs(image=image2) == hasher.hash_kwargs(image=image2a)
+    assert hasher.hash_kwargs("blake3", image=image2) == hasher.hash_kwargs(
+        "blake3", image=image2a
+    )
+
+
+def _rgba_png_bytes() -> bytes:
+    image = Image.new("RGBA", (8, 8), (255, 0, 0, 128))
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_hash_collision_media_io_config():
+    data = _rgba_png_bytes()
+    white = ImageMediaIO(rgba_background_color=(255, 255, 255)).load_bytes(data)
+    black = ImageMediaIO(rgba_background_color=(0, 0, 0)).load_bytes(data)
+    white2 = ImageMediaIO(rgba_background_color=(255, 255, 255)).load_bytes(data)
+    keep = ImageMediaIO(image_mode=None).load_bytes(data)
+
+    hasher = MultiModalHasher
+    assert hasher.hash_kwargs("blake3", image=white) != hasher.hash_kwargs(
+        "blake3", image=black
+    )
+    assert hasher.hash_kwargs("blake3", image=white) != hasher.hash_kwargs(
+        "blake3", image=keep
+    )
+    assert hasher.hash_kwargs("blake3", image=white) == hasher.hash_kwargs(
+        "blake3", image=white2
+    )
+
+
+def test_hash_media_io_noop_config_preserves_hash():
+    image = Image.new("RGB", (8, 8), (0, 128, 255))
+    buf = BytesIO()
+    image.save(buf, format="PNG")
+    data = buf.getvalue()
+
+    loaded = ImageMediaIO().load_bytes(data)
+    assert loaded.io_config is None
+
+    plain = MediaWithBytes(loaded.media, data)
+    hasher = MultiModalHasher
+    assert hasher.hash_kwargs("blake3", image=loaded) == hasher.hash_kwargs(
+        "blake3", image=plain
+    )

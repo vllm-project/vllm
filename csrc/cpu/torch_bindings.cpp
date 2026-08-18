@@ -110,7 +110,7 @@ std::tuple<at::Tensor, at::Tensor> chunk_gated_delta_rule_cpu(
     const at::Tensor& g, const at::Tensor& beta,
     const at::Tensor& initial_state, bool output_final_state,
     const at::Tensor& cu_seqlens, bool head_first, bool use_qk_l2norm_in_kernel,
-    double eps = 1e-5);
+    const at::Tensor& initial_state_indices, double eps = 1e-5);
 
 at::Tensor fused_sigmoid_gating_delta_rule_update_cpu(
     const at::Tensor& A_log, const at::Tensor& dt_bias, const at::Tensor& q,
@@ -163,7 +163,8 @@ torch::Tensor get_scheduler_metadata(
     const torch::Tensor& query_start_loc, const bool casual,
     const int64_t window_size, const std::string& isa_hint,
     const bool enable_kv_split,
-    const std::optional<torch::Tensor>& dynamic_causal);
+    const std::optional<torch::Tensor>& dynamic_causal,
+    const std::string& kv_cache_dtype);
 
 void cpu_attn_reshape_and_cache(const torch::Tensor& key,
                                 const torch::Tensor& value,
@@ -397,7 +398,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Quantization
 #if defined(__AVX512F__) || defined(__AVX2__) ||                               \
     (defined(__aarch64__) && !defined(__APPLE__)) || defined(__powerpc64__) || \
-    defined(__riscv_v)
+    defined(__riscv_v) || defined(__s390x__)
   // Helper function to release oneDNN handlers
   ops.def("release_dnnl_matmul_handler(int handler) -> ()",
           &release_dnnl_matmul_handler);
@@ -545,7 +546,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor g, Tensor beta, "
       "Tensor initial_state, bool output_final_state, Tensor cu_seqlens, bool "
       "head_first, "
-      "bool use_qk_l2norm_in_kernel, float eps=1e-5) -> (Tensor, Tensor)");
+      "bool use_qk_l2norm_in_kernel, Tensor initial_state_indices, float "
+      "eps=1e-5) -> (Tensor, Tensor)");
   ops.impl("chunk_gated_delta_rule_cpu", torch::kCPU,
            &chunk_gated_delta_rule_cpu);
   ops.def(
@@ -577,7 +579,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "get_scheduler_metadata(int num_req, int num_heads_q, int num_heads_kv, "
       "int head_dim, Tensor seq_lens, ScalarType dtype, Tensor "
       "query_start_loc, bool casual, int window_size, str isa_hint, bool "
-      "enable_kv_split, Tensor? dynamic_causal) -> Tensor",
+      "enable_kv_split, Tensor? dynamic_causal, "
+      "str kv_cache_dtype=\"auto\") -> Tensor",
       &get_scheduler_metadata);
   ops.def(
       "cpu_attn_reshape_and_cache(Tensor key, Tensor value, Tensor(a2!) "
@@ -602,7 +605,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("dynamic_per_token_scaled_fp8_quant() -> ()", placeholder_op);
 
   // WNA16
-#if defined(__AVX512F__) || defined(__riscv_v)
+#if defined(__AVX512F__) || defined(__riscv_v) || defined(__s390x__)
   ops.def(
       "cpu_gemm_wna16(Tensor input, Tensor q_weight, Tensor(a2!) output, "
       "Tensor scales, Tensor? zeros, Tensor? g_idx, Tensor? bias, SymInt "
@@ -611,7 +614,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
   // fused moe
-#if defined(__AVX512F__) || (defined(ARM_BF16_SUPPORT) && !defined(__APPLE__))
   ops.def(
       "prepack_moe_weight(Tensor weight, Tensor(a1!) packed_weight, str isa) "
       "-> ()");
@@ -622,8 +624,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool skip_weighted, "
       "str act, str isa) -> ()");
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
-#endif  // #if defined(__AVX512F__) || (defined(ARM_BF16_SUPPORT) &&
-        // !defined(__APPLE__))
 #if defined(ARM_I8MM_SUPPORT) && defined(ARM_BF16_SUPPORT) && \
     !defined(__APPLE__)
   ops.def(

@@ -411,3 +411,57 @@ def test_cp_gather_fp8_large_seqlens(seq_lens, block_size):
         dst[:, :NOPE_DIM], expected[:, :NOPE_DIM], atol=1e-3, rtol=1e-2
     )
     assert torch.equal(dst[:, NOPE_DIM:], expected[:, NOPE_DIM:])
+
+
+def test_cp_gather_fp8_large_uneven_sequences_with_starts():
+    """Gather uneven long request slices through the page-oriented path."""
+    gather_seq_lens = [17, 32_768, 71]
+    seq_starts = [3, 17, 5]
+    full_seq_lens = [
+        start + length for start, length in zip(seq_starts, gather_seq_lens)
+    ]
+    (
+        cache,
+        block_table,
+        full_workspace_starts,
+        num_reqs,
+        _total_tokens,
+        full_expected,
+    ) = _build_test_case_fast(full_seq_lens, block_size=64)
+
+    workspace_starts = torch.zeros(num_reqs, dtype=torch.int32, device="cuda")
+    workspace_starts[1:] = torch.tensor(
+        gather_seq_lens[:-1], dtype=torch.int32, device="cuda"
+    ).cumsum(dim=0)
+    seq_starts_t = torch.tensor(seq_starts, dtype=torch.int32, device="cuda")
+    dst = torch.empty(
+        sum(gather_seq_lens),
+        NOPE_DIM + ROPE_DIM,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+
+    ops.cp_gather_and_upconvert_fp8_kv_cache(
+        cache,
+        dst,
+        block_table,
+        workspace_starts,
+        num_reqs,
+        seq_starts_t,
+    )
+
+    expected = torch.cat(
+        [
+            full_expected[
+                full_workspace_starts[req_id]
+                + seq_starts[req_id] : full_workspace_starts[req_id]
+                + seq_starts[req_id]
+                + gather_seq_lens[req_id]
+            ]
+            for req_id in range(num_reqs)
+        ]
+    )
+    torch.testing.assert_close(
+        dst[:, :NOPE_DIM], expected[:, :NOPE_DIM], atol=1e-3, rtol=1e-2
+    )
+    assert torch.equal(dst[:, NOPE_DIM:], expected[:, NOPE_DIM:])

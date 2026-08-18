@@ -15,6 +15,7 @@ from vllm.envs import (
     env_with_choices,
     environment_variables,
 )
+from vllm.exceptions import VLLMValidationError
 
 
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
@@ -248,6 +249,21 @@ class TestEnvWithChoices:
                 ValueError, match="Invalid value 'invalid' for TEST_ENV"
             ):
                 env_func()
+
+
+def test_gdn_decode_kernel_env(monkeypatch: pytest.MonkeyPatch):
+    env_func = environment_variables["VLLM_GDN_DECODE_KERNEL"]
+    monkeypatch.delenv("VLLM_GDN_DECODE_KERNEL", raising=False)
+    assert env_func() == "cuda"
+
+    for value in ("cuda", "triton"):
+        monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", value)
+        assert env_func() == value
+
+    for value in ("fused", "invalid"):
+        monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", value)
+        with pytest.raises(ValueError, match="VLLM_GDN_DECODE_KERNEL"):
+            env_func()
 
 
 class TestEnvListWithChoices:
@@ -547,7 +563,7 @@ class TestVllmMaxNSequences:
         max_n = envs.VLLM_MAX_N_SEQUENCES
         SamplingParams(n=max_n)
 
-        with pytest.raises(ValueError, match="n must be at most"):
+        with pytest.raises(VLLMValidationError, match="n must be at most"):
             SamplingParams(n=max_n + 1)
 
     def test_sampling_params_respects_custom_limit(
@@ -563,5 +579,5 @@ class TestVllmMaxNSequences:
 
         SamplingParams(n=128)
 
-        with pytest.raises(ValueError, match="n must be at most 128"):
+        with pytest.raises(VLLMValidationError, match="n must be at most 128"):
             SamplingParams(n=129)
