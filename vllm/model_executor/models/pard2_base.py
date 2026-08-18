@@ -17,7 +17,7 @@ from collections.abc import Iterable
 import torch
 import torch.nn as nn
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -48,8 +48,8 @@ PARD2_COMPILE_DYNAMIC_ARG_DIMS = {
 
 class Pard2ModelBase(nn.Module):
     """PARD-2 draft body: a stock decoder stack on fused (embed + projected
-    target hidden state) embeddings. Subclasses implement ``build_layers`` for
-    their model family and apply ``@support_torch_compile`` themselves."""
+    target hidden state) embeddings. Subclasses implement ``_make_decoder_layer``
+    for their model family and apply ``@support_torch_compile`` themselves."""
 
     def __init__(
         self,
@@ -68,8 +68,6 @@ class Pard2ModelBase(nn.Module):
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
-        # Family-specific decoder stack. KV-cache layer ids are offset past the
-        # target model's layers so the draft does not collide with the verifier.
         self.layers = self.build_layers(vllm_config, start_layer_id, prefix)
 
         self._init_target_projection(vllm_config, prefix)
@@ -79,6 +77,21 @@ class Pard2ModelBase(nn.Module):
     def build_layers(
         self, vllm_config: VllmConfig, start_layer_id: int, prefix: str
     ) -> nn.ModuleList:
+        # start_layer_id offsets the draft's KV-cache layer ids past the target's
+        # so the two don't collide.
+        current_vllm_config = get_current_vllm_config()
+        return nn.ModuleList(
+            [
+                self._make_decoder_layer(
+                    current_vllm_config,
+                    maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
+                )
+                for i in range(self.config.num_hidden_layers)
+            ]
+        )
+
+    def _make_decoder_layer(self, vllm_config: VllmConfig, prefix: str) -> nn.Module:
+        """Construct one decoder layer for this model family."""
         raise NotImplementedError
 
     def _init_target_projection(self, vllm_config: VllmConfig, prefix: str) -> None:
@@ -130,12 +143,15 @@ class Pard2ModelBase(nn.Module):
 
     def project_target_feat(self, target_feat: torch.Tensor) -> torch.Tensor:
         if self._needs_reorder:
+            # Move the tiny permutation index onto the compute device once (device
+            # check is host-side, no sync), then cache it in the buffer.
+            if self.target_layer_perm.device != target_feat.device:
+                self.target_layer_perm = self.target_layer_perm.to(target_feat.device)
             # unflatten/index_select/flatten keeps this shape-agnostic: handles
             # both [num_tokens, fc_in] and a bare [fc_in] warmup vector.
-            perm = self.target_layer_perm.to(target_feat.device)
             target_feat = (
                 target_feat.unflatten(-1, (self.num_aux, self.target_hidden))
-                .index_select(-2, perm)
+                .index_select(-2, self.target_layer_perm)
                 .flatten(-2)
             )
         return self.target_proj(target_feat) * self.scale
@@ -155,10 +171,12 @@ class Pard2ModelBase(nn.Module):
         residual = None
         for layer in self.layers:
             hidden, residual = layer(positions, hidden, residual)
-        hidden, _ = self.norm(hidden, residual)
-        return hidden, hidden
+        hidden, residual = self.norm(hidden, residual)
+        return hidden, residual
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Load the draft body's weights, fusing the checkpoint's q/k/v and gate/up
+        projections into the stacked ``qkv_proj``/``gate_up_proj`` params."""
         stacked_params_mapping = [
             (".qkv_proj", ".q_proj", "q"),
             (".qkv_proj", ".k_proj", "k"),
@@ -250,24 +268,26 @@ class Pard2ForCausalLMMixin:
     def _load_warp_projection(self) -> bool:
         """Load `target_proj` from the separate ``warp_model.bin`` that ships
         alongside the PARD-2 checkpoint (not in the main safetensors)."""
-        import os
+        import io
 
-        from huggingface_hub import hf_hub_download
+        from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 
-        path = self._draft_model_name
-        local = os.path.join(path, "warp_model.bin")
-        if not os.path.exists(local):
-            try:
-                local = hf_hub_download(repo_id=path, filename="warp_model.bin")
-            except Exception as e:
-                logger.warning("PARD-2: could not fetch warp_model.bin: %s", e)
-                return False
-        warp = torch.load(local, map_location="cpu", weights_only=True)
+        data = get_hf_file_bytes("warp_model.bin", self._draft_model_name)
+        if data is None:
+            logger.warning("PARD-2: could not fetch warp_model.bin")
+            return False
+        warp = torch.load(io.BytesIO(data), map_location="cpu", weights_only=True)
+        # Copy into the existing target_proj params, moving the loaded tensors to
+        # their device/dtype (GPU when the draft is placed there).
         proj = self.model.target_proj
         with torch.no_grad():
-            proj.weight.copy_(warp["target_proj.weight"].to(proj.weight.dtype))
+            proj.weight.copy_(
+                warp["target_proj.weight"].to(proj.weight.device, proj.weight.dtype)
+            )
             if proj.bias is not None and "target_proj.bias" in warp:
-                proj.bias.copy_(warp["target_proj.bias"].to(proj.bias.dtype))
+                proj.bias.copy_(
+                    warp["target_proj.bias"].to(proj.bias.device, proj.bias.dtype)
+                )
         return True
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):

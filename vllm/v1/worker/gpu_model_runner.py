@@ -578,7 +578,7 @@ class GPUModelRunner(
         self.use_aux_hidden_state_outputs = False
         # PARD-2 fuses the target's final (-1) layer, whose aux capture is the
         # PRE-final-norm residual; when True, swap it for the POST-norm output.
-        self._pard2_final_aux_post_norm = False
+        self._swap_final_aux_to_post_norm = False
         # Set up speculative decoding.
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
@@ -4462,7 +4462,7 @@ class GPUModelRunner(
             if self.use_aux_hidden_state_outputs:
                 # True when EAGLE 3 is used.
                 hidden_states, aux_hidden_states = model_output
-                if self._pard2_final_aux_post_norm and aux_hidden_states:
+                if self._swap_final_aux_to_post_norm and aux_hidden_states:
                     # Final layer's aux is the pre-final-norm residual; PARD-2
                     # needs the post-norm value, which is the returned hidden_states.
                     aux_hidden_states[-1] = hidden_states
@@ -5507,13 +5507,15 @@ class GPUModelRunner(
 
         self.model.set_aux_hidden_state_layers(aux_layers)
 
-        # PARD-2's target_proj is trained on HF's POST-final-norm hidden state for
-        # the final (-1) layer, but the in-loop aux capture records the PRE-norm
-        # residual. Flag it so the forward postprocess can swap in the post-norm
-        # value (the model's returned hidden_states). Only PARD-2 requests the
-        # final layer, so EAGLE3/DFlash (interior layers) are unaffected.
+        # PARD-2 (https://arxiv.org/abs/2504.18583) was trained on HF's
+        # `output_hidden_states[-1]` for its final (-1) aux layer, i.e. the value
+        # *after* the model's final norm. vLLM captures aux states inside the decoder
+        # loop (pre-norm), so flag the final layer to be swapped for the post-norm
+        # value (the returned `hidden_states`) in postprocess. EAGLE3/DFlash use only
+        # interior layers, so this never fires for them.
+        assert self.speculative_config is not None
         num_hidden_layers = self.model_config.hf_text_config.num_hidden_layers
-        self._pard2_final_aux_post_norm = (
+        self._swap_final_aux_to_post_norm = (
             self.speculative_config.method == "pard2"
             and num_hidden_layers in aux_layers
         )

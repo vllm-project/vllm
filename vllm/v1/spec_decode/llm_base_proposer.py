@@ -940,21 +940,16 @@ class SpecDecodeBaseProposer:
                     last_real = torch.cummax(
                         torch.where(mask, torch.zeros_like(idx), idx), dim=0
                     ).values
-                    src = self.hidden_states[:n].index_select(0, last_real)
-                    torch.where(
-                        mask.unsqueeze(1),
-                        src,
-                        self.hidden_states[:n],
-                        out=self.hidden_states[:n],
-                    )
+                    masked_slot_src = self.hidden_states[:n].index_select(0, last_real)
                 else:
                     assert self.parallel_drafting_hidden_state_tensor is not None
-                    torch.where(
-                        mask.unsqueeze(1),
-                        self.parallel_drafting_hidden_state_tensor,
-                        self.hidden_states[:n],
-                        out=self.hidden_states[:n],
-                    )
+                    masked_slot_src = self.parallel_drafting_hidden_state_tensor
+                torch.where(
+                    mask.unsqueeze(1),
+                    masked_slot_src,
+                    self.hidden_states[:n],
+                    out=self.hidden_states[:n],
+                )
 
             # 2.
             # Recompute the slot mapping based on the new positions and

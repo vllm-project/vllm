@@ -11,7 +11,7 @@ Qwen3 decoder layers. See ``llama_pard2.py`` for the Llama twin.
 import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.model_executor.models.qwen3 import Qwen3DecoderLayer, Qwen3ForCausalLM
 
 from .pard2_base import (
@@ -19,25 +19,16 @@ from .pard2_base import (
     Pard2ForCausalLMMixin,
     Pard2ModelBase,
 )
-from .utils import maybe_prefix
 
 
 @support_torch_compile(dynamic_arg_dims=PARD2_COMPILE_DYNAMIC_ARG_DIMS)
 class Pard2Qwen3Model(Pard2ModelBase):
-    def build_layers(
-        self, vllm_config: VllmConfig, start_layer_id: int, prefix: str
-    ) -> nn.ModuleList:
-        current_vllm_config = get_current_vllm_config()
-        return nn.ModuleList(
-            [
-                Qwen3DecoderLayer(
-                    config=self.config,
-                    cache_config=current_vllm_config.cache_config,
-                    quant_config=self.quant_config,
-                    prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
-                )
-                for i in range(self.config.num_hidden_layers)
-            ]
+    def _make_decoder_layer(self, vllm_config: VllmConfig, prefix: str) -> nn.Module:
+        return Qwen3DecoderLayer(
+            config=self.config,
+            cache_config=vllm_config.cache_config,
+            quant_config=self.quant_config,
+            prefix=prefix,
         )
 
 
