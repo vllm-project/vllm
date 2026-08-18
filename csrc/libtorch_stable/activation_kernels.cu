@@ -538,21 +538,8 @@ __global__ void situ_and_mul_kernel(
   }
 }
 
-// Saturating float -> fp8 conversion. `inv_scale = 1 / scale`, so this computes
-// clamp(val / scale) and casts (round-to-nearest-even) to fp8. `fp8_max` is the
-// representable max for the target fp8 type (448 for e4m3fn), passed from the
-// host to avoid device-side numeric_limits.
-// c10::Float8_e4m3fn's `static_cast` operator is a software/bit-manipulation
-// implementation of float->fp8 rounding; it does NOT necessarily round ties
-// the same way as the hardware cvt instruction (`__nv_cvt_float_to_fp8`,
-// PTX `cvt.rn.satfinite.e4m3.f32`) that scaled_fp8_conversion (see
-// quantization/w8a8/fp8/common.cuh + nvidia/quant_utils.cuh) uses on SM80+,
-// and that Triton's `.to(tl.float8e4nv)` also lowers to -- humming's
-// quant_input is a Triton kernel. Using `static_cast` here instead of the
-// hardware instruction was the root cause of a ~0.1-0.2%-of-elements
-// quantization mismatch against humming's output: on exact or near-exact
-// ties between two representable fp8 values, the two implementations
-// occasionally round to different buckets.
+  // Match Humming's hardware FP8 conversion. c10::Float8_e4m3fn's software cast
+  // can round ties differently from `cvt.rn.satfinite.e4m3.f32`.
 __device__ __forceinline__ c10::Float8_e4m3fn cvt_fp8_hw(float x) {
 #if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
   return c10::Float8_e4m3fn(__nv_cvt_float_to_fp8(x, __NV_SATFINITE, __NV_E4M3),
