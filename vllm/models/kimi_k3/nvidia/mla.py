@@ -341,11 +341,6 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             "parallelism."
         )
         self.dcp_world_size = parallel_config.decode_context_parallel_size
-        assert self.dcp_world_size <= 1 or self.rotary_emb is None, (
-            "Kimi-K3 MultiHeadLatentAttention does not support RoPE with decode "
-            "context parallelism because gathered queries require gathered "
-            "positions."
-        )
         self.dcp_manager: MLADCPManager | None = None
         if self.dcp_world_size > 1:
             query_dtype = (
@@ -400,6 +395,8 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             dtype=kv_cache_dtype,
             cache_dtype_str=self.kv_cache_dtype,
             kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
+            # fp8_ds_mla: 656-byte custom layout; see flashmla_sparse.py.
+            state_content_bytes=656 if self.kv_cache_dtype == "fp8_ds_mla" else None,
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
 
