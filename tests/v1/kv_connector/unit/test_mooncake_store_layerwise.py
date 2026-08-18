@@ -723,6 +723,8 @@ class TestSendingThreadSessionApi:
         called_keys, called_sizes, _ = store.batch_put_session_start.call_args[0]
         assert called_keys == keys
         assert called_sizes == [object_size, object_size]
+        # Successfully-started keys seed the per-layer range-put filter.
+        assert thread._active_put_keys == {"key_a", "key_b"}
 
     def test_start_put_sessions_partial_failure_revokes(self):
         """Failed session starts are revoked."""
@@ -735,6 +737,8 @@ class TestSendingThreadSessionApi:
 
         # Failed key should be revoked
         store.batch_put_session_revoke.assert_called_once_with(["fail_key"])
+        # Only the successful key remains writable.
+        assert thread._active_put_keys == {"ok_key"}
 
     def test_handle_request_dispatches_session_path(self):
         """use_key_major_ranges=True dispatches to session handler."""
