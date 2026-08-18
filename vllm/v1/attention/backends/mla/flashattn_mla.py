@@ -113,7 +113,12 @@ class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
 
 
 class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    # Per-request bounds reach the kernel via the device query_start_loc and
+    # seq_lens, so varlen decode batches replay correctly under capture.
+    # max_query_len must be a true upper bound on every row: FA3 computes
+    # garbage for rows past it, so it comes from the scheduled max rather
+    # than from the CPU query lengths, which adaptive verification skews.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.VARLEN
     reorder_batch_threshold: int = 512  # process small prefills with decode pathway
 
@@ -166,6 +171,15 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         if envs.VLLM_BATCH_INVARIANT:
             self.max_num_splits = 1
 
+        # Most drafts a single request can be given, and so the most its device
+        # query length can exceed the CPU one when adaptive verification
+        # reallocates the draft budget after the CPU batch is built.
+        spec_config = vllm_config.speculative_config
+        num_spec = spec_config.num_speculative_tokens if spec_config else None
+        self.max_draft_slack = (
+            (2 if spec_config.parallel_drafting else 1) * num_spec if num_spec else 0
+        )
+
     def _schedule_decode(
         self,
         num_reqs,
@@ -203,9 +217,16 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
+        max_decode_query_len: int,
     ) -> FlashAttnMLADecodeMetadata:
         query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        max_query_len = query_lens_cpu.max().item()
+        # FA3 leaves query rows past max_seqlen_q uncomputed, so it has to be a
+        # true upper bound. Adaptive verification reallocates the draft budget on
+        # device after this batch is built, so a request's real query length can
+        # exceed its CPU one by up to its draft count.
+        max_query_len = min(
+            max_decode_query_len, int(query_lens_cpu.max()) + self.max_draft_slack
+        )
 
         # For Flash Attention MLA + full cudagraph
         max_num_splits = 0

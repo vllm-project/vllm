@@ -161,6 +161,7 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[FlashInferMLAMetadat
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
+        max_decode_query_len: int,
     ) -> FlashInferMLADecodeMetadata:
         return FlashInferMLADecodeMetadata(
             block_table=block_table_tensor,

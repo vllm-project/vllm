@@ -2210,6 +2210,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
+        max_decode_query_len: int,
     ) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
@@ -2369,6 +2370,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 query_start_loc_device=query_start_loc[: num_decodes + 1],
                 num_decode_tokens=num_decode_tokens,
                 dcp_tot_seq_lens_device=dcp_tot_seq_lens_device,
+                # Adaptive verification trims drafts on device, so the CPU
+                # query_start_loc holds an even split of the draft budget whose
+                # per-request lengths understate the device ones. Only the
+                # common max_query_len (the scheduled max) bounds every row.
+                max_decode_query_len=min(
+                    common_attn_metadata.max_query_len, self.reorder_batch_threshold
+                ),
             )
 
         attn_metadata = self.metadata_cls(

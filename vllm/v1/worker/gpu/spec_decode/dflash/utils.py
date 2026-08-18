@@ -4,11 +4,14 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import (
     _should_share,
     get_target_lm_head,
 )
+
+logger = init_logger(__name__)
 
 
 def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Module:
@@ -23,7 +26,20 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     draft_model_config = speculative_config.draft_model_config
     # The drafter must rotate Q/K the way its target does. Take that from the
     # built target before super() constructs the draft.
-    is_neox_style = dflash_target_rope_is_neox_style(target_model)
+    # An MLA target is the exception: its is_neox_style describes the layout of
+    # the decoupled RoPE sub-vector (qk_rope_head_dim), which is internal to MLA
+    # and says nothing about the convention a dense draft head must use. Copying
+    # it across rotates every drafted Q/K wrongly and acceptance collapses with
+    # no error raised, so leave the draft on its own convention.
+    if vllm_config.model_config.use_mla:
+        is_neox_style = None
+        logger.info(
+            "DFlash: target uses MLA, keeping the draft's own RoPE layout "
+            "(is_neox_style=%s) instead of copying the target's.",
+            getattr(draft_model_config.hf_config, "is_neox_style", True),
+        )
+    else:
+        is_neox_style = dflash_target_rope_is_neox_style(target_model)
     if is_neox_style is not None:
         draft_model_config.hf_config.is_neox_style = is_neox_style
     # Select an attention backend that supports the drafter's attention: mixing

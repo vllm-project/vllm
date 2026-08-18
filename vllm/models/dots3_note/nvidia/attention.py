@@ -339,6 +339,7 @@ class Dots3NoteMLAMetadataBuilder(TritonMLAMetadataBuilder):
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
+        max_decode_query_len: int,
     ) -> Dots3NoteDecodeMetadata:
         del max_seq_len, query_start_loc_device, num_decode_tokens
         query_len = int(query_start_loc_cpu[1] - query_start_loc_cpu[0])

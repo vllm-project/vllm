@@ -380,7 +380,7 @@ def _maybe_symmetrize_window(
 
 
 class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetadata]):
-    # FA3:
+    # FA3/FA4:
     # Supports full cudagraphs for all cases.
     #
     # FA2:
@@ -400,7 +400,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     #  https://github.com/vllm-project/vllm/issues/22945
     _cudagraph_support = (
         AttentionCGSupport.ALWAYS
-        if get_flash_attn_version() == 3
+        if get_flash_attn_version() in (3, 4)
         else AttentionCGSupport.UNIFORM_BATCH
     )
     supports_update_block_table: bool = True

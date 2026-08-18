@@ -201,22 +201,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             return align_mla_chunked_context_workspace_size(vllm_config, workspace_size)
         return workspace_size
 
-    def _build_req_id_per_token(
-        self,
-        common_attn_metadata: "CommonAttentionMetadata",
-    ) -> torch.Tensor:
-        num_tokens = common_attn_metadata.num_actual_tokens
-        starts = np.asarray(common_attn_metadata.query_start_loc_cpu, dtype=np.int32)
-        seg_lengths = np.diff(starts)
-        req_id_per_token = np.repeat(
-            np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
-        )
-        self.req_id_per_token_buffer.fill_(0)
-        self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
-            np_to_pinned_tensor(req_id_per_token), non_blocking=True
-        )
-        return self.req_id_per_token_buffer[:num_tokens]
-
     def _build_chunked_context_fields(
         self,
         common_attn_metadata: "CommonAttentionMetadata",
@@ -256,7 +240,12 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         common_attn_metadata: "CommonAttentionMetadata",
         fast_build: bool = False,
     ) -> T:
-        req_id_per_token = self._build_req_id_per_token(common_attn_metadata)
+        # The sparse path indexes each token's top-k rows through its request's
+        # block table, so a wrong token->request mapping silently reads another
+        # request's KV.
+        req_id_per_token = common_attn_metadata.token_to_req_indices(
+            self.req_id_per_token_buffer
+        )
 
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             common_attn_metadata,
