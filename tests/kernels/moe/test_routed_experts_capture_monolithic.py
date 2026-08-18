@@ -114,7 +114,13 @@ def _moe_config(top_k: int, routing_method: RoutingMethodType) -> FusedMoEConfig
     )
 
 
-def _bf16_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
+def _bf16_kernel(
+    top_k: int,
+    routing_method: RoutingMethodType,
+    simulated: bool = False,
+) -> Kernel:
+    assert not simulated, "BF16 kernel does not support simulated routing"
+
     from flashinfer import shuffle_matrix_a
     from flashinfer.fused_moe import convert_to_block_layout
 
@@ -163,7 +169,13 @@ def _bf16_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
     return experts, forward
 
 
-def _fp8_block_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
+def _fp8_block_kernel(
+    top_k: int,
+    routing_method: RoutingMethodType,
+    simulated: bool = False,
+) -> Kernel:
+    assert not simulated, "FP8 kernel does not support simulated routing"
+
     from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
         _shuffle_deepseek_fp8_moe_weights,
     )
@@ -212,7 +224,11 @@ def _fp8_block_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
     return experts, forward
 
 
-def _nvfp4_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
+def _nvfp4_kernel(
+    top_k: int,
+    routing_method: RoutingMethodType,
+    simulated: bool = False,
+) -> Kernel:
     from flashinfer import fp4_quantize
 
     block = 16
@@ -232,8 +248,13 @@ def _nvfp4_kernel(top_k: int, routing_method: RoutingMethodType) -> Kernel:
         torch.randn(NUM_EXPERTS, HIDDEN, INTERMEDIATE, device=DEVICE).bfloat16()
     )
     ones = torch.ones(NUM_EXPERTS, device=DEVICE)
+    moe_config = _moe_config(top_k, routing_method)
+    if simulated:
+        moe_config.original_routing_method = routing_method
+        moe_config.routing_method = RoutingMethodType.Simulated
+
     experts = TrtLlmNvFp4ExpertsMonolithic(
-        moe_config=_moe_config(top_k, routing_method),
+        moe_config=moe_config,
         quant_config=FusedMoEQuantConfig.make(
             quant_dtype="nvfp4",
             per_act_token_quant=False,
@@ -282,13 +303,33 @@ KERNELS = {"bf16": _bf16_kernel, "fp8_block": _fp8_block_kernel, "nvfp4": _nvfp4
 @pytest.mark.parametrize(
     "routing_method", [RoutingMethodType.Renormalize, RoutingMethodType.DeepSeekV3]
 )
+@pytest.mark.parametrize("simulated", [False, True])
 @pytest.mark.parametrize("top_k", [2, 4])
 @pytest.mark.parametrize("num_tokens", [2, 7, 16])
 def test_routing_replay_reports_the_routed_experts(
-    kernel: str, routing_method: RoutingMethodType, top_k: int, num_tokens: int
+    kernel: str,
+    routing_method: RoutingMethodType,
+    simulated: bool,
+    top_k: int,
+    num_tokens: int,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    if simulated and (
+        kernel != "nvfp4" or routing_method != RoutingMethodType.DeepSeekV3
+    ):
+        pytest.skip("Simulation coverage requires NVFP4 with DeepSeekV3 routing")
+
+    if simulated:
+        import vllm.envs as envs
+
+        monkeypatch.setitem(
+            envs.environment_variables,
+            "VLLM_MOE_ROUTING_SIMULATION_STRATEGY",
+            lambda: "uniform_random",
+        )
+
     torch.manual_seed(0)
-    experts, forward = KERNELS[kernel](top_k, routing_method)
+    experts, forward = KERNELS[kernel](top_k, routing_method, simulated=simulated)
     assert experts.supports_routing_replay_capture()
     router_logits, planted = _planted_routing(num_tokens, top_k)
     # One spare row: the kernel must write the batch's rows and nothing else.
@@ -299,5 +340,11 @@ def test_routing_replay_reports_the_routed_experts(
     forward(router_logits, routing_replay_out)
 
     reported = routing_replay_out[:num_tokens].long().sort(dim=-1).values
-    assert torch.equal(reported, planted), (reported, planted)
+    if simulated:
+        # Simulation replaces the planted logits, so check validity, not exact IDs.
+        assert (reported >= 0).all()
+        assert (reported < NUM_EXPERTS).all()
+        assert (reported[:, 1:] != reported[:, :-1]).all()
+    else:
+        assert torch.equal(reported, planted), (reported, planted)
     assert (routing_replay_out[num_tokens:] == -1).all()

@@ -378,6 +378,7 @@ def FusedMoEFactory(
         routing_method=router.routing_method_type,  # Not ideal
         has_hash_routing=hash_indices_table is not None,
         require_decomposed_backend=expert_substitution is not None,
+        original_routing_method=router.original_routing_method_type,
         swiglu_limit=swiglu_limit,
         swiglu_alpha=swiglu_alpha,
         swiglu_beta=swiglu_beta,
