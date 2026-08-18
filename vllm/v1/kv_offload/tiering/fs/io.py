@@ -165,6 +165,16 @@ def _load_block(
             os.close(fd)
 
 
+def delete_block(dest_path: str) -> None:
+    """
+    Delete a stored block file. Missing files are ignored (idempotent).
+    """
+    try:
+        os.remove(dest_path)
+    except FileNotFoundError:
+        pass
+
+
 def batch_store_block(
     paths: list[str],
     view: memoryview,

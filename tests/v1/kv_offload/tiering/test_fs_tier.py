@@ -219,6 +219,96 @@ def test_lookup_empty_tier(fs_tier):
     assert results == [LookupResult.MISS, LookupResult.MISS]
 
 
+def test_capacity_evicts_oldest_blocks(tmp_path):
+    """Blocks beyond capacity_bytes are evicted LRU-first."""
+    tensor = _page_aligned_zero_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
+    mock_view = memoryview(tensor.numpy())
+    block_size = _BLOCK_ELEMENTS * _DTYPE.itemsize
+    tier = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_view,
+        tier_type="fs",
+        root_dir=str(tmp_path),
+        n_read_threads=4,
+        n_write_threads=4,
+        capacity_bytes=3 * block_size,  # room for exactly 3 blocks
+    )
+    try:
+        for i in range(5):
+            tier.submit_store(make_job(i, [key(i)], [i]))
+            drain(tier)
+
+        on_disk = [
+            f for _, _, files in os.walk(tmp_path) for f in files if f.endswith(".bin")
+        ]
+        assert len(on_disk) == 3, f"expected 3 blocks on disk, got {len(on_disk)}"
+        assert tier._bytes_used <= tier.capacity_bytes
+
+        # Oldest two blocks (0, 1) evicted; newest three (2, 3, 4) kept.
+        for evicted in (0, 1):
+            assert not os.path.exists(tier.file_mapper.get_file_name(key(evicted)))
+        for kept in (2, 3, 4):
+            assert os.path.exists(tier.file_mapper.get_file_name(key(kept)))
+
+        # touch() protects a block from eviction.
+        tier.touch([key(2)], _CTX)
+        tier.submit_store(make_job(5, [key(5)], [5]))
+        drain(tier)
+        # Eviction order: 3 (oldest), then 4 down to the 90% watermark
+        # (3 blocks * 90% = 2.7 blocks, so 2 blocks remain).
+        for gone in (3, 4):
+            assert not os.path.exists(tier.file_mapper.get_file_name(key(gone)))
+        assert os.path.exists(tier.file_mapper.get_file_name(key(2)))
+        assert os.path.exists(tier.file_mapper.get_file_name(key(5)))
+    finally:
+        tier.shutdown()
+
+
+def test_capacity_indexes_existing_files(tmp_path):
+    """Pre-existing block files count toward capacity on startup."""
+    tensor = _page_aligned_zero_tensor(_NUM_BLOCKS, _BLOCK_ELEMENTS)
+    mock_view = memoryview(tensor.numpy())
+    block_size = _BLOCK_ELEMENTS * _DTYPE.itemsize
+    # First tier writes two blocks without a capacity bound.
+    tier = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_view,
+        tier_type="fs",
+        root_dir=str(tmp_path),
+        n_read_threads=4,
+        n_write_threads=4,
+    )
+    try:
+        tier.submit_store(make_job(1, [key(1)], [1]))
+        tier.submit_store(make_job(2, [key(2)], [2]))
+        drain(tier)
+    finally:
+        tier.shutdown()
+
+    # Second tier with a tight bound must see the existing files and evict
+    # them on the first store.
+    tier = FileSystemTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_view,
+        tier_type="fs",
+        root_dir=str(tmp_path),
+        n_read_threads=4,
+        n_write_threads=4,
+        capacity_bytes=1 * block_size,
+    )
+    try:
+        assert tier._bytes_used == 2 * block_size
+        tier.submit_store(make_job(3, [key(3)], [3]))
+        drain(tier)
+        assert tier._bytes_used <= tier.capacity_bytes
+        # Oldest (key 1) evicted; newest (key 3) kept.
+        assert not os.path.exists(tier.file_mapper.get_file_name(key(1)))
+        assert os.path.exists(tier.file_mapper.get_file_name(key(3)))
+    finally:
+        tier.shutdown()
+
+
+
 def test_store_creates_file_and_lookup_succeeds(fs_tier):
     tier, _ = fs_tier
     job = make_job(1, [key(1)], [0])

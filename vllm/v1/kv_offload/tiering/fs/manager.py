@@ -18,7 +18,8 @@ File naming:  <base_path>_r<rank>/<hhh>/<hh>_g<group_idx>/<hash_hex>.bin
 import functools
 import json
 import os
-from collections.abc import Iterable
+from collections import OrderedDict
+from collections.abc import Collection, Iterable
 from typing import TYPE_CHECKING, ClassVar
 
 try:
@@ -38,6 +39,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadKey,
     ReqContext,
+    make_offload_key,
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
@@ -52,6 +54,7 @@ from vllm.v1.kv_offload.tiering.base import (
 from vllm.v1.kv_offload.tiering.fs.io import (
     batch_load_block,
     batch_store_block,
+    delete_block,
     probe_o_direct,
 )
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
@@ -116,6 +119,7 @@ class FileSystemTierManager(SecondaryTierManager):
         n_write_threads: int = 16,
         enable_kv_events: bool = False,
         locality: str | None = None,
+        capacity_bytes: int | None = None,
     ):
         """
         Args:
@@ -131,6 +135,12 @@ class FileSystemTierManager(SecondaryTierManager):
                 cache events are enabled globally (kv_events_config).
             locality: Whether this tier's storage is LOCAL or REMOTE relative
                 to the publishing vLLM instance.
+            capacity_bytes: Optional upper bound on total on-disk usage for
+                this tier. When a store would push usage past this bound,
+                the least-recently-used block files are deleted until usage
+                drops to 90% of the bound. ``None`` (default) disables
+                eviction, preserving historical behavior of unbounded disk
+                growth.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
         self.locality = Locality(locality) if locality is not None else None
@@ -158,6 +168,17 @@ class FileSystemTierManager(SecondaryTierManager):
         # the GIL that read cannot observe the finished job without the prior
         # write, so no extra lock is needed (get_finished is itself lock-free).
         self._load_progress: dict[JobId, int] = {}
+
+        # Capacity management. All fields below are scheduler-thread owned:
+        # get_finished_jobs(), lookup(), and touch() run on the scheduler
+        # thread, so no locking is needed.
+        self.capacity_bytes = capacity_bytes
+        # LRU ordering for eviction: insertion order == store order, and
+        # move_to_end() marks a block as recently used (touch / load hit).
+        self._lru: OrderedDict[OffloadKey, None] = OrderedDict()
+        self._bytes_used: int = 0
+        # Blocks currently being loaded from disk; never evict these.
+        self._in_flight_loads: set[OffloadKey] = set()
 
         # Extract block size from primary view
         assert primary_kv_view.strides is not None, (
@@ -200,18 +221,128 @@ class FileSystemTierManager(SecondaryTierManager):
             thread_name_prefix="vllm_kv_py_fs",
         )
 
+        if capacity_bytes is not None:
+            self._scan_existing_files()
+
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         return RequestOffloadingContext()
 
+    def _scan_existing_files(self) -> None:
+        """Index block files left by previous runs sharing ``root_dir``.
+
+        Capacity accounting and LRU eviction must cover the full on-disk
+        state; without this, a fresh instance would ignore pre-existing
+        files until they are touched by a new store.
+        """
+        base = f"{self.file_mapper.base_path}_r{self.file_mapper.rank}"
+        if not os.path.isdir(base):
+            return
+        entries: list[tuple[float, str, OffloadKey]] = []
+        for dirpath, _dirnames, filenames in os.walk(base):
+            for fname in filenames:
+                if not fname.endswith(".bin"):
+                    continue
+                # Directory layout: <hh>_g<group_idx>
+                group_dir = os.path.basename(dirpath)
+                try:
+                    group_idx = int(group_dir.split("_g", 1)[1])
+                    key = make_offload_key(
+                        bytes.fromhex(fname[:-4]), group_idx
+                    )
+                except (ValueError, IndexError):
+                    continue
+                path = os.path.join(dirpath, fname)
+                entries.append((os.path.getmtime(path), path, key))
+        entries.sort()
+        for _mtime, path, key in entries:
+            self._lru[key] = None
+            self._bytes_used += os.path.getsize(path)
+        if entries:
+            logger.info(
+                "FileSystemTierManager: indexed %d existing block file(s) "
+                "(%d bytes) under %s",
+                len(entries),
+                self._bytes_used,
+                base,
+            )
+
+    def _touch_keys(self, keys: Iterable[OffloadKey]) -> None:
+        """Mark keys as recently used; ignore keys not on disk."""
+        for key in keys:
+            if key in self._lru:
+                self._lru.move_to_end(key)
+
+    def _maybe_evict(self) -> None:
+        """Evict least-recently-used blocks past the capacity bound.
+
+        Called after stores complete. Deletes block files until usage
+        drops to 90% of ``capacity_bytes`` (hysteresis avoids thrashing at
+        the boundary). Blocks with an in-flight load are skipped.
+        """
+        if self.capacity_bytes is None or self._bytes_used <= self.capacity_bytes:
+            return
+        target = self.capacity_bytes * 9 // 10
+        evicted: list[OffloadKey] = []
+        freed_bytes = 0
+        for key in list(self._lru.keys()):
+            if self._bytes_used <= target:
+                break
+            if key in self._in_flight_loads:
+                continue
+            path = self.file_mapper.get_file_name(key)
+            try:
+                size = os.path.getsize(path)
+            except FileNotFoundError:
+                # Already gone (concurrent cleanup); drop the stale entry.
+                del self._lru[key]
+                continue
+            except OSError as exc:
+                logger.warning(
+                    "Failed to stat block file %s: %s", path, exc
+                )
+                continue
+            delete_block(path)
+            self._bytes_used -= size
+            freed_bytes += size
+            del self._lru[key]
+            evicted.append(key)
+        if evicted:
+            logger.info(
+                "FileSystemTierManager: evicted %d block(s) (%d bytes); "
+                "usage now %d / %d bytes",
+                len(evicted),
+                freed_bytes,
+                self._bytes_used,
+                self.capacity_bytes,
+            )
+            if self.events is not None:
+                self.events.append(
+                    OffloadingEvent(
+                        keys=evicted,
+                        medium=self.medium,
+                        removed=True,
+                        locality=self.locality,
+                    )
+                )
+
+    @override
+    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
+        """Mark blocks as recently used for eviction policy."""
+        self._touch_keys(keys)
+
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         result = self._lookup_manager.lookup(key, req_context)
         if result is None:
             return LookupResult.RETRY
-        return LookupResult.HIT if result else LookupResult.MISS
+        if result:
+            # A hit means the block is wanted; keep it out of eviction.
+            self._touch_keys([key])
+            return LookupResult.HIT
+        return LookupResult.MISS
 
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
@@ -235,6 +366,7 @@ class FileSystemTierManager(SecondaryTierManager):
         # keys as a miss (see get_finished_jobs).
         keys = list(job_metadata.keys)
         self._load_job_keys[job_id] = keys
+        self._in_flight_loads.update(keys)
         paths = [self.file_mapper.get_file_name(key) for key in keys]
         offsets = [int(bid) * self._block_size for bid in job_metadata.block_ids]
 
@@ -273,18 +405,38 @@ class FileSystemTierManager(SecondaryTierManager):
         as a miss here (scheduler thread)."""
         results = []
         for job_id, success, transfer_time in self._pool.get_finished():
+            store_keys = self._store_job_keys.pop(job_id, None)
             if self.events is not None:
-                keys = self._store_job_keys.pop(job_id, None)
-                if success and keys:
+                if success and store_keys:
                     self.events.append(
                         OffloadingEvent(
-                            keys=keys,
+                            keys=store_keys,
                             medium=self.medium,
                             removed=False,
                             locality=self.locality,
                         )
                     )
             load_keys = self._load_job_keys.pop(job_id, None)
+            if load_keys is not None:
+                # Load (promotion) finished: block is evictable again and
+                # recently used.
+                self._in_flight_loads.difference_update(load_keys)
+                self._touch_keys(load_keys)
+            else:
+                # Store finished: account for newly-created block files.
+                # batch_store_block() skips files that already exist, so
+                # size is only added once per key.
+                if success and store_keys:
+                    for key in store_keys:
+                        if key in self._lru:
+                            continue
+                        path = self.file_mapper.get_file_name(key)
+                        try:
+                            size = os.path.getsize(path)
+                        except OSError:
+                            continue
+                        self._bytes_used += size
+                        self._lru[key] = None
             num_succeeded = self._load_progress.pop(job_id, 0)
             if load_keys is not None and not success:
                 # A batched load stops at the first bad block and reports how
@@ -310,6 +462,7 @@ class FileSystemTierManager(SecondaryTierManager):
                     transfer_time=transfer_time,
                 )
             )
+        self._maybe_evict()
         return results
 
     @override
