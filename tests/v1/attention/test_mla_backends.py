@@ -27,6 +27,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
     QueryLenSupport,
     _DecodeConcatQuantFP8,
+    build_mla_chunked_context_metadata,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
@@ -91,6 +92,48 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     assert spec.kv_quant_mode == expected_quant_mode
     if cache_dtype == "fp8_ds_mla":
         assert spec.page_size_bytes == 64 * 656
+
+
+@pytest.mark.cpu_test
+def test_dcp_chunked_context_accepts_non_virtual_block_aligned_prefix():
+    context_lens_cpu = torch.tensor([65, 96], dtype=torch.int32)
+    prefill_query_start_loc_cpu = torch.tensor([0, 1, 2], dtype=torch.int32)
+
+    metadata = build_mla_chunked_context_metadata(
+        context_lens_cpu=context_lens_cpu,
+        prefill_query_start_loc_cpu=prefill_query_start_loc_cpu,
+        chunked_prefill_workspace=torch.empty(0),
+        chunked_prefill_workspace_size=128,
+        block_size=64,
+        align_chunk_to_block=True,
+        device=torch.device("cpu"),
+        dcp_world_size=4,
+        dcp_local_block_size=1,
+        dcp_virtual_block_size=4,
+    )
+
+    assert metadata is not None
+    assert metadata.context_lens.tolist() == [65, 96]
+    assert [chunk.seq_lens.tolist() for chunk in metadata.chunks] == [[65], [96]]
+    assert [chunk.starts.tolist() for chunk in metadata.chunks] == [[0], [0]]
+    assert [chunk.local_context_lens_allranks for chunk in metadata.chunks] == [
+        [[17, 16, 16, 16]],
+        [[24, 24, 24, 24]],
+    ]
+    assert [chunk.padded_local_seq_lens for chunk in metadata.chunks] == [
+        [17],
+        [24],
+    ]
+    assert [chunk.padded_local_cu_seq_lens.tolist() for chunk in metadata.chunks] == [
+        [0, 17],
+        [0, 24],
+    ]
+    assert [chunk.cu_seq_lens.tolist() for chunk in metadata.chunks] == [
+        [0, 65],
+        [0, 96],
+    ]
+    assert [chunk.num_context_tokens for chunk in metadata.chunks] == [65, 96]
+    assert [chunk.num_local_context_tokens for chunk in metadata.chunks] == [17, 24]
 
 
 # Remove sm100 backends from the list if not using sm100
@@ -837,7 +880,84 @@ def test_mock_mla_dcp_fp8_decode_gathers_quantized_query(
 def test_tokenspeed_mla_noncausal_capability():
     builder = tokenspeed_mla_module.TokenspeedMLAMetadataBuilder
     assert builder.supports_non_causal_multi_token_decode
+    assert builder.supports_non_causal_multi_token_dcp
     assert tokenspeed_mla_module.TokenspeedMLABackend.supports_non_causal()
+
+
+def test_flashinfer_mla_dcp_multi_token_decode_uses_per_query_bounds(monkeypatch):
+    flashinfer_mla_module = pytest.importorskip(
+        "vllm.v1.attention.backends.mla.flashinfer_mla"
+    )
+
+    decode_call = None
+
+    def fake_decode(**kwargs):
+        nonlocal decode_call
+        decode_call = kwargs
+        query = kwargs["query"]
+        output = torch.empty(*query.shape[:-1], 512, dtype=torch.bfloat16)
+        lse = torch.empty(query.shape[0], query.shape[-2], dtype=torch.float32)
+        return output, lse
+
+    monkeypatch.setattr(
+        flashinfer_mla_module,
+        "trtllm_batch_decode_with_kv_cache_mla",
+        fake_decode,
+    )
+    monkeypatch.setattr(
+        flashinfer_mla_module,
+        "_get_workspace_buffer",
+        lambda return_lse: torch.empty(1, dtype=torch.int8),
+    )
+
+    impl = object.__new__(flashinfer_mla_module.FlashInferMLAImpl)
+    impl.dcp_world_size = 2
+    impl.dcp_rank = 1
+    impl.cp_kv_cache_interleave_size = 1
+    impl.need_to_return_lse_for_decode = True
+    impl.kv_lora_rank = 512
+    impl.qk_nope_head_dim = 128
+    impl.qk_rope_head_dim = 64
+    impl.bmm1_scale = 1.0
+    impl.bmm2_scale = 1.0
+
+    block_table = torch.tensor([[1], [2]], dtype=torch.int32)
+    metadata = SimpleNamespace(
+        num_decodes=2,
+        num_decode_tokens=6,
+        max_seq_len=7,
+        causal=True,
+        decode=SimpleNamespace(
+            block_table=block_table,
+            seq_lens=torch.tensor([5, 6], dtype=torch.int32),
+            dcp_tot_seq_lens=torch.tensor([10, 13], dtype=torch.int32),
+            flattened_block_table=None,
+            flattened_seq_lens=None,
+            query_len=0,
+        ),
+    )
+    query = torch.empty(6, 2, 576, dtype=torch.bfloat16)
+    kv_cache = torch.empty(3, 16, 576, dtype=torch.bfloat16)
+
+    output, lse = impl.forward_mqa(
+        query,
+        kv_cache,
+        metadata,
+        SimpleNamespace(),
+    )
+
+    assert output.shape == (6, 2, 512)
+    assert lse is not None
+    assert lse.shape == (6, 2)
+    assert decode_call is not None
+    assert decode_call["query"].shape == (6, 1, 2, 576)
+    torch.testing.assert_close(
+        decode_call["seq_lens"],
+        torch.tensor([4, 4, 5, 5, 6, 6], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        decode_call["block_tables"], block_table.repeat_interleave(3, dim=0)
+    )
 
 
 @pytest.mark.parametrize(
