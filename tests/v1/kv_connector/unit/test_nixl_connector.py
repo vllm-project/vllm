@@ -1974,7 +1974,7 @@ def test_register_kv_caches(
         for addr, blk in owner.items():
             block_bytes[blk].add(addr)
 
-        covered = defaultdict(set)
+        covered: defaultdict[int, set[int]] = defaultdict(set)
         for block_start_addr, block_len, _tp_rank in blocks_data:
             window = range(block_start_addr, block_start_addr + block_len)
             owners = {owner[addr] for addr in window}
