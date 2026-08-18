@@ -19,6 +19,7 @@ import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.models.deepseek_v4 import compressor as compressor_module
 from vllm.models.deepseek_v4.common.ops import (
     compute_global_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
@@ -30,7 +31,11 @@ from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
     _launch_two_stage_sparse_attn_compressor,
     compress_norm_rope_store_triton,
 )
-from vllm.models.deepseek_v4.compressor import _get_c128_boundary
+from vllm.models.deepseek_v4.compressor import (
+    CompressorMetadata,
+    DeepseekCompressor,
+    _get_c128_boundary,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.mla.compressor_utils import (
     get_dspark_swa_index_width,
@@ -52,6 +57,133 @@ def _on_gfx950() -> bool:
         return _ON_GFX950
     except Exception:
         return False
+
+
+def _make_compressor_forward_case(
+    monkeypatch: pytest.MonkeyPatch, kv_cache: torch.Tensor
+) -> tuple[DeepseekCompressor, torch.Tensor, torch.Tensor, SimpleNamespace]:
+    device = kv_cache.device
+    head_dim = 512
+    rope_head_dim = 64
+
+    compressor = DeepseekCompressor.__new__(DeepseekCompressor)
+    torch.nn.Module.__init__(compressor)
+    compressor.compress_ratio = 1
+    compressor.coff = 1
+    compressor.head_dim = head_dim
+    compressor.rope_head_dim = rope_head_dim
+    compressor.overlap = False
+    compressor.use_fp4_cache = False
+    compressor.rms_norm_eps = 1e-6
+    compressor._quant_block = 64
+    compressor._token_stride = 576
+    compressor._scale_dim = 8
+    compressor._use_two_stage_fused_compressor = False
+    compressor.eager_scratch_pool = None
+    compressor.ape = torch.empty(0, device=device)
+    compressor.norm = SimpleNamespace(
+        weight=torch.ones(head_dim, dtype=torch.bfloat16, device=device)
+    )
+
+    state_cache = torch.randn(1, 1, 2 * head_dim, dtype=torch.float32, device=device)
+    compressor.state_cache = SimpleNamespace(prefix="state", kv_cache=state_cache)
+    compressor.k_cache_prefix = "k_cache"
+    compressor._static_forward_context = {"k_cache": SimpleNamespace(kv_cache=kv_cache)}
+
+    slot_mapping = torch.zeros(1, dtype=torch.int64, device=device)
+    state_metadata = CompressorMetadata(
+        block_table=torch.zeros(1, 1, dtype=torch.int32, device=device),
+        slot_mapping=slot_mapping,
+        block_size=1,
+        token_to_req_indices=torch.zeros(1, dtype=torch.int32, device=device),
+    )
+    k_cache_metadata = SimpleNamespace(slot_mapping=slot_mapping)
+    forward_context = SimpleNamespace(
+        attn_metadata={"state": state_metadata, "k_cache": k_cache_metadata},
+        cudagraph_runtime_mode=None,
+    )
+    monkeypatch.setattr(
+        compressor_module, "get_forward_context", lambda: forward_context
+    )
+    monkeypatch.setattr(compressor_module, "save_partial_states", lambda **kwargs: None)
+
+    kv_score = torch.empty(1, 2 * head_dim, dtype=torch.bfloat16, device=device)
+    positions = torch.zeros(1, dtype=torch.int64, device=device)
+    rotary_emb = SimpleNamespace(
+        cos_sin_cache=torch.cat(
+            [
+                torch.ones(1, rope_head_dim // 2, device=device),
+                torch.zeros(1, rope_head_dim // 2, device=device),
+            ],
+            dim=-1,
+        )
+    )
+    return compressor, kv_score, positions, rotary_emb
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only dispatch")
+@pytest.mark.parametrize("cache_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_compressor_rejects_plain_cache_without_cutedsl(
+    monkeypatch: pytest.MonkeyPatch, cache_dtype: torch.dtype
+) -> None:
+    kv_cache = torch.empty(1, 1, 512, dtype=cache_dtype, device="cuda")
+    compressor, kv_score, positions, rotary_emb = _make_compressor_forward_case(
+        monkeypatch, kv_cache
+    )
+    monkeypatch.setattr(compressor_module, "has_cutedsl", lambda: False)
+    monkeypatch.setattr(
+        compressor_module,
+        "compress_norm_rope_store_triton",
+        lambda **kwargs: pytest.fail("Triton must not receive a plain cache row"),
+    )
+
+    with pytest.raises(RuntimeError, match="only supports the packed fp8_ds_mla"):
+        compressor(kv_score, positions, rotary_emb)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only dispatch")
+def test_compressor_triton_fallback_accepts_packed_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    kv_cache = torch.empty(1, 1, 584, dtype=torch.uint8, device="cuda")
+    compressor, kv_score, positions, rotary_emb = _make_compressor_forward_case(
+        monkeypatch, kv_cache
+    )
+    monkeypatch.setattr(compressor_module, "has_cutedsl", lambda: False)
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        compressor_module,
+        "compress_norm_rope_store_triton",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    compressor(kv_score, positions, rotary_emb)
+
+    assert len(calls) == 1
+    assert calls[0]["kv_cache"] is kv_cache
+
+
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(89),
+    reason="native FP8 E4M3 store requires SM89+",
+)
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only dispatch")
+def test_compressor_triton_fallback_writes_only_packed_cache_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = 0xA5
+    storage = torch.full((1, 1, 600), sentinel, dtype=torch.uint8, device="cuda")
+    kv_cache = storage[..., :584]
+    compressor, kv_score, positions, rotary_emb = _make_compressor_forward_case(
+        monkeypatch, kv_cache
+    )
+    monkeypatch.setattr(compressor_module, "has_cutedsl", lambda: False)
+
+    compressor(kv_score, positions, rotary_emb)
+    torch.cuda.synchronize()
+
+    assert not torch.all(storage[..., :584] == sentinel)
+    assert torch.all(storage[..., 584:] == sentinel)
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only dispatch")

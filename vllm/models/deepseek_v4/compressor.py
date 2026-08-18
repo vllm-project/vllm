@@ -21,6 +21,7 @@ from vllm.models.deepseek_v4.common.ops.save_partial_states import (
     save_partial_states,
 )
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_cutedsl
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -43,6 +44,21 @@ def _prefer_two_stage_compressor() -> bool:
     # Platforms that favor the triton variant of two-stage compressor split.
     # Currently only tested on ROCm
     return current_platform.is_rocm()
+
+
+def _use_cutedsl_compressor(head_dim: int, kv_cache_dtype: torch.dtype) -> bool:
+    if head_dim != 512:
+        return False
+    if current_platform.is_cuda() and has_cutedsl():
+        return True
+    if kv_cache_dtype != torch.uint8:
+        raise RuntimeError(
+            "DeepSeek V4 plain BF16/per-tensor FP8 KV cache compression "
+            "requires the CuTe DSL compressor, but CuTe DSL is unavailable. "
+            "The Triton fallback only supports the packed fp8_ds_mla "
+            "torch.uint8 layout."
+        )
+    return False
 
 
 def _get_c128_boundary(metadata: CommonAttentionMetadata) -> bool | None:
@@ -419,7 +435,7 @@ class DeepseekCompressor(nn.Module):
         # cutedsl (head=512) accepts the full-cache flags; triton (indexer/AMD)
         # does not, so the two callables have different signatures.
         compress_norm_rope_store_fn: Any
-        if current_platform.is_cuda() and self.head_dim == 512:
+        if _use_cutedsl_compressor(self.head_dim, kv_cache.dtype):
             from .nvidia.ops.sparse_attn_compress_cutedsl import (
                 compress_norm_rope_store_cutedsl,
             )
