@@ -25,8 +25,13 @@ def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> N
     """Spin-wait until the file reaches expected_size (creator truncated it)."""
     deadline = time.monotonic() + timeout
     while True:
-        if os.fstat(fd).st_size >= expected_size:
+        file_stat = os.fstat(fd)
+        if file_stat.st_size >= expected_size:
             return
+        if file_stat.st_nlink == 0:
+            raise RuntimeError(
+                "Shared offload region creator failed during initialization."
+            )
         if time.monotonic() > deadline:
             raise TimeoutError(
                 f"Timed out waiting for mmap file to reach {expected_size} bytes"
@@ -83,6 +88,8 @@ class SharedOffloadRegion:
         rank: int | None,
         kv_bytes_per_block: int,
         cpu_page_size: int,
+        *,
+        creator_memory_check: Callable[[int], None] | None = None,
     ) -> None:
         self.page_size = mmap.PAGESIZE
         assert kv_bytes_per_block % self.page_size == 0
@@ -109,7 +116,7 @@ class SharedOffloadRegion:
             self.fd = os.open(self.mmap_path, os.O_RDWR)
             try:
                 _wait_for_file_size(self.fd, self.total_size_bytes)
-            except (TimeoutError, OSError):
+            except (RuntimeError, TimeoutError, OSError):
                 os.close(self.fd)
                 raise
             logger.info("Opened existing mmap file %s", self.mmap_path)
@@ -119,9 +126,11 @@ class SharedOffloadRegion:
             # land on a 0-byte stub and spin in _wait_for_file_size
             # for the full 30 s timeout.
             try:
+                if creator_memory_check is not None:
+                    creator_memory_check(self.total_size_bytes)
                 check_shm_free_space(self.total_size_bytes)
                 os.ftruncate(self.fd, self.total_size_bytes)
-            except (RuntimeError, OSError):
+            except (ValueError, RuntimeError, OSError):
                 os.unlink(self.mmap_path)
                 os.close(self.fd)
                 raise
@@ -168,6 +177,12 @@ class SharedOffloadRegion:
         self._base = torch.frombuffer(memoryview(self.mmap_obj), dtype=torch.int8)
         self._views: list[torch.Tensor] = []
         self.is_pinned: bool = False
+
+    @property
+    def base_tensor(self) -> torch.Tensor:
+        if self._base is None:
+            raise RuntimeError("Shared offload region has been released.")
+        return self._base
 
     def create_next_view(self, tensor_page_size: int) -> torch.Tensor:
         """Allocate a strided int8 view for this worker, one canonical tensor.

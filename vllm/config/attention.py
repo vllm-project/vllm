@@ -19,7 +19,12 @@ class HiSparseConfig:
     """Configuration for HiSparse sparse-MLA decode."""
 
     host_pool_gib: float = Field(gt=0)
-    """Per-rank pinned host pool size in GiB."""
+    """Logical pinned host KV capacity budget per rank in GiB.
+
+    Eligible local tensor-parallel workers share one physical pool without
+    changing the logical capacity. Otherwise each rank allocates a private
+    physical pool.
+    """
 
     device_buffer_size: int | None = Field(default=None, gt=0)
     """Total per-request GPU hot-buffer rows, including the newest-token slot.
