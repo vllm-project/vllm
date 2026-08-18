@@ -1807,8 +1807,9 @@ def element_byte_addrs(view: torch.Tensor) -> list[int]:
         shape[dim] = size
         offsets = offsets + torch.arange(size, dtype=torch.int64).view(shape) * stride
     esize = view.element_size()
-    starts = (view.data_ptr() + offsets.flatten() * esize).tolist()
-    return [addr + i for addr in starts for i in range(esize)]
+    byte_offsets = (offsets.flatten() * esize).tolist()
+    base = view.data_ptr()
+    return [base + offset + i for offset in byte_offsets for i in range(esize)]
 
 
 @pytest.mark.parametrize(

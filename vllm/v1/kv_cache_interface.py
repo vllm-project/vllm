@@ -316,19 +316,25 @@ def compute_layout_strides(
         num_layers,
         *compute_layer_kv_cache_shape_bytes(spec, num_blocks, kernel_block_size),
     )
-    padded_block_size = getattr(spec, "page_size_padded", None)
-    if padded_block_size is not None:
-        assert layout.is_block_compact, f"{layout.name} does not support page padding."
+    order = layout.stride_order
+    padded_page_size = getattr(spec, "page_size_padded", None)
+    if padded_page_size is not None:
         assert kernel_block_size is None or kernel_block_size == spec.block_size, (
             "Padded KV pages do not support kernel block splitting."
+        )
+        page_grid_end = max(order.index(_DIM_L), order.index(_DIM_B)) + 1
+        page_grid_shape = tuple(shape[dim] for dim in order[:page_grid_end])
+        assert prod(page_grid_shape) == num_layers * num_blocks, (
+            "Page padding requires dimensions outside the page tail to be L, B, "
+            f"or singleton; got {layout.name} with shape {shape}."
         )
 
     strides = [0] * 5
     current_stride = 1
-    for physical_idx, dim in reversed(tuple(enumerate(layout.stride_order))):
-        if physical_idx == _DIM_B and padded_block_size is not None:
-            current_stride = max(current_stride, padded_block_size)
-            assert current_stride % padded_block_size == 0
+    for physical_idx, dim in reversed(tuple(enumerate(order))):
+        if padded_page_size is not None and physical_idx == page_grid_end - 1:
+            current_stride = max(current_stride, padded_page_size)
+            assert current_stride % padded_page_size == 0
         strides[dim] = fixed_strides[dim] or current_stride
         current_stride = strides[dim] * shape[dim]
     return tuple(strides)

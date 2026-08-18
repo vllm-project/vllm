@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheTensor,
     KVQuantMode,
+    MambaSpec,
     MLAAttentionSpec,
     compute_layout_strides,
 )
