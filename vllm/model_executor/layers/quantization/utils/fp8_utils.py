@@ -1449,10 +1449,7 @@ def process_fp8_input_tensor_strategy_moe(
             "for each layer."
         )
 
-    # Triton MoE kernels load tensor-wise activation scales through pointers.
-    # Keep the reduced scales as rank-1 tensors so they are not treated as
-    # compile-time scalar constants.
     return (
-        amax_for_moe_activation_quant(w13_input_scale, enable_eplb).reshape(1),
-        amax_for_moe_activation_quant(w2_input_scale, enable_eplb).reshape(1),
+        amax_for_moe_activation_quant(w13_input_scale, enable_eplb),
+        amax_for_moe_activation_quant(w2_input_scale, enable_eplb),
     )
