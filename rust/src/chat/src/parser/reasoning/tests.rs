@@ -15,12 +15,14 @@ fn factory_contains_and_lists_registered_parsers() {
     assert!(factory.contains(names::SEED_OSS));
     assert!(factory.contains(names::STEP3P5));
     assert!(factory.contains(names::MINIMAX_M3));
+    assert!(factory.contains(names::MINIMAX_M2_APPEND_THINK));
     assert!(factory.contains(names::GEMMA4));
     assert!(factory.list().contains(&names::QWEN3.to_string()));
     assert!(factory.list().contains(&names::DEEPSEEK_V4.to_string()));
     assert!(factory.list().contains(&names::SEED_OSS.to_string()));
     assert!(factory.list().contains(&names::STEP3P5.to_string()));
     assert!(factory.list().contains(&names::MINIMAX_M3.to_string()));
+    assert!(factory.list().contains(&names::MINIMAX_M2_APPEND_THINK.to_string()));
     assert!(factory.list().contains(&names::GEMMA4.to_string()));
 }
 
@@ -122,4 +124,17 @@ fn factory_distinguishes_glm_reasoning_framing() {
     for model in ["zai-org/GLM-4.7-Flash", "zai-org/GLM-5.2-FP8"] {
         assert_eq!(factory.resolve_name_for_model(model), Some(names::GLM47));
     }
+}
+
+#[test]
+fn factory_creates_minimax_m2_append_think_by_exact_name_only() {
+    let tokenizer = Arc::new(TestTokenizer::new());
+    let factory = ReasoningParserFactory::new();
+    let parser = factory.create(names::MINIMAX_M2_APPEND_THINK, tokenizer).unwrap();
+
+    assert!(parser.preserve_special_tokens());
+    assert_eq!(
+        factory.resolve_name_for_model("MiniMaxAI/MiniMax-M2"),
+        Some(names::MINIMAX_M2)
+    );
 }
