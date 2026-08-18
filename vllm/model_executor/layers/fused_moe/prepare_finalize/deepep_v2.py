@@ -4,7 +4,6 @@ from collections.abc import Callable
 
 import deep_ep
 import torch
-
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
@@ -17,7 +16,10 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
+    dbo_enabled,
 )
+
+import vllm.envs as envs
 
 
 class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
@@ -76,6 +78,15 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         self.num_topk = num_topk
         self.use_fp8_dispatch = use_fp8_dispatch
         self.use_cudagraph = use_cudagraph
+
+        # Custom latency-hiding: overlap the (independent) shared-expert FFN with
+        # the routed-expert combine a2a. Read env once here (finalize_async runs
+        # inside the captured region, so it must not touch os.environ per step).
+        # Output is byte-identical to the synchronous combine; set
+        # VLLM_DEEPEP_V2_COMBINE_OVERLAP=0 to force the synchronous path.
+        self._combine_overlap = bool(envs.VLLM_DEEPEP_V2_COMBINE_OVERLAP)
+        self._overlap_logged = False
+        self._overlap_noevent_logged = False
 
         # DBO microbatching: one handle slot per micro-batch.
         self.handles: list[deep_ep.EPHandle | None] = [None, None]
@@ -387,11 +398,60 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             x=fused_expert_output,
             handle=handle,
             topk_weights=None,
-            async_with_compute_stream=False,
+            async_with_compute_stream=do_async,
+            allocate_on_comm_stream=do_async,
         )
 
-        output.copy_(combined_x, non_blocking=True)
-        return None
+        if not do_async:
+            output.copy_(combined_x, non_blocking=True)
+            return None
+
+        if event.event is None:
+            # Async-combine capability gate. This DeepEP build returned no
+            # completion event for an async combine, so the async path cannot
+            # be joined without a full device sync — which must never run
+            # inside a captured region. The first MoE forward always executes
+            # in eager warmup (profile/compile warmup precede any cudagraph
+            # capture), so disabling here is a PRE-capture decision: every
+            # later call, including all captured ones, takes the synchronous
+            # combine path above and the captured region never contains a
+            # host synchronization.
+            if torch.cuda.is_current_stream_capturing():
+                raise RuntimeError(
+                    "DeepEP-v2 async combine returned no completion event "
+                    "during CUDA graph capture; the pre-capture capability "
+                    "gate should have disabled the overlap. Set "
+                    "VLLM_DEEPEP_V2_COMBINE_OVERLAP=0 to run without overlap."
+                )
+            if not self._overlap_noevent_logged:
+                from vllm.logger import init_logger
+
+                init_logger(__name__).warning_once(
+                    "DeepEP-v2 async combine returned no completion event; "
+                    "permanently disabling combine<->shared-expert overlap "
+                    "(synchronous combine from now on)."
+                )
+                self._overlap_noevent_logged = True
+            self._combine_overlap = False
+            torch.cuda.synchronize()
+            output.copy_(combined_x, non_blocking=True)
+            return None
+
+        # Async path: combine ran on DeepEP's private comm stream. Return a
+        # receiver closure that the modular kernel calls AFTER the shared-expert
+        # FFN has been issued on the compute stream (see modular_kernel
+        # finalize orchestration: finalize_async -> shared experts -> receiver).
+        # current_stream_wait() is a device-side cudaStreamWaitEvent (no host
+        # sync); release_handle defaults False so the event survives graph replay.
+        # The closure keeps combined_x + event alive until the join copy. The
+        # event is guaranteed non-None here (gated above), so the captured
+        # path contains no host synchronization.
+        def _finalize_receiver():
+            assert event.event is not None
+            event.current_stream_wait()
+            output.copy_(combined_x, non_blocking=True)
+
+        return _finalize_receiver
 
     def finalize_async(
         self,
@@ -402,16 +462,28 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> Callable:
-        self._finalize(
+        # Overlap only when enabled AND not under DBO (DBO drives its own
+        # hook/receiver schedule; combine stays synchronous there). Safe
+        # fallback, no assert.
+        do_async = self._combine_overlap and not dbo_enabled()
+        if self._combine_overlap and not self._overlap_logged:
+            from vllm.logger import init_logger
+
+            init_logger(__name__).info_once(
+                "DeepEP-v2 combine<->shared-expert overlap %s",
+                "ENABLED" if do_async else "disabled (DBO active)",
+            )
+            self._overlap_logged = True
+        recv = self._finalize(
             output,
             fused_expert_output,
             topk_weights,
             topk_ids,
             apply_router_weight_on_input,
             weight_and_reduce_impl,
-            False,
+            do_async,
         )
-        return lambda: None
+        return recv if recv is not None else (lambda: None)
 
     def finalize(
         self,
