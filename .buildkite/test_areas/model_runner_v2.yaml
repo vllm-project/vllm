@@ -100,10 +100,11 @@ steps:
     - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
     - pytest -v -s v1/distributed/test_pp_dp_v2.py
 
-- label: Model Runner V2 Spec Decode
+- label: Model Runner V2 Spec Decode %N
   device: h200_35gb
   key: model-runner-v2-spec-decode
   timeout_in_minutes: 50
+  parallelism: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/worker/gpu/
@@ -115,11 +116,9 @@ steps:
   commands:
   - set -x
   - export VLLM_USE_V2_MODEL_RUNNER=1
-  - pytest -v -s v1/spec_decode/test_max_len.py -k "eagle or mtp"
-  - pytest -v -s v1/spec_decode/test_rejection_sampler_utils.py
-  - pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py
-  - pytest -v -s v1/e2e/spec_decode/eagle/
-  - pytest -v -s v1/e2e/spec_decode/speculators/
-  - >-
-    pytest -v -s
-    'v1/e2e/spec_decode/mtp/test_mtp.py::test_mtp_correctness[qwen3_5-hybrid]'
+  - pytest -v -s v1/spec_decode/test_max_len.py -k "eagle or mtp" --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pytest -v -s v1/spec_decode/test_rejection_sampler_utils.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pytest -v -s v1/e2e/spec_decode/eagle/ --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s v1/e2e/spec_decode/speculators/; fi
+  - if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then pytest -v -s 'v1/e2e/spec_decode/mtp/test_mtp.py::test_mtp_correctness[qwen3_5-hybrid]'; fi
