@@ -926,6 +926,15 @@ class PyNvVideoCodecVideoBackendMixin:
         return frames, source, frame_idx, valid_frame_indices
 
 
+# Assumed for the first segment only, before the decoder reports the real rate.
+_ASSUMED_FPS = 30.0
+
+# A live source cannot deliver a segment faster than real time, so the decode
+# timeout is derived from the span it covers, with a floor for short segments.
+_MIN_SEGMENT_TIMEOUT_SEC = 30.0
+_SEGMENT_TIMEOUT_HEADROOM_SEC = 10.0
+
+
 class DeepStreamVideoBackendMixin:
     """NVIDIA DeepStream (NVDEC) GPU-decode codec utilities.
 
@@ -1032,6 +1041,108 @@ class DeepStreamVideoBackendMixin:
         else:
             arr = gpu.numpy()
         return arr, valid
+
+    # ----------------------------------------------------------------
+    # RTSP / URI streaming (per-stream worker)
+    # ----------------------------------------------------------------
+    @classmethod
+    def stream_uri(
+        cls,
+        uri: str,
+        num_frames: int = 8,
+        chunk_duration: float = 0.0,
+        timeout_sec: float | None = None,
+    ):
+        """Stream an RTSP/URI source via a dedicated pipeline.
+
+        One :class:`StreamHandle` per call, so contention scales independently
+        of stream count. Yields ``(frames, metadata)`` indefinitely, ``frames``
+        being a host-side numpy array.
+
+        Args:
+            uri: Stream URI (``rtsp://``, ``rtmp://``, ``file://``, ...).
+            num_frames: Frames sampled from each segment.
+            chunk_duration: Seconds of video per segment; ``0`` disables
+                buffering. The first segment is sized with ``_ASSUMED_FPS``,
+                later ones with the measured rate.
+            timeout_sec: Per-segment decode timeout. Derived from
+                ``chunk_duration`` when omitted.
+        """
+        import torch as _torch
+        from nvidia.deepstream_videodecode import StreamHandle
+
+        if timeout_sec is None:
+            timeout_sec = max(
+                _MIN_SEGMENT_TIMEOUT_SEC,
+                chunk_duration + _SEGMENT_TIMEOUT_HEADROOM_SEC,
+            )
+
+        handle = StreamHandle(uri, drop_interval=0)
+        logger.info(
+            "[DeepStream] Opened RTSP stream uri=%s chunk_duration=%.1fs timeout=%.1fs",
+            uri,
+            chunk_duration,
+            timeout_sec,
+        )
+        try:
+            detected_fps = 0.0
+            while True:
+                if chunk_duration > 0:
+                    fps_estimate = detected_fps if detected_fps > 0 else _ASSUMED_FPS
+                    raw_keep = max(num_frames, round(chunk_duration * fps_estimate))
+                else:
+                    raw_keep = num_frames
+
+                target_indices: list[int] | None = (
+                    np.linspace(0, raw_keep - 1, num_frames, dtype=int).tolist()
+                    if raw_keep > num_frames
+                    else None
+                )
+
+                res = handle.decode_segment(
+                    target_indices=target_indices,
+                    max_frames=num_frames,
+                    timeout_sec=timeout_sec,
+                )
+
+                if res.error:
+                    logger.error(
+                        "[DeepStream RTSP] decode error after %.1fs timeout "
+                        "(chunk_duration=%.1fs): %s",
+                        timeout_sec,
+                        chunk_duration,
+                        res.error,
+                    )
+                    break
+
+                if res.fps > 0:
+                    detected_fps = res.fps
+
+                if (
+                    res.frames is None
+                    or not isinstance(res.frames, _torch.Tensor)
+                    or res.frames.shape[0] == 0
+                ):
+                    break
+
+                logger.info(
+                    "[RTSP stream_uri] segment: raw_keep=%d yielding=%d "
+                    "fps=%.2f buffer_sec=%.1f",
+                    raw_keep,
+                    res.frames.shape[0],
+                    detected_fps,
+                    chunk_duration,
+                )
+
+                metadata: dict = {
+                    "total_num_frames": res.n_total,
+                    "fps": res.fps,
+                    "video_backend": "deepstream_rtsp",
+                }
+                yield res.frames.cpu().numpy(), metadata
+        finally:
+            handle.close()
+            logger.info("[DeepStream] Closed RTSP stream uri=%s", uri)
 
 
 @VIDEO_LOADER_REGISTRY.register("opencv")
