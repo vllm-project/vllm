@@ -34,7 +34,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_events import MEDIUM_CPU, MEDIUM_STORAGE, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
@@ -323,7 +323,7 @@ def _get_replica_tiers_by_key(store: Any, keys: list[str]) -> dict[str, str]:
         replica_descs_by_key = store.batch_get_replica_desc(keys)
     except Exception as e:
         logger.warning(
-            "Failed to get Mooncake replica descriptors for tier logging "
+            "Failed to get Mooncake replica descriptors for tier classification "
             "(batch_keys=%d, error=%s); marking tiers unknown",
             len(keys),
             e,
@@ -340,6 +340,14 @@ def _get_replica_tiers_by_key(store: Any, keys: list[str]) -> dict[str, str]:
                 replica_descs = None
         tiers_by_key[key] = _classify_replica_tier(replica_descs)
     return tiers_by_key
+
+
+def _medium_for_replica_tier(tier: str) -> str | None:
+    if tier == "memory":
+        return MEDIUM_CPU
+    if tier == "disk":
+        return MEDIUM_STORAGE
+    return None
 
 
 def _log_mooncake_load_tier_summary(
@@ -1131,6 +1139,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         tp_rank: int,
         ready_event: threading.Event,
         disk_offload_buffer_budget_bytes: int | None = None,
+        enable_kv_event: bool = False,
         record_operation: Callable[..., None] | None = None,
         request_queue: queue.Queue[Any] | None = None,
     ):
@@ -1156,6 +1165,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             )
         )
         self.coord = coord
+        self.enable_kv_event = enable_kv_event
 
     def _add_load_error_block_ids(self, block_ids: list[int]) -> None:
         with self._invalid_block_ids_lock:
@@ -1184,6 +1194,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         size_list: list[list[int]] = []
         key_list: list[str] = []
         block_id_list: list[int] = []
+        event_info_list: list[tuple[BlockHash, int, int, int]] = []
         for g_idx, db in enumerate(self.token_databases):
             mask = load_mask_per_group[g_idx]
             chunks: list[tuple[int, int]] = []
@@ -1194,6 +1205,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 if chunk_idx >= len(mask) or not mask[chunk_idx]:
                     continue
                 key_list.append(db.key_for(block_hash))
+                event_info_list.append((block_hash, start, end, g_idx))
                 chunks.append((start, end))
             g_addrs, g_sizes, g_block_ids = db.prepare_values(
                 chunks, req_meta.block_ids[g_idx]
@@ -1208,8 +1220,11 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         addr_list_c = _rotate_list(addr_list, rotation)
         size_list_c = _rotate_list(size_list, rotation)
         block_id_list_c = _rotate_list(block_id_list, rotation)
+        event_info_list_c = _rotate_list(event_info_list, rotation)
 
-        load_batches = [(key_list_c, addr_list_c, size_list_c, block_id_list_c)]
+        load_batches = [
+            (key_list_c, addr_list_c, size_list_c, block_id_list_c, event_info_list_c)
+        ]
         if self.usable_disk_offload_buffer_budget_bytes is not None:
             total_staging_bytes = sum(
                 _estimate_disk_offload_staging_bytes(size) for size in size_list_c
@@ -1250,21 +1265,37 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     batch_block_ids = block_id_list_c[
                         block_id_offset:next_block_id_offset
                     ]
+                    batch_event_infos = event_info_list_c[
+                        block_id_offset:next_block_id_offset
+                    ]
                     load_batches.append(
-                        (batch_keys, batch_addrs, batch_sizes, batch_block_ids)
+                        (
+                            batch_keys,
+                            batch_addrs,
+                            batch_sizes,
+                            batch_block_ids,
+                            batch_event_infos,
+                        )
                     )
                     block_id_offset = next_block_id_offset
 
         current_batch_keys: list[str] = key_list_c
         current_batch_block_ids: list[int] = block_id_list_c
         batch_bytes = 0
+        prev_event_hash_per_group: dict[int, Any] = {}
         try:
-            for batch_keys, batch_addrs, batch_sizes, batch_block_ids in load_batches:
+            for (
+                batch_keys,
+                batch_addrs,
+                batch_sizes,
+                batch_block_ids,
+                batch_event_infos,
+            ) in load_batches:
                 current_batch_keys = batch_keys
                 current_batch_block_ids = batch_block_ids
                 batch_bytes = _sum_batch_bytes(batch_sizes)
                 tiers_by_key: dict[str, str] | None = None
-                if envs.VLLM_MOONCAKE_STORE_TIER_LOG:
+                if self.enable_kv_event or envs.VLLM_MOONCAKE_STORE_TIER_LOG:
                     tiers_by_key = _get_replica_tiers_by_key(self.store, batch_keys)
                 # Reset so the recorded RPC duration excludes tier lookup.
                 load_get_start = time.perf_counter()
@@ -1275,6 +1306,37 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     _log_mooncake_load_tier_summary(
                         req_id, batch_keys, res, tiers_by_key
                     )
+                if self.enable_kv_event:
+                    loaded_events: list[BlockStored] = []
+                    for key, value, (block_hash, start, end, g_idx) in zip(
+                        batch_keys, res, batch_event_infos, strict=True
+                    ):
+                        if value < 0:
+                            continue
+                        event_hash = maybe_convert_block_hash(block_hash)
+                        loaded_events.append(
+                            BlockStored(
+                                block_hashes=[event_hash],
+                                parent_block_hash=prev_event_hash_per_group.get(g_idx),
+                                token_ids=(
+                                    req_meta.token_ids[start:end]
+                                    if req_meta.token_ids is not None
+                                    else None
+                                ),
+                                block_size=self.token_databases[g_idx].block_size,
+                                lora_id=None,
+                                medium=_medium_for_replica_tier(
+                                    tiers_by_key.get(key, "unknown")
+                                    if tiers_by_key is not None
+                                    else "unknown"
+                                ),
+                                lora_name=None,
+                                group_idx=g_idx,
+                            )
+                        )
+                        prev_event_hash_per_group[g_idx] = event_hash
+                    if loaded_events:
+                        self.update_kv_event(loaded_events)
                 failed = [
                     (key, value, block_id)
                     for key, value, block_id in zip(
@@ -1730,6 +1792,7 @@ class MooncakeStoreWorker:
                 self.tp_rank,
                 ready_event_recving,
                 disk_offload_buffer_budget_bytes=self.disk_offload_buffer_budget_bytes,
+                enable_kv_event=self.enable_kv_events,
                 record_operation=self._record_kv_connector_operation,
                 request_queue=self.recv_request_queue,
             )
@@ -1987,9 +2050,15 @@ class MooncakeStoreWorker:
         return hit_length
 
     def get_kv_events(self) -> list[BlockStored]:
-        if self.enable_kv_events and self.kv_send_thread is not None:
-            return self.kv_send_thread.get_kv_events()
-        return []
+        if not self.enable_kv_events:
+            return []
+
+        events: list[BlockStored] = []
+        if self.kv_send_thread is not None:
+            events.extend(self.kv_send_thread.get_kv_events())
+        for recv_thread in self.kv_recv_threads:
+            events.extend(recv_thread.get_kv_events())
+        return events
 
     def close(self) -> None:
         """Release the MooncakeDistributedStore handle on teardown.
