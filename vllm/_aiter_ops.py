@@ -1813,6 +1813,21 @@ class rocm_aiter_ops:
         return on_rdna4() and cls._AITER_ENABLED
 
     @classmethod
+    def is_gfx11_aiter_enabled(cls) -> bool:
+        """AITER on RDNA3 (gfx11): library present, arch is gfx11, and the user
+        enabled aiter. As on gfx12, only aiter's Triton kernels exist here (no
+        CK build); the AMD Triton compiler lowers the fp8 ``tl.dot`` in the
+        MQA-logits kernels for gfx11, so the same aiter Triton logits kernels
+        RDNA4 uses run unchanged. The gfx11 analog of `is_rdna_aiter_enabled()`;
+        kept separate so it gates only the sparse-MLA indexer logits, not the
+        RDNA4 linear/MoE/fusion paths."""
+        if not current_platform.is_rocm() or not IS_AITER_FOUND:
+            return False
+        from vllm.platforms.rocm import on_gfx11
+
+        return on_gfx11() and cls._AITER_ENABLED
+
+    @classmethod
     def is_rdna_linear_enabled(cls) -> bool:
         """RDNA4 (gfx12) analog of is_linear_enabled() (aiter Triton blockscale)."""
         return cls.is_rdna_aiter_enabled() and cls._LINEAR_ENABLED
