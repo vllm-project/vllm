@@ -18,8 +18,11 @@ jobs:
     if: >-
       github.event.issue.pull_request &&
       (github.event.comment.body == '/ci run' ||
-      github.event.comment.body == '/ci retry')
-    runs-on: ubuntu-latest
+      github.event.comment.body == '/ci run all' ||
+      github.event.comment.body == '/ci run nightly' ||
+      github.event.comment.body == '/ci retry' ||
+      github.event.comment.body == '/ci cancel')
+    runs-on: [self-hosted, linux, x64, vllm-runners]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:

@@ -11,9 +11,12 @@ from safetensors.torch import load as safetensors_load
 from torch import nn
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.pool.metadata import PoolingMetadata
 
 from ..layers.pooler import DispatchPooler
@@ -26,7 +29,13 @@ from .interfaces import SupportsLateInteraction
 from .interfaces_base import VllmModelForPooling
 from .llama import LlamaForCausalLM
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
-from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    StageMissingLayer,
+    WeightsMapper,
+    maybe_prefix,
+    no_init_weights,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,19 +111,24 @@ class JinaForRankingPool(StepPool):
         prompt_token_ids = pooling_metadata.get_prompt_token_ids()
 
         embeds_list = list[torch.Tensor | None]()
-        for data, token_ids in zip(pooled_data_lst, prompt_token_ids):
-            # for unfinished chunked prefill
-            if data is None:
-                embeds_list.append(None)
-            else:
-                docs_indexes = torch.where(torch.eq(token_ids, self.doc_token_id))[0]
-                query_indexes = torch.where(torch.eq(token_ids, self.query_token_id))[0]
+        # `torch.where` resolves the match count on the host.
+        with gpu_sync_allowed():
+            for data, token_ids in zip(pooled_data_lst, prompt_token_ids):
+                # for unfinished chunked prefill
+                if data is None:
+                    embeds_list.append(None)
+                else:
+                    doc_match = torch.eq(token_ids, self.doc_token_id)
+                    docs_indexes = torch.where(doc_match)[0]
+                    query_indexes = torch.where(
+                        torch.eq(token_ids, self.query_token_id)
+                    )[0]
 
-                # The JinaForRanking model concatenates docs first, then query.
-                # Let's stay consistent with this novel design.
-                indexes = torch.cat([docs_indexes, query_indexes])
-                embeds = self.projector(data[indexes])
-                embeds_list.append(embeds)
+                    # The JinaForRanking model concatenates docs first, then query.
+                    # Let's stay consistent with this novel design.
+                    indexes = torch.cat([docs_indexes, query_indexes])
+                    embeds = self.projector(data[indexes])
+                    embeds_list.append(embeds)
 
         return embeds_list
 
@@ -267,7 +281,12 @@ class JinaEmbeddingsV5DecoderModel(Qwen3ForCausalLM, VllmModelForPooling):
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        with no_init_weights(
+            self,
+            lambda mod: StageMissingLayer("output", mod),
+            targets=(LogitsProcessor, ParallelLMHead),
+        ):
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
         _setup_jina_v5_task_and_pooler(self, vllm_config)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -289,7 +308,12 @@ class JinaEmbeddingsV5EncoderModel(LlamaForCausalLM, VllmModelForPooling):
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        with no_init_weights(
+            self,
+            lambda mod: StageMissingLayer("output", mod),
+            targets=(LogitsProcessor, ParallelLMHead),
+        ):
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
         _setup_jina_v5_task_and_pooler(self, vllm_config)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

@@ -95,6 +95,7 @@ enforces decode-size limits to prevent out-of-memory denial of service:
 | `VLLM_MAX_IMAGE_PIXELS` | `178956970` (~179M pixels) | Maximum decoded image size in pixels. Images exceeding this are rejected before raster memory is allocated. Default matches PIL's built-in 2x decompression-bomb threshold (~680 MB for RGB). |
 | `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` | `25` | Maximum filesize in MB for a single audio file. |
 | `VLLM_MAX_AUDIO_DECODE_DURATION_S` | `600` | Maximum decoded audio duration in seconds. Prevents compressed audio from expanding into gigabytes of float32 PCM. |
+| `VLLM_MAX_AUDIO_DECODE_BYTES` | `268435456` (256 MiB) | Maximum float32 PCM bytes that audio decoding may allocate. Guards against sample-rate forgery where an inflated header sample rate bypasses the duration guard while the actual frame count causes a multi-GiB allocation. |
 
 Setting any of these to `0` disables the corresponding limit. This is **not
 recommended** for deployments exposed to untrusted users, as it removes the
@@ -344,7 +345,7 @@ vLLM supports loading out-of-tree HTTP routes via the `vllm.endpoint_plugins` en
 
 ## gRPC Interface
 
-vLLM provides an optional gRPC Generate service on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
+vLLM provides optional gRPC `Inference` and `Control` services on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
 
 **Warning:** The gRPC interface is **insecure by default** — it does not implement authentication, authorization, or encryption. It should be considered a private, internal interface intended for use only between co-located services within a trusted network. Do not expose the gRPC port to the public internet or untrusted clients. If you enable the gRPC interface, protect it via network-level access controls such as firewall rules, network segmentation, or deployment on an isolated private network.
 
@@ -353,8 +354,9 @@ vLLM provides an optional gRPC Generate service on a separate TCP port, enabled 
 An attacker who can reach the gRPC port can:
 
 1. **Run arbitrary inference** via the `Generate` and `GenerateStream` RPCs without any credentials
-2. **Consume GPU and compute resources** by submitting unbounded generation requests
-3. **Cause Denial of Service** by exploiting bugs in the gRPC interface that can crash vLLM.
+2. **Mutate engine state** by pausing generation, sleeping the engine, or initiating configured RL weight updates through the `Control` service
+3. **Consume GPU and compute resources** by submitting unbounded generation requests
+4. **Cause Denial of Service** by exploiting bugs in the gRPC interface that can crash vLLM.
 
 ### Recommendations
 
