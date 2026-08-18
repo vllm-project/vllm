@@ -17,6 +17,18 @@ logger = init_logger(__name__)
 class RoutingStrategy(ABC):
     """Base class for token-to-expert routing strategies."""
 
+    def generate_monolithic_logits(
+        self,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Generate synthetic logits for a monolithic MoE implementation.
+
+        Returning ``None`` indicates that the strategy requires precomputed
+        expert IDs and weights and cannot yet use a logits-only monolithic
+        implementation.
+        """
+        return None
+
     @abstractmethod
     def route_tokens(
         self,
@@ -119,6 +131,20 @@ class DistributionBasedRouting(RoutingStrategy):
         topk_weights = self._generate_weights(num_tokens, top_k, hidden_states.device)
 
         return topk_weights, topk_ids
+
+    def generate_monolithic_logits(
+        self,
+        router_logits: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Generate distribution-specific synthetic router logits."""
+        if self.distribution == "uniform":
+            return torch.rand(
+                router_logits.shape,
+                dtype=router_logits.dtype,
+                device=router_logits.device,
+            )
+
+        return None
 
     def _sample_expert_ids(
         self,
@@ -258,6 +284,40 @@ class RoutingSimulator:
         """
         return list(cls._routing_strategies.keys())
 
+    @classmethod
+    def get_strategy(cls, strategy_name: str) -> RoutingStrategy:
+        """Return a registered routing strategy by name."""
+        if strategy_name not in cls._routing_strategies:
+            raise ValueError(
+                f"Unknown routing strategy: {strategy_name}. "
+                f"Available strategies: {list(cls._routing_strategies.keys())}"
+            )
+        return RoutingSimulator._routing_strategies[strategy_name]
+
+    @classmethod
+    def simulate_monolithic_logits(
+        cls,
+        router_logits: torch.Tensor,
+        strategy_name: str,
+    ) -> torch.Tensor:
+        """Generate synthetic logits for a registered routing strategy."""
+        strategy = RoutingSimulator.get_strategy(strategy_name)
+        logger.warning_once(
+            "Simulating MoE routing using a %s strategy. "
+            "This should only be used for performance testing. "
+            "Model outputs will not be valid.",
+            strategy_name,
+        )
+
+        simulated_logits = strategy.generate_monolithic_logits(router_logits)
+        if simulated_logits is None:
+            raise NotImplementedError(
+                f"Routing strategy {strategy_name!r} does not yet support "
+                "monolithic logits generation."
+            )
+
+        return simulated_logits
+
     @staticmethod
     def simulate_routing(
         hidden_states: torch.Tensor,
@@ -279,12 +339,7 @@ class RoutingSimulator:
         Returns:
             tuple of (topk_weights, topk_ids)
         """
-        if strategy_name not in RoutingSimulator._routing_strategies:
-            raise ValueError(
-                f"Unknown routing strategy: {strategy_name}. "
-                f"Available strategies: "
-                f"{list(RoutingSimulator._routing_strategies.keys())}"
-            )
+        strategy = RoutingSimulator.get_strategy(strategy_name)
         logger.warning_once(
             "Simulating MoE routing using a %s strategy. "
             "This should only be used for performance testing. "
@@ -292,7 +347,6 @@ class RoutingSimulator:
             strategy_name,
         )
 
-        strategy = RoutingSimulator._routing_strategies[strategy_name]
         return strategy.route_tokens(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -308,6 +362,7 @@ class RoutingSimulatorRouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
+        original_routing_method_type: RoutingMethodType,
         eplb_state: EplbLayerState | None = None,
     ):
         super().__init__(
@@ -315,10 +370,15 @@ class RoutingSimulatorRouter(BaseRouter):
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
         )
+        self._original_routing_method_type = original_routing_method_type
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
         return RoutingMethodType.Simulated
+
+    @property
+    def original_routing_method_type(self) -> RoutingMethodType:
+        return self._original_routing_method_type
 
     def _compute_routing(
         self,
