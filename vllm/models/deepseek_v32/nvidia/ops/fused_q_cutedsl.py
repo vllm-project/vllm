@@ -10,6 +10,7 @@ from cutlass import BFloat16, Float8E4M3FN, Float32, Int64, Uint8, Uint16, Uint3
 
 from vllm.cute_utils import _TORCH_TO_CUTE_DTYPE, cvt
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 def _make_fake_tensor(dtype, shape, divisibility):
@@ -25,6 +26,11 @@ def _make_fake_tensor(dtype, shape, divisibility):
     )
 
 
+@torch.compiler.assume_constant_result
+def _is_sm100_or_newer() -> bool:
+    return current_platform.has_device_capability(100)
+
+
 def is_fused_q_cutedsl_supported(
     q_pe: torch.Tensor,
     index_q: torch.Tensor | None,
@@ -34,7 +40,7 @@ def is_fused_q_cutedsl_supported(
     quantize_mqa: bool,
 ) -> bool:
     if not (
-        current_platform.has_device_capability(100)
+        _is_sm100_or_newer()
         and quantize_mqa
         and q_pe.dtype == ql_nope.dtype == torch.bfloat16
         and q_pe.shape[-1] == 64
@@ -52,7 +58,7 @@ def is_fused_q_cutedsl_supported(
     )
 
 
-def fused_q_cutedsl(
+def _fused_q_cutedsl_impl(
     positions: torch.Tensor,
     q_pe: torch.Tensor,
     rope_cache: torch.Tensor,
@@ -107,6 +113,70 @@ def fused_q_cutedsl(
         idx_q_fp8,
         idx_weights_out,
         float(idx_weights_softmax_scale * idx_weights_head_scale),
+    )
+
+
+def _fused_q_cutedsl_fake(
+    positions: torch.Tensor,
+    q_pe: torch.Tensor,
+    rope_cache: torch.Tensor,
+    ql_nope: torch.Tensor,
+    q_scale: torch.Tensor,
+    mqa_output: torch.Tensor,
+    idx_q: torch.Tensor,
+    idx_rope_cache: torch.Tensor,
+    idx_weights: torch.Tensor,
+    idx_weights_softmax_scale: float,
+    idx_weights_head_scale: float,
+    idx_q_fp8: torch.Tensor,
+    idx_weights_out: torch.Tensor,
+    has_indexer: bool = True,
+    index_rope_interleave: bool = True,
+) -> None:
+    return None
+
+
+direct_register_custom_op(
+    op_name="fused_q_cutedsl",
+    op_func=_fused_q_cutedsl_impl,
+    mutates_args=["mqa_output", "idx_q_fp8", "idx_weights_out"],
+    fake_impl=_fused_q_cutedsl_fake,
+)
+
+
+def fused_q_cutedsl(
+    positions: torch.Tensor,
+    q_pe: torch.Tensor,
+    rope_cache: torch.Tensor,
+    ql_nope: torch.Tensor,
+    q_scale: torch.Tensor,
+    mqa_output: torch.Tensor,
+    idx_q: torch.Tensor,
+    idx_rope_cache: torch.Tensor,
+    idx_weights: torch.Tensor,
+    idx_weights_softmax_scale: float,
+    idx_weights_head_scale: float,
+    idx_q_fp8: torch.Tensor,
+    idx_weights_out: torch.Tensor,
+    has_indexer: bool = True,
+    index_rope_interleave: bool = True,
+) -> None:
+    torch.ops.vllm.fused_q_cutedsl(
+        positions,
+        q_pe,
+        rope_cache,
+        ql_nope,
+        q_scale,
+        mqa_output,
+        idx_q,
+        idx_rope_cache,
+        idx_weights,
+        idx_weights_softmax_scale,
+        idx_weights_head_scale,
+        idx_q_fp8,
+        idx_weights_out,
+        has_indexer,
+        index_rope_interleave,
     )
 
 
