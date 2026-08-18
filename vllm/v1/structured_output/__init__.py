@@ -31,12 +31,6 @@ else:
 
 logger = init_logger(__name__)
 
-_INKLING_STRUCTURED_OUTPUT_STOP_TOKENS = (
-    "<|content_model_end_sampling|>",
-    "<|end_message|>",
-    "<|begin_of_text|>",
-)
-
 
 class StructuredOutputManager:
     """Engine-level manager for structured output requests."""
@@ -192,7 +186,7 @@ class StructuredOutputManager:
             assert self.backend is not None
             if request.sampling_params is not None:
                 stop_token_ids = self._structured_output_stop_token_ids(
-                    request.sampling_params.all_stop_token_ids
+                    request, request.sampling_params.all_stop_token_ids
                 )
             else:
                 stop_token_ids = None
@@ -205,20 +199,14 @@ class StructuredOutputManager:
             )
             raise
 
-    def _structured_output_stop_token_ids(self, stop_token_ids: set[int]) -> set[int]:
-        if self.vllm_config.structured_outputs_config.reasoning_parser != "inkling":
+    def _structured_output_stop_token_ids(
+        self, request: "Request", stop_token_ids: set[int]
+    ) -> set[int]:
+        reasoner = self._get_reasoner(request)
+        if reasoner is None:
             return stop_token_ids
 
-        vocab = self.tokenizer.get_vocab()
-        inkling_stop_token_ids = [
-            token_id
-            for token in _INKLING_STRUCTURED_OUTPUT_STOP_TOKENS
-            if (token_id := vocab.get(token)) is not None
-        ]
-        if not inkling_stop_token_ids:
-            return stop_token_ids
-
-        return stop_token_ids | set(inkling_stop_token_ids)
+        return stop_token_ids | reasoner.structured_output_stop_token_ids()
 
     def _fill_bitmasks(
         self, batch: Iterable[tuple[StructuredOutputGrammar, int, bool]]

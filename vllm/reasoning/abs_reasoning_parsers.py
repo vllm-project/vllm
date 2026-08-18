@@ -143,6 +143,16 @@ class ReasoningParser:
         # By default, assume the parser cannot detect reasoning spans.
         return 0
 
+    def structured_output_stop_token_ids(self) -> set[int]:
+        """Return model-format terminal token ids for structured outputs.
+
+        Some reasoning parsers handle model-specific structural tokens that
+        should terminate a completed structured-output grammar without being
+        added to the request's sampling stop tokens. Parsers can override this
+        to expose those tokens to grammar compilation.
+        """
+        return set()
+
     @abstractmethod
     def extract_reasoning(
         self,

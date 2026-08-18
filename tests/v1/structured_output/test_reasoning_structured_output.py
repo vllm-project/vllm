@@ -352,21 +352,22 @@ class TestReasoningStructuredOutput:
             mock_request_with_structured_output, new_token_ids
         ) == [271, 5005]
 
-    def test_inkling_structural_tokens_are_stop_overrides(
+    def test_reasoning_parser_structural_tokens_are_stop_overrides(
         self,
         mock_vllm_config,
         mock_request_with_structured_output,
     ):
-        mock_vllm_config.structured_outputs_config.reasoning_parser = "inkling"
+        class ReasonerWithStructuralStopTokens:
+            def __init__(self, tokenizer):
+                pass
+
+            def structured_output_stop_token_ids(self):
+                return {200006, 200010, 200028}
+
         manager = StructuredOutputManager(mock_vllm_config)
+        manager.reasoner_cls = ReasonerWithStructuralStopTokens
         manager.backend = Mock()
         manager.tokenizer = Mock()
-        manager.tokenizer.get_vocab.return_value = {
-            "<|endoftext|>": 199999,
-            "<|content_model_end_sampling|>": 200006,
-            "<|end_message|>": 200010,
-            "<|begin_of_text|>": 200028,
-        }
 
         sampling_params = SamplingParams(stop_token_ids=[199999])
         mock_request_with_structured_output.sampling_params = sampling_params
