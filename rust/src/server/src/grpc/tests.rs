@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
 use std::io;
@@ -33,11 +34,15 @@ use vllm_engine_core_client::mock_engine::{
 };
 use vllm_engine_core_client::protocol::decode_value;
 use vllm_engine_core_client::protocol::handshake::{EngineCoreReadyResponse, KvEventsConfig};
+use vllm_engine_core_client::protocol::multimodal::{
+    MmBatchedField, MmField, MmFieldElem, MmKwargValue,
+};
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
     UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::tensor::WireTensor;
 use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task_with_ready};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
@@ -723,6 +728,91 @@ async fn unary_generate_prepares_multimodal_input_for_engine_core() {
         })
         .await
         .expect("multimodal generate");
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn unary_generate_lowers_preprocessed_multimodal_features_without_reprocessing() {
+    let kwargs = BTreeMap::from([(
+        "pixel_values".to_string(),
+        MmFieldElem {
+            data: Some(MmKwargValue::Tensor(WireTensor::from_raw(
+                "uint8",
+                vec![3],
+                vec![1, 2, 3],
+            ))),
+            field: MmField::Batched(MmBatchedField { keep_on_cpu: false }),
+        },
+    )]);
+    let encoded_kwargs = rmp_serde::to_vec_named(&kwargs).expect("encode multimodal kwargs");
+    let expected_kwargs = kwargs.clone();
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_backend(
+            b"engine-grpc-preprocessed-multimodal",
+            default_stream_output_specs(),
+            multimodal_backend(),
+            move |request| {
+                assert_eq!(
+                    request.prompt_token_ids.as_deref(),
+                    Some(&[11, 99, 99, 12][..])
+                );
+                let features = request.mm_features.as_ref().expect("multimodal features");
+                assert_eq!(features.len(), 1);
+                let feature = &features[0];
+                assert_eq!(feature.modality, "image");
+                assert!(feature.identifier.starts_with("grpc-mm:"));
+                assert_eq!(
+                    feature.mm_hash.as_deref(),
+                    Some(feature.identifier.as_str())
+                );
+                assert_eq!(feature.mm_position.offset, 1);
+                assert_eq!(feature.mm_position.length, 2);
+                assert_eq!(feature.data.as_ref(), Some(&expected_kwargs));
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = InferenceClient::new(channel);
+
+    client
+        .generate(pb::GenerateRequest {
+            request_id: "test-preprocessed-multimodal".to_string(),
+            model: "test-model".to_string(),
+            prompt: Some(pb::generate_request::Prompt::TokenIds(pb::TokenIds {
+                ids: vec![11, 99, 99, 12],
+            })),
+            media: vec![pb::MediaItem {
+                modality: pb::Modality::Image as i32,
+                source: Some(pb::media_item::Source::Features(
+                    pb::PreprocessedMediaFeatures {
+                        kwargs: Some(encoded_kwargs),
+                        identifier: "image-hash-a".to_string(),
+                        offset: 1,
+                        length: 2,
+                        mm_hash: Some("image-hash-a".to_string()),
+                        is_embed: Vec::new(),
+                    },
+                )),
+                mime_type: String::new(),
+                uuid: String::new(),
+            }],
+            stopping: Some(pb::StoppingCriteria {
+                max_new_tokens: 10,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("preprocessed multimodal generate");
 
     engine_task.await.expect("mock engine task");
     server_task.abort();
