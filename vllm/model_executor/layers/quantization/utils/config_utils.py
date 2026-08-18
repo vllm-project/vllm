@@ -32,9 +32,6 @@ def is_shared_expert_quant_fse_compatible(
     if quant_config is None:
         return True, None
 
-    from vllm.model_executor.layers.quantization.online.base import (
-        OnlineQuantizationConfig,
-    )
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
     from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
 
@@ -99,47 +96,6 @@ def is_shared_expert_quant_fse_compatible(
         return (
             False,
             f"DeepSeek-V4 shared experts at {shared_expert_prefix} are not MXFP4",
-        )
-
-    if isinstance(quant_config, OnlineQuantizationConfig):
-        from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-            should_ignore_layer,
-        )
-
-        ignored_layers = quant_config.args.ignore
-        expert_is_ignored = should_ignore_layer(
-            expert_prefix,
-            ignore=ignored_layers,
-            fused_mapping=quant_config.packed_modules_mapping,
-        )
-        shared_expert_is_ignored = any(
-            should_ignore_layer(
-                f"{shared_expert_prefix}.{projection_name}",
-                ignore=ignored_layers,
-                fused_mapping=quant_config.packed_modules_mapping,
-            )
-            for projection_name in projection_names
-        )
-        if expert_is_ignored or shared_expert_is_ignored:
-            ignored_prefix = (
-                expert_prefix if expert_is_ignored else shared_expert_prefix
-            )
-            return (
-                False,
-                f"online quantization excludes FSE weights at {ignored_prefix}",
-            )
-
-        if (
-            quant_config.args.moe is not None
-            and quant_config.args.linear is not None
-            and quant_config.args.moe == quant_config.args.linear
-        ):
-            return True, None
-        return (
-            False,
-            "online quantization requires identical non-empty moe and linear "
-            f"quantization configurations; got moe={quant_config.args.moe}, "
-            f"linear={quant_config.args.linear}",
         )
 
     if isinstance(quant_config, QuarkConfig):
