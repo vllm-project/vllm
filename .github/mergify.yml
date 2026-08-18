@@ -475,6 +475,8 @@ pull_request_rules:
       - files~=^vllm/models/deepseek_v4/nvidia/dspark\.py
       - files~=^vllm/models/deepseek_v4/amd/dspark\.py
       - files~=^vllm/models/deepseek_v4/xpu/dspark\.py
+      - files~=^vllm/models/kimi_k3/nvidia/dspark_mla\.py
+      - files~=^vllm/transformers_utils/configs/k3_dspark\.py
       - files~=^tests/.*dspark.*\.py
       - title~=(?i)dspark
   actions:
