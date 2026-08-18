@@ -161,6 +161,7 @@ def test_handler_shutdown_skips_transfers_after_event_sync_failure() -> None:
         ]
     )
     handler._transfer_events = {1: failed_event, 2: skipped_event}
+    handler._submit_failures = gpu_worker.deque()
     handler._stream_pool = [MagicMock()]
     handler._event_pool = [MagicMock()]
     handler._buffer_pool = [(MagicMock(), MagicMock(), MagicMock())]
@@ -178,6 +179,74 @@ def test_handler_shutdown_skips_transfers_after_event_sync_failure() -> None:
     assert not handler._buffer_pool
     assert not handler.src_tensors
     assert not handler.dst_tensors
+
+
+def _bare_handler(gpu_to_cpu: bool = True):
+    """Handler with only the state the failure paths touch."""
+    handler = gpu_worker.SingleDirectionOffloadingHandler.__new__(
+        gpu_worker.SingleDirectionOffloadingHandler
+    )
+    handler.gpu_to_cpu = gpu_to_cpu
+    handler._transfers = gpu_worker.deque()
+    handler._transfer_events = {}
+    handler._submit_failures = gpu_worker.deque()
+    handler._stream_pool = []
+    handler._event_pool = []
+    handler._buffer_pool = []
+    return handler
+
+
+def test_get_finished_reports_submit_failure_without_raising() -> None:
+    """A transfer that faulted at submit time still completes, as a failure.
+
+    The scheduler waits for every submitted job to complete, so a fault must be
+    reported rather than dropped or raised.
+    """
+    handler = _bare_handler()
+    handler._transfer_events[7] = MagicMock()
+    handler._submit_failures.append(7)
+
+    results = handler.get_finished()
+
+    assert [(r.job_id, r.success) for r in results] == [(7, False)]
+    assert not handler._transfer_events
+    assert handler.get_finished() == []
+
+
+def test_get_finished_reports_failure_when_event_query_raises() -> None:
+    """A device error latched after submit surfaces at poll time, not as a raise."""
+    handler = _bare_handler()
+    failing = MagicMock()
+    failing.end_event.query.side_effect = RuntimeError("device lost")
+    failing.job_id = 3
+    ready = MagicMock()
+    ready.job_id = 4
+    ready.end_event.query.return_value = True
+    ready.start_event.elapsed_time.return_value = 2.0
+    ready.num_bytes = 512
+    handler._transfers.extend([failing, ready])
+    handler._transfer_events = {3: failing.end_event, 4: ready.end_event}
+
+    results = handler.get_finished()
+
+    assert [(r.job_id, r.success) for r in results] == [(3, False), (4, True)]
+    assert not handler._transfers
+    assert not handler._transfer_events
+    # The faulted transfer's stream/events are dropped rather than pooled, so a
+    # latched device error cannot leak into an unrelated transfer.
+    assert handler._stream_pool == [ready.stream]
+
+
+def test_wait_swallows_synchronize_failure() -> None:
+    """wait() must not raise; the failure is reported by the next poll."""
+    handler = _bare_handler()
+    event = MagicMock()
+    event.synchronize.side_effect = RuntimeError("device lost")
+    handler._transfer_events[9] = event
+
+    handler.wait({9})
+
+    event.synchronize.assert_called_once_with()
 
 
 @pytest.mark.parametrize("device_sync_fails", [False, True])
