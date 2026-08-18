@@ -251,11 +251,16 @@ async def test_shutdown_children_uses_engine_process_timeout(
         SimpleNamespace(name="APIServer_DPRank_4", pid=None, is_alive=lambda: False)
     ]
     calls = []
+    timeout_calls = []
+
+    def get_process_timeout(request_timeout, manager_timeout):
+        timeout_calls.append((request_timeout, manager_timeout))
+        return 15.0
 
     monkeypatch.setattr(
         dp_sup,
         "get_engine_process_shutdown_timeout",
-        lambda request_timeout, manager_timeout: 15.0,
+        get_process_timeout,
     )
     monkeypatch.setattr(
         dp_sup,
@@ -265,6 +270,7 @@ async def test_shutdown_children_uses_engine_process_timeout(
 
     await supervisor._shutdown_children()
 
+    assert timeout_calls == [(0.0, 0.0)]
     assert calls == [
         (supervisor._processes, 15.0 + CHILD_EXIT_GRACE_S),
     ]
