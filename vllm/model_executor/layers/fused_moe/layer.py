@@ -85,6 +85,11 @@ def determine_expert_counts(
     # path (env + master switch, via is_fusion_moe_shared_experts_enabled) or the
     # backend-neutral router-append path (env alone, independent of the master
     # switch; e.g. the MM3 triton/flydsl mxfp8 MoE). Gated activations only.
+    # TODO: we should simply pass `fuse_shared_experts` to `FusedMoEFactory`,
+    # the dual resolution in both 1/ modeling file, and, 2/ here, is bug-prone.
+    # The condition on `is_act_and_mul` dates back from #32244, and #46545 added the
+    # questionable `or` here. See more context in:
+    # https://github.com/vllm-project/vllm/pull/51695
     fuse_shared_enabled = (
         (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()

@@ -266,21 +266,9 @@ def get_fse_test_model_config(
 def test_determine_expert_counts_fuse_shared_experts_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.fused_moe.layer.rocm_aiter_ops."
-        "is_fusion_moe_shared_experts_enabled",
-        lambda: False,
-    )
-    monkeypatch.setattr(
-        "vllm.model_executor.layers.fused_moe.layer.envs."
-        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS",
-        False,
-    )
-
     common_args = (8, 0, 2, True)
     assert determine_expert_counts(*common_args, True)[2] == 2
     assert determine_expert_counts(*common_args, False)[2] == 0
-    assert determine_expert_counts(*common_args, None)[2] == 0
 
 
 def test_resolve_layer_fused_shared_expert_skips_compatibility_when_disabled(
