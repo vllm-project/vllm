@@ -145,8 +145,8 @@ pub struct EngineCoreSamplingParams {
     pub skip_reading_prefix_cache: Option<bool>,
     /// Additional request parameters for custom extensions (from `vllm_xargs`).
     pub extra_args: Option<HashMap<String, serde_json::Value>>,
-    /// Number of prompt-token routing rows already returned to the caller.
-    /// Engine-core skips this prefix when routed-experts capture is enabled.
+    /// Number of prompt tokens to skip from returned routed-expert data.
+    /// A value of zero returns routing data for the entire prompt.
     pub routed_experts_prompt_start: u32,
 }
 
