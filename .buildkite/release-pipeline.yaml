@@ -960,7 +960,7 @@ steps:
           DOCKERHUB_USERNAME: "vllmbot"
 
   - trigger: "perf-eval"
-    label: ":rocket: Trigger perf-eval"
+    label: "Trigger perf-eval"
     key: trigger-perf-eval
     if: build.env("NIGHTLY") == "1" || build.env("RUN_PERF_EVAL") == "1"
     depends_on:
@@ -970,7 +970,7 @@ steps:
     soft_fail: true
     build:
       branch: "main"
-      message: "Evaluate vLLM $BUILDKITE_COMMIT"
+      message: "(NIGHTLY=${NIGHTLY:-0}) Evaluate vLLM $BUILDKITE_COMMIT"
       env:
         NIGHTLY: "${NIGHTLY:-0}"
         VLLM_COMMIT: "$BUILDKITE_COMMIT"
