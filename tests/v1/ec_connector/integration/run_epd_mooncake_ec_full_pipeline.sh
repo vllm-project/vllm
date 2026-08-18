@@ -45,6 +45,11 @@ EC_MOONCAKE_RESERVATION_PORT="${EC_MOONCAKE_RESERVATION_PORT:-19019}"
 MOONCAKE_EC_PROTOCOL="${MOONCAKE_EC_PROTOCOL:-rdma}"
 export EC_MOONCAKE_RESERVATION_PORT
 export MOONCAKE_EC_PROTOCOL
+# Mooncake cannot register CUDA memory through the peer-memory path on hosts
+# whose kernel lacks the OFED peer-memory API; every transfer then fails at
+# setup with -202. Opting out selects the path that works there and is a no-op
+# where GPUDirect is available.
+export WITH_NVIDIA_PEERMEM="${WITH_NVIDIA_PEERMEM:-0}"
 
 LOG_PATH="${LOG_PATH:-/tmp}"
 BASELINE_FILE="${BASELINE_FILE:-/tmp/vllm_epd_mooncake_baseline.txt}"

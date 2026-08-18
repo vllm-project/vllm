@@ -115,7 +115,11 @@ class ECMooncakeWorkerMetadata(ECConnectorWorkerMetadata):
     def aggregate(self, other: ECConnectorWorkerMetadata) -> ECMooncakeWorkerMetadata:
         assert isinstance(other, ECMooncakeWorkerMetadata)
         return ECMooncakeWorkerMetadata(
-            loaded=self.loaded | other.loaded,
+            # Every tensor-parallel rank gathers the embedding from its own
+            # cache, so an item counts as loaded only where all of them have
+            # it; one rank falling short must fail the load rather than leave
+            # the scheduler believing it is ready.
+            loaded=self.loaded & other.loaded,
             failed_loads=self.failed_loads | other.failed_loads,
             reclaimed=self.reclaimed | other.reclaimed,
             pending_loads=self.pending_loads or other.pending_loads,
@@ -161,7 +165,7 @@ class _PushCompletion:
 class _PendingPush:
     tensor: torch.Tensor
     spec: ECMooncakePushSpec
-    reservation: Future[dict[str, Any]]
+    reservation: Future[list[dict[str, Any]]]
     ready_event: torch.Event | None
     enqueued_at: float
 
@@ -409,9 +413,13 @@ class ECMooncakeControlServer:
         cancel: Callable[[str, str, bool], bool],
         reap: Callable[[], int],
         metrics_log_interval: float = 10,
+        peer_ports: list[int] | None = None,
+        device: torch.device | None = None,
     ):
         self.host = host
         self.port = port
+        self.peer_ports = peer_ports or [port]
+        self._device = device
         self.event_port: int | None = None
         self._reserve = reserve
         self._status = status
@@ -426,6 +434,15 @@ class ECMooncakeControlServer:
 
     def start(self) -> None:
         def loop() -> None:
+            if self._device is not None and self._device.type == "cuda":
+                # Reserving can retire an entry, and the event that orders its
+                # reuse is created on the recording thread's device rather
+                # than the stream's. A thread starts on device 0, which under
+                # a shard-local CUDA_VISIBLE_DEVICES is a peer's GPU, so
+                # without this every shard but the first strands a primary
+                # context there. The event orders correctly either way; what
+                # it costs is a few hundred MiB on someone else's card.
+                torch.accelerator.set_device_index(self._device.index or 0)
             context = zmq.Context()
             socket = context.socket(zmq.REP)
             event_socket = context.socket(zmq.PUSH)
@@ -502,6 +519,10 @@ class ECMooncakeControlServer:
                             result = self._status(str(request["transfer_id"]))
                         elif op == "event_port":
                             result = self.event_port
+                        elif op == "peers":
+                            # Every consumer shard receives its own copy, so a
+                            # producer holding one address needs the rest.
+                            result = {"ports": self.peer_ports}
                         elif op in ("complete", "complete_batch"):
                             items = (
                                 request["items"]
@@ -594,7 +615,9 @@ class ECMooncakeConnector(ECConnectorBase):
     - ``consumer_buffer_pool_size`` (consumer, optional): Bytes reserved for a
       long-lived registered CUDA receive arena (default ``ec_buffer_size``).
     - ``reservation_zmq_port`` (consumer worker, required): Exposes registered
-      receive addresses over ZMQ on this port so producers can push into them.
+      receive addresses over ZMQ. Tensor-parallel rank ``r`` of the first
+      pipeline stage listens on ``port + r``, and rank 0 reports the whole set,
+      so a producer only needs the first address.
     - ``reservation_zmq_addr`` (consumer scheduler, required): Address of the
       consumer control channel. Defaults to ``tcp://127.0.0.1:<port>``.
     - ``transfer_max_workers`` (optional): Maximum concurrent Mooncake transfer
@@ -606,8 +629,13 @@ class ECMooncakeConnector(ECConnectorBase):
     - ``consumer_metrics_log_interval`` (optional): Seconds between aggregated
       consumer lifecycle logs (default ``10``; ``0`` disables them).
 
-    Limitations: ``tensor_parallel_size`` and ``pipeline_parallel_size`` must
-    be ``1`` (same assumption as Mooncake KV connector for P2P handshake).
+    Parallelism: consumers may use tensor and pipeline parallelism. Only the
+    first pipeline stage holds encoder outputs, and each tensor-parallel rank
+    there gathers from its own cache, so every rank exposes a control channel
+    and the producer writes into all of them concurrently from one registered
+    source. That costs bandwidth but not latency, and avoids the second hop a
+    receive-then-broadcast would add. Producers must be unsharded, and data
+    parallelism is unsupported on either side.
     """
 
     def __init__(self, vllm_config: VllmConfig, role: ECConnectorRole):
@@ -618,12 +646,26 @@ class ECMooncakeConnector(ECConnectorBase):
                 "https://github.com/kvcache-ai/Mooncake ) to use ECMooncakeConnector."
             ) from _MOONCAKE_IMPORT_ERROR
 
-        if vllm_config.parallel_config.tensor_parallel_size > 1:
-            raise ValueError("ECMooncakeConnector requires tensor_parallel_size=1.")
-        if vllm_config.parallel_config.pipeline_parallel_size > 1:
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.data_parallel_size > 1:
             raise ValueError(
-                "ECMooncakeConnector does not support pipeline parallelism yet."
+                "ECMooncakeConnector does not support data parallelism yet: the "
+                "consumer exposes one control channel per instance, so a push "
+                "cannot be routed to the replica that will run the request."
             )
+        ec_cfg_early = vllm_config.ec_transfer_config
+        assert ec_cfg_early is not None
+        if ec_cfg_early.is_ec_producer:
+            # The producer holds one copy of each encoder output and addresses
+            # consumers directly; sharding it would only duplicate the push.
+            if parallel_config.tensor_parallel_size > 1:
+                raise ValueError(
+                    "ECMooncakeConnector producers require tensor_parallel_size=1."
+                )
+            if parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "ECMooncakeConnector producers do not support pipeline parallelism."
+                )
 
         self._role = role
         ec_cfg = vllm_config.ec_transfer_config
@@ -664,6 +706,10 @@ class ECMooncakeConnector(ECConnectorBase):
             tuple[torch.Event, _ConsumerPoolAllocation]
         ] = []
         self._consumer_reclaimed: set[str] = set()
+        self._consumer_rank_resolved = False
+        self._is_receiving_rank = True
+        self._tp_rank = 0
+        self._tp_size = 1
         self._consumer_pool_disabled = self._consumer_pool_capacity <= 0
         self._consumer_lock = threading.Lock()
         self._push_reservations: dict[str, _PushReservation] = {}
@@ -737,9 +783,12 @@ class ECMooncakeConnector(ECConnectorBase):
         self._control_executor = ThreadPoolExecutor(
             max_workers=control_workers, thread_name_prefix="ec-mooncake-control"
         )
+        self._consumer_shard_cache: dict[str, list[str]] = {}
+        self._shard_pool: ThreadPoolExecutor | None = None
+        self._shard_pool_lock = threading.Lock()
         self._pending_saves: list[tuple[str, Future[None]]] = []
         self._pending_reservations: dict[
-            str, deque[tuple[ECMooncakePushSpec, Future[dict[str, Any]]]]
+            str, deque[tuple[ECMooncakePushSpec, Future[list[dict[str, Any]]]]]
         ] = {}
         self._pending_pushes: list[_PendingPush] = []
         self._push_perf_lock = threading.Lock()
@@ -780,6 +829,32 @@ class ECMooncakeConnector(ECConnectorBase):
             )
         return self._engine
 
+    def _resolve_consumer_rank(self) -> None:
+        """Place this worker in the consumer's receive topology.
+
+        Encoder outputs only exist on the first pipeline stage, and every
+        tensor-parallel rank there gathers from its own cache, so each of them
+        receives its own copy on its own control channel. Ports run
+        consecutively from the configured one so a producer holding the first
+        address can reach the rest.
+        """
+        if self._consumer_rank_resolved:
+            return
+        self._consumer_rank_resolved = True
+        try:
+            from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+
+            tp_group = get_tp_group()
+            self._tp_rank = tp_group.rank_in_group
+            self._tp_size = tp_group.world_size
+            self._is_receiving_rank = get_pp_group().is_first_rank
+        except AssertionError:
+            # Groups are only absent outside a distributed run, where this
+            # worker is the whole consumer.
+            self._tp_rank = 0
+            self._tp_size = 1
+            self._is_receiving_rank = True
+
     def start_worker_services(self) -> None:
         if (
             self._role != ECConnectorRole.WORKER
@@ -787,6 +862,11 @@ class ECMooncakeConnector(ECConnectorBase):
             or self._reservation_zmq_port is None
             or self._control_server is not None
         ):
+            return
+        self._resolve_consumer_rank()
+        if not self._is_receiving_rank:
+            # Later pipeline stages hold no encoder outputs, so they need
+            # neither a receive pool nor a control channel.
             return
         raw_device = self._ec_cfg.ec_buffer_device
         device_name = (
@@ -799,13 +879,17 @@ class ECMooncakeConnector(ECConnectorBase):
             )
         self._control_server = ECMooncakeControlServer(
             "0.0.0.0",
-            self._reservation_zmq_port,
+            self._reservation_zmq_port + self._tp_rank,
             self._reserve_push_destination,
             self._push_status,
             self._complete_push,
             self._cancel_push,
             self._expire_push_reservations,
             self._consumer_metrics_log_interval,
+            peer_ports=[
+                self._reservation_zmq_port + rank for rank in range(self._tp_size)
+            ],
+            device=self._consumer_pool.device,
         )
         self._control_server.start()
 
@@ -930,11 +1014,14 @@ class ECMooncakeConnector(ECConnectorBase):
             pool = torch.empty(
                 self._consumer_pool_capacity, dtype=torch.uint8, device=device
             )
-            ret = self._ensure_engine().batch_register_memory(
-                [pool.data_ptr()], [pool.nbytes]
-            )
-            if ret != 0:
-                raise RuntimeError(f"Mooncake returned {ret}")
+            if self._is_receiving_rank:
+                # Producers write into this pool directly, so it needs a memory
+                # region. Later pipeline stages never receive and skip it.
+                ret = self._ensure_engine().batch_register_memory(
+                    [pool.data_ptr()], [pool.nbytes]
+                )
+                if ret != 0:
+                    raise RuntimeError(f"Mooncake returned {ret}")
         except (RuntimeError, torch.OutOfMemoryError) as e:
             self._consumer_pool_disabled = True
             logger.warning(
@@ -946,8 +1033,9 @@ class ECMooncakeConnector(ECConnectorBase):
         self._consumer_pool = pool
         self._consumer_pool_allocator = _ContiguousAllocator(pool.nbytes)
         logger.info(
-            "Registered %d-byte CUDA receive pool for Mooncake EC",
+            "Prepared %d-byte CUDA receive pool for Mooncake EC (registered=%s)",
             pool.nbytes,
+            self._is_receiving_rank,
         )
 
     def _ensure_producer_pool(self, device: torch.device) -> None:
@@ -1483,11 +1571,12 @@ class ECMooncakeConnector(ECConnectorBase):
     ) -> tuple[torch.Tensor, _ConsumerPoolAllocation]:
         with self._consumer_lock:
             reservation = self._push_reservations.get(spec.transfer_id)
-            if (
-                reservation is None
-                or not reservation.ready
-                or reservation.reservation_id != spec.reservation_id
-            ):
+            # Not compared against `spec.reservation_id`: each shard mints its
+            # own, while the spec carries the one from whichever shard's event
+            # the scheduler observed. `transfer_id` is assigned per request
+            # item and is already unique, and a stale reservation for a reused
+            # one is rejected by `_reserve_push_destination`.
+            if reservation is None or not reservation.ready:
                 self._consumer_worker_metrics["takes_rejected"] += 1
                 raise RuntimeError(
                     f"Pushed EC tensor is not ready for mm_hash={spec.mm_hash}"
@@ -1502,9 +1591,58 @@ class ECMooncakeConnector(ECConnectorBase):
     def _send_control(self, addr: str, request: dict[str, Any]) -> Any:
         return self._control_channel.request(addr, request)
 
-    def _reserve_remote(self, spec: ECMooncakePushSpec) -> dict[str, Any]:
+    def _shard_executor(self) -> ThreadPoolExecutor:
+        """Threads for the extra shards of a sharded consumer.
+
+        Reserving and writing both fan out from a task that already holds a
+        worker of the control or transfer pool, so the extra shards need a
+        pool of their own: queueing them behind their own caller deadlocks as
+        soon as every worker there is waiting. Nothing submitted here fans out
+        again, so this pool cannot deadlock on itself.
+        """
+        with self._shard_pool_lock:
+            if self._shard_pool is None:
+                self._shard_pool = ThreadPoolExecutor(
+                    max_workers=32, thread_name_prefix="ec-mooncake-shard"
+                )
+            return self._shard_pool
+
+    def _consumer_shards(self, base_addr: str) -> list[str]:
+        """Every control channel of the consumer reachable at `base_addr`.
+
+        A tensor-parallel consumer gathers from each rank's own cache, so each
+        rank receives its own copy. Asking the first one for the roster keeps
+        the address list out of the request and the proxy configuration.
+        """
+        cached = self._consumer_shard_cache.get(base_addr)
+        if cached is not None:
+            return cached
+        shards = [base_addr]
+        try:
+            reply = self._send_control(base_addr, {"op": "peers"})
+            ports = reply.get("ports") if isinstance(reply, dict) else None
+            if ports:
+                prefix = base_addr.rsplit(":", 1)[0]
+                shards = [f"{prefix}:{int(port)}" for port in ports]
+        except Exception:
+            # An older consumer does not answer this, and it can only be
+            # unsharded, so its single address is the whole roster.
+            logger.warning(
+                "EC Mooncake consumer at %s did not report its shards; "
+                "assuming it is unsharded.",
+                base_addr,
+                exc_info=True,
+            )
+        self._consumer_shard_cache[base_addr] = shards
+        if len(shards) > 1:
+            logger.info(
+                "EC Mooncake consumer at %s has %d shards", base_addr, len(shards)
+            )
+        return shards
+
+    def _reserve_one(self, addr: str, spec: ECMooncakePushSpec) -> dict[str, Any]:
         result = self._send_control(
-            spec.consumer_zmq,
+            addr,
             {
                 "op": "reserve",
                 "transfer_id": spec.transfer_id,
@@ -1517,20 +1655,43 @@ class ECMooncakeConnector(ECConnectorBase):
         if not isinstance(result, dict):
             raise RuntimeError("Invalid EC reservation response")
         result["_received_at"] = time.monotonic()
+        result["addr"] = addr
         return result
+
+    def _reserve_remote(self, spec: ECMooncakePushSpec) -> list[dict[str, Any]]:
+        """Reserve a destination on every shard of the consumer."""
+        shards = self._consumer_shards(spec.consumer_zmq)
+        if len(shards) == 1:
+            return [self._reserve_one(shards[0], spec)]
+        # This already runs on the control pool, so the extra shards go to the
+        # fan-out pool: queueing them behind their own caller would deadlock
+        # once every control worker is holding a reservation.
+        extra = [
+            self._shard_executor().submit(self._reserve_one, addr, spec)
+            for addr in shards[1:]
+        ]
+        return [self._reserve_one(shards[0], spec)] + [f.result() for f in extra]
 
     def _cancel_remote(
         self, consumer_zmq: str, transfer_id: str, reservation_id: str
     ) -> bool:
-        result = self._send_control(
-            consumer_zmq,
-            {
-                "op": "cancel",
-                "transfer_id": transfer_id,
-                "reservation_id": reservation_id,
-            },
-        )
-        return isinstance(result, dict) and bool(result.get("cancelled"))
+        """Release this transfer on every shard that reserved for it.
+
+        A sharded consumer holds one reservation per rank, so cancelling only
+        the first would leave the rest pinning pool slots until they expire.
+        """
+        cancelled = False
+        for addr in self._consumer_shards(consumer_zmq):
+            result = self._send_control(
+                addr,
+                {
+                    "op": "cancel",
+                    "transfer_id": transfer_id,
+                    "reservation_id": reservation_id,
+                },
+            )
+            cancelled |= isinstance(result, dict) and bool(result.get("cancelled"))
+        return cancelled
 
     def _poll_pending_cancels(self) -> None:
         pending = {}
@@ -1570,6 +1731,12 @@ class ECMooncakeConnector(ECConnectorBase):
     def start_load_caches(
         self, encoder_cache: dict[str, torch.Tensor], **kwargs: Any
     ) -> None:
+        self._resolve_consumer_rank()
+        if not self._is_receiving_rank:
+            # Reached on steps with no work, from a stage that never gathers
+            # multimodal embeddings. Taking a transfer here would fail for
+            # want of a reservation and fail the load for everyone.
+            return
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, ECMooncakeConnectorMetadata)
         self._ensure_engine()
@@ -1584,7 +1751,8 @@ class ECMooncakeConnector(ECConnectorBase):
         for spec in metadata.loads:
             if spec.mm_hash in encoder_cache:
                 if spec.pushed:
-                    self._cancel_push(spec.transfer_id, spec.reservation_id)
+                    # The spec's id is one shard's; cancel by transfer.
+                    self._cancel_push(spec.transfer_id, "")
                 self._completed_loads.add(spec.mm_hash)
                 continue
             if spec.local:
@@ -1635,39 +1803,52 @@ class ECMooncakeConnector(ECConnectorBase):
         notifications: list[tuple[_PendingPush, dict[str, Any]]] = []
         failed = False
         try:
+            synchronized: set[int] = set()
             for push in pushes:
                 stage_started_at = time.monotonic()
-                reservation = push.reservation.result()
-                received_at = float(reservation.get("_received_at", started_at))
-                if (
-                    not reservation.get("ready", False)
-                    and time.monotonic() - received_at >= _RESERVATION_REFRESH_SECONDS
-                ):
-                    reservation = self._reserve_remote(push.spec)
+                reservations = push.reservation.result()
+                stale = [
+                    index
+                    for index, shard in enumerate(reservations)
+                    if not shard.get("ready", False)
+                    and time.monotonic() - float(shard.get("_received_at", started_at))
+                    >= _RESERVATION_REFRESH_SECONDS
+                ]
+                if stale:
+                    reservations = self._reserve_remote(push.spec)
                 stage_ms["reserve"] += (time.monotonic() - stage_started_at) * 1000
-                if reservation.get("cached", False) or reservation.get(
-                    "cancelled", False
-                ):
-                    continue
-                if not reservation.get("write", True):
-                    continue
-                if push.ready_event is not None:
-                    stage_started_at = time.monotonic()
-                    push.ready_event.synchronize()
-                    stage_ms["cuda"] += (time.monotonic() - stage_started_at) * 1000
-                if int(reservation["nbytes"]) != push.tensor.nbytes:
-                    raise RuntimeError(
-                        "Reserved EC size does not match tensor for "
-                        f"mm_hash={push.spec.mm_hash}"
-                    )
-                ready.append((push, reservation))
-                notifications.append((push, reservation))
+                for shard in reservations:
+                    if shard.get("cached", False) or shard.get("cancelled", False):
+                        continue
+                    if not shard.get("write", True):
+                        continue
+                    if push.ready_event is not None and id(push) not in synchronized:
+                        stage_started_at = time.monotonic()
+                        push.ready_event.synchronize()
+                        stage_ms["cuda"] += (time.monotonic() - stage_started_at) * 1000
+                        synchronized.add(id(push))
+                    if int(shard["nbytes"]) != push.tensor.nbytes:
+                        raise RuntimeError(
+                            "Reserved EC size does not match tensor for "
+                            f"mm_hash={push.spec.mm_hash}"
+                        )
+                    ready.append((push, shard))
+                    notifications.append((push, shard))
             if not ready and not notifications:
                 return
 
             if ready:
                 eng = self._ensure_engine()
-                tensors = [push.tensor for push, _ in ready]
+                # One source per push: a sharded consumer reads the same bytes
+                # into each of its ranks, so staging and registration happen
+                # once however many destinations there are.
+                unique: list[_PendingPush] = []
+                source_index: dict[int, int] = {}
+                for push, _ in ready:
+                    if id(push) not in source_index:
+                        source_index[id(push)] = len(unique)
+                        unique.append(push)
+                tensors = [push.tensor for push in unique]
                 lengths = [tensor.nbytes for tensor in tensors]
                 stage_started_at = time.monotonic()
                 staged = self._stage_push_sources(tensors)
@@ -1689,23 +1870,39 @@ class ECMooncakeConnector(ECConnectorBase):
                 addresses = [tensor.data_ptr() for tensor in sources]
                 stage_ms["register"] = (time.monotonic() - stage_started_at) * 1000
                 try:
-                    by_session: dict[str, list[int]] = {}
-                    for index, (_, reservation) in enumerate(ready):
-                        by_session.setdefault(
-                            str(reservation["dst_session"]), []
-                        ).append(index)
+                    by_session: dict[str, list[tuple[int, int]]] = {}
+                    for push, shard in ready:
+                        by_session.setdefault(str(shard["dst_session"]), []).append(
+                            (source_index[id(push)], int(shard["dst_ptr"]))
+                        )
                     stage_started_at = time.monotonic()
-                    for session, indices in by_session.items():
+
+                    def write(session: str, items: list[tuple[int, int]]) -> None:
                         ret = eng.batch_transfer_sync_write(
                             session,
-                            [addresses[index] for index in indices],
-                            [int(ready[index][1]["dst_ptr"]) for index in indices],
-                            [lengths[index] for index in indices],
+                            [addresses[index] for index, _ in items],
+                            [dst for _, dst in items],
+                            [lengths[index] for index, _ in items],
                         )
                         if ret != 0:
                             raise RuntimeError(
-                                f"Mooncake EC push failed with status {ret}"
+                                f"Mooncake EC push to {session} failed with "
+                                f"status {ret}"
                             )
+
+                    sessions = list(by_session.items())
+                    # Shards are written concurrently: serialising them would
+                    # make the transfer cost the sum of the ranks instead of
+                    # the slowest one.
+                    extra = [
+                        self._shard_executor().submit(write, session, items)
+                        for session, items in sessions[1:]
+                    ]
+                    try:
+                        write(*sessions[0])
+                    finally:
+                        for future in extra:
+                            future.result()
                     stage_ms["rdma"] = (time.monotonic() - stage_started_at) * 1000
                 finally:
                     stage_started_at = time.monotonic()
@@ -1742,8 +1939,12 @@ class ECMooncakeConnector(ECConnectorBase):
                 stage_ms,
                 stage_max_ms={"queue": max(queue_waits_ms, default=0.0)},
                 item_count=len(pushes),
-                byte_count=sum(push.tensor.nbytes for push, _ in ready),
-                skipped_items=len(pushes) - len(ready),
+                # `ready` holds one entry per destination shard, so count the
+                # distinct items rather than the writes.
+                byte_count=sum(
+                    push.tensor.nbytes for push in {id(p): p for p, _ in ready}.values()
+                ),
+                skipped_items=len(pushes) - len({id(push) for push, _ in ready}),
                 failed=failed,
             )
 
@@ -1755,9 +1956,9 @@ class ECMooncakeConnector(ECConnectorBase):
             return
         by_destination: dict[str, list[tuple[_PendingPush, dict[str, Any]]]] = {}
         for push, reservation in notifications:
-            by_destination.setdefault(push.spec.consumer_zmq, []).append(
-                (push, reservation)
-            )
+            by_destination.setdefault(
+                str(reservation.get("addr", push.spec.consumer_zmq)), []
+            ).append((push, reservation))
         for consumer_zmq, items in by_destination.items():
             result = self._send_control(
                 consumer_zmq,
@@ -1784,21 +1985,23 @@ class ECMooncakeConnector(ECConnectorBase):
     def _abandon_pushes(self, pushes: list[_PendingPush]) -> None:
         """Release the consumer-side reservations of a batch that failed."""
         for push in pushes:
-            reservation_id = ""
+            shards: list[dict[str, Any]] = []
             if push.reservation.done() and not push.reservation.cancelled():
                 with suppress(Exception):
-                    result = push.reservation.result()
-                    reservation_id = str(result.get("reservation_id", ""))
-            with suppress(Exception):
-                self._send_control(
-                    push.spec.consumer_zmq,
-                    {
-                        "op": "cancel",
-                        "transfer_id": push.spec.transfer_id,
-                        "reservation_id": reservation_id,
-                        "abandon": True,
-                    },
-                )
+                    shards = push.reservation.result()
+            if not shards:
+                shards = [{"addr": push.spec.consumer_zmq, "reservation_id": ""}]
+            for shard in shards:
+                with suppress(Exception):
+                    self._send_control(
+                        str(shard.get("addr", push.spec.consumer_zmq)),
+                        {
+                            "op": "cancel",
+                            "transfer_id": push.spec.transfer_id,
+                            "reservation_id": str(shard.get("reservation_id", "")),
+                            "abandon": True,
+                        },
+                    )
 
     def _record_push_perf(
         self,
@@ -1895,7 +2098,7 @@ class ECMooncakeConnector(ECConnectorBase):
         self,
         tensor: torch.Tensor,
         spec: ECMooncakePushSpec,
-        reservation: Future[dict[str, Any]],
+        reservation: Future[list[dict[str, Any]]],
     ) -> None:
         ready_event = None
         if tensor.device.type == "cuda":
@@ -1922,21 +2125,21 @@ class ECMooncakeConnector(ECConnectorBase):
     def _cancel_orphaned_reservation(
         self,
         spec: ECMooncakePushSpec,
-        reservation: Future[dict[str, Any]],
+        reservation: Future[list[dict[str, Any]]],
     ) -> None:
         try:
-            result = reservation.result()
-            if result.get("cached", False) or result.get("cancelled", False):
-                return
-            self._send_control(
-                spec.consumer_zmq,
-                {
-                    "op": "cancel",
-                    "transfer_id": spec.transfer_id,
-                    "reservation_id": str(result.get("reservation_id", "")),
-                    "abandon": True,
-                },
-            )
+            for shard in reservation.result():
+                if shard.get("cached", False) or shard.get("cancelled", False):
+                    continue
+                self._send_control(
+                    str(shard.get("addr", spec.consumer_zmq)),
+                    {
+                        "op": "cancel",
+                        "transfer_id": spec.transfer_id,
+                        "reservation_id": str(shard.get("reservation_id", "")),
+                        "abandon": True,
+                    },
+                )
         except Exception:
             logger.exception(
                 "Failed to cancel orphaned EC reservation for transfer_id=%s",
@@ -1949,11 +2152,10 @@ class ECMooncakeConnector(ECConnectorBase):
         if not self.is_producer or self._role != ECConnectorRole.WORKER:
             return None, None
 
-        orphaned: list[tuple[ECMooncakePushSpec, Future[dict[str, Any]]]] = []
+        Reserved = tuple[ECMooncakePushSpec, Future[list[dict[str, Any]]]]
+        orphaned: list[Reserved] = []
         for mm_hash, reservations in list(self._pending_reservations.items()):
-            remaining: deque[tuple[ECMooncakePushSpec, Future[dict[str, Any]]]] = (
-                deque()
-            )
+            remaining: deque[Reserved] = deque()
             for spec, reservation in reservations:
                 if spec.request_id in finished_req_ids:
                     orphaned.append((spec, reservation))
@@ -2089,7 +2291,7 @@ class ECMooncakeConnector(ECConnectorBase):
             if spec is not None:
                 self._consumer_pending_since.pop(spec.mm_hash, None)
                 self._consumer_scheduler_metrics["pending_specs_expired"] += 1
-                self._queue_cancel(transfer_id, spec.reservation_id)
+                self._queue_cancel(transfer_id)
 
     def _ensure_event_channel(self) -> None:
         if self._event_zmq_socket is not None:
@@ -2305,11 +2507,8 @@ class ECMooncakeConnector(ECConnectorBase):
         transfer_id = self._request_transfer_id(request, index)
         if transfer_id is None:
             return
-        pending = self._pop_pending_spec(transfer_id)
-        self._queue_cancel(
-            transfer_id,
-            pending.reservation_id if pending is not None else "",
-        )
+        self._pop_pending_spec(transfer_id)
+        self._queue_cancel(transfer_id)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -2352,6 +2551,10 @@ class ECMooncakeConnector(ECConnectorBase):
 
     def build_connector_worker_meta(self) -> ECConnectorWorkerMetadata | None:
         if self._role != ECConnectorRole.WORKER:
+            return None
+        if self.is_consumer and not self._is_receiving_rank:
+            # `loaded` is intersected across reporting ranks, so a stage that
+            # never loads must not report at all rather than report nothing.
             return None
 
         self._flush_pending_pushes()
@@ -2440,11 +2643,8 @@ class ECMooncakeConnector(ECConnectorBase):
                 transfer_id = self._request_transfer_id(request, index)
                 if transfer_id is None:
                     continue
-                pending = self._pop_pending_spec(transfer_id)
-                self._queue_cancel(
-                    transfer_id,
-                    pending.reservation_id if pending is not None else "",
-                )
+                self._pop_pending_spec(transfer_id)
+                self._queue_cancel(transfer_id)
         if not self.is_producer:
             return False, None
 
@@ -2474,6 +2674,8 @@ class ECMooncakeConnector(ECConnectorBase):
         self._shutdown = True
         self._flush_pending_pushes()
         self._io_executor.shutdown(wait=True, cancel_futures=True)
+        if self._shard_pool is not None:
+            self._shard_pool.shutdown(wait=True, cancel_futures=True)
         self._control_executor.shutdown(wait=True, cancel_futures=True)
         # Every thread that could hold a control socket is stopped by now.
         self._control_channel.close()

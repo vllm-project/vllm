@@ -116,6 +116,7 @@ def mock_vllm_config_producer():
     config.parallel_config = Mock()
     config.parallel_config.tensor_parallel_size = 1
     config.parallel_config.pipeline_parallel_size = 1
+    config.parallel_config.data_parallel_size = 1
     config.ec_transfer_config = Mock()
     config.ec_transfer_config.is_ec_producer = True
     config.ec_transfer_config.is_ec_consumer = False
@@ -133,6 +134,7 @@ def mock_vllm_config_consumer():
     config.parallel_config = Mock()
     config.parallel_config.tensor_parallel_size = 1
     config.parallel_config.pipeline_parallel_size = 1
+    config.parallel_config.data_parallel_size = 1
     config.ec_transfer_config = Mock()
     config.ec_transfer_config.is_ec_producer = False
     config.ec_transfer_config.is_ec_consumer = True
@@ -188,13 +190,56 @@ class TestContiguousAllocator:
 
 
 class TestECMooncakeConnectorValidation:
-    def test_rejects_tensor_parallel_gt_one(self, mock_vllm_config_producer):
+    def test_rejects_sharded_producer(self, mock_vllm_config_producer):
+        """One copy of each encoder output, so sharding only duplicates it."""
         mock_vllm_config_producer.parallel_config.tensor_parallel_size = 2
         with (
             patch_ec_mooncake_deps(),
             pytest.raises(ValueError, match="tensor_parallel_size"),
         ):
             ECMooncakeConnector(mock_vllm_config_producer, ECConnectorRole.WORKER)
+
+    def test_accepts_sharded_consumer(self, mock_vllm_config_consumer):
+        """Consumers shard: each rank gathers from its own encoder cache."""
+        mock_vllm_config_consumer.parallel_config.tensor_parallel_size = 4
+        mock_vllm_config_consumer.parallel_config.pipeline_parallel_size = 2
+        with patch_ec_mooncake_deps():
+            connector = ECMooncakeConnector(
+                mock_vllm_config_consumer, ECConnectorRole.SCHEDULER
+            )
+            connector.shutdown()
+
+    def test_rejects_data_parallel(self, mock_vllm_config_consumer):
+        """One control channel per instance cannot address a replica."""
+        mock_vllm_config_consumer.parallel_config.data_parallel_size = 2
+        with (
+            patch_ec_mooncake_deps(),
+            pytest.raises(ValueError, match="data parallelism"),
+        ):
+            ECMooncakeConnector(mock_vllm_config_consumer, ECConnectorRole.SCHEDULER)
+
+
+class TestECMooncakeWorkerMetadataAggregation:
+    def test_an_item_one_rank_missed_is_not_loaded(self):
+        """Each rank gathers from its own cache, so all of them must have it.
+
+        Reporting it as loaded because one rank succeeded left the scheduler
+        marking the hash ready while another rank raised on the cache miss.
+        """
+        rank0 = ECMooncakeWorkerMetadata(loaded={"a", "b"})
+        rank1 = ECMooncakeWorkerMetadata(loaded={"a"}, failed_loads={"b"})
+
+        merged = rank0.aggregate(rank1)
+
+        assert merged.loaded == {"a"}
+        assert merged.failed_loads == {"b"}
+
+    def test_a_reclaim_on_any_rank_invalidates_residency(self):
+        """The scheduler mirrors one pool, so the weakest rank decides."""
+        merged = ECMooncakeWorkerMetadata(loaded={"a"}).aggregate(
+            ECMooncakeWorkerMetadata(loaded={"a"}, reclaimed={"c"})
+        )
+        assert merged.reclaimed == {"c"}
 
 
 class TestECMooncakeSchedulerMetadata:
@@ -360,7 +405,9 @@ class TestECMooncakeSchedulerMetadata:
                 )
                 with patch.object(scheduler, "_queue_cancel") as cancel:
                     scheduler.update_state_after_free(request, 0)
-                cancel.assert_called_once_with("consumed-transfer", "reservation")
+                # Cancelled by transfer: a shard's reservation id means
+                # nothing to its peers, so it is not passed along.
+                cancel.assert_called_once_with("consumed-transfer")
                 assert "consumed-transfer" not in scheduler._pending_specs
             finally:
                 scheduler.shutdown()
@@ -813,7 +860,10 @@ class TestECMooncakeWorkerTransfer:
             try:
                 producer.start_save_caches(encoder_cache={})
                 _, reservation = producer._pending_reservations["hash"][0]
-                reservation_data = reservation.result(timeout=2)
+                shards = reservation.result(timeout=2)
+                # One reservation per consumer shard; this consumer is single.
+                assert len(shards) == 1
+                reservation_data = shards[0]
                 assert reservation_data["nbytes"] == source.nbytes
                 old_reservation_id = reservation_data["reservation_id"]
                 reservation_data["_received_at"] -= _LEASE_TTL_SECONDS
@@ -1071,6 +1121,66 @@ class TestECMooncakeWorkerTransfer:
                 assert consumer._take_resident_tensor(spec) is tensor
             finally:
                 consumer.shutdown()
+
+    def test_push_reaches_every_consumer_shard(self, mock_vllm_config_producer):
+        """A sharded consumer gets one copy per rank, from one source.
+
+        Each rank gathers from its own encoder cache, so the push has to land
+        on all of them; the bytes are identical, so staging and registration
+        happen once however many destinations there are.
+        """
+        shard_ports = [_find_free_port() for _ in range(3)]
+        base = f"tcp://127.0.0.1:{shard_ports[0]}"
+        source = torch.randn(4, 16)
+        spec = ECMooncakePushSpec(
+            mm_hash="hash",
+            nbytes=source.nbytes,
+            shape=tuple(source.shape),
+            dtype="float32",
+            consumer_zmq=base,
+            transfer_id="transfer-0",
+        )
+        mock_vllm_config_producer.ec_transfer_config.ec_buffer_device = "cpu"
+        destinations = [torch.zeros_like(source) for _ in shard_ports]
+
+        def fake_send(addr: str, request: dict):
+            if request["op"] == "peers":
+                return {"ports": shard_ports}
+            index = shard_ports.index(int(addr.rsplit(":", 1)[1]))
+            if request["op"] == "reserve":
+                return {
+                    "reservation_id": f"r{index}",
+                    "dst_session": f"session-{index}",
+                    "dst_ptr": destinations[index].data_ptr(),
+                    "nbytes": source.nbytes,
+                    "write": True,
+                    "ready": True,
+                    "addr": addr,
+                }
+            if request["op"] == "complete_batch":
+                return {"items": [{"completed": True} for _ in request["items"]]}
+            return {}
+
+        with patch_ec_mooncake_deps():
+            producer = ECMooncakeConnector(
+                mock_vllm_config_producer, ECConnectorRole.WORKER
+            )
+            producer.bind_connector_metadata(ECMooncakeConnectorMetadata(pushes=[spec]))
+            try:
+                with patch.object(producer, "_send_control", side_effect=fake_send):
+                    producer.start_save_caches(encoder_cache={"hash": source})
+                    _wait_for_worker_io(producer)
+
+                engine = producer._engine
+                assert isinstance(engine, CopyingFakeTransferEngine)
+                # One write per rank, and every rank got the same bytes.
+                assert len(engine.transfer_calls) == len(shard_ports)
+                for destination in destinations:
+                    assert torch.equal(destination, source)
+                # The source is staged once, not once per destination.
+                assert len(engine.register_calls) == 1
+            finally:
+                producer.shutdown()
 
     def test_pushes_stage_through_the_registered_pool(self, mock_vllm_config_producer):
         """Repeated content must not register overlapping source storage."""
