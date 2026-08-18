@@ -154,18 +154,18 @@ def is_aiter_found_and_supported() -> bool:
     return False
 
 
-def is_aiter_found_and_supported_on_rdna4() -> bool:
-    """RDNA4 (gfx12) analog of `is_aiter_found_and_supported()`.
+def is_aiter_found_and_supported_on_rdna() -> bool:
+    """RDNA analog of `is_aiter_found_and_supported()`.
 
-    gfx12 has no aiter CK build, so this deliberately stays off the gfx9
-    `@if_aiter_supported` umbrella; it reports only that aiter's Triton
-    kernels are usable here. Like its gfx9 counterpart it checks platform +
-    arch + library availability and does not check environment variables.
+    RDNA has no aiter CK build, so this deliberately stays off the gfx9
+    `@if_aiter_supported` umbrella; it reports only that aiter's Triton kernels
+    are usable here. Like its gfx9 counterpart it checks platform + arch +
+    library availability and does not check environment variables.
     """
     if current_platform.is_rocm() and IS_AITER_FOUND:
-        from vllm.platforms.rocm import on_rdna4
+        from vllm.platforms.rocm import on_rdna
 
-        return on_rdna4()
+        return on_rdna()
     return False
 
 
@@ -1801,35 +1801,20 @@ class rocm_aiter_ops:
 
     @classmethod
     def is_rdna_aiter_enabled(cls) -> bool:
-        """AITER on RDNA4 (gfx12): library present, arch is rdna4, and the user
-        enabled aiter. Only aiter's Triton kernels exist on gfx12 (no CK build),
-        so this deliberately stays off the gfx9/CK `@if_aiter_supported` umbrella
-        and gates only the Triton paths rdna4 uses. The gfx12 analog of
+        """AITER on RDNA: library present, arch is RDNA, and the user enabled
+        aiter. Only aiter's Triton kernels exist on RDNA (no CK build), so this
+        deliberately stays off the gfx9/CK `@if_aiter_supported` umbrella and
+        gates only the Triton paths RDNA uses. The RDNA analog of
         `is_enabled()`."""
         if not current_platform.is_rocm() or not IS_AITER_FOUND:
             return False
-        from vllm.platforms.rocm import on_rdna4
+        from vllm.platforms.rocm import on_rdna
 
-        return on_rdna4() and cls._AITER_ENABLED
-
-    @classmethod
-    def is_gfx11_aiter_enabled(cls) -> bool:
-        """AITER on RDNA3 (gfx11): library present, arch is gfx11, and the user
-        enabled aiter. As on gfx12, only aiter's Triton kernels exist here (no
-        CK build); the AMD Triton compiler lowers the fp8 ``tl.dot`` in the
-        MQA-logits kernels for gfx11, so the same aiter Triton logits kernels
-        RDNA4 uses run unchanged. The gfx11 analog of `is_rdna_aiter_enabled()`;
-        kept separate so it gates only the sparse-MLA indexer logits, not the
-        RDNA4 linear/MoE/fusion paths."""
-        if not current_platform.is_rocm() or not IS_AITER_FOUND:
-            return False
-        from vllm.platforms.rocm import on_gfx11
-
-        return on_gfx11() and cls._AITER_ENABLED
+        return on_rdna() and cls._AITER_ENABLED
 
     @classmethod
     def is_rdna_linear_enabled(cls) -> bool:
-        """RDNA4 (gfx12) analog of is_linear_enabled() (aiter Triton blockscale)."""
+        """RDNA analog of is_linear_enabled() (aiter Triton blockscale)."""
         return cls.is_rdna_aiter_enabled() and cls._LINEAR_ENABLED
 
     @classmethod
@@ -2019,8 +2004,8 @@ class rocm_aiter_ops:
         return cls._AITER_ENABLED and cls._gdn_triton_kernels_importable()
 
     @classmethod
-    def is_rdna_gdn_triton_kernels_available(cls) -> bool:
-        """RDNA4 (gfx12) analog of are_gdn_triton_kernels_available()."""
+    def are_rdna_gdn_triton_kernels_available(cls) -> bool:
+        """RDNA analog of are_gdn_triton_kernels_available()."""
         return cls.is_rdna_aiter_enabled() and cls._gdn_triton_kernels_importable()
 
     @classmethod
@@ -2043,22 +2028,8 @@ class rocm_aiter_ops:
         global _OPS_REGISTERED
 
         if not (
-            is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna4()
+            is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna()
         ):
-            if not current_platform.is_rocm():
-                return
-
-            from vllm.platforms.rocm import on_gfx11
-
-            if on_gfx11() and not _OPS_REGISTERED:
-                direct_register_custom_op(
-                    op_name="rocm_aiter_sparse_attn_indexer",
-                    op_func=rocm_aiter_sparse_attn_indexer,
-                    mutates_args=["topk_indices_buffer"],
-                    fake_impl=rocm_aiter_sparse_attn_indexer_fake,
-                    dispatch_key=current_platform.dispatch_key,
-                )
-                _OPS_REGISTERED = True
             return
 
         if not _OPS_REGISTERED:
