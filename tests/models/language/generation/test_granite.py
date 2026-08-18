@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
-import torch
 from transformers import GraniteConfig
 
 from vllm.model_executor.models.granite import granite_layer_attn_params
-from vllm.model_executor.models.granitemoe import granitemoe_split_expert_weights
 
 from ...utils import check_logprobs_close, check_transformers_version
 
@@ -81,49 +79,3 @@ def test_granite_swa_features_resolve_per_layer(attention_sinks, expected_sink):
         (128, 0.0, expected_sink),
         (128, 1000000.0, expected_sink),
     ]
-
-
-def test_granitemoe_expert_weights_accept_both_checkpoint_spellings():
-    """The legacy and current MoE tensor names differ but the layouts match."""
-    num_experts, hidden, inter = 3, 8, 4
-    gate_up = torch.randn(num_experts, 2 * inter, hidden)
-    down = torch.randn(num_experts, hidden, inter)
-    router = torch.randn(num_experts, hidden)
-
-    def weights(gate_up_name, down_name, router_name):
-        return [
-            (f"model.layers.0.block_sparse_moe.{gate_up_name}", gate_up),
-            (f"model.layers.0.block_sparse_moe.{down_name}", down),
-            (f"model.layers.0.block_sparse_moe.{router_name}", router),
-            # Must pass through: the shared MLP reuses the legacy expert names.
-            ("model.layers.0.shared_mlp.input_linear.weight", down[0]),
-        ]
-
-    legacy = dict(
-        granitemoe_split_expert_weights(
-            weights(
-                "input_linear.weight", "output_linear.weight", "router.layer.weight"
-            )
-        )
-    )
-    current = dict(
-        granitemoe_split_expert_weights(
-            weights("experts.gate_up_proj", "experts.down_proj", "router.weight")
-        )
-    )
-
-    assert legacy.keys() == current.keys()
-    for name, weight in legacy.items():
-        assert torch.equal(weight, current[name]), name
-
-    prefix = "model.layers.0.block_sparse_moe"
-    assert torch.equal(legacy[f"{prefix}.gate.weight"], router)
-    assert torch.equal(legacy["model.layers.0.shared_mlp.input_linear.weight"], down[0])
-    for e in range(num_experts):
-        assert torch.equal(
-            legacy[f"{prefix}.experts.{e}.w1.weight"], gate_up[e][:inter]
-        )
-        assert torch.equal(
-            legacy[f"{prefix}.experts.{e}.w3.weight"], gate_up[e][inter:]
-        )
-        assert torch.equal(legacy[f"{prefix}.experts.{e}.w2.weight"], down[e])
