@@ -115,7 +115,10 @@ def _dequant_mxfp4(
             "amd-quark`."
         ) from err
 
-    return mx.dq_mxfp4(x, scale, float_dtype)
+    # MLA chunked-prefill passes non-contiguous slices of kv_b_proj.weight /
+    # scale; the Quark HIP kernel asserts on non-contiguous inputs. Make them
+    # contiguous to satisfy the kernel without affecting numerics.
+    return mx.dq_mxfp4(x.contiguous(), scale.contiguous(), float_dtype)
 
 
 def _dequant_mxfp4_fake(
@@ -138,7 +141,9 @@ def _quant_dequant_mxfp4(
             "amd-quark`."
         ) from err
 
-    return mx.qdq_mxfp4(x, scale_calculation_mode)
+    # Same contiguous guard as _dequant_mxfp4: chunked-prefill non-contiguous
+    # slices crash the HIP kernel's assertion otherwise.
+    return mx.qdq_mxfp4(x.contiguous(), scale_calculation_mode)
 
 
 def _quant_dequant_mxfp4_fake(
