@@ -2278,7 +2278,7 @@ class VllmConfig:
         ) or (kv_config is not None and kv_config.is_kv_consumer)
         if mm_config.allow_missing_mm_embeddings:
             logger.info_once(
-                "EC consumer: pre-computed-embedding inputs may "
+                "EC/KV consumer: pre-computed-embedding inputs may "
                 "omit the embedding tensor."
             )
 
