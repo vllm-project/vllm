@@ -192,7 +192,7 @@ steps:
   commands:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
 
-- label: Multi-Modal Models (Extended Pooling)
+- label: Multi-Modal Models (Extended Pooling) %N
   key: multi-modal-models-extended-pooling
   optional: true
   device: h200_18gb
@@ -201,11 +201,13 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal/pooling
   commands:
-    - pytest -v -s models/multimodal/pooling -m 'not core_model'
+    - pytest -v -s models/multimodal/pooling -m 'not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  parallelism: 4
   mirror:
     amd:
       dind: false
       device: mi300_1
+      parallelism: 1
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
