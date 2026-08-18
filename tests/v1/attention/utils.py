@@ -34,10 +34,11 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheLayout,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     compute_layout_strides,
+    create_kv_cache_views,
     get_kv_quant_mode,
-    reshape_kv_cache,
 )
 
 
@@ -431,18 +432,21 @@ def dense_kv_cache_views(
     layout: KVCacheLayout,
     kernel_block_size: int | None = None,
 ) -> list[torch.Tensor]:
-    """``reshape_kv_cache`` for a dense allocation of ``num_layers`` layers."""
+    """``create_kv_cache_views`` for a dense allocation of ``num_layers`` layers."""
     layer_stride, block_stride, _, _, _ = compute_layout_strides(
         spec, num_blocks, num_layers, layout
     )
-    return reshape_kv_cache(
+    tensor = KVCacheTensor(
+        size=raw.numel(),
+        layers=[str(i) for i in range(num_layers)],
+        layer_stride=layer_stride,
+        block_stride=block_stride,
+    )
+    return create_kv_cache_views(
         raw,
         spec,
         num_blocks,
-        num_layers,
         layout,
-        offset=0,
-        layer_stride=layer_stride,
-        block_stride=block_stride,
+        tensor,
         kernel_block_size=kernel_block_size,
     )

@@ -284,8 +284,17 @@ def compute_layer_kv_cache_shape_bytes(
 ) -> tuple[int, ...]:
     """Return the 4D logical shape ``(B, H, N, C)`` where C is in bytes."""
     bs = kernel_block_size if kernel_block_size is not None else spec.block_size
+    assert spec.block_size % bs == 0, (
+        f"Kernel block size {bs} must divide KV cache block size {spec.block_size}."
+    )
+    blocks_per_page = spec.block_size // bs
     num_states = spec.num_states * bs // spec.block_size
-    return (num_blocks, spec.num_heads, num_states, spec.state_content_size_bytes)
+    return (
+        num_blocks * blocks_per_page,
+        spec.num_heads,
+        num_states,
+        spec.state_content_size_bytes,
+    )
 
 
 def compute_layout_strides(
@@ -294,76 +303,53 @@ def compute_layout_strides(
     num_layers: int,
     layout: KVCacheLayout,
     kernel_block_size: int | None = None,
-    interleaved_block_stride: int | None = None,
+    fixed_strides: tuple[int | None, ...] = (None,) * 5,
 ) -> tuple[int, ...]:
     """Byte strides in logical ``[L, B, H, N, C]`` axis order."""
-    logical_shape = (
+    assert len(fixed_strides) == 5
+    assert all(stride is None or stride > 0 for stride in fixed_strides)
+    shape = (
         num_layers,
         *compute_layer_kv_cache_shape_bytes(spec, num_blocks, kernel_block_size),
     )
-    order = layout.stride_order
-    physical_shape = tuple(logical_shape[i] for i in order)
-    inverse_order = tuple(order.index(i) for i in range(5))
-    assert interleaved_block_stride is None or layout.is_block_outermost, (
-        "An interleaved block stride requires B to be the outermost dimension."
-    )
-
     padded_block_size = getattr(spec, "page_size_padded", None)
     if padded_block_size is not None:
-        assert layout.is_block_compact, (
-            f"{layout.name} cannot carry page padding because L and B are not "
-            "the outermost dimensions."
-        )
+        assert layout.is_block_compact, f"{layout.name} does not support page padding."
         assert kernel_block_size is None or kernel_block_size == spec.block_size, (
             "Padded KV pages do not support kernel block splitting."
         )
 
-        layer_block_grid_shape = physical_shape[:2]  # [L, B] or [B, L]
-        block_shape = physical_shape[2:]  # [H, N, C] or [N, H, C]
-        dense_block_size = prod(block_shape)
-        storage_shape = (*layer_block_grid_shape, padded_block_size)
-    else:
-        storage_shape = physical_shape
-
-    natural_outer_stride = prod(storage_shape[1:])
-    outer_stride = max(natural_outer_stride, interleaved_block_stride or 0)
-    storage = torch.empty(
-        (storage_shape[0], outer_stride), dtype=torch.uint8, device="meta"
-    )
-    storage = storage[..., :natural_outer_stride].view(storage_shape)
-
-    if padded_block_size is not None:
-        physical = storage[..., :dense_block_size].view(physical_shape)
-    else:
-        physical = storage
-
-    return physical.permute(inverse_order).stride()
+    strides = [0] * 5
+    current_stride = 1
+    for physical_idx, dim in reversed(tuple(enumerate(layout.stride_order))):
+        if physical_idx == _DIM_B and padded_block_size is not None:
+            current_stride = max(current_stride, padded_block_size)
+            assert current_stride % padded_block_size == 0
+        strides[dim] = fixed_strides[dim] or current_stride
+        current_stride = strides[dim] * shape[dim]
+    return tuple(strides)
 
 
-def reshape_kv_cache(
+def create_kv_cache_views(
     raw: torch.Tensor,
     spec: KVCacheSpec,
     num_blocks: int,
-    num_layers: int,
     layout: KVCacheLayout,
-    *,
-    offset: int,
-    layer_stride: int,
-    block_stride: int,
+    kv_cache_tensor: KVCacheTensor,
     kernel_block_size: int | None = None,
 ) -> list[torch.Tensor]:
     """View a flat int8 buffer as one 4D ``[B, H, N, C]`` view per layer.
 
-    block ``b`` starts at ``offset + l * layer_stride + b * block_stride``.
+    Block ``b`` of layer ``l`` starts at the tensor offset plus its layer and
+    block stride contributions.
     """
-    if kernel_block_size is None:
-        ratio = 1
-    else:
-        assert spec.block_size % kernel_block_size == 0, (
-            f"Kernel block size {kernel_block_size} must divide KV cache block "
-            f"size {spec.block_size}."
-        )
-        ratio = spec.block_size // kernel_block_size
+    num_layers = len(kv_cache_tensor.layers)
+    layer_stride = kv_cache_tensor.layer_stride
+    block_stride = kv_cache_tensor.block_stride
+    shape_bytes = compute_layer_kv_cache_shape_bytes(
+        spec, num_blocks, kernel_block_size
+    )
+    ratio = shape_bytes[0] // num_blocks
     if ratio > 1:
         # Kernel blocks subdivide a manager block into `ratio` equal pieces, so
         # they sit a constant stride apart only if a block is one dense page: no
@@ -376,33 +362,29 @@ def reshape_kv_cache(
         assert block_stride % ratio == 0, (
             f"Block stride {block_stride} must divide into {ratio} equal kernel blocks."
         )
-        num_blocks *= ratio
         block_stride //= ratio
-    shape_bytes = compute_layer_kv_cache_shape_bytes(
-        spec, num_blocks, kernel_block_size
-    )
 
-    # Everything inside the layer and block dims is dense in layout order (so
-    # e.g. BHLNC's head stride spans the layers it interleaves); the caller's
-    # strides place the layers and blocks themselves.
     logical_shape = (num_layers, *shape_bytes)
-    strides = list(
-        compute_layout_strides(spec, num_blocks, num_layers, layout, kernel_block_size)
+    strides = compute_layout_strides(
+        spec,
+        num_blocks,
+        num_layers,
+        layout,
+        kernel_block_size,
+        fixed_strides=(layer_stride, block_stride, None, None, None),
     )
-    strides[_DIM_L] = layer_stride
-    strides[_DIM_B] = block_stride
     dtype = getattr(spec, "dtype", None)
 
-    cache_logical_5d = torch.as_strided(
+    view_5d = torch.as_strided(
         raw,
         size=logical_shape,
-        stride=tuple(strides),
-        storage_offset=raw.storage_offset() + offset,
+        stride=strides,
+        storage_offset=raw.storage_offset() + kv_cache_tensor.offset,
     )
 
     views = []
     for layer_idx in range(num_layers):
-        cache_logical = cache_logical_5d[layer_idx]
+        cache_logical = view_5d[layer_idx]
         if dtype is not None:
             cache_logical = cache_logical.view(dtype)
         views.append(cache_logical)

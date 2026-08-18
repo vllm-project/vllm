@@ -21,7 +21,7 @@ from vllm.v1.kv_cache_interface import KVCacheLayout, MLAAttentionSpec
 from vllm.v1.worker.utils import (
     AttentionGroup,
     KVBlockZeroer,
-    allocate_and_reshape_kv_cache,
+    allocate_kv_cache,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -132,7 +132,7 @@ def test_overlaid_zeroer_dedups_segments_with_max_span():
     set_kv_cache_layout("BLHNC")
     try:
         config = get_kv_cache_config_from_groups(vllm_config, groups, 8 * 1024 * 1024)
-        views = allocate_and_reshape_kv_cache(
+        views = allocate_kv_cache(
             config, torch.device("cpu"), get_kv_cache_layout(), None
         )
     finally:

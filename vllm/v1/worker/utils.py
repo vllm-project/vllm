@@ -34,7 +34,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
-    reshape_kv_cache,
+    create_kv_cache_views,
 )
 from vllm.v1.worker.block_table import get_block_table_width
 
@@ -375,7 +375,7 @@ def select_common_block_size(
     raise ValueError(f"No common block size for {kv_manager_block_size}. ")
 
 
-def allocate_and_reshape_kv_cache(
+def allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     device: torch.device,
     layout: KVCacheLayout,
@@ -410,21 +410,17 @@ def allocate_and_reshape_kv_cache(
     for tensor in kv_cache_config.kv_cache_tensors:
         spec = layer_specs[tensor.layers[0]]
         group_id = layer_group_ids[tensor.layers[0]]
-        block_stride = tensor.block_stride
         num_blocks = kv_cache_config.num_blocks
         kernel_block_size = None
         if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
             kernel_block_size = kernel_block_sizes[group_id]
 
-        views = reshape_kv_cache(
+        views = create_kv_cache_views(
             buf,
             spec,
             num_blocks,
-            len(tensor.layers),
             layout,
-            offset=tensor.offset,
-            layer_stride=tensor.layer_stride,
-            block_stride=block_stride,
+            tensor,
             kernel_block_size=kernel_block_size,
         )
         kv_caches.update(zip(tensor.layers, views))

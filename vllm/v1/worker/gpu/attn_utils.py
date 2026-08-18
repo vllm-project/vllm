@@ -25,7 +25,7 @@ from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import (
     AttentionGroup,
     add_kv_sharing_layers_to_kv_cache_groups,
-    allocate_and_reshape_kv_cache,
+    allocate_kv_cache,
     bind_kv_cache,
     prepare_kernel_block_sizes,
 )
@@ -190,7 +190,7 @@ def init_kv_cache(
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
 ) -> dict[str, Any]:
-    kv_caches = allocate_and_reshape_kv_cache(
+    kv_caches = allocate_kv_cache(
         kv_cache_config, device, get_kv_cache_layout(), kernel_block_sizes
     )
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():

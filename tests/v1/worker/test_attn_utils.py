@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Padded-page handling in reshape_kv_cache.
+"""Padded-page handling in create_kv_cache_views.
 
 Guards that a page_size_padded spec strides the block dimension by the padded page
 while keeping per-block content compact, so padding bytes at the end of each page are
@@ -22,9 +22,10 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     KVQuantMode,
     MLAAttentionSpec,
+    compute_layout_strides,
 )
 from vllm.v1.worker.utils import (
-    allocate_and_reshape_kv_cache,
+    allocate_kv_cache,
     copy_kv_cache_blocks_inplace,
 )
 
@@ -183,7 +184,7 @@ def test_allocate_compressed_mla_cache(
         kv_cache_groups=[KVCacheGroupSpec(["layer.0"], spec)],
     )
 
-    caches = allocate_and_reshape_kv_cache(
+    caches = allocate_kv_cache(
         config, torch.device("cpu"), KVCacheLayout.LBHNC, kernel_block_sizes
     )
 
@@ -219,6 +220,31 @@ def test_copy_kv_cache_blocks_shared_storage(layout: KVCacheLayout):
     for layer_idx, cache in enumerate(caches):
         torch.testing.assert_close(cache[2], expected[layer_idx][0])
         torch.testing.assert_close(cache[1], expected[layer_idx][1])
+
+
+def test_fixed_block_stride_propagates_outward_in_lhbnc():
+    num_blocks = 3
+    num_layers = 2
+    spec = FullAttentionSpec(
+        block_size=2,
+        num_kv_heads=2,
+        head_size=2,
+        dtype=torch.float32,
+    )
+    natural = compute_layout_strides(spec, num_blocks, num_layers, KVCacheLayout.LHBNC)
+    block_stride = natural[1] + 8
+
+    strides = compute_layout_strides(
+        spec,
+        num_blocks,
+        num_layers,
+        KVCacheLayout.LHBNC,
+        fixed_strides=(None, block_stride, None, None, None),
+    )
+
+    assert strides[1] == block_stride
+    assert strides[2] == block_stride * num_blocks
+    assert strides[0] == strides[2] * spec.num_heads
 
 
 def test_copy_kv_cache_blocks_separate_head_groups():

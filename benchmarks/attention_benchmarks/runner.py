@@ -46,9 +46,10 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheTensor,
     compute_layer_kv_cache_shape_bytes,
     compute_layout_strides,
-    reshape_kv_cache,
+    create_kv_cache_views,
 )
 
 # ============================================================================
@@ -372,15 +373,18 @@ def _create_kv_cache(
     layer_stride, block_stride, _, _, _ = compute_layout_strides(
         spec, max_num_blocks, config.num_layers, layout
     )
-    return reshape_kv_cache(
+    tensor = KVCacheTensor(
+        size=total_bytes,
+        layers=[str(i) for i in range(config.num_layers)],
+        layer_stride=layer_stride,
+        block_stride=block_stride,
+    )
+    return create_kv_cache_views(
         buf,
         spec,
         max_num_blocks,
-        config.num_layers,
         layout,
-        offset=0,
-        layer_stride=layer_stride,
-        block_stride=block_stride,
+        tensor,
     )
 
 

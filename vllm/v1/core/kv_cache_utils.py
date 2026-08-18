@@ -1350,6 +1350,7 @@ def get_kv_cache_config_from_groups(
     layout = validate_kv_cache_layout(kv_cache_groups)
     bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups)
     interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
+
     num_blocks = available_memory // bytes_per_block
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
     size = bytes_per_block * num_blocks
@@ -1382,7 +1383,7 @@ def get_kv_cache_config_from_groups(
                 num_blocks,
                 len(layer_names),
                 layout,
-                interleaved_block_stride=interleaved_block_stride,
+                fixed_strides=(None, interleaved_block_stride, None, None, None),
             )
             offset = (
                 byte_offset

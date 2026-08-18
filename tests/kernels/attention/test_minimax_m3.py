@@ -1351,7 +1351,7 @@ def test_decode_wrong_layout_breaks_parity():
 
 
 def test_main_cache_byte_identical_through_production_allocator():
-    """AC-2: drive the real allocator (`reshape_kv_cache`) for the M3 main
+    """AC-2: drive the real allocator (`create_kv_cache_views`) for the M3 main
     `FullAttentionSpec` under HND and assert the backend-visible view has the
     same shape, stride, and storage offset as the packed-HND allocation."""
     nb = 4

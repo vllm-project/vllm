@@ -145,7 +145,7 @@ def create_and_prepopulate_kv_cache(
         num_blocks: Total number of blocks in the cache
         common_attn_metadata: Provides seq lens, block table and slot mapping
         layout: Physical layout to allocate in; the cache is returned as the
-                logical ``[B, H, N, C]`` view (as ``reshape_kv_cache`` does)
+                logical ``[B, H, N, C]`` view (as ``create_kv_cache_views`` does)
         randomize_blocks: Whether to randomly permute blocks
                           or use sequential order
         kv_cache_dtype: Cache dtype string; fp8 caches use fp8 storage
@@ -179,7 +179,7 @@ def create_and_prepopulate_kv_cache(
 
     kv_cache_physical = torch.zeros(physical_5d, dtype=storage_dtype, device=device)
     # Permute to logical [L, B, H, N, C], then select a layer. This mirrors
-    # reshape_kv_cache and retains cross-layer strides in the 4D view.
+    # create_kv_cache_views and retains cross-layer strides in the 4D view.
     kv_cache = kv_cache_physical.permute(*inv_order)[0]
 
     # Write context tokens into the cache via the logical view:

@@ -760,9 +760,9 @@ def test_unsupported_shape_raises_value_error():
 
 
 def test_standardized_view_geometry_and_padded_registration():
-    """Production per-layer views come from ``reshape_kv_cache``: geometry must track
-    the [B, H, N, C] shape, and padded pages must register the full strided span (not
-    just the meaningful block_len)."""
+    """Production views come from ``create_kv_cache_views``: geometry must track
+    the [B, H, N, C] shape, and padded pages must register the full strided span
+    (not just the meaningful block_len)."""
     num_blocks = 8
     spec = _full_spec()
     raw = torch.zeros(num_blocks * spec.page_size_bytes, dtype=torch.int8)

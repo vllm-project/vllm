@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for reshape_kv_cache."""
+"""Unit tests for create_kv_cache_views."""
 
 import pytest
 import torch

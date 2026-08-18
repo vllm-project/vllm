@@ -243,7 +243,7 @@ from .utils import (
     AttentionGroup,
     KVBlockZeroer,
     add_kv_sharing_layers_to_kv_cache_groups,
-    allocate_and_reshape_kv_cache,
+    allocate_kv_cache,
     bind_kv_cache,
     copy_kv_cache_blocks_inplace,
     prepare_kernel_block_sizes,
@@ -7459,7 +7459,7 @@ class GPUModelRunner(
             corresponding memory buffer for KV cache.
         """
 
-        kv_caches = allocate_and_reshape_kv_cache(
+        kv_caches = allocate_kv_cache(
             kv_cache_config, self.device, get_kv_cache_layout(), kernel_block_sizes
         )
 

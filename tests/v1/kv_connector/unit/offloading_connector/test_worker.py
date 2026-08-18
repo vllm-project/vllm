@@ -64,16 +64,16 @@ elif current_platform.is_xpu():
 # ---------------------------------------------------------------------------
 
 
-def _allocate_and_reshape_kv_caches(
+def _allocate_kv_caches(
     kv_cache_config: KVCacheConfig,
     attn_groups: list[list],
     device: torch.device,
 ):
     """Allocate kv_caches exactly as the model runner does at startup."""
-    from vllm.v1.worker.utils import allocate_and_reshape_kv_cache
+    from vllm.v1.worker.utils import allocate_kv_cache
 
     kernel_block_sizes = [BLOCK_SIZE] * len(kv_cache_config.kv_cache_groups)
-    return allocate_and_reshape_kv_cache(
+    return allocate_kv_cache(
         kv_cache_config, device, KVCacheLayout.LBNHC, kernel_block_sizes
     )
 
@@ -445,7 +445,7 @@ def test_register_kv_caches(backend):
         kv_cache_groups=kv_cache_groups,
     )
 
-    kv_caches = _allocate_and_reshape_kv_caches(
+    kv_caches = _allocate_kv_caches(
         kv_cache_config,
         attn_groups,
         device=torch.device(f"{DEVICE_TYPE}:0"),
@@ -598,7 +598,7 @@ def test_register_kv_caches_uniform_type(backend):
         ]
     ]
 
-    kv_caches = _allocate_and_reshape_kv_caches(
+    kv_caches = _allocate_kv_caches(
         kv_cache_config,
         attn_groups,
         device=torch.device(f"{DEVICE_TYPE}:0"),

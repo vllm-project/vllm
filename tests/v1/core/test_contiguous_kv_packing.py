@@ -9,7 +9,6 @@ block dim (a contiguous region per layer) or inside it (all layers' pages within
 block); the allocation is the same either way.
 """
 
-from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -20,16 +19,14 @@ from vllm.v1.core.kv_cache_utils import (
     _get_kv_cache_bytes_per_block,
     _pool_bytes_per_block,
     get_kv_cache_config_from_groups,
-    get_kv_cache_groups,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     MLAAttentionSpec,
-    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.worker.utils import allocate_and_reshape_kv_cache
+from vllm.v1.worker.utils import allocate_kv_cache
 
 MEMORY = 8 * 1024 * 1024
 
@@ -90,9 +87,7 @@ def _expected_bytes_per_block(groups) -> int:
 
 
 def _bind(config):
-    return allocate_and_reshape_kv_cache(
-        config, torch.device("cpu"), get_kv_cache_layout(), None
-    )
+    return allocate_kv_cache(config, torch.device("cpu"), get_kv_cache_layout(), None)
 
 
 class TestDensePacking:
