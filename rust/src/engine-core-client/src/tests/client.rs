@@ -303,6 +303,7 @@ fn bootstrapped_test_config(
             output_address,
             engine_start_index: 0,
             engine_count,
+            data_parallel_size: engine_count,
             ready_timeout,
         },
         coordinator_mode,
@@ -330,13 +331,45 @@ fn bootstrapped_test_config_with_start_index(
     );
     let TransportMode::Bootstrapped {
         engine_start_index: start,
+        data_parallel_size,
         ..
     } = &mut config.transport_mode
     else {
         unreachable!("bootstrapped_test_config returns bootstrapped transport")
     };
     *start = engine_start_index;
+    *data_parallel_size = usize::try_from(engine_start_index)
+        .expect("test start index fits usize")
+        .checked_add(engine_count)
+        .expect("test engine range fits usize");
     config
+}
+
+#[test]
+fn client_config_validates_bootstrapped_dp_range() {
+    let mut config = bootstrapped_test_config_with_start_index(
+        "ipc://unused-input".to_string(),
+        "ipc://unused-output".to_string(),
+        1,
+        2,
+        Duration::from_secs(1),
+        0,
+        None,
+    );
+    config.validate().expect("frontend may own a subset of global DP ranks");
+
+    let TransportMode::Bootstrapped {
+        data_parallel_size, ..
+    } = &mut config.transport_mode
+    else {
+        unreachable!("expected bootstrapped transport")
+    };
+    *data_parallel_size = 2;
+    let error = config.validate().expect_err("engine range above DP size must fail");
+    expect_test::expect![[
+        "invalid engine-core client configuration: connected engine range [1, 3) exceeds data parallel size (2)"
+    ]]
+    .assert_eq(&error.to_string());
 }
 
 async fn recv_xpub_message(xpub: &mut XPubSocket) -> Vec<bytes::Bytes> {
@@ -2498,6 +2531,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let defaults_request_hex = lines.next().expect("missing defaults request fixture line");
     let multimodal_request_hex = lines.next().expect("missing multimodal request fixture line");
     let outputs_hex = lines.next().expect("missing outputs fixture line");
+    let sampling_mask_outputs_hex =
+        lines.next().expect("missing sampling mask outputs fixture line");
     let inline_logprobs_frames = lines.next().expect("missing inline logprobs fixture line");
     let multipart_logprobs_frames = lines.next().expect("missing multipart logprobs fixture line");
     let inline_prompt_frames = lines.next().expect("missing inline prompt logprobs fixture line");
@@ -2508,6 +2543,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
     let outputs_bytes = hex::decode(outputs_hex).unwrap();
+    let sampling_mask_outputs_bytes = hex::decode(sampling_mask_outputs_hex).unwrap();
 
     let decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
     let expected_request = sample_request();
@@ -2571,6 +2607,16 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         decode_value(&rmp_serde::to_vec_named(&expected_multimodal_request.mm_features).unwrap());
     assert_eq!(python_mm_features, rust_mm_features);
 
+    let decoded_sampling_mask_outputs: EngineCoreOutputs =
+        rmp_serde::from_slice(&sampling_mask_outputs_bytes).unwrap();
+    let sampling_mask_output =
+        &decoded_sampling_mask_outputs.as_request_batch().unwrap().outputs[0];
+    assert!(sampling_mask_output.mm_cache_miss_hashes.is_none());
+    assert!(matches!(
+        sampling_mask_output.new_sampling_mask.as_ref(),
+        Some(Value::Array(fields)) if fields.len() == 3
+    ));
+
     let decoded_outputs: EngineCoreOutputs = rmp_serde::from_slice(&outputs_bytes).unwrap();
     expect_test::expect![[r#"
         RequestBatch(
@@ -2598,6 +2644,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
                         routed_experts: None,
                         num_nans_in_logits: 0,
                         mm_cache_miss_hashes: None,
+                        new_sampling_mask: None,
                     },
                 ],
                 scheduler_stats: None,
@@ -2672,6 +2719,14 @@ fn python_msgpack_fixtures_match_rust_encoding() {
 
     let ready_response: EngineCoreReadyResponse =
         rmp_serde::from_slice(&hex::decode(ready_response_hex).unwrap()).unwrap();
+    assert!(ready_response.supports_lora);
+    assert_eq!(ready_response.max_loras, 8);
+    assert_eq!(
+        ready_response.weight_transfer_backend.as_deref(),
+        Some("nccl")
+    );
+    assert!(ready_response.enable_sleep_mode);
+    assert!(ready_response.supports_draft_weight_updates);
     let kv_events_config = ready_response.kv_events_config.expect("KV events config should decode");
     assert!(kv_events_config.enable_kv_cache_events);
     assert_eq!(kv_events_config.publisher, "zmq");
