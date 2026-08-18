@@ -279,8 +279,20 @@ struct TemplateToolFunction {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(transparent)]
-pub(super) struct TemplateTool(JsonValue);
+pub(super) struct TemplateTool {
+    #[serde(rename = "type")]
+    tool_type: &'static str,
+    function: TemplateToolDefinition,
+}
+
+#[derive(Debug, Serialize)]
+struct TemplateToolDefinition {
+    name: String,
+    description: Option<String>,
+    parameters: JsonValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    strict: Option<bool>,
+}
 
 /// Convert chat messages into the JSON shape expected by Jinja chat templates.
 fn to_template_messages(
@@ -544,27 +556,14 @@ fn truncate_prompt_at_continue_final_message_tag(
 fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
     tools
         .iter()
-        .map(|tool| {
-            let mut function = serde_json::Map::new();
-            function.insert("name".to_string(), JsonValue::String(tool.name.clone()));
-            if let Some(description) = &tool.description {
-                function.insert(
-                    "description".to_string(),
-                    JsonValue::String(description.clone()),
-                );
-            }
-            function.insert("parameters".to_string(), tool.parameters.clone());
-            if let Some(strict) = tool.strict {
-                function.insert("strict".to_string(), JsonValue::Bool(strict));
-            }
-
-            let mut definition = serde_json::Map::new();
-            definition.insert(
-                "type".to_string(),
-                JsonValue::String("function".to_string()),
-            );
-            definition.insert("function".to_string(), JsonValue::Object(function));
-            TemplateTool(JsonValue::Object(definition))
+        .map(|tool| TemplateTool {
+            tool_type: "function",
+            function: TemplateToolDefinition {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                parameters: tool.parameters.clone(),
+                strict: tool.strict,
+            },
         })
         .collect()
 }
@@ -1306,6 +1305,45 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered, "name|description|parameters|");
+    }
+
+    #[test]
+    fn chat_template_preserves_python_optional_tool_fields() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        let tools = vec![
+            ChatTool {
+                name: "without_strict".to_string(),
+                description: None,
+                parameters: Value::Null,
+                strict: None,
+            },
+            ChatTool {
+                name: "with_strict".to_string(),
+                description: Some("description".to_string()),
+                parameters: serde_json::json!({"type": "object"}),
+                strict: Some(false),
+            },
+        ];
+        request.tool_context = crate::request::ResolvedToolContext::new(
+            &request.messages,
+            tools,
+            Some(ChatToolChoice::Auto),
+            true,
+        )
+        .expect("tool context should resolve");
+
+        let rendered = render(
+            Some(
+                "{% for tool in tools %}{% for key, value in tool.function.items() %}{{ key }}={{ value|tojson }}|{% endfor %};{% endfor %}",
+            ),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rendered,
+            "name=\"without_strict\"|description=null|parameters=null|;name=\"with_strict\"|description=\"description\"|parameters={\"type\": \"object\"}|strict=false|;"
+        );
     }
 
     #[test]
