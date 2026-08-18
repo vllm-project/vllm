@@ -39,10 +39,11 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: V1 Core + KV + Metrics
+- label: V1 Core + KV + Metrics %N
   device: h200_35gb
   key: v1-core-kv-metrics
   timeout_in_minutes: 80
+  parallelism: 5
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/
@@ -76,25 +77,43 @@ steps:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     # split the test to avoid interference
-    - pytest -v -s -m 'not cpu_test' v1/core
-    - pytest -v -s v1/executor
-    - pytest -v -s v1/kv_offload
-    - pytest -v -s v1/simple_kv_offload
-    - pytest -v -s v1/worker
-    - pytest -v -s v1/streaming_input
-    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
-    - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit
-    - pytest -v -s -m 'not cpu_test' v1/metrics
+    - pytest -v -s -m 'not cpu_test' v1/core --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s v1/executor --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s v1/kv_offload --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s v1/simple_kv_offload --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s v1/worker --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s v1/streaming_input --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+    - pytest -v -s -m 'not cpu_test' v1/metrics --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
     # Integration test for streaming correctness (requires special branch).
-    - pip install -U git+https://github.com/vllm-project/lm-evaluation-harness.git@streaming-api
-    - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+    - >-
+      if [ "$$BUILDKITE_PARALLEL_JOB" = "4" ]; then
+        pip install -U git+https://github.com/vllm-project/lm-evaluation-harness.git@streaming-api &&
+        pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine;
+      fi
   mirror:
     amd:
       dind: false
       device: mi300_1
       timeout_in_minutes: 65
+      parallelism: 1
       depends_on:
       - image-build-amd
+      commands:
+      - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -v -s -m 'not cpu_test' v1/core
+      - pytest -v -s v1/executor
+      - pytest -v -s v1/kv_offload
+      - pytest -v -s v1/simple_kv_offload
+      - pytest -v -s v1/worker
+      - pytest -v -s v1/streaming_input
+      - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
+      - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit
+      - pytest -v -s -m 'not cpu_test' v1/metrics
+      - pip install -U git+https://github.com/vllm-project/lm-evaluation-harness.git@streaming-api
+      - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 - label: V1 Others (CPU)
   key: v1-others-cpu
