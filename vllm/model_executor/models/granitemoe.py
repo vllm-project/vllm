@@ -453,7 +453,7 @@ class GraniteMoeModel(nn.Module):
           - ``shard_id``     (``w1``/``w2``/``w3``) tells the FusedMoE weight
             loader which half of ``w13`` (gate vs up) or that it is ``w2``.
 
-        ``load_weights`` iterates this table in ``_load_quant_expert`` to route
+        ``load_weights`` iterates this table in ``_load_unfused_expert`` to route
         each split tensor (both ``weight`` and ``weight_scale``) to the right
         expert slot. The mapping is suffix-agnostic, so weight and scale share
         one path.
@@ -506,7 +506,7 @@ class GraniteMoeModel(nn.Module):
             weight_loader(param, p, name, shard_id=shard_id, expert_id=expert_id)
             loaded_params.add(n)
 
-        def _load_quant_expert(name, loaded_weight):
+        def _load_unfused_expert(name, loaded_weight):
             # Handles the split per-expert checkpoint layout
             # (``experts.{e}.{gate,up,down}_proj.{weight,weight_scale}``), e.g.
             # produced by llm-compressor FP8 quantization.
@@ -532,7 +532,7 @@ class GraniteMoeModel(nn.Module):
             return None
 
         for n, p in weights:
-            if _load_quant_expert(n, p):
+            if _load_unfused_expert(n, p):
                 continue
 
             # Map the fused expert layout of the unquantized base checkpoint
