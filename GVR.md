@@ -3822,3 +3822,37 @@ not as evidence of a large serving speedup.
 
 Detailed results are in `/tmp/glm52_fp16_e2e_20260818`. The description for
 pull request 52696 contains the same serving table and caveats.
+
+## 2026-08-18: DeepSeek-V4 Flash MXFP4 indexer coverage
+
+The FP16-logits path also supports DeepSeek-V4 Flash when its indexer cache is
+configured with `indexer_kv_dtype=mxfp4`. No separate runtime implementation
+was needed: `DeepseekV4Indexer` already supplies packed MXFP4 Q/K tensors to
+the unified DeepGEMM APIs, and `SparseAttnIndexer` independently selects the
+FP16 output dtype. The important missing piece was coverage of the combined
+path. The pre-existing DeepGEMM tests used only FP8 Q/K even though the wrapper
+names contain `fp8_fp4`.
+
+Two focused SM100 tests now use the actual DSV4 dimensions and layouts:
+
+- prefill uses 64 indexer heads, head dimension 128, packed E2M1 values, and
+  packed UE8M0 scales;
+- decode uses the 68-byte logical cache width (64 FP4 value bytes plus four
+  scale bytes), the page-segregated physical value/scale layout, and
+  `next_n=3`, matching MTP with two speculative tokens.
+
+Both request FP16 logits and compare them with logits computed from the
+dequantized MXFP4 inputs. The first direct probe also verified that the scalar
+tags matter: raw `uint8` Q/K values are rejected by DeepGEMM, while the model's
+zero-copy `int8` value and `int32` scale reinterpretations execute correctly.
+
+Validation on one GB200:
+
+- `CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m pytest
+  tests/kernels/attention/test_deepgemm_attention.py -k dsv4_mxfp4 -vv`:
+  2 passed;
+- the complete DeepGEMM attention file: 12 passed;
+- all pre-commit hooks applicable to the modified test file passed.
+
+The coverage was pushed to pull request 52696 in commit `10c21f2549`, and the
+PR description now calls out DSV4 Flash MXFP4 prefill and MTP decode support.
