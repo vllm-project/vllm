@@ -311,7 +311,16 @@ def moe_fused_mul_sum(
             inputs.element_size(),
         )
         if num_valid_tokens is not None:
-            num_k_tiles = triton.cdiv(size, BLOCK_K)
+            # Occupancy is register-limited by the fp32 accumulator width, not by
+            # pipelining. With BLOCK_K=512 / 256 threads the acc tile alone costs
+            # 8 fp32/thread (+ the per-n a_vec load), pushing ~79 regs/thread ->
+            # 3 blocks/SM (past the 64-reg cliff). Halving BLOCK_K to 256 halves
+            # both to 4 fp32/thread -> ~63 regs -> 4 blocks/SM, and doubles the
+            # k-tile count so the fixed grid is better filled when num_recv (the
+            # real row count) is small. num_stages barely affects this masked,
+            # no-MMA reduce, so just cap it to keep buffers off the reg file.
+            persistent_block_k = min(BLOCK_K, 256)
+            num_k_tiles = triton.cdiv(size, persistent_block_k)
             num_sms = torch.cuda.get_device_properties(
                 inputs.device
             ).multi_processor_count
@@ -319,10 +328,6 @@ def moe_fused_mul_sum(
             grid: tuple[int, ...] = (
                 min(num_sms * _PERSISTENT_BLOCKS_PER_SM, max_tiles),
             )
-            # Memory-bound streaming reduce: favor occupancy over deep per-thread
-            # pipelining. Deep num_stages buffers the unrolled top_k loads in
-            # registers and pushes past the 64-reg/thread cliff (3 vs 4+
-            # blocks/SM). Cap at 2 so more blocks stay resident to hide latency.
             persistent_num_stages = min(num_stages, 2)
             moe_fused_mul_sum_persistent_kernel[grid](
                 inputs,
@@ -338,7 +343,7 @@ def moe_fused_mul_sum(
                 top_k,
                 size,
                 BLOCK_M,
-                BLOCK_K,
+                persistent_block_k,
                 num_k_tiles,
                 num_warps=num_warps,
                 num_stages=persistent_num_stages,
