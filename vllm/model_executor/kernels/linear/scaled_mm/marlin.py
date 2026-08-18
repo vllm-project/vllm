@@ -43,16 +43,6 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             return False, "FP8 Marlin requires compute capability 7.5 or higher"
         if envs.VLLM_BATCH_INVARIANT:
             return False, "FP8 Marlin not supported for batch invariant execution."
-        if (
-            compute_capability is not None
-            and compute_capability >= 89
-            and not envs.VLLM_TEST_FORCE_FP8_MARLIN
-        ):
-            return (
-                False,
-                "To apply FP8 Marlin on high-capability GPUs, please set "
-                "VLLM_TEST_FORCE_FP8_MARLIN=1",
-            )
         return True, None
 
     @classmethod

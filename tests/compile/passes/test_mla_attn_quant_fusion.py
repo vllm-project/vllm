@@ -481,6 +481,12 @@ def test_mla_attention_quant_pattern(
             device=device,
             vllm_config=vllm_config_unfused,
         )
+        if (
+            model_class is TestMLAAttentionFp8GroupQuantPatternModel
+            and type(model_unfused.block_fp8_linear.kernel)
+            is not CutlassFp8BlockScaledMMKernel
+        ):
+            pytest.skip("CUTLASS FP8 block kernel is not supported on this platform")
         model_unfused = model_unfused.to(device)
         # HACK: See #131044
         result_unfused_0 = model_unfused(q, kv_c_normed, k_pe)  # noqa: F841
