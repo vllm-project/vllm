@@ -20,6 +20,7 @@ from vllm._custom_ops import (
     cpu_prepack_moe_weight_int8,
     fused_experts_cpu,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.zentorch_utils import (
     _ZENTORCH_MOE_ACTIVATIONS,
     has_zentorch_op,
@@ -46,6 +47,7 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.math_utils import round_up
 
+logger = init_logger(__name__)
 # ===========================================================================
 # Routing
 # ===========================================================================
@@ -1421,6 +1423,9 @@ class ZenCPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
             None
             if self.w2_bias is None
             else self.w2_bias.detach().to(torch.bfloat16).contiguous()
+        )
+        logger.info_once(
+            "[zen_cpu] Using zentorch_fused_moe for W8A8 INT8 MoE (monolithic experts)"
         )
 
     @property
