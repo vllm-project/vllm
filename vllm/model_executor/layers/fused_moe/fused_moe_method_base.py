@@ -51,6 +51,16 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         return False
 
     @property
+    def supports_dbo(self) -> bool:
+        """Whether the method supports concurrent DBO microbatches."""
+        return True
+
+    @property
+    def requires_moe_quant_config(self) -> bool:
+        """Whether the runner must lazily build a modular quant config."""
+        return True
+
+    @property
     def output_is_reduced(self) -> bool:
         """Whether the method returns the final cross-rank expert result."""
         return self.moe_kernel is not None and self.moe_kernel.output_is_reduced()
@@ -66,7 +76,11 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     def bind_routed_scaling_factor(self, routed_scaling_factor: float) -> None:
         """Bind the routed-output scale for methods that add shared output."""
-        return
+        if self.mk_fuses_shared_experts and routed_scaling_factor != 1.0:
+            raise NotImplementedError(
+                f"{type(self).__name__} fuses shared experts but does not "
+                "consume routed_scaling_factor."
+            )
 
     @abstractmethod
     def create_weights(

@@ -9,6 +9,10 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
+from vllm.forward_context import (
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
@@ -991,6 +995,23 @@ ModelOptFp8Config.FusedMoEMethodCls = ModelOptFp8MoEMethod
 ModelOptFp8Config.KVCacheMethodCls = ModelOptKVCacheMethod
 
 
+def _make_modelopt_nvfp4_moe_method(
+    quant_config: "ModelOptNvFp4Config",
+    layer: RoutedExperts,
+) -> FusedMoEMethodBase:
+    if layer.moe_config.moe_backend == "deep_gemm_mega_moe":
+        if quant_config.quant_method != "NVFP4":
+            raise ValueError("deep_gemm_mega_moe requires NVFP4 W4A4, not W4A16.")
+        return ModelOptNvFp4MegaMoE(
+            quant_config=quant_config,
+            moe_config=layer.moe_config,
+        )
+    return ModelOptNvFp4FusedMoE(
+        quant_config=quant_config,
+        moe_config=layer.moe_config,
+    )
+
+
 class ModelOptNvFp4Config(ModelOptQuantConfigBase):
     """Config class for ModelOpt FP4."""
 
@@ -1042,16 +1063,10 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
     ) -> "QuantizeMethodBase | None":
         # Pure-NVFP4 checkpoints use this config directly rather than
         # ModelOptMixedPrecisionConfig.
-        if (
-            isinstance(layer, RoutedExperts)
-            and layer.moe_config.moe_backend == "deep_gemm_mega_moe"
-        ):
-            if self.quant_method != "NVFP4":
-                raise ValueError("deep_gemm_mega_moe requires NVFP4 W4A4, not W4A16.")
-            return ModelOptNvFp4MegaMoE(
-                quant_config=self,
-                moe_config=layer.moe_config,
-            )
+        if isinstance(layer, RoutedExperts):
+            if self.is_layer_excluded(prefix):
+                return None
+            return _make_modelopt_nvfp4_moe_method(self, layer)
         return super().get_quant_method(layer, prefix)
 
     @classmethod
@@ -1678,9 +1693,6 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
     loader while preventing the runner from dispatching the same tokens twice.
     """
 
-    _symm_buffer_cache: dict[tuple[object, ...], object] = {}
-    _synchronized_ep_groups: set[tuple[int, int]] = set()
-
     def __init__(
         self,
         quant_config: ModelOptNvFp4Config,
@@ -1698,6 +1710,9 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
         self._shared_l2_weights: torch.Tensor | None = None
         self._num_shared_experts = 0
         self._routed_scaling_factor = 1.0
+        self._deep_gemm: Any = None
+        self._scaled_fp4_quant: Any = None
+        self._symm_buffer: Any = None
 
         parallel = moe_config.moe_parallel_config
         if not parallel.use_ep or parallel.ep_size <= 1:
@@ -1722,6 +1737,14 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
     @property
     def supports_internal_mk(self) -> bool:
         return True
+
+    @property
+    def supports_dbo(self) -> bool:
+        return False
+
+    @property
+    def requires_moe_quant_config(self) -> bool:
+        return False
 
     @property
     def mk_can_overlap_shared_experts(self) -> bool:
@@ -1777,7 +1800,21 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
         return packed.transpose(-1, -2).contiguous().transpose(-1, -2)
 
     def _transform_shared_weights(self, deep_gemm) -> None:
-        if self._shared_experts_layer is None:
+        if self._shared_experts_layer is None or self._shared_l1_weights is not None:
+            return
+
+        cached_l1 = getattr(
+            self._shared_experts_layer,
+            "_deep_gemm_mega_shared_l1_weights",
+            None,
+        )
+        if cached_l1 is not None:
+            shared_layer = cast(Any, self._shared_experts_layer)
+            self._shared_l1_weights = cached_l1
+            self._shared_l2_weights = shared_layer._deep_gemm_mega_shared_l2_weights
+            self._num_shared_experts = (
+                self._shared_l1_weights.shape[0] // 2 // self.moe.intermediate_size
+            )
             return
 
         gate_up = getattr(self._shared_experts_layer, "gate_up_proj", None)
@@ -1816,49 +1853,55 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
                 shared_l1.contiguous(), shared_l2.contiguous()
             )
         )
+        shared_layer = cast(Any, self._shared_experts_layer)
+        shared_layer._deep_gemm_mega_shared_l1_weights = self._shared_l1_weights
+        shared_layer._deep_gemm_mega_shared_l2_weights = self._shared_l2_weights
+        gate_up.weight = None
+        down.weight = None
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        if hasattr(layer, "_deep_gemm_mega_l1_weights"):
-            return
-
         from vllm.utils.deep_gemm import _import_deep_gemm
 
         deep_gemm = _import_deep_gemm()
-        w13_scale = self._pack_e4m3_scales(layer.w13_weight_scale.data)
-        w2_scale = self._pack_e4m3_scales(layer.w2_weight_scale.data)
-        l1_weights, l2_weights = deep_gemm.transform_weights_for_mega_moe(
-            (layer.w13_weight.data.view(torch.int8).contiguous(), w13_scale),
-            (layer.w2_weight.data.view(torch.int8).contiguous(), w2_scale),
-        )
-        layer._deep_gemm_mega_l1_weights = l1_weights
-        layer._deep_gemm_mega_l2_weights = l2_weights
+        if not hasattr(layer, "_deep_gemm_mega_l1_weights"):
+            w13_scale = self._pack_e4m3_scales(layer.w13_weight_scale.data)
+            w2_scale = self._pack_e4m3_scales(layer.w2_weight_scale.data)
+            l1_weights, l2_weights = deep_gemm.transform_weights_for_mega_moe(
+                (layer.w13_weight.data.view(torch.int8).contiguous(), w13_scale),
+                (layer.w2_weight.data.view(torch.int8).contiguous(), w2_scale),
+            )
+            layer._deep_gemm_mega_l1_weights = l1_weights
+            layer._deep_gemm_mega_l2_weights = l2_weights
 
-        a1_scale = layer.w13_input_scale.data.max().float().reshape(())
-        layer._deep_gemm_mega_a1_scale = a1_scale
-        layer._deep_gemm_mega_l1_alphas = (
-            layer.w13_weight_scale_2.data.float().reshape(-1, 2).contiguous() * a1_scale
-        )
-        layer._deep_gemm_mega_l2_alphas = (
-            layer.w2_weight_scale_2.data.float().reshape(-1).contiguous()
-        )
-        a2_scale = layer.w2_input_scale.data.max().float().reshape(())
-        layer._deep_gemm_mega_a2_scales = (
-            torch.ones_like(layer._deep_gemm_mega_l2_alphas) * a2_scale
-        )
+            a1_scale = layer.w13_input_scale.data.max().float().reshape(())
+            layer._deep_gemm_mega_a1_scale = a1_scale
+            layer._deep_gemm_mega_l1_alphas = (
+                layer.w13_weight_scale_2.data.float().reshape(-1, 2).contiguous()
+                * a1_scale
+            )
+            layer._deep_gemm_mega_l2_alphas = (
+                layer.w2_weight_scale_2.data.float().reshape(-1).contiguous()
+            )
+            a2_scale = layer.w2_input_scale.data.max().float().reshape(())
+            layer._deep_gemm_mega_a2_scales = layer._deep_gemm_mega_l2_alphas.new_full(
+                layer._deep_gemm_mega_l2_alphas.shape,
+                a2_scale,
+            )
+
+            # The transformed L2 weight aliases its loader Parameter. The other
+            # transformed tensors own fresh storage, so dropping the loader-side
+            # Parameters releases only redundant memory.
+            layer.w13_weight = None
+            layer.w13_weight_scale = None
+            layer.w13_weight_scale_2 = None
+            layer.w13_input_scale = None
+            layer.w2_weight = None
+            layer.w2_weight_scale = None
+            layer.w2_weight_scale_2 = None
+            layer.w2_input_scale = None
 
         self._transform_shared_weights(deep_gemm)
-
-        # The transformed L2 weight aliases its loader Parameter. The other
-        # transformed tensors own fresh storage, so dropping the loader-side
-        # Parameters releases only redundant memory.
-        layer.w13_weight = None
-        layer.w13_weight_scale = None
-        layer.w13_weight_scale_2 = None
-        layer.w13_input_scale = None
-        layer.w2_weight = None
-        layer.w2_weight_scale = None
-        layer.w2_weight_scale_2 = None
-        layer.w2_input_scale = None
+        self._initialize_runtime(deep_gemm)
 
         logger.info_once(
             "Using DeepGEMM NVFP4 MegaMoE (fused_shared=%s).",
@@ -1871,32 +1914,13 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
     ) -> FusedMoEQuantConfig | None:
         return None
 
-    def _synchronize_first_launch(self) -> None:
+    def _initialize_runtime(self, deep_gemm) -> None:
+        import vllm._custom_ops as ops
         from vllm.distributed import get_ep_group
 
         ep_group = get_ep_group()
         device = torch.accelerator.current_device_index()
-        key = (id(ep_group.cpu_group), device)
-        if key in self._synchronized_ep_groups:
-            return
-        torch.accelerator.synchronize()
-        # Use the device group with an explicit local device.  A NCCL-backed
-        # ``cpu_group`` may otherwise guess from the global rank, which is
-        # wrong on multi-node jobs (e.g. rank 4 owns local CUDA device 0).
-        torch.distributed.barrier(
-            group=ep_group.device_group,
-            device_ids=[device],
-        )
-        self._synchronized_ep_groups.add(key)
-
-    def _get_symm_buffer(self):
-        from vllm.distributed import get_ep_group
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        group = get_ep_group().device_group
-        device = torch.accelerator.current_device_index()
         key = (
-            id(group),
             device,
             self.moe.num_experts,
             self.moe.max_num_tokens,
@@ -1905,11 +1929,14 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
             self.moe.intermediate_size,
             self._num_shared_experts,
         )
-        symm_buffer = self._symm_buffer_cache.get(key)
+        cache = getattr(ep_group, "_modelopt_nvfp4_mega_moe_buffers", None)
+        if cache is None:
+            cache = {}
+            cast(Any, ep_group)._modelopt_nvfp4_mega_moe_buffers = cache
+        symm_buffer = cache.get(key)
         if symm_buffer is None:
-            deep_gemm = _import_deep_gemm()
             symm_buffer = deep_gemm.get_symm_buffer_for_mega_moe(
-                group,
+                ep_group.device_group,
                 self.moe.num_experts,
                 self.moe.max_num_tokens,
                 self.moe.experts_per_token,
@@ -1918,8 +1945,10 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
                 num_shared_experts=self._num_shared_experts,
                 mma_type="fp4xfp4",
             )
-            self._symm_buffer_cache[key] = symm_buffer
-        return symm_buffer
+            cache[key] = symm_buffer
+        self._deep_gemm = deep_gemm
+        self._scaled_fp4_quant = ops.scaled_fp4_quant
+        self._symm_buffer = symm_buffer
 
     def apply(
         self,
@@ -1937,22 +1966,16 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
             raise ValueError(
                 f"NVFP4 MegaMoE got M={num_tokens}, capacity={self.moe.max_num_tokens}."
             )
-        if self._shared_experts_layer is not None and shared_experts is None:
-            raise RuntimeError("Fused shared-expert module was not passed to MegaMoE.")
+        if self._symm_buffer is None or self._deep_gemm is None:
+            raise RuntimeError(
+                "NVFP4 MegaMoE runtime was not initialized after weight loading."
+            )
+        assert self._scaled_fp4_quant is not None
+        symm_buffer = self._symm_buffer
 
-        self._synchronize_first_launch()
-        symm_buffer = self._get_symm_buffer()
-
-        import vllm._custom_ops as ops
-        from vllm.forward_context import (
-            get_forward_context,
-            is_forward_context_available,
-        )
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        x_fp4, x_scale = ops.scaled_fp4_quant(
+        x_fp4, x_scale = self._scaled_fp4_quant(
             x,
-            layer._deep_gemm_mega_a1_scale,
+            1.0 / layer._deep_gemm_mega_a1_scale,
             is_sf_swizzled_layout=False,
         )
         staged_topk_ids = topk_ids
@@ -1970,7 +1993,7 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
         symm_buffer.topk_idx[:num_tokens].copy_(staged_topk_ids)
         symm_buffer.topk_weights[:num_tokens].copy_(topk_weights)
 
-        y = torch.empty_like(x, dtype=torch.bfloat16)
+        y = torch.empty_like(x)
         shared_kwargs = {}
         if self._shared_experts_layer is not None:
             if shared_experts_input is None:
@@ -1981,8 +2004,7 @@ class ModelOptNvFp4MegaMoE(ModelOptNvFp4FusedMoE):
                 "x_bf16": shared_experts_input,
             }
 
-        deep_gemm = _import_deep_gemm()
-        deep_gemm.fp4_fp4_mega_moe(
+        self._deep_gemm.fp4_fp4_mega_moe(
             y,
             layer._deep_gemm_mega_l1_weights,
             layer._deep_gemm_mega_l2_weights,
@@ -2759,23 +2781,14 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                     moe_config=layer.moe_config,
                 )
             if quant_algo == "NVFP4":
-                if layer.moe_config.moe_backend == "deep_gemm_mega_moe":
-                    return ModelOptNvFp4MegaMoE(
-                        quant_config=self.nvfp4_config,
-                        moe_config=layer.moe_config,
-                    )
-                return ModelOptNvFp4FusedMoE(
-                    quant_config=self.nvfp4_config,
-                    moe_config=layer.moe_config,
+                return _make_modelopt_nvfp4_moe_method(
+                    self.nvfp4_config,
+                    layer,
                 )
             if quant_algo == "W4A16_NVFP4":
-                if layer.moe_config.moe_backend == "deep_gemm_mega_moe":
-                    raise ValueError(
-                        "deep_gemm_mega_moe requires NVFP4 W4A4, not W4A16."
-                    )
-                return ModelOptNvFp4FusedMoE(
-                    quant_config=self.w4a16_nvfp4_config,
-                    moe_config=layer.moe_config,
+                return _make_modelopt_nvfp4_moe_method(
+                    self.w4a16_nvfp4_config,
+                    layer,
                 )
             if quant_algo == "MXFP8":
                 return ModelOptMxFp8FusedMoE(
