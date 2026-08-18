@@ -257,6 +257,13 @@ class DeepseekV4SparseMLAMetadataBuilder(
         assert cm.positions is not None, (
             "positions is required for C128A metadata build"
         )
+        active_topk_width = min(
+            max(
+                triton.next_power_of_2(max(cm.max_seq_len // self.compress_ratio, 1)),
+                _C128A_TOPK_ALIGNMENT,
+            ),
+            self.c128a_max_compressed,
+        )
         block_size = self.kv_cache_spec.block_size // self.compress_ratio
         global_decode, decode_lens, prefill_local = build_c128a_topk_metadata(
             cm.positions[:num_total],
@@ -269,7 +276,7 @@ class DeepseekV4SparseMLAMetadataBuilder(
             self.c128a_global_decode_buffer,
             self.c128a_decode_lens_buffer,
             self.c128a_prefill_buffer,
-            max_compressed_tokens=self.c128a_max_compressed,
+            max_compressed_tokens=active_topk_width,
         )
 
         result: dict[str, torch.Tensor | None] = {}
@@ -321,9 +328,9 @@ def build_c128a_topk_metadata(
     num_tokens = positions.shape[0]
     num_prefill_tokens = num_tokens - num_decode_tokens
 
-    global_decode = global_decode_buffer[:num_decode_tokens]
+    global_decode = global_decode_buffer[:num_decode_tokens, :max_compressed_tokens]
     decode_lens = decode_lens_buffer[:num_decode_tokens]
-    prefill_local = prefill_buffer[:num_prefill_tokens]
+    prefill_local = prefill_buffer[:num_prefill_tokens, :max_compressed_tokens]
 
     if num_tokens == 0:
         return global_decode, decode_lens, prefill_local
