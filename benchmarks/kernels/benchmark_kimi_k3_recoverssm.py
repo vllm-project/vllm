@@ -91,6 +91,10 @@ class KernelConfig:
     num_warps: int
 
 
+DEFAULT_VERIFY_CONFIG = KernelConfig(32, 4)
+DEFAULT_RECOVER_CONFIG = KernelConfig(16, 1)
+
+
 def local_num_heads(tp_size: int) -> int:
     if KIMI_K3_NUM_HEADS % tp_size:
         raise ValueError("Kimi-K3 head count must divide TP size")
@@ -103,8 +107,8 @@ class Inputs:
         batch: int,
         spec_query_len: int,
         tp_size: int,
-        verify_config: KernelConfig = KernelConfig(32, 4),
-        recover_config: KernelConfig = KernelConfig(32, 4),
+        verify_config: KernelConfig = DEFAULT_VERIFY_CONFIG,
+        recover_config: KernelConfig = DEFAULT_RECOVER_CONFIG,
     ) -> None:
         h = local_num_heads(tp_size)
         d = KIMI_K3_HEAD_DIM
@@ -250,10 +254,10 @@ def compile_warmup(
     if workers <= 0:
         return
     jobs = [
-        (batch, config, KernelConfig(32, 4), "verify")
+        (batch, config, DEFAULT_RECOVER_CONFIG, "verify")
         for batch, config in product(batch_sizes, verify_configs)
     ] + [
-        (batch, KernelConfig(32, 4), config, "recover")
+        (batch, DEFAULT_VERIFY_CONFIG, config, "recover")
         for batch, config in product(batch_sizes, recover_configs)
     ]
     print(f"compile warmup: {len(jobs)} configurations across {workers} processes")
@@ -327,8 +331,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tp-size", type=int, default=KIMI_K3_TP_SIZE)
     parser.add_argument("--verify-value-slices", default="32")
     parser.add_argument("--verify-num-warps", default="4")
-    parser.add_argument("--recover-value-slices", default="32")
-    parser.add_argument("--recover-num-warps", default="4")
+    parser.add_argument("--recover-value-slices", default="16")
+    parser.add_argument("--recover-num-warps", default="1")
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--iters", type=int, default=100)
     parser.add_argument("--compile-workers", type=int, default=4)

@@ -509,13 +509,10 @@ def _commit_kda_state_kernel(
         mask=mask_k,
         other=0.0,
     ).to(tl.float32)
-    final_decay = tl.full([BK], 1.0, tl.float32)
-    final_correction = tl.zeros([BV, BK], tl.float32)
-    boundary_decay = tl.full([BK], 1.0, tl.float32)
-    boundary_correction = tl.zeros([BV, BK], tl.float32)
+    state = initial_state
+    boundary_state = initial_state
 
-    for reverse_offset in range(commit_len):
-        token_offset = commit_len - reverse_offset - 1
+    for token_offset in range(commit_len):
         correction_ptr = (
             correction_cache_ptr + token_offset * stride_correction_cache_pos
         )
@@ -544,21 +541,15 @@ def _commit_kda_state_kernel(
             USE_LOWER_BOUND,
         )
         decay = tl.exp(gate)
-        final_correction += correction[:, None] * (
-            normalized_k * final_decay
-        )[None, :]
-        final_decay *= decay
+        update = correction[:, None] * normalized_k[None, :]
+        state = state * decay[None, :] + update
         if ALIGN_MODE:
-            before_boundary = token_offset < boundary_recovery_len
-            boundary_correction += tl.where(
-                before_boundary,
-                correction[:, None]
-                * (normalized_k * boundary_decay)[None, :],
-                0.0,
+            boundary_state = tl.where(
+                token_offset == boundary_recovery_len - 1,
+                state,
+                boundary_state,
             )
-            boundary_decay *= tl.where(before_boundary, decay, 1.0)
 
-    state = initial_state * final_decay[None, :] + final_correction
     if ALIGN_MODE:
         boundary_ptrs = (
             state_ptr
@@ -567,7 +558,6 @@ def _commit_kda_state_kernel(
             + offs_v[:, None] * stride_state_v
             + offs_k[None, :] * stride_state_k
         )
-        boundary_state = initial_state * boundary_decay[None, :] + boundary_correction
         tl.store(
             boundary_ptrs,
             boundary_state,
@@ -925,8 +915,8 @@ class KDARecoverSSMCommitContext:
         block_table: torch.Tensor | None = None,
         num_computed_tokens: torch.Tensor | None = None,
         mamba_block_size: int | None = None,
-        value_block_size: int | None = None,
-        num_warps: int = 4,
+        value_block_size: int = 16,
+        num_warps: int = 1,
     ) -> None:
         """Fold accepted KDA and convolution inputs into every layer."""
         batch = state_indices.shape[0]
