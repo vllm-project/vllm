@@ -1,5 +1,3 @@
-import pytest
-
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     get_moe_wna16_block_config,
 )
