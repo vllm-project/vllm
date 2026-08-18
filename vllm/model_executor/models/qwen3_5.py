@@ -25,6 +25,7 @@
 """Inference-only Qwen3.5 Series compatible with HuggingFace weights."""
 
 from collections.abc import Iterable
+from typing import Any
 
 import torch
 from torch import nn
@@ -49,6 +50,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -91,6 +93,7 @@ from .qwen3_vl import (
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    StageMissingLayer,
     WeightsMapper,
     _merge_multimodal_embeddings,
     extract_layer_index,
@@ -101,6 +104,24 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+class _Qwen3_5VisionTowerPlaceholder(StageMissingLayer):
+    """Metadata-only vision tower used when multimodal inputs are disabled."""
+
+    def __init__(self, vision_config: Any, dtype: torch.dtype):
+        super().__init__("vision_tower")
+
+        deepstack_visual_indexes = getattr(
+            vision_config, "deepstack_visual_indexes", []
+        )
+        self.out_hidden_size = vision_config.out_hidden_size * (
+            1 + len(deepstack_visual_indexes)
+        )
+        self.spatial_merge_size = vision_config.spatial_merge_size
+        self.spatial_merge_unit = self.spatial_merge_size**2
+        self.temporal_patch_size = vision_config.temporal_patch_size
+        self.dtype = dtype
 
 
 class Qwen3_5ProcessingInfo(Qwen3VLProcessingInfo):
@@ -477,6 +498,38 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
 
+    def _init_vision_tower(
+        self,
+        vllm_config: VllmConfig,
+        vision_config: Any,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> None:
+        multimodal_config = vllm_config.model_config.multimodal_config
+        modalities = ("image", "video")
+
+        if all(
+            multimodal_config.get_limit_per_prompt(modality) == 0
+            for modality in modalities
+        ):
+            logger.debug(
+                "Skipping Qwen3.5 vision tower construction because image and "
+                "video limits are zero."
+            )
+            self.visual = _Qwen3_5VisionTowerPlaceholder(
+                vision_config, vllm_config.model_config.dtype
+            )
+            self._tower_model_names = ["visual"]
+            return
+
+        with self._mark_tower_model(vllm_config, set(modalities)):
+            self.visual = Qwen3_VisionTransformer(
+                vision_config,
+                norm_eps=getattr(self.config, "rms_norm_eps", 1e-6),
+                quant_config=quant_config,
+                prefix=prefix,
+            )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__
         nn.Module.__init__(self)
@@ -504,13 +557,12 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         self.visual_dim = config.vision_config.out_hidden_size
         self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
-        with self._mark_tower_model(vllm_config, {"image", "video"}):
-            self.visual = Qwen3_VisionTransformer(
-                config.vision_config,
-                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "visual"),
-            )
+        self._init_vision_tower(
+            vllm_config,
+            config.vision_config,
+            quant_config,
+            maybe_prefix(prefix, "visual"),
+        )
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3_5ForCausalLM(
@@ -720,13 +772,12 @@ class Qwen3_5MoeForConditionalGeneration(
         self.visual_dim = config.vision_config.out_hidden_size
         self.multiscale_dim = self.visual_dim * self.deepstack_num_level
 
-        with self._mark_tower_model(vllm_config, {"image", "video"}):
-            self.visual = Qwen3_VisionTransformer(
-                config.vision_config,
-                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "visual"),
-            )
+        self._init_vision_tower(
+            vllm_config,
+            config.vision_config,
+            quant_config,
+            maybe_prefix(prefix, "visual"),
+        )
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3_5MoeForCausalLM(
