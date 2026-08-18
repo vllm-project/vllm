@@ -202,6 +202,71 @@ def test_partial_lookup_requires_every_cache_group():
     assert req_status.partial_tail_boundary is None
 
 
+def _make_backfill_request(
+    scheduler: OffloadingConnectorScheduler, num_tokens: int
+) -> MagicMock:
+    request = MagicMock()
+    request.request_id = "req"
+    request.kv_transfer_params = None
+    request.num_prompt_tokens = num_tokens
+    request.num_tokens = num_tokens
+    request.block_hashes = [BlockHash(f"h{i}".encode()) for i in range(num_tokens // 4)]
+    request.all_token_ids = list(range(num_tokens))
+    request.lora_request = None
+    request.skip_reading_prefix_cache = False
+    request.is_finished.return_value = False
+    scheduler.on_new_request(request)
+    return request
+
+
+def test_hybrid_backfill_returns_deepest_fully_backed_boundary():
+    scheduler = _make_partial_tail_scheduler()
+    assert scheduler.supports_hybrid_backfill
+    request = _make_backfill_request(scheduler, num_tokens=48)
+    req_status = scheduler._req_status["req"]
+    req_status.update_offload_keys()
+
+    # The deepest boundary (chunk 3) is missing its recurrent chunk; the
+    # boundary below it is offloaded in every group.
+    def lookup(key, req_context):
+        if get_offload_group_idx(key) == 1 and get_offload_block_hash(key) == b"h11":
+            return LookupResult.MISS
+        return LookupResult.HIT
+
+    scheduler.manager.lookup.side_effect = lookup
+    assert scheduler.get_hybrid_backfill_tokens(request, 48) == (16, 16)
+    assert req_status.num_locally_computed_tokens == 16
+
+
+def test_hybrid_backfill_misses_when_no_boundary_is_fully_backed():
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_backfill_request(scheduler, num_tokens=48)
+    req_status = scheduler._req_status["req"]
+    req_status.update_offload_keys()
+    req_status.num_locally_computed_tokens = 48
+
+    def lookup(key, req_context):
+        if get_offload_group_idx(key) == 1:
+            return LookupResult.MISS
+        return LookupResult.HIT
+
+    scheduler.manager.lookup.side_effect = lookup
+    assert scheduler.get_hybrid_backfill_tokens(request, 48) == (0, 0)
+    assert req_status.num_locally_computed_tokens == 48
+
+
+def test_hybrid_backfill_skips_boundaries_being_loaded():
+    scheduler = _make_partial_tail_scheduler()
+    request = _make_backfill_request(scheduler, num_tokens=48)
+    req_status = scheduler._req_status["req"]
+    req_status.update_offload_keys()
+    scheduler.manager.lookup.return_value = LookupResult.HIT
+
+    assert scheduler._chunks_being_loaded is not None
+    scheduler._chunks_being_loaded.add(req_status.group_states[1].offload_keys[2])
+    assert scheduler.get_hybrid_backfill_tokens(request, 48) == (16, 16)
+
+
 def test_scheduler_reports_allocation_failure(request_runner):
     runner = request_runner(
         block_size=4,

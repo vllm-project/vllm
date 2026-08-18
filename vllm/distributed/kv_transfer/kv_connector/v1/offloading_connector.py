@@ -48,6 +48,13 @@ from vllm.v1.request import Request
 
 class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     @property
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        # Divergent hits are resolved by a longer external hit or by
+        # get_hybrid_backfill_tokens(); the scheduler reconciles otherwise.
+        cs = self.connector_scheduler
+        return cs is not None and cs.supports_hybrid_backfill
+
+    @property
     def prefer_cross_layer_blocks(self) -> bool:
         # Cross-layer slabs have no per-layer refs to certify canonical mappings
         return not self._canonical_layout
@@ -149,6 +156,14 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
+            request, num_computed_tokens
+        )
+
+    def get_hybrid_backfill_tokens(
+        self, request: "Request", num_computed_tokens: int
+    ) -> tuple[int, int]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.get_hybrid_backfill_tokens(
             request, num_computed_tokens
         )
 

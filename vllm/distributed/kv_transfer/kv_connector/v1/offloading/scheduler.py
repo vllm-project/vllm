@@ -534,6 +534,22 @@ class OffloadingConnectorScheduler:
             if config.requires_cow_source
         )
 
+        # Divergent local hybrid hits can be resolved by loading a single
+        # full per-group boundary chunk only when boundaries are common to
+        # all groups and every group resumes from that one chunk: recurrent
+        # groups have a one-chunk window, while wider sliding windows would
+        # need more chunks than the load path supplies and eagle groups have
+        # lookup semantics the boundary probe does not model.
+        tokens_per_chunk = {gc.tokens_per_chunk for gc in self.config.kv_group_configs}
+        self.supports_hybrid_backfill = (
+            len(tokens_per_chunk) == 1
+            and all(
+                (gc.sliding_window_size_in_chunks or 1) == 1
+                for gc in self.config.kv_group_configs
+            )
+            and not any(gc.is_eagle_group for gc in self.config.kv_group_configs)
+        )
+
         self._req_status: dict[ReqId, RequestOffloadState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
         self._current_batch_jobs_to_flush: set[int] = set()
@@ -989,6 +1005,49 @@ class OffloadingConnectorScheduler:
         self._touch(req_status)
 
         return num_hit_tokens, bool(num_hit_tokens)
+
+    def get_hybrid_backfill_tokens(
+        self, request: Request, num_computed_tokens: int
+    ) -> tuple[int, int]:
+        """Find the deepest full per-group boundary at or below a divergent hit.
+
+        Walks chunk boundaries downwards from `num_computed_tokens` and
+        returns `((boundary - 1) * tokens_per_chunk, tokens_per_chunk)` for
+        the deepest boundary whose chunk is offloaded in every group: the
+        scheduler keeps the local prefix below that boundary and loads just
+        the boundary chunk, which restores the recurrent state the divergent
+        local hit is missing. Returns `(0, 0)` when no boundary is fully
+        backed. Must be called after `get_num_new_matched_tokens()`, which
+        refreshes the per-group offload keys.
+        """
+        if not self.supports_hybrid_backfill or request.skip_reading_prefix_cache:
+            return (0, 0)
+        req_status = self._req_status.get(request.request_id)
+        if req_status is None:
+            return (0, 0)
+        tokens_per_chunk = self.config.kv_group_configs[0].tokens_per_chunk
+        for boundary in range(num_computed_tokens // tokens_per_chunk, 0, -1):
+            backed = True
+            for group_state in req_status.group_states:
+                if len(group_state.offload_keys) < boundary:
+                    backed = False
+                    break
+                key = group_state.offload_keys[boundary - 1]
+                being_loaded = (
+                    self._chunks_being_loaded is not None
+                    and key in self._chunks_being_loaded
+                )
+                if being_loaded or (
+                    self.manager.lookup(key, req_status.req_context)
+                    is not LookupResult.HIT
+                ):
+                    backed = False
+                    break
+            if backed:
+                num_local = (boundary - 1) * tokens_per_chunk
+                req_status.num_locally_computed_tokens = num_local
+                return (num_local, tokens_per_chunk)
+        return (0, 0)
 
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int

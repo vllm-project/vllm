@@ -364,6 +364,7 @@ class MockKVConfig:
     is_async: bool = False
     num_defers_before_matching: int = 0
     supports_divergent_local_hybrid_hits: bool = False
+    hybrid_backfill_tokens: tuple[int, int] = (0, 0)
 
 
 class MockKVConnectorMetadata(KVConnectorMetadata):
@@ -392,6 +393,9 @@ class MockKVConnector(KVConnectorBase_V1):
             supports_divergent_local_hybrid_hits=extra_config.get(
                 "supports_divergent_local_hybrid_hits", False
             ),
+            hybrid_backfill_tokens=tuple(
+                extra_config.get("hybrid_backfill_tokens", (0, 0))
+            ),
         )
         self._defers_left: defaultdict[str, int] = defaultdict(
             lambda: self.config.num_defers_before_matching
@@ -410,6 +414,13 @@ class MockKVConnector(KVConnectorBase_V1):
             self._defers_left[request.request_id] -= 1
             return (None, False)
         return (self.config.matched_tokens, self.config.is_async)
+
+    def get_hybrid_backfill_tokens(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+    ) -> tuple[int, int]:
+        return self.config.hybrid_backfill_tokens
 
     def update_state_after_alloc(
         self,

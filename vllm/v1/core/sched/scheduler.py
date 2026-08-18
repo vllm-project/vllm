@@ -863,14 +863,34 @@ class Scheduler(SchedulerInterface):
                             num_external_computed_tokens = ext_tokens
 
                         if hit_diverged and num_external_computed_tokens == 0:
-                            # No external tokens back the deeper local hit, so its
-                            # resume boundary would have no valid Mamba state.
-                            # Reconcile to the boundary every group agrees on.
-                            (
-                                new_computed_blocks,
-                                num_new_local_computed_tokens,
-                                request.shared_prefix_boundary,
-                            ) = self.kv_cache_manager.get_computed_blocks(request)
+                            backfill_local, backfill_ext = (
+                                self.connector.get_hybrid_backfill_tokens(
+                                    request, block_aligned_local
+                                )
+                            )
+                            if backfill_ext > 0:
+                                # A full per-group boundary at or below the
+                                # divergent hit restores the lagging Mamba
+                                # state: keep the deeper local prefix and
+                                # load just that boundary externally.
+                                new_computed_blocks = (
+                                    self.kv_cache_manager.truncate_computed_blocks(
+                                        new_computed_blocks, backfill_local
+                                    )
+                                )
+                                num_new_local_computed_tokens = backfill_local
+                                num_external_computed_tokens = backfill_ext
+                                load_kv_async = True
+                            else:
+                                # No external tokens back the deeper local hit,
+                                # so its resume boundary would have no valid
+                                # Mamba state. Reconcile to the boundary every
+                                # group agrees on.
+                                (
+                                    new_computed_blocks,
+                                    num_new_local_computed_tokens,
+                                    request.shared_prefix_boundary,
+                                ) = self.kv_cache_manager.get_computed_blocks(request)
 
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens

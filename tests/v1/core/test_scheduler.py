@@ -5695,6 +5695,7 @@ def _create_hybrid_mamba_connector_scheduler(
     block_size: int = 16,
     num_blocks: int = 100,
     supports_divergent_hits: bool = True,
+    hybrid_backfill: tuple[int, int] = (0, 0),
 ) -> Scheduler:
     """FA + Mamba ("all" cache mode) scheduler with a MockKVConnector."""
     model_config = ModelConfig(
@@ -5726,6 +5727,7 @@ def _create_hybrid_mamba_connector_scheduler(
                 "matched_tokens": matched_tokens,
                 "is_async": False,
                 "supports_divergent_local_hybrid_hits": supports_divergent_hits,
+                "hybrid_backfill_tokens": hybrid_backfill,
             },
         ),
     )
@@ -5900,6 +5902,91 @@ def test_hybrid_fa_deeper_hit_respects_connector_lookup_policy(
 
     scheduler.add_request(replay)
     output = scheduler.schedule()
+    num_scheduled = output.num_scheduled_tokens[replay.request_id]
+    assert replay.num_tokens - num_scheduled == expected_num_computed
+
+
+@pytest.mark.parametrize(
+    "hybrid_backfill,expected_num_computed",
+    [
+        # The connector holds the full per-group set at the 48-token
+        # boundary: keep 32 local tokens and async-load the boundary block
+        # that restores the lagging Mamba state.
+        ((32, 16), 48),
+        # No backed boundary: reconcile to the locally-consistent one.
+        ((0, 0), 16),
+    ],
+)
+def test_hybrid_fa_deeper_hit_backfilled_by_connector(
+    hybrid_backfill: tuple[int, int], expected_num_computed: int
+):
+    """With no external tokens beyond a divergent FA-deeper local hit, a
+    capable connector can still back an intermediate boundary: the scheduler
+    keeps the deeper local prefix below that boundary and loads just the
+    boundary, instead of discarding the divergent hit and recomputing.
+    """
+    block_size = 16
+    scheduler = _create_hybrid_mamba_connector_scheduler(
+        matched_tokens=0,
+        supports_divergent_hits=True,
+        hybrid_backfill=hybrid_backfill,
+    )
+    manager = scheduler.kv_cache_manager
+    assert isinstance(manager.coordinator, HybridKVCacheCoordinator)
+
+    # Seed a 4-block prefix in both groups.
+    [fill] = create_requests(
+        num_requests=1,
+        num_tokens=4 * block_size,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["fill"],
+    )
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(fill)
+    blocks = manager.allocate_slots(
+        fill, fill.num_tokens, num_computed, computed_blocks
+    )
+    mamba_ids = [b.block_id for b in blocks.blocks[1]]
+    manager.free(fill)
+
+    # Keep all FA blocks; evict every mamba state but block 0. FA reaches 4
+    # blocks, the mamba hit only reaches 1 -> diverged (FA > Mamba).
+    manager.block_pool.evict_blocks({mamba_ids[1], mamba_ids[2], mamba_ids[3]})
+
+    [replay] = create_requests(
+        num_requests=1,
+        num_tokens=6 * block_size,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=block_size,
+        req_ids=["replay"],
+    )
+    _, per_group_hits = manager.coordinator.find_longest_cache_hit_per_group(
+        replay.block_hashes, replay.num_tokens - 1
+    )
+    assert per_group_hits == (4 * block_size, 1 * block_size)  # FA deeper
+
+    scheduler.add_request(replay)
+    output = scheduler.schedule()
+    if hybrid_backfill[1] > 0:
+        # The backfilled boundary is loaded asynchronously.
+        assert replay.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+        assert replay.num_computed_tokens == expected_num_computed
+        recv_done = dataclasses.replace(
+            ModelRunnerOutput(
+                req_ids=[],
+                req_id_to_index={},
+                sampled_token_ids=[],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+            kv_connector_output=KVConnectorOutput(finished_recving=[replay.request_id]),
+        )
+        scheduler.update_from_output(output, recv_done)
+        output = scheduler.schedule()
+        assert replay.status == RequestStatus.RUNNING
     num_scheduled = output.num_scheduled_tokens[replay.request_id]
     assert replay.num_tokens - num_scheduled == expected_num_computed
 
