@@ -82,11 +82,52 @@ skip_if_not_cuda_alike = pytest.mark.skipif(
     reason="Requires CUDA >= Ampere (SM80) or ROCm",
 )
 
+skip_if_not_rocm = pytest.mark.skipif(
+    not DEVICE_BACKENDS["rocm"].available,
+    reason="Requires ROCm",
+)
+
 
 requires_mx = pytest.mark.skipif(
     not (current_platform.is_rocm() and current_platform.supports_mx()),
     reason="requires a ROCm device with native MX support (gfx95x)",
 )
+
+
+def order_sensitive_elements(probe: torch.Tensor) -> torch.Tensor:
+    """Mask of probe elements whose reduction depends on the rank order.
+
+    The collectives sum the ``world_size`` contributions of an element in rank
+    order with an fp32 accumulator and round once on the way out, so an element
+    can only notice a reordering if that accumulation is inexact for its
+    operands. Summing the gathered contributions in the opposite order is the
+    strongest reordering available and bounds what any other one can do: where
+    it changes nothing, an invariance sweep cannot fail either.
+
+    The all-gather is pure data movement, so every rank computes the same mask.
+    """
+    import torch.distributed as dist
+
+    from vllm.distributed.parallel_state import get_tp_group
+
+    world_size = get_tp_group().world_size
+    gathered = torch.empty(
+        (world_size * probe.shape[0], *probe.shape[1:]),
+        dtype=probe.dtype,
+        device=probe.device,
+    )
+    dist.all_gather_into_tensor(
+        gathered, probe.contiguous(), group=get_tp_group().device_group
+    )
+    gathered = gathered.view(world_size, *probe.shape)
+
+    ascending = torch.zeros(probe.shape, dtype=torch.float32, device=probe.device)
+    for contribution in gathered:
+        ascending += contribution.float()
+    descending = torch.zeros_like(ascending)
+    for contribution in gathered.flip(0):
+        descending += contribution.float()
+    return ascending.to(probe.dtype) != descending.to(probe.dtype)
 
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
@@ -162,9 +203,3 @@ def shutdown_llm(llm) -> None:
     those tests in a spawned interpreter.
     """
     llm.llm_engine.engine_core.shutdown()
-
-
-def bits(t: torch.Tensor) -> torch.Tensor:
-    """Reinterpret ``t`` as integers, so comparisons are bitwise."""
-    view = {1: torch.uint8, 2: torch.int16, 4: torch.int32}[t.element_size()]
-    return t.contiguous().view(view)
