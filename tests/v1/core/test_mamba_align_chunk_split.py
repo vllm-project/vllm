@@ -92,7 +92,9 @@ def _split(
         # `prefix_match_unit` finer than the block size (#46384).
         mamba_partial_cache_hit=partial_hit,
         hash_block_size=ATTN_BLOCK_SIZE,
-        mamba_has_prefill_checkpoint_blocks=num_prefill_checkpoint_blocks > 0,
+        mamba_has_prefill_checkpoint_blocks=(
+            num_prefill_checkpoint_blocks > 0 and not use_eagle
+        ),
     )
     return Scheduler._mamba_block_aligned_split(stub, request, num_new_tokens)
 

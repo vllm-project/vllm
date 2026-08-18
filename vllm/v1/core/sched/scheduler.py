@@ -316,10 +316,15 @@ class Scheduler(SchedulerInterface):
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
-        self.mamba_has_prefill_checkpoint_blocks = self.has_mamba_layers and all(
-            not isinstance(group.kv_cache_spec, MambaSpec)
-            or group.kv_cache_spec.num_prefill_checkpoint_blocks > 0
-            for group in kv_cache_config.kv_cache_groups
+        self.mamba_has_prefill_checkpoint_blocks = (
+            self.has_mamba_layers
+            # TODO: support spec decoding
+            and not self.use_eagle
+            and all(
+                not isinstance(group.kv_cache_spec, MambaSpec)
+                or group.kv_cache_spec.num_prefill_checkpoint_blocks > 0
+                for group in kv_cache_config.kv_cache_groups
+            )
         )
         # A finer prefix_match_unit is configured: a mamba partial tail entry
         # can only be registered by a step ending exactly at the prompt's last
@@ -403,12 +408,7 @@ class Scheduler(SchedulerInterface):
             last_cache_position = max(last_cache_position - block_size, 0)
 
         end = start + num_new_tokens
-        if (
-            self.mamba_has_prefill_checkpoint_blocks
-            and not self.use_eagle
-            and end >= prefill_end
-        ):
-            # TODO: support spec decoding
+        if self.mamba_has_prefill_checkpoint_blocks and end >= prefill_end:
             last_cache_position = 0
         # Invariant: slot p holds the state after exactly (p + 1) * block_size
         # tokens. State is written at chunk ends, so chunk ends must be block
