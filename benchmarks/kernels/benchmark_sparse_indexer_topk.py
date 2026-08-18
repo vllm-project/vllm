@@ -41,6 +41,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--kv-lengths", nargs="+", type=int, default=KV_LENGTHS)
     parser.add_argument("--top-k", type=int, default=2048)
     parser.add_argument("--samples", type=int, default=7)
+    parser.add_argument(
+        "--backend",
+        choices=("auto", "cooperative", "persistent", "decode"),
+        default="auto",
+    )
     return parser.parse_args()
 
 
@@ -73,8 +78,20 @@ def _selector(
     workspace: torch.Tensor,
     top_k: int,
     kv_length: int,
+    backend_override: str,
 ) -> tuple[str, Callable[[], None]]:
-    if logits.shape[0] <= 32:
+    use_cooperative = logits.shape[0] <= 32
+    use_decode = logits.dtype == torch.float16 and (
+        (kv_length <= 32768 and logits.shape[0] >= 512)
+        or (32768 < kv_length <= 131072 and logits.shape[0] >= 256)
+    )
+    backend = (
+        ("cooperative" if use_cooperative else "decode" if use_decode else "persistent")
+        if backend_override == "auto"
+        else backend_override
+    )
+
+    if backend == "cooperative":
         backend = "cooperative"
 
         def launch() -> None:
@@ -82,11 +99,7 @@ def _selector(
                 logits, lengths, output, workspace, top_k, kv_length
             )
 
-    elif logits.dtype == torch.float16 and (
-        (kv_length <= 32768 and logits.shape[0] >= 512)
-        or 32768 < kv_length <= 65536
-        or (65536 < kv_length <= 131072 and logits.shape[0] >= 256)
-    ):
+    elif backend == "decode":
         backend = "decode"
 
         def launch() -> None:
@@ -101,13 +114,16 @@ def _selector(
                 top_k,
             )
 
-    else:
+    elif backend == "persistent":
         backend = "persistent"
 
         def launch() -> None:
             torch.ops._C.persistent_topk(
                 logits, lengths, output, workspace, top_k, kv_length
             )
+
+    else:
+        raise ValueError(f"Unknown backend: {backend}")
 
     return backend, launch
 
@@ -193,6 +209,7 @@ def main() -> None:
                     workspace,
                     args.top_k,
                     kv_length,
+                    args.backend,
                 )
                 launch()
                 torch.accelerator.synchronize()
