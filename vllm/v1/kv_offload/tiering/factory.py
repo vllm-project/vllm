@@ -69,6 +69,7 @@ class SecondaryTierFactory:
         config = tier_config.copy()
         tier_type = config.pop("type")
         config.pop("module_path", None)
+        locality = config.get("locality")
         bp_config = config.pop("backpressure", None)
         bp_detector = None
         if bp_config is not None:
@@ -82,7 +83,7 @@ class SecondaryTierFactory:
             policy_cls_name = bp_config.pop("policy_cls", None)
             policy = _import_class(policy_cls_name)() if policy_cls_name else None
             detector_cls: type[BackpressureDetector] = _import_class(bp_cls_name)
-            defaults = detector_cls.default_config(tier_type)
+            defaults = detector_cls.default_config(tier_type, locality=locality)
             if defaults:
                 for k, v in defaults.items():
                     bp_config.setdefault(k, v)

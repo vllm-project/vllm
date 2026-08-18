@@ -91,8 +91,18 @@ class BackpressureDetector(ABC):
         return True
 
     @classmethod
-    def default_config(cls, tier_type: str) -> dict | None:
-        """Return default constructor kwargs for ``tier_type``, or None."""
+    def default_config(
+        cls, tier_type: str, *, locality: str | None = None
+    ) -> dict | None:
+        """Return default constructor kwargs for ``tier_type``, or None.
+
+        Args:
+            tier_type: The tier type string (e.g. ``"fs"``, ``"obj"``).
+            locality: Optional locality hint from the tier config
+                (``"LOCAL"`` or ``"REMOTE"``). When ``"REMOTE"``, tiers
+                that would normally get local-storage watermarks (e.g.
+                ``"fs"``) receive network watermarks instead.
+        """
         return None
 
     @property
@@ -110,16 +120,18 @@ class EMABackpressureDetector(BackpressureDetector):
     Default water marks are derived from fio benchmarks on the WDC H100
     cluster.  Two presets are provided:
 
-      LOCAL (NVMe/SSD, ``fs`` tier): NVMe sustains ~5 GB/s writes.
+      LOCAL (NVMe/SSD): NVMe sustains ~5 GB/s writes.
         high=0.005 s/MiB (~200 MB/s) catches severe congestion;
         low=0.001 s/MiB (~1 GB/s) requires meaningful recovery.
 
-      NETWORK (CephFS, object store, ``obj``/``p2p`` tiers): CephFS
-        sustains ~1.5 GB/s.  high=0.020 s/MiB (~50 MB/s);
-        low=0.005 s/MiB (~200 MB/s).
+      NETWORK (CephFS, object store, ``obj``/``p2p`` tiers, or any
+        tier with ``"locality": "REMOTE"``): CephFS sustains ~1.5 GB/s.
+        high=0.020 s/MiB (~50 MB/s); low=0.005 s/MiB (~200 MB/s).
 
-    The constructor defaults to LOCAL; callers for networked tiers should
-    pass ``NETWORK_HIGH_WATER_S`` / ``NETWORK_LOW_WATER_S``.
+    ``obj`` and ``p2p`` tiers get NETWORK defaults automatically. An
+    ``fs`` tier defaults to LOCAL (appropriate for NVMe/SSD); set
+    ``"locality": "REMOTE"`` in the tier config for network-backed
+    filesystems like CephFS.
     """
 
     _MIB = 1 << 20
@@ -142,8 +154,11 @@ class EMABackpressureDetector(BackpressureDetector):
     _NETWORK_TIER_TYPES = frozenset({"obj", "p2p"})
 
     @classmethod
-    def default_config(cls, tier_type: str) -> dict | None:
-        if tier_type in cls._NETWORK_TIER_TYPES:
+    def default_config(
+        cls, tier_type: str, *, locality: str | None = None
+    ) -> dict | None:
+        is_remote = locality is not None and locality.upper() == "REMOTE"
+        if is_remote or tier_type in cls._NETWORK_TIER_TYPES:
             return {
                 "high_water_s": cls.NETWORK_HIGH_WATER_S,
                 "low_water_s": cls.NETWORK_LOW_WATER_S,
