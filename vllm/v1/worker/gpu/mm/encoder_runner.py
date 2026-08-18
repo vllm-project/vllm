@@ -22,6 +22,7 @@ from vllm.multimodal.utils import (
 from vllm.renderers.paged_shm.tensor_ipc import PagedShmTensorIPC
 from vllm.utils.time_utils import debug_spend_time
 from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import (
     EncoderTimingStats,
@@ -96,6 +97,17 @@ class EncoderRunner:
                 if mm_feature.data is None:
                     continue
                 if mm_feature.identifier in self.encoder_cache.encoder_outputs:
+                    continue
+                if mm_feature.modality == "prompt_embeds":
+                    # Passthrough modality: the tensor is already in the
+                    # model's embedding space, so no encoder runs. Cache it
+                    # directly so gather_mm_embeddings splices it via the
+                    # standard is_mm_embed path.
+                    embeds = mm_feature.data["embedding"].data
+                    assert isinstance(embeds, torch.Tensor)
+                    self.encoder_cache.encoder_outputs[mm_feature.identifier] = (
+                        async_tensor_h2d(embeds, device=self.device)
+                    )
                     continue
                 mm_hashes.append(mm_feature.identifier)
                 mm_kwargs.append((mm_feature.modality, mm_feature.data))
