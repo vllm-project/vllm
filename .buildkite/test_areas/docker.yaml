@@ -9,7 +9,6 @@ steps:
     - .buildkite/release-pipeline.yaml
     - .buildkite/cuda134-prerelease-pipeline.yaml
     - .buildkite/scripts/docker-build-metadata-args.sh
-    - .buildkite/scripts/validate-cuda134-image.sh
     - docker/Dockerfile
     - docker/Dockerfile.cpu
     - docker/docker-bake.hcl

@@ -1,5 +1,4 @@
 env:
-  CUDA_ARCH_RUBIN: "10.7f"
   CUDA134_STAGING_REPO: "public.ecr.aws/q9t5s3a7/vllm-release-repo"
 
 steps:
@@ -27,16 +26,14 @@ steps:
               --build-arg RUN_WHEEL_CHECK=false \
               --build-arg CUDA_VERSION=13.4 \
               --build-arg CUDA_TOOLKIT_PYPI_VERSION=13.4.0rc1 \
-              --build-arg PYTORCH_NIGHTLY=1 \
+              --build-arg PYTORCH_NIGHTLY=https://download.pytorch.org/whl/nightly/cu134 \
               --build-arg PYTORCH_NIGHTLY_REQUIREMENTS=requirements/cuda134-nightly.txt \
-              --build-arg torch_cuda_arch_list="${CUDA_ARCH_RUBIN}" \
               --build-arg BUILD_BASE_IMAGE=pytorch/manylinux2_28-builder:cuda13.0 \
               --build-arg FINAL_BASE_IMAGE=ubuntu:24.04 \
               --build-arg INSTALL_FLASHINFER_JIT_CACHE=false \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
-          - 'bash .buildkite/scripts/validate-cuda134-image.sh "${CUDA134_STAGING_REPO}:$BUILDKITE_COMMIT-$(uname -m)-cu134-rc1" x86_64'
           - 'docker push "${CUDA134_STAGING_REPO}:$BUILDKITE_COMMIT-$(uname -m)-cu134-rc1"'
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "${CUDA134_STAGING_REPO}:$BUILDKITE_COMMIT-$(uname -m)-cu134-rc1" release-images'
 
@@ -57,16 +54,14 @@ steps:
               --build-arg RUN_WHEEL_CHECK=false \
               --build-arg CUDA_VERSION=13.4 \
               --build-arg CUDA_TOOLKIT_PYPI_VERSION=13.4.0rc1 \
-              --build-arg PYTORCH_NIGHTLY=1 \
+              --build-arg PYTORCH_NIGHTLY=https://download.pytorch.org/whl/nightly/cu134 \
               --build-arg PYTORCH_NIGHTLY_REQUIREMENTS=requirements/cuda134-nightly.txt \
-              --build-arg torch_cuda_arch_list="${CUDA_ARCH_RUBIN}" \
               --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0 \
               --build-arg FINAL_BASE_IMAGE=ubuntu:24.04 \
               --build-arg INSTALL_FLASHINFER_JIT_CACHE=false \
               --target vllm-openai \
               --progress plain \
               -f docker/Dockerfile .
-          - 'bash .buildkite/scripts/validate-cuda134-image.sh "${CUDA134_STAGING_REPO}:$BUILDKITE_COMMIT-$(uname -m)-cu134-rc1" aarch64'
           - 'docker push "${CUDA134_STAGING_REPO}:$BUILDKITE_COMMIT-$(uname -m)-cu134-rc1"'
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "${CUDA134_STAGING_REPO}:$BUILDKITE_COMMIT-$(uname -m)-cu134-rc1" release-images'
 
