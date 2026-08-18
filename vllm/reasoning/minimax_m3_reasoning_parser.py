@@ -44,6 +44,12 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         self._continue_final_message = bool(
             chat_kwargs.get("_vllm_continue_final_message", False)
         )
+        self._continue_final_message_content = chat_kwargs.get(
+            "_vllm_continue_final_message_content"
+        )
+        self._continue_final_message_reasoning = chat_kwargs.get(
+            "_vllm_continue_final_message_reasoning"
+        )
         self._initial_in_reasoning = self._thinking_mode == "enabled"
         self._reasoning_ended_streaming = False
         self._reasoning_active_streaming = self._initial_in_reasoning
@@ -328,15 +334,26 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         if self._thinking_mode == "disabled":
             return True
         if self._continue_final_message:
-            start_index = self._rfind_token_sequence(
-                prompt_token_ids, self._start_token_ids
-            )
-            end_index = self._rfind_token_sequence(
-                prompt_token_ids, self._end_token_ids
-            )
-            reasoning_ended = not (start_index >= 0 and start_index > end_index)
-            self._initial_in_reasoning = not reasoning_ended
-            self._reasoning_active_streaming = self._initial_in_reasoning
+            content = self._continue_final_message_content
+            if isinstance(content, str):
+                start_index = content.rfind(self.start_token)
+                end_index = content.rfind(self.end_token)
+                if start_index >= 0 or end_index >= 0:
+                    reasoning_ended = not (start_index >= 0 and start_index > end_index)
+                elif content:
+                    reasoning_ended = True
+                elif (
+                    isinstance(self._continue_final_message_reasoning, str)
+                    and self._continue_final_message_reasoning
+                ):
+                    reasoning_ended = False
+                else:
+                    reasoning_ended = self._thinking_mode != "enabled"
+            else:
+                reasoning_ended = False if self._thinking_mode == "enabled" else None
+            if reasoning_ended is not None:
+                self._initial_in_reasoning = not reasoning_ended
+                self._reasoning_active_streaming = self._initial_in_reasoning
             return reasoning_ended
         if self._thinking_mode == "enabled":
             return False
