@@ -271,6 +271,11 @@ class KVCacheLayout(Enum):
         the L and B dimensions are outermost."""
         return set(self.value[:2]) == {_DIM_L, _DIM_B}
 
+    @property
+    def is_block_outermost(self) -> bool:
+        """True when B is the outermost physical dimension."""
+        return self.value[0] == _DIM_B
+
 
 def compute_layer_kv_cache_shape_bytes(
     spec: KVCacheSpec,
@@ -289,41 +294,50 @@ def compute_layout_strides(
     num_layers: int,
     layout: KVCacheLayout,
     kernel_block_size: int | None = None,
-    packed_block_stride: int | None = None,
+    interleaved_block_stride: int | None = None,
 ) -> tuple[int, ...]:
     """Byte strides in logical ``[L, B, H, N, C]`` axis order."""
-    shape = (
+    logical_shape = (
         num_layers,
         *compute_layer_kv_cache_shape_bytes(spec, num_blocks, kernel_block_size),
     )
-    stride_order = layout.stride_order
-    physical_shape = tuple(shape[i] for i in stride_order)
-    inv_order = [stride_order.index(i) for i in range(5)]
+    order = layout.stride_order
+    physical_shape = tuple(logical_shape[i] for i in order)
+    inverse_order = tuple(order.index(i) for i in range(5))
+    assert interleaved_block_stride is None or layout.is_block_outermost, (
+        "An interleaved block stride requires B to be the outermost dimension."
+    )
 
-    padded = getattr(spec, "page_size_padded", None)
-    if padded is not None:
+    padded_block_size = getattr(spec, "page_size_padded", None)
+    if padded_block_size is not None:
+        assert layout.is_block_compact, (
+            f"{layout.name} cannot carry page padding because L and B are not "
+            "the outermost dimensions."
+        )
         assert kernel_block_size is None or kernel_block_size == spec.block_size, (
             "Padded KV pages do not support kernel block splitting."
         )
-        lb = (inv_order[_DIM_L], inv_order[_DIM_B])
-        assert all(physical_shape[i] == 1 for i in range(max(lb) + 1) if i not in lb), (
-            "Padded KV pages need L and B outermost (any other dim between "
-            f"them must have extent 1), got {layout.name}."
-        )
 
-    # Splitting the meta tensor at the inner of L and B makes the padded
-    # storage tail span exactly one page; without padding any split point
-    # yields the same dense strides.
-    split = max(inv_order[_DIM_L], inv_order[_DIM_B]) + 1
-    logical_tail = prod(physical_shape[split:])
-    storage_tail = padded if padded is not None else logical_tail
-    physical = torch.empty((*physical_shape[:split], storage_tail), device="meta")
-    strides = list(
-        physical[..., :logical_tail].view(physical_shape).permute(*inv_order).stride()
+        layer_block_grid_shape = physical_shape[:2]  # [L, B] or [B, L]
+        block_shape = physical_shape[2:]  # [H, N, C] or [N, H, C]
+        dense_block_size = prod(block_shape)
+        storage_shape = (*layer_block_grid_shape, padded_block_size)
+    else:
+        storage_shape = physical_shape
+
+    natural_outer_stride = prod(storage_shape[1:])
+    outer_stride = max(natural_outer_stride, interleaved_block_stride or 0)
+    storage = torch.empty(
+        (storage_shape[0], outer_stride), dtype=torch.uint8, device="meta"
     )
-    if packed_block_stride is not None and inv_order[_DIM_B] < inv_order[_DIM_L]:
-        strides[_DIM_B] = packed_block_stride
-    return tuple(strides)
+    storage = storage[..., :natural_outer_stride].view(storage_shape)
+
+    if padded_block_size is not None:
+        physical = storage[..., :dense_block_size].view(physical_shape)
+    else:
+        physical = storage
+
+    return physical.permute(inverse_order).stride()
 
 
 def reshape_kv_cache(
@@ -342,15 +356,38 @@ def reshape_kv_cache(
 
     block ``b`` starts at ``offset + l * layer_stride + b * block_stride``.
     """
-    shape_bytes = compute_layer_kv_cache_shape_bytes(spec, num_blocks, kernel_block_size)
+    if kernel_block_size is None:
+        ratio = 1
+    else:
+        assert spec.block_size % kernel_block_size == 0, (
+            f"Kernel block size {kernel_block_size} must divide KV cache block "
+            f"size {spec.block_size}."
+        )
+        ratio = spec.block_size // kernel_block_size
+    if ratio > 1:
+        # Kernel blocks subdivide a manager block into `ratio` equal pieces, so
+        # they sit a constant stride apart only if a block is one dense page: no
+        # padding at its end, and no other layer's page before the next block.
+        dense_page_size = prod(compute_layer_kv_cache_shape_bytes(spec, 1)[1:])
+        assert block_stride == dense_page_size, (
+            "Kernel block splitting needs dense, unpadded KV cache blocks "
+            f"(block stride {block_stride} != page {dense_page_size})."
+        )
+        assert block_stride % ratio == 0, (
+            f"Block stride {block_stride} must divide into {ratio} equal kernel blocks."
+        )
+        num_blocks *= ratio
+        block_stride //= ratio
+    shape_bytes = compute_layer_kv_cache_shape_bytes(
+        spec, num_blocks, kernel_block_size
+    )
+
     # Everything inside the layer and block dims is dense in layout order (so
     # e.g. BHLNC's head stride spans the layers it interleaves); the caller's
     # strides place the layers and blocks themselves.
     logical_shape = (num_layers, *shape_bytes)
     strides = list(
-        compute_layout_strides(
-            spec, num_blocks, num_layers, layout, kernel_block_size
-        )
+        compute_layout_strides(spec, num_blocks, num_layers, layout, kernel_block_size)
     )
     strides[_DIM_L] = layer_stride
     strides[_DIM_B] = block_stride

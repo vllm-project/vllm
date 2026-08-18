@@ -1002,7 +1002,7 @@ def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
     `available_memory` into `num_blocks`. Used to compute the effective KV cache
     capacity once `num_gpu_blocks_override` is applied.
     """
-    return _get_packed_kv_cache_layout(kv_cache_groups)[0]
+    return _get_kv_cache_bytes_per_block(kv_cache_groups)
 
 
 def get_uniform_page_size(kv_cache_specs: Iterable[KVCacheSpec]) -> int:
@@ -1269,38 +1269,19 @@ def _get_per_layer_spec(
     return spec
 
 
-def _get_packed_kv_cache_layout(
+def _get_kv_cache_bytes_per_block(
     kv_cache_groups: list[KVCacheGroupSpec],
-) -> tuple[int, list[tuple[int, list[str], KVCacheSpec]]]:
-    """Lay out each cache group densely in one shared block slab.
-
-    A block ID is owned by one cache group at a time, so layouts from different
-    groups may overlap. Layers within a group remain disjoint.
-
-    Returns the packed block stride (the largest group's packing) and, per run
-    of consecutive same-spec layers, its byte offset within a block. Runs are
-    the unit of allocation: layers in a run share one spec, so they form a
-    rectangular layer dimension.
-    """
-    runs: list[tuple[int, list[str], KVCacheSpec]] = []
-    packed_block_stride = 0
-    for group in kv_cache_groups:
-        byte_offset = 0
-        for layer_name in group.layer_names:
-            spec = _get_per_layer_spec(group, layer_name)
-            extends_last_run = (
-                runs
-                and runs[-1][2] == spec
-                and runs[-1][0] + len(runs[-1][1]) * spec.page_size_bytes == byte_offset
-            )
-            if extends_last_run:
-                runs[-1][1].append(layer_name)
-            else:
-                runs.append((byte_offset, [layer_name], spec))
-            byte_offset += spec.page_size_bytes
-        packed_block_stride = max(packed_block_stride, byte_offset)
-    assert packed_block_stride > 0
-    return packed_block_stride, runs
+) -> int:
+    """Return the largest cache group's bytes per block."""
+    bytes_per_block = max(
+        sum(
+            _get_per_layer_spec(group, layer_name).page_size_bytes
+            for layer_name in group.layer_names
+        )
+        for group in kv_cache_groups
+    )
+    assert bytes_per_block > 0
+    return bytes_per_block
 
 
 def validate_kv_cache_layout(
@@ -1366,35 +1347,58 @@ def get_kv_cache_config_from_groups(
             ),
         )
 
-    packed_block_stride, runs = _get_packed_kv_cache_layout(kv_cache_groups)
-    num_blocks = available_memory // packed_block_stride
-    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
-    size = packed_block_stride * num_blocks
-
     layout = validate_kv_cache_layout(kv_cache_groups)
+    bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups)
+    interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
+    num_blocks = available_memory // bytes_per_block
+    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+    size = bytes_per_block * num_blocks
+
+    # Groups alias from byte 0. Spec regions are laid out differently:
+    #
+    # block-outer (the same packing repeats for every block):
+    # group 0: | blk 0 [ A | B  | pad ] | blk 1 [ A | B  | pad ] | ...
+    # group 1: | blk 0 [  C  |    D   ] | blk 1 [  C  |    D   ] | ...
+    #          |<--- bytes_per_block -->|
+    #
+    # layer-outer (only supported for uniform page sizes or single-group models):
+    # group 0: | A [ blk 0 | blk 1 | ... ] | B [ blk 0 | blk 1 | ... ] |
+    # group 1: | C [ blk 0 | blk 1 | ... ] | D [ blk 0 | blk 1 | ... ] |
+
     kv_cache_tensors = []
-    for byte_offset, layer_names, spec in runs:
-        layer_stride, block_stride, _, _, _ = compute_layout_strides(  # L, B, H, N, C
-            spec,
-            num_blocks,
-            len(layer_names),
-            layout,
-            packed_block_stride=packed_block_stride,
-        )
-        offset = (
-            byte_offset
-            * max(layer_stride, spec.page_size_bytes)
-            // spec.page_size_bytes
-        )
-        kv_cache_tensors.append(
-            KVCacheTensor(
-                size=size,
-                layers=layer_names,
-                layer_stride=layer_stride,
-                block_stride=block_stride,
-                offset=offset,
+    for group in kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        layers_by_spec: defaultdict[KVCacheSpec, list[str]] = defaultdict(list)
+        if isinstance(group_spec, UniformTypeKVCacheSpecs):
+            for layer_name, spec in group_spec.kv_cache_specs.items():
+                layers_by_spec[spec].append(layer_name)
+        elif group.layer_names:
+            layers_by_spec[group_spec].extend(group.layer_names)
+
+        byte_offset = 0
+        for spec, layer_names in layers_by_spec.items():
+            layer_stride, block_stride, _, _, _ = compute_layout_strides(
+                spec,
+                num_blocks,
+                len(layer_names),
+                layout,
+                interleaved_block_stride=interleaved_block_stride,
             )
-        )
+            offset = (
+                byte_offset
+                * max(layer_stride, spec.page_size_bytes)
+                // spec.page_size_bytes
+            )
+            kv_cache_tensors.append(
+                KVCacheTensor(
+                    size=size,
+                    layers=layer_names,
+                    layer_stride=layer_stride,
+                    block_stride=block_stride,
+                    offset=offset,
+                )
+            )
+            byte_offset += len(layer_names) * spec.page_size_bytes
 
     return KVCacheConfig(
         num_blocks=num_blocks,

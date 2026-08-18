@@ -9,6 +9,7 @@ block dim (a contiguous region per layer) or inside it (all layers' pages within
 block); the allocation is the same either way.
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,14 +17,16 @@ import torch
 
 from vllm.v1.attention.backends.utils import get_kv_cache_layout, set_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
-    _get_packed_kv_cache_layout,
+    _get_kv_cache_bytes_per_block,
     _pool_bytes_per_block,
     get_kv_cache_config_from_groups,
+    get_kv_cache_groups,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import allocate_and_reshape_kv_cache
@@ -81,7 +84,7 @@ def _pages(groups) -> dict[str, int]:
     }
 
 
-def _packed_block_stride(groups) -> int:
+def _expected_bytes_per_block(groups) -> int:
     pages = _pages(groups)
     return max(sum(pages[n] for n in g.layer_names) for g in groups)
 
@@ -93,14 +96,17 @@ def _bind(config):
 
 
 class TestDensePacking:
-    def test_packed_block_stride_is_largest_group_packing(self):
+    def test_bytes_per_block_is_largest_group(self):
         groups, g1, g2 = _mixed_page_groups()
-        block_stride, runs = _get_packed_kv_cache_layout(groups)
-        assert block_stride == _packed_block_stride(groups)
+        assert _get_kv_cache_bytes_per_block(groups) == _expected_bytes_per_block(
+            groups
+        )
+
+        set_kv_cache_layout("BLHNC")
+        config = get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
         # Groups overlay: both start at offset 0.
-        assert [offset for offset, _, _ in runs].count(0) == 2
-        # Same-spec layers merge into one tensor, in layer order.
-        assert [layers for _, layers, _ in runs] == [
+        assert [tensor.offset for tensor in config.kv_cache_tensors].count(0) == 2
+        assert [tensor.layers for tensor in config.kv_cache_tensors] == [
             list(g1)[:3],
             list(g1)[3:],
             list(g2),
@@ -109,11 +115,12 @@ class TestDensePacking:
     def test_layers_within_a_group_are_dense(self):
         groups, _, _ = _mixed_page_groups()
         pages = _pages(groups)
-        _, runs = _get_packed_kv_cache_layout(groups)
+        set_kv_cache_layout("BLHNC")
+        config = get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
         offsets = {
-            name: run_offset + i * pages[name]
-            for run_offset, layers, _ in runs
-            for i, name in enumerate(layers)
+            name: tensor.offset + i * tensor.layer_stride
+            for tensor in config.kv_cache_tensors
+            for i, name in enumerate(tensor.layers)
         }
         for group in groups:
             expected = 0
@@ -146,7 +153,7 @@ class TestDensePacking:
         groups = [_uniform_group(specs)]
         set_kv_cache_layout(layout)
         config = get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
-        block_stride = _packed_block_stride(groups)
+        block_stride = _expected_bytes_per_block(groups)
         mla_tensor, idx_tensor = config.kv_cache_tensors
         assert mla_tensor.layers == ["mla.0", "mla.1"]
         assert idx_tensor.layers == ["idx.0"]
@@ -168,8 +175,8 @@ class TestDensePacking:
         # model's backend declares it); mirror that here.
         set_kv_cache_layout("BLNHC")
         config = get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
-        assert config.num_blocks == MEMORY // _packed_block_stride(groups)
-        assert _pool_bytes_per_block(groups) == _packed_block_stride(groups)
+        assert config.num_blocks == MEMORY // _expected_bytes_per_block(groups)
+        assert _pool_bytes_per_block(groups) == _expected_bytes_per_block(groups)
 
         views = _bind(config)
         assert set(views) == set(g1) | set(g2)

@@ -5,7 +5,6 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
-from math import prod
 from typing import Any
 
 import numpy as np
@@ -35,7 +34,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
-    compute_layer_kv_cache_shape_bytes,
     reshape_kv_cache,
 )
 from vllm.v1.worker.block_table import get_block_table_width
@@ -417,20 +415,6 @@ def allocate_and_reshape_kv_cache(
         kernel_block_size = None
         if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
             kernel_block_size = kernel_block_sizes[group_id]
-            ratio = spec.block_size // kernel_block_size
-            if ratio > 1:
-                # Kernel blocks subdivide a manager block into `ratio` equal
-                # pieces, so they are a constant stride apart
-                dense_block = prod(
-                    compute_layer_kv_cache_shape_bytes(spec, 1, spec.block_size)[1:]
-                )
-                assert block_stride == dense_block, (
-                    "Kernel block splitting requires dense, unpadded KV cache "
-                    f"blocks (block stride {block_stride} != {dense_block})."
-                )
-                assert block_stride % ratio == 0
-                block_stride //= ratio
-                num_blocks *= ratio
 
         views = reshape_kv_cache(
             buf,
@@ -441,7 +425,7 @@ def allocate_and_reshape_kv_cache(
             offset=tensor.offset,
             layer_stride=tensor.layer_stride,
             block_stride=block_stride,
-            block_size=kernel_block_size,
+            kernel_block_size=kernel_block_size,
         )
         kv_caches.update(zip(tensor.layers, views))
     return kv_caches

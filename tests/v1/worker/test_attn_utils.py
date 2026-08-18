@@ -261,10 +261,19 @@ def test_copy_kv_cache_blocks_separate_head_groups():
         torch.testing.assert_close(cache[1], expected[layer_idx][1])
 
 
-@pytest.mark.parametrize("layout", [KVCacheLayout.LBHNC, KVCacheLayout.BLHNC])
-def test_copy_kv_cache_blocks_with_virtual_block_splitting(layout: KVCacheLayout):
+@pytest.mark.parametrize(
+    "layout,num_layers",
+    [
+        (KVCacheLayout.LBHNC, 2),
+        # Splitting needs a manager block to be one dense page, which a
+        # block-outermost layout only gives when the block holds one layer.
+        (KVCacheLayout.BLHNC, 1),
+    ],
+)
+def test_copy_kv_cache_blocks_with_virtual_block_splitting(
+    layout: KVCacheLayout, num_layers: int
+):
     num_blocks = 4
-    num_layers = 2
     physical_per_logical = 2
     spec = FullAttentionSpec(
         block_size=4,
@@ -276,10 +285,10 @@ def test_copy_kv_cache_blocks_with_virtual_block_splitting(layout: KVCacheLayout
     caches = dense_kv_cache_views(
         raw,
         spec,
-        num_blocks * physical_per_logical,
+        num_blocks,
         num_layers,
         layout,
-        block_size=spec.block_size // physical_per_logical,
+        kernel_block_size=spec.block_size // physical_per_logical,
     )
 
     for layer_idx, cache in enumerate(caches):

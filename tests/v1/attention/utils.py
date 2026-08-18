@@ -429,11 +429,11 @@ def dense_kv_cache_views(
     num_blocks: int,
     num_layers: int,
     layout: KVCacheLayout,
-    block_size: int | None = None,
+    kernel_block_size: int | None = None,
 ) -> list[torch.Tensor]:
     """``reshape_kv_cache`` for a dense allocation of ``num_layers`` layers."""
     layer_stride, block_stride, _, _, _ = compute_layout_strides(
-        spec, num_blocks, num_layers, layout, block_size
+        spec, num_blocks, num_layers, layout
     )
     return reshape_kv_cache(
         raw,
@@ -444,5 +444,5 @@ def dense_kv_cache_views(
         offset=0,
         layer_stride=layer_stride,
         block_stride=block_stride,
-        block_size=block_size,
+        kernel_block_size=kernel_block_size,
     )
