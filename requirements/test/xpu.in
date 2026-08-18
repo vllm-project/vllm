@@ -38,6 +38,9 @@ mteb[bm25s]>=2, <3 # required for mteb test
 num2words
 pqdm
 
+# --- Serialization ---
+tensorizer
+
 # --- Vision & Multimodal ---
 timm
 albumentations
