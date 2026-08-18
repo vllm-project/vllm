@@ -563,15 +563,19 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
     ],
 )
 @pytest.mark.parametrize("num_padded_reqs", [0, 2])
+# num_idx_heads == num_kv_heads, which is not a power of two for every TP
+# split (e.g. 96 query heads over 6 KV heads). The decode score kernel tiles
+# num_idx_heads * BLOCK_SIZE_Q lanes, so those counts must not break it.
+@pytest.mark.parametrize("num_idx_heads", [2, 3, 6])
 def test_decode_index_topk_correctness(
     decode_query_len: int,
     max_decode_query_len: int,
     num_padded_reqs: int,
+    num_idx_heads: int,
 ):
     topk = 6
     init_blocks = 0
     local_blocks = 1
-    num_idx_heads = 2
     head_dim = 16
     active_seq_lens = torch.tensor((7, 129, 1025), device="cuda", dtype=torch.int32)
     q_lens = torch.full_like(active_seq_lens, decode_query_len)
