@@ -319,6 +319,11 @@ def moe_fused_mul_sum(
             grid: tuple[int, ...] = (
                 min(num_sms * _PERSISTENT_BLOCKS_PER_SM, max_tiles),
             )
+            # Memory-bound streaming reduce: favor occupancy over deep per-thread
+            # pipelining. Deep num_stages buffers the unrolled top_k loads in
+            # registers and pushes past the 64-reg/thread cliff (3 vs 4+
+            # blocks/SM). Cap at 2 so more blocks stay resident to hide latency.
+            persistent_num_stages = min(num_stages, 2)
             moe_fused_mul_sum_persistent_kernel[grid](
                 inputs,
                 topk_weights,
@@ -336,7 +341,7 @@ def moe_fused_mul_sum(
                 BLOCK_K,
                 num_k_tiles,
                 num_warps=num_warps,
-                num_stages=num_stages,
+                num_stages=persistent_num_stages,
             )
         else:
             grid = (triton.cdiv(size, BLOCK_K), triton.cdiv(num_tokens, BLOCK_M))
