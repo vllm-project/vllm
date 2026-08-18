@@ -270,14 +270,15 @@ def test_eps_attr_is_found_by_value_not_name(cls, default_vllm_config):
 
 def test_literal_eps_is_not_mistaken_for_an_attribute(default_vllm_config, caplog):
     """A literal eps is recognised as coming from no attribute, even when one
-    holds the same value, and is taken from the matched source with a warning."""
-    with caplog.at_level("WARNING"), torch.device("meta"):
+    holds the same value, and is taken from the traced source instead."""
+    logger = "vllm.model_executor.models.transformers.fusers.rms_norm"
+    with caplog.at_level("DEBUG", logger=logger), torch.device("meta"):
         module = LiteralEpsRMSNorm()
         fuser = get_fuser(module)
         built = fuser.fuse(module, "norm", default_vllm_config)
     assert fuser.eps_attr is None
     assert built.variance_epsilon == 1e-4
-    assert "does not read its eps" in caplog.text
+    assert "does not hold its eps" in caplog.text
 
 
 def test_ambiguous_eps_attrs_are_disambiguated(default_vllm_config):

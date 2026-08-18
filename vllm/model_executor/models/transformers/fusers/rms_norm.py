@@ -218,11 +218,13 @@ class RMSNormFuser(BaseFuser):
                     setattr(module, name, value)
         if (name := markers.get(marked)) is not None:
             return name, None
-        logger.warning_once(
-            "%s does not read its eps (%s) from an attribute, so every instance "
-            "of it will be fused with that value.",
+        logger.debug_once(
+            "%s does not hold its eps (%s) in an attribute. Every instance in this "
+            "model will use the value traced from this instance. If this is not "
+            "desired, consider storing and reading eps using attribute of %s.",
             type(module).__name__,
             eps,
+            type(module).__name__,
         )
         return None, eps
 
