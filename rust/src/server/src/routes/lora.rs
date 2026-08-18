@@ -113,12 +113,6 @@ pub async fn load_lora_adapter(
     State(state): State<Arc<AppState>>,
     ValidatedJson(request): ValidatedJson<LoadLoraAdapterRequest>,
 ) -> Result<String, ApiError> {
-    if request.lora_name.is_empty() || request.lora_path.is_empty() {
-        return Err(ApiError::invalid_request(
-            "Both 'lora_name' and 'lora_path' must be provided.".to_string(),
-            None,
-        ));
-    }
     let allowed_prefixes = runtime_lora_allowed_path_prefixes();
     let lora_path = validate_lora_path_access(&request.lora_path, allowed_prefixes.as_deref())?
         .unwrap_or(request.lora_path);
@@ -128,11 +122,15 @@ pub async fn load_lora_adapter(
         .load_lora(
             lora_name.clone(),
             lora_path,
+            None,
             request.load_inplace,
             request.is_3d_lora_weight,
         )
         .await
         .map_err(|error| match error {
+            LoadLoraError::InvalidRequest(error) => {
+                ApiError::invalid_request(error.to_string(), None)
+            }
             LoadLoraError::AlreadyLoaded { lora_name } => ApiError::invalid_request(
                 format!(
                     "The lora adapter '{lora_name}' has already been loaded. If you want to load the adapter in place, set 'load_inplace' to true."

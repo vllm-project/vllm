@@ -9,9 +9,11 @@ use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse;
+use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::utility::PauseMode as EnginePauseMode;
 
 use super::{ControlServer, pb};
+use crate::lora::{LoadLoraError, UnloadLoraError};
 use crate::state::AppState;
 
 pub(crate) type ControlGrpcService = ControlServer<ControlServiceImpl>;
@@ -133,6 +135,23 @@ fn weight_version(value: String) -> Result<String, Status> {
     Ok(value)
 }
 
+fn ensure_lora_enabled(state: &AppState) -> Result<(), Status> {
+    state
+        .engine_core_client()
+        .ready_response()
+        .supports_lora
+        .then_some(())
+        .ok_or_else(|| Status::failed_precondition("engine was not started with LoRA enabled"))
+}
+
+fn lora_to_proto(adapter: &LoraRequest) -> pb::LoraAdapter {
+    pb::LoraAdapter {
+        lora_id: adapter.lora_int_id.min(i64::MAX as u64) as i64,
+        lora_name: adapter.lora_name.clone(),
+        source_path: adapter.lora_path.clone(),
+    }
+}
+
 #[tonic::async_trait]
 impl pb::control_server::Control for ControlServiceImpl {
     async fn get_server_info(
@@ -198,6 +217,96 @@ impl pb::control_server::Control for ControlServiceImpl {
             .await
             .map_err(|error| Status::internal(error.to_report_string()))?;
         Ok(Response::new(pb::AbortResponse {}))
+    }
+
+    async fn load_lora(
+        &self,
+        request: Request<pb::LoadLoraRequest>,
+    ) -> Result<Response<pb::LoadLoraResponse>, Status> {
+        ensure_lora_enabled(&self.state)?;
+        let adapter = request
+            .into_inner()
+            .adapter
+            .ok_or_else(|| Status::invalid_argument("adapter is required"))?;
+        let lora_int_id = u64::try_from(adapter.lora_id)
+            .map_err(|_| Status::invalid_argument("lora_id must be positive"))?;
+        let adapter = self
+            .state
+            .load_lora(
+                adapter.lora_name,
+                adapter.source_path,
+                Some(lora_int_id),
+                false,
+                false,
+            )
+            .await
+            .map_err(|error| match error {
+                LoadLoraError::InvalidRequest(error) => Status::invalid_argument(error.to_string()),
+                LoadLoraError::AlreadyLoaded { lora_name } => {
+                    Status::already_exists(format!("LoRA adapter `{lora_name}` is already loaded"))
+                }
+                LoadLoraError::BaseModelName { lora_name } => Status::already_exists(format!(
+                    "LoRA adapter `{lora_name}` conflicts with a served base model"
+                )),
+                LoadLoraError::Engine(error) => Status::internal(error.to_report_string()),
+                LoadLoraError::NotLoaded { lora_name } => Status::internal(format!(
+                    "one or more engine ranks rejected LoRA adapter `{lora_name}`"
+                )),
+            })?;
+        Ok(Response::new(pb::LoadLoraResponse {
+            adapter: Some(lora_to_proto(&adapter)),
+        }))
+    }
+
+    async fn unload_lora(
+        &self,
+        request: Request<pb::UnloadLoraRequest>,
+    ) -> Result<Response<pb::UnloadLoraResponse>, Status> {
+        ensure_lora_enabled(&self.state)?;
+        let name = request.into_inner().lora_name;
+        if name.trim().is_empty() {
+            return Err(Status::invalid_argument("lora_name is required"));
+        }
+
+        let adapter = self
+            .state
+            .served_lora_requests()
+            .await
+            .into_iter()
+            .find(|adapter| adapter.lora_name == name)
+            .ok_or_else(|| Status::not_found(format!("LoRA adapter `{name}` is not loaded")))?;
+        let adapter = self.state.unload_lora(&name, Some(adapter.lora_int_id)).await.map_err(
+            |error| match error {
+                UnloadLoraError::NotFound { lora_name } => {
+                    Status::not_found(format!("LoRA adapter `{lora_name}` is not loaded"))
+                }
+                UnloadLoraError::IntIdMismatch { .. } => {
+                    Status::internal("LoRA registry changed during unload")
+                }
+                UnloadLoraError::Engine(error) => Status::internal(error.to_report_string()),
+                UnloadLoraError::NotRemoved {
+                    lora_name,
+                    lora_int_id,
+                } => Status::internal(format!(
+                    "engine rejected removal of LoRA adapter `{lora_name}` with id {lora_int_id}"
+                )),
+            },
+        )?;
+        Ok(Response::new(pb::UnloadLoraResponse {
+            adapter: Some(lora_to_proto(&adapter)),
+        }))
+    }
+
+    async fn list_loras(
+        &self,
+        _request: Request<pb::ListLorasRequest>,
+    ) -> Result<Response<pb::ListLorasResponse>, Status> {
+        ensure_lora_enabled(&self.state)?;
+        let mut adapters = self.state.served_lora_requests().await;
+        adapters.sort_by(|left, right| left.lora_name.cmp(&right.lora_name));
+        Ok(Response::new(pb::ListLorasResponse {
+            adapters: adapters.iter().map(lora_to_proto).collect(),
+        }))
     }
 
     async fn get_kv_event_sources(

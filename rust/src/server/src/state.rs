@@ -171,6 +171,7 @@ impl AppState {
         &self,
         lora_name: String,
         lora_path: String,
+        lora_int_id: Option<u64>,
         load_inplace: bool,
         is_3d_lora_weight: bool,
     ) -> Result<LoraRequest, LoadLoraError> {
@@ -180,6 +181,7 @@ impl AppState {
                 &self.served_model_names,
                 lora_name,
                 lora_path,
+                lora_int_id,
                 load_inplace,
                 is_3d_lora_weight,
             )

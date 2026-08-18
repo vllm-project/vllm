@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use indexmap::IndexMap;
 use tokio::sync::{Mutex, RwLock};
 use vllm_engine_core_client::EngineCoreClient;
-use vllm_engine_core_client::protocol::lora::LoraRequest;
+use vllm_engine_core_client::protocol::lora::{LoraRequest, LoraRequestError};
 
 /// Snapshot of the currently served model names plus the requested LoRA, if
 /// the model name resolves to a dynamic adapter.
@@ -28,6 +28,7 @@ pub(crate) struct LoraManager {
 
 #[derive(Debug)]
 pub(crate) enum LoadLoraError {
+    InvalidRequest(LoraRequestError),
     AlreadyLoaded { lora_name: String },
     BaseModelName { lora_name: String },
     Engine(vllm_engine_core_client::Error),
@@ -90,6 +91,7 @@ impl LoraManager {
         base_model_names: &[String],
         lora_name: String,
         lora_path: String,
+        requested_lora_int_id: Option<u64>,
         load_inplace: bool,
         is_3d_lora_weight: bool,
     ) -> Result<LoraRequest, LoadLoraError> {
@@ -97,16 +99,14 @@ impl LoraManager {
         if base_model_names.iter().any(|name| name == &lora_name) {
             return Err(LoadLoraError::BaseModelName { lora_name });
         }
-        if !load_inplace && self.requests.read().await.contains_key(&lora_name) {
+        let requests = self.requests.read().await;
+        let existing_lora_int_id = requests.get(&lora_name).map(|request| request.lora_int_id);
+        if !load_inplace && existing_lora_int_id.is_some() {
             return Err(LoadLoraError::AlreadyLoaded { lora_name });
         }
 
-        let lora_int_id = self
-            .requests
-            .read()
-            .await
-            .get(&lora_name)
-            .map(|request| request.lora_int_id)
+        let lora_int_id = existing_lora_int_id
+            .or(requested_lora_int_id)
             .unwrap_or_else(|| self.id_counter.fetch_add(1, Ordering::Relaxed) + 1);
         let lora_request = LoraRequest::new(
             lora_name.clone(),
@@ -114,7 +114,17 @@ impl LoraManager {
             lora_path,
             load_inplace,
             is_3d_lora_weight,
-        );
+        )
+        .map_err(LoadLoraError::InvalidRequest)?;
+        if let Some(existing) = requests
+            .values()
+            .find(|request| request.lora_int_id == lora_int_id && request.lora_name != lora_name)
+        {
+            return Err(LoadLoraError::AlreadyLoaded {
+                lora_name: existing.lora_name.clone(),
+            });
+        }
+        drop(requests);
 
         let loaded = engine_core_client
             .add_lora(&lora_request)
@@ -123,6 +133,7 @@ impl LoraManager {
         if !loaded {
             return Err(LoadLoraError::NotLoaded { lora_name });
         }
+        self.id_counter.fetch_max(lora_int_id, Ordering::Relaxed);
         self.requests.write().await.insert(lora_name, lora_request.clone());
         Ok(lora_request)
     }
