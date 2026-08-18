@@ -52,6 +52,12 @@ class KVQuantMode(IntEnum):
     TURBOQUANT_K3V4_NC = 8
     TURBOQUANT_3BIT_NC = 9
 
+    # Backend self-manages kernel dispatch. Reads as quantized but matches no
+    # generic kernel mode (is_per_token_head / is_nvfp4 / is_turboquant all
+    # False). Registered handlers return this when they own kernel selection
+    # rather than reusing an upstream kernel path. See KVCacheDTypeHandler.
+    BACKEND = 10
+
     @property
     def is_per_token_head(self) -> bool:
         """True for any per-token-head quantization mode."""
@@ -75,6 +81,17 @@ class KVQuantMode(IntEnum):
             KVQuantMode.TURBOQUANT_K3V4_NC,
             KVQuantMode.TURBOQUANT_3BIT_NC,
         )
+
+    @property
+    def is_backend(self) -> bool:
+        """True when a platform backend fully self-manages kernel dispatch.
+
+        The attention selector should defer to the backend's own kernel
+        selection rather than a generic per-token-head / fp8 / turboquant
+        path. Distinct from NONE (which means non-quantized): BACKEND is
+        quantized, just with no generic kernel mode.
+        """
+        return self == KVQuantMode.BACKEND
 
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:

@@ -298,13 +298,11 @@ class CacheConfig:
         from vllm.config.kv_cache_dtype import KV_CACHE_DTYPES, is_known_kv_cache_dtype
         from vllm.platforms import current_platform
 
-        # Accessing current_platform triggers platform activation and lets
-        # backends register their custom dtypes (appending to KV_CACHE_DTYPES
-        # and STR_DTYPE_TO_TORCH_DTYPE), so membership must be checked after
-        # registration and the platform whitelist verification.
-        current_platform.register_kv_cache_dtypes()
-        if cache_dtype != "auto":
-            current_platform.verify_kv_cache_dtype(cache_dtype)
+        # Accessing current_platform triggers platform activation, which
+        # lets out-of-tree backends register their custom dtypes (via
+        # @register_kv_cache_dtype in their Platform.__init__) before
+        # membership is checked.
+        _ = current_platform
         if not is_known_kv_cache_dtype(cache_dtype):
             raise ValueError(
                 f"Invalid kv_cache_dtype: {cache_dtype!r}. "

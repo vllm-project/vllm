@@ -9,7 +9,6 @@ import torch
 
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.platforms import current_platform, is_current_platform_resolved
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import KVQuantMode
 
@@ -61,10 +60,6 @@ class KVCacheDTypeHandler(Protocol):
         """
         ...
 
-    def supports_platform(self, platform) -> bool:
-        """Whether this dtype is supported on the given platform."""
-        ...
-
 
 def register_kv_cache_dtype(name: str):
     """Register a custom ``--kv-cache-dtype`` value (eager decorator).
@@ -74,8 +69,7 @@ def register_kv_cache_dtype(name: str):
     allocated. During decoration the handler will:
 
     - append ``name`` to the mutable ``KV_CACHE_DTYPES`` list (driving
-      Pydantic + CLI validation), and to the active platform's
-      ``supported_kv_cache_dtypes`` when it enforces a whitelist;
+      Pydantic + CLI validation);
     - resolve ``torch_dtype()`` once and inject it into
       ``STR_DTYPE_TO_TORCH_DTYPE``, so all existing ``dict[name]`` /
       ``name in dict`` sites need zero changes;
@@ -94,9 +88,6 @@ def register_kv_cache_dtype(name: str):
         ...
         ...     def quant_mode(self):
         ...         return KVQuantMode.BACKEND
-        ...
-        ...     def supports_platform(self, platform):
-        ...         return platform.__class__.__name__ == "NPUPlatform"
     """
 
     def _decorate(cls):
@@ -109,15 +100,6 @@ def register_kv_cache_dtype(name: str):
             )
         else:
             KV_CACHE_DTYPES.append(name)
-            # Auto-register support on the active platform, mirroring
-            # register_quantization_config. Registration may run while the
-            # platform is still resolving (OOT backends register from their
-            # platform __init__), where accessing current_platform would
-            # recurse; platforms enforcing a whitelist hard-code it instead.
-            if is_current_platform_resolved() and (
-                skd := current_platform.supported_kv_cache_dtypes
-            ):
-                skd.append(name)
         inst = cls()
         # Inject into the shared dtype dict in-place so every existing
         # direct [] / `in` access site sees the new entry.

@@ -169,9 +169,6 @@ class Platform:
 
     supported_quantization: list[str] = []
 
-    # [] means "no enforced whitelist" — all registered dtypes are allowed.
-    supported_kv_cache_dtypes: list[str] = []
-
     additional_env_vars: list[str] = []
 
     _global_graph_pool: Any | None = None
@@ -948,17 +945,6 @@ class Platform:
         pass
 
     @classmethod
-    def register_kv_cache_dtypes(cls) -> None:
-        """
-        Register custom ``--kv-cache-dtype`` values on the current platform.
-
-        Called during CacheConfig validation (after ``vllm.config`` and
-        ``vllm.utils.torch_utils`` are fully imported), so backends can
-        register their dtypes before membership is checked.
-        """
-        pass
-
-    @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
         """
         Verify whether the current platform supports the specified model
@@ -978,17 +964,6 @@ class Platform:
         if cls.supported_quantization and quant not in cls.supported_quantization:
             raise ValueError(
                 f"{quant} quantization is currently not supported in {cls.device_name}."
-            )
-
-    @classmethod
-    def verify_kv_cache_dtype(cls, dtype: str) -> None:
-        """
-        Verify whether the kv cache dtype is supported by the current platform.
-        """
-        if cls.supported_kv_cache_dtypes and dtype not in cls.supported_kv_cache_dtypes:
-            raise ValueError(
-                f"{dtype} kv-cache-dtype is currently not supported "
-                f"in {cls.device_name}."
             )
 
     @classmethod
