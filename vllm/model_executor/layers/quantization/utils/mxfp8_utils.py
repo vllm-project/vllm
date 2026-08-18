@@ -177,8 +177,9 @@ def _mxfp8_e4m3_quantize_impl(
     alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm.platforms import current_platform
+    from vllm.utils.flashinfer import has_flashinfer
 
-    if current_platform.has_device_capability(100):
+    if current_platform.has_device_capability(100) and has_flashinfer():
         from flashinfer import mxfp8_quantize as flashinfer_mxfp8_quantize
 
         x_q, x_scales = flashinfer_mxfp8_quantize(
