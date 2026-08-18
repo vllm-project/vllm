@@ -11,7 +11,7 @@ if not torch.cuda.is_available():
         allow_module_level=True,
     )
 
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import PostThinkingParams, SamplingParams
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 from vllm.v1.worker.gpu.states import RequestState
@@ -299,3 +299,27 @@ def test_v2_thinking_budget_continues_end_prefix_from_prompt():
 
     assert out[0, END_B] == pytest.approx(1.0e9)
     assert out[0, END_A] == 0
+
+
+def test_v2_post_thinking_observe_tokens_flips_temperature():
+    from vllm.v1.worker.gpu.sample.states import SamplingStates
+
+    states = SamplingStates(
+        max_num_reqs=4,
+        vocab_size=VOCAB_SIZE,
+        reasoning_start_token_ids=[START],
+        reasoning_end_token_ids=[END],
+    )
+    params = SamplingParams(
+        temperature=1.0,
+        max_tokens=16,
+        post_thinking=PostThinkingParams(temperature=0.4, top_p=0.95, top_k=20),
+    )
+    states.add_request(3, params, token_ids=[1, START, 7])
+    assert states.temperature.np[3] == pytest.approx(1.0)
+    assert states.observe_tokens(3, [END])
+    assert states.temperature.np[3] == pytest.approx(0.4)
+    assert states.top_p.np[3] == pytest.approx(0.95)
+    assert states.top_k.np[3] == 20
+    assert states.observe_tokens(3, [START])
+    assert states.temperature.np[3] == pytest.approx(1.0)

@@ -115,6 +115,8 @@ pub(super) struct GenerationConfig {
     pub min_p: Option<f32>,
     pub repetition_penalty: Option<f32>,
     pub max_new_tokens: Option<u32>,
+    pub post_thinking:
+        Option<vllm_engine_core_client::protocol::sampling::PostThinkingParams>,
 }
 
 /// HF generation configs allow either one EOS id or a list of EOS ids.

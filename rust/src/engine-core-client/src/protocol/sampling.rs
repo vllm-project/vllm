@@ -20,6 +20,22 @@ fn default_temperature() -> f32 {
     1.0
 }
 
+/// Sampling knobs applied after the model exits a thinking block.
+///
+/// Mirrors Python's `PostThinkingParams`. Unset fields inherit the primary
+/// `EngineCoreSamplingParams` values.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct PostThinkingParams {
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub top_k: Option<u32>,
+    pub min_p: Option<f32>,
+    pub presence_penalty: Option<f32>,
+    pub frequency_penalty: Option<f32>,
+    pub repetition_penalty: Option<f32>,
+}
+
 fn default_max_tokens() -> u32 {
     16
 }
@@ -86,6 +102,10 @@ pub struct EngineCoreSamplingParams {
     /// reaching this DTO, so only non-negative values are sent. Enforced
     /// engine-side (and only when a reasoning parser is configured).
     pub thinking_token_budget: Option<u64>,
+    /// Optional sampling knobs used while the request is not inside a think
+    /// block. Unset fields inherit the primary values. Requires a configured
+    /// reasoning parser.
+    pub post_thinking: Option<PostThinkingParams>,
     /// Number of log probabilities to return per generated token.
     ///
     /// `None` disables sample logprobs. `-1` requests the full vocabulary.
@@ -161,6 +181,7 @@ impl EngineCoreSamplingParams {
             max_tokens: 65536,
             min_tokens: 0,
             thinking_token_budget: None,
+            post_thinking: None,
             logprobs: None,
             prompt_logprobs: None,
             min_p: 0.0,

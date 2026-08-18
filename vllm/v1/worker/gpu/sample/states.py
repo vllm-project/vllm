@@ -3,7 +3,9 @@
 import numpy as np
 import torch
 
-from vllm.sampling_params import SamplingParams
+from collections.abc import Sequence
+
+from vllm.sampling_params import SamplingKnobs, SamplingParams, tokens_in_reasoning
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.gumbel import apply_temperature
@@ -15,9 +17,17 @@ _NP_INT64_MAX = np.iinfo(np.int64).max
 
 
 class SamplingStates:
-    def __init__(self, max_num_reqs: int, vocab_size: int):
+    def __init__(
+        self,
+        max_num_reqs: int,
+        vocab_size: int,
+        reasoning_start_token_ids: Sequence[int] | None = None,
+        reasoning_end_token_ids: Sequence[int] | None = None,
+    ):
         self.max_num_reqs = max_num_reqs
         self.vocab_size = vocab_size
+        self.reasoning_start_token_ids = list(reasoning_start_token_ids or [])
+        self.reasoning_end_token_ids = list(reasoning_end_token_ids or [])
 
         self.temperature = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.top_k = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
@@ -38,15 +48,17 @@ class SamplingStates:
         # -1 means no logprobs are requested.
         self.num_logprobs.fill(NO_LOGPROBS)
 
-    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
-        self.temperature.np[req_idx] = sampling_params.temperature
-        self.top_p.np[req_idx] = sampling_params.top_p
-        top_k = sampling_params.top_k
-        if top_k <= 0 or top_k > self.vocab_size:
-            top_k = self.vocab_size
-        self.top_k.np[req_idx] = top_k
-        self.min_p.np[req_idx] = sampling_params.min_p
+        self.post_thinking_params: dict[int, SamplingParams] = {}
+        self.in_reasoning = np.ones(max_num_reqs, dtype=bool)
+        self._marker_window: dict[int, list[int]] = {}
+        self.knobs_dirty = False
 
+    def add_request(
+        self,
+        req_idx: int,
+        sampling_params: SamplingParams,
+        token_ids: Sequence[int] | None = None,
+    ) -> None:
         seed = sampling_params.seed
         self.seeds_set[req_idx] = seed is not None
         if seed is None:
@@ -59,6 +71,72 @@ class SamplingStates:
         elif num_logprobs == -1:
             num_logprobs = self.vocab_size
         self.num_logprobs[req_idx] = num_logprobs
+
+        in_reasoning = True
+        if sampling_params.post_thinking is not None:
+            self.post_thinking_params[req_idx] = sampling_params
+            ids = list(token_ids or [])
+            in_reasoning = tokens_in_reasoning(
+                ids, self.reasoning_start_token_ids, self.reasoning_end_token_ids
+            )
+            overlap = self._marker_overlap()
+            self._marker_window[req_idx] = ids[-overlap:] if overlap else []
+        else:
+            self.post_thinking_params.pop(req_idx, None)
+            self._marker_window.pop(req_idx, None)
+        self.in_reasoning[req_idx] = in_reasoning
+        self._write_knobs(
+            req_idx, sampling_params.resolve_sampling_knobs(in_reasoning)
+        )
+
+    def observe_tokens(self, req_idx: int, new_token_ids: Sequence[int]) -> bool:
+        """Update in-reasoning state from newly sampled tokens.
+
+        Returns True when the active overlay changed.
+        """
+        params = self.post_thinking_params.get(req_idx)
+        if params is None or not new_token_ids:
+            return False
+        overlap = self._marker_overlap()
+        prev = self._marker_window.get(req_idx, [])
+        window = prev[-overlap:] + list(new_token_ids)
+        self._marker_window[req_idx] = window[-max(overlap, 1) :]
+        in_reasoning = self._in_reasoning_from_window(
+            window, bool(self.in_reasoning[req_idx])
+        )
+        if in_reasoning == bool(self.in_reasoning[req_idx]):
+            return False
+        self.in_reasoning[req_idx] = in_reasoning
+        self._write_knobs(req_idx, params.resolve_sampling_knobs(in_reasoning))
+        self.knobs_dirty = True
+        return True
+
+    def _marker_overlap(self) -> int:
+        return max(
+            len(self.reasoning_start_token_ids),
+            len(self.reasoning_end_token_ids),
+            1,
+        )
+
+    def _in_reasoning_from_window(
+        self, window: Sequence[int], current: bool
+    ) -> bool:
+        from vllm.sampling_params import last_subsequence_index
+
+        last_start = last_subsequence_index(window, self.reasoning_start_token_ids)
+        last_end = last_subsequence_index(window, self.reasoning_end_token_ids)
+        if last_start < 0 and last_end < 0:
+            return current
+        return last_start > last_end
+
+    def _write_knobs(self, req_idx: int, knobs: SamplingKnobs) -> None:
+        self.temperature.np[req_idx] = knobs.temperature
+        self.top_p.np[req_idx] = knobs.top_p
+        top_k = knobs.top_k
+        if top_k <= 0 or top_k > self.vocab_size:
+            top_k = self.vocab_size
+        self.top_k.np[req_idx] = top_k
+        self.min_p.np[req_idx] = knobs.min_p
 
     def apply_staged_writes(self) -> None:
         self.temperature.copy_to_uva()

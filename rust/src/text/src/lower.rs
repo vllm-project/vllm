@@ -85,6 +85,7 @@ pub fn lower_sampling_params(
         default_min_p,
         default_repetition_penalty,
         default_max_tokens,
+        default_post_thinking,
     }: SamplingHints,
     sampling_limits: SamplingLimits,
     prompt_len: u32,
@@ -98,6 +99,7 @@ pub fn lower_sampling_params(
         max_tokens,
         min_tokens,
         thinking_token_budget,
+        post_thinking,
         logprobs,
         prompt_logprobs,
         min_p,
@@ -148,6 +150,7 @@ pub fn lower_sampling_params(
         });
     }
     let thinking_token_budget = normalize_thinking_token_budget(thinking_token_budget)?;
+    let post_thinking = post_thinking.or(default_post_thinking);
     let frequency_penalty = frequency_penalty.unwrap_or(0.0);
     let presence_penalty = presence_penalty.unwrap_or(0.0);
 
@@ -170,6 +173,7 @@ pub fn lower_sampling_params(
         max_tokens,
         min_tokens,
         thinking_token_budget,
+        post_thinking,
         logprobs,
         prompt_logprobs,
         min_p,
@@ -349,6 +353,7 @@ mod tests {
             default_min_p: None,
             default_repetition_penalty: None,
             default_max_tokens: None,
+            default_post_thinking: None,
         }
     }
 
@@ -376,6 +381,7 @@ mod tests {
                 default_min_p: None,
                 default_repetition_penalty: None,
                 default_max_tokens: None,
+                default_post_thinking: None,
             },
             sampling_limits,
             3,
@@ -411,6 +417,27 @@ mod tests {
             lower(Some(-2)),
             Err(Error::InvalidThinkingTokenBudget)
         ));
+    }
+
+    #[test]
+    fn lower_sampling_params_forwards_post_thinking() {
+        use vllm_engine_core_client::protocol::sampling::PostThinkingParams;
+
+        let params = lower_sampling_params_with_limits(
+            SamplingParams {
+                post_thinking: Some(PostThinkingParams {
+                    temperature: Some(0.4),
+                    top_k: Some(20),
+                    ..PostThinkingParams::default()
+                }),
+                ..SamplingParams::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap();
+        let overlay = params.post_thinking.expect("post_thinking forwarded");
+        assert_eq!(overlay.temperature, Some(0.4));
+        assert_eq!(overlay.top_k, Some(20));
     }
 
     #[test]
@@ -622,6 +649,7 @@ mod tests {
                 max_tokens: 999997,
                 min_tokens: 0,
                 thinking_token_budget: None,
+                post_thinking: None,
                 logprobs: None,
                 prompt_logprobs: None,
                 min_p: 0.0,
@@ -676,6 +704,7 @@ mod tests {
                 max_tokens: 999997,
                 min_tokens: 0,
                 thinking_token_budget: None,
+                post_thinking: None,
                 logprobs: None,
                 prompt_logprobs: None,
                 min_p: 0.0,
@@ -810,6 +839,7 @@ mod tests {
                 default_min_p: None,
                 default_repetition_penalty: None,
                 default_max_tokens: None,
+                default_post_thinking: None,
             }
         "#]]
         .assert_debug_eq(&hints);
@@ -838,6 +868,7 @@ mod tests {
                 max_tokens: 40957,
                 min_tokens: 0,
                 thinking_token_budget: None,
+                post_thinking: None,
                 logprobs: None,
                 prompt_logprobs: None,
                 min_p: 0.0,
@@ -886,6 +917,7 @@ mod tests {
                 default_min_p: None,
                 default_repetition_penalty: None,
                 default_max_tokens: None,
+                default_post_thinking: None,
             },
             sample_sampling_limits(),
             3,
@@ -902,6 +934,7 @@ mod tests {
                 max_tokens: 999997,
                 min_tokens: 0,
                 thinking_token_budget: None,
+                post_thinking: None,
                 logprobs: None,
                 prompt_logprobs: None,
                 min_p: 0.0,
@@ -958,6 +991,7 @@ mod tests {
                 default_min_p: Some(0.1),
                 default_repetition_penalty: Some(1.2),
                 default_max_tokens: Some(128),
+                default_post_thinking: None,
             },
             sample_sampling_limits(),
             3,
@@ -974,6 +1008,7 @@ mod tests {
                 max_tokens: 32,
                 min_tokens: 2,
                 thinking_token_budget: None,
+                post_thinking: None,
                 logprobs: None,
                 prompt_logprobs: None,
                 min_p: 0.1,
@@ -1016,6 +1051,7 @@ mod tests {
                 default_min_p: None,
                 default_repetition_penalty: None,
                 default_max_tokens: None,
+                default_post_thinking: None,
             },
             SamplingLimits {
                 max_logprobs: -1,
@@ -1208,6 +1244,7 @@ mod tests {
                 default_min_p: Some(0.1),
                 default_repetition_penalty: Some(1.2),
                 default_max_tokens: Some(128),
+                default_post_thinking: None,
             },
             sample_sampling_limits(),
             3,
@@ -1224,6 +1261,7 @@ mod tests {
                 max_tokens: 128,
                 min_tokens: 0,
                 thinking_token_budget: None,
+                post_thinking: None,
                 logprobs: None,
                 prompt_logprobs: None,
                 min_p: 0.1,

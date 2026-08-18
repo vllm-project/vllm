@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import PostThinkingParams, SamplingParams
 from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors
@@ -517,3 +517,52 @@ def test_pooling_metadata_token_id_buffers(
         assert metadata.get_prompt_token_ids_cpu()[0].tolist() == req.prompt_token_ids
     else:
         assert metadata.prompt_token_ids_cpu is None
+
+
+class _MockReasoningConfig:
+    enabled = True
+    reasoning_start_token_ids = [10]
+    reasoning_end_token_ids = [11]
+    natural_reasoning_end_token_ids = [11]
+
+
+def test_post_thinking_overlay_switches_after_think_end():
+    input_batch = InputBatch(
+        max_num_reqs=1,
+        max_model_len=64,
+        max_num_batched_tokens=64,
+        device=torch.device("cpu"),
+        vocab_size=VOCAB_SIZE,
+        block_sizes=[16],
+        kernel_block_sizes=[16],
+        max_num_blocks_per_req=[4],
+        reasoning_config=_MockReasoningConfig(),
+    )
+    req = CachedRequestState(
+        req_id="req0",
+        prompt_token_ids=[1, 10, 2],
+        sampling_params=SamplingParams(
+            temperature=1.0,
+            top_p=1.0,
+            top_k=0,
+            max_tokens=16,
+            post_thinking=PostThinkingParams(temperature=0.4, top_p=0.95, top_k=20),
+        ),
+        pooling_params=None,
+        mm_features=[],
+        block_ids=([],),
+        generator=None,
+        num_computed_tokens=0,
+        output_token_ids=[],
+    )
+    req_index = input_batch.add_request(req)
+    input_batch.refresh_metadata()
+    assert input_batch.temperature_cpu[req_index] == 1.0
+
+    req.output_token_ids.append(11)
+    input_batch.token_ids_cpu[req_index, 3] = 11
+    input_batch.num_tokens_no_spec[req_index] = 4
+    input_batch.refresh_metadata()
+    assert input_batch.temperature_cpu[req_index] == pytest.approx(0.4)
+    assert input_batch.top_p_cpu[req_index] == pytest.approx(0.95)
+    assert input_batch.top_k_cpu[req_index] == 20

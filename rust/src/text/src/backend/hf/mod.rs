@@ -155,6 +155,7 @@ impl TextBackend for HfTextBackend {
             default_min_p: self.generation_config.min_p,
             default_repetition_penalty: self.generation_config.repetition_penalty,
             default_max_tokens: self.generation_config.max_new_tokens,
+            default_post_thinking: self.generation_config.post_thinking.clone(),
         })
     }
 }
