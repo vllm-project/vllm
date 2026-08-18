@@ -422,13 +422,6 @@ run_epd_1e_1p_1d() {
         --enable-request-id-headers \
         --max-num-seqs "$MAX_NUM_SEQS" \
         --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
-        --ec-transfer-config '{
-            "ec_connector": "ECExampleConnector",
-            "ec_role": "ec_consumer",
-            "ec_connector_extra_config": {
-                "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
-            }
-        }' \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
             "kv_role": "kv_consumer"
