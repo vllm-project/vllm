@@ -360,6 +360,14 @@ class FlashMLASparseMetadataBuilder(
             num_tokens - metadata.num_decode_tokens,
         )
 
+        FP8Meta = FlashMLASparseMetadata.FP8SeparatePrefillDecode
+        # PCP decode sharding can leave a rank with only its collective-padding
+        # row when the global decode batch is smaller than the PCP world size.
+        # The row has no actual query tokens and must not be interpreted as a
+        # zero-length decode request by the sparse FP8 metadata builder.
+        if num_tokens == 0:
+            return FP8Meta()
+
         decode_query_len = 0
         active_num_decodes = num_decodes
         if num_decodes > 0:
@@ -369,7 +377,6 @@ class FlashMLASparseMetadataBuilder(
             active_num_decodes = num_decode_tokens // decode_query_len
             assert active_num_decodes * decode_query_len == num_decode_tokens
 
-        FP8Meta = FlashMLASparseMetadata.FP8SeparatePrefillDecode
         fp8_metadata = FP8Meta(
             num_decodes=active_num_decodes,
             num_prefills=num_prefills,

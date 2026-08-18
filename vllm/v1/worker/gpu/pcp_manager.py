@@ -48,6 +48,7 @@ class PCPManager:
         pcp_world_size: int,
         pcp_rank: int,
         device: torch.device,
+        shard_decode_requests: bool,
         req_states: RequestState | None = None,
         max_num_reqs: int | None = None,
         max_num_tokens: int | None = None,
@@ -62,6 +63,7 @@ class PCPManager:
         self.dcp_world_size = dcp_world_size
         self.dcp_rank = dcp_rank
         self.cp_interleave = cp_interleave
+        self.shard_decode_requests = shard_decode_requests
 
         self._global_batch: InputBatch | None = None
         self._req_states = req_states
@@ -212,6 +214,7 @@ class PCPManager:
         """
         rank_segments = []
         rank_offset = 0
+        decode_ordinal = 0
         num_chunks = 2 * self.pcp_world_size
         for global_batch_req_idx, num_tokens in enumerate(num_scheduled_tokens):
             query_len = int(num_tokens)
@@ -222,7 +225,16 @@ class PCPManager:
             if bool(is_prefilling[global_batch_req_idx]):
                 chunk_size = (query_len + num_chunks - 1) // num_chunks
                 chunk_indices = (rank, num_chunks - 1 - rank)
-            else:  # decodes are replicated
+            elif self.shard_decode_requests:
+                chunk_size = query_len
+                # KV and hidden states are gathered back to every PCP rank, so
+                # decode ownership does not need to persist across steps. Use a
+                # compact decode-only ordinal to keep each step exactly
+                # balanced even when prefills and zero-token rows are present.
+                owner_rank = decode_ordinal % self.pcp_world_size
+                decode_ordinal += 1
+                chunk_indices = (0,) if rank == owner_rank else ()
+            else:  # DCP requires decode queries on every participating rank.
                 chunk_size = query_len
                 chunk_indices = (0,)
 
@@ -295,8 +307,14 @@ class PCPManager:
                     segment.global_batch_slice.stop,
                     dtype=np.int64,
                 )
-                # Cache insertion pairs one slot entry with each rank's local decode.
-                if not bool(is_prefilling[segment.global_batch_req_idx]) and rank != 0:
+                # Replicated decode rows contain identical KV, so rank 0 is the
+                # canonical writer. Sharded decode rows have exactly one owner
+                # and therefore need no de-duplication here.
+                if (
+                    not bool(is_prefilling[segment.global_batch_req_idx])
+                    and not self.shard_decode_requests
+                    and rank != 0
+                ):
                     continue
                 gathered_kv_write_mask[padded_gathered_slice] = True
                 hidden_restore_idx[segment.global_batch_slice] = np.arange(
@@ -672,6 +690,7 @@ def maybe_build_pcp_manager(
         pcp_world_size=pcp_size,
         pcp_rank=pcp_rank,
         device=device,
+        shard_decode_requests=parallel_config.pcp_shard_decode_requests,
         req_states=req_states,
         max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
         max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,

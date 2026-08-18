@@ -484,6 +484,7 @@ class DeepseekV32Attention(MLAAttention):
                 self.topk_indices_buffer,
                 skip_k_cache_insert=True,
                 use_pcp=False,
+                pcp_shard_decode_requests=False,
                 dense_mha_metadata_layer_name=self._dense_mha_metadata_layer_name,
                 use_fp4_cache=False,
                 # fused_norm_rope already cleared the topk buffer this forward.
