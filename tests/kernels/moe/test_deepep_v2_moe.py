@@ -23,7 +23,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.import_utils import has_deep_ep_v2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -619,8 +619,7 @@ def _deep_ep_v2_moe_backends(
 @multi_gpu_test(num_gpus=2)
 @requires_deep_ep_v2
 @pytest.mark.skipif(
-    not has_flashinfer_trtllm_fused_moe()
-    or not current_platform.has_device_capability(100),
+    not has_flashinfer() or not current_platform.has_device_capability(100),
     reason="Requires FlashInfer TRTLLM fused MoE (SM100)",
 )
 def test_deep_ep_v2_moe_backends(
