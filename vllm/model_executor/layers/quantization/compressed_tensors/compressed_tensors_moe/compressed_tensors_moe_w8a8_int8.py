@@ -209,8 +209,6 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
                     requires_grad=False,
                 )
 
-        # Backend-specific kernel layout conversion (no-op for CPU_ZEN, which
-        # keeps the loaded [N, K] layout; zentorch handles packing itself).
         w13, w2 = convert_to_int8_moe_kernel_format(
             int8_backend=self.int8_backend,
             w13=layer.w13_weight,
