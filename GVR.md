@@ -3259,9 +3259,11 @@ The production objective is now to emit FP16 indexer logits by default on
 CUDA, retaining FP32 only when the operator requires it or the user explicitly
 selects it. `VLLM_INDEXER_LOGITS_DTYPE` accepts `auto`, `float16`, `bfloat16`,
 or `float32`; `auto` is the default and resolves to FP16 on CUDA. It resolves
-to FP32 on non-CUDA platforms and for the prefill DCP merge, whose current
-candidate-exchange format requires FP32. An explicit setting takes precedence
-over the older FP16/BF16 boolean switches, so
+to FP32 on non-CUDA platforms. DCP keeps the large local logits tensor and
+local top-k in the selected reduced dtype; only the small gathered candidate
+pair buffer is FP32 because it stores scores and exactly representable global
+IDs in one homogeneous tensor for the existing CuTe selector. An explicit
+setting takes precedence over the older FP16/BF16 boolean switches, so
 `VLLM_INDEXER_LOGITS_DTYPE=float32` is an unambiguous compatibility override.
 
 The final FP16 prefill selector uses three measured policies:
@@ -3304,3 +3306,63 @@ Forty-seven focused FP16 selector cases and six dtype-policy tests pass.
 Artifacts are
 `/tmp/gvr_fp16_production_dual_launch_{small,mid,boundary}_20260816.log` and
 `/tmp/gvr_fp16_production_prefill_matrix_{small,large}_20260816.log`.
+
+## 2026-08-18: FP16-first upstream draft PR
+
+The production subset is now isolated from the experimental GVR work and
+published as draft PR
+[`vllm-project/vllm#52696`](https://github.com/vllm-project/vllm/pull/52696),
+based on current `main`. Its source branch is `agent/fp16-indexer-logits` and
+its single implementation commit is `839529e522`. The PR deliberately does
+not contain GVR state, research scripts, or these research notes.
+
+The upstream scope is the existing materialized-logits path:
+
+- `auto` selects FP16 indexer logits on CUDA and FP32 elsewhere, with explicit
+  FP16, BF16, and FP32 overrides.
+- DeepGEMM paged/non-paged MQA logits and vLLM's cooperative, persistent, and
+  histogram top-k paths accept FP16 and BF16 without widening the full logits
+  tensor.
+- DCP also retains reduced-precision local logits and local top-k. Its gathered
+  `world_size * topk` score/ID candidate buffer remains FP32 for the mixed
+  representation described above; this is not a fallback of the large logits
+  tensor to FP32.
+- Exact reduced-precision selector behavior is covered across prefill, decode,
+  ties, padded strides, DeepGEMM, and DCP.
+
+The real-model no-GVR prefill measurement used GLM-5.2-NVFP4 on four GB200s,
+91,840 cached tokens plus an 8,192-token suffix (100,032 KV), eager execution,
+BEAM-derived tokens, and disabled FlashInfer autotuning. All selector calls per
+forward fell from 37.638 ms to 24.287 ms (1.550x). Producer time fell from
+73.770 ms to 73.142 ms, and the forward critical-path median fell from
+445.036 ms to 431.223 ms, a 1.0320x speedup or 3.10% lower latency. Amdahl's
+law predicts 431.057 ms from the measured component savings, leaving only
+0.166 ms unexplained; this is the consistency check that was missing from the
+earlier event-based interpretation.
+
+The directly isolated no-GVR NIAH evaluation used the real checkpoint and the
+standard Paul Graham corpus at 50K, 75K, and 95K contexts, depths 10/50/90,
+and two seven-digit keys per cell. FP32 and FP16 both recovered 18/18 keys and
+all 18 generated responses were identical. This is evidence of no observed
+regression for this evaluation, not a general proof of model-level parity.
+
+Final validation on the PR commit:
+
+- both changed CUDA targets build successfully;
+- 126 focused top-k cases pass;
+- 15 DeepGEMM paged/non-paged logits cases pass;
+- 6 DCP candidate pack/select cases and 3 full DCP decode parity cases pass;
+- 6 dtype-policy/environment cases pass; and
+- every applicable pre-commit hook passes.
+
+The required full editable install was attempted with
+`uv pip install -e . --torch-backend=auto`. It is currently blocked by an
+unmodified current-`main` QUTLASS binding that includes ATen extension headers
+while `TORCH_TARGET_VERSION` is defined. The focused vLLM and DeepGEMM CUDA
+targets build and load successfully, so this unrelated failure is reported in
+the draft PR rather than hidden.
+
+Duplicate-work checks found PR #52149, which addresses persistent top-k
+candidate overflow, and PR #48726, which adds an opt-in fused DSA
+indexer/top-k path. PR #52696 is distinct: it adds native reduced-precision
+support to the existing materialized-logits path, including DeepGEMM and DCP.
