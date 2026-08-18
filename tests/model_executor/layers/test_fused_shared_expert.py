@@ -508,9 +508,20 @@ def test_models_fse_init(
         mp.setenv("VLLM_ROCM_USE_AITER", str(use_fse))
         mp.setenv("VLLM_ROCM_USE_AITER_MOE", str(use_fse))
         mp.setenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", str(use_fse))
+        mp.setattr(
+            "vllm.model_executor.layers.fused_moe.experts."
+            "ocp_mx_emulation_moe.has_quark",
+            lambda: True,
+        )
         importlib.reload(envs)
         mp.setattr(envs, "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", use_fse)
         rocm_aiter_ops.refresh_env_variables()
+        aiter_fse_enabled = bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+        # These AMD-specific models currently use the raw environment flag.
+        # and do not rely on `rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()`.
+        fse_enabled = use_fse and (
+            aiter_fse_enabled or model_type in {"deepseek_v4", "minimax_m3"}
+        )
 
         with (
             patch.object(warning_logger, "warning") as warning,
@@ -527,7 +538,7 @@ def test_models_fse_init(
                     draft_model_config=SimpleNamespace(hf_config=config)
                 )
                 mtp = DeepSeekV4MTP(vllm_config=vllm_config)
-        assert model.is_fused_shared_expert_enabled is (use_fse and not exclude)
+        assert model.is_fused_shared_expert_enabled is (fse_enabled and not exclude)
 
         # The dummy quant config here uses mixed mxfp4/fp8 for experts/shared_expert
         # so should just raise a warning.
@@ -540,7 +551,7 @@ def test_models_fse_init(
                 "DeepSeek-V4 shared experts at mtp.0.ffn.shared_experts"
                 in (warning.call_args.args[1])
             )
-        if use_fse and exclude:
+        if aiter_fse_enabled and exclude:
             warning.assert_called_once()
             assert (
                 "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled"
