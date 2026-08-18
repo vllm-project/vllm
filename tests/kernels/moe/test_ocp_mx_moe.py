@@ -1495,7 +1495,6 @@ ROCM_BACKEND_CONFIGS = {
         "requires_gfx950": False,
         "backend_override": "EMULATION",
     },
->>>>>>> 2d7822bf3d (Aggressive refactor: fully deprecate gpt-oss methods)
 }
 
 
