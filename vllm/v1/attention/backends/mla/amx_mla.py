@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """AMX-only, high-performance MLA backend for DeepSeek V2/V3/R1 on CPU.
 
-Built on the AMX decode/extend/bmm/qkv-proj kernels vendored under
+Built on the AMX decode/extend/bmm kernels vendored under
 ``csrc/cpu/sgl-kernels/``, plugged into vLLM's ``MLACommonBackend``/
 ``MLACommonImpl`` abstraction the same way every other concrete MLA backend
 (``TritonMLAImpl``, etc.) does.
@@ -203,9 +203,6 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
             )
         self._w_uk_packed: torch.Tensor | None = None
         self._w_uv_packed: torch.Tensor | None = None
-        self._fused_qkv_rope_ready = False
-        self._qkv_a_proj_packed: torch.Tensor | None = None
-        self._q_b_proj_packed: torch.Tensor | None = None
 
     def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
         # forward_mha (unlike forward_mqa) receives no `layer` argument, so it
@@ -401,60 +398,3 @@ class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
             0, 1
         )
         ops.bmm_cpu(output_view, attn_out_t, self._w_uv_packed, True, None)
-
-    def fused_qkv_rope(
-        self,
-        layer,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
-        """Duck-typed hook consumed by MultiHeadLatentAttentionWrapper.forward
-        (mla.py) when present: fuses fused_qkv_a_proj -> both RMSNorms ->
-        q_b_proj -> RoPE into one AMX kernel, stopping before Q-absorption --
-        see module docstring. Returns the standard unabsorbed (q, kv_c_normed,
-        k_pe) tuple, or None to fall back to the unfused path (bf16-only for
-        now; also skipped for DCP/sparse-indexer/llama4-scaling batches,
-        which mla.py itself guards before calling this).
-        """
-        if layer.q_lora_rank is None or layer.fused_qkv_a_proj is None:
-            return None
-        weight = layer.fused_qkv_a_proj.weight
-        if weight.dtype not in (torch.bfloat16, torch.float16):
-            # int8/fp8-quantized fused_qkv_a_proj not yet supported by this
-            # fused path; fall back to the unfused (still correct) sequence.
-            return None
-
-        if not self._fused_qkv_rope_ready:
-            self._qkv_a_proj_packed = torch.ops._C.convert_weight_packed(
-                weight.detach().clone()
-            )
-            self._q_b_proj_packed = torch.ops._C.convert_weight_packed(
-                layer.q_b_proj.weight.detach().clone()
-            )
-            self._fused_qkv_rope_ready = True
-
-        q, k_input, v_input = ops.cpu_mla_qkv_rope_fused(
-            hidden_states,
-            self._qkv_a_proj_packed,
-            self._q_b_proj_packed,
-            layer.q_a_layernorm.weight,
-            layer.kv_a_layernorm.weight,
-            positions,
-            layer.rotary_emb.cos_sin_cache,
-            layer.kv_a_layernorm.variance_epsilon,
-            False,
-            False,
-            None,
-            None,
-            None,
-            True,
-            None,
-            layer.q_lora_rank,
-            self.kv_lora_rank,
-            self.qk_rope_head_dim,
-            self.num_heads,
-            self.qk_nope_head_dim,
-        )
-        kv_c_normed = v_input.squeeze(1)
-        k_pe = k_input[..., self.kv_lora_rank :]
-        return q, kv_c_normed, k_pe

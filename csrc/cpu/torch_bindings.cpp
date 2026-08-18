@@ -118,17 +118,6 @@ void extend_attention_cpu(
 void bmm_cpu(at::Tensor& out, at::Tensor& mat1, at::Tensor& mat2, bool is_vnni,
              const std::optional<at::Tensor>& scale);
 
-std::tuple<at::Tensor, at::Tensor, at::Tensor> qkv_proj_with_rope_fused_weight(
-    at::Tensor& hidden_states, at::Tensor& qkv_a_proj_weight,
-    at::Tensor& q_b_proj_weight, at::Tensor& q_a_layernorm_weight,
-    at::Tensor& kv_a_layernorm_weight, at::Tensor& positions,
-    at::Tensor& cos_sin_cache, double eps, bool use_int8_w8a8,
-    bool use_fp8_w8a16, std::optional<at::Tensor> qkv_a_proj_scale,
-    std::optional<at::Tensor> q_b_proj_scale, std::optional<at::Tensor> w_scale,
-    bool is_vnni, std::optional<std::vector<int64_t>> block_size,
-    int64_t q_lora_rank, int64_t kv_lora_rank, int64_t qk_rope_head_dim,
-    int64_t num_heads, int64_t qk_nope_head_dim);
-
 // vLLM-native: CPU cache-write op for MLA's single-latent-buffer KV cache
 // (the CUDA-only `concat_and_cache_mla` has no CPU dispatch).
 void concat_and_cache_mla_cpu(const at::Tensor& kv_c_normed,
@@ -589,18 +578,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bmm_cpu(Tensor(a!) out, Tensor mat1, Tensor mat2, bool is_vnni, "
       "Tensor? scale) -> ()");
   ops.impl("bmm_cpu", torch::kCPU, &bmm_cpu);
-
-  ops.def(
-      "qkv_proj_with_rope_fused_weight(Tensor hidden_states, Tensor "
-      "qkv_a_proj_weight, Tensor q_b_proj_weight, Tensor "
-      "q_a_layernorm_weight, Tensor kv_a_layernorm_weight, Tensor positions, "
-      "Tensor cos_sin_cache, float eps, bool use_int8_w8a8, bool "
-      "use_fp8_w8a16, Tensor? qkv_a_proj_scale, Tensor? q_b_proj_scale, "
-      "Tensor? w_scale, bool is_vnni, int[]? block_size, int q_lora_rank, "
-      "int kv_lora_rank, int qk_rope_head_dim, int num_heads, int "
-      "qk_nope_head_dim) -> (Tensor, Tensor, Tensor)");
-  ops.impl("qkv_proj_with_rope_fused_weight", torch::kCPU,
-           &qkv_proj_with_rope_fused_weight);
 
   ops.def(
       "concat_and_cache_mla_cpu(Tensor kv_c_normed, Tensor k_pe, "

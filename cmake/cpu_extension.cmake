@@ -523,7 +523,6 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/sgl-kernels/bmm.cpp"
         "csrc/cpu/sgl-kernels/decode.cpp"
         "csrc/cpu/sgl-kernels/extend.cpp"
-        "csrc/cpu/sgl-kernels/qkv_proj.cpp"
         "csrc/cpu/sgl-kernels/mla_cache.cpp")
 
     set(VLLM_EXT_SRC_AVX512

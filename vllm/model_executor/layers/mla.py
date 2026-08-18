@@ -156,70 +156,54 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         q_c = None
         kv_lora = None
 
-        # Optional fused proj+RMSNorm+RoPE path (see AMXMLAImpl.fused_qkv_rope),
-        # duck-typed so unsupported backends/configs fall through unchanged.
-        fused = None
-        if (
-            llama_4_scaling is None
-            and not self.dcp_q_replicate
-            and not (self.indexer and self.is_sparse and not self.skip_topk)
-            and hasattr(self.mla_attn.impl, "fused_qkv_rope")
-        ):
-            fused = self.mla_attn.impl.fused_qkv_rope(self, positions, hidden_states)
-
-        if fused is not None:
-            q, kv_c_normed, k_pe = fused
-        else:
-            if self.q_lora_rank is not None:
-                assert self.fused_qkv_a_proj is not None, (
-                    "fused_qkv_a_proj is required when q_lora_rank is not None"
-                )
-                assert self.q_a_layernorm is not None, (
-                    "q_a_layernorm is required when q_lora_rank is not None"
-                )
-                assert self.q_b_proj is not None, (
-                    "q_b_proj is required when q_lora_rank is not None"
-                )
-
-                qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-                q_c, kv_lora = qkv_lora.split(
-                    [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                    dim=-1,
-                )
-                q_c = self.q_a_layernorm(q_c)
-                q_proj_layer = self.q_b_proj
-                q_proj_input = q_c
-            else:
-                assert self.kv_a_proj_with_mqa is not None, (
-                    "kv_a_proj_with_mqa is required when q_lora_rank is None"
-                )
-                assert self.q_proj is not None, (
-                    "q_proj is required when q_lora_rank is None"
-                )
-                kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
-                q_proj_layer = self.q_proj
-                q_proj_input = hidden_states
-
-            kv_c, k_pe = kv_lora.split(
-                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        if self.q_lora_rank is not None:
+            assert self.fused_qkv_a_proj is not None, (
+                "fused_qkv_a_proj is required when q_lora_rank is not None"
             )
-            kv_c_normed = self.kv_a_layernorm(kv_c)
-            # Add head dim of 1 to k_pe
-            k_pe = k_pe.unsqueeze(1)
+            assert self.q_a_layernorm is not None, (
+                "q_a_layernorm is required when q_lora_rank is not None"
+            )
+            assert self.q_b_proj is not None, (
+                "q_b_proj is required when q_lora_rank is not None"
+            )
 
-            q = q_proj_layer(q_proj_input)[0]
-            heads = self.num_heads
-            if self.dcp_q_replicate:
-                heads *= q_proj_layer.group_size
-            q = q.view(-1, heads, self.qk_head_dim)
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            q_c, kv_lora = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+            q_c = self.q_a_layernorm(q_c)
+            q_proj_layer = self.q_b_proj
+            q_proj_input = q_c
+        else:
+            assert self.kv_a_proj_with_mqa is not None, (
+                "kv_a_proj_with_mqa is required when q_lora_rank is None"
+            )
+            assert self.q_proj is not None, (
+                "q_proj is required when q_lora_rank is None"
+            )
+            kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
+            q_proj_layer = self.q_proj
+            q_proj_input = hidden_states
 
-            if self.rotary_emb is not None:
-                q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                    positions, q[..., self.qk_nope_head_dim :], k_pe
-                )
+        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_c_normed = self.kv_a_layernorm(kv_c)
+        # Add head dim of 1 to k_pe
+        k_pe = k_pe.unsqueeze(1)
 
-            if self.indexer and self.is_sparse and not self.skip_topk:
-                self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+        q = q_proj_layer(q_proj_input)[0]
+        heads = self.num_heads
+        if self.dcp_q_replicate:
+            heads *= q_proj_layer.group_size
+        q = q.view(-1, heads, self.qk_head_dim)
+
+        if self.rotary_emb is not None:
+            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                positions, q[..., self.qk_nope_head_dim :], k_pe
+            )
+
+        if self.indexer and self.is_sparse and not self.skip_topk:
+            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
 
         if llama_4_scaling is not None:
             q *= llama_4_scaling
