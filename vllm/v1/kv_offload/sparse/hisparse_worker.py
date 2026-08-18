@@ -34,6 +34,7 @@ from vllm.v1.kv_offload.sparse.hisparse_runtime import (
     HiSparseCacheHandle,
     release_pinned_state,
 )
+from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -71,6 +72,7 @@ class HiSparseWorker:
         max_model_len: int,
         max_concurrent_batches: int,
         blocks_per_kv_block: int,
+        host_num_blocks: int,
         source_group_id: int,
         indexer_group_id: int,
         device: torch.device,
@@ -81,6 +83,7 @@ class HiSparseWorker:
         kernel_block_size = cache_pairs[0][0].shape[1]
         self.kernel_block_size = kernel_block_size
         self.blocks_per_kv_block = blocks_per_kv_block
+        self.host_num_blocks = host_num_blocks
         self.source_group_id = source_group_id
         self.indexer_group_id = indexer_group_id
         self.pinned_host_pools = pinned_host_pools
@@ -132,6 +135,7 @@ class HiSparseWorker:
     ) -> None:
         entries = [cache.runtime.backup_caches() for cache in self.cache_handles]
         hot_caches, host_caches = zip(*entries)
+        self.host_caches = host_caches
 
         def host_layout(cache: torch.Tensor) -> tuple[int, int, int]:
             if cache.ndim not in (2, 3):
@@ -211,11 +215,22 @@ class HiSparseWorker:
         self._spill_staging_index = 0
         self._spill_staging_events = [torch.Event() for _ in range(spill_staging_count)]
 
-    def prepare_step(
+    def apply_scheduler_output(
         self,
         command: SparseKVOffloadCommand | None,
         scheduler_output: SchedulerOutput,
     ) -> None:
+        host_copies = [
+            copy
+            for copy in scheduler_output.kv_cache_block_copies or ()
+            if copy.block_pool_id is None
+        ]
+        copy_kv_cache_blocks_inplace(
+            self.host_caches,
+            self.host_num_blocks,
+            host_copies,
+            self.host_write_event,
+        )
         self.set_fully_resident_batch(
             command.fully_resident if command is not None else False
         )
@@ -574,6 +589,7 @@ def init_hisparse_worker(
         max_model_len,
         max_concurrent_batches,
         block_size // indexer_block_size,
+        host_num_blocks,
         source_group_id,
         indexer_group_id,
         device,

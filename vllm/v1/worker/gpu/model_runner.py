@@ -31,11 +31,6 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.kv_transfer import get_kv_transfer_group
-from vllm.distributed.kv_transfer.kv_connector.v1.hisparse_connector import (
-    bind_hisparse_worker,
-    get_hisparse_connector_metadata,
-)
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
@@ -68,8 +63,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import HiSparseHotSpec, KVCacheConfig, MambaSpec
-from vllm.v1.kv_offload.sparse.hisparse_worker import HiSparseWorker
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -153,8 +147,9 @@ from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (
+    DeviceKVCacheBlockCopier,
     KVBlockZeroer,
-    copy_kv_cache_blocks_inplace,
+    build_kv_block_zeroers,
     get_uniform_decode_token_count,
 )
 from vllm.v1.worker.workspace import use_workspace_lane
@@ -321,9 +316,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
-
-        # HiSparse state if configured.
-        self.hisparse_worker: HiSparseWorker | None = None
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
@@ -522,30 +514,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
-            # When using DCP, each request's KV cache is sharded among different ranks.
-            # As a result, one block on the current rank covers `block_size * cp_size`
-            # tokens in the full, global (unsharded) sequence.
-            if isinstance(spec, HiSparseHotSpec):
-                max_num_blocks = spec.blocks_per_request
-            else:
+            if isinstance(spec, MambaSpec):
                 max_num_blocks = cdiv(
                     block_table_max_model_len, spec.block_size * self.dcp_size
                 )
-            # For Mamba/Hybrid Model, KVCaches need extra blocks for speculative tokens
-            if isinstance(spec, MambaSpec):
                 max_num_blocks = (
                     max_num_blocks if self.cache_config.enable_prefix_caching else 1
                 ) + spec.num_speculative_blocks
                 max_num_blocks = get_block_table_width(
                     max_num_blocks, spec.block_size, token_alignment=None
                 )
-            elif isinstance(spec, HiSparseHotSpec):
-                # blocks_per_request is already the exact hot-window width;
-                # aligning it up would over-allocate the hot pool.
-                max_num_blocks = get_block_table_width(
-                    max_num_blocks, spec.block_size, token_alignment=None
-                )
             else:
+                max_num_blocks = spec.max_num_blocks_per_req(
+                    self.vllm_config, block_table_max_model_len
+                )
                 max_num_blocks = get_block_table_width(max_num_blocks, spec.block_size)
             max_num_blocks_per_group.append(max_num_blocks)
 
@@ -608,9 +590,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cudagraph_mode,
             decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
-            capture_hybrid_kv=(
-                self.vllm_config.attention_config.hisparse_config is not None
-            ),
+            capture_hybrid_kv=kv_cache_config.has_hybrid_kv_residency,
             varlen_decode=self.adaptive_verification is not None,
         )
         check_attention_cp_compatibility(self.vllm_config)
@@ -629,7 +609,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         self.kv_caches: list[torch.Tensor] = []
-        kv_caches_dict, self.hisparse_worker = init_kv_cache(
+        kv_caches_dict, kv_cache_runtime = init_kv_cache(
             self.kv_caches,
             self.compilation_config.static_forward_context,
             self.kv_cache_config,
@@ -640,38 +620,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config,
             self.block_tables,
         )
-        self.kv_caches_by_pool: dict[int | None, list[torch.Tensor]] = {}
-        for group in self.kv_cache_config.kv_cache_groups:
-            pool_caches = self.kv_caches_by_pool.setdefault(group.block_pool_id, [])
-            pool_caches.extend(
-                kv_caches_dict[name]
-                for name in group.layer_names
-                if name in kv_caches_dict
-            )
-        if self.hisparse_worker is not None:
-            bind_hisparse_worker(get_kv_transfer_group(), self.hisparse_worker)
-        self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+        self.device_kv_cache_block_copier = DeviceKVCacheBlockCopier(
+            self.kv_cache_config, kv_caches_dict
+        )
+        self.kv_connector = get_kv_connector(
+            self.vllm_config, kv_caches_dict, kv_cache_runtime
+        )
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
-        zeroing_pools = self.kv_cache_config.zeroing_block_pool_ids
-        self.kv_block_zeroers = {
-            pool_id: KVBlockZeroer(
-                self.device,
-                attn_groups_iter=(g for groups in self.attn_groups for g in groups),
-                kernel_block_sizes=self.kernel_block_sizes,
-                cache_dtype=self.cache_config.cache_dtype,
-                static_forward_context=self.compilation_config.static_forward_context,
-                zeroing_group_ids={
-                    group_id
-                    for group_id, group in enumerate(
-                        self.kv_cache_config.kv_cache_groups
-                    )
-                    if group.block_pool_id == pool_id
-                },
-            )
-            for pool_id in zeroing_pools
-        }
+        self.kv_block_zeroers = build_kv_block_zeroers(
+            device=self.device,
+            attn_groups=self.attn_groups,
+            kernel_block_sizes=self.kernel_block_sizes,
+            cache_dtype=self.cache_config.cache_dtype,
+            static_forward_context=self.compilation_config.static_forward_context,
+            kv_cache_config=self.kv_cache_config,
+        )
 
     @torch.inference_mode()
     @step_eplb_after(is_dummy=True)
@@ -920,9 +885,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model_state.encoder_runner.capture()
 
             if capture_decoder:
-                if self.hisparse_worker is not None:
-                    self.hisparse_worker.set_fully_resident_batch(True)
-                try:
+                with self.kv_connector.capture_kv_residency() as residency_hook:
                     self.cudagraph_manager.capture(
                         self.model,
                         self.model_state,
@@ -938,17 +901,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         lora_capture_hook=create_lora_capture_hook(
                             self.lora_config, self
                         ),
-                        decode_post_forward_hook=None,
-                        kv_residency_capture_hook=(
-                            self.hisparse_worker.set_fully_resident_batch
-                            if self.hisparse_worker is not None
-                            else None
-                        ),
+                        kv_residency_capture_hook=residency_hook,
                     )
-                finally:
-                    if self.hisparse_worker is not None:
-                        self.hisparse_worker.set_fully_resident_batch(False)
-                        self.hisparse_worker.reset_hot_state()
                 if self.speculator is not None:
                     with use_workspace_lane(self._draft_workspace_lane):
                         self.speculator.capture()
@@ -1075,29 +1029,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def update_requests(self, scheduler_output: SchedulerOutput) -> None:
         # Add new blocks and update num_computed_tokens for the existing requests.
         reqs = scheduler_output.scheduled_cached_reqs
-        metadata = get_hisparse_connector_metadata(
-            scheduler_output.kv_connector_metadata
+        table_updates = scheduler_output.block_table_updates or {}
+        self.block_tables.update_block_ids(
+            table_updates, self.req_states.req_id_to_index
         )
-        offload_command = metadata.command if metadata is not None else None
-        table_updates = (
-            offload_command.block_table_updates if offload_command is not None else None
-        )
-        if table_updates is not None:
-            for req_id, block_ids in table_updates.items():
-                req_index = self.req_states.req_id_to_index.get(req_id)
-                if req_index is not None:
-                    self.block_tables.append_block_ids(
-                        req_index, block_ids, overwrite=True
-                    )
         num_computed_tokens_np = self.req_states.num_computed_tokens_np
         for req_id, num_computed_tokens, req_new_block_ids in zip(
             reqs.req_ids, reqs.num_computed_tokens, reqs.new_block_ids
         ):
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens_np[req_index] = num_computed_tokens
-            if req_new_block_ids is not None and (
-                table_updates is None or req_id not in table_updates
-            ):
+            if req_new_block_ids is not None and req_id not in table_updates:
                 self.block_tables.append_block_ids(
                     req_index, req_new_block_ids, overwrite=False
                 )
@@ -1118,30 +1060,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Apply copy-on-write block copies for partial prefix-cache hits, after
         # zeroing new blocks and before the forward pass reads them.
         if scheduler_output.kv_cache_block_copies:
-            for copy_pool_id, pool_caches in self.kv_caches_by_pool.items():
-                copies = [
-                    copy
-                    for copy in scheduler_output.kv_cache_block_copies
-                    if copy.block_pool_id == copy_pool_id
-                ]
-                if not copies:
-                    continue
-                num_blocks = (
-                    self.kv_cache_config.hisparse_host_num_blocks
-                    if copy_pool_id is None
-                    else self.kv_cache_config.num_blocks_by_pool[copy_pool_id]
-                )
-                assert num_blocks is not None
-                copy_kv_cache_blocks_inplace(
-                    pool_caches,
-                    num_blocks,
-                    copies,
-                    (
-                        self.hisparse_worker.host_write_event
-                        if copy_pool_id is None and self.hisparse_worker is not None
-                        else None
-                    ),
-                )
+            self.device_kv_cache_block_copier.copy(
+                scheduler_output.kv_cache_block_copies
+            )
 
     def gather_batch_req_state(
         self, scheduler_output: SchedulerOutput, dummy_run: bool
@@ -1519,7 +1440,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
-            self.kv_connector.prepare_step(scheduler_output)
+            self.kv_connector.bind_metadata(scheduler_output)
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
@@ -1561,10 +1482,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_query_len=max_query_len,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
-            fully_resident_kv=(
-                self.hisparse_worker is None
-                or self.hisparse_worker.fully_resident_batch
-            ),
+            fully_resident_kv=self.kv_connector.fully_resident_kv,
         )
 
         if batch_desc.num_tokens == 0:
@@ -1625,9 +1543,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
                 block_tables = None
                 slot_mappings = None
-
-        if self.hisparse_worker is not None:
-            self.hisparse_worker.set_request_state_indices(input_batch.idx_mapping)
 
         attn_metadata = None
         slot_mappings_by_layer = None
@@ -1736,7 +1651,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
-            self.kv_connector.pre_forward()
+            self.kv_connector.pre_forward(input_batch.idx_mapping)
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
             # For piecewise and eager mode, just call model().
@@ -1757,7 +1672,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_compiled=skip_compiled,
                 is_padding=input_batch.is_padding,
             ):
-                self.kv_connector.pre_forward()
+                self.kv_connector.pre_forward(input_batch.idx_mapping)
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
                     # Run the PIECEWISE graph (compiled PW cudagraph or breakable
                     # cudagraph, chosen inside run_pw_graph). cg_mode is only

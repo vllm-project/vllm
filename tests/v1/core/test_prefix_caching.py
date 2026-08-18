@@ -277,8 +277,8 @@ def test_hisparse_reclaims_sealed_resident_pages_before_rejecting_admission():
     )
 
     first_blocks = manager.get_block_ids("first")
-    command = manager.hisparse_coordinator.build_offload_command([])
-    assert command.block_table_updates.get("first") == first_blocks
+    block_table_updates = manager.hisparse_coordinator.take_block_table_updates()
+    assert block_table_updates.get("first") == first_blocks
 
     first.num_computed_tokens = 128
     assert manager.allocate_slots(first, num_new_tokens=16) is None

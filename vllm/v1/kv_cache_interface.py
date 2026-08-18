@@ -1152,6 +1152,13 @@ class KVCacheConfig:
         return any(isinstance(g.kv_cache_spec, MambaSpec) for g in self.kv_cache_groups)
 
     @property
+    def has_hybrid_kv_residency(self) -> bool:
+        return any(
+            isinstance(group.kv_cache_spec, HiSparseHotSpec)
+            for group in self.kv_cache_groups
+        )
+
+    @property
     def has_mixed_precision_kv_cache(self) -> bool:
         """Whether attention groups store their KV cache at more than one precision."""
         kv_cache_precisions: set[tuple[torch.dtype, KVQuantMode]] = set()

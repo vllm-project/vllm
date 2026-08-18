@@ -21,7 +21,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
-    MultiKVConnectorMetadata,
 )
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -96,11 +95,28 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
     def bind_worker(self, worker: HiSparseWorker) -> None:
         self._worker = worker
 
-    def prepare_step(self, scheduler_output: SchedulerOutput) -> None:
+    def apply_scheduler_output(self, scheduler_output: SchedulerOutput) -> None:
         assert self._worker is not None
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, HiSparseConnectorMetadata)
-        self._worker.prepare_step(metadata.command, scheduler_output)
+        self._worker.apply_scheduler_output(metadata.command, scheduler_output)
+
+    def set_request_state_indices(self, indices: torch.Tensor) -> None:
+        assert self._worker is not None
+        self._worker.set_request_state_indices(indices)
+
+    @property
+    def fully_resident_kv(self) -> bool:
+        assert self._worker is not None
+        return self._worker.fully_resident_batch
+
+    def set_fully_resident_kv(self, fully_resident: bool) -> None:
+        assert self._worker is not None
+        self._worker.set_fully_resident_batch(fully_resident)
+
+    def reset_hot_state(self) -> None:
+        assert self._worker is not None
+        self._worker.reset_hot_state()
 
     def finish_forward(self) -> None:
         assert self._worker is not None
@@ -156,11 +172,13 @@ class HiSparseConnector(KVConnectorBase_V1, SupportsHMA):
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         assert self._coordinator is not None
-        return HiSparseConnectorMetadata(
-            self._coordinator.build_offload_command(
-                list(scheduler_output.num_scheduled_tokens)
-            )
+        scheduler_output.block_table_updates = (
+            self._coordinator.take_block_table_updates() or None
         )
+        command = self._coordinator.build_offload_command(
+            list(scheduler_output.num_scheduled_tokens)
+        )
+        return HiSparseConnectorMetadata(command)
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
         assert self._coordinator is not None
@@ -205,22 +223,14 @@ def attach_hisparse_connector(
     )
 
 
-def bind_hisparse_worker(connector: KVConnectorBase_V1, worker: HiSparseWorker) -> None:
+def bind_hisparse_worker(
+    connector: KVConnectorBase_V1, worker: HiSparseWorker
+) -> HiSparseConnector | None:
     if isinstance(connector, HiSparseConnector):
         connector.bind_worker(worker)
-        return
+        return connector
     if isinstance(connector, MultiConnector):
         for child in connector._connectors:
-            bind_hisparse_worker(child, worker)
-
-
-def get_hisparse_connector_metadata(
-    metadata: KVConnectorMetadata | None,
-) -> HiSparseConnectorMetadata | None:
-    if isinstance(metadata, HiSparseConnectorMetadata):
-        return metadata
-    if isinstance(metadata, MultiKVConnectorMetadata):
-        for child in metadata.metadata:
-            if (result := get_hisparse_connector_metadata(child)) is not None:
-                return result
+            if hisparse_connector := bind_hisparse_worker(child, worker):
+                return hisparse_connector
     return None

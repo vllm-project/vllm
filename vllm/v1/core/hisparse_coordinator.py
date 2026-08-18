@@ -492,14 +492,8 @@ class HiSparseCoordinator:
         self.spills_to_send.append(plan)
         return True
 
-    def build_offload_command(
-        self,
-        request_ids: Sequence[str],
-    ) -> SparseKVOffloadCommand | None:
-        """Package residency decisions for the worker connector."""
-        if not self.resident_managers:
-            return None
-        block_table_updates = {
+    def take_block_table_updates(self) -> dict[str, tuple[list[int], ...]]:
+        updates = {
             request_id: tuple(
                 [block.block_id for block in manager.req_to_blocks.get(request_id, [])]
                 for manager in self.managers
@@ -507,6 +501,15 @@ class HiSparseCoordinator:
             for request_id in self.block_table_updates
         }
         self.block_table_updates.clear()
+        return updates
+
+    def build_offload_command(
+        self,
+        request_ids: Sequence[str],
+    ) -> SparseKVOffloadCommand | None:
+        """Package residency decisions for the worker connector."""
+        if not self.resident_managers:
+            return None
         indexer_ready_req_ids = tuple(
             request_id
             for request_id in sorted(request_ids)
@@ -516,7 +519,6 @@ class HiSparseCoordinator:
         for request_id in indexer_ready_req_ids:
             self.request_states[request_id].indexer_ready = False
         command = SparseKVOffloadCommand(
-            block_table_updates=block_table_updates,
             page_transfers=self.spills_to_send,
             fully_resident=self.are_requests_fully_resident(request_ids),
             indexer_ready_req_ids=indexer_ready_req_ids,

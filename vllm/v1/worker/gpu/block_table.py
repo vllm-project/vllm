@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 import torch
 
@@ -118,6 +118,16 @@ class BlockTables:
                 block_ids = [b * bpk + k for b in block_ids for k in range(bpk)]
             self.block_tables[i].stage_write(req_index, start, block_ids)
             self.num_blocks.np[i, req_index] = start + len(block_ids)
+
+    def update_block_ids(
+        self,
+        updates: Mapping[str, tuple[list[int], ...]],
+        req_id_to_index: Mapping[str, int],
+    ) -> None:
+        for req_id, block_ids in updates.items():
+            req_index = req_id_to_index.get(req_id)
+            if req_index is not None:
+                self.append_block_ids(req_index, block_ids, overwrite=True)
 
     def apply_staged_writes(self) -> None:
         if self.num_kv_cache_groups == 0:

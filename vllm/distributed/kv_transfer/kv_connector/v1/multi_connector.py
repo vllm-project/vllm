@@ -390,14 +390,6 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c, cm in zip(self._connectors, kv_connector_metadata.metadata):
             c.handle_preemptions(cm)
 
-    def prepare_step(self, scheduler_output: SchedulerOutput) -> None:
-        for c in self._connectors:
-            c.prepare_step(scheduler_output)
-
-    def finish_forward(self) -> None:
-        for c in self._connectors:
-            c.finish_forward()
-
     def get_finished_count(self) -> int | None:
         # TODO(https://github.com/vllm-project/vllm/issues/33400)
         # Currently no connectors return non-None

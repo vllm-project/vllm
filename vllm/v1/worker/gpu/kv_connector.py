@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import torch
@@ -11,6 +13,10 @@ from vllm.distributed.kv_transfer import (
     kv_transfer_state,
 )
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.distributed.kv_transfer.kv_connector.v1.hisparse_connector import (
+    HiSparseConnector,
+    bind_hisparse_worker,
+)
 from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
@@ -24,15 +30,16 @@ from vllm.v1.outputs import (
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.kv_offload.sparse.hisparse_worker import HiSparseWorker
 
 
 class KVConnector:
     """KVConnector interface used by GPUModelRunner."""
 
-    def prepare_step(self, scheduler_output: "SchedulerOutput") -> None:
+    def bind_metadata(self, scheduler_output: "SchedulerOutput") -> None:
         pass
 
-    def pre_forward(self) -> None:
+    def pre_forward(self, batch_request_indices: torch.Tensor | None = None) -> None:
         pass
 
     def finish_forward(self) -> None:
@@ -49,13 +56,30 @@ class KVConnector:
     def set_disabled(self, disabled: bool) -> None:
         pass
 
+    @property
+    def fully_resident_kv(self) -> bool:
+        return True
+
+    @contextmanager
+    def capture_kv_residency(self) -> Iterator[Callable[[bool], None] | None]:
+        yield None
+
 
 class ActiveKVConnector(KVConnector):
     def __init__(
-        self, vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
+        self,
+        vllm_config: VllmConfig,
+        kv_caches_dict: dict[str, torch.Tensor],
+        hisparse_worker: "HiSparseWorker | None" = None,
     ):
         self.vllm_config = vllm_config
         self.kv_connector = get_kv_transfer_group()
+        self.hisparse_connector: HiSparseConnector | None = None
+        if hisparse_worker is not None:
+            self.hisparse_connector = bind_hisparse_worker(
+                self.kv_connector, hisparse_worker
+            )
+            assert self.hisparse_connector is not None
         # Register kv caches with KV Connector if applicable.
         # TODO: support cross_layers_kv_cache
         # (see https://github.com/vllm-project/vllm/pull/27743)
@@ -64,18 +88,22 @@ class ActiveKVConnector(KVConnector):
 
         self._disabled = False
 
-    def prepare_step(self, scheduler_output: "SchedulerOutput") -> None:
+    def bind_metadata(self, scheduler_output: "SchedulerOutput") -> None:
         if self._disabled:
             return
         kv_connector_metadata = scheduler_output.kv_connector_metadata
         assert kv_connector_metadata is not None
         self.kv_connector.handle_preemptions(kv_connector_metadata)
         self.kv_connector.bind_connector_metadata(kv_connector_metadata)
-        self.kv_connector.prepare_step(scheduler_output)
+        if self.hisparse_connector is not None:
+            self.hisparse_connector.apply_scheduler_output(scheduler_output)
 
-    def pre_forward(self) -> None:
+    def pre_forward(self, batch_request_indices: torch.Tensor | None = None) -> None:
         if self._disabled:
             return
+
+        if self.hisparse_connector is not None and batch_request_indices is not None:
+            self.hisparse_connector.set_request_state_indices(batch_request_indices)
 
         # TODO: sort out KV Connectors' use of forward_context
         if is_forward_context_available():
@@ -85,8 +113,26 @@ class ActiveKVConnector(KVConnector):
                 self.kv_connector.start_load_kv(get_forward_context())
 
     def finish_forward(self) -> None:
-        if not self._disabled:
-            self.kv_connector.finish_forward()
+        if not self._disabled and self.hisparse_connector is not None:
+            self.hisparse_connector.finish_forward()
+
+    @property
+    def fully_resident_kv(self) -> bool:
+        connector = self.hisparse_connector
+        return connector is None or connector.fully_resident_kv
+
+    @contextmanager
+    def capture_kv_residency(self) -> Iterator[Callable[[bool], None] | None]:
+        connector = self.hisparse_connector
+        if connector is None:
+            yield None
+            return
+        connector.set_fully_resident_kv(True)
+        try:
+            yield connector.set_fully_resident_kv
+        finally:
+            connector.set_fully_resident_kv(False)
+            connector.reset_hot_state()
 
     def post_forward(
         self, finished_req_ids: set[str], wait_for_save: bool = True
@@ -129,10 +175,12 @@ NO_OP_KV_CONNECTOR = KVConnector()
 
 
 def get_kv_connector(
-    vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
+    vllm_config: VllmConfig,
+    kv_caches_dict: dict[str, torch.Tensor],
+    hisparse_worker: "HiSparseWorker | None" = None,
 ) -> KVConnector:
     if not has_kv_transfer_group():
         # No-op connector.
         return NO_OP_KV_CONNECTOR
 
-    return ActiveKVConnector(vllm_config, kv_caches_dict)
+    return ActiveKVConnector(vllm_config, kv_caches_dict, hisparse_worker)

@@ -248,6 +248,34 @@ class KVBlockZeroer:
             self.zero_block_ids([0])
 
 
+def build_kv_block_zeroers(
+    *,
+    device: torch.device,
+    attn_groups: list[list["AttentionGroup"]],
+    kernel_block_sizes: list[int],
+    cache_dtype: str,
+    static_forward_context: dict[str, Any],
+    kv_cache_config: KVCacheConfig,
+    runner_only_attn_layers: set[str] | None = None,
+) -> dict[int, KVBlockZeroer]:
+    return {
+        pool_id: KVBlockZeroer(
+            device,
+            attn_groups_iter=(group for groups in attn_groups for group in groups),
+            kernel_block_sizes=kernel_block_sizes,
+            cache_dtype=cache_dtype,
+            static_forward_context=static_forward_context,
+            runner_only_attn_layers=runner_only_attn_layers,
+            zeroing_group_ids={
+                group_id
+                for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+                if group.block_pool_id == pool_id
+            },
+        )
+        for pool_id in kv_cache_config.zeroing_block_pool_ids
+    }
+
+
 @dataclass
 class AttentionGroup:
     backend: type[AttentionBackend]
@@ -520,6 +548,37 @@ def bind_kv_cache(
     # layer for the KV connector to register.
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].bind_kv_cache(kv_cache)
+
+
+class DeviceKVCacheBlockCopier:
+    def __init__(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_caches: Mapping[str, torch.Tensor | list[torch.Tensor]],
+    ) -> None:
+        self._num_blocks_by_pool = kv_cache_config.num_blocks_by_pool
+        self._caches_by_pool: dict[int, list[torch.Tensor | list[torch.Tensor]]] = (
+            defaultdict(list)
+        )
+        for group in kv_cache_config.kv_cache_groups:
+            pool_id = group.block_pool_id
+            if pool_id is None:
+                continue
+            self._caches_by_pool[pool_id].extend(
+                kv_caches[name] for name in group.layer_names if name in kv_caches
+            )
+
+    def copy(self, copies: Sequence[KVCacheBlockCopy]) -> None:
+        copies_by_pool: dict[int, list[KVCacheBlockCopy]] = defaultdict(list)
+        for copy in copies:
+            if copy.block_pool_id is not None:
+                copies_by_pool[copy.block_pool_id].append(copy)
+        for pool_id, pool_copies in copies_by_pool.items():
+            copy_kv_cache_blocks_inplace(
+                self._caches_by_pool[pool_id],
+                self._num_blocks_by_pool[pool_id],
+                pool_copies,
+            )
 
 
 def copy_kv_cache_blocks_inplace(
