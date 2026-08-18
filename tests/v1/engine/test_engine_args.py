@@ -19,6 +19,7 @@ def test_prefix_caching_from_cli():
         "V1 turns on prefix caching by default."
     )
     assert not vllm_config.cache_config.deterministic_prefix_caching
+    assert vllm_config.cache_config.prefix_cache_retention_interval == 0
 
     args = parser.parse_args(["--deterministic-prefix-caching"])
     vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
@@ -59,6 +60,10 @@ def test_prefix_caching_from_cli():
     parser.exit_on_error = False
     with pytest.raises(ArgumentError):
         args = parser.parse_args(["--prefix-caching-hash-algo", "invalid"])
+
+    args = parser.parse_args(["--prefix-cache-retention-interval", "64"])
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert vllm_config.cache_config.prefix_cache_retention_interval == 64
 
 
 @pytest.mark.skipif(_xxhash is None, reason="xxhash not installed")
@@ -112,3 +117,20 @@ def test_mm_prefix_lm_raises_batched_tokens_floor():
         vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
 
     assert vllm_config.scheduler_config.max_num_batched_tokens >= 2496
+
+
+def test_data_parallel_start_rank_zero_infers_hybrid_lb():
+    """An explicit --data-parallel-start-rank 0 must be treated the same as
+    any other explicit start rank when inferring hybrid LB mode, not as
+    "unset" (regression test for a truthiness-vs-`is not None` bug).
+    """
+    engine_args = EngineArgs(
+        model="facebook/opt-125m",
+        data_parallel_size=4,
+        data_parallel_size_local=2,
+        data_parallel_start_rank=0,
+    )
+    vllm_config = engine_args.create_engine_config(UsageContext.OPENAI_API_SERVER)
+
+    assert vllm_config.parallel_config.data_parallel_hybrid_lb is True
+    assert vllm_config.parallel_config.data_parallel_rank == 0

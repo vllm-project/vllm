@@ -17,7 +17,7 @@ import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.config.parallel import ParallelConfig
-from vllm.utils.network_utils import get_open_port
+from vllm.utils.network_utils import get_file_store_init_method
 from vllm.utils.system_utils import update_environment_variables
 
 mp.set_start_method("spawn", force=True)
@@ -76,7 +76,7 @@ def _assert_packed_a2a_close(
 
 
 def _distributed_run(fn, world_size: int, extra_env: dict[str, str]) -> None:
-    port = str(get_open_port())
+    distributed_init_method = get_file_store_init_method()
     processes: list[mp.Process] = []
     for rank in range(world_size):
         env = {
@@ -84,8 +84,7 @@ def _distributed_run(fn, world_size: int, extra_env: dict[str, str]) -> None:
             "LOCAL_RANK": str(rank),
             "WORLD_SIZE": str(world_size),
             "LOCAL_WORLD_SIZE": str(world_size),
-            "MASTER_ADDR": "localhost",
-            "MASTER_PORT": port,
+            "DISTRIBUTED_INIT_METHOD": distributed_init_method,
             **extra_env,
         }
         process = mp.Process(target=fn, args=(env,))
@@ -483,14 +482,23 @@ class TestPackedA2AKernels:
 def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
     update_environment_variables(env)
     local_rank = int(env["LOCAL_RANK"])
+    world_size = int(env["WORLD_SIZE"])
     torch.accelerator.set_device_index(local_rank)
     if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
         dist.init_process_group(
             backend="cpu:gloo,cuda:nccl",
             device_id=torch.device(f"cuda:{local_rank}"),
+            init_method=env["DISTRIBUTED_INIT_METHOD"],
+            rank=local_rank,
+            world_size=world_size,
         )
     else:
-        dist.init_process_group(backend="nccl")
+        dist.init_process_group(
+            backend="nccl",
+            init_method=env["DISTRIBUTED_INIT_METHOD"],
+            rank=local_rank,
+            world_size=world_size,
+        )
     use_workspace = env.get("USE_WORKSPACE") == "1"
     if use_workspace:
         from vllm.v1.worker.workspace import init_workspace_manager
