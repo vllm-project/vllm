@@ -270,9 +270,11 @@ struct TemplateMessage<'a> {
     // as top-level request tools.
     tools: Option<Vec<TemplateTool>>,
     // Reasoning-capable HF templates are inconsistent on the exact field name,
-    // so expose both variants for compatibility.
+    // so expose all known variants for compatibility (`thoughts` is read by the
+    // ERNIE 4.5 thinking template).
     reasoning: Option<String>,
     reasoning_content: Option<String>,
+    thoughts: Option<String>,
     // Function-call-capable templates commonly expect assistant tool calls
     // under this OpenAI-compatible field name.
     tool_calls: Option<Vec<TemplateToolCall>>,
@@ -350,6 +352,7 @@ fn to_template_message<'a>(
             tools: None,
             reasoning: None,
             reasoning_content: None,
+            thoughts: None,
             tool_calls: None,
             tool_call_id: None,
         },
@@ -359,6 +362,7 @@ fn to_template_message<'a>(
             tools: tools.as_deref().map(to_template_tools),
             reasoning: None,
             reasoning_content: None,
+            thoughts: None,
             tool_calls: None,
             tool_call_id: None,
         },
@@ -368,6 +372,7 @@ fn to_template_message<'a>(
             tools: None,
             reasoning: None,
             reasoning_content: None,
+            thoughts: None,
             tool_calls: None,
             tool_call_id: None,
         },
@@ -382,7 +387,8 @@ fn to_template_message<'a>(
                 content,
                 tools: None,
                 reasoning: reasoning.clone(),
-                reasoning_content: reasoning,
+                reasoning_content: reasoning.clone(),
+                thoughts: reasoning,
                 tool_calls,
                 tool_call_id: None,
             }
@@ -396,6 +402,7 @@ fn to_template_message<'a>(
             tools: None,
             reasoning: None,
             reasoning_content: None,
+            thoughts: None,
             tool_calls: None,
             tool_call_id: Some(tool_call_id.clone()),
         },
