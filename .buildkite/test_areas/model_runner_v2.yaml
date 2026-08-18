@@ -131,7 +131,7 @@ steps:
       label: ":amd: (MI355) Model Runner V2 Spec Decode"
       dind: false
       device: mi355_1
-      timeout_in_minutes: 73
+      timeout_in_minutes: 75
       depends_on:
       - image-build-amd
       source_file_dependencies:

@@ -143,7 +143,7 @@ steps:
       label: ":amd: (MI250) Language Models (PPL)"
       dind: false
       device: mi250_1
-      timeout_in_minutes: 64
+      timeout_in_minutes: 65
       depends_on:
       - image-build-amd
       source_file_dependencies:
@@ -206,6 +206,6 @@ steps:
       label: ":amd: (MI250) Language Models (MTEB)"
       dind: false
       device: mi250_1
-      timeout_in_minutes: 58
+      timeout_in_minutes: 60
       depends_on:
       - image-build-amd
