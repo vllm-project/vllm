@@ -12,6 +12,7 @@ from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonPointerInputVariant,
     TritonWarmupTensor,
+    triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -248,7 +249,7 @@ class BuildPrefillChunkMetadataKernel(
         input_variant: TritonPointerInputVariant
 
     @staticmethod
-    @triton.jit(do_not_specialize=["query_slice_start", "query_slice_stop"])
+    @triton.jit
     def kernel(
         # Inputs
         query_start_loc_ptr,
@@ -357,9 +358,12 @@ class BuildPrefillChunkMetadataKernel(
             max(1, int(ratio))
             for ratio in (getattr(hf_config, "compress_ratios", None) or (1,))
         )
+        scalar_specialization_reps = tuple(
+            triton_scalar_specialization_rep(value) for value in (1, 2, 16)
+        )
         return self._trace_dispatch(self.dispatch)(
-            query_slice_start=0,
-            query_slice_stop=1,
+            query_slice_start=scalar_specialization_reps,
+            query_slice_stop=scalar_specialization_reps,
             DCP_RANK=dcp_rank,
             DCP_WORLD=dcp_world,
             DCP_INTERLEAVE=dcp_interleave,

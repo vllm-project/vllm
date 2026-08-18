@@ -8,7 +8,7 @@ import torch
 
 from tests.v1.attention.utils import create_vllm_config
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
-    trace_triton_kernel_specialization_args,
+    triton_scalar_specialization_rep,
 )
 from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
     _INDEXER_PREFILL_CHUNK_METADATA_BACKENDS,
@@ -39,13 +39,21 @@ def test_indexer_warmup_normalizes_zero_compress_ratios():
     assert {key.COMPRESS_RATIO for key in keys} == {1, 4, 128}
 
 
-def test_prefill_chunk_slice_bounds_do_not_specialize():
-    specialization_args = trace_triton_kernel_specialization_args(
-        BuildPrefillChunkMetadataKernel.kernel
+def test_prefill_chunk_warmup_covers_scalar_specializations():
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(compress_ratios=[4])),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=1,
+            cp_kv_cache_interleave_size=1,
+        ),
     )
 
-    assert "query_slice_start" not in specialization_args
-    assert "query_slice_stop" not in specialization_args
+    keys = BuildPrefillChunkMetadataKernel().get_warmup_keys(config)
+    expected = {triton_scalar_specialization_rep(value) for value in (0, 1, 2)}
+
+    assert {key.query_slice_start for key in keys} == expected
+    assert {key.query_slice_stop for key in keys} == expected
 
 
 def test_deepseek_v4_indexer_enables_prefill_metadata_warmup():
