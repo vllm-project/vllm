@@ -593,7 +593,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # consumed by the per-layer range-put handler). None/empty until then.
         self._active_put_keys: set[str] | None = None
 
-    def add_request(self, request: ReqMeta) -> None:
+    def add_request(self, request: ReqMeta | LayerTransferTask) -> None:
+        # Layerwise per-layer tasks carry no store_job_id; enqueue them directly
+        # (the ledger only tracks bulk, non-layerwise store jobs).
+        if isinstance(request, LayerTransferTask):
+            super().add_request(request)
+            return
         # Register before enqueueing so a job is never picked up unledgered.
         assert request.store_job_id is not None
         with self.done_task_lock:
