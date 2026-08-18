@@ -338,5 +338,73 @@
       "atomic_indexing": [],
       "pid_type": "flat"
     }
+  },
+  {
+    "key": {
+      "config_id": 5
+    },
+    "config": {
+      "block_sizes": [
+        2048,
+        8
+      ],
+      "loop_orders": [
+        [
+          0,
+          1
+        ]
+      ],
+      "range_unroll_factors": [
+        0,
+        0,
+        4,
+        0
+      ],
+      "range_warp_specializes": [
+        null,
+        false,
+        null,
+        null
+      ],
+      "range_num_stages": [],
+      "range_multi_buffers": [
+        null,
+        null,
+        false,
+        false
+      ],
+      "range_flattens": [
+        null,
+        null,
+        true,
+        false
+      ],
+      "static_ranges": [
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "",
+        "last",
+        "first",
+        "first",
+        "first"
+      ],
+      "num_warps": 1,
+      "num_stages": 8,
+      "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer",
+        "pointer",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer",
+        "pointer"
+      ],
+      "pid_type": "flat",
+      "atomic_indexing": []
+    }
   }
 ]

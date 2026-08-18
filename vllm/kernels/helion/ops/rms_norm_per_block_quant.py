@@ -36,6 +36,7 @@ from vllm.kernels.helion.register import register_kernel
 
 logger = init_logger(__name__)
 
+
 def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover all
     # input property combination. Currently, dtypes are fixed. We need
@@ -130,10 +131,12 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
         return cached
 
     if all(set(key) == {"config_id"} for key in config_keys):
-        if num_tokens <= 1:
+        if group_size != 128:
+            config_id = 5
+        elif num_tokens <= 1:
             config_id = 0
         elif num_tokens <= 8:
-            config_id = 1
+            config_id = 1 if hidden_size <= 4096 else 2
         elif num_tokens <= 16:
             config_id = 2
         elif num_tokens <= 32:

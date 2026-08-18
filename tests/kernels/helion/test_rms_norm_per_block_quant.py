@@ -127,6 +127,42 @@ class TestRmsNormPerBlockQuantConfigPicker:
 
         assert pick_config((), [config_key]) is config_key
 
+    @pytest.mark.parametrize(
+        "num_tokens, hidden_size, group_size, expected_config_id",
+        [
+            (1, 2048, 128, 0),
+            (2, 2048, 128, 1),
+            (8, 4096, 128, 1),
+            (2, 5120, 128, 2),
+            (8, 7168, 128, 2),
+            (9, 5120, 128, 2),
+            (16, 7168, 128, 2),
+            (17, 3072, 128, 3),
+            (32, 5120, 128, 3),
+            (33, 7168, 128, 4),
+            (512, 8192, 128, 4),
+            (8, 8192, 128, 2),
+            (16, 12288, 128, 2),
+            (32, 16384, 128, 3),
+            (33, 25600, 128, 4),
+            (2, 64, 64, 5),
+            (8, 4096, 64, 5),
+        ],
+    )
+    def test_b200_compact_config_routing(
+        self,
+        num_tokens: int,
+        hidden_size: int,
+        group_size: int,
+        expected_config_id: int,
+    ) -> None:
+        config_keys = [CaseKey({"config_id": config_id}) for config_id in range(6)]
+        args = _generate_fake_input(num_tokens, hidden_size, group_size)
+
+        assert pick_config(args, config_keys) == CaseKey(
+            {"config_id": expected_config_id}
+        )
+
     def test_config_picker_fallback_to_largest(self):
         config_keys = [
             CaseKey({"hidden_size": 2048, "group_size": 64, "num_tokens": 16}),
@@ -149,7 +185,8 @@ class TestRmsNormPerBlockQuantConfigPicker:
         config_set = ConfigManager.get_instance().load_config_set(
             "rms_norm_per_block_quant"
         )
-        configs = config_set.to_dict()["nvidia_b200"].values()
+        configs = list(config_set.to_dict()["nvidia_b200"].values())
+        assert len(configs) == 6
 
         # TODO: Remove once the Triton pin includes
         # https://github.com/triton-lang/triton/pull/9716. Tracked by
@@ -349,6 +386,97 @@ class TestRmsNormPerBlockQuantCorrectness:
             - ops_out.view(torch.uint8).to(torch.int16)
         ).abs().max() <= 1
 
+        if add_residual:
+            torch.testing.assert_close(ref_residual, ops_residual)
+
+    @pytest.mark.parametrize(
+        "num_tokens, hidden_size, group_size",
+        [
+            (2, 64, 64),
+            (1, 1024, 64),
+            (8, 5120, 64),
+            (33, 8192, 64),
+            (16, 12288, 64),
+            (513, 16384, 64),
+            (1, 2048, 128),
+            (2, 2048, 128),
+            (8, 1024, 128),
+            (8, 4096, 128),
+            (2, 5120, 128),
+            (8, 7168, 128),
+            (8, 8192, 128),
+            (9, 5120, 128),
+            (16, 7168, 128),
+            (16, 12288, 128),
+            (17, 3072, 128),
+            (32, 5120, 128),
+            (32, 16384, 128),
+            (33, 7168, 128),
+            (33, 25600, 128),
+            (513, 8192, 128),
+        ],
+    )
+    @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
+    def test_b200_compact_config_robustness(
+        self,
+        num_tokens: int,
+        hidden_size: int,
+        group_size: int,
+        add_residual: bool,
+    ) -> None:
+        if not current_platform.is_cuda() or "B200" not in torch.cuda.get_device_name():
+            pytest.skip("B200 compact config robustness test")
+
+        set_random_seed(0)
+        input = torch.randn(
+            num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
+        ) / hidden_size
+        weight = torch.normal(
+            mean=1.0,
+            std=1.0,
+            size=(hidden_size,),
+            dtype=input.dtype,
+            device=input.device,
+        )
+        residual = torch.randn_like(input) / hidden_size if add_residual else None
+        groups_per_row = hidden_size // group_size
+        ref_residual = residual.clone() if residual is not None else None
+        ops_residual = residual.clone() if residual is not None else None
+        ref_out = torch.empty(input.shape, device=input.device, dtype=FP8_DTYPE)
+        ops_out = torch.empty_like(ref_out)
+        ref_scales = torch.empty(
+            num_tokens, groups_per_row, device=input.device, dtype=torch.float32
+        )
+        ops_scales = torch.empty_like(ref_scales)
+
+        baseline(
+            ref_out,
+            input,
+            weight,
+            ref_scales,
+            EPS,
+            None,
+            ref_residual,
+            group_size,
+            False,
+        )
+        rms_norm_per_block_quant(
+            ops_out,
+            input,
+            weight,
+            ops_scales,
+            EPS,
+            None,
+            ops_residual,
+            group_size,
+            False,
+        )
+
+        torch.testing.assert_close(ref_scales, ops_scales)
+        assert (
+            ref_out.view(torch.uint8).to(torch.int16)
+            - ops_out.view(torch.uint8).to(torch.int16)
+        ).abs().max() <= 1
         if add_residual:
             torch.testing.assert_close(ref_residual, ops_residual)
 
