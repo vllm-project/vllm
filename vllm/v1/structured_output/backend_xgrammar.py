@@ -164,6 +164,7 @@ class XgrammarGrammar(StructuredOutputGrammar):
             return False
         for token in tokens:
             if not self.matcher.accept_token(token):
+                self._is_terminated = self.matcher.is_terminated()
                 logger.error(
                     "Failed to advance FSM for request %s "
                     "for tokens %s. Please file an issue.",
@@ -172,7 +173,9 @@ class XgrammarGrammar(StructuredOutputGrammar):
                 )
                 return False
             self.num_processed_tokens += 1
-        self._is_terminated = self.matcher.is_terminated()
+            self._is_terminated = self.matcher.is_terminated()
+            if self._is_terminated:
+                break
         return True
 
     def validate_tokens(self, tokens: list[int]) -> list[int]:
@@ -185,6 +188,8 @@ class XgrammarGrammar(StructuredOutputGrammar):
         for token in tokens:
             if self.matcher.accept_token(token):
                 accepted_tokens.append(token)
+                if self.matcher.is_terminated():
+                    break
             else:
                 break
         if len(accepted_tokens) > 0:
@@ -204,8 +209,9 @@ class XgrammarGrammar(StructuredOutputGrammar):
         return self._is_terminated
 
     def reset(self):
-        self.num_processed_tokens = 0
         self.matcher.reset()
+        self.num_processed_tokens = 0
+        self._is_terminated = False
 
 
 # cf https://github.com/mlc-ai/xgrammar/blob/a32ac892676d2eedc0327416105b9b06edfb94b2/cpp/json_schema_converter.cc
