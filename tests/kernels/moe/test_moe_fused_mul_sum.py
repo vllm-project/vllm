@@ -71,9 +71,13 @@ def test_invalid_slots_excluded(num_tokens: int, top_k: int, use_expert_map: boo
         expert_map[:local] = torch.arange(local, dtype=torch.int32, device=device)
         inputs[(topk_ids >= 0) & (expert_map[topk_ids.clamp(min=0)] < 0)] = float("nan")
 
+    # The _reference implementation zeros out outputs. We need to match that here,
+    # otherwise the test fails.
+    outputs = torch.zeros(num_tokens, HIDDEN_SIZE, dtype=torch.bfloat16, device=device)
     out = moe_fused_mul_sum(
         inputs=inputs,
         topk_weights=topk_weights,
+        outputs=outputs,
         topk_ids=topk_ids,
         expert_map=expert_map,
     )
