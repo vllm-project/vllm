@@ -112,6 +112,18 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
             head_dim=head_dim, dtype=dtype, prefix=prefix, cache_config=cache_config
         )
         assert index_kpool > 1, "Glm5NextIndexerCache expects index_kpool > 1"
+        # Chunked prefill aligns chunk ends to ``cache_config.block_size``;
+        # the prefill compress kernel (``_kpool_compress_insert``) assumes
+        # pool-aligned chunk starts, which holds only if that block_size is a
+        # multiple of kpool -- otherwise every pool straddling a chunk
+        # boundary is silently dropped (masked off as a leading-partial pool).
+        # Distinct from the get_kv_cache_spec assert, which guards the spec's
+        # DeepGEMM tiling on its own block_size.
+        assert cache_config.block_size % index_kpool == 0, (
+            "Glm5NextIndexerCache: cache_config.block_size "
+            f"({cache_config.block_size}) must be a multiple of index_kpool "
+            f"({index_kpool}) so chunked-prefill boundaries stay pool-aligned."
+        )
         self._index_kpool = index_kpool
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig):
