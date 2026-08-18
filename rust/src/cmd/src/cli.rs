@@ -39,7 +39,8 @@ use crate::cli::unsupported::UnsupportedArgs;
 #[derive(Debug, Parser)]
 #[command(
     name = "vllm-rs",
-    about = "Rust frontend and managed-engine CLI for vLLM."
+    about = "Rust frontend and managed-engine CLI for vLLM.",
+    version = vllm_build_info::VERSION
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -457,6 +458,7 @@ impl SharedRuntimeArgs {
         coordinator_address: Option<String>,
         engine_start_index: u32,
         engine_count: usize,
+        data_parallel_size: usize,
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
@@ -472,6 +474,7 @@ impl SharedRuntimeArgs {
                 output_address,
                 engine_start_index,
                 engine_count,
+                data_parallel_size,
                 ready_timeout,
             },
             coordinator_mode: match coordinator_address {
@@ -661,6 +664,9 @@ pub struct FrontendArgs {
     /// Total number of data-parallel engines expected for this frontend.
     #[arg(long, default_value_t = 1)]
     pub engine_count: usize,
+    /// Deployment-wide configured data-parallel size. Defaults to engine count.
+    #[arg(long)]
+    pub data_parallel_size: Option<usize>,
 
     /// Shared frontend arguments as one JSON object.
     #[arg(long = "args-json", value_parser = parse_runtime_args_json, value_name = "JSON")]
@@ -670,6 +676,7 @@ pub struct FrontendArgs {
 impl FrontendArgs {
     /// Convert the CLI arguments into the OpenAI server's runtime config.
     pub fn into_config(self) -> Config {
+        let data_parallel_size = self.data_parallel_size.unwrap_or(self.engine_count);
         self.runtime.into_bootstrapped_config(
             self.listen_fd,
             self.input_address,
@@ -677,6 +684,7 @@ impl FrontendArgs {
             self.coordinator_address,
             self.engine_start_index,
             self.engine_count,
+            data_parallel_size,
         )
     }
 }

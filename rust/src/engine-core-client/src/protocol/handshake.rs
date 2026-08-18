@@ -63,8 +63,11 @@ pub struct EngineCoreReadyResponse {
     pub vllm_version: String,
     /// World size (TP * PP) from the parallel config.
     pub world_size: u64,
-    /// Data parallelism size from the parallel config.
-    pub data_parallel_size: u64,
+    /// Data-parallel size from this EngineCore's effective parallel config.
+    /// Dense independent-DP ranks are reconfigured to report `1`; the client
+    /// transport owns the deployment-wide data-parallel size.
+    #[serde(rename = "data_parallel_size")]
+    pub effective_data_parallel_size: u64,
     // Required discovery metadata; EngineCore and client versions must match.
     /// Tensor-parallel size of this engine.
     pub tensor_parallel_size: u32,
@@ -80,6 +83,10 @@ pub struct EngineCoreReadyResponse {
     pub max_num_batched_tokens: u64,
     /// Unique identifier for this server instance.
     pub instance_id: String,
+    /// Whether the engine was started with LoRA support enabled.
+    pub supports_lora: bool,
+    /// Maximum number of LoRA adapters the engine may keep active.
+    pub max_loras: u32,
     /// Total KV cache capacity in tokens, if reported.
     pub kv_cache_size_tokens: Option<u64>,
     /// Maximum achievable request concurrency given the KV cache, if reported.
@@ -87,6 +94,15 @@ pub struct EngineCoreReadyResponse {
     /// KV-event publisher configuration, if configured.
     #[serde(default)]
     pub kv_events_config: Option<KvEventsConfig>,
+    /// Configured RL weight-transfer backend, if weight transfer is enabled.
+    #[serde(default)]
+    pub weight_transfer_backend: Option<String>,
+    /// Whether the engine was started with sleep mode enabled.
+    #[serde(default)]
+    pub enable_sleep_mode: bool,
+    /// Whether the engine has a speculative draft model that can be updated.
+    #[serde(default)]
+    pub supports_draft_weight_updates: bool,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

@@ -60,7 +60,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, StopParam
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
@@ -281,7 +281,7 @@ class ResponsesRequest(OpenAIBaseModel):
 
     repetition_penalty: float | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
-    stop: str | list[str] | None = []
+    stop: StopParam = []
     ignore_eos: bool = False
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
@@ -467,6 +467,8 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_background(cls, data):
+        if not isinstance(data, dict):
+            return data
         if not data.get("background"):
             return data
         if not data.get("store", True):
@@ -479,6 +481,8 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_prompt(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("prompt") is not None:
             raise VLLMValidationError(
                 "prompt template is not supported", parameter="prompt"
@@ -499,6 +503,8 @@ class ResponsesRequest(OpenAIBaseModel):
 
         Invalid structures are left for Pydantic to reject.
         """
+        if not isinstance(data, dict):
+            return data
         input_data = data.get("input")
 
         # Early return for None, strings, or bytes
