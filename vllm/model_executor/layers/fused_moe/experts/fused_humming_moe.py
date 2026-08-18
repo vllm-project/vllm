@@ -103,7 +103,7 @@ def _fixup_moe_tuning_config(tuning_config: list, max_k_block: int = 128) -> Non
       the Hopper WGMMA N dimension. Widen to 32 when block_n % 32 == 0. w2
       (down) already uses warp_n=32 and is untouched.
     """
-    logger.info_once(f"Attempting to override humming GEMM config")
+    logger.info_once("Attempting to override humming GEMM config")
     for entry in tuning_config:
         config = entry[2]
         block_shape = config.get("block_shape")
@@ -116,7 +116,9 @@ def _fixup_moe_tuning_config(tuning_config: list, max_k_block: int = 128) -> Non
             config["block_shape"] = [block_m, block_n, max_k_block]
             warp_shape = config.get("warp_shape")
             config["warp_shape"] = [warp_shape[0], 32, warp_shape[2]]
-            logger.info_once(f"Overridden humming GEMM config. Current config\n: {config}")
+            logger.info_once(
+                f"Overridden humming GEMM config. Current config\n: {config}"
+            )
 
 
 class HummingExpertsBase(mk.FusedMoEExpertsModular):
