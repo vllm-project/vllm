@@ -71,6 +71,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -788,7 +789,10 @@ class VariableResolutionResamplerModel(nn.Module):
             return x
 
         def fwd_placeholder(x, grid_thw, to_tensor=False):
-            grid_thw_cpu = grid_thw.cpu().numpy()
+            # The per-image grids drive the Python-level offset arithmetic
+            # below; the same read is wrapped on the cudagraph path.
+            with gpu_sync_allowed():
+                grid_thw_cpu = grid_thw.cpu().numpy()
             grid_t, grid_hw = grid_thw_cpu[:, 0], grid_thw_cpu[:, 1:]
             grid_hw_after_conv = grid_hw.prod(-1) // (self.spatial_conv_size**2)
 
@@ -1697,8 +1701,11 @@ class Ernie4_5_VLMoeForConditionalGeneration(
             EncoderCudaGraphReplayBuffers,
         )
 
+        # The per-image grids are needed as Python ints to size the buffers.
+        with gpu_sync_allowed():
+            grid_thw_list = mm_kwargs["image_grid_thw"].tolist()
         metadata = self.vision_model.prepare_encoder_metadata(
-            mm_kwargs["image_grid_thw"].tolist(), max_batch_size=max_batch_size
+            grid_thw_list, max_batch_size=max_batch_size
         )
         values = metadata | {
             "pixel_values": mm_kwargs["pixel_values"],
@@ -1738,7 +1745,10 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         # Ernie only uses the single "default" encoder path.
         output = outputs["default"]
         grid_thw = batch_mm_kwargs["image_grid_thw"].to(output.device)
-        num_valid = int((grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).sum())
+        # The valid token count slices the graph output for the eager
+        # resampler call, so it has to come back to the host.
+        with gpu_sync_allowed():
+            num_valid = int((grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).sum())
         image_embeds = self.resampler_model(output[:num_valid], grid_thw)
         scatter_output_slices(image_embeds, indices, per_item_out_tokens, dest, clone)
 
