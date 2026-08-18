@@ -543,15 +543,17 @@ def _commit_kda_state_kernel(
             lower_bound,
             USE_LOWER_BOUND,
         )
-        update = correction[:, None] * normalized_k[None, :]
         decay = tl.exp(gate)
-        final_correction += update * final_decay[None, :]
+        final_correction += correction[:, None] * (
+            normalized_k * final_decay
+        )[None, :]
         final_decay *= decay
         if ALIGN_MODE:
             before_boundary = token_offset < boundary_recovery_len
             boundary_correction += tl.where(
                 before_boundary,
-                update * boundary_decay[None, :],
+                correction[:, None]
+                * (normalized_k * boundary_decay)[None, :],
                 0.0,
             )
             boundary_decay *= tl.where(before_boundary, decay, 1.0)
