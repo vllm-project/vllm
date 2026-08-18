@@ -36,37 +36,6 @@ from vllm.kernels.helion.register import register_kernel
 
 logger = init_logger(__name__)
 
-# H100 multi-shape schedule from pytorch/helion#3154.
-_SINGLE_CONFIGS = {
-    "nvidia_h100": helion.Config(
-        block_sizes=[2048, 16],
-        loop_orders=[[1, 0]],
-        range_unroll_factors=[0, 2, 2, 4],
-        range_multi_buffers=[None, True, True, True],
-        range_flattens=[None, None, False, True],
-        static_ranges=[False],
-        load_eviction_policies=["", "", "first", "last", "last", ""],
-        num_warps=8,
-        num_stages=1,
-        indexing=[
-            "tensor_descriptor",
-            "pointer",
-            "tensor_descriptor",
-            "tensor_descriptor",
-            "tensor_descriptor",
-            "pointer",
-            "tensor_descriptor",
-            "pointer",
-            "tensor_descriptor",
-        ],
-        pid_type="flat",
-        atomic_indexing=[],
-        range_warp_specializes=[],
-        range_num_stages=[],
-    )
-}
-
-
 def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover all
     # input property combination. Currently, dtypes are fixed. We need
@@ -137,17 +106,20 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     """Pick the best pre-tuned config for the given input shape.
 
     Selection strategy:
-      1. Find the closest hidden_size among available configs
+      1. Return the config directly when the platform has only one.
+      2. Find the closest hidden_size among available configs
          (exact match preferred).
-      2. Find the closest group_size among available configs
+      3. Find the closest group_size among available configs
          (exact match preferred).
-      2. Among the num_tokens values tuned for that hidden_size and group_size, pick
+      4. Among the num_tokens values tuned for that hidden_size and group_size, pick
          the smallest num_tokens >= the input's num_tokens. If the input is
          larger than all available num_tokens, fall back to the largest.
     """
 
     if not config_keys:
         return None
+    if len(config_keys) == 1:
+        return config_keys[0]
 
     _, input, _, _, _, _, _, group_size, *_ = args
     num_tokens, hidden_size = input.shape
@@ -282,7 +254,6 @@ autotune_baseline = (
         autotune_baseline_fn=autotune_baseline,
         ignore_warnings=[helion.exc.TensorOperationInWrapper],
     ),
-    single_configs=_SINGLE_CONFIGS,
 )  # type: ignore[misc]
 def rms_norm_per_block_quant(
     result: torch.Tensor,  # [num_tokens, hidden_size]

@@ -113,6 +113,11 @@ class TestPerTokenGroupFp8QuantConfigPicker:
         selected_key = pick_config(args, config_keys)
         assert selected_key is None
 
+    def test_config_picker_single_config(self):
+        config_key = CaseKey.default()
+
+        assert pick_config((), [config_key]) is config_key
+
     def test_config_picker_fallback_to_largest(self):
         config_keys = [
             CaseKey({"hidden_size": 2048, "group_size": 64, "num_tokens": 16}),

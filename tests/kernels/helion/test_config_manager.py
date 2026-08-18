@@ -38,6 +38,20 @@ def reset_config_manager_singleton():
     ConfigManager.reset_instance()
 
 
+@pytest.mark.parametrize(
+    "kernel_name",
+    [
+        "per_token_group_fp8_quant",
+        "rms_norm_per_block_quant",
+        "silu_and_mul_per_block_quant",
+    ],
+)
+def test_h100_block_quant_uses_one_default_config(kernel_name: str):
+    configs = ConfigManager().get_platform_configs(kernel_name, "nvidia_h100")
+
+    assert list(configs) == [CaseKey.default()]
+
+
 class TestConfigSet:
     """Test suite for ConfigSet class."""
 
