@@ -197,12 +197,15 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if current_platform.is_cpu():
+            # MLA's kv_b_proj (see `_cpu_skip_gemm_dispatch`): not
+            # perf-critical, so skip packing and use a plain fallback.
+            if getattr(layer, "_cpu_skip_gemm_dispatch", False):
+                layer.cpu_linear = torch.nn.functional.linear
+                return
+
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
-            # Layers that read their raw weight after loading (e.g. MLA's
-            # kv_b_proj) opt out via `_cpu_keep_raw_weight`.
-            remove_weight = not getattr(layer, "_cpu_keep_raw_weight", False)
-            dispatch_cpu_unquantized_gemm(layer, remove_weight=remove_weight)
+            dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
 
     def apply(
         self,

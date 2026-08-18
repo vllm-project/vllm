@@ -163,6 +163,11 @@ class AMXMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
 
 
 class AMXMLAImpl(MLACommonImpl[MLACommonMetadata]):
+    # Tells MLAAttention (mla_attention.py) to use this impl's own packed
+    # W_UK/W_UV + bmm_cpu for the shared decode absorb/de-absorb, mirroring
+    # is_aiter_triton_fp8_bmm_enabled/is_aiter_triton_fp4_bmm_enabled.
+    uses_amx_bmm = True
+
     def __init__(
         self,
         num_heads: int,
