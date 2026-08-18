@@ -396,6 +396,32 @@ def test_continuation_ignores_reasoning_markers_before_final_message(thinking_mo
     assert (delta.content or "") == " more"
 
 
+def test_adaptive_continuation_resumes_separate_reasoning_content():
+    tokenizer = MiniMaxM3Tokenizer()
+    parser = MiniMaxM3DelegatingParser(
+        tokenizer,
+        chat_template_kwargs={
+            "thinking_mode": "adaptive",
+            "_vllm_continue_final_message": True,
+            "_vllm_continue_final_message_content": "",
+            "_vllm_continue_final_message_reasoning": "plan",
+        },
+    )
+
+    assert parser.is_reasoning_end_from_prompt(tokenizer.encode("plan")) is False
+
+    request = ChatCompletionRequest(
+        messages=[{"role": "assistant", "content": ""}],
+        model="test-model",
+        add_generation_prompt=False,
+        continue_final_message=True,
+    )
+    reasoning, content, _ = parser.parse(" more", request)
+
+    assert (reasoning or "") == " more"
+    assert (content or "") == ""
+
+
 def test_streaming_boundary_can_emit_reasoning_and_content():
     parser, tokenizer = make_parser()
 
