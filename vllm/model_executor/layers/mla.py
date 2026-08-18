@@ -88,7 +88,6 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.kv_b_proj = mla_modules.kv_b_proj
         self.rotary_emb = mla_modules.rotary_emb
         self.o_proj = mla_modules.o_proj
-        self.g_proj = mla_modules.g_proj
         self.indexer = mla_modules.indexer
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
         self.is_sparse = mla_modules.is_sparse
