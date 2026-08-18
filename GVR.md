@@ -3856,3 +3856,50 @@ Validation on one GB200:
 
 The coverage was pushed to pull request 52696 in commit `10c21f2549`, and the
 PR description now calls out DSV4 Flash MXFP4 prefill and MTP decode support.
+
+## 2026-08-18: DeepSeek-V4 Flash FP4 indexer-cache NIAH
+
+The real `deepseek-ai/DeepSeek-V4-Flash` checkpoint was tested with FP16
+indexer logits and `use_fp4_indexer_cache=true`. The paired control used the
+FP8 indexer cache. Both arms otherwise used TP4, MTP with two speculative
+tokens, FP8 main KV cache, 8,192-token chunked prefill, eager execution,
+disabled prefix caching, and disabled FlashInfer autotuning.
+
+The local mega-MoE DeepGEMM extension was stale and lacked
+`get_ring_limit_for_mega_moe`, so both arms used the same ordinary fused-MoE
+path selected by `moe_backend=auto`. The local Rust frontend binary also had a
+stale engine-output schema, so both arms used the Python frontend from the
+repository `.venv`. Neither workaround changed the paired indexer-cache
+comparison.
+
+Startup provided three independent checks that the requested path was active:
+
+- the deprecated alias warning mapped `use_fp4_indexer_cache=true` to
+  `indexer_kv_dtype=mxfp4`;
+- model construction logged `Using MXFP4 indexer cache for Lightning Indexer`;
+- decode metadata logged `use_fp4_cache=True`, with `next_n=3`.
+
+The standard Paul Graham NIAH corpus used one deterministic seven-digit key at
+each of three depths (10%, 50%, and 90%) for four context lengths. Generation
+was greedy and thinking was disabled:
+
+|Context|FP8 indexer exact|FP4 indexer exact|Paired identical responses|
+|---:|---:|---:|---:|
+|50K|3/3|3/3|3/3|
+|100K|3/3|3/3|3/3|
+|200K|3/3|3/3|3/3|
+|250K|3/3|3/3|3/3|
+|**Total**|**12/12**|**12/12**|**12/12**|
+
+Server prompt-token counts matched between paired arms in every cell and
+ranged from 49,983 to 249,984, confirming that no prompt was truncated. The
+raw JSONL results are
+`/tmp/dsv4_niah_fp8_control_20260818.jsonl` and
+`/tmp/dsv4_niah_fp4_alias_true_20260818.jsonl`.
+
+This validates deterministic long-context single-needle retrieval for the
+real DSV4 FP4 indexer-cache path with FP16 logits. It is not a comprehensive
+downstream-accuracy claim. Request latency was intentionally excluded because
+the FP8 control absorbed first-use JIT compilation, so the elapsed times are
+not a controlled performance comparison. The NIAH result and caveat were also
+added to pull request 52696.
