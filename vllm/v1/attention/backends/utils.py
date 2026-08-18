@@ -277,7 +277,9 @@ def resolve_kv_cache_layout(
     if _KV_CACHE_LAYOUT_OVERRIDE is not None:
         return _layout_from_name(_KV_CACHE_LAYOUT_OVERRIDE)
 
-    assert supported_layouts, "No worker reported supported KV cache layouts."
+    assert supported_layouts and all(supported_layouts), (
+        "No worker reported supported KV cache layouts."
+    )
     assert all(names == supported_layouts[0] for names in supported_layouts[1:]), (
         f"Workers disagree on supported KV cache layouts: {supported_layouts}."
     )

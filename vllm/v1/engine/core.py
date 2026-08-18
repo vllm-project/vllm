@@ -290,13 +290,13 @@ class EngineCore:
             # Resolve the KV cache layout before memory profiling: workers that
             # capture full cudagraphs initialize a minimal KV cache during it.
             layout = resolve_kv_cache_layout(
-                self.collective_rpc("get_supported_kv_cache_layouts"),
+                self.model_executor.get_supported_kv_cache_layouts(),
                 [s for specs in kv_cache_specs for s in specs.values()],
             )
             publish_kv_cache_layout_to_current_process(
                 layout.name, vllm_config.cache_config
             )
-            self.collective_rpc("set_kv_cache_layout", args=(layout.name,))
+            self.model_executor.set_kv_cache_layout(layout.name)
 
             if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
                 # NOTE(yongji): should already be set
