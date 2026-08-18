@@ -125,7 +125,6 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
 
         # if model_case.model_id == "fxmarty/qwen_1.5-moe-a2.7b-mxfp4":
         #     llm.apply_model(check_model)
-
         output = llm.generate_greedy("Today I am in the French Alps and", max_tokens=20)
         assert output
 
@@ -187,6 +186,16 @@ def mxfp8_dequantize(x, scale):
     return x_float * scale
 
 
+def mxfp4_quant_dequant(x: torch.Tensor) -> torch.Tensor:
+    shape = x.shape
+    quantized, scale = dynamic_mxfp4_quant(x.to(torch.bfloat16).flatten(0, -2))
+    return (
+        upcast_from_mxfp(quantized.view(torch.uint8), scale, torch.bfloat16, axis=-1)
+        .reshape(shape)
+        .float()
+    )
+
+
 def reference_moe(
     roouting_logits,
     topk,
@@ -219,6 +228,8 @@ def reference_moe(
     expert_weights = torch.nn.functional.softmax(experts.values, dim=1)
     expert_indices = experts.indices
     t = hidden_states.clone()
+    if act_type == "mxfp4":
+        t = mxfp4_quant_dequant(t)
     # MLP #1
     mlp1_weight = w13[expert_indices, ...]
     mlp1_bias = bias13[expert_indices, ...]
@@ -243,6 +254,8 @@ def reference_moe(
             t.to(torch.bfloat16), is_sf_swizzled_layout=False
         )
         t = mxfp8_dequantize(t_quantized, t_scale)
+    elif act_type == "mxfp4":
+        t = mxfp4_quant_dequant(t)
     # MLP #2
     mlp2_weight = w2[expert_indices, ...]
     mlp2_bias = bias2[expert_indices, ...]
@@ -1402,6 +1415,14 @@ ROCM_BACKEND_CONFIGS = {
         "requires_aiter": True,
         "requires_gfx950": True,
     },
+    "AITER_MXFP4_MXFP4": {
+        "activation": "SILU",
+        "act_type": "mxfp4",
+        "rtol": 1.0,
+        "percent": 0.8,
+        "requires_aiter": True,
+        "requires_gfx950": True,
+    },
 }
 
 
@@ -1662,12 +1683,6 @@ def test_rocm_mxfp4_moe_oracle(
     else:
         act_name = "relu2"
 
-    # Some backends apply a SwiGLU clamp even for SILU (e.g. the aiter Triton
-    # W4A16 kernel defaults to limit=7.0); let the backend config override the
-    # reference limit so it matches the kernel.
-    ref_limit = config.get(
-        "swiglu_limit", 7.0 if activation == MoEActivation.SWIGLUOAI else None
-    )
     ref = reference_moe(
         router_logits,
         topk,
@@ -1679,8 +1694,8 @@ def test_rocm_mxfp4_moe_oracle(
         w2_bias.to(torch.float32),
         alpha=1.702 if activation == MoEActivation.SWIGLUOAI else 1.0,
         beta=1.0 if activation == MoEActivation.SWIGLUOAI else 0.0,
-        limit=ref_limit,
-        act_type="bf16",
+        limit=7.0 if activation == MoEActivation.SWIGLUOAI else None,
+        act_type=str(config.get("act_type", "bf16")),
         activation=act_name,
         use_interleaved_layout=use_interleaved,
     )
