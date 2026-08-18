@@ -14,17 +14,17 @@ import torch
 from vllm.platforms import current_platform
 
 
-def _on_gfx950() -> bool:
+def _on_supported_arch() -> bool:
     if not current_platform.is_rocm():
         return False
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import on_gfx942, on_gfx950
 
-    return on_gfx950()
+    return on_gfx950() or on_gfx942()
 
 
 pytestmark = pytest.mark.skipif(
-    not _on_gfx950(),
-    reason="The fused KDA decode kernel is only built for gfx950",
+    not _on_supported_arch(),
+    reason="The fused KDA decode kernel is only built for gfx942 / gfx950",
 )
 
 # Kimi-K3 KDA: 96 heads x 128, conv width 4, gate_lower_bound -5.0.
