@@ -1171,7 +1171,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         ),
                         cu_seqlens=fi_cu_seqlens,
                         max_seqlen=fi_max_seqlen,
-                        enable_pdl=current_platform.is_arch_support_pdl(),
+                        enable_pdl=False,
                     )
                 else:
                     selective_state_update_replayssm_output_only(
