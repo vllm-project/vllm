@@ -98,6 +98,16 @@ variables:
     tests/test_logger.py
   # 国内访问 HuggingFace 的镜像 (parser 测试需要下载 Qwen tokenizer)
   HF_ENDPOINT: https://hf-mirror.com
+  # 整条 pipeline 跑在哪个 runner 上 (job 按 tag 匹配 runner)。
+  # 默认 CPU runner; 手动 Run pipeline 时页面上会出现下拉框, 可切到 GPU runner
+  # (如怀疑 CPU runner 所在节点到 registry 的网络有问题时换链路重试)。
+  # 注意: 该变量作用于全部 job, 不是只换构建 job。
+  RUNNER_TAG:
+    value: "iquest-inference-runner"
+    options:
+      - "iquest-inference-runner"
+      - "iquest-inference-gpu-runner"
+    description: "执行本条 pipeline 的 runner tag (默认 CPU runner)"
 
 # 镜像 tag 规则: <类型>-<commit前9位>-<日期>-dev<流水线编号>,
 #   如 base-5da4717f4-20260706-dev45
@@ -228,7 +238,7 @@ variables:
 lint:
   stage: lint
   tags:
-    - iquest-inference-runner
+    - $RUNNER_TAG
   image: python:3.12
   timeout: 1h
   # 只在 push/MR 上跑; tag 事件不跑 (tag 只用于触发镜像构建)
@@ -284,7 +294,7 @@ lint:
 unit-test:
   stage: unittest
   tags:
-    - iquest-inference-runner
+    - $RUNNER_TAG
   image: ${TEST_DEPS_IMAGE}
   timeout: 1h
   # 只在 push/MR 上跑; tag 事件不跑
@@ -313,7 +323,7 @@ base-image-build:
   interruptible: false   # 完整编译数小时, 不因新推送被自动取消
   extends: .feishu-notify
   tags:
-    - iquest-inference-runner
+    - $RUNNER_TAG
   image:
     name: ${KANIKO_IMAGE}
     entrypoint: [""]
@@ -360,7 +370,7 @@ unittest-image-build:
   interruptible: false   # 重建单测依赖镜像较慢, 不因新推送被自动取消
   extends: .feishu-notify
   tags:
-    - iquest-inference-runner
+    - $RUNNER_TAG
   image:
     name: ${KANIKO_IMAGE}
     entrypoint: [""]
@@ -399,7 +409,7 @@ image-build:
   interruptible: false   # 打包镜像不因新推送被自动取消
   extends: .feishu-notify
   tags:
-    - iquest-inference-runner
+    - $RUNNER_TAG
   image:
     name: ${KANIKO_IMAGE}
     entrypoint: [""]
