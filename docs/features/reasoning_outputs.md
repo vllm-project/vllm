@@ -269,6 +269,9 @@ If `thinking_token_budget` is not specified, no explicit reasoning limit is appl
 !!! note
     `reasoning_end_str` can include a transition phrase before the reasoning end token. For example, setting `reasoning_end_str` to `"I have to give the solution based on the reasoning directly now.</think>"` instructs the model to emit that phrase when the budget is exhausted, making the reasoning termination more natural.
 
+!!! note
+    The forced string may also continue past the end token, for example `"</think>Final answer:"`, and the whole string is delivered. Keep such a continuation neutral: it should steer the model into answering, and for models that address their messages to recipients it must not contain addressing text, or it overrides the model's choice of whom to answer.
+
 ### Online Serving
 
 ```bash
