@@ -22,6 +22,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.dflash.utils import load_dflash_model
+from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import get_parallel_drafting_token_id
 from vllm.v1.worker.utils import AttentionGroup
@@ -352,21 +353,23 @@ class DFlashSpeculator(DraftModelSpeculator):
             # Memory profiling path: block_tables / kv_cache_config are not initialized.
             # Since DFlash needs to build its own attention metadata, we must skip the
             # preparation in this path and run a minimal forward pass.
-            self.model.precompute_and_store_context_kv(
-                self.hidden_states[:num_target_tokens],
-                self.context_positions[:num_target_tokens],
-            )
+            with record_function_or_nullcontext("speculator: precompute_context_kv"):
+                self.model.precompute_and_store_context_kv(
+                    self.hidden_states[:num_target_tokens],
+                    self.context_positions[:num_target_tokens],
+                )
             # DFlash processes all speculative tokens in one forward pass,
             # so the real token count is num_query_tokens.
             self._prepare_eplb_forward(num_query_tokens)
-            self._generate_draft(
-                num_reqs,
-                num_query_tokens,
-                attn_metadata=None,
-                slot_mappings=None,
-                num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            )
+            with record_function_or_nullcontext("speculator: draft_forward"):
+                self._generate_draft(
+                    num_reqs,
+                    num_query_tokens,
+                    attn_metadata=None,
+                    slot_mappings=None,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                )
             return self.draft_tokens[:num_reqs]
 
         # The query slot mapping is written into the shared BlockTables slot_mappings.
@@ -415,11 +418,12 @@ class DFlashSpeculator(DraftModelSpeculator):
             ]
         else:
             context_slots = self._context_slot_mappings[0][:num_target_tokens]
-        self.model.precompute_and_store_context_kv(
-            self.hidden_states[:num_target_tokens],
-            self.context_positions[:num_target_tokens],
-            context_slots,
-        )
+        with record_function_or_nullcontext("speculator: precompute_context_kv"):
+            self.model.precompute_and_store_context_kv(
+                self.hidden_states[:num_target_tokens],
+                self.context_positions[:num_target_tokens],
+                context_slots,
+            )
 
         # Every DFlash step has exactly num_query_per_req tokens, so we can use FULL CGs
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
@@ -454,18 +458,19 @@ class DFlashSpeculator(DraftModelSpeculator):
         # so the real token count is num_query_tokens.
         self._prepare_eplb_forward(num_query_tokens)
 
-        if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            assert self.query_cudagraph_manager is not None
-            self.query_cudagraph_manager.run_fullgraph(batch_desc)
-        else:
-            self._generate_draft(
-                num_reqs,
-                num_tokens_padded,
-                draft_attn_metadata,
-                draft_slot_mappings_by_layer,
-                num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=batch_desc.cg_mode,
-            )
+        with record_function_or_nullcontext("speculator: draft_forward"):
+            if batch_desc.cg_mode == CUDAGraphMode.FULL:
+                assert self.query_cudagraph_manager is not None
+                self.query_cudagraph_manager.run_fullgraph(batch_desc)
+            else:
+                self._generate_draft(
+                    num_reqs,
+                    num_tokens_padded,
+                    draft_attn_metadata,
+                    draft_slot_mappings_by_layer,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    cudagraph_runtime_mode=batch_desc.cg_mode,
+                )
 
         return self.draft_tokens[:num_reqs]
 
