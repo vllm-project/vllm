@@ -836,13 +836,17 @@ class HummingIndexedExperts(HummingExpertsBase):
         )
 
         valid_rows = None
+        valid_tokens = None
         if (
             expert_tokens_meta is not None
             and expert_tokens_meta.psum_recv_per_rank is not None
         ):
             psum = expert_tokens_meta.psum_recv_per_rank
             topk = topk_ids.size(1)
+            # situ operates on [num_tokens * topk] rows; mul_sum's outer dim is
+            # tokens (it reduces topk internally), so it bounds on psum[-1] alone.
             valid_rows = psum[-1:].to(torch.int64) * topk
+            valid_tokens = psum[-1:]
 
         if self.fused_situ_quant_enabled(activation):
             # Fused SITU + FP8 quant (per-token or block-FP8 group-128) straight
@@ -881,6 +885,7 @@ class HummingIndexedExperts(HummingExpertsBase):
             topk_ids=topk_ids,
             expert_map=expert_map,
             outputs=output,
+            num_valid_tokens=valid_tokens,
         )
 
 
