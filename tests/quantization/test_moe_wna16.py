@@ -146,6 +146,36 @@ def test_compressed_tensors_nfirst_weights_pass_through_for_triton():
     assert torch.equal(converted[3], w2_scale)
 
 
+def test_gptq_nfirst_weights_pass_through_for_triton():
+    """GPTQ frontend normalizes to N-first before calling oracle.
+
+    Verifies the oracle handles N-first GPTQ inputs the same way as CT.
+    """
+    quant_config = AutoGPTQConfig(4, 128, False, True, False, {}, {})
+    # N-first layout (after GPTQ frontend transpose): [E, N, K_packed]
+    w13 = torch.arange(16, dtype=torch.int32).reshape(1, 8, 2)
+    w2 = torch.arange(12, dtype=torch.int32).reshape(1, 6, 2)
+    w13_scale = torch.arange(32, dtype=torch.float16).reshape(1, 8, 4)
+    w2_scale = torch.arange(18, dtype=torch.float16).reshape(1, 6, 3)
+
+    converted = convert_to_wna16_moe_kernel_format(
+        backend=WNA16MoEBackend.TRITON,
+        layer=torch.nn.Module(),
+        quant_config=quant_config,
+        input_dtype=None,
+        w13=w13,
+        w2=w2,
+        w13_scale=w13_scale,
+        w2_scale=w2_scale,
+    )
+
+    assert converted is not None
+    assert torch.equal(converted[0], w13.contiguous().view(torch.uint8))
+    assert torch.equal(converted[1], w2.contiguous().view(torch.uint8))
+    assert torch.equal(converted[2], w13_scale)
+    assert torch.equal(converted[3], w2_scale)
+
+
 def test_moe_wna16_setup_forwards_selected_backend(monkeypatch):
     method = object.__new__(MoeWNA16Method)
     method.experts_cls = object

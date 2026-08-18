@@ -157,33 +157,24 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         Marlin's K-first layout) is deferred to
         ``convert_to_wna16_moe_kernel_format``.
         """
-        if weight_name in ("w13_scale", "w13_zp"):
-            assert num_groups_w13 is not None, (
-                "num_groups_w13 must be provided for weight scales/zero_points"
-            )
-        if weight_name in ("w2_scale", "w2_zp"):
-            assert num_groups_w2 is not None, (
-                "num_groups_w2 must be provided for weight scales/zero_points"
-            )
         w13_num_shards = 2 if self.moe.is_act_and_mul else 1
         w13_n = w13_num_shards * intermediate_size_per_partition
-        shape_map: dict[str, tuple[int, int, int]] = {
-            "w13_weight": (num_experts, w13_n, hidden_size // self.packed_factor),
+        pf = self.packed_factor
+        shape_map = {
+            "w13_weight": (num_experts, w13_n, hidden_size // pf),
             "w13_scale": (num_experts, w13_n, num_groups_w13),
-            "w13_zp": (num_experts, w13_n // self.packed_factor, num_groups_w13),
+            "w13_zp": (num_experts, w13_n // pf, num_groups_w13),
             "w2_weight": (
                 num_experts,
                 hidden_size,
-                intermediate_size_per_partition // self.packed_factor,
+                intermediate_size_per_partition // pf,
             ),
             "w2_scale": (num_experts, hidden_size, num_groups_w2),
-            "w2_zp": (
-                num_experts,
-                hidden_size // self.packed_factor,
-                num_groups_w2,
-            ),
+            "w2_zp": (num_experts, hidden_size // pf, num_groups_w2),
         }
-        return shape_map[weight_name]
+        shape = shape_map[weight_name]
+        assert isinstance(shape, tuple) and all(isinstance(d, int) for d in shape)
+        return shape  # type: ignore[return-value]
 
     @staticmethod
     def _w2_scale_sharding(
