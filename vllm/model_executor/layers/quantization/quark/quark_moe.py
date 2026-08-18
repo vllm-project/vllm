@@ -180,9 +180,11 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 )
             self.weight_block_size = list(block_size)
         self.block_quant = self.weight_block_size is not None
-        # Block-quantized checkpoints name their per-block scales `weight_scale_inv`
-        # (the deepseek-v3 convention Quark follows), unlike the per-tensor/per-channel
-        # `weight_scale`. The parameter has to match so the loader can find it.
+        # Per-block scales are named `weight_scale_inv` and per-tensor/per-channel
+        # ones `weight_scale`, the same split `Fp8MoEMethod` and the Quark per-block
+        # linear scheme use. The name is not free to choose:
+        # `RoutedExperts.load_weights` carries the checkpoint suffix over
+        # verbatim, so it has to match.
         self.weight_scale_name = (
             "weight_scale_inv" if self.block_quant else "weight_scale"
         )
