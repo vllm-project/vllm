@@ -1540,6 +1540,13 @@ def record_gpu_memory_usage_stats(
             mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
             gb_used = mem_info["vram_used"] / 2**10
             gb_total = mem_info["vram_total"] / 2**10
+        elif current_platform.is_xpu():
+            # nvml/amdsmi are unavailable on XPU. Query device memory through
+            # torch.accelerator.get_memory_info, which the XPU platform patches
+            # to return (free, total) bytes via Level Zero.
+            free_b, total_b = torch.accelerator.get_memory_info(device)
+            gb_used = (total_b - free_b) / 2**30
+            gb_total = total_b / 2**30
         else:
             dev_handle = get_nvml_device_handle(device)
             mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
@@ -1680,19 +1687,19 @@ def wait_for_gpu_memory_to_clear(
         time.sleep(poll_interval_s)
 
 
-def wait_for_rocm_memory_to_settle(
+def wait_for_memory_to_settle(
     *,
     threshold_ratio: float | dict[int, float] | None = 0.1,
     timeout_s: float = 240,
 ) -> None:
-    """Block until ROCm device VRAM usage drops below ``threshold_ratio``.
+    """Block until ROCm or XPU device VRAM usage drops below ``threshold_ratio``.
 
-    ROCm reclaims GPU memory more lazily than CUDA, so back-to-back model
+    ROCm and XPU reclaims GPU memory more lazily than CUDA, so back-to-back model
     loads in a single test process can OOM the *next* engine/model startup
     even after ``cleanup_dist_env_and_memory``. This gives the driver time to
     actually release VRAM before the next allocation. No-op off ROCm.
     """
-    if not current_platform.is_rocm():
+    if not current_platform.is_rocm() and not current_platform.is_xpu():
         return
 
     num_gpus = current_platform.device_count()
@@ -2332,6 +2339,10 @@ class TestFP8Layer(torch.nn.Module):
         force_kernel: type[_KernelT] | None = None,
     ):
         super().__init__()
+        self.input_size_per_partition = weight_shape[1]
+        self.output_size_per_partition = weight_shape[0]
+        self.logical_widths = [self.output_size_per_partition]
+        self.orig_dtype = input_dtype
         act_scale_desc = activation_quant_key.scale
         weight_scale_desc = weight_quant_key.scale
         is_block_wise = act_scale_desc.group_shape.is_per_group()
@@ -2339,11 +2350,12 @@ class TestFP8Layer(torch.nn.Module):
             block_size = weight_scale_desc.group_shape.col
             weight_scale_shape = weight_shape[0] // block_size
             self.weight_scale_inv = torch.rand(
-                (weight_scale_shape, weight_scale_shape), dtype=torch.float32
+                (weight_scale_shape, weight_scale_shape),
+                dtype=torch.float32,
+                device=device,
             )
-            self.weight = torch.rand(weight_shape).to(dtype=FP8_DTYPE)
+            self.weight = torch.rand(weight_shape, device=device).to(dtype=FP8_DTYPE)
             self.input_scale = None
-            self.weight_scale = None
             self.weight_block_size = [block_size, block_size]
             if transpose_weights:
                 self.weight = self.weight.t()
