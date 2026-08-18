@@ -1228,6 +1228,35 @@ def test_prefix_cache_stats_counted_once_for_retried_then_scheduled_request():
     )
 
 
+def test_schedule_drops_request_aborted_while_waiting():
+    """A client disconnect can abort a request via finish_requests() while
+    it is still sitting in the waiting queue. If that lands between
+    schedule() popping the request and checking its status, the request's
+    status is no longer WAITING or PREEMPTED. schedule() must drop it
+    instead of crashing -- prior to this fix it raised an uncaught
+    RuntimeError("Invalid request status: FINISHED_ABORTED"), which took
+    down the entire engine-core process."""
+    scheduler = create_scheduler()
+    requests = create_requests(num_requests=1, num_tokens=10)
+    scheduler.add_request(requests[0])
+
+    original_pop_request = scheduler.waiting.pop_request
+
+    def pop_request_then_abort():
+        request = original_pop_request()
+        scheduler.finish_requests([request.request_id], RequestStatus.FINISHED_ABORTED)
+        return request
+
+    scheduler.waiting.pop_request = pop_request_then_abort
+
+    scheduler_output = scheduler.schedule()
+
+    assert requests[0].status == RequestStatus.FINISHED_ABORTED
+    assert requests[0] not in scheduler.running
+    assert requests[0].request_id not in scheduler_output.num_scheduled_tokens
+    assert scheduler.get_num_unfinished_requests() == 0
+
+
 def test_scheduler_reset_prefix_cache():
     scheduler = create_scheduler(enable_prefix_caching=True)
     requests = create_requests(num_requests=10)
