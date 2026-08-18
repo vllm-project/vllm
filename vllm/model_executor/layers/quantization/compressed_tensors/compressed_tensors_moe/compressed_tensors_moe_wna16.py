@@ -167,7 +167,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 "num_groups_w2 must be provided for weight scales/zero_points"
             )
         w13_num_shards = 2 if self.moe.is_act_and_mul else 1
-        shape_map = {
+        shape_map: dict[str, dict[str, tuple[int, int | None, int | None]]] = {
             "w13_weight": {
                 "Flashinfer": (
                     num_experts,
@@ -224,7 +224,9 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             },
         }
         backend_key = "Marlin" if self.is_transposed else "Flashinfer"
-        return shape_map[weight_name][backend_key]
+        shape = shape_map[weight_name][backend_key]
+        assert shape[1] is not None and shape[2] is not None
+        return shape[0], shape[1], shape[2]
 
     @staticmethod
     def _w2_scale_sharding(
