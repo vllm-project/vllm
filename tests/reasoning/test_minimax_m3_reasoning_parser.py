@@ -682,6 +682,29 @@ def test_reasoning_marker_token_ids():
     )
 
 
+def test_reasoning_marker_state_admits_runtime_split_tokens():
+    tokenizer = RuntimeSplitMiniMaxM3Tokenizer()
+    parser = MiniMaxM3ReasoningParser(tokenizer)
+    split_start_ids = tokenizer.encode_runtime("<mm:think>")
+
+    marker_complete, next_token_ids = parser.reasoning_marker_token_state([])
+    assert marker_complete is False
+    assert split_start_ids[0] in next_token_ids
+
+    for index in range(1, len(split_start_ids)):
+        marker_complete, next_token_ids = parser.reasoning_marker_token_state(
+            split_start_ids[:index]
+        )
+        assert marker_complete is False
+        assert split_start_ids[index] in next_token_ids
+
+    marker_complete, next_token_ids = parser.reasoning_marker_token_state(
+        split_start_ids
+    )
+    assert marker_complete is True
+    assert next_token_ids == ()
+
+
 def test_token_id_helpers_enabled_mode():
     parser, tokenizer = make_parser(chat_template_kwargs={"thinking_mode": "enabled"})
     output_ids = tokenizer.encode("abc</mm:think>def", add_special_tokens=False)
@@ -716,3 +739,30 @@ def test_prompt_reasoning_state_follows_thinking_mode(thinking_mode, expected):
     )
 
     assert parser.is_reasoning_end_from_prompt(prompt_token_ids) is expected
+
+
+@pytest.mark.parametrize(
+    "continuation_kwargs",
+    [
+        {"_vllm_continue_final_message_content": "<mm:think>partial plan"},
+        {
+            "_vllm_continue_final_message_content": "",
+            "_vllm_continue_final_message_reasoning": "partial plan",
+            "_vllm_continue_final_message_reasoning_ended": False,
+        },
+    ],
+)
+def test_disabled_mode_preserves_open_reasoning_continuation(continuation_kwargs):
+    parser, tokenizer = make_parser(
+        chat_template_kwargs={
+            "thinking_mode": "disabled",
+            "_vllm_continue_final_message": True,
+            **continuation_kwargs,
+        }
+    )
+
+    assert (
+        parser.is_reasoning_end_from_prompt(tokenizer.encode("partial plan")) is False
+    )
+    assert parser._initial_in_reasoning is True
+    assert parser._reasoning_active_streaming is True
