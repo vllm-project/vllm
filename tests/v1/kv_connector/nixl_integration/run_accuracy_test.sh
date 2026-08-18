@@ -112,7 +112,7 @@ wait_for_server() {
 # Function to clean up previous instances
 wait_for_gpu_memory_release() {
   if [[ "$SMI_BIN" == *"rocm"* ]]; then
-    PYTHONPATH="${GIT_ROOT}" python3 -c "from tests.utils import wait_for_rocm_memory_to_settle; wait_for_rocm_memory_to_settle()"
+    PYTHONPATH="${GIT_ROOT}" python3 -c "from tests.utils import wait_for_memory_to_settle; wait_for_memory_to_settle()"
   fi
 }
 

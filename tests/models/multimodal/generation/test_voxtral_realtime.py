@@ -104,9 +104,9 @@ async def async_engine():
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
-        from tests.utils import wait_for_rocm_memory_to_settle
+        from tests.utils import wait_for_memory_to_settle
 
-        wait_for_rocm_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
+        wait_for_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
 
     engine_args = AsyncEngineArgs(**ENGINE_CONFIG)
     llm = AsyncLLM.from_engine_args(engine_args)
@@ -122,9 +122,9 @@ async def async_engine():
         from vllm.distributed import cleanup_dist_env_and_memory
 
         cleanup_dist_env_and_memory()
-        from tests.utils import wait_for_rocm_memory_to_settle
+        from tests.utils import wait_for_memory_to_settle
 
-        wait_for_rocm_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
+        wait_for_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
 
 
 def test_voxtral_realtime_forward(audio_assets, tokenizer, vllm_runner, monkeypatch):
