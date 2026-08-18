@@ -2,14 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 import vllm.config
+import vllm.model_executor.layers.fused_qkv_norm_rope_cache as fused_gated_qkv
 from tests.compile.backend import TestBackend
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
-from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+from vllm._aiter_ops import (
+    is_aiter_found_and_supported,
+    is_aiter_fused_qkv_split_qk_norm_rope_cache_available,
+    rocm_aiter_ops,
+)
 from vllm.compilation.passes.fusion.matcher_utils import ROTARY_OP
 from vllm.compilation.passes.fusion.qk_norm_rope_kvcache_fusion import (
     QkNormRopeKvCacheFusionPass,
@@ -30,8 +36,9 @@ from vllm.config import (
 )
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding.mrope import MRotaryEmbedding
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -241,6 +248,73 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         return [torch.ops.vllm.fused_qk_norm_rope_and_unified_kv_cache_update.default]
 
 
+class GatedQKNormRoPEKVCacheTestModel(QKNormRoPEKVCacheTestModel):
+    def __init__(self, *args, rms_norm_eps: float, **kwargs):
+        super().__init__(*args, rms_norm_eps=rms_norm_eps, **kwargs)
+        self.q_norm = GemmaRMSNorm(self.head_size, eps=rms_norm_eps)
+        self.k_norm = GemmaRMSNorm(self.head_size, eps=rms_norm_eps)
+        self.rotary_emb = MRotaryEmbedding(
+            self.head_size,
+            self.rotary_dim,
+            4096,
+            10000,
+            self.is_neox,
+            self.dtype,
+            mrope_section=[self.rotary_dim // 6] * 2
+            + [self.rotary_dim // 2 - 2 * (self.rotary_dim // 6)],
+        )
+        self.enable_rope_custom_op = self.rotary_emb.enabled()
+
+    def forward(self, qkv: torch.Tensor, positions: torch.Tensor):
+        qkv = qkv.clone()
+        q_gate, k, v = qkv.split([self.q_size * 2, self.kv_size, self.kv_size], dim=-1)
+        q_gate = q_gate.view(-1, self.num_heads, 2 * self.head_size)
+        q, gate = q_gate.chunk(2, dim=-1)
+        q = q.reshape(-1, self.q_size)
+        gate = gate.reshape(-1, self.q_size)
+
+        q = self.q_norm(q.view(-1, self.num_heads, self.head_size))
+        k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_size))
+        cos, sin = self.rotary_emb.cos_sin_cache[positions].chunk(2, dim=-1)
+        q_cos = cos.unsqueeze(-2).to(q.dtype)
+        q_sin = sin.unsqueeze(-2).to(q.dtype)
+        k_cos = cos.unsqueeze(-2).to(k.dtype)
+        k_sin = sin.unsqueeze(-2).to(k.dtype)
+
+        def apply_rope(x, rope_cos, rope_sin):
+            x1, x2 = torch.chunk(x, 2, dim=-1)
+            return torch.cat(
+                (x1 * rope_cos - x2 * rope_sin, x2 * rope_cos + x1 * rope_sin),
+                dim=-1,
+            )
+
+        q_rot = apply_rope(q[..., : self.rotary_dim], q_cos, q_sin)
+        k_rot = apply_rope(k[..., : self.rotary_dim], k_cos, k_sin)
+        q = torch.cat((q_rot, q[..., self.rotary_dim :]), dim=-1).view(-1, self.q_size)
+        k = torch.cat((k_rot, k[..., self.rotary_dim :]), dim=-1)
+
+        if self.kv_cache_dtype != self.dtype:
+            q_fp8 = torch.empty_like(q, dtype=FP8_DTYPE)
+            torch.ops.vllm.rocm_aiter_per_tensor_quant(
+                q_fp8, q, self.attn._q_scale, False
+            )
+            q = q_fp8
+
+        q = q.view(-1, self.num_heads, self.head_size)
+        k = k.view(-1, self.num_kv_heads, self.head_size)
+        v = v.view(-1, self.num_kv_heads, self.head_size)
+        dummy = torch.ops.vllm.unified_kv_cache_update(k, v, self.layer_name)
+        return q, k, v, gate, dummy
+
+    def ops_in_model_after(self) -> list[torch._ops.OpOverload]:
+        return [
+            torch.ops.vllm.fused_gated_qk_norm_rope_and_unified_kv_cache_update.default
+        ]
+
+    def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
+        return [INDEX_SELECT_OP, torch.ops.vllm.unified_kv_cache_update.default]
+
+
 def _run_qk_norm_rope_kvcache_fusion_test(
     *,
     attn_backend: AttentionBackendEnum,
@@ -259,6 +333,7 @@ def _run_qk_norm_rope_kvcache_fusion_test(
     rms_norm_eps: float,
     custom_op: str,
     monkeypatch: pytest.MonkeyPatch,
+    gated: bool = False,
 ) -> None:
     device = os.environ.get("VLLM_TEST_CUDA_DEVICE", "cuda")
     torch.set_default_device(device)
@@ -274,12 +349,18 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             custom_ops=[custom_op],
+            splitting_ops=[],
             pass_config=PassConfig(
                 fuse_qk_norm_rope_kvcache=True,
                 eliminate_noops=True,
             ),
         ),
     )
+    if gated:
+        vllm_config.model_config.hf_text_config.attn_output_gate = True
+        vllm_config.model_config.hf_text_config.rope_parameters = {
+            "partial_rotary_factor": rotary_dim / head_size
+        }
 
     with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
         m.setenv("VLLM_ROCM_USE_AITER", "1")
@@ -290,7 +371,10 @@ def _run_qk_norm_rope_kvcache_fusion_test(
         m.setenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", use_shuffle_kv_layout)
         rocm_aiter_ops.refresh_env_variables()
 
-        model = QKNormRoPEKVCacheTestModel(
+        model_cls = (
+            GatedQKNormRoPEKVCacheTestModel if gated else QKNormRoPEKVCacheTestModel
+        )
+        model = model_cls(
             vllm_config=vllm_config,
             attn_backend=attn_backend,
             num_heads=num_heads,
@@ -315,7 +399,7 @@ def _run_qk_norm_rope_kvcache_fusion_test(
 
         qkv = torch.randn(
             num_tokens,
-            num_heads * head_size + 2 * num_kv_heads * head_size,
+            num_heads * head_size * (2 if gated else 1) + 2 * num_kv_heads * head_size,
             dtype=dtype,
         )
         pos = torch.arange(num_tokens, dtype=torch.long)
@@ -330,7 +414,11 @@ def _run_qk_norm_rope_kvcache_fusion_test(
             forward_context.slot_mapping = {
                 model.layer_name: attn_metadata.slot_mapping
             }
-            q_unfused, k_unfused, v_unfused, dummy = model(qkv_unfused, pos_unfused)
+            outputs_unfused = model(qkv_unfused, pos_unfused)
+            if gated:
+                q_unfused, k_unfused, v_unfused, gate_unfused, dummy = outputs_unfused
+            else:
+                q_unfused, k_unfused, v_unfused, dummy = outputs_unfused
             attn_layer = forward_context.no_compile_layers[model.layer_name]
             kv_cache_unfused = attn_layer.kv_cache
         del dummy
@@ -345,7 +433,11 @@ def _run_qk_norm_rope_kvcache_fusion_test(
             forward_context.slot_mapping = {
                 model.layer_name: attn_metadata.slot_mapping
             }
-            q_fused, k_fused, v_fused, dummy = model_fused(qkv, pos)
+            outputs_fused = model_fused(qkv, pos)
+            if gated:
+                q_fused, k_fused, v_fused, gate_fused, dummy = outputs_fused
+            else:
+                q_fused, k_fused, v_fused, dummy = outputs_fused
             attn_layer = forward_context.no_compile_layers[model.layer_name]
             kv_cache_fused = attn_layer.kv_cache
         del dummy
@@ -377,6 +469,8 @@ def _run_qk_norm_rope_kvcache_fusion_test(
 
         # Should be bit exact since no processing had been done on v for both paths
         torch.testing.assert_close(v_unfused, v_fused, atol=0.0, rtol=0.0)
+        if gated:
+            torch.testing.assert_close(gate_unfused, gate_fused, atol=0.0, rtol=0.0)
 
         # fp8 vs triton-rope ref requires loosening tolerance to 1.25e-1.
         if is_fp8_cache and enable_aiter_triton_rope:
@@ -482,4 +576,103 @@ def test_qk_norm_rope_kvcache_fusion(
         rms_norm_eps=rms_norm_eps,
         custom_op=custom_op,
         monkeypatch=monkeypatch,
+    )
+
+
+@pytest.mark.skipif(
+    not is_aiter_fused_qkv_split_qk_norm_rope_cache_available(),
+    reason="AITER fused QKV split/QK norm/RoPE/cache kernel is unavailable",
+)
+def test_gated_qk_norm_rope_kvcache_fusion(monkeypatch: pytest.MonkeyPatch):
+    _run_qk_norm_rope_kvcache_fusion_test(
+        attn_backend=AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+        enable_aiter_triton_rope=True,
+        num_tokens=5,
+        num_heads=8,
+        num_kv_heads=2,
+        head_size=128,
+        rotary_dim=64,
+        block_size=64,
+        is_neox=True,
+        use_shuffle_kv_layout="0",
+        kv_stride_order=(0, 1, 2, 3),
+        dtype=torch.bfloat16,
+        kv_cache_dtype="fp8",
+        rms_norm_eps=1e-6,
+        custom_op="+rotary_embedding",
+        monkeypatch=monkeypatch,
+        gated=True,
+    )
+
+
+@pytest.mark.parametrize("configured_layout", ["NHD", "HND"])
+def test_gated_qkv_cache_layout_uses_configured_layout(
+    configured_layout: str, monkeypatch: pytest.MonkeyPatch
+):
+    cache = torch.empty(2, 4, 4, 8)
+    monkeypatch.setattr(
+        fused_gated_qkv, "get_current_vllm_config_or_none", lambda: object()
+    )
+    monkeypatch.setattr(
+        fused_gated_qkv, "get_kv_cache_layout", lambda: configured_layout
+    )
+
+    assert fused_gated_qkv._get_kv_cache_layout(cache, cache, 4, 8) == (
+        configured_layout
+    )
+
+
+def test_gated_qkv_cache_layout_rejects_ambiguous_shape(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    cache = torch.empty(2, 4, 4, 8)
+    monkeypatch.setattr(
+        fused_gated_qkv, "get_current_vllm_config_or_none", lambda: None
+    )
+
+    with pytest.raises(ValueError, match="configured_layout=None"):
+        fused_gated_qkv._get_kv_cache_layout(cache, cache, 4, 8)
+
+
+def test_gated_qkv_fusion_rejects_non_power_of_two_head_size(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        fused_gated_qkv,
+        "is_aiter_fused_qkv_split_qk_norm_rope_cache_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        fused_gated_qkv.rocm_aiter_ops,
+        "is_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        fused_gated_qkv.rocm_aiter_ops,
+        "is_shuffle_kv_cache_enabled",
+        lambda: False,
+    )
+    attn_layer = SimpleNamespace(head_size=192, head_size_v=192)
+
+    assert not fused_gated_qkv.attn_layer_supports_gated_qk_norm_rope_kvcache(
+        attn_layer
+    )
+
+
+def test_gated_qkv_fusion_respects_aiter_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        fused_gated_qkv,
+        "is_aiter_fused_qkv_split_qk_norm_rope_cache_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        fused_gated_qkv.rocm_aiter_ops,
+        "is_enabled",
+        lambda: False,
+    )
+
+    assert not fused_gated_qkv.attn_layer_supports_gated_qk_norm_rope_kvcache(
+        SimpleNamespace()
     )

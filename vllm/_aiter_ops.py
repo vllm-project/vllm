@@ -20,6 +20,23 @@ from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
 
 logger = init_logger(__name__)
 
+_AITER_HAS_FUSED_QKV_SPLIT_QK_NORM_ROPE_CACHE: bool | None = None
+
+
+def is_aiter_fused_qkv_split_qk_norm_rope_cache_available() -> bool:
+    global _AITER_HAS_FUSED_QKV_SPLIT_QK_NORM_ROPE_CACHE
+    if _AITER_HAS_FUSED_QKV_SPLIT_QK_NORM_ROPE_CACHE is None:
+        try:
+            from aiter.ops.triton.rope.fused_qkv_split_qk_norm_rope_cache import (  # noqa: F401
+                fused_qkv_split_qk_norm_rope_cache,
+            )
+        except (ImportError, ModuleNotFoundError):
+            _AITER_HAS_FUSED_QKV_SPLIT_QK_NORM_ROPE_CACHE = False
+        else:
+            _AITER_HAS_FUSED_QKV_SPLIT_QK_NORM_ROPE_CACHE = True
+    return _AITER_HAS_FUSED_QKV_SPLIT_QK_NORM_ROPE_CACHE
+
+
 try:
     import pandas as pd
 except ImportError:
