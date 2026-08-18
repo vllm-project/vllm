@@ -1,19 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::{join_all, try_join_all};
 use itertools::Itertools;
 use serde::Serialize;
+use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
 
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
 use crate::coordinator::CoordinatorHandle;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, bail_invalid_client_config};
 use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
@@ -66,9 +68,68 @@ pub enum TransportMode {
         engine_start_index: u32,
         /// Total number of engines expected to register on this transport.
         engine_count: usize,
+        /// Deployment-wide data-parallel size. This may be larger than
+        /// `engine_count` when a supervisor partitions ranks across frontends.
+        data_parallel_size: usize,
         /// Maximum time to wait for all expected engines to register.
         ready_timeout: Duration,
     },
+}
+
+impl TransportMode {
+    /// Return the deployment-wide data-parallel size for this transport.
+    pub fn data_parallel_size(&self) -> usize {
+        match self {
+            Self::HandshakeOwner { engine_count, .. } => *engine_count,
+            Self::Bootstrapped {
+                data_parallel_size, ..
+            } => *data_parallel_size,
+        }
+    }
+
+    /// Validate the transport topology before opening any sockets.
+    pub fn validate(&self) -> Result<()> {
+        let data_parallel_size = self.data_parallel_size();
+        if data_parallel_size == 0 {
+            bail_invalid_client_config!("data parallel size must be at least 1");
+        }
+        if data_parallel_size > usize::from(u16::MAX) + 1 {
+            bail_invalid_client_config!(
+                "data parallel size ({data_parallel_size}) exceeds the two-byte engine identity limit"
+            );
+        }
+
+        match self {
+            Self::HandshakeOwner { .. } => {}
+            Self::Bootstrapped {
+                engine_start_index,
+                engine_count,
+                ..
+            } => {
+                if *engine_count == 0 {
+                    bail_invalid_client_config!("engine count must be at least 1");
+                }
+                let engine_start_index = usize::try_from(*engine_start_index).map_err(|_| {
+                    Error::InvalidClientConfig {
+                        message: "engine start index does not fit usize".to_string(),
+                    }
+                })?;
+                let engine_end_index =
+                    engine_start_index.checked_add(*engine_count).ok_or_else(|| {
+                        Error::InvalidClientConfig {
+                            message: "engine start index + engine count overflows".to_string(),
+                        }
+                    })?;
+                if engine_end_index > data_parallel_size {
+                    bail_invalid_client_config!(
+                        "connected engine range [{engine_start_index}, {engine_end_index}) exceeds data parallel size ({data_parallel_size})"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Which coordinator implementation should be active when one is present for a
@@ -113,6 +174,11 @@ impl EngineCoreClientConfig {
             model_name: String::new(),
             client_index: 0,
         }
+    }
+
+    /// Validate the client topology before opening any transport sockets.
+    pub fn validate(&self) -> Result<()> {
+        self.transport_mode.validate()
     }
 
     /// Set the model name used by frontend-side metrics and diagnostics.
@@ -224,6 +290,7 @@ impl EngineCoreClient {
     /// handshake. In bootstrapped mode it binds the provided frontend
     /// sockets and waits for the expected engine registration frames.
     pub async fn connect(config: EngineCoreClientConfig) -> Result<Self> {
+        config.validate()?;
         let connected = match &config.transport_mode {
             TransportMode::HandshakeOwner {
                 handshake_address,
@@ -259,6 +326,7 @@ impl EngineCoreClient {
                 engine_start_index,
                 engine_count,
                 ready_timeout,
+                ..
             } => {
                 if let Some(CoordinatorMode::InProc) = config.coordinator_mode {
                     panic!("cannot use in-process coordinator with bootstrapped transport mode")
@@ -284,6 +352,7 @@ impl EngineCoreClient {
         config: EngineCoreClientConfig,
         connected: transport::ConnectedTransport,
     ) -> Result<Self> {
+        validate_lora_capabilities(&connected.engines)?;
         let (output_tx, output_rx) = mpsc::channel(64);
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
         let engines = connected.engines;
@@ -373,6 +442,12 @@ impl EngineCoreClient {
     /// Return the number of engines connected to this client.
     pub fn engine_count(&self) -> usize {
         self.engines.len()
+    }
+
+    /// Return the deployment-wide data-parallel size configured for this
+    /// client.
+    pub fn data_parallel_size(&self) -> usize {
+        self.config.transport_mode.data_parallel_size()
     }
 
     /// Return the engine-side indices connected to this client.
@@ -472,6 +547,32 @@ impl EngineCoreClient {
     pub fn health_error(&self) -> Option<Arc<Error>> {
         self.inner.health_error()
     }
+}
+
+fn validate_lora_capabilities(engines: &[ConnectedEngine]) -> Result<()> {
+    let first = engines.first().expect("engine core client requires at least one engine");
+    for engine in engines {
+        let ready = &engine.ready_response;
+        if ready.supports_lora != (ready.max_loras > 0) {
+            return Err(Error::UnexpectedHandshakeMessage {
+                message: format!(
+                    "engine {:?} reported inconsistent LoRA capability (supports_lora={}, max_loras={})",
+                    engine.engine_id, ready.supports_lora, ready.max_loras
+                ),
+            });
+        }
+        if ready.supports_lora != first.ready_response.supports_lora
+            || ready.max_loras != first.ready_response.max_loras
+        {
+            return Err(Error::UnexpectedHandshakeMessage {
+                message: format!(
+                    "engine {:?} reported LoRA capability inconsistent with engine {:?}",
+                    engine.engine_id, first.engine_id
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 // Client API implementation.
@@ -672,6 +773,77 @@ impl EngineCoreClient {
                 other => vec![other],
             })
             .collect())
+    }
+
+    /// Initialize the configured RL weight-transfer backend.
+    pub async fn init_weight_transfer_engine(&self, init_info: JsonValue) -> Result<()> {
+        self.collective_rpc(
+            "init_weight_transfer_engine",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::from([("init_info".to_string(), init_info)]),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Start a weight update for the base model.
+    pub async fn start_weight_update(&self) -> Result<()> {
+        self.collective_rpc(
+            "start_weight_update",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::<String, JsonValue>::new(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Start a weight update for the speculative draft model.
+    pub async fn start_draft_weight_update(&self) -> Result<()> {
+        self.collective_rpc(
+            "start_draft_weight_update",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::<String, JsonValue>::new(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Apply one backend-specific weight metadata chunk.
+    pub async fn update_weights(&self, update_info: JsonValue) -> Result<()> {
+        self.collective_rpc(
+            "update_weights",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::from([("update_info".to_string(), update_info)]),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Finish the current weight update.
+    pub async fn finish_weight_update(&self) -> Result<()> {
+        self.collective_rpc(
+            "finish_weight_update",
+            None,
+            Vec::<JsonValue>::new(),
+            BTreeMap::<String, JsonValue>::new(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Set the committed weight version on every connected engine.
+    pub async fn set_weight_version(&self, weight_version: &str) -> Result<()> {
+        self.call_utility::<(), _>("set_weight_version", (weight_version,)).await?;
+        Ok(())
+    }
+
+    /// Return the committed weight version agreed on by every connected engine.
+    pub async fn get_weight_version(&self) -> Result<String> {
+        self.call_utility_consensus("get_weight_version", ()).await
     }
 
     /// Return whether the engine is currently sleeping at any level.
