@@ -79,13 +79,8 @@ def _fp8_mla_prefill_supported() -> bool:
 
 
 @functools.lru_cache(maxsize=1)
-def _aiter_mla_native_h24_supported() -> bool:
-    """Whether AITER's JIT reducer supports the native H24/512 shape.
-
-    AITER ships the reducer source used by its JIT build. Detect the H24
-    specialization there so older AITER builds keep the 24-to-32 padding
-    fallback while builds containing ROCm/aiter#4710 use 24 heads directly.
-    """
+def _aiter_mla_native_h24_reducer_supported() -> bool:
+    """Whether AITER's JIT reducer supports the native H24/512 shape."""
     try:
         from aiter.jit.core import AITER_CSRC_DIR
 
@@ -94,6 +89,39 @@ def _aiter_mla_native_h24_supported() -> bool:
     except (ImportError, OSError):
         return False
     return "MLA_REDUCE_CASE_EF(NUM_HEAD,24,HEAD_DIM,512," in source
+
+
+@functools.lru_cache(maxsize=1)
+def _aiter_mla_native_h24_metadata_supported() -> bool:
+    """Whether AITER's fast MLA metadata planner accepts native H24.
+
+    The reducer and metadata planner have independent shape dispatch. Checking
+    only the reducer can route H24 into a planner that rejects it before the
+    attention kernel launches. Until AITER exposes a capability API, inspect
+    the shipped JIT source for an explicit native-H24 planner branch.
+    """
+    try:
+        from aiter.jit.core import AITER_CSRC_DIR
+
+        metadata_source = (
+            Path(AITER_CSRC_DIR)
+            / "kernels"
+            / "mla"
+            / "metadata"
+            / "v1_2_device.cuh"
+        )
+        source = "".join(metadata_source.read_text(encoding="utf-8").split())
+    except (ImportError, OSError):
+        return False
+    return "num_heads==24" in source
+
+
+def _aiter_mla_native_h24_supported() -> bool:
+    """Whether the complete AITER decode path supports native H24."""
+    return (
+        _aiter_mla_native_h24_reducer_supported()
+        and _aiter_mla_native_h24_metadata_supported()
+    )
 
 
 @functools.lru_cache(maxsize=1)

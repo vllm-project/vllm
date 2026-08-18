@@ -150,8 +150,45 @@ def test_h24_output_discards_h32_padding_heads():
     torch.testing.assert_close(unpadded_o, o[:, :24])
 
 
-def test_native_h24_is_zero_copy(monkeypatch):
-    monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_native_h24_supported", lambda: True)
+def test_h24_reducer_without_metadata_still_pads_to_h32(monkeypatch):
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_native_h24_reducer_supported", lambda: True
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_native_h24_metadata_supported", lambda: False
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla,
+        "_aiter_mla_native_h24_supported",
+        lambda: (
+            rocm_aiter_mla._aiter_mla_native_h24_reducer_supported()
+            and rocm_aiter_mla._aiter_mla_native_h24_metadata_supported()
+        ),
+    )
+    q = torch.arange(2 * 24 * 4, dtype=torch.float32).view(2, 24, 4)
+
+    assert AiterMLAHelper.get_actual_mla_num_heads(24) == 32
+    padded_q = AiterMLAHelper.get_mla_padded_q(24, q)
+    assert padded_q.shape == (2, 32, 4)
+    torch.testing.assert_close(padded_q[:, :24], q)
+    torch.testing.assert_close(padded_q[:, 24:], q[:, :8])
+
+
+def test_native_h24_requires_reducer_and_metadata(monkeypatch):
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_native_h24_reducer_supported", lambda: True
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla, "_aiter_mla_native_h24_metadata_supported", lambda: True
+    )
+    monkeypatch.setattr(
+        rocm_aiter_mla,
+        "_aiter_mla_native_h24_supported",
+        lambda: (
+            rocm_aiter_mla._aiter_mla_native_h24_reducer_supported()
+            and rocm_aiter_mla._aiter_mla_native_h24_metadata_supported()
+        ),
+    )
     q = torch.arange(2 * 24 * 4, dtype=torch.float32).view(2, 24, 4)
 
     assert AiterMLAHelper.get_actual_mla_num_heads(24) == 24
