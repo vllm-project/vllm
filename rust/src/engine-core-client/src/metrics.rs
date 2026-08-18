@@ -327,11 +327,13 @@ const NIXL_FLAT_DATA_KEYS: &[&str] = &[
 
 /// Mooncake store RPC operation names, i.e. the only keys that ever appear
 /// directly on `MooncakeStoreConnectorStats.data` (see
-/// `mooncake/store/worker.py::_record_operation()` call sites on the Python
-/// side). Their presence at the top level of `kv_connector_stats` means
-/// we're looking at a bare `MooncakeStoreConnector`'s own data, not a
-/// `MultiConnector` wrapper.
-const MOONCAKE_FLAT_OPERATION_KEYS: &[&str] = &["save_exists", "save_put", "load_get"];
+/// `mooncake/store/worker.py::_record_operation()` and
+/// `_record_kv_connector_operation()` call sites on the Python side). Their
+/// presence at the top level of `kv_connector_stats` means we're looking at
+/// a bare `MooncakeStoreConnector`'s own data, not a `MultiConnector`
+/// wrapper.
+const MOONCAKE_FLAT_OPERATION_KEYS: &[&str] =
+    &["save_exists", "save_put", "load_get", "lookup_exists"];
 
 /// A bare (non-`MultiConnector`) connector reports its own `.data` directly
 /// as `kv_connector_stats`, so the top-level map itself needs to be handed
