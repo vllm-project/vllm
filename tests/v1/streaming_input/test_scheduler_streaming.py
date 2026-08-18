@@ -577,3 +577,293 @@ class TestStreamingScheduler(unittest.TestCase):
             cached_state_cycle1["prompt_token_ids"]
             is not cached_state_cycle3["prompt_token_ids"]
         ), "Cached states from different cycles should be independent objects."
+
+    def test_running_session_on_waiting_queue_does_not_kill_engine(self):
+        """Regression for issue #52693.
+
+        A resumable streaming session can occupy both `self.running` and a
+        waiting queue in one `schedule()` call (pipelined continuation while
+        chunked prefill is still in flight). The waiting-loop status gate
+        then raises `RuntimeError: Invalid request status: RUNNING`, which
+        EngineCore treats as fatal.
+
+        This test plants that illegal dual membership directly and requires
+        `schedule()` to isolate the session instead of crashing.
+        """
+        # Issue #52693 is a scheduler-state bug, not a model-forward bug.
+        # A CPU scheduler with dummy KV config is enough to reach the gate.
+        # Reuse the file-local helper so this test matches neighboring cases.
+        scheduler = create_scheduler()
+
+        # The live crash used a continuation still mid-prefill: computed
+        # tokens strictly less than prompt tokens, and zero sampled output.
+        # A 32-token prompt is long enough to split that way without being
+        # so long that the running loop exhausts the token budget.
+        prompt_token_ids = list(range(32))
+        # One request object is required: dual membership is the same
+        # Request sitting in two queues, not two Requests sharing an id.
+        # DummyRequest is resumable by default; pass True so the intent is
+        # obvious if that default ever changes.
+        session = DummyRequest(
+            # Stable id so num_scheduled_tokens lookups are readable.
+            # This is not a second request: add_request later reuses it.
+            request_id="sess-52693",
+            # Full continuation prompt; we will mark only half computed.
+            # Distinct ids make a prompt-vs-output mix-up obvious in diffs.
+            prompt_token_ids=prompt_token_ids,
+            # resumable=True is the streaming-session path in add_request.
+            # Non-resumable requests never enter the update-and-requeue loop.
+            resumable=True,
+        )
+
+        # add_request registers the session in scheduler.requests and
+        # enqueues it as WAITING so the first schedule() can allocate KV
+        # blocks. Without that allocation, the running loop on the second
+        # schedule() would preempt or fail before we reach the status gate.
+        scheduler.add_request(session)
+        # First schedule() pops the session from waiting, appends it to
+        # running, and sets status=RUNNING. We do not call
+        # update_from_output, so num_computed_tokens stays at the pre-step
+        # value and the session is still prefilling from the scheduler's
+        # point of view: the same shape as the instrumented crash.
+        first_output = scheduler.schedule()
+        # Confirm the setup actually entered the running/prefill state.
+        # If this fails, later assertions would be testing the wrong path.
+        # status is the field the waiting-loop gate inspects.
+        assert session.status == RequestStatus.RUNNING
+        # Membership in the running list is what the first loop iterates.
+        # The bug is dual membership, so this list must already hold it.
+        assert session in scheduler.running
+        # First step must have committed tokens under this id. Otherwise
+        # the second step is not a continuation of an in-flight prefill.
+        assert session.request_id in first_output.num_scheduled_tokens
+        # After the first schedule the waiting queue must be empty, otherwise
+        # we would be stacking a second legal waiter rather than planting
+        # the illegal duplicate-running membership the issue reports.
+        assert len(scheduler.waiting) == 0
+
+        # Mirror the crash snapshot: 16 of 32 prompt tokens computed, no
+        # decode tokens yet. The running loop will therefore still have
+        # leftover prefill work and will put this id in num_scheduled_tokens
+        # before the waiting loop runs.
+        session.num_computed_tokens = 16
+        # Dual membership: the same RUNNING object is also on waiting.
+        # This is what the pipelined continuation race produces in production.
+        # FCFSRequestQueue.append does not check status, so this is legal at
+        # the queue API and fatal at the waiting-loop status gate.
+        scheduler.waiting.add_request(session)
+
+        # On unfixed main this raises RuntimeError and kills EngineCore.
+        # After the fix it must return a SchedulerOutput instead.
+        # Do not wrap in assertRaises: survival of this call is the test.
+        scheduler_output = scheduler.schedule()
+
+        # The session may still be running (prefill not finished), but the
+        # engine must have survived. A raise would have failed the line
+        # above; this asserts the output is a real schedule, not None.
+        assert scheduler_output is not None
+        # num_scheduled_tokens is a dict keyed by request_id, so a double
+        # commit cannot appear as two entries. We still require this id to
+        # be scheduled this step: the running loop owns it.
+        scheduled_for_session = scheduler_output.num_scheduled_tokens.get(
+            session.request_id
+        )
+        # None would mean the running loop dropped the in-flight prefill.
+        # The waiting loop must skip, not cancel, the already-scheduled id.
+        assert scheduled_for_session is not None
+        # Token count can be the leftover prefill (16) from the running
+        # loop. The important property is a single dict entry, not a
+        # second waiting-loop allocation on top of it.
+        assert session.request_id in scheduler_output.num_scheduled_tokens
+        # Count how many times this request object sits in running. The
+        # waiting loop currently appends before it raises, so a naive
+        # "append then raise" path would duplicate the list entry if the
+        # raise were ever swallowed. After a correct skip, it stays once.
+        running_occurrences = sum(1 for req in scheduler.running if req is session)
+        # Exactly one running-list slot: skip the waiting duplicate, do
+        # not finish_requests (that path KeyErrors in _update_after_schedule).
+        assert running_occurrences == 1
+
+    def test_continuation_stays_queued_while_running(self):
+        """Continuations buffer in streaming_queue until the session leaves RUNNING.
+
+        Root-cause contract for #52693: add_request must not merge a pipelined
+        chunk into an in-flight session, and must not put that session on a
+        waiting queue while it still occupies self.running.
+        """
+        # CPU scheduler is enough: this is queue-membership and prompt
+        # identity, not a forward pass. Dummy KV config matches neighbors.
+        scheduler = create_scheduler()
+        # Three prompt tokens so a later merge of [4, 5] is obvious if it
+        # happens too early. Distinct values detect "applied while running".
+        # resumable=True is the session path that owns streaming_queue.
+        session = DummyRequest(
+            # Same id as the continuation below: this is one session.
+            # A different id would be a new request, not a pipelined chunk.
+            request_id="sess-52693-buffer",
+            # In-flight prompt. Must remain exactly this list until we
+            # leave RUNNING. [4, 5] must not appear here after add_request.
+            prompt_token_ids=[1, 2, 3],
+            # Non-resumable ids never get a streaming_queue; the buffer
+            # rule would not apply and this test would be meaningless.
+            resumable=True,
+        )
+        # First add_request is the session start: WAITING, empty queue.
+        # Without this, schedule() has nothing to move into RUNNING.
+        scheduler.add_request(session)
+        # schedule() pops WAITING, appends running, sets RUNNING, and
+        # allocates KV. The current chunk is now in flight.
+        scheduler.schedule()
+        # The buffer rule is keyed on RUNNING / self.running, not WAITING.
+        # If this is not RUNNING, add_request would take the paused path.
+        assert session.status == RequestStatus.RUNNING
+        # Membership in the list is the second in-flight check in
+        # add_request (status can theoretically lag the list).
+        assert session in scheduler.running
+
+        # Pipelined next turn: same request_id, new tokens only.
+        # This is the live audio+vision arrival while prefill is unfinished.
+        continuation = DummyRequest(
+            # Must match session.request_id so add_request finds existing.
+            # A new id would enqueue a second request, not a continuation.
+            request_id="sess-52693-buffer",
+            # Delta tokens. If they leak into session.prompt_token_ids
+            # before we leave RUNNING, add_request merged too early.
+            prompt_token_ids=[4, 5],
+            # Must be resumable so StreamingUpdate is queued, not treated
+            # as a duplicate-id abort of a one-shot request.
+            resumable=True,
+        )
+        # This is the call that used to apply the delta while RUNNING.
+        # After the fix it must only append to streaming_queue.
+        scheduler.add_request(continuation)
+
+        # Prompt must still be the in-flight chunk. Merging here is the
+        # bug: it grows num_prompt_tokens while status stays RUNNING.
+        assert session.prompt_token_ids == [1, 2, 3]
+        # The delta lives on the queue until we leave RUNNING.
+        # Length 1: exactly the continuation we just added, nothing else.
+        assert len(session.streaming_queue) == 1
+        # Must not appear on the main waiting queue: that is one half of
+        # dual membership and would hit the RUNNING status gate.
+        assert session not in scheduler.waiting
+        # Must not appear on skipped_waiting either: _handle_stopped_request
+        # has not run yet, so a pause enqueue would be premature.
+        assert session not in scheduler.skipped_waiting
+        # Still owned by the running loop for this chunk. Losing this
+        # list slot would mean we finished or preempted too early.
+        assert session in scheduler.running
+        # Status must remain RUNNING; add_request must not pause us.
+        assert session.status == RequestStatus.RUNNING
+
+    def test_queued_continuation_applies_only_after_leaving_running(self):
+        """After stop, a queued continuation is applied by promotion, not by stop.
+
+        _handle_stopped_request must pause into WAITING_FOR_STREAMING_REQ
+        without calling _update_request_as_session. The next schedule()
+        promotes, merges the queue, and only then schedules the new tokens.
+        """
+        # Same dummy scheduler as the buffer test. We drive one decode
+        # token then STOP so stop handling runs with a non-empty queue.
+        scheduler = create_scheduler()
+        # Distinct request_id from the buffer test so failures are easy
+        # to attribute. Prompt [1, 2, 3] matches the e2e lifecycle numbers.
+        session = DummyRequest(
+            # Unique id: this test both queues and later merges.
+            request_id="sess-52693-apply",
+            # In-flight prompt before the pipelined [4, 5] continuation.
+            prompt_token_ids=[1, 2, 3],
+            # Session path: stop must pause, not free the request.
+            resumable=True,
+        )
+        # Session start. Needed before schedule() can allocate KV blocks.
+        scheduler.add_request(session)
+        # Prefill step. We keep the SchedulerOutput for update_from_output.
+        scheduler_output = scheduler.schedule()
+        # Match the e2e lifecycle: computed tokens cover the prompt before
+        # the first sampled token is applied in update_from_output.
+        # Otherwise stop/discard math in _update_request_as_session drifts.
+        session.num_computed_tokens = len(session.prompt_token_ids)
+        # Non-stop first token so the turn stays RUNNING after this step.
+        # STOP on the first sample would pause before we queue the chunk.
+        first_token = 10
+        # Deliver the sampled token the way EngineCore does after execute.
+        scheduler.update_from_output(
+            scheduler_output,
+            ModelRunnerOutput(
+                req_ids=[session.request_id],
+                req_id_to_index={session.request_id: 0},
+                sampled_token_ids=[[first_token]],
+                logprobs=None,
+                prompt_logprobs_dict={session.request_id: None},
+                pooler_output=[],
+            ),
+        )
+        # Session is still RUNNING (turn not stopped). Queue the next chunk
+        # now, while in flight, which is the case _handle_stopped_request
+        # used to apply too early.
+        assert session.status == RequestStatus.RUNNING
+        # Same id as session: this is a continuation, not a new request.
+        scheduler.add_request(
+            DummyRequest(
+                request_id="sess-52693-apply",
+                # Tokens that must not appear on the prompt until after
+                # we leave RUNNING and promotion merges the queue.
+                prompt_token_ids=[4, 5],
+                resumable=True,
+            )
+        )
+        # Queue holds the continuation; stop handling must not pop it.
+        assert len(session.streaming_queue) == 1
+        # Prompt still the original chunk. [4, 5] would mean apply-on-add.
+        assert session.prompt_token_ids == [1, 2, 3]
+
+        # Second step samples STOP. update_from_output must pause, not merge.
+        scheduler_output = scheduler.schedule()
+        # STOP_TOKEN is DummyRequest's stop id. This is a real turn end,
+        # not a planted status, so _handle_stopped_request actually runs.
+        scheduler.update_from_output(
+            scheduler_output,
+            ModelRunnerOutput(
+                req_ids=[session.request_id],
+                req_id_to_index={session.request_id: 0},
+                sampled_token_ids=[[STOP_TOKEN]],
+                logprobs=None,
+                prompt_logprobs_dict={session.request_id: None},
+                pooler_output=[],
+            ),
+        )
+        # Left RUNNING via the normal stop path. Still paused: the queued
+        # continuation is not applied inside _handle_stopped_request.
+        assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+        # Caller removes stopped_running_reqs after handle returns False.
+        # Still being in running here would be the dual-membership setup.
+        assert session not in scheduler.running
+        # Paused sessions live in skipped_waiting, not the main queue.
+        assert session in scheduler.skipped_waiting
+        # Queue still has the continuation. Empty would mean stop applied
+        # it (the old _handle_stopped_request behavior).
+        assert len(session.streaming_queue) == 1
+        # Prompt still lacks [4, 5]; those apply on the next schedule().
+        assert 4 not in session.prompt_token_ids
+        # Check 5 separately so a partial merge is visible in the failure.
+        assert 5 not in session.prompt_token_ids
+
+        # Promotion sees the non-empty queue, merges, status becomes WAITING,
+        # then this same schedule() admits the new tokens.
+        scheduler_output = scheduler.schedule()
+        # After promote+schedule the session is in flight on the new chunk.
+        assert session.status == RequestStatus.RUNNING
+        # Computed output 10 is kept; STOP is discarded; [4, 5] append.
+        # This is the same merge e2e used to do immediately on add_request
+        # while paused; we only delayed it until after leaving RUNNING.
+        assert session.prompt_token_ids == [1, 2, 3, 10, 4, 5]
+        # Queue object still exists (resumable sessions keep the deque).
+        assert session.streaming_queue is not None
+        # Continuation was consumed by promotion. A leftover item would
+        # mean we merged from somewhere else and left the queue stale.
+        assert len(session.streaming_queue) == 0
+        # Only the new prompt tokens need compute this step (2).
+        # 0 would mean we did not schedule the merged delta; >2 would mean
+        # we recomputed kept prefix tokens that KV should already hold.
+        assert scheduler_output.num_scheduled_tokens[session.request_id] == 2
