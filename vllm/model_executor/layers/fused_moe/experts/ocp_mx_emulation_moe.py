@@ -196,9 +196,6 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             a1q_scale=None,
-            # The second GEMM quantizes from this argument, not from the quant
-            # config: dropping it takes a statically-calibrated scheme down
-            # scaled_fp8_quant's dynamic path.
             a2_scale=a2_scale,
             workspace13=workspace13,
             workspace2=workspace2,

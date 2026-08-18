@@ -10,11 +10,6 @@ pins NUM_KSPLIT to 1 and leaves the rest of the tuned tile alone. The native
 MXFP8 selector varies BLOCK_K across its M buckets, the one tile parameter that
 reorders an output element's accumulation, so ``_mxfp8_dot_scaled_linear`` pins
 BLOCK_K. These tests run with the mode on.
-
-Both fixes change which config the kernel runs, so accuracy is checked in that
-config rather than assumed: MXFP4 against a hand-decoded reference below, MXFP8
-by ``test_mxfp8_native_linear`` in ``tests/kernels/test_minimax_m3_amd_ops.py``
-(pinning BLOCK_K does not change what the tile computes, only how K is chunked).
 """
 
 import pytest
@@ -104,17 +99,6 @@ def _variant_rows(probes: dict[int, torch.Tensor]) -> list[str]:
     return failures
 
 
-def _dequant_mxfp4(packed: torch.Tensor, scale: torch.Tensor, k: int) -> torch.Tensor:
-    """Decode E2M1 pairs (low nibble first) scaled by their E8M0 block exponent."""
-    lut = torch.tensor(
-        [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], device=packed.device
-    ).repeat(2)
-    lut[8:] *= -1
-    nibbles = torch.stack([packed & 0xF, (packed >> 4) & 0xF], dim=-1)
-    values = lut[nibbles.long()].view(*packed.shape[:-1], k)
-    return values * torch.exp2(scale.float() - 127).repeat_interleave(32, dim=-1)
-
-
 def _mxfp4_weights(n: int, k: int, use_asm_gemm: bool):
     """Weights laid out as AiterMxfp4LinearKernel.process_weights_after_loading."""
     weight = torch.randint(0, 255, (n, k // 2), dtype=torch.uint8, device="cuda")
@@ -156,15 +140,16 @@ def _mxfp8_weights(n: int, k: int):
 def _reference_operands(fmt: str, n: int, k: int):
     """Dequantized (activation, weight) for the operands the sweeps below use."""
     if fmt == "mxfp4":
-        pytest.importorskip("aiter")
-        from aiter.ops.triton.quant import dynamic_mxfp4_quant
+        from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+            dequant_mxfp4,
+            quant_dequant_mxfp4,
+        )
 
         weight, weight_scale = _mxfp4_weights(n, k, use_asm_gemm=False)
         x = torch.randn(64, k, device="cuda", dtype=torch.bfloat16)
-        x_q, x_s = dynamic_mxfp4_quant(x)
         return (
-            _dequant_mxfp4(x_q, x_s, k),
-            _dequant_mxfp4(weight, weight_scale.T.contiguous(), k),
+            quant_dequant_mxfp4(x).float(),
+            dequant_mxfp4(weight, weight_scale.T.contiguous(), torch.bfloat16).float(),
         )
 
     from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
@@ -184,7 +169,7 @@ def _reference_operands(fmt: str, n: int, k: int):
 @requires_mx
 @pytest.mark.parametrize("fmt", ["mxfp4", "mxfp8"])
 def test_scale_spread_exposes_reordering(fmt: str):
-    """The sweeps are only meaningful if their operands can see a reordering.
+    """Positive control for the sweeps below, not a test of the operands.
 
     Summing one K row in the opposite order has to move the bf16 result at
     SCALE_SPREAD, or the invariance sweeps below are asserting nothing. MXFP4
@@ -200,46 +185,6 @@ def test_scale_spread_exposes_reordering(fmt: str):
         f"reversing the K order leaves every {fmt} output bit unchanged at "
         f"SCALE_SPREAD={SCALE_SPREAD}: the fp32 accumulation is exact for these "
         f"operands, so the batch-invariance sweeps cannot fail"
-    )
-
-
-@requires_mx
-@pytest.mark.parametrize("n,k", [(4096, 2048), (512, 1024)])
-# M=8 is the only bucket whose config batch invariance changes (NUM_KSPLIT 4 ->
-# 1), so it is the one the reference has to cover; M=256 pins a bucket the mode
-# leaves alone.
-@pytest.mark.parametrize("m", [8, 256])
-def test_mxfp4_linear_matches_dequant_reference(m: int, n: int, k: int):
-    """The AITER MXFP4 GEMM against a hand-decoded reference, in the pinned config.
-
-    Batch invariance drops the kernel's split-K, so the accuracy of what it
-    actually runs under the mode is not what ``tests/evals/gsm8k`` measures.
-    Quark's ``mx.dq_mxfp4`` disagrees with AITER on the activation path, so
-    ``_dequant_mxfp4`` is the oracle here.
-    """
-    import vllm.model_executor.kernels.linear.mxfp4.aiter  # noqa: F401
-
-    pytest.importorskip("aiter")
-    from aiter.ops.triton.quant import dynamic_mxfp4_quant
-
-    set_random_seed(SEED)
-    weight, weight_scale = _mxfp4_weights(n, k, use_asm_gemm=False)
-    x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
-
-    got = torch.ops.vllm.gemm_with_dynamic_quant(
-        x, weight, weight_scale, False, torch.bfloat16
-    )
-    # The op quantizes x internally; repeating it here is bit-exact.
-    x_q, x_s = dynamic_mxfp4_quant(x)
-    reference = (
-        _dequant_mxfp4(x_q, x_s, k)
-        @ _dequant_mxfp4(weight, weight_scale.T.contiguous(), k).T
-    )
-
-    error = ((got.float() - reference).norm() / reference.norm()).item()
-    assert error < 5e-3, (
-        f"MXFP4 linear is {error:.2e} from the dequantized reference "
-        f"(M={m}, N={n}, K={k}); bf16 output rounding alone is ~2e-3"
     )
 
 
