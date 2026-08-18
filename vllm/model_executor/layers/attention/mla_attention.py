@@ -390,6 +390,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
     3. Return the output tensor.
     """
 
+    supports_dense_mha_prefill: ClassVar[bool] = True
+
     def __init__(
         self,
         num_heads: int,
@@ -549,9 +551,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
 
         self.prefill_backend: MLAPrefillBackend | None
-        if self.impl.is_sparse and not self.impl.supports_dense_mha_prefill:
+        if self.impl.is_sparse and not (
+            self.impl.supports_dense_mha_prefill and self.supports_dense_mha_prefill
+        ):
             logger.warning_once(
-                "Sparse MLA impl has no dense-MHA prefill path; using the top-k "
+                "Sparse MLA layer has no dense-MHA prefill path; using the top-k "
                 "MQA path only."
             )
             self.prefill_backend = None
