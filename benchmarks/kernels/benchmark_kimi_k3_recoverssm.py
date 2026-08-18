@@ -13,6 +13,8 @@ import importlib.util
 import multiprocessing as mp
 import statistics
 import sys
+from dataclasses import dataclass
+from itertools import product
 from types import SimpleNamespace
 import types
 from pathlib import Path
@@ -83,6 +85,12 @@ CONV_WIDTH = 4
 L2_FLUSH_FLOATS = 128 * 1024 * 1024
 
 
+@dataclass(frozen=True)
+class KernelConfig:
+    value_slice: int
+    num_warps: int
+
+
 def local_num_heads(tp_size: int) -> int:
     if KIMI_K3_NUM_HEADS % tp_size:
         raise ValueError("Kimi-K3 head count must divide TP size")
@@ -90,7 +98,14 @@ def local_num_heads(tp_size: int) -> int:
 
 
 class Inputs:
-    def __init__(self, batch: int, spec_query_len: int, tp_size: int) -> None:
+    def __init__(
+        self,
+        batch: int,
+        spec_query_len: int,
+        tp_size: int,
+        verify_config: KernelConfig = KernelConfig(32, 4),
+        recover_config: KernelConfig = KernelConfig(32, 4),
+    ) -> None:
         h = local_num_heads(tp_size)
         d = KIMI_K3_HEAD_DIM
         tokens = batch * spec_query_len
@@ -100,6 +115,8 @@ class Inputs:
         self.batch = batch
         self.t = spec_query_len
         self.h = h
+        self.verify_config = verify_config
+        self.recover_config = recover_config
         self.mixed_qkv_source = torch.randn(
             tokens, 3 * h * d, device=device, dtype=dtype
         )
@@ -159,7 +176,9 @@ class Inputs:
         q, k, v = (part.view(1, -1, self.h, KIMI_K3_HEAD_DIM) for part in x.split(self.h * KIMI_K3_HEAD_DIM, dim=-1))
         kda_recoverssm_verify(q, k, v, self.gate, self.beta, self.a_log, self.dt_bias,
                               None, self.state, self.correction, self.kg,
-                              self.query_start_loc, self.state_indices, self.t)
+                              self.query_start_loc, self.state_indices, self.t,
+                              value_block_size=self.verify_config.value_slice,
+                              num_warps=self.verify_config.num_warps)
 
     def reset_verify(self) -> None:
         self.conv_state.copy_(self._verify_conv_state)
@@ -176,7 +195,13 @@ class Inputs:
 
     def commit(self, accepted_tokens: int) -> None:
         self.accepted.fill_(accepted_tokens)
-        self.commit_context.commit(self.accepted, self.state_indices, self.query_start_loc)
+        self.commit_context.commit(
+            self.accepted,
+            self.state_indices,
+            self.query_start_loc,
+            value_block_size=self.recover_config.value_slice,
+            num_warps=self.recover_config.num_warps,
+        )
 
 
 def capture_graph(run, reset, l2_flush: torch.Tensor, setup=None) -> torch.cuda.CUDAGraph:
@@ -195,24 +220,57 @@ def capture_graph(run, reset, l2_flush: torch.Tensor, setup=None) -> torch.cuda.
     return graph
 
 
-def _compile_warmup_worker(batch: int, spec_query_len: int, accepted: int, tp_size: int) -> None:
-    inputs = Inputs(batch, spec_query_len, tp_size)
+def _compile_warmup_worker(
+    batch: int,
+    spec_query_len: int,
+    accepted: int,
+    tp_size: int,
+    verify_config: KernelConfig,
+    recover_config: KernelConfig,
+    mode: str,
+) -> None:
+    inputs = Inputs(batch, spec_query_len, tp_size, verify_config, recover_config)
     inputs.warm_projection_output()
-    inputs.verify()
-    inputs.commit(accepted)
+    if mode == "verify":
+        inputs.verify()
+    else:
+        inputs.commit(accepted)
     torch.cuda.synchronize()
 
 
-def compile_warmup(batch_sizes: tuple[int, ...], spec_query_len: int,
-                   accepted: int, tp_size: int, workers: int) -> None:
+def compile_warmup(
+    batch_sizes: tuple[int, ...],
+    spec_query_len: int,
+    accepted: int,
+    tp_size: int,
+    verify_configs: tuple[KernelConfig, ...],
+    recover_configs: tuple[KernelConfig, ...],
+    workers: int,
+) -> None:
     if workers <= 0:
         return
-    print(f"compile warmup: {len(batch_sizes)} shapes across {workers} processes")
+    jobs = [
+        (batch, config, KernelConfig(32, 4), "verify")
+        for batch, config in product(batch_sizes, verify_configs)
+    ] + [
+        (batch, KernelConfig(32, 4), config, "recover")
+        for batch, config in product(batch_sizes, recover_configs)
+    ]
+    print(f"compile warmup: {len(jobs)} configurations across {workers} processes")
     context = mp.get_context("spawn")
     with ProcessPoolExecutor(max_workers=workers, mp_context=context) as executor:
         futures = [
-            executor.submit(_compile_warmup_worker, batch, spec_query_len, accepted, tp_size)
-            for batch in batch_sizes
+            executor.submit(
+                _compile_warmup_worker,
+                batch,
+                spec_query_len,
+                accepted,
+                tp_size,
+                verify_config,
+                recover_config,
+                mode,
+            )
+            for batch, verify_config, recover_config, mode in jobs
         ]
         for future in futures:
             future.result()
@@ -267,10 +325,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--accepted-tokens", default="1")
     parser.add_argument("--tp-size", type=int, default=KIMI_K3_TP_SIZE)
+    parser.add_argument("--verify-value-slices", default="32")
+    parser.add_argument("--verify-num-warps", default="4")
+    parser.add_argument("--recover-value-slices", default="32")
+    parser.add_argument("--recover-num-warps", default="4")
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--iters", type=int, default=100)
     parser.add_argument("--compile-workers", type=int, default=4)
     return parser.parse_args()
+
+
+def parse_kernel_configs(value_slices: str, num_warps: str) -> tuple[KernelConfig, ...]:
+    values = tuple(int(value) for value in value_slices.split(","))
+    warps = tuple(int(value) for value in num_warps.split(","))
+    if any(value <= 0 or value & (value - 1) for value in values):
+        raise ValueError("value slices must be positive powers of two")
+    if any(value <= 0 for value in warps):
+        raise ValueError("num_warps must be positive")
+    return tuple(KernelConfig(value, warps) for value, warps in product(values, warps))
 
 
 def main() -> None:
@@ -280,47 +352,78 @@ def main() -> None:
         raise ValueError("--num-speculative-tokens must be non-negative")
     batch_sizes = tuple(int(value) for value in args.batch_sizes.split(","))
     accepted_tokens = tuple(int(value) for value in args.accepted_tokens.split(","))
+    verify_configs = parse_kernel_configs(
+        args.verify_value_slices, args.verify_num_warps
+    )
+    recover_configs = parse_kernel_configs(
+        args.recover_value_slices, args.recover_num_warps
+    )
     if any(value < 0 or value > spec_query_len for value in accepted_tokens):
         raise ValueError("accepted tokens must be in [0, T]")
     l2_flush = torch.empty(L2_FLUSH_FLOATS, device="cuda", dtype=torch.float32)
     print(
         f"RecoverSSM benchmark: heads={local_num_heads(args.tp_size)}, "
         f"head_dim={KIMI_K3_HEAD_DIM}, T={spec_query_len}, batches={batch_sizes}, "
-        f"accepted={accepted_tokens}, device={torch.cuda.get_device_name()}"
+        f"accepted={accepted_tokens}, verify={verify_configs}, "
+        f"recover={recover_configs}, device={torch.cuda.get_device_name()}"
     )
     compile_warmup(
-        batch_sizes, spec_query_len, accepted_tokens[0], args.tp_size,
-        min(args.compile_workers, len(batch_sizes)),
+        batch_sizes,
+        spec_query_len,
+        accepted_tokens[0],
+        args.tp_size,
+        verify_configs,
+        recover_configs,
+        min(args.compile_workers, len(batch_sizes) * (len(verify_configs) + len(recover_configs))),
     )
     for batch in batch_sizes:
-        inputs = Inputs(batch, spec_query_len, args.tp_size)
-        verify_graph = capture_graph(
-            inputs.verify, inputs.reset_verify, l2_flush, inputs.warm_projection_output
-        )
-        measure_graph(
-            verify_graph,
-            tag=f"verify batch={batch}",
-            targets=("_causal_conv1d_update_kernel", "_kda_recoverssm_verify_kernel"),
-            warmup=args.warmup,
-            iters=args.iters,
-        )
-        for accepted in accepted_tokens:
-            commit_graph = capture_graph(
-                lambda accepted=accepted: inputs.commit(accepted),
-                inputs.reset_commit,
+        for verify_config in verify_configs:
+            inputs = Inputs(
+                batch,
+                spec_query_len,
+                args.tp_size,
+                verify_config=verify_config,
+            )
+            verify_graph = capture_graph(
+                inputs.verify,
+                inputs.reset_verify,
                 l2_flush,
+                inputs.warm_projection_output,
             )
             measure_graph(
-                commit_graph,
-                tag=f"commit batch={batch} accepted={accepted}",
-                targets=(
-                    "_prepare_commit_plan_kernel",
-                    "_compact_conv_state_kernel",
-                    "_commit_kda_state_kernel",
-                ),
+                verify_graph,
+                tag=f"verify batch={batch} BV={verify_config.value_slice} warps={verify_config.num_warps}",
+                targets=("_causal_conv1d_update_kernel", "_kda_recoverssm_verify_kernel"),
                 warmup=args.warmup,
                 iters=args.iters,
             )
+        for recover_config in recover_configs:
+            inputs = Inputs(
+                batch,
+                spec_query_len,
+                args.tp_size,
+                recover_config=recover_config,
+            )
+            for accepted in accepted_tokens:
+                commit_graph = capture_graph(
+                    lambda accepted=accepted: inputs.commit(accepted),
+                    inputs.reset_commit,
+                    l2_flush,
+                )
+                measure_graph(
+                    commit_graph,
+                    tag=(
+                        f"commit batch={batch} accepted={accepted} "
+                        f"BV={recover_config.value_slice} warps={recover_config.num_warps}"
+                    ),
+                    targets=(
+                        "_prepare_commit_plan_kernel",
+                        "_compact_conv_state_kernel",
+                        "_commit_kda_state_kernel",
+                    ),
+                    warmup=args.warmup,
+                    iters=args.iters,
+                )
 
 
 if __name__ == "__main__":

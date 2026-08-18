@@ -600,6 +600,8 @@ def kda_recoverssm_verify(
     state_indices: torch.Tensor,
     spec_query_len: int,
     out: torch.Tensor | None = None,
+    value_block_size: int | None = None,
+    num_warps: int = 4,
 ) -> torch.Tensor:
     """Verify a KDA speculative window without modifying its checkpoint."""
     if q.ndim != 4 or q.shape[0] != 1:
@@ -679,8 +681,14 @@ def kda_recoverssm_verify(
     if total_tokens == 0:
         return out
 
+    if value_block_size is not None and (
+        value_block_size <= 0 or value_block_size & (value_block_size - 1)
+    ):
+        raise ValueError("KDA RecoverSSM value block size must be a power of two")
+    if num_warps <= 0:
+        raise ValueError("KDA RecoverSSM num_warps must be positive")
     block_k = triton.next_power_of_2(key_dim)
-    block_v = min(triton.next_power_of_2(value_dim), 32)
+    block_v = value_block_size or min(triton.next_power_of_2(value_dim), 32)
     grid = (triton.cdiv(value_dim, block_v), batch, num_heads)
     _kda_recoverssm_verify_kernel[grid](
         q,
@@ -724,7 +732,7 @@ def kda_recoverssm_verify(
         BV=block_v,
         SPEC_QUERY_LEN=spec_query_len,
         USE_LOWER_BOUND=lower_bound is not None,
-        num_warps=4,
+        num_warps=num_warps,
         num_stages=2,
     )
     return out
@@ -917,6 +925,8 @@ class KDARecoverSSMCommitContext:
         block_table: torch.Tensor | None = None,
         num_computed_tokens: torch.Tensor | None = None,
         mamba_block_size: int | None = None,
+        value_block_size: int | None = None,
+        num_warps: int = 4,
     ) -> None:
         """Fold accepted KDA and convolution inputs into every layer."""
         batch = state_indices.shape[0]
@@ -939,6 +949,12 @@ class KDARecoverSSMCommitContext:
             )
         if block_table is not None and block_table.ndim != 2:
             raise ValueError("KDA RecoverSSM block table must be two-dimensional")
+        if value_block_size is not None and (
+            value_block_size <= 0 or value_block_size & (value_block_size - 1)
+        ):
+            raise ValueError("KDA RecoverSSM value block size must be a power of two")
+        if num_warps <= 0:
+            raise ValueError("KDA RecoverSSM num_warps must be positive")
         device = self.checkpoints[0].device
         if (
             any(
@@ -1014,7 +1030,7 @@ class KDARecoverSSMCommitContext:
         state_ref = self.checkpoints[0]
         _, num_heads, value_dim, key_dim = state_ref.shape
         block_k = triton.next_power_of_2(key_dim)
-        block_v = min(triton.next_power_of_2(value_dim), 32)
+        block_v = value_block_size or min(triton.next_power_of_2(value_dim), 32)
         grid = (
             triton.cdiv(value_dim, block_v),
             batch,
@@ -1061,7 +1077,7 @@ class KDARecoverSSMCommitContext:
             NUM_HEADS=num_heads,
             USE_LOWER_BOUND=self.lower_bound is not None,
             ALIGN_MODE=block_table is not None,
-            num_warps=4,
+            num_warps=num_warps,
             num_stages=2,
         )
 
