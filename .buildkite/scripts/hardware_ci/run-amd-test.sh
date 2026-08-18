@@ -1523,7 +1523,8 @@ fi
 clear_ci_orchestration_env
 if is_multi_node "$commands"; then
   echo "--- Multi-node job detected"
-  export DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
+  DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
+  export DCKR_VER
 
   # Parse the bracket syntax:  prefix ; [node0_cmds] && [node1_cmds]
   #   BASH_REMATCH[1] = prefix (everything before first bracket)
@@ -1581,10 +1582,10 @@ else
     ulimit_core_hard="-1"
   fi
    # Disable core dumps in the ROCm test container unless the ROCm debug agent is enabled
-  coredump_flags="--ulimit core=0:$ulimit_core_hard"
+  coredump_flags=(--ulimit "core=0:$ulimit_core_hard")
   if [[ "$commands" == *"ROCm debug agent enabled"* ]]; then
     # Works around https://github.com/rocm/rocm-systems/issues/6206
-    coredump_flags='-e HSA_COREDUMP_PATTERN="/tmp/gpucore.%p"'
+    coredump_flags=(-e 'HSA_COREDUMP_PATTERN="/tmp/gpucore.%p"')
   else
     echo "ROCm debug agent not enabled, coredumps are disabled in the test container."
   fi
@@ -1597,7 +1598,7 @@ else
     --shm-size=16gb \
     --group-add "$render_gid" \
     --rm \
-    $coredump_flags \
+    "${coredump_flags[@]}" \
     -e HF_TOKEN \
     -e "HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT}" \
     -e "HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT}" \

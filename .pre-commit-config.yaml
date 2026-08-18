@@ -40,7 +40,6 @@ repos:
   hooks:
   - id: shellcheck
     args: ["-s", "bash", "--format=gcc", "--severity=warning"]
-    exclude: ^\.buildkite/scripts/hardware_ci/run-amd-test\.sh$
 - repo: https://github.com/astral-sh/uv-pre-commit
   rev: 0.11.1
   hooks:
