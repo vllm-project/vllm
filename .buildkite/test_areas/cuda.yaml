@@ -19,6 +19,7 @@ steps:
     - pytest -v -s cuda/test_cuda_compatibility_path.py
   mirror:
     amd:
+      label: ":amd: (MI355) CUDA Platform"
       dind: false
       device: mi355_1
       working_dir: "/vllm-workspace/tests"
@@ -50,6 +51,7 @@ steps:
     - pytest -v -s v1/cudagraph/test_encoder_cudagraph.py
   mirror:
     amd:
+      label: ":amd: (MI250) CUDAGraph"
       device: mi250_1
       timeout_in_minutes: 42
       depends_on:

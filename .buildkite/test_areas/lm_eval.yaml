@@ -397,6 +397,7 @@ steps:
     - pytest -s -v evals/mrcr/test_mrcr_correctness.py --config-list-file=evals/mrcr/configs/models-small.txt
   mirror:
     amd:
+      label: ":amd: (MI355) MRCR Eval Small Models"
       dind: false
       device: mi355_1
       timeout_in_minutes: 40

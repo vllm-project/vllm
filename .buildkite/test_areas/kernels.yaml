@@ -237,6 +237,7 @@ steps:
     - pytest -v -s kernels/mamba
   mirror:
     amd:
+      label: ":amd: (MI250) Mamba Kernels"
       device: mi250_1
       timeout_in_minutes: 54
       depends_on:
@@ -384,6 +385,7 @@ steps:
   parallelism: 2
   mirror:
     amd:
+      label: ":amd: (MI250) Helion Kernels Shard %N"
       device: mi250_1
       timeout_in_minutes: 43
       depends_on:

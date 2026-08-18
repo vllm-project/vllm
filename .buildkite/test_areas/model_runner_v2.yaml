@@ -128,6 +128,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   mirror:
     amd:
+      label: ":amd: (MI355) Model Runner V2 Spec Decode"
       dind: false
       device: mi355_1
       timeout_in_minutes: 73

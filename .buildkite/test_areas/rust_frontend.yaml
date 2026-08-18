@@ -38,6 +38,7 @@ steps:
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
   mirror:
     amd:
+      label: ":amd: (MI355) Rust Frontend OpenAI Coverage"
       dind: false
       device: mi355_1
       timeout_in_minutes: 35
@@ -89,6 +90,7 @@ steps:
   - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
   mirror:
     amd:
+      label: ":amd: (MI355) Rust Frontend Serve/Admin Coverage"
       dind: false
       device: mi355_1
       timeout_in_minutes: 30

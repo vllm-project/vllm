@@ -16,6 +16,7 @@ steps:
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
   mirror:
     amd:
+      label: ":amd: (MI355) Basic Models (Initialization)"
       dind: false
       device: mi355_1
       timeout_in_minutes: 25

@@ -140,6 +140,7 @@ steps:
     - pytest -v -s models/language/generation_ppl_test
   mirror:
     amd:
+      label: ":amd: (MI250) Language Models (PPL)"
       dind: false
       device: mi250_1
       timeout_in_minutes: 64
@@ -202,6 +203,7 @@ steps:
     - pytest -v -s models/language/pooling_mteb_test
   mirror:
     amd:
+      label: ":amd: (MI250) Language Models (MTEB)"
       dind: false
       device: mi250_1
       timeout_in_minutes: 58
