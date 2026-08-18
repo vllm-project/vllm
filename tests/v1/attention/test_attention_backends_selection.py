@@ -5,7 +5,9 @@
 from types import SimpleNamespace
 
 import pytest
+import torch
 
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (
     MiniMaxText01LinearAttention,
 )
@@ -17,6 +19,31 @@ from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionBackend
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionBackend
+
+
+@pytest.mark.parametrize(("use_replayssm", "expected_blocks"), [(False, 3), (True, 0)])
+def test_replayssm_does_not_reserve_speculative_state_blocks(
+    use_replayssm, expected_blocks
+):
+    layer = SimpleNamespace(
+        get_state_shape=lambda: ((2,),),
+        get_state_dtype=lambda: (torch.float32,),
+        mamba_type=MambaAttentionBackendEnum.MAMBA2,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            mamba_block_size=1,
+            mamba_page_size_padded=None,
+            mamba_cache_mode="none",
+            use_replayssm=use_replayssm,
+        ),
+        num_speculative_tokens=3,
+    )
+
+    spec = MambaBase.get_kv_cache_spec(layer, vllm_config)
+
+    assert spec is not None
+    assert spec.num_speculative_blocks == expected_blocks
 
 
 @pytest.mark.parametrize(
