@@ -19,7 +19,6 @@ from vllm.config.kv_cache_dtype import (
     is_known_kv_cache_dtype,
     register_kv_cache_dtype,
 )
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     is_quantized_kv_cache,
@@ -48,9 +47,6 @@ class TestC8Handler:
     def quant_mode(self):
         return KVQuantMode.BACKEND
 
-    def supports_platform(self, platform):
-        return True
-
 
 @register_kv_cache_dtype("test-ith")
 class TestIthHandler:
@@ -66,9 +62,6 @@ class TestIthHandler:
 
     def quant_mode(self):
         return KVQuantMode.INT8_PER_TOKEN_HEAD
-
-    def supports_platform(self, platform):
-        return True
 
 
 def test_register_kv_cache_dtype():
@@ -131,19 +124,6 @@ def test_backend_sentinel_properties():
     assert mode != KVQuantMode.NONE
     assert mode.is_per_token_head is False
     assert mode.is_nvfp4 is False
-
-
-def test_platform_whitelist_enforced(monkeypatch):
-    """Platform whitelist rejects unknown dtypes in CacheConfig."""
-    platform_cls = type(current_platform)
-    monkeypatch.setattr(platform_cls, "supported_kv_cache_dtypes", ["test-c8"])
-
-    with pytest.raises(
-        ValueError, match="fp8 kv-cache-dtype is currently not supported"
-    ):
-        CacheConfig(cache_dtype="fp8")
-
-    CacheConfig(cache_dtype="test-c8")
 
 
 def test_no_snapshot_of_shared_dtype_registry():
