@@ -111,9 +111,8 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         image_size = config.force_image_size or config.vision_config.image_size
         patch_size = config.vision_config.patch_size
         self.patch_size = patch_size
-        self.num_image_token = int(
-            (image_size // patch_size) ** 2 * (config.downsample_ratio**2)
-        )
+        self.patch_tokens = (image_size // patch_size) ** 2
+        self.num_image_token = int(self.patch_tokens * (config.downsample_ratio**2))
         self.downsample_ratio = config.downsample_ratio
         self.ps_version = config.ps_version
 
@@ -392,6 +391,25 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
             connector="mlp1",
             tower_model="vision_model",
         )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        # The vision features contain no CLS token (`extract_feature`
+        # reshapes the full sequence to an h x w grid), so the encoder
+        # processes exactly `patch_tokens` tokens per tile.
+        if num_image_tokens <= 0 or self.num_image_token <= 0:
+            return 0
+
+        num_patches = num_image_tokens // self.num_image_token
+        return num_patches * self.patch_tokens
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        # mlp1 runs after pixel shuffle, so it sees `num_image_token`
+        # tokens per tile, matching the LLM-side placeholder count.
+        if num_vision_tokens <= 0 or self.patch_tokens <= 0:
+            return 0
+
+        num_patches = num_vision_tokens // self.patch_tokens
+        return num_patches * self.num_image_token
 
 
 # --------------------------------------------------------
