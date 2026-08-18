@@ -111,9 +111,7 @@ def _worker(local_rank: int, world_size: int, master_port: int) -> None:
         assert op.compile() == len(op.bucket_sizes)
         assert op.compile() == 0
 
-        mismatched_dtype = (
-            torch.bfloat16 if dtype == torch.float16 else torch.float16
-        )
+        mismatched_dtype = torch.bfloat16 if dtype == torch.float16 else torch.float16
         mismatched_x = torch.empty(256, K, dtype=mismatched_dtype, device=device)
         assert not projection.should_run(mismatched_x)
 
@@ -125,9 +123,7 @@ def _worker(local_rank: int, world_size: int, master_port: int) -> None:
             torch.accelerator.synchronize(device)
             assert actual.dtype == dtype
             rtol, atol = _TOLERANCES[dtype]
-            torch.testing.assert_close(
-                actual.float(), expected, rtol=rtol, atol=atol
-            )
+            torch.testing.assert_close(actual.float(), expected, rtol=rtol, atol=atol)
 
         first_output = projection(x)
         first_output_snapshot = first_output.clone()

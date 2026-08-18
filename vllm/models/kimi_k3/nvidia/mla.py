@@ -292,8 +292,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             self.cutedsl_fused_gemm_ar = make_cutedsl_fused_gemm_ar(
                 self.o_proj,
                 max_M=(
-                    get_current_vllm_config()
-                    .scheduler_config.max_num_batched_tokens
+                    get_current_vllm_config().scheduler_config.max_num_batched_tokens
                 ),
             )
             if self.cutedsl_fused_gemm_ar is None:
