@@ -161,10 +161,9 @@ class XgrammarGrammar(StructuredOutputGrammar):
         Returns False if the FSM failed to advance.
         """
         if self._is_terminated:
-            return False
+            return True
         for token in tokens:
             if not self.matcher.accept_token(token):
-                self._is_terminated = self.matcher.is_terminated()
                 logger.error(
                     "Failed to advance FSM for request %s "
                     "for tokens %s. Please file an issue.",
@@ -184,6 +183,9 @@ class XgrammarGrammar(StructuredOutputGrammar):
 
         Returns the prefix list of tokens that are accepted by the FSM.
         """
+        if self._is_terminated:
+            return []
+
         accepted_tokens = []
         for token in tokens:
             if self.matcher.accept_token(token):

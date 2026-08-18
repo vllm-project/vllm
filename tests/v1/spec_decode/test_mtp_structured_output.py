@@ -278,6 +278,11 @@ def test_xgrammar_accept_tokens_stops_at_termination(capfd):
     assert grammar.num_processed_tokens == processed_before + 1
     assert "trying to accept new token" not in capfd.readouterr().err
 
+    processed_after_eos = grammar.num_processed_tokens
+    assert grammar.accept_tokens(request.request_id, [trailing])
+    assert grammar.num_processed_tokens == processed_after_eos
+    assert "trying to accept new token" not in capfd.readouterr().err
+
     grammar.reset()
     assert not grammar.is_terminated()
     assert grammar.num_processed_tokens == 0
@@ -299,6 +304,9 @@ def test_xgrammar_validate_tokens_stops_at_termination(capfd):
 
     assert grammar.accept_tokens(request.request_id, [eos])
     assert grammar.is_terminated()
+
+    assert grammar.validate_tokens([trailing]) == []
+    assert "trying to accept new token" not in capfd.readouterr().err
 
 
 class _MarkerReasoner:
