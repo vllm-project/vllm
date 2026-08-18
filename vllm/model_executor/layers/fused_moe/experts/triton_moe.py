@@ -6,7 +6,10 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+    apply_moe_activation_supported,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -59,6 +62,31 @@ from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     """Triton-based fused MoE expert implementation."""
 
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        supported, reason = mk.FusedMoEExperts.is_supported_config(
+            cls,
+            moe_config,
+            weight_key,
+            activation_key,
+            activation_format,
+        )
+        if not supported or not current_platform.is_cuda_alike():
+            return supported, reason
+
+        padded_num_experts = (moe_config.num_experts + 31) // 32 * 32
+        if padded_num_experts >= 1024:
+            return False, (
+                "kernel's moe_align_block_size requires fewer than 1024 padded experts"
+            )
+        return True, None
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -68,15 +96,6 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # higher-precision + activation QDQ.
         self.quantization_emulation = False
         super().__init__(moe_config, quant_config)
-
-        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
-        # Gated-activation params: silu == swigluoai with alpha=1, beta=0.
-        self.gemm1_alpha = (
-            quant_config.gemm1_alpha if quant_config.gemm1_alpha is not None else 1.0
-        )
-        self.gemm1_beta = (
-            quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
-        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -136,19 +155,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.GELU_TANH,
-            MoEActivation.SITU,
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
-            MoEActivation.SWIGLUSTEP,
-            MoEActivation.SILU_NO_MUL,
-            MoEActivation.GELU_NO_MUL,
-            MoEActivation.GELU_TANH_NO_MUL,
-            MoEActivation.RELU2_NO_MUL,
-        ]
+        return apply_moe_activation_supported(activation)
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -171,17 +178,18 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         input: torch.Tensor,
         **kwargs,
     ) -> None:
-        gemm1_clamp_limit = self.quant_config.gemm1_clamp_limit
-        if activation == MoEActivation.SILU and gemm1_clamp_limit is not None:
-            swiglu_limit_func(output, input, float(gemm1_clamp_limit))
+        activation_config = self.activation_config
+        if (
+            activation == MoEActivation.SILU
+            and activation_config.clamp_limit is not None
+        ):
+            swiglu_limit_func(output, input, activation_config.clamp_limit)
             return
 
         # SWIGLUOAI_UNINTERLEAVE routes to the silu_and_mul_with_clamp kernel and
-        # needs the clamped-SwiGLU params (gemm1_clamp_limit/alpha/beta read from
-        # the quant config in __init__) forwarded; without a clamp_limit it
-        # asserts. Other activations ignore alpha/beta/clamp_limit.
+        # requires a clamp limit. Other activations ignore these parameters.
         if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
-            assert gemm1_clamp_limit is not None, (
+            assert activation_config.clamp_limit is not None, (
                 "SWIGLUOAI_UNINTERLEAVE requires gemm1_clamp_limit"
             )
 
@@ -189,9 +197,6 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             activation,
             output,
             input,
-            clamp_limit=gemm1_clamp_limit,
-            alpha=self.gemm1_alpha,
-            beta=self.gemm1_beta,
         )
 
     def workspace_shapes(
@@ -247,6 +252,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             torch.bfloat16,
             torch.float8_e4m3fn,
             torch.float8_e4m3fnuz,
+            torch.int8,
         ]
 
         # We declared expects_unquantized_inputs (LoRA + DP/EP all2all), so the
@@ -293,6 +299,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         elif (
             hidden_states.dtype == torch.float8_e4m3fn
             or hidden_states.dtype == torch.float8_e4m3fnuz
+            or hidden_states.dtype == torch.int8
         ):
             compute_type = tl.bfloat16
         else:

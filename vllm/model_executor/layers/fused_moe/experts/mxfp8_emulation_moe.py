@@ -104,16 +104,13 @@ class Mxfp8EmulationTritonExperts(Mxfp8TritonExpertsBase):
         )
 
         if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
-            limit = self.quant_config.gemm1_clamp_limit
-            if limit is None:
+            if self.activation_config.clamp_limit is None:
                 raise ValueError("SWIGLUOAI_UNINTERLEAVE requires gemm1_clamp_limit")
             apply_moe_activation(
                 activation,
                 output,
                 input,
-                clamp_limit=float(limit),
-                alpha=self.gemm1_alpha,
-                beta=self.gemm1_beta,
+                activation_config=self.activation_config,
             )
             return
         super().activation(activation, output, input)
