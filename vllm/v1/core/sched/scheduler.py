@@ -763,6 +763,13 @@ class Scheduler(SchedulerInterface):
                 request = request_queue.peek_request()
                 request_id = request.request_id
 
+                if (
+                    request.status == RequestStatus.RUNNING
+                    or request_id in num_scheduled_tokens
+                ):
+                    request_queue.pop_request()
+                    continue
+
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
                     request.status
@@ -1462,6 +1469,10 @@ class Scheduler(SchedulerInterface):
         session.num_prompt_tokens = len(session.prompt_token_ids)
         session.arrival_time = update.arrival_time
         session.sampling_params = update.sampling_params
+        # Mark remaining in-flight tokens from the prior turn as stale.
+        session.drop_stale_output = True
+        session.num_stale_output_tokens = session.num_in_flight_tokens
+        session.num_output_placeholders = 0
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1
         session.status = RequestStatus.WAITING
