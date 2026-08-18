@@ -141,9 +141,9 @@ class BaseFrontendArgs:
     """Enable the `/tokenizer_info` endpoint. May expose chat
     templates and other tokenizer configuration."""
     enable_log_outputs: bool = False
-    """If set to True, log model outputs (generations).
-    Requires `--enable-log-requests`. As with `--enable-log-requests`,
-    information is only logged at INFO level at maximum."""
+    """If set to True, log model outputs (generations). Requires
+    `--enable-log-requests`. Output text and finish reasons are logged at INFO,
+    while output token IDs are logged at DEBUG."""
     enable_log_deltas: bool = True
     """If set to False, output deltas will not be logged. Relevant only if 
     --enable-log-outputs is set.
@@ -282,7 +282,15 @@ class FrontendArgs(BaseFrontendArgs):
     """Allowed headers."""
     api_key: list[str] | None = None
     """If provided, the server will require one of these keys to be presented in
-    the header."""
+    the header.
+
+    Warning: this only authenticates endpoints under the `/v1`, `/v2`, and
+    `/inference` path prefixes. Other endpoints on the same server, including
+    `/invocations` (which exposes the same inference capabilities as `/v1`),
+    remain unauthenticated. Do not rely on `--api-key` alone to secure vLLM;
+    see
+    https://docs.vllm.ai/en/latest/usage/security.html#api-key-authentication-limitations
+    for what it does and does not protect."""
     ssl_keyfile: str | None = None
     """The file path to the SSL key file."""
     ssl_certfile: str | None = None

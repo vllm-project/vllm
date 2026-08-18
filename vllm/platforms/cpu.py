@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils.cpu_resource_utils import (
     DEVICE_CONTROL_ENV_VAR,
@@ -54,18 +55,25 @@ class CpuPlatform(Platform):
         elif self.get_cpu_architecture() == CpuArchEnum.ARM and sys.platform.startswith(
             "darwin"
         ):
-            if (
-                subprocess.check_output(
-                    ["sysctl -n hw.optional.arm.FEAT_BF16"], shell=True
-                ).strip()
+            # sysctl exits non-zero when the OID is absent, so check_output would
+            # raise instead of letting the fp16/fp32 fallback below run.
+            bf16 = (
+                subprocess.run(
+                    ["sysctl", "-n", "hw.optional.arm.FEAT_BF16"], capture_output=True
+                ).stdout.strip()
                 == b"1"
-            ):
+            )
+            if bf16:
                 return [torch.bfloat16, torch.float16, torch.float32]
             return [torch.float16, torch.float32]
         elif self.get_cpu_architecture() == CpuArchEnum.RISCV:
             return [torch.bfloat16, torch.float16, torch.float32]
         # x86/aarch64 CPU has supported both bf16 and fp16 natively.
         return [torch.bfloat16, torch.float16, torch.float32]
+
+    @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -196,10 +204,7 @@ class CpuPlatform(Platform):
             # cache. So use VLLM_CPU_CI_ENV to indicate the CI environment,
             # and just execute model with dynamo + eager mode to save time.
             # VLLM_CPU_CI_ENV is only used as an internal variable.
-            if os.environ.get("VLLM_CPU_CI_ENV", "0") != "0":
-                backend = "eager"
-            else:
-                backend = "inductor"
+            backend = "eager" if envs.VLLM_CPU_CI_ENV else "inductor"
 
             compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
             compilation_config.backend = backend
