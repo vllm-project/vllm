@@ -3390,8 +3390,7 @@ selector chooses among the existing exact FP16 algorithms:
 - at most 32 rows: cooperative top-k;
 - over 32 rows and at most 32K KV: persistent through 256 rows, native decode
   radix from 512 rows;
-- 32K-64K KV: native decode radix;
-- 64K-128K KV: persistent below 256 rows, native decode radix otherwise; and
+- 32K-128K KV: persistent below 256 rows, native decode radix otherwise; and
 - above 128K KV: persistent filtered top-k.
 
 A 512-thread persistent specialization with one 64 KiB buffer was tested and
@@ -3422,7 +3421,7 @@ FP16 latency in microseconds:
 | 1 | 4.817 | 7.669 | 8.256 | 9.514 |
 | 8 | 5.257 | 7.715 | 9.107 | 11.651 |
 | 32 | 5.366 | 8.944 | 11.662 | 18.941 |
-| 128 | 5.695 | 21.270 | 28.611 | 47.335 |
+| 128 | 5.695 | 17.476 | 28.611 | 47.335 |
 | 1,024 | 30.152 | 95.526 | 148.928 | 313.888 |
 | 8,192 | 214.645 | 635.104 | 1,010.123 | 2,375.072 |
 | 16,384 | 417.771 | 1,248.619 | 1,988.821 | 4,723.989 |
@@ -3446,7 +3445,7 @@ FP16 speedup over FP32:
 | 1 | 0.961x | 1.266x | 1.269x | 1.264x |
 | 8 | 0.970x | 1.298x | 1.263x | 1.206x |
 | 32 | 0.984x | 1.276x | 1.222x | 1.190x |
-| 128 | 0.984x | 0.922x | 1.049x | 1.433x |
+| 128 | 0.984x | 1.122x | 1.049x | 1.433x |
 | 1,024 | 1.109x | 1.467x | 1.489x | 1.516x |
 | 8,192 | 1.256x | 1.627x | 1.627x | 1.534x |
 | 16,384 | 1.267x | 1.637x | 1.635x | 1.529x |
@@ -3454,11 +3453,11 @@ FP16 speedup over FP32:
 The remaining regressions are bounded and explainable. At 1-32 rows and 10K,
 the selector is launch/fixed-work dominated, so halving score bytes cannot
 recover the common histogram and synchronization cost; FP16 is 1.6%-4.1%
-slower. At 50K/128, the best exact FP16 algorithm is native decode radix at
-21.270 us, still 8.5% slower than the unusually efficient FP32 persistent cell
-at 19.610 us. For throughput-bound shapes, FP16 is 1.11x-1.64x faster, below
-the 2x bandwidth ceiling because histogram atomics, index traffic, output, and
-synchronization are unchanged.
+slower. The earlier 50K/128 regression was a dispatch error, not an FP16
+kernel limitation; the persistent FP16 kernel is 1.122x faster there. For
+throughput-bound shapes, FP16 is 1.11x-1.64x faster, below the 2x bandwidth
+ceiling because histogram atomics, index traffic, output, and synchronization
+are unchanged.
 
 Focused validation after the final rebuild includes 13 BF16-rejection/native
 FP16/padded-stride cases, 10 DeepGEMM FP16/FP32 cases, 2 full DCP FP16/FP32
@@ -3466,3 +3465,103 @@ parity cases, 9 dtype/selector-policy cases, and all applicable pre-commit
 hooks. The reusable benchmark is
 `benchmarks/kernels/benchmark_sparse_indexer_topk.py` on PR branch
 `agent/fp16-indexer-logits`.
+
+## 2026-08-18: Nsight Compute analysis and corrected crossover
+
+Nsight Compute 2025.4.1 was run with elevated performance-counter permission
+on the same GB200 and workspace `.venv`. Each report profiles one exact top-k
+kernel invocation built from the captured 21st-selector GLM logits. The
+profiler replays the kernel for 41 metric passes, so its absolute duration is
+perturbed and is not substituted for the CUDA-graph latency above. Relative
+counter comparisons use identical profiling settings.
+
+The central result is that FP16 is not slower at 50K/128. The selector had
+sent that shape to the decode kernel based partly on a random-input crossover.
+Forced CUDA-graph measurements on real logits give:
+
+| Rows | KV | Persistent FP16 | Decode FP16 | Selected after fix |
+| ---: | ---: | ---: | ---: | --- |
+| 128 | 50K | 17.476 us | 21.303 us | persistent |
+| 256 | 50K | 33.467 us | 31.509 us | decode |
+| 512 | 50K | 64.633 us | 56.025 us | decode |
+| 128 | 100K | 28.521 us | 35.486 us | persistent |
+| 256 | 100K | 54.308 us | 50.201 us | decode |
+| 512 | 100K | 107.053 us | 90.176 us | decode |
+
+The corrected rule uses persistent below 256 rows for 32K-128K KV. An
+automatic-dispatch rerun measured FP16 versus FP32 as 17.476 versus 19.646 us
+at 50K/128, 31.529 versus 37.685 us at 50K/256, and 56.071 versus 77.195 us at
+50K/512. All outputs were checked against `torch.topk` before timing. The
+selector suite passes 18 tests, and all applicable pre-commit hooks pass.
+
+Representative Nsight counters explain the crossover:
+
+| Shape and kernel | Waves/SM | Achieved occupancy | No eligible | Instructions | DRAM throughput |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 10K/32 cooperative FP16 | 0.84 | 49.13% | 64.67% | 0.672M | 0.68% |
+| 10K/32 cooperative FP32 | 0.84 | 48.66% | 64.97% | 0.667M | 1.29% |
+| 50K/128 persistent FP16 | 0.84 | 49.74% | 56.53% | 8.247M | 4.28% |
+| 50K/128 persistent FP32 | 0.84 | 50.10% | 55.43% | 9.120M | 7.97% |
+| 50K/128 decode FP16 | 0.28 | 25.02% | 58.12% | 8.924M | 3.72% |
+| 50K/1,024 persistent FP16 | 6.74 | 49.73% | 50.24% | 65.980M | 6.48% |
+| 50K/1,024 decode FP16 | 2.25 | 65.87% | 29.49% | 71.395M | 8.17% |
+
+At 128 rows, the 512-thread decode grid has too few blocks to fill the 152-SM
+GPU, while persistent uses 1,024 threads per row and exposes twice as many
+active warps. At 1,024 rows, decode has enough blocks to reach 65.9% occupancy
+and 2.87 eligible warps per scheduler, versus 49.7% and 1.28 for persistent;
+it wins despite executing 8.2% more instructions. This is a row-count
+crossover, not a data-width crossover.
+
+The 10K small-row regime is different. It uses less than 1.3% of DRAM
+throughput and about 7.5% of SM throughput. At 32 rows, FP16 saves half the
+score traffic but executes 0.8% more instructions, while the fixed histogram,
+barriers, and launch occupy nearly all of the latency. Real FP16 logits also
+have more duplicate ordered keys. Nsight records 18,334 shared atomic
+instructions and 20,979 shared-bank conflicts for FP16, versus 17,306 and
+19,120 for FP32. This small contention increase explains why byte reduction
+does not make FP16 faster at 10K/1-32.
+
+At 50K/128 persistent, FP16 is already faster: it halves the score reads,
+executes 9.6% fewer instructions, and reduces long-scoreboard stalls. Its
+remaining FP16-specific cost is shared contention: 320,699 shared atomics and
+92,036 bank conflicts versus FP32's 309,071 and 73,291. The decode kernel is a
+particularly poor choice at this row count, with 399,767 bank conflicts, 4.34x
+the persistent FP16 count.
+
+Two structural prototypes were implemented, correctness-checked, measured,
+and rejected:
+
+- Making every cooperative cluster CTA participate in the 10K FP16 histogram
+  increased latency from 4.82 to 6.55 us at one row, 5.26 to 6.92 us at eight
+  rows, and 5.37 to 7.13 us at 32 rows. TMA and cluster synchronization cost
+  more than the added parallelism saves.
+- Reducing the short FP16 coarse histogram from 12 to 11 bits halved the bin
+  scan but doubled the threshold candidates. It regressed 10K latency from
+  4.82 to 4.98 us at one row, 5.26 to 5.86 us at eight rows, 5.37 to 6.05 us
+  at 32 rows, and 5.70 to 6.39 us at 128 rows.
+
+The next optimization ideas, ordered by confidence and likely payoff, are:
+
+1. Build a stripped, non-cluster short-FP16 kernel with one CTA per row and
+   the cooperative kernel's compact shared-memory layout. Merely forcing the
+   existing persistent kernel is about 0.3 us slower, so this requires removing
+   persistent bookkeeping rather than only changing dispatch.
+2. Replace the generic FP32-oriented threshold refinement with an FP16-native
+   16-bin low-nibble refinement. FP16 has only four key bits below the 12-bit
+   coarse histogram. A per-warp 16-bin subhistogram can avoid the generic
+   candidate scatter and reduce the measured atomic/bank-conflict pressure.
+3. Try warp-aggregated histogram atomics using `__match_any_sync`, incrementing
+   once per distinct bin in a warp. Real FP16 key duplication makes this more
+   promising than it is for FP32, but the vote/leader overhead must be measured
+   because coarse-bin collisions are input-dependent.
+4. Pad or swizzle the decode shared histogram and scatter arrays. This directly
+   targets its 4.34x bank-conflict excess. It is most relevant near and above
+   the 256-row crossover; corrected dispatch already avoids it below that.
+5. For a substantially larger 1-32-row gain, fuse top-k into the logits
+   producer. The standalone kernel is launch- and synchronization-bound there,
+   so memory-width tuning alone has essentially no remaining ceiling.
+
+These are hypotheses until benchmarked. The selector correction is the only
+new production change retained from this profiling pass; both experimental
+kernel rewrites were reverted.
