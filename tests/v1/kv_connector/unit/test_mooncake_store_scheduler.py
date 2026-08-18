@@ -263,26 +263,50 @@ def test_decode_tracking_is_skipped_by_default(kv_role):
     assert tracker.token_ids == list(range(47))
 
 
-def test_consumer_decode_offload_does_not_save_prefill():
+def test_fresh_consumer_first_decode_save_can_backfill_missing_prompt():
     scheduler = _make_bare_scheduler(
         kv_role="kv_consumer",
         save_decode_cache=True,
     )
-    _add_unfinished_request(
-        scheduler,
-        token_ids=list(range(48)),
-        block_hashes=[b"h0", b"h1", b"h2"],
-        prefill_end_tokens=48,
-    )
+    scheduler.enable_kv_events = True
+    new_output = _make_new_scheduler_output()
+    request = new_output.request
+    request.block_ids = ([0, 1, 2],)
+    request.block_hashes = [b"h0", b"h1", b"h2"]
+    request.all_token_ids = list(range(48))
+    request.num_output_placeholders = 0
+    scheduler._unfinished_requests["req-0"] = (request, request.block_ids)
 
-    meta = scheduler.build_connector_meta(
-        _make_scheduler_output(scheduled_spec_tokens=None)
-    )
-
-    assert meta.requests == []
+    # The consumer does not save during prefill, so its first decode save must
+    # still cover the prompt. The worker deduplicates prompt blocks already in
+    # the Store and fills any that are missing, preserving a complete prefix.
+    assert scheduler.build_connector_meta(new_output).requests == []
     tracker = scheduler._request_trackers["req-0"]
-    assert tracker.token_len == 48
-    assert tracker.num_saved_tokens == 32
+    assert tracker.num_saved_tokens == 0
+
+    # The first decode step checks/saves the block-aligned prompt. The worker's
+    # Store dedup turns this into a no-op when the producer already saved it.
+    [prompt_meta] = scheduler.build_connector_meta(
+        _make_decode_scheduler_output(num_computed_tokens=32)
+    ).requests
+    assert prompt_meta.token_len_chunk == 32
+    assert prompt_meta.token_ids_start == 0
+    assert prompt_meta.token_ids == list(range(32))
+
+    for num_computed_tokens in range(33, 48):
+        meta = scheduler.build_connector_meta(
+            _make_decode_scheduler_output(
+                num_computed_tokens=num_computed_tokens,
+            )
+        )
+        if num_computed_tokens < 47:
+            assert meta.requests == []
+
+    [req_meta] = meta.requests
+    assert req_meta.token_len_chunk == 48
+    assert req_meta.token_ids_start == 32
+    assert req_meta.token_ids == list(range(32, 48))
+    assert tracker.num_saved_tokens == 48
 
 
 @pytest.mark.parametrize("token_len, saved_tokens", [(46, 32), (47, 48)])

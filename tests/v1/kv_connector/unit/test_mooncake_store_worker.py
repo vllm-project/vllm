@@ -36,7 +36,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 
 
 class _RecordingBlockHashes:
@@ -2226,18 +2226,34 @@ def _make_event_store_req(token_len: int, token_ids_start: int = 0) -> ReqMeta:
     )
 
 
-def test_store_sending_thread_kv_events_use_token_suffix():
+@pytest.mark.parametrize(
+    ("saved_offset", "put_step", "exists", "stored_indices", "parent_indices"),
+    [
+        pytest.param(16, 1, [0, 0, 0], [1, 2, 3], [0, 1, 2], id="suffix"),
+        pytest.param(0, 1, [1, 0, 1, 0], [1, 3], [0, 2], id="dedup-holes"),
+        pytest.param(0, 2, [0, 0], [0, 2], [None, 1], id="tp-stride"),
+    ],
+)
+def test_store_sending_thread_kv_events_use_request_chain_parents(
+    saved_offset, put_step, exists, stored_indices, parent_indices
+):
     store = MagicMock()
-    store.batch_is_exist.return_value = [0]
-    store.batch_put_from_multi_buffers.return_value = [256]
-    thread = _make_store_sending_thread(store)
+    store.batch_is_exist.return_value = exists
+    store.batch_put_from_multi_buffers.return_value = [256] * len(stored_indices)
+    thread = _make_store_sending_thread(store, put_step=put_step)
     thread.enable_kv_event = True
 
-    thread._saved_offset["r0"] = 16
-    _run_store_req(thread, _make_event_store_req(32, 16))
+    thread._saved_offset["r0"] = saved_offset
+    _run_store_req(thread, _make_event_store_req(64, saved_offset))
 
-    [event] = thread.get_kv_events()
-    assert event.token_ids == list(range(16, 32))
+    events = thread.get_kv_events()
+    assert [event.block_hashes for event in events] == [
+        [maybe_convert_block_hash(BlockHash(f"a{i}".encode()))] for i in stored_indices
+    ]
+    assert [event.parent_block_hash for event in events] == [
+        (None if i is None else maybe_convert_block_hash(BlockHash(f"a{i}".encode())))
+        for i in parent_indices
+    ]
     assert thread._retry_token_ids == {}
 
 

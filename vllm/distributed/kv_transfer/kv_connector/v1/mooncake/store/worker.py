@@ -830,7 +830,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
             lcm_block_size = self.coord.lcm_block_size
             token_len = req_meta.token_len_chunk // lcm_block_size * lcm_block_size
             block_ids_per_group = req_meta.block_ids
-            req_id = req_meta.req_id
             current_event = req_meta.current_event
 
             if not self.is_live_store_job(req_meta):
@@ -976,9 +975,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 addrs.extend(group_addrs)
                 sizes.extend(group_sizes)
 
-            # parent_block_hash chains live within a group, not across.
             if self.enable_kv_event:
-                prev_key_per_group: dict[int, Any] = {}
                 new_block_hashes = [
                     maybe_convert_block_hash(bh) for bh in kv_event_block_hashes
                 ]
@@ -998,7 +995,16 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
                     stored_event = BlockStored(
                         block_hashes=[new_block_hashes[idx]],
-                        parent_block_hash=prev_key_per_group.get(g_idx),
+                        # Derive the direct predecessor from the unfiltered
+                        # request chain. Adjacent PUTs need not be adjacent in
+                        # that chain after Store dedup, masks, or TP striding.
+                        parent_block_hash=(
+                            maybe_convert_block_hash(
+                                req_meta.block_hashes[s // db.hash_block_size - 1]
+                            )
+                            if s > 0
+                            else None
+                        ),
                         token_ids=token_ids,
                         block_size=db.block_size,
                         lora_id=None,
@@ -1007,7 +1013,6 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         group_idx=g_idx,
                     )
                     stored_events.append(stored_event)
-                    prev_key_per_group[g_idx] = new_block_hashes[idx]
 
             if current_event is not None:
                 current_event.synchronize()
@@ -1349,9 +1354,7 @@ class MooncakeStoreWorker:
         self.can_put = self.kv_role in ("kv_producer", "kv_both") or (
             extra_config.get("save_decode_cache", False)
         )
-        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "load_async", True
-        )
+        self.load_async = extra_config.get("load_async", True)
         # Mirrors MooncakeStoreConnector._capacity_only.
         self._capacity_only = (
             self.kv_role == "kv_consumer"
@@ -1783,8 +1786,6 @@ class MooncakeStoreWorker:
                 request.current_event = current_event
                 assert self.kv_send_thread is not None
                 self.kv_send_thread.add_request(request)
-
-        if self.can_put:
             self._close_ended_store_requests(finished_req_ids, meta)
 
         # Blocks read by a store job are released by the scheduler when the job
