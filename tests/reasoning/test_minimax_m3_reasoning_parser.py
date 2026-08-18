@@ -7,6 +7,7 @@ from collections.abc import Sequence
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning import ReasoningParserManager
 from vllm.reasoning.minimax_m3_reasoning_parser import MiniMaxM3ReasoningParser
 
@@ -97,8 +98,12 @@ class RuntimeSplitMiniMaxM3Tokenizer(MiniMaxM3Tokenizer):
         return [self._add_token(token) for token in list(text)]
 
 
+class MiniMaxM3DelegatingParser(DelegatingParser):
+    reasoning_parser_cls = MiniMaxM3ReasoningParser
+
+
 def make_parser(
-    chat_template_kwargs: dict[str, str] | None = None,
+    chat_template_kwargs: dict[str, object] | None = None,
 ) -> tuple[MiniMaxM3ReasoningParser, MiniMaxM3Tokenizer]:
     tokenizer = MiniMaxM3Tokenizer()
     return (
@@ -233,6 +238,126 @@ def test_streaming_reasoning_tags_are_not_returned():
     assert end_states == [False, False, True, True]
 
 
+@pytest.mark.parametrize(
+    ("thinking_mode", "prompt_suffix", "chunks", "expected_reasoning"),
+    [
+        ("adaptive", "", ["</mm:think>", "answer"], ""),
+        (
+            "adaptive",
+            "",
+            ["<mm:think>", "plan", "</mm:think>", "answer"],
+            "plan",
+        ),
+        ("enabled", "<mm:think>", ["plan", "</mm:think>", "answer"], "plan"),
+        ("disabled", "</mm:think>", ["answer"], ""),
+    ],
+)
+def test_prompt_instructions_do_not_end_new_reasoning(
+    thinking_mode, prompt_suffix, chunks, expected_reasoning
+):
+    tokenizer = MiniMaxM3Tokenizer()
+    parser = MiniMaxM3DelegatingParser(
+        tokenizer, chat_template_kwargs={"thinking_mode": thinking_mode}
+    )
+    request = ChatCompletionRequest(messages=[], model="test-model")
+    prompt_token_ids = tokenizer.encode(
+        "Wrap reasoning in <mm:think></mm:think> tags.\nai\n" + prompt_suffix
+    )
+    reasoning_parts: list[str] = []
+    content_parts: list[str] = []
+
+    for index, chunk in enumerate(chunks):
+        delta = parser.parse_delta(
+            chunk,
+            tokenizer.encode(chunk),
+            request,
+            prompt_token_ids=prompt_token_ids if index == 0 else None,
+            finished=index == len(chunks) - 1,
+        )
+        if delta is not None and delta.reasoning is not None:
+            reasoning_parts.append(delta.reasoning)
+        if delta is not None and delta.content is not None:
+            content_parts.append(delta.content)
+
+    assert "".join(reasoning_parts) == expected_reasoning
+    assert "".join(content_parts) == "answer"
+
+
+@pytest.mark.parametrize(
+    ("prompt_suffix", "expected_reasoning", "expected_content"),
+    [
+        ("<mm:think>plan", " more", ""),
+        ("<mm:think>plan</mm:think>answer", "", " more"),
+    ],
+)
+def test_enabled_continuation_respects_prompt_reasoning_state(
+    prompt_suffix,
+    expected_reasoning,
+    expected_content,
+):
+    tokenizer = MiniMaxM3Tokenizer()
+    parser = MiniMaxM3DelegatingParser(
+        tokenizer,
+        chat_template_kwargs={
+            "thinking_mode": "enabled",
+            "_vllm_continue_final_message": True,
+        },
+    )
+    request = ChatCompletionRequest(
+        messages=[{"role": "assistant", "content": prompt_suffix}],
+        model="test-model",
+        add_generation_prompt=False,
+        continue_final_message=True,
+    )
+    prompt_token_ids = tokenizer.encode(prompt_suffix)
+
+    delta = parser.parse_delta(
+        " more",
+        tokenizer.encode(" more"),
+        request,
+        prompt_token_ids=prompt_token_ids,
+        finished=True,
+    )
+
+    assert delta is not None
+    assert (delta.reasoning or "") == expected_reasoning
+    assert (delta.content or "") == expected_content
+
+
+@pytest.mark.parametrize(
+    ("prompt_suffix", "expected_reasoning", "expected_content"),
+    [
+        ("<mm:think>plan", " more", ""),
+        ("<mm:think>plan</mm:think>answer", "", " more"),
+    ],
+)
+def test_enabled_non_streaming_continuation_respects_prompt_reasoning_state(
+    prompt_suffix,
+    expected_reasoning,
+    expected_content,
+):
+    tokenizer = MiniMaxM3Tokenizer()
+    parser = MiniMaxM3DelegatingParser(
+        tokenizer,
+        chat_template_kwargs={
+            "thinking_mode": "enabled",
+            "_vllm_continue_final_message": True,
+        },
+    )
+    request = ChatCompletionRequest(
+        messages=[{"role": "assistant", "content": prompt_suffix}],
+        model="test-model",
+        add_generation_prompt=False,
+        continue_final_message=True,
+    )
+
+    parser.is_reasoning_end_from_prompt(tokenizer.encode(prompt_suffix))
+    reasoning, content, _ = parser.parse(" more", request)
+
+    assert (reasoning or "") == expected_reasoning
+    assert (content or "") == expected_content
+
+
 def test_streaming_boundary_can_emit_reasoning_and_content():
     parser, tokenizer = make_parser()
 
@@ -287,6 +412,15 @@ def test_streaming_enabled_mode_starts_in_reasoning():
     assert reasoning == "plan"
     assert content == "answer"
     assert end_states == [False, True, True]
+
+
+def test_enabled_mode_engine_detection_observes_end_marker():
+    """Structured output detects the boundary without running extraction."""
+    parser, tokenizer = make_parser(chat_template_kwargs={"thinking_mode": "enabled"})
+    output_ids = tokenizer.encode("plan</mm:think>")
+    delta_ids = tokenizer.encode("</mm:think>")
+
+    assert parser.is_reasoning_end_streaming(output_ids, delta_ids) is True
 
 
 def test_streaming_plain_content_ends_reasoning_phase():
@@ -459,3 +593,24 @@ def test_token_id_helpers_enabled_mode():
     assert parser.count_reasoning_tokens(open_reasoning_ids) == len(
         tokenizer.encode("abc")
     )
+
+
+@pytest.mark.parametrize(
+    ("thinking_mode", "expected"),
+    [
+        (None, None),
+        ("adaptive", None),
+        ("enabled", False),
+        ("disabled", True),
+    ],
+)
+def test_prompt_reasoning_state_follows_thinking_mode(thinking_mode, expected):
+    chat_template_kwargs = (
+        None if thinking_mode is None else {"thinking_mode": thinking_mode}
+    )
+    parser, tokenizer = make_parser(chat_template_kwargs=chat_template_kwargs)
+    prompt_token_ids = tokenizer.encode(
+        "Instructions may contain <mm:think></mm:think> examples.\nai\n"
+    )
+
+    assert parser.is_reasoning_end_from_prompt(prompt_token_ids) is expected

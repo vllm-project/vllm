@@ -40,7 +40,11 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         self._start_token_ids = self._encode_marker(self.start_token)
         self._end_token_ids = self._encode_marker(self.end_token)
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        self._initial_in_reasoning = chat_kwargs.get("thinking_mode") == "enabled"
+        self._thinking_mode = chat_kwargs.get("thinking_mode", "adaptive")
+        self._continue_final_message = bool(
+            chat_kwargs.get("_vllm_continue_final_message", False)
+        )
+        self._initial_in_reasoning = self._thinking_mode == "enabled"
         self._reasoning_ended_streaming = False
         self._reasoning_active_streaming = self._initial_in_reasoning
         self._pending_marker_streaming = False
@@ -200,14 +204,13 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         if self._reasoning_ended_streaming:
             return True
 
-        if self._reasoning_active_streaming or self._pending_marker_streaming:
-            return False
-
         delta_ids = tuple(delta_ids)
         if self._contains_token_sequence(delta_ids, self._end_token_ids):
             return True
         if self._contains_token_sequence(input_ids, self._end_token_ids):
             return True
+        if self._reasoning_active_streaming or self._pending_marker_streaming:
+            return False
         if self._initial_in_reasoning:
             return False
         if self._ends_with_token_sequence_prefix(input_ids, self._start_token_ids):
@@ -318,3 +321,23 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         if start_index < 0:
             return True
         return end_index > start_index
+
+    def is_reasoning_end_from_prompt(
+        self, prompt_token_ids: Sequence[int]
+    ) -> bool | None:
+        if self._thinking_mode == "disabled":
+            return True
+        if self._continue_final_message:
+            start_index = self._rfind_token_sequence(
+                prompt_token_ids, self._start_token_ids
+            )
+            end_index = self._rfind_token_sequence(
+                prompt_token_ids, self._end_token_ids
+            )
+            reasoning_ended = not (start_index >= 0 and start_index > end_index)
+            self._initial_in_reasoning = not reasoning_ended
+            self._reasoning_active_streaming = self._initial_in_reasoning
+            return reasoning_ended
+        if self._thinking_mode == "enabled":
+            return False
+        return None
