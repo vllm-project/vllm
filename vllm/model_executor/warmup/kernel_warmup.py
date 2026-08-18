@@ -292,18 +292,22 @@ def _temporary_replayssm_autotune_state(
     )
 
     reset_tensors: dict[int, torch.Tensor] = {}
-    tracker_specs: dict[int, tuple[torch.Tensor, torch.Tensor, int, int]] = {}
+    tracker_specs: dict[
+        int, tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, int]
+    ] = {}
     for module in runner.get_model().modules():
         if not isinstance(module, MambaMixer2) or not module.use_replayssm:
             continue
         assert module.replayssm_buffer_len is not None
         ring_start = module._replayssm_ring_start
         prev_num_accepted = module._replayssm_prev_num_accepted
+        prev_query_len = module._replayssm_prev_query_len
         tracker_specs.setdefault(
             ring_start.data_ptr(),
             (
                 ring_start,
                 prev_num_accepted,
+                prev_query_len,
                 module.replayssm_buffer_len,
                 module.kv_cache[2].size(2),
             ),
@@ -312,6 +316,7 @@ def _temporary_replayssm_autotune_state(
             *module.kv_cache,
             ring_start,
             prev_num_accepted,
+            prev_query_len,
         )
         for tensor in tensors:
             if tensor.numel():
@@ -339,20 +344,26 @@ def _temporary_replayssm_autotune_state(
         for (
             ring_start,
             prev_num_accepted,
+            prev_query_len,
             logical_window,
             ring_buffer_len,
         ) in tracker_specs.values():
             # Compile reset (prefill) and advance (decode) before inference.
             # The final reset leaves the decode tuning run in a clean state.
-            reset_replayssm_ring_trackers(ring_start, prev_num_accepted, state_slots)
+            reset_replayssm_ring_trackers(
+                ring_start, prev_num_accepted, prev_query_len, state_slots
+            )
             update_replayssm_ring_trackers(
                 ring_start,
                 prev_num_accepted,
+                prev_query_len,
                 state_slots,
                 logical_window,
                 ring_buffer_len,
             )
-            reset_replayssm_ring_trackers(ring_start, prev_num_accepted, state_slots)
+            reset_replayssm_ring_trackers(
+                ring_start, prev_num_accepted, prev_query_len, state_slots
+            )
 
     try:
         yield

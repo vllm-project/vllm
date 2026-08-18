@@ -108,6 +108,39 @@ def test_replayssm_flashinfer_decode_matches_baseline_tp2(vllm_runner, model_nam
     )
 
 
+@pytest.mark.skipif(
+    not HAS_FLASHINFER_CHECKPOINTING_SSU,
+    reason="flashinfer.mamba.checkpointing_ssu not available",
+)
+@pytest.mark.parametrize("model_name", MODELS)
+def test_replayssm_flashinfer_spec_decode_matches_baseline(vllm_runner, model_name):
+    common = dict(
+        max_model_len=1024,
+        trust_remote_code=True,
+        enable_prefix_caching=False,
+        mamba_cache_mode="none",
+        mamba_backend="flashinfer",
+        speculative_config={
+            "method": "ngram",
+            "num_speculative_tokens": 3,
+            "prompt_lookup_max": 3,
+        },
+    )
+    with vllm_runner(model_name, **common) as llm:
+        baseline = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
+    with vllm_runner(
+        model_name, use_replayssm=True, replayssm_buffer_len=16, **common
+    ) as llm:
+        replay = llm.generate_greedy_logprobs(PROMPTS, max_tokens=32, num_logprobs=5)
+
+    check_logprobs_close(
+        outputs_0_lst=baseline,
+        outputs_1_lst=replay,
+        name_0="baseline_spec",
+        name_1="replayssm_flashinfer_spec",
+    )
+
+
 # Prefix spans several mamba blocks; prefix caching only reuses full blocks.
 _PC_SENTENCE = (
     "In a detailed survey of state space models, the authors compared many "

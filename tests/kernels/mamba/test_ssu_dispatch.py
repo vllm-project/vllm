@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from importlib import import_module
 from unittest.mock import Mock
 
 import pytest
@@ -11,6 +12,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculat
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     FlashInferSSUBackend,
     TritonSSUBackend,
+    commit_replayssm_ring_trackers,
     get_mamba_ssu_backend,
     initialize_mamba_ssu_backend,
     reset_replayssm_ring_trackers,
@@ -61,6 +63,7 @@ def restore_backend_state():
 def test_flashinfer_replayssm_ring_tracker_lifecycle():
     ring_start = torch.zeros(2, dtype=torch.int32, device="cuda")
     prev_num_accepted = torch.zeros(2, dtype=torch.int32, device="cuda")
+    prev_query_len = torch.zeros(2, dtype=torch.int32, device="cuda")
     state_batch_indices = torch.tensor([1], dtype=torch.int32, device="cuda")
 
     observed = []
@@ -68,6 +71,7 @@ def test_flashinfer_replayssm_ring_tracker_lifecycle():
         update_replayssm_ring_trackers(
             ring_start,
             prev_num_accepted,
+            prev_query_len,
             state_batch_indices,
             logical_window=16,
             ring_buffer_len=17,
@@ -83,6 +87,7 @@ def test_flashinfer_replayssm_ring_tracker_lifecycle():
     reset_replayssm_ring_trackers(
         ring_start,
         prev_num_accepted,
+        prev_query_len,
         state_batch_indices,
     )
     assert (ring_start[1].item(), prev_num_accepted[1].item()) == (0, 0)
@@ -92,11 +97,13 @@ def test_flashinfer_replayssm_ring_tracker_lifecycle():
 def test_flashinfer_replayssm_ring_tracker_ignores_invalid_slots():
     ring_start = torch.zeros(2, dtype=torch.int32, device="cuda")
     prev_num_accepted = torch.zeros(2, dtype=torch.int32, device="cuda")
+    prev_query_len = torch.zeros(2, dtype=torch.int32, device="cuda")
     state_batch_indices = torch.tensor([-1, 2, 1, 0], dtype=torch.int32, device="cuda")
 
     update_replayssm_ring_trackers(
         ring_start,
         prev_num_accepted,
+        prev_query_len,
         state_batch_indices,
         logical_window=16,
         ring_buffer_len=17,
@@ -104,6 +111,44 @@ def test_flashinfer_replayssm_ring_tracker_ignores_invalid_slots():
 
     assert ring_start.tolist() == [0, 0]
     assert prev_num_accepted.tolist() == [0, 1]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_flashinfer_replayssm_spec_ring_tracker_lifecycle():
+    ring_start = torch.zeros(2, dtype=torch.int32, device="cuda")
+    prev_num_accepted = torch.zeros(2, dtype=torch.int32, device="cuda")
+    prev_query_len = torch.zeros(2, dtype=torch.int32, device="cuda")
+    state_batch_indices = torch.tensor([1], dtype=torch.int32, device="cuda")
+    query_start_loc = torch.tensor([0, 4], dtype=torch.int32, device="cuda")
+
+    observed = []
+    for accepted in (4, 3, 4, 4, 4, 2):
+        commit_replayssm_ring_trackers(
+            ring_start,
+            prev_num_accepted,
+            prev_query_len,
+            state_batch_indices,
+            torch.tensor([accepted], dtype=torch.int32, device="cuda"),
+            query_start_loc,
+            logical_window=16,
+            ring_buffer_len=20,
+        )
+        observed.append(
+            (
+                int(ring_start[1]),
+                int(prev_num_accepted[1]),
+                int(prev_query_len[1]),
+            )
+        )
+
+    assert observed == [
+        (0, 0, 4),
+        (0, 3, 4),
+        (0, 7, 4),
+        (0, 11, 4),
+        (0, 15, 4),
+        (15, 2, 4),
+    ]
 
 
 def _kv_cache_config_with_ssu(
@@ -274,6 +319,7 @@ def test_replayssm_flashinfer_call_forwards_explicit_controls(monkeypatch):
     B_cache = torch.empty(1, ngroups, window, dstate)
     ring_start = torch.zeros(1, dtype=torch.int32)
     prev_num_accepted = torch.zeros(1, dtype=torch.int32)
+    prev_query_len = torch.zeros(1, dtype=torch.int32)
     scratch = (torch.empty(1), torch.empty(1), torch.empty(1))
 
     selective_state_update_replayssm_flashinfer(
@@ -289,6 +335,7 @@ def test_replayssm_flashinfer_call_forwards_explicit_controls(monkeypatch):
         dt_cache,
         ring_start,
         prev_num_accepted,
+        prev_query_len,
         logical_window=window,
         scratch=scratch,
         algorithm="two-kernel",
@@ -297,6 +344,7 @@ def test_replayssm_flashinfer_call_forwards_explicit_controls(monkeypatch):
         enable_stochastic_rounding=True,
         stochastic_rounding_philox_rounds=6,
         update_trackers=False,
+        enable_pdl=True,
     )
 
     args = kernel.call_args.args
@@ -310,8 +358,63 @@ def test_replayssm_flashinfer_call_forwards_explicit_controls(monkeypatch):
     assert kwargs["cumAdt_vec"] is scratch[1]
     assert kwargs["cb_old"] is scratch[2]
     assert kwargs["philox_rounds"] == 6
+    assert kwargs["enable_pdl"] is True
     assert kwargs["rand_seed"].shape == (1,)
     assert kwargs["rand_seed"].dtype == torch.int64
+
+
+def test_replayssm_flashinfer_call_forwards_packed_mtp(monkeypatch):
+    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
+
+    kernel = Mock(return_value=torch.empty(1, 6, 2, 4))
+    monkeypatch.setattr(mod, "_flashinfer_replayssm_kernel", kernel)
+
+    tokens, nheads, dim, dstate, ngroups = 6, 2, 4, 8, 1
+    state = torch.empty(2, nheads, dim, dstate)
+    x = torch.empty(tokens, nheads, dim)
+    dt = torch.empty_like(x)
+    A = torch.empty(nheads, dim, dstate)
+    B = torch.empty(tokens, ngroups, dstate)
+    C = torch.empty_like(B)
+    out = torch.empty_like(x)
+    x_cache = torch.empty(2, nheads, 20, dim)
+    dt_cache = torch.empty(2, nheads, 20)
+    B_cache = torch.empty(2, ngroups, 20, dstate)
+    ring_start = torch.zeros(2, dtype=torch.int32)
+    prev_num_accepted = torch.zeros(2, dtype=torch.int32)
+    prev_query_len = torch.zeros(2, dtype=torch.int32)
+    cu_seqlens = torch.tensor([0, 4, 6], dtype=torch.int32)
+
+    selective_state_update_replayssm_flashinfer(
+        state,
+        x,
+        dt,
+        A,
+        B,
+        C,
+        out,
+        x_cache,
+        B_cache,
+        dt_cache,
+        ring_start,
+        prev_num_accepted,
+        prev_query_len,
+        logical_window=16,
+        state_batch_indices=torch.tensor([0, 1], dtype=torch.int32),
+        cu_seqlens=cu_seqlens,
+        max_seqlen=4,
+        update_trackers=False,
+    )
+
+    args = kernel.call_args.args
+    kwargs = kernel.call_args.kwargs
+    assert args[6].shape == (1, tokens, nheads, dim)
+    assert args[7].shape == (1, tokens, nheads, dim)
+    assert args[9].shape == (1, tokens, ngroups, dstate)
+    assert args[10].shape == (1, tokens, ngroups, dstate)
+    assert args[11].shape == (1, tokens, nheads, dim)
+    assert kwargs["cu_seqlens"] is cu_seqlens
+    assert kwargs["max_seqlen"] == 4
 
 
 @pytest.mark.skipif(
@@ -330,14 +433,38 @@ def test_replayssm_flashinfer_backend_init():
     assert mod._flashinfer_replayssm_kernel is checkpointing_ssu_kernel
 
 
+@pytest.mark.skipif(
+    not HAS_FLASHINFER_CHECKPOINTING_SSU,
+    reason="compatible flashinfer checkpointing_ssu not available",
+)
+def test_replayssm_flashinfer_backend_rejects_missing_mtp_api(monkeypatch):
+    checkpointing_ssu_module = import_module("flashinfer.mamba.checkpointing_ssu")
+
+    def legacy_checkpointing_ssu():
+        pass
+
+    monkeypatch.setattr(
+        checkpointing_ssu_module, "checkpointing_ssu", legacy_checkpointing_ssu
+    )
+    with pytest.raises(ImportError, match="native MTP and PDL support"):
+        initialize_mamba_ssu_backend(
+            MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+            _kv_cache_config_with_ssu(),
+            use_replayssm=True,
+        )
+
+
 @pytest.mark.parametrize(
-    ("backend", "expected_ring_len"),
+    ("backend", "num_speculative_tokens", "expected_ring_len"),
     [
-        (MambaBackendEnum.TRITON, 16),
-        (MambaBackendEnum.FLASHINFER, 17),
+        (MambaBackendEnum.TRITON, 0, 16),
+        (MambaBackendEnum.FLASHINFER, 0, 17),
+        (MambaBackendEnum.FLASHINFER, 3, 20),
     ],
 )
-def test_replayssm_physical_ring_shape(backend, expected_ring_len):
+def test_replayssm_physical_ring_shape(
+    backend, num_speculative_tokens, expected_ring_len
+):
     base_shapes = ((64, 3), (8, 4, 16))
 
     shapes = MambaStateShapeCalculator.append_replayssm_ring(
@@ -346,6 +473,7 @@ def test_replayssm_physical_ring_shape(backend, expected_ring_len):
         tp_world_size=2,
         logical_window=16,
         backend=backend,
+        num_speculative_tokens=num_speculative_tokens,
     )
 
     assert shapes[2:] == (

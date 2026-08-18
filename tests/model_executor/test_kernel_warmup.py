@@ -25,6 +25,7 @@ def _replayssm_mixer() -> MambaMixer2:
     )
     mixer._replayssm_ring_start = torch.full((4,), 3, dtype=torch.int32)
     mixer._replayssm_prev_num_accepted = torch.full((4,), 3, dtype=torch.int32)
+    mixer._replayssm_prev_query_len = torch.full((4,), 3, dtype=torch.int32)
     return mixer
 
 
@@ -137,6 +138,7 @@ def test_replayssm_autotune_slots_restore_state_and_trackers():
             *mixer.kv_cache,
             mixer._replayssm_ring_start,
             mixer._replayssm_prev_num_accepted,
+            mixer._replayssm_prev_query_len,
         ):
             tensor[1:3].fill_(9)
 
@@ -149,6 +151,7 @@ def test_replayssm_autotune_slots_restore_state_and_trackers():
         *mixer.kv_cache,
         mixer._replayssm_ring_start,
         mixer._replayssm_prev_num_accepted,
+        mixer._replayssm_prev_query_len,
     ):
         assert torch.count_nonzero(tensor[1:3]) == 0
         assert torch.all(tensor[0] == 3)
@@ -169,6 +172,7 @@ def test_replayssm_autotune_slots_reset_v2_dummy_tables_and_state():
             *mixer.kv_cache,
             mixer._replayssm_ring_start,
             mixer._replayssm_prev_num_accepted,
+            mixer._replayssm_prev_query_len,
         ):
             tensor[1:3].fill_(9)
 
@@ -177,5 +181,6 @@ def test_replayssm_autotune_slots_reset_v2_dummy_tables_and_state():
         *mixer.kv_cache,
         mixer._replayssm_ring_start,
         mixer._replayssm_prev_num_accepted,
+        mixer._replayssm_prev_query_len,
     ):
         assert torch.count_nonzero(tensor[1:3]) == 0
