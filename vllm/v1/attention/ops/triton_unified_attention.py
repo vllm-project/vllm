@@ -799,6 +799,31 @@ def _get_tile_size(
     return 16 if element_size >= 2 else 32
 
 
+def _is_gfx1100() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx1100
+
+    return on_gfx1100()
+
+
+def _select_query_block(
+    max_seqlen_q: int, num_queries_per_kv: int
+) -> tuple[int, int, bool]:
+    tuned_gfx1100_prefill = (
+        max_seqlen_q >= 512 and num_queries_per_kv <= 16 and _is_gfx1100()
+    )
+    if tuned_gfx1100_prefill:
+        block_m = 64
+        block_q = block_m // triton.next_power_of_2(num_queries_per_kv)
+        return block_m, block_q, True
+
+    block_m = (
+        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
+    )
+    return block_m, block_m // num_queries_per_kv, False
+
+
 def unified_attention(
     q,
     k,
@@ -929,14 +954,20 @@ def unified_attention(
     num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = q.shape[2]
 
-    BLOCK_M = (
-        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
+    BLOCK_M, BLOCK_Q, tuned_gfx1100_prefill = _select_query_block(
+        max_seqlen_q, num_queries_per_kv
     )
-    BLOCK_Q = BLOCK_M // num_queries_per_kv
 
     # Tuned launch parameters; ``None`` lets Triton pick its defaults.
     launch_num_warps: int | None = None
     launch_num_stages: int | None = None
+
+    # Long prefill performs many KV-tile iterations per query block. On
+    # gfx1100, grouping more query rows amortizes that loop and reduces the
+    # launch grid without changing the kernel's math. Keep decode and short
+    # prefill on their smaller block, where the wider block is slower.
+    if tuned_gfx1100_prefill:
+        launch_num_warps = 4
 
     # head_size 256 with many query rows per sequence (e.g. diffusion-gemma
     # bidirectional canvas passes) is prefill-shaped, but the decode-oriented

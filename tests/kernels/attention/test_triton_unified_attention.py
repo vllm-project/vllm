@@ -8,6 +8,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.ops import triton_unified_attention as triton_ua
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 from vllm.v1.kv_cache_interface import KVQuantMode
 
@@ -28,6 +29,29 @@ NUM_BLOCKS = [32768, 2048]
 # 0: use 2D kernel for decode
 # 8: use 3D kernel for decode
 SEQ_THRESHOLD_3D_VALUES = [0, 8]
+
+
+@pytest.mark.parametrize(
+    ("is_gfx1100", "max_seqlen_q", "nq_per_kv", "expected"),
+    [
+        (True, 512, 4, (64, 16, True)),
+        (True, 8192, 5, (64, 8, True)),
+        (True, 8192, 7, (64, 8, True)),
+        (True, 512, 16, (64, 4, True)),
+        (True, 511, 4, (16, 4, False)),
+        (True, 8192, 17, (32, 1, False)),
+        (False, 8192, 4, (16, 4, False)),
+    ],
+)
+def test_select_query_block(
+    monkeypatch: pytest.MonkeyPatch,
+    is_gfx1100: bool,
+    max_seqlen_q: int,
+    nq_per_kv: int,
+    expected: tuple[int, int, bool],
+) -> None:
+    monkeypatch.setattr(triton_ua, "_is_gfx1100", lambda: is_gfx1100)
+    assert triton_ua._select_query_block(max_seqlen_q, nq_per_kv) == expected
 
 
 def ref_paged_attn(
