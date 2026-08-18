@@ -408,12 +408,27 @@ class TestMergeKwargsGpuBackendPolicy:
     def test_pynvvideocodec_requires_gpu(self):
         assert VIDEO_LOADER_REGISTRY.backend_requires_gpu(PYNVVIDEOCODEC_VIDEO_BACKEND)
 
+    def test_strips_video_backend_pynv_when_not_static(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs=None,
+            runtime_kwargs={"video_backend": "pynvvideocodec"},
+        )
+        assert "video_backend" not in result
+
     def test_strips_backend_pynv_when_not_static(self):
         result = VideoMediaIO.merge_kwargs(
             default_kwargs={"num_frames": 16},
             runtime_kwargs={"backend": "pynvvideocodec"},
         )
         assert result.get("backend") != "pynvvideocodec"
+
+    def test_preserves_video_backend_pynv_when_static(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"video_backend": "pynvvideocodec"},
+            runtime_kwargs={"video_backend": "pynvvideocodec", "num_frames": 8},
+        )
+        assert result["video_backend"] == "pynvvideocodec"
+        assert result["num_frames"] == 8
 
     def test_preserves_backend_pynv_when_static(self):
         result = VideoMediaIO.merge_kwargs(
@@ -424,7 +439,7 @@ class TestMergeKwargsGpuBackendPolicy:
 
     def test_strips_request_level_hw_decoders_when_not_static(self):
         result = VideoMediaIO.merge_kwargs(
-            default_kwargs={"backend": "pynvvideocodec"},
+            default_kwargs={"video_backend": "pynvvideocodec"},
             runtime_kwargs={"hw_decoders": 4},
         )
         assert "hw_decoders" not in result
@@ -432,7 +447,7 @@ class TestMergeKwargsGpuBackendPolicy:
     def test_prevents_request_level_hw_decoders_override(self):
         result = VideoMediaIO.merge_kwargs(
             default_kwargs={
-                "backend": "pynvvideocodec",
+                "video_backend": "pynvvideocodec",
                 "hw_decoders": 2,
             },
             runtime_kwargs={"hw_decoders": 4},
@@ -455,16 +470,39 @@ class TestMergeKwargsGpuBackendPolicy:
         )
         assert result["backend"] == backend
 
+    def test_strips_both_keys_independently(self):
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs=None,
+            runtime_kwargs={
+                "video_backend": "pynvvideocodec",
+                "backend": "pynvvideocodec",
+                "num_frames": 4,
+            },
+        )
+        assert "video_backend" not in result
+        assert result.get("backend") != "pynvvideocodec"
+        assert result["num_frames"] == 4
+
     def test_other_kwargs_preserved_when_gpu_backend_stripped(self):
         result = VideoMediaIO.merge_kwargs(
             default_kwargs={"fps": 2},
             runtime_kwargs={
-                "backend": "pynvvideocodec",
+                "video_backend": "pynvvideocodec",
                 "num_frames": 16,
             },
         )
-        assert "backend" not in result
+        assert "video_backend" not in result
         assert result["num_frames"] == 16
+
+    def test_static_pynv_with_different_runtime_gpu_backend(self):
+        """If static sets pynv via video_backend but runtime tries to set it
+        via the codec-level 'backend' key (without a static match), strip it."""
+        result = VideoMediaIO.merge_kwargs(
+            default_kwargs={"video_backend": "pynvvideocodec"},
+            runtime_kwargs={"backend": "pynvvideocodec"},
+        )
+        assert result.get("backend") != "pynvvideocodec"
+        assert result["video_backend"] == "pynvvideocodec"
 
     def test_deepstream_requires_gpu(self):
         assert VIDEO_LOADER_REGISTRY.backend_requires_gpu("deepstream")

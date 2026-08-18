@@ -187,6 +187,7 @@ def reserve_mm_ipc_gpu_memory(
     if mm_config is None:
         return available_kv_cache_memory_bytes
 
+    from vllm import envs
     from vllm.multimodal.video_decoders import (
         PYNVVIDEOCODEC_DEFAULT_HW_DECODERS,
         PYNVVIDEOCODEC_VIDEO_BACKEND,
@@ -203,8 +204,14 @@ def reserve_mm_ipc_gpu_memory(
     # per process so gpu_memory_utilization bounds total GPU usage across them.
     num_api_servers = max(1, api_process_count)
     video_kwargs = mm_config.media_io_kwargs.get("video", {})
+    video_loader_backend = (
+        video_kwargs.get("video_backend") or envs.VLLM_VIDEO_LOADER_BACKEND
+    )
     codec_backend = video_kwargs.get("backend")
-    uses_pynvvideocodec = codec_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
+    uses_pynvvideocodec = (
+        video_loader_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
+        or codec_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
+    )
     hw_decoders = (
         validate_pynvvideocodec_hw_decoders(
             video_kwargs.get("hw_decoders", PYNVVIDEOCODEC_DEFAULT_HW_DECODERS)

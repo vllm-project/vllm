@@ -251,12 +251,8 @@ def test_pynvvideocodec_backend_accounts_raw_decoded_frames(
         classmethod(fake_decode),
     )
 
-    loader = VIDEO_LOADER_REGISTRY.load("opencv")
-    frames, metadata = loader.load_bytes(
-        b"fake video",
-        num_frames=4,
-        backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
-    )
+    loader = VIDEO_LOADER_REGISTRY.load(PYNVVIDEOCODEC_VIDEO_BACKEND)
+    frames, metadata = loader.load_bytes(b"fake video", num_frames=4)
 
     assert frames.shape == (4, 20, 10, 3)
     assert pool.acquired == [4 * 20 * 10 * 3]
@@ -348,7 +344,7 @@ def test_pynvvideocodec_corrupted_videos_raise_value_error():
         PyNvVideoCodecVideoBackendMixin._decoder_slot_cond = threading.Condition()
         PyNvVideoCodecVideoBackendMixin._max_decoder_slots = None
 
-        loader = VIDEO_LOADER_REGISTRY.load("opencv")
+        loader = VIDEO_LOADER_REGISTRY.load(PYNVVIDEOCODEC_VIDEO_BACKEND)
         with pytest.raises(
             ValueError,
             match=r"^Invalid or unsupported video file\.$",
@@ -356,7 +352,6 @@ def test_pynvvideocodec_corrupted_videos_raise_value_error():
             loader.load_bytes(
                 malformed_video,
                 num_frames=1,
-                backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
                 hw_decoders=1,
             )
 
@@ -369,7 +364,6 @@ def test_pynvvideocodec_corrupted_videos_raise_value_error():
             loader.load_bytes(
                 corrupted_video,
                 num_frames=-1,
-                backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
                 hw_decoders=1,
             )
 
@@ -378,7 +372,6 @@ def test_pynvvideocodec_corrupted_videos_raise_value_error():
         frames, _ = loader.load_bytes(
             valid_video,
             num_frames=1,
-            backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
             hw_decoders=1,
         )
         assert frames.shape[0] == 1
@@ -554,11 +547,10 @@ def test_pynvvideocodec_h200_recovers_after_unsupported_8k():
         PyNvVideoCodecVideoBackendMixin._decoder_slot_cond = threading.Condition()
         PyNvVideoCodecVideoBackendMixin._max_decoder_slots = None
 
-        loader = VIDEO_LOADER_REGISTRY.load("opencv")
+        loader = VIDEO_LOADER_REGISTRY.load(PYNVVIDEOCODEC_VIDEO_BACKEND)
         frames_before, _ = loader.load_bytes(
             valid_video,
             num_frames=1,
-            backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
             hw_decoders=1,
         )
 
@@ -566,7 +558,6 @@ def test_pynvvideocodec_h200_recovers_after_unsupported_8k():
             loader.load_bytes(
                 unsupported_video,
                 num_frames=1,
-                backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
                 hw_decoders=1,
             )
 
@@ -579,7 +570,6 @@ def test_pynvvideocodec_h200_recovers_after_unsupported_8k():
         frames_after, _ = loader.load_bytes(
             valid_video,
             num_frames=1,
-            backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
             hw_decoders=1,
         )
 
