@@ -109,7 +109,11 @@ def test_wna16_oracle_rejects_incompatible_quant_structures(
     assert expected in reason
 
 
-def test_compressed_tensors_weights_are_transposed_for_triton():
+def test_compressed_tensors_nfirst_weights_pass_through_for_triton():
+    """CT provides N-first [E, N, K_packed] int32; Triton expects N-first uint8.
+
+    No transpose needed — just a view from int32 to uint8.
+    """
     quant_config = QuantizationArgs(
         num_bits=4,
         type=QuantizationType.INT,
@@ -118,10 +122,11 @@ def test_compressed_tensors_weights_are_transposed_for_triton():
         dynamic=False,
         group_size=32,
     )
-    w13 = torch.arange(16, dtype=torch.int32).reshape(1, 2, 8)
-    w2 = torch.arange(12, dtype=torch.int32).reshape(1, 2, 6)
-    w13_scale = torch.arange(32, dtype=torch.float16).reshape(1, 4, 8)
-    w2_scale = torch.arange(18, dtype=torch.float16).reshape(1, 3, 6)
+    # N-first layout: [E, N, K_packed]
+    w13 = torch.arange(16, dtype=torch.int32).reshape(1, 8, 2)
+    w2 = torch.arange(12, dtype=torch.int32).reshape(1, 6, 2)
+    w13_scale = torch.arange(32, dtype=torch.float16).reshape(1, 8, 4)
+    w2_scale = torch.arange(18, dtype=torch.float16).reshape(1, 6, 3)
 
     converted = convert_to_wna16_moe_kernel_format(
         backend=WNA16MoEBackend.TRITON,
@@ -135,10 +140,10 @@ def test_compressed_tensors_weights_are_transposed_for_triton():
     )
 
     assert converted is not None
-    assert torch.equal(converted[0], w13.transpose(1, 2).contiguous().view(torch.uint8))
-    assert torch.equal(converted[1], w2.transpose(1, 2).contiguous().view(torch.uint8))
-    assert torch.equal(converted[2], w13_scale.transpose(1, 2).contiguous())
-    assert torch.equal(converted[3], w2_scale.transpose(1, 2).contiguous())
+    assert torch.equal(converted[0], w13.contiguous().view(torch.uint8))
+    assert torch.equal(converted[1], w2.contiguous().view(torch.uint8))
+    assert torch.equal(converted[2], w13_scale)
+    assert torch.equal(converted[3], w2_scale)
 
 
 def test_moe_wna16_setup_forwards_selected_backend(monkeypatch):

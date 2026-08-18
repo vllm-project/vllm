@@ -646,7 +646,7 @@ class RoutedExperts(PluggableLayer):
         # Hereafter, `expert_id` is local physical id
 
         # is_transposed: if the dim to shard the weight
-        # should be flipped. Required by GPTQ, compressed-tensors
+        # should be flipped. Required by GPTQ/AWQ (K-first format).
         # should be whatever dimension intermediate_size_per_partition is
         is_transposed = getattr(param, "is_transposed", False)
 
