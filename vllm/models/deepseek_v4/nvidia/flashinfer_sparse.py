@@ -21,13 +21,18 @@ from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
 from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
     DeepseekV4SparseMLABackend,
+    DeepseekV4SparseMLAMetadataBuilder,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
-from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backend import AttentionCGSupport, MultipleOf
 from vllm.v1.attention.backends.mla.compressor_utils import (
     get_dspark_swa_index_width,
+)
+from vllm.v1.attention.backends.mla.sparse_swa import (
+    DeepseekSparseSWABackend,
+    DeepseekSparseSWAMetadataBuilder,
 )
 
 if TYPE_CHECKING:
@@ -166,6 +171,10 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
         return "FLASHINFER_MLA_SPARSE_DSV4 requires SM10x or SM12x"
 
     @staticmethod
+    def get_builder_cls() -> type["DeepseekV4FlashInferSparseMLAMetadataBuilder"]:
+        return DeepseekV4FlashInferSparseMLAMetadataBuilder
+
+    @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
         block_size: int,
@@ -186,10 +195,29 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
         return (num_blocks, block_size, head_size)
 
 
+class DeepseekV4FlashInferSparseMLAMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
+    """Varlen-capable metadata builder for the FlashInfer sparse MLA backend."""
+
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+
+
+class DeepseekSparseSWAFlashInferMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
+    """SWA metadata for the FlashInfer sparse decode path (varlen decode)."""
+
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+
+
+class DeepseekSparseSWAFlashInferBackend(DeepseekSparseSWABackend):
+    @staticmethod
+    def get_builder_cls() -> type[DeepseekSparseSWAFlashInferMetadataBuilder]:
+        return DeepseekSparseSWAFlashInferMetadataBuilder
+
+
 class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
     """FlashInfer TRTLLM-gen sparse MLA attention layer for SM100 DeepSeek V4."""
 
     backend_cls = DeepseekV4FlashInferMLASparseBackend
+    swa_backend_cls = DeepseekSparseSWAFlashInferBackend
     use_fp8_ds_mla_layout: ClassVar[bool] = False
 
     @classmethod
@@ -551,6 +579,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
     """DeepSeek V4 sparse MLA attention through FlashInfer's SM120 kernels."""
 
     backend_cls = DeepseekV4FlashInferMLASparseBackend
+    swa_backend_cls = DeepseekSparseSWAFlashInferBackend
     use_fp8_ds_mla_layout: ClassVar[bool] = True
 
     @staticmethod
