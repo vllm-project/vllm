@@ -266,7 +266,7 @@ def get_fse_test_model_config(
 def test_determine_expert_counts_fuse_shared_experts_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    common_args = (8, 0, 2, True)
+    common_args = (8, 0, 2)
     assert determine_expert_counts(*common_args, True)[2] == 2
     assert determine_expert_counts(*common_args, False)[2] == 0
 
