@@ -781,6 +781,7 @@ def _rms_norm_kernel(
     n_cols,
     eps,
     BLOCK_SIZE: tl.constexpr,
+    HAS_WEIGHT: tl.constexpr,
 ):
     """
     Compute RMS normalization along the last dimension of a 2D tensor.
@@ -813,18 +814,19 @@ def _rms_norm_kernel(
         col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
         mask = col_idx < n_cols
         vals = tl.load(row_start_ptr + col_idx, mask=mask, other=0.0)
-        weight = tl.load(weight_ptr + col_idx, mask=mask, other=1.0)
         # Compute in float32 then convert back to input dtype
         vals_f32 = vals.to(tl.float32)
-        weight_f32 = weight.to(tl.float32)
-        output_f32 = vals_f32 * inv_rms * weight_f32
+        output_f32 = vals_f32 * inv_rms
+        if HAS_WEIGHT:
+            weight = tl.load(weight_ptr + col_idx, mask=mask, other=1.0)
+            output_f32 = output_f32 * weight.to(tl.float32)
         output = output_f32.to(vals.dtype)
         tl.store(output_row_start_ptr + col_idx, output, mask=mask)
 
 
 def rms_norm_batch_invariant(
     input: torch.Tensor,
-    weight: torch.Tensor,
+    weight: torch.Tensor | None,
     eps: float = 1e-6,
     residual: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -834,7 +836,8 @@ def rms_norm_batch_invariant(
 
     Args:
         input: Input tensor of shape (..., hidden_size)
-        weight: Weight tensor of shape (hidden_size,)
+        weight: Weight tensor of shape (hidden_size,), or None to skip the
+            per-channel multiply (``RMSNorm(has_weight=False)``)
         eps: Small constant for numerical stability
         residual: Optional residual tensor fused into the normalization path
 
@@ -851,17 +854,18 @@ def rms_norm_batch_invariant(
         ops.fused_add_rms_norm(input, residual, weight, eps)
         return input, residual
 
-    assert weight.dim() == 1, "Weight must be 1-dimensional"
-    assert input.shape[-1] == weight.shape[0], (
-        f"Input last dimension ({input.shape[-1]}) must match "
-        f"weight dimension ({weight.shape[0]})"
-    )
+    if weight is not None:
+        assert weight.dim() == 1, "Weight must be 1-dimensional"
+        assert input.shape[-1] == weight.shape[0], (
+            f"Input last dimension ({input.shape[-1]}) must match "
+            f"weight dimension ({weight.shape[0]})"
+        )
+        weight = weight.contiguous()
 
     # Flatten all dimensions except the last one
     original_shape = input.shape
     input_2d = input.reshape(-1, input.shape[-1])
     input_2d = input_2d.contiguous()
-    weight = weight.contiguous()
 
     n_rows, n_cols = input_2d.shape
 
@@ -870,13 +874,14 @@ def rms_norm_batch_invariant(
     grid = (n_rows,)
     _rms_norm_kernel[grid](
         input_2d,
-        weight,
+        weight if weight is not None else input_2d,
         output,
         input_2d.stride(0),
         output.stride(0),
         n_cols,
         eps,
         BLOCK_SIZE=BLOCK_SIZE,
+        HAS_WEIGHT=weight is not None,
     )
     return output.reshape(original_shape)
 

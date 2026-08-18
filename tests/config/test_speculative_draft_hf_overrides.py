@@ -85,6 +85,36 @@ def test_arch_mapping_applies_before_callable_override():
     assert seen_architectures == ["MiMoMTPModel"]
 
 
+@pytest.mark.cpu_test
+def test_inkling_override_exposes_all_mtp_depths():
+    text_config = _make_hf_config(
+        architectures=["InklingForCausalLM"],
+        model_type="inkling_model",
+        local_layer_ids=[1, 3],
+    )
+    config = _make_hf_config(
+        architectures=["InklingForConditionalGeneration"],
+        model_type="inkling_mm_model",
+        text_config=text_config,
+        mtp_config={
+            "num_nextn_predict_layers": 8,
+            "local_layer_ids": [0, 2, 4],
+        },
+    )
+
+    out = SpeculativeConfig.hf_config_override(config)
+
+    assert out is text_config
+    assert out.model_type == "inkling_mtp"
+    assert out.architectures == ["InklingMTPModel"]
+    # Multi-module MTP: every checkpoint depth is exposed (module i drafts
+    # speculative token i), no longer clamped to the first depth.
+    assert out.n_predict == 8
+    assert out.num_nextn_predict_layers == 8
+    assert out.chain_hidden_post_norm is False
+    assert out.local_layer_ids == [0, 2, 4]
+
+
 def _module_level_shrink(hf_config: PretrainedConfig) -> PretrainedConfig:
     hf_config.num_hidden_layers = 1
     return hf_config

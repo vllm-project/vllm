@@ -52,7 +52,7 @@ impl DefaultChatOutputProcessor {
     ) -> ChatResult<Self> {
         let parser = if tool_call_parser == reasoning_parser
             && let Some(parser) = Self::resolve_optional_unified_parser(
-                &request.tools,
+                request.tools(),
                 model_id,
                 tokenizer.clone(),
                 tool_call_parser,
@@ -62,7 +62,7 @@ impl DefaultChatOutputProcessor {
             let tool_parsing_enabled = request.tool_parsing_enabled();
             let tool_parser = if tool_parsing_enabled {
                 Some(Self::resolve_tool_parser(
-                    &request.tools,
+                    request.tools(),
                     model_id,
                     tool_call_parser,
                 )?)
@@ -74,7 +74,7 @@ impl DefaultChatOutputProcessor {
             Box::new(CombinedParser::new(reasoning_parser, tool_parser)) as Box<dyn UnifiedParser>
         };
 
-        apply_structural_tag_constraint(request, parser.structural_tag_model())?;
+        apply_structural_tag_constraint(request, parser.structural_tag_builder())?;
 
         if parser.preserve_special_tokens() {
             request.decode_options.skip_special_tokens = false;
@@ -82,7 +82,7 @@ impl DefaultChatOutputProcessor {
 
         Ok(Self {
             parser,
-            parallel_tool_calls: request.parallel_tool_calls,
+            parallel_tool_calls: request.parallel_tool_calls(),
         })
     }
 

@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
 
+from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
+
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
@@ -65,6 +67,14 @@ class NewRequestData:
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
         )
+
+    @property
+    def prompt_len(self) -> int:
+        if self.prompt_token_ids is not None:
+            return len(self.prompt_token_ids)
+        if self.prompt_embeds is not None:
+            return self.prompt_embeds.shape[0]
+        return 0
 
     def __repr__(self) -> str:
         prompt_embeds_shape = (
@@ -180,6 +190,14 @@ class CachedRequestData:
 
 
 @dataclass
+class ScheduledEncoderInputStats:
+    """Stats for encoder inputs scheduled in one iteration."""
+
+    num_inputs: int = 0
+    output_tokens: int = 0
+
+
+@dataclass
 class SchedulerOutput:
     # list of the requests that are scheduled for the first time.
     # We cache the request's data in each worker process, so that we don't
@@ -216,6 +234,8 @@ class SchedulerOutput:
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
+    scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
+
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
     preempted_req_ids: set[str] | None = None
@@ -236,7 +256,8 @@ class SchedulerOutput:
 
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
-
+    # EC Cache Manager metadata
+    ec_manager_metadata: EncoderCacheManagerMetadata | None = None
     # Block IDs freshly allocated from the pool during this scheduling step.
     # The worker zeros the corresponding GPU memory before the blocks are used,
     # preventing stale NaN/data from corrupting attention or SSM computation.
@@ -244,6 +265,12 @@ class SchedulerOutput:
 
     # CoW copies to apply after zeroing new blocks and before forward.
     kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
+
+    # Producer partial-tail offload hand-off for external KV connectors:
+    # {request_id: [(group_id, block_id, boundary_tokens), ...]} pointing at
+    # the durable boundary block of a producer's last-prompt-boundary partial
+    # tail (mamba "align" CoW target). None unless partial hash hits are active.
+    partial_tail_offloads: dict[str, list[tuple[int, int, int]]] | None = None
 
     # Dynamic speculative decoding: optimal K chosen by scheduler.
     # Number of spec tokens to schedule for the next step.

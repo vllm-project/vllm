@@ -18,17 +18,34 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     draft_model_config = speculative_config.draft_model_config
 
     from vllm.compilation.backends import set_model_tag
+    from vllm.model_executor.models.qwen3_dflash import dflash_has_any_non_causal
+    from vllm.model_executor.models.utils import get_draft_quant_config
 
-    # DSpark uses non-causal attention.
-    causal = False
+    # None re-runs backend auto-selection for the draft, which can pick a
+    # different attention class than the target; fall back to the target's.
+    draft_attention_backend = (
+        speculative_config.attention_backend or vllm_config.attention_config.backend
+    )
+
     draft_vllm_config = replace(
         vllm_config,
         attention_config=replace(
             vllm_config.attention_config,
-            use_non_causal=not causal,
-            backend=speculative_config.attention_backend,
+            use_non_causal=dflash_has_any_non_causal(draft_model_config.hf_config),
+            backend=draft_attention_backend,
+        ),
+        cache_config=(
+            replace(
+                vllm_config.cache_config,
+                cache_dtype=speculative_config.kv_cache_dtype,
+            )
+            if speculative_config.kv_cache_dtype is not None
+            else vllm_config.cache_config
         ),
     )
+    # VllmConfig post-init restores the target's quant config because the target
+    # config is retained for DSpark's target-layer metadata, so we must override it.
+    draft_vllm_config.quant_config = get_draft_quant_config(vllm_config)
 
     with set_model_tag("dspark_head"):
         draft_model = get_model(

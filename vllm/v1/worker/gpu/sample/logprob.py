@@ -106,7 +106,7 @@ def compute_token_logprobs(
     return logprobs
 
 
-def compute_topk_logprobs(
+def compute_topk_scores(
     logits: torch.Tensor,
     num_logprobs: int,
     sampled_token_ids: torch.Tensor,
@@ -114,6 +114,7 @@ def compute_topk_logprobs(
     logprob_token_ids_state: "LogprobTokenIdsState | None" = None,
     expanded_idx_mapping: torch.Tensor | None = None,
     max_per_req_token_ids: int = 0,
+    logits_mode: bool = False,
 ) -> LogprobsTensors:
     assert num_logprobs >= 0
     batch_size, vocab_size = logits.shape
@@ -124,7 +125,10 @@ def compute_topk_logprobs(
         if num_logprobs > 0:
             topk_indices = torch.topk(logits, num_logprobs, dim=-1).indices
             logprob_token_ids = torch.cat((logprob_token_ids, topk_indices), dim=1)
-        logprobs = compute_token_logprobs(logits, logprob_token_ids)
+        if logits_mode:
+            scores = logits.gather(-1, logprob_token_ids).to(torch.float32)
+        else:
+            scores = compute_token_logprobs(logits, logprob_token_ids)
     else:
         # Some requests specified logprob_token_ids. Build the [batch_size,
         # 1 + max_cols] token_ids matrix and validity mask on the GPU via a
@@ -158,8 +162,11 @@ def compute_topk_logprobs(
             NUM_TOPK=num_logprobs,
             PADDED_COLS=triton.next_power_of_2(num_cols),
         )
-        logprobs = compute_token_logprobs(logits, logprob_token_ids)
-        logprobs = logprobs.masked_fill(~valid_mask, float("-inf"))
+        if logits_mode:
+            scores = logits.gather(-1, logprob_token_ids).to(torch.float32)
+        else:
+            scores = compute_token_logprobs(logits, logprob_token_ids)
+        scores = scores.masked_fill(~valid_mask, float("-inf"))
 
     token_ranks = torch.empty(batch_size, dtype=torch.int64, device=logits.device)
     _ranks_kernel[(batch_size,)](
@@ -172,7 +179,7 @@ def compute_topk_logprobs(
     )
     return LogprobsTensors(
         logprob_token_ids=logprob_token_ids,
-        logprobs=logprobs,
+        logprobs=scores,
         selected_token_ranks=token_ranks,
         cu_num_generated_tokens=cu_num_logits,
     )
