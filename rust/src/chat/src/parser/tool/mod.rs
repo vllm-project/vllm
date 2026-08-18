@@ -7,10 +7,10 @@ use std::sync::{Arc, LazyLock};
 
 pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
-    Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser,
-    Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MinimaxM2ToolParser,
-    MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser,
-    Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
+    Ernie45ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser,
+    HermesToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser,
+    MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
+    Qwen3CoderToolParser, Qwen3XmlToolParser, SeedOssToolParser, ToolParser, ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -22,6 +22,7 @@ pub mod names {
     pub const DEEPSEEK_V31: &str = "deepseek_v31";
     pub const DEEPSEEK_V32: &str = "deepseek_v32";
     pub const DEEPSEEK_V4: &str = "deepseek_v4";
+    pub const ERNIE45: &str = "ernie45";
     pub const GLM45: &str = "glm45";
     pub const GLM47: &str = "glm47";
     pub const GEMMA4: &str = "gemma4";
@@ -70,6 +71,7 @@ impl ToolParserFactory {
             .register_parser::<DeepSeekV31ToolParser>(names::DEEPSEEK_V31)
             .register_parser::<DeepSeekV32ToolParser>(names::DEEPSEEK_V32)
             .register_parser::<DeepSeekV4ToolParser>(names::DEEPSEEK_V4)
+            .register_parser::<Ernie45ToolParser>(names::ERNIE45)
             .register_parser::<Glm45MoeToolParser>(names::GLM45)
             .register_parser::<Glm47MoeToolParser>(names::GLM47)
             .register_unified_dummy(names::GEMMA4)
@@ -115,6 +117,9 @@ impl ToolParserFactory {
             .register_pattern("deepseek-v3.2", names::DEEPSEEK_V32)
             .register_pattern("deepseek-v3.1", names::DEEPSEEK_V31)
             .register_pattern("deepseek-v3", names::DEEPSEEK_V3)
+            // Only the ERNIE-4.5 thinking checkpoint renders `<tool_call>` blocks;
+            // the `*-PT` text checkpoints use a plain `User:`/`Assistant:` template.
+            .register_pattern("ernie-4.5-21b-a3b-thinking", names::ERNIE45)
             .register_pattern("glm-5", names::GLM47)
             .register_pattern("glm-4.7", names::GLM47)
             .register_pattern("glm-4.6", names::GLM45)

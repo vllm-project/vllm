@@ -319,6 +319,22 @@ impl RoundtripCase {
         }
     }
 
+    /// ERNIE 4.5 `<tool_call>` JSON format with `<think>` reasoning tags and a
+    /// `<response>` wrapper around the final answer.
+    fn ernie45() -> Self {
+        Self {
+            model_id: "baidu/ERNIE-4.5-21B-A3B-Thinking",
+            // The template unconditionally appends the next generation prompt
+            // after a closed assistant turn.
+            assistant_stop_suffix: "<|im_end|>\n\n<|im_start|>assistant\n<think>\n",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: spaced_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
     /// Nemotron V3 with `<think>` / `</think>` reasoning tags.
     fn nemotron_v3() -> Self {
         Self {
@@ -391,6 +407,7 @@ roundtrip_tests! {
     glm52 => [reasoning_and_content, tool_call_mix],
     seed_oss => [reasoning_and_content, tool_call_mix],
     step3p5 => [reasoning_and_content],
+    ernie45 => [reasoning_and_content, tool_call_mix],
     nemotron_v3 => [reasoning_and_content],
     gemma4 => [tool_call_mix], // Gemma4 strips reasoning in history if there's no tool call
     kimi_k25 => [tool_call_mix], // Kimi K2.5 strips reasoning in history

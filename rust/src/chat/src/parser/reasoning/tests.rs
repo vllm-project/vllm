@@ -90,6 +90,26 @@ fn factory_routes_seed_oss_models() {
 }
 
 #[test]
+fn factory_routes_ernie45_thinking_models_only() {
+    let factory = ReasoningParserFactory::new();
+    assert!(factory.contains(names::ERNIE45));
+    assert_eq!(
+        factory.resolve_name_for_model("baidu/ERNIE-4.5-21B-A3B-Thinking"),
+        Some(names::ERNIE45)
+    );
+    // The `*-PT` ERNIE text checkpoints have neither `<think>` tokens nor a
+    // reasoning template, so they must not resolve to the ERNIE parser.
+    assert_eq!(
+        factory.resolve_name_for_model("baidu/ERNIE-4.5-21B-A3B-PT"),
+        None
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("baidu/ERNIE-4.5-0.3B-PT"),
+        None
+    );
+}
+
+#[test]
 fn factory_resolves_minimax_m3_before_generic_minimax() {
     let factory = ReasoningParserFactory::new();
     assert_eq!(
