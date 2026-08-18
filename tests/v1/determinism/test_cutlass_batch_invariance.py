@@ -22,6 +22,9 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
     CutlassFP8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.triton import (
+    TritonFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -87,16 +90,29 @@ _NVFP4_MOE_BATCH_INVARIANT_CASES = (
 
 @pytest.fixture(autouse=True)
 def setup_cuda():
-    if not current_platform.is_cuda():
-        pytest.skip("CUTLASS FP8 kernels require CUDA.")
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Requires CUDA or ROCm.")
     torch.set_default_device("cuda")
 
 
 @requires_fp8
+@pytest.mark.parametrize(
+    "kernel",
+    [
+        pytest.param(
+            CutlassFP8ScaledMMLinearKernel,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="CUTLASS requires CUDA."
+            ),
+        ),
+        TritonFP8ScaledMMLinearKernel,
+    ],
+)
 @pytest.mark.parametrize("weight_shape", [(1024, 2048), (4608, 4096)])
 @pytest.mark.parametrize("batch_size", [1, 16, 17, 32, 64, 65, 256, 257])
 @torch.inference_mode()
-def test_cutlass_fp8_batch_invariant_fixed_config(
+def test_fp8_scaled_mm_batch_invariant_fixed_config(
+    kernel: type,
     weight_shape: tuple[int, int],
     batch_size: int,
     default_vllm_config,
@@ -113,9 +129,9 @@ def test_cutlass_fp8_batch_invariant_fixed_config(
         input_dtype=torch.bfloat16,
         out_dtype=torch.bfloat16,
         device=torch.device("cuda"),
-        force_kernel=CutlassFP8ScaledMMLinearKernel,
+        force_kernel=kernel,
     )
-    assert isinstance(layer.kernel, CutlassFP8ScaledMMLinearKernel)
+    assert isinstance(layer.kernel, kernel)
 
     in_features = weight_shape[1]
     needle = torch.randn((1, in_features), device="cuda", dtype=torch.bfloat16)

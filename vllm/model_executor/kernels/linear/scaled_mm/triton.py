@@ -5,9 +5,6 @@
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.batch_invariant import (
-    scaled_mm_batch_invariant,
-)
 from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa: E501
     triton_scaled_mm,
 )
@@ -161,12 +158,7 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         return out
 
 
-class BatchInvariantFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
-    """Per-tensor / per-token fp8 GEMM that does not vary with the batch size.
-
-    Currently used only by ROCm, but in principle batch invariant on every platform.
-    """
-
+class TritonFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -196,7 +188,9 @@ class BatchInvariantFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
-        out = scaled_mm_batch_invariant(A, B, As, Bs, out_dtype, bias)
+        out = triton_scaled_mm(
+            A, B, scale_a=As, scale_b=Bs, out_dtype=out_dtype, bias=bias
+        )
         return out.view(*output_shape)
 
 

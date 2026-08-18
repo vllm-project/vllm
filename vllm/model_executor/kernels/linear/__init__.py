@@ -211,8 +211,8 @@ from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
-    BatchInvariantFP8ScaledMMLinearKernel,
     TritonFp8BlockScaledMMKernel,
+    TritonFP8ScaledMMLinearKernel,
     TritonInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
@@ -718,7 +718,7 @@ def init_fp8_linear_kernel(
 
     else:
         if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
-            force_kernel = BatchInvariantFP8ScaledMMLinearKernel
+            force_kernel = TritonFP8ScaledMMLinearKernel
 
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,

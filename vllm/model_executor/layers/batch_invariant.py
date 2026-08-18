@@ -352,7 +352,7 @@ def bmm_kernel(
 
 
 @triton.jit
-def _log_softmax_kernel(
+def _softmax_kernel(
     input_ptr,
     output_ptr,
     input_row_stride,
@@ -360,10 +360,12 @@ def _log_softmax_kernel(
     output_row_stride,
     n_cols,
     BLOCK_SIZE: tl.constexpr,
+    LOG: tl.constexpr = False,
 ):
     """
-    Compute log_softmax along the last dimension of a 2D tensor.
-    Each block handles one row of the input tensor.
+    Compute softmax, or log_softmax when ``LOG``, along the last dimension of a
+    2D tensor. Each block handles one row of the input tensor, in a fixed block
+    order, so the result never depends on the row count.
     """
     # Get the row index for this block
     row_idx = tl.program_id(0).to(tl.int64)
@@ -399,10 +401,9 @@ def _log_softmax_kernel(
         exp_vals = tl.exp(vals - max_val)
         sum_exp += tl.sum(tl.where(mask, exp_vals, 0.0))
 
-    # Compute log(sum_exp)
-    log_sum_exp = tl.log(sum_exp)
+    log_sum_exp = tl.log(sum_exp) if LOG else 0.0
 
-    # Step 3: Compute final log_softmax values: x - max_val - log_sum_exp
+    # Step 3: normalise
     for col_offset in range(0, n_cols, BLOCK_SIZE):
         col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
         mask = col_idx < n_cols
@@ -410,8 +411,10 @@ def _log_softmax_kernel(
         # Load values
         vals = tl.load(row_start_ptr + col_idx * input_col_stride, mask=mask)
 
-        # Compute log_softmax
-        output = vals - max_val - log_sum_exp
+        if LOG:
+            output = vals - max_val - log_sum_exp
+        else:
+            output = tl.exp(vals - max_val) / sum_exp
 
         # Store results
         tl.store(output_row_start_ptr + col_idx, output, mask=mask)
@@ -448,7 +451,7 @@ def log_softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
 
     # Launch kernel with one block per row
     grid = (n_rows,)
-    _log_softmax_kernel[grid](
+    _softmax_kernel[grid](
         input_2d,
         output,
         input_2d.stride(0),
@@ -456,57 +459,10 @@ def log_softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
         output.stride(0),
         n_cols,
         BLOCK_SIZE=BLOCK_SIZE,
+        LOG=True,
     )
     # Reshape output back to original shape
     return output.reshape(original_shape)
-
-
-@triton.jit
-def _softmax_kernel(
-    input_ptr,
-    output_ptr,
-    input_row_stride,
-    input_col_stride,
-    output_row_stride,
-    n_cols,
-    BLOCK_SIZE: tl.constexpr,
-):
-    """Softmax over the last dimension, one row per program.
-
-    Mirrors ``_log_softmax_kernel``: each row is reduced by a single program in
-    a fixed block order, so the result never depends on the row count.
-    """
-    row_idx = tl.program_id(0).to(tl.int64)
-    row_start_ptr = input_ptr + row_idx * input_row_stride
-    output_row_start_ptr = output_ptr + row_idx * output_row_stride
-
-    max_val = -float("inf")
-    for col_offset in range(0, n_cols, BLOCK_SIZE):
-        col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
-        mask = col_idx < n_cols
-        vals = tl.load(
-            row_start_ptr + col_idx * input_col_stride, mask=mask, other=-float("inf")
-        )
-        max_val = tl.max(tl.maximum(vals, max_val))
-
-    sum_exp = 0.0
-    for col_offset in range(0, n_cols, BLOCK_SIZE):
-        col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
-        mask = col_idx < n_cols
-        vals = tl.load(row_start_ptr + col_idx * input_col_stride, mask=mask, other=0.0)
-        exp_vals = tl.exp(vals.to(tl.float32) - max_val)
-        sum_exp += tl.sum(tl.where(mask, exp_vals, 0.0))
-
-    for col_offset in range(0, n_cols, BLOCK_SIZE):
-        col_idx = col_offset + tl.arange(0, BLOCK_SIZE)
-        mask = col_idx < n_cols
-        vals = tl.load(row_start_ptr + col_idx * input_col_stride, mask=mask)
-        output = tl.exp(vals.to(tl.float32) - max_val) / sum_exp
-        tl.store(
-            output_row_start_ptr + col_idx,
-            output.to(output_ptr.dtype.element_ty),
-            mask=mask,
-        )
 
 
 def softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
@@ -1029,183 +985,6 @@ def linear_batch_invariant(input, weight, bias=None):
         input.reshape(-1, input.shape[-1]), weight.t(), bias=bias
     )
     return output.view(*input.shape[:-1], output.shape[-1])
-
-
-@triton.jit(launch_metadata=_matmul_launch_metadata)
-def scaled_mm_kernel_persistent(
-    a_ptr,
-    b_ptr,
-    c_ptr,
-    a_scale_ptr,
-    b_scale_ptr,
-    bias_ptr,
-    M,
-    N,
-    K,
-    stride_am,
-    stride_ak,
-    stride_bk,
-    stride_bn,
-    stride_cm,
-    stride_cn,
-    stride_as,
-    stride_bs,
-    stride_bias,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
-    NUM_SMS: tl.constexpr,
-    A_SCALE_PER_TOKEN: tl.constexpr,
-    B_SCALE_PER_CHANNEL: tl.constexpr,
-    HAS_BIAS: tl.constexpr,
-):
-    """Persistent fp8 GEMM with an fp32 accumulator and a dequant epilogue.
-
-    Same fixed tiling as ``matmul_kernel_persistent``: the tile shape and the
-    K-loop order are compile-time constants, so a given output tile is summed
-    in the same order no matter how many rows the launch has.
-    """
-    start_pid = tl.program_id(axis=0)
-    num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    k_tiles = tl.cdiv(K, BLOCK_SIZE_K)
-    num_tiles = num_pid_m * num_pid_n
-
-    offs_k_for_mask = tl.arange(0, BLOCK_SIZE_K)
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-
-    for tile_id in tl.range(start_pid, num_tiles, NUM_SMS, flatten=True):
-        pid_m, pid_n = _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M)
-        offs_am = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-        offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-        offs_am = tl.where(offs_am < M, offs_am, 0)
-        offs_bn = tl.where(offs_bn < N, offs_bn, 0)
-        offs_am = tl.max_contiguous(tl.multiple_of(offs_am, BLOCK_SIZE_M), BLOCK_SIZE_M)
-        offs_bn = tl.max_contiguous(tl.multiple_of(offs_bn, BLOCK_SIZE_N), BLOCK_SIZE_N)
-
-        accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-        for ki in range(k_tiles):
-            offs_k = ki * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
-            a_ptrs = a_ptr + (
-                offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak
-            )
-            b_ptrs = b_ptr + (
-                offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn
-            )
-            k_valid = offs_k_for_mask < K - ki * BLOCK_SIZE_K
-            a = tl.load(a_ptrs, mask=k_valid[None, :], other=0.0)
-            b = tl.load(b_ptrs, mask=k_valid[:, None], other=0.0)
-            accumulator = tl.dot(a, b, accumulator)
-
-        offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-        offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-
-        if A_SCALE_PER_TOKEN:
-            a_scale = tl.load(
-                a_scale_ptr + offs_cm * stride_as, mask=offs_cm < M, other=0.0
-            )
-        else:
-            a_scale = tl.load(a_scale_ptr)
-        if B_SCALE_PER_CHANNEL:
-            b_scale = tl.load(
-                b_scale_ptr + offs_cn * stride_bs, mask=offs_cn < N, other=0.0
-            )
-        else:
-            b_scale = tl.load(b_scale_ptr)
-
-        if A_SCALE_PER_TOKEN and B_SCALE_PER_CHANNEL:
-            accumulator = accumulator * a_scale[:, None] * b_scale[None, :]
-        elif A_SCALE_PER_TOKEN:
-            accumulator = accumulator * a_scale[:, None] * b_scale
-        elif B_SCALE_PER_CHANNEL:
-            accumulator = accumulator * a_scale * b_scale[None, :]
-        else:
-            accumulator = accumulator * a_scale * b_scale
-
-        if HAS_BIAS:
-            bias = tl.load(
-                bias_ptr + offs_cn * stride_bias, mask=offs_cn < N, other=0.0
-            )
-            accumulator += bias.to(tl.float32)
-
-        c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-        c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
-        tl.store(c_ptrs, accumulator.to(c_ptr.dtype.element_ty), mask=c_mask)
-
-
-def scaled_mm_batch_invariant(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    a_scale: torch.Tensor,
-    b_scale: torch.Tensor,
-    out_dtype: torch.dtype,
-    bias: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Batch-invariant replacement for ``torch._scaled_mm``.
-
-    ``a`` is ``(M, K)`` fp8 with per-tensor or per-token scales, ``b`` is
-    ``(K, N)`` fp8 with per-tensor or per-channel scales.
-    """
-    M, K = a.shape
-    _, N = b.shape
-    NUM_SMS = num_compute_units(a.device.index)
-
-    a_scale_per_token = a_scale.numel() > 1
-    b_scale_per_channel = b_scale.numel() > 1
-    assert not a_scale_per_token or a_scale.numel() == M, (
-        f"activation scale must be per-tensor or per-token, got {a_scale.shape}"
-    )
-    assert not b_scale_per_channel or b_scale.numel() == N, (
-        f"weight scale must be per-tensor or per-channel, got {b_scale.shape}"
-    )
-
-    c = torch.empty((M, N), device=a.device, dtype=out_dtype)
-
-    cfg = {
-        "BLOCK_SIZE_M": 128,
-        "BLOCK_SIZE_N": 128,
-        "BLOCK_SIZE_K": 128,
-        "GROUP_SIZE_M": 8,
-        "num_stages": 2,
-        "num_warps": 8,
-    }
-
-    def grid(META):
-        return (
-            min(
-                NUM_SMS,
-                triton.cdiv(M, META["BLOCK_SIZE_M"])
-                * triton.cdiv(N, META["BLOCK_SIZE_N"]),
-            ),
-        )
-
-    scaled_mm_kernel_persistent[grid](
-        a,
-        b,
-        c,
-        a_scale,
-        b_scale,
-        bias,
-        M,
-        N,
-        K,
-        a.stride(0),
-        a.stride(1),
-        b.stride(0),
-        b.stride(1),
-        c.stride(0),
-        c.stride(1),
-        _vector_stride(a_scale),
-        _vector_stride(b_scale),
-        _vector_stride(bias) if bias is not None else 1,
-        NUM_SMS=NUM_SMS,
-        A_SCALE_PER_TOKEN=a_scale_per_token,
-        B_SCALE_PER_CHANNEL=b_scale_per_channel,
-        HAS_BIAS=bias is not None,
-        **cfg,
-    )
-    return c
 
 
 @triton.jit
