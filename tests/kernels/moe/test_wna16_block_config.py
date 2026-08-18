@@ -14,7 +14,7 @@ def test_wna16_block_config_reduces_num_blocks_correctly():
 
     cfg = {}
     use_cuda = True
-    num_valid_tokens = 1
+    num_valid_tokens = 100
     size_k = 512
     size_n = 512
     num_experts = 100
