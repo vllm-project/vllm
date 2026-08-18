@@ -507,6 +507,13 @@ class OpenCVVideoBackendMixin:
         *,
         frame_recovery: bool = False,
     ) -> tuple[npt.NDArray, list[int]]:
+        if not frame_idx:
+            # Degenerate input (e.g. a video with zero frames): nothing to load.
+            # Match the shape produced by the internal readers for empty input.
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            return np.empty((0, height, width, 3), dtype=np.uint8), []
+
         if frame_recovery:
             num_frames_to_sample = len(frame_idx)
             frames, valid_frame_indices, recovered_map = cls._read_frames_with_recovery(
