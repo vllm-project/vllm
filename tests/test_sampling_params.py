@@ -49,3 +49,24 @@ def test_diffusion_accepts_top_k_top_p():
 def test_non_diffusion_models_unaffected():
     params = SamplingParams(temperature=0.7, top_k=10, seed=42)
     params.verify(MockModelConfig(), None, None, None)
+
+
+def test_from_optional_parsing():
+    """Test SamplingParams.from_optional default fallbacks and valid dict
+    logit_bias parsing."""
+    params = SamplingParams.from_optional(
+        temperature=None,
+        top_p=None,
+        presence_penalty=None,
+        logit_bias={"12": 2.5, 34: -1.0},
+    )
+    assert params.temperature == 1.0
+    assert params.top_p == 1.0
+    assert params.presence_penalty == 0.0
+    assert params.logit_bias == {12: 2.5, 34: -1.0}
+
+
+def test_invalid_logit_bias_key():
+    """Test that invalid non-integer keys in logit_bias raise VLLMValidationError."""
+    with pytest.raises(VLLMValidationError, match="logit_bias contains key"):
+        SamplingParams.from_optional(logit_bias={"invalid_token_id": 1.0})
