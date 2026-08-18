@@ -50,6 +50,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) V1 Engine"
+      dind: false
       device: mi250_1
       timeout_in_minutes: 45
       depends_on:
@@ -67,6 +68,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) E2E Scheduling"
+      dind: false
       device: mi250_1
       timeout_in_minutes: 55
       depends_on:
@@ -84,6 +86,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) E2E Core"
+      dind: false
       device: mi250_1
       timeout_in_minutes: 50
       depends_on:

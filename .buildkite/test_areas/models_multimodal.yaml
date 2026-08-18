@@ -57,6 +57,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI250) Multimodal Models (Standard) 3: llava + qwen2_vl"
+      dind: false
       device: mi250_1
       timeout_in_minutes: 55
       depends_on:
