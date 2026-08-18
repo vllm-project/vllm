@@ -3490,15 +3490,15 @@ def test_chunk_derived_namespace_save_load_agree():
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.return_value = [256, 256]
     send_thread = _make_store_sending_thread(store, dcp_size=2)
-    send_thread.add_stored_request("req-a")
-    send_thread._handle_request(
+    _run_store_req(
+        send_thread,
         ReqMeta(
             req_id="req-a",
             token_len_chunk=32,
             block_ids=([1, 2],),
             block_hashes=block_hashes,
             can_save=True,
-        )
+        ),
     )
     save_keys = store.batch_is_exist.call_args.args[0]
     # chunk 0 → dcp0, chunk 1 → dcp1
@@ -3680,15 +3680,15 @@ def test_write_amplification_mla_global_once():
         s.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
         s.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
         thread = _make_store_sending_thread(s, tp_rank=tp_rank, put_step=8, dcp_size=4)
-        thread.add_stored_request("req-a")
-        thread._handle_request(
+        _run_store_req(
+            thread,
             ReqMeta(
                 req_id="req-a",
                 token_len_chunk=64,
                 block_ids=([1, 2, 3, 4],),
                 block_hashes=[b"a0", b"a1", b"a2", b"a3"],
                 can_save=True,
-            )
+            ),
         )
         if s.batch_is_exist.called:
             all_saved_keys.extend(s.batch_is_exist.call_args.args[0])
@@ -3768,16 +3768,16 @@ def test_null_block_guard_save():
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.return_value = [256]
     thread = _make_store_sending_thread(store)
-    thread.add_stored_request("req-a")
     # block_ids has NULL_BLOCK_ID at index 1 and only 2 entries (chunk 2 OOB)
-    thread._handle_request(
+    _run_store_req(
+        thread,
         ReqMeta(
             req_id="req-a",
             token_len_chunk=48,
             block_ids=([1, NULL_BLOCK_ID],),
             block_hashes=[b"a0", b"a1", b"a2"],
             can_save=True,
-        )
+        ),
     )
     keys = store.batch_is_exist.call_args.args[0]
     # chunk 0 saved, chunk 1 skipped (NULL_BLOCK_ID), chunk 2 skipped (OOB)
@@ -3817,16 +3817,16 @@ def test_token_len_clamp():
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.return_value = [256]
     thread = _make_store_sending_thread(store)
-    thread.add_stored_request("req-a")
     # token_len_chunk=64 but only 2 block_hashes (coverage = 32 tokens)
-    thread._handle_request(
+    _run_store_req(
+        thread,
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([1, 2, 3, 4],),
             block_hashes=[b"a0", b"a1"],
             can_save=True,
-        )
+        ),
     )
     keys = store.batch_is_exist.call_args.args[0]
     # Clamped to 32 tokens = 2 chunks
@@ -3957,8 +3957,8 @@ def test_partial_tail_dcp_namespace():
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.return_value = [256]
     thread = _make_store_sending_thread(store, dcp_size=2)
-    thread.add_stored_request("req-a")
-    thread._handle_request(
+    _run_store_req(
+        thread,
         ReqMeta(
             req_id="req-a",
             token_len_chunk=32,
@@ -3966,7 +3966,7 @@ def test_partial_tail_dcp_namespace():
             block_hashes=[b"a0", b"a1"],
             can_save=True,
             partial_tail_offloads=[(0, 3, 20)],
-        )
+        ),
     )
     # Check partial-tail keys (from batch_is_exist for the partial tail)
     all_calls = store.batch_is_exist.call_args_list
@@ -3986,15 +3986,15 @@ def test_gqa_write_amplification():
         s.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
         # GQA: factor=2, put_step=2
         thread = _make_store_sending_thread(s, tp_rank=tp_rank, put_step=2, dcp_size=4)
-        thread.add_stored_request("req-a")
-        thread._handle_request(
+        _run_store_req(
+            thread,
             ReqMeta(
                 req_id="req-a",
                 token_len_chunk=64,
                 block_ids=([1, 2, 3, 4],),
                 block_hashes=[b"a0", b"a1", b"a2", b"a3"],
                 can_save=True,
-            )
+            ),
         )
         if s.batch_is_exist.called:
             all_saved_keys.extend(s.batch_is_exist.call_args.args[0])
@@ -4010,15 +4010,15 @@ def test_mamba_save_load_dcp():
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
     store.batch_put_from_multi_buffers.return_value = [256, 256]
     send_thread = _make_store_sending_thread(store, dcp_size=2, put_step=1)
-    send_thread.add_stored_request("req-a")
-    send_thread._handle_request(
+    _run_store_req(
+        send_thread,
         ReqMeta(
             req_id="req-a",
             token_len_chunk=32,
             block_ids=([1, 2],),
             block_hashes=block_hashes,
             can_save=True,
-        )
+        ),
     )
     save_keys = store.batch_is_exist.call_args.args[0]
     # Mamba factor=1, put_step=1: all ranks save all chunks
