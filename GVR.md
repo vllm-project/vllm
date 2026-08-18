@@ -3257,14 +3257,15 @@ clang-format and Python ruff hooks pass. Artifacts:
 
 The production objective is now to emit FP16 indexer logits by default on
 CUDA, retaining FP32 only when the operator requires it or the user explicitly
-selects it. `VLLM_INDEXER_LOGITS_DTYPE` accepts `auto`, `float16`, `bfloat16`,
-or `float32`; `auto` is the default and resolves to FP16 on CUDA. It resolves
-to FP32 on non-CUDA platforms. DCP keeps the large local logits tensor and
-local top-k in the selected reduced dtype; only the small gathered candidate
-pair buffer is FP32 because it stores scores and exactly representable global
-IDs in one homogeneous tensor for the existing CuTe selector. An explicit
-setting takes precedence over the older FP16/BF16 boolean switches, so
-`VLLM_INDEXER_LOGITS_DTYPE=float32` is an unambiguous compatibility override.
+selects it. `AttentionConfig.indexer_logits_dtype` accepts `auto`, `float16`,
+`bfloat16`, or `float32`; `auto` is the default and resolves to FP16 on CUDA.
+It resolves to FP32 on non-CUDA platforms. DCP keeps the large local logits
+tensor and local top-k in the selected reduced dtype; only the small gathered
+candidate pair buffer is FP32 because it stores scores and exactly
+representable global IDs in one homogeneous tensor for the existing CuTe
+selector. The engine argument
+`--attention-config.indexer_logits_dtype float32` is an unambiguous
+compatibility override.
 
 The final FP16 prefill selector uses three measured policies:
 
@@ -3313,13 +3314,16 @@ The production subset is now isolated from the experimental GVR work and
 published as draft PR
 [`vllm-project/vllm#52696`](https://github.com/vllm-project/vllm/pull/52696),
 based on current `main`. Its source branch is `agent/fp16-indexer-logits` and
-its single implementation commit is `839529e522`. The PR deliberately does
-not contain GVR state, research scripts, or these research notes.
+its initial implementation commit is `839529e522`. Follow-up commit
+`7340b26338` replaced the experimental environment variable with the engine
+configuration described above. The PR deliberately does not contain GVR
+state, research scripts, or these research notes.
 
 The upstream scope is the existing materialized-logits path:
 
 - `auto` selects FP16 indexer logits on CUDA and FP32 elsewhere, with explicit
-  FP16, BF16, and FP32 overrides.
+  FP16, BF16, and FP32 overrides through
+  `--attention-config.indexer_logits_dtype`.
 - DeepGEMM paged/non-paged MQA logits and vLLM's cooperative, persistent, and
   histogram top-k paths accept FP16 and BF16 without widening the full logits
   tensor.
