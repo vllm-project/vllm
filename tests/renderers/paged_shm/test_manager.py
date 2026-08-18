@@ -324,7 +324,7 @@ class TestBatchAllocation:
             ShmItem(uuid="x", size=800, use_cache=True),  # needs 4 blocks
             ShmItem(uuid="y", size=10, use_cache=True),  # needs 1 block -> total 5 > 4
         ]
-        with pytest.raises(MemoryError, match="No sufficient space"):
+        with pytest.raises(MemoryError, match="Not enough blocks"):
             manager.open_write(items)
 
     def test_batch_duplicate_uuid_raises(self, manager, item_small):

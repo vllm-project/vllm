@@ -17,6 +17,10 @@ from vllm.utils.cache import LRUCache
 
 from .types import AllocatedShmItemInternal, ShmItem
 
+# Special reference count values
+REF_WRITING = -1  # Item is being written (not yet readable)
+REF_IDLE = 0  # Item is idle and may be cached or pinned
+
 
 class PagedShmManager:
     """Manages a fixed-size, paged shm pool with LRU eviction."""
@@ -68,7 +72,10 @@ class PagedShmManager:
 
         # 2. Confirm whether there is sufficient space to meet all requirements.
         if self._total_available_blocks < total_need:
-            raise MemoryError("No sufficient space to meet all requirements")
+            raise MemoryError(
+                f"Not enough blocks: need {total_need}, "
+                f"available {self._total_available_blocks}"
+            )
 
         # 3. Evict cached items until enough free blocks are available.
         self._evict(total_need)
@@ -83,7 +90,7 @@ class PagedShmManager:
                 size=item.size,
                 use_cache=item.use_cache,
                 blocks=blocks,
-                ref_count=-1,  # Item is being written
+                ref_count=REF_WRITING,
             )
             self._all_items[item.uuid] = new_item
             allocated.append(new_item)
@@ -96,29 +103,31 @@ class PagedShmManager:
         item = self._all_items.get(uuid, None)
         if item is None:
             raise ValueError(f"UUID {uuid} not found")
-        if item.ref_count >= 0:
+        if item.ref_count != REF_WRITING:
             raise ValueError(f"UUID {uuid} not being written")
 
         if not open_read:
-            item.ref_count = 0
+            item.ref_count = REF_IDLE
             # Insert into LRU cache if open_read is False, caching is enabled,
             # and item is not pinned
             if item.use_cache and uuid not in self._pinned_items:
                 self._total_available_blocks += item.n_block()
                 self._lru_cache.put(uuid, item)
         else:
-            item.ref_count = 1
+            item.ref_count = 1  # start with one reader
 
     def open_read(self, uuid):
         item: AllocatedShmItemInternal | None = self._all_items.get(uuid, None)
         if item is None:
             raise ValueError(f"UUID {uuid} not found")
-        if item.ref_count < 0:
+        if item.ref_count == REF_WRITING:
             raise ValueError(f"UUID {uuid} is being written")
 
         # If the item is idle and cacheable, take it out of the cache
         update_cache = (
-            item.use_cache and item.ref_count == 0 and uuid not in self._pinned_items
+            item.use_cache
+            and item.ref_count == REF_IDLE
+            and uuid not in self._pinned_items
         )
         if update_cache:
             self._lru_cache.pop(uuid)
@@ -131,9 +140,9 @@ class PagedShmManager:
         item = self._all_items.get(uuid, None)
         if item is None:
             raise ValueError(f"UUID {uuid} not found")
-        if item.ref_count < 0:
+        if item.ref_count == REF_WRITING:
             raise ValueError(f"UUID {uuid} being written")
-        if item.ref_count == 0:
+        if item.ref_count == REF_IDLE:
             raise ValueError(f"UUID {uuid} not being read")
 
         if item.ref_count > 0:
@@ -141,7 +150,9 @@ class PagedShmManager:
 
         # If the item is now idle and cacheable, put it back into the cache
         update_cache = (
-            item.use_cache and item.ref_count == 0 and uuid not in self._pinned_items
+            item.use_cache
+            and item.ref_count == REF_IDLE
+            and uuid not in self._pinned_items
         )
         if update_cache:
             self._total_available_blocks += len(item.blocks)
@@ -161,7 +172,7 @@ class PagedShmManager:
         self._pinned_items.add(uuid)
 
         # If the item is currently in the LRU cache, remove it
-        if item.ref_count == 0:
+        if item.ref_count == REF_IDLE:
             self._lru_cache.pop(uuid)
             self._total_available_blocks -= len(item.blocks)
 
@@ -170,7 +181,7 @@ class PagedShmManager:
         if item is None:
             raise ValueError(f"UUID {uuid} not found")
 
-        if not item.use_cache and item.ref_count == 0:
+        if not item.use_cache and item.ref_count == REF_IDLE:
             self.delete(uuid)
             return
 
@@ -180,7 +191,7 @@ class PagedShmManager:
         self._pinned_items.discard(uuid)
 
         # If the item is idle, re‑insert it into the LRU cache
-        if item.ref_count == 0:
+        if item.ref_count == REF_IDLE:
             self._total_available_blocks += len(item.blocks)
             self._lru_cache.put(uuid, item)
 
@@ -188,7 +199,7 @@ class PagedShmManager:
         item = self._all_items.get(uuid, None)
         if item is None:
             raise ValueError(f"UUID {uuid} not found")
-        if item.ref_count != 0:
+        if item.ref_count != REF_IDLE:
             raise ValueError(f"UUID {uuid} is busy now")
 
         # If the item was not cached (or was pinned) its blocks were counted
@@ -221,9 +232,9 @@ class PagedShmManager:
         cached_blocks = self._total_available_blocks - len(self._free_blocks)
 
         for item in self._all_items.values():
-            if item.ref_count < 0:
+            if item.ref_count == REF_WRITING:
                 writing_count += 1
-            elif item.ref_count == 0:
+            elif item.ref_count == REF_IDLE:
                 idle_count += 1
             else:
                 reading_count += 1
