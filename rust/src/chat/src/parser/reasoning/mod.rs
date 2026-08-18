@@ -8,9 +8,9 @@ use std::sync::{Arc, LazyLock};
 pub use vllm_parser::reasoning::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
     DeepSeekV4ReasoningParser, Glm45ReasoningParser, KimiK2ReasoningParser, KimiReasoningParser,
-    MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser, NemotronV3ReasoningParser,
-    Qwen3ReasoningParser, ReasoningDelta, ReasoningError, ReasoningParser, SeedOssReasoningParser,
-    Step3ReasoningParser, Step3p5ReasoningParser,
+    MiniMaxM2AppendThinkReasoningParser, MiniMaxM2ReasoningParser, MiniMaxM3ReasoningParser,
+    NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningError,
+    ReasoningParser, SeedOssReasoningParser, Step3ReasoningParser, Step3p5ReasoningParser,
 };
 use vllm_tokenizer::DynTokenizer;
 
@@ -30,6 +30,7 @@ pub mod names {
     pub const KIMI_K2: &str = "kimi_k2";
     pub const KIMI_K3: &str = "kimi_k3";
     pub const MINIMAX_M2: &str = "minimax_m2";
+    pub const MINIMAX_M2_APPEND_THINK: &str = "minimax_m2_append_think";
     pub const MINIMAX_M3: &str = "minimax_m3";
     pub const NEMOTRON_V3: &str = "nemotron_v3";
     pub const QWEN3: &str = "qwen3";
@@ -73,6 +74,7 @@ impl ReasoningParserFactory {
             .register_parser::<KimiK2ReasoningParser>(names::KIMI_K2)
             .register_unified_dummy(names::KIMI_K3)
             .register_parser::<MiniMaxM2ReasoningParser>(names::MINIMAX_M2)
+            .register_parser::<MiniMaxM2AppendThinkReasoningParser>(names::MINIMAX_M2_APPEND_THINK)
             .register_parser::<MiniMaxM3ReasoningParser>(names::MINIMAX_M3)
             .register_parser::<NemotronV3ReasoningParser>(names::NEMOTRON_V3)
             .register_parser::<Qwen3ReasoningParser>(names::QWEN3)
