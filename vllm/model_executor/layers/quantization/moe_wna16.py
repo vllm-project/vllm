@@ -222,7 +222,6 @@ class MoeWNA16Method(FusedMoEMethodBase):
             else:
                 scale = kInt4StaticGroupScale
         elif num_bits == 8:
-            assert group_size == -1
             quant_type = INT8_DTYPE
             scale = kInt8StaticGroupScale
         else:

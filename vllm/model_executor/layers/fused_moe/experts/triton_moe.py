@@ -48,6 +48,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt4Static,
     kInt4Static32,
+    kInt4Static32Asym,
+    kInt4StaticAsym,
     kInt8DynamicTensorSym,
     kInt8DynamicTokenSym,
     kInt8Static,
@@ -186,8 +188,8 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             swiglu_limit_func(output, input, activation_config.clamp_limit)
             return
 
-        # SWIGLUOAI_UNINTERLEAVE routes to the silu_and_mul_with_clamp kernel and
-        # requires a clamp limit. Other activations ignore these parameters.
+        # SWIGLUOAI_UNINTERLEAVE routes to torch.ops._C.silu_and_mul_with_clamp
+        # via apply_moe_activation() and requires clamp_limit to be set.
         if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
             assert activation_config.clamp_limit is not None, (
                 "SWIGLUOAI_UNINTERLEAVE requires gemm1_clamp_limit"
@@ -580,6 +582,8 @@ class TritonWNA16Experts(TritonExperts):
             kInt4Static,
             kInt8Static,
             kInt4Static32,
+            kInt4StaticAsym,
+            kInt4Static32Asym,
             # other group sizes?
         ]
         return weight_key in SUPPORTED_W
@@ -591,6 +595,7 @@ class TritonWNA16Experts(TritonExperts):
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
             MoEActivation.SWIGLUSTEP,
             MoEActivation.SILU_NO_MUL,
             MoEActivation.GELU_NO_MUL,
