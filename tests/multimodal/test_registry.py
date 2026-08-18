@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Unit tests for MultiModalRegistry.supports_multimodal_inputs and
-Qwen2.5-VL visual component loading behavior.
+Unit tests for MultiModalRegistry multimodal capability checks and Qwen2.5-VL
+visual component loading behavior.
 """
 
 from types import SimpleNamespace
@@ -34,6 +34,26 @@ def test_supports_multimodal_inputs(model_id, limit_mm_per_prompt, expected):
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
     assert MULTIMODAL_REGISTRY.supports_multimodal_inputs(ctx.model_config) is expected
+
+
+@pytest.mark.parametrize(
+    "limit_mm_per_prompt,enable_mm_embeds,expected",
+    [
+        ({"image": 0, "video": 0}, False, False),
+        ({"image": 0, "video": 0}, True, False),
+        ({"image": 0}, True, True),
+        ({}, True, True),
+    ],
+)
+@pytest.mark.core_model
+def test_supports_multimodal_encoder(limit_mm_per_prompt, enable_mm_embeds, expected):
+    """Only modalities with positive limits should run the encoder tower."""
+    ctx = build_model_context(
+        "Qwen/Qwen2.5-VL-3B-Instruct",
+        limit_mm_per_prompt=limit_mm_per_prompt,
+    )
+    ctx.model_config.multimodal_config.enable_mm_embeds = enable_mm_embeds
+    assert MULTIMODAL_REGISTRY.supports_multimodal_encoder(ctx.model_config) is expected
 
 
 def test_create_processor_error_uses_served_model_name():

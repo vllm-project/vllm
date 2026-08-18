@@ -12,12 +12,16 @@ Test organization:
     - TestEncoderCudaGraphVideoReplay   — video modality capture, replay
 """
 
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 import torch
+import torch.nn as nn
 
 from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.v1.worker.encoder_cudagraph import (
     EncoderCudaGraphManager,
@@ -28,6 +32,8 @@ from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderCudaGraphReplayBuffers,
     EncoderItemSpec,
 )
+from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
+from vllm.v1.worker.gpu.model_states.interface import ModelState
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -96,6 +102,69 @@ class _MockModel(SupportsEncoderCudaGraph):
 
     def get_encoder_cudagraph_budget_range(self, vllm_config):
         return (self._min_budget, self._max_budget)
+
+
+class _ModelStateForTest(ModelState):
+    def prepare_inputs_embeds(self, *args: Any, **kwargs: Any) -> torch.Tensor | None:
+        return None
+
+    def prepare_inputs(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    def prepare_dummy_inputs(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    def prepare_attn(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {}
+
+
+def _make_model_state_vllm_config():
+    model_config = SimpleNamespace(
+        dtype=torch.float32,
+        enforce_eager=False,
+        max_model_len=128,
+        get_inputs_embeds_size=lambda: 4,
+    )
+    return SimpleNamespace(
+        model_config=model_config,
+        scheduler_config=SimpleNamespace(
+            max_num_seqs=1,
+            max_num_batched_tokens=8,
+        ),
+        compilation_config=SimpleNamespace(cudagraph_mm_encoder=True),
+        observability_config=None,
+    )
+
+
+@pytest.mark.cpu_test
+def test_embedding_only_mode_skips_encoder_cudagraph_manager():
+    """Embedding-only inputs must not capture a missing vision tower."""
+    vllm_config = _make_model_state_vllm_config()
+    model = nn.Module()
+
+    with (
+        patch.object(
+            MULTIMODAL_REGISTRY,
+            "supports_multimodal_encoder",
+            return_value=False,
+        ),
+        patch(
+            "vllm.v1.worker.gpu.model_states.interface.supports_encoder_cudagraph",
+            return_value=True,
+        ),
+        patch(
+            "vllm.v1.worker.gpu.model_states.interface.EncoderCudaGraphManager",
+        ) as manager,
+    ):
+        state = _ModelStateForTest(
+            vllm_config,
+            model,
+            EncoderCache(),
+            torch.device("cpu"),
+        )
+
+    manager.assert_not_called()
+    assert not state.encoder_runner.has_cudagraph()
 
 
 def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:

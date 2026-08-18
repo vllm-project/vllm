@@ -146,6 +146,30 @@ class MultiModalRegistry:
 
         return True
 
+    def supports_multimodal_encoder(self, model_config: "ModelConfig") -> bool:
+        """Return whether any configured modality uses the encoder tower.
+
+        This is distinct from :meth:`supports_multimodal_inputs`: embedding-only
+        configurations still accept pre-computed multimodal embeddings while
+        having no modality that should execute the encoder.
+        """
+        if not model_config.is_multimodal_model:
+            return False
+
+        mm_config = model_config.get_multimodal_config()
+        if mm_config is None:
+            return False
+
+        try:
+            info = self._create_processing_info(model_config, tokenizer=None)
+        except ValueError:
+            return False
+
+        return any(
+            mm_config.get_limit_per_prompt(modality) > 0
+            for modality in info.supported_mm_limits
+        )
+
     def register_processor(
         self,
         processor: MultiModalProcessorFactory[_I],
