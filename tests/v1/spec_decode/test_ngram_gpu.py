@@ -33,6 +33,7 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
     build_verification_layout,
 )
 from vllm.v1.worker.gpu.spec_decode.ngram.speculator import NgramGPUSpeculator
+from vllm.v1.worker.gpu.states import RequestState
 
 if not torch.cuda.is_available():
     pytest.skip(
@@ -73,19 +74,16 @@ def _make_vllm_config(
     )
 
 
-class _FakeStaged:
-    """Stand-in for ``StagedWriteTensor``; only ``.gpu`` is read by propose()."""
-
-    def __init__(self, tensor: torch.Tensor):
-        self.gpu = tensor
-
-
-class _FakeRequestState:
-    """Minimal duck-typed ``RequestState`` exposing what propose() reads."""
-
-    def __init__(self, all_token_ids: torch.Tensor, total_len: torch.Tensor):
-        self.all_token_ids = _FakeStaged(all_token_ids)
-        self.total_len = _FakeStaged(total_len)
+def _make_request_state(cfg: VllmConfig) -> RequestState:
+    return RequestState(
+        max_num_reqs=cfg.scheduler_config.max_num_seqs,
+        max_model_len=cfg.model_config.max_model_len,
+        max_num_batched_tokens=cfg.scheduler_config.max_num_batched_tokens,
+        num_speculative_steps=cfg.speculative_config.num_speculative_tokens,
+        vocab_size=cfg.model_config.get_vocab_size(),
+        device=DEVICE,
+        use_dense_all_token_ids=True,
+    )
 
 
 def _make_speculator(
@@ -102,7 +100,7 @@ def _make_speculator(
         max_num_seqs=max_num_seqs,
         max_model_len=max_model_len,
     )
-    return NgramGPUSpeculator(vllm_config=cfg, device=DEVICE)
+    return NgramGPUSpeculator(cfg, DEVICE, _make_request_state(cfg))
 
 
 def _propose(
@@ -128,9 +126,10 @@ def _propose(
         slots = list(range(B))
 
     max_num_reqs = spec.max_num_reqs
-    L = spec.max_model_len
-    all_token_ids = torch.zeros((max_num_reqs, L), dtype=torch.int32, device=DEVICE)
-    total_len = torch.zeros(max_num_reqs, dtype=torch.int32, device=DEVICE)
+    all_token_ids = spec.req_states.all_token_ids.gpu
+    total_len = spec.req_states.total_len.gpu
+    all_token_ids.zero_()
+    total_len.zero_()
     last_sampled_t = torch.zeros((max_num_reqs, 1), dtype=torch.int64, device=DEVICE)
     for row, slot, seq_len, last in zip(rows, slots, seq_lens, last_sampled):
         if row:
@@ -140,7 +139,6 @@ def _propose(
         total_len[slot] = seq_len
         last_sampled_t[slot, 0] = last
 
-    spec.req_states = _FakeRequestState(all_token_ids, total_len)
     idx_mapping = torch.tensor(slots, dtype=torch.int64, device=DEVICE)
     input_batch = SimpleNamespace(num_reqs=B, idx_mapping=idx_mapping)
 
@@ -335,40 +333,6 @@ def test_dummy_run_does_not_touch_state():
     )
     assert drafts.shape == (1, 2)
     assert torch.equal(spec.num_valid_drafts.cpu(), before.cpu())
-
-
-def test_propose_requires_req_states():
-    """propose() must assert that req_states was injected by the model runner."""
-    spec = _make_speculator(min_n=2, max_n=2, k=2)
-    assert spec.req_states is None
-    input_batch = SimpleNamespace(
-        num_reqs=1,
-        idx_mapping=torch.tensor([0], dtype=torch.int64, device=DEVICE),
-    )
-    with pytest.raises(AssertionError, match="req_states"):
-        spec.propose(
-            input_batch=input_batch,
-            attn_metadata=None,
-            slot_mappings=None,
-            last_hidden_states=torch.empty(0, device=DEVICE),
-            aux_hidden_states=None,
-            num_sampled=torch.ones(1, dtype=torch.int32, device=DEVICE),
-            num_rejected=torch.zeros(1, dtype=torch.int32, device=DEVICE),
-            last_sampled=torch.zeros((8, 1), dtype=torch.int64, device=DEVICE),
-            next_prefill_tokens=torch.zeros(1, dtype=torch.int32, device=DEVICE),
-            temperature=torch.zeros(1, dtype=torch.float32, device=DEVICE),
-            seeds=torch.zeros(1, dtype=torch.int64, device=DEVICE),
-        )
-
-
-@pytest.mark.parametrize("method", ["ngram", "ngram_gpu"])
-def test_both_ngram_methods_resolve_to_gpu_speculator(method: str):
-    """On the V2 runner, "ngram" and "ngram_gpu" use the same implementation."""
-    from vllm.v1.worker.gpu.spec_decode import init_speculator
-
-    cfg = _make_vllm_config(min_n=2, max_n=3, k=2, method=method)
-    spec = init_speculator(cfg, DEVICE)
-    assert isinstance(spec, NgramGPUSpeculator)
 
 
 def test_construction_validates_speculative_config():

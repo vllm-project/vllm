@@ -159,7 +159,12 @@ class NgramGPUSpeculator(BaseSpeculator):
     # for GPU-side verification trimming.
     trims_drafts_on_gpu = True
 
-    def __init__(self, vllm_config: VllmConfig, device: torch.device):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        req_states: RequestState,
+    ):
         if not HAS_TRITON:
             raise RuntimeError("ngram_gpu speculative decoding requires Triton.")
         spec = vllm_config.speculative_config
@@ -174,6 +179,7 @@ class NgramGPUSpeculator(BaseSpeculator):
 
         self.vllm_config = vllm_config
         self.device = device
+        self.req_states = req_states
         self.speculative_config = spec
         self.num_speculative_steps: int = spec.num_speculative_tokens
 
@@ -210,8 +216,6 @@ class NgramGPUSpeculator(BaseSpeculator):
             device=device,
         )
 
-        self.req_states: RequestState | None = None
-
     @torch.inference_mode()
     def propose(
         self,
@@ -238,10 +242,6 @@ class NgramGPUSpeculator(BaseSpeculator):
             return self.drafts[:num_reqs]
 
         req_states = self.req_states
-        assert req_states is not None, (
-            "NgramGPUSpeculator.req_states was not injected by the model runner."
-        )
-
         token_ids = req_states.all_token_ids.gpu
         idx_mapping = input_batch.idx_mapping
 

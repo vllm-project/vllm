@@ -238,13 +238,41 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_cache = EncoderCache()
         self.ec_connector = get_ec_connector(vllm_config, self.encoder_cache)
 
+        self.num_speculative_steps = vllm_config.num_speculative_tokens
+
+        # Multi-module MTP feeds its modules the next num_speculative_steps prefill
+        # tokens during chunked prefill. Other speculators only read the immediate
+        # next one.
+        num_prefill_lookahead = (
+            self.num_speculative_steps
+            if self.speculative_config is not None
+            and self.speculative_config.use_multi_module_mtp()
+            else 1
+        )
+
+        # General request states.
+        use_dense_all_token_ids = (
+            self.speculative_config is not None and self.speculative_config.use_ngram()
+        )
+        self.req_states = RequestState(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_tokens,
+            num_speculative_steps=self.num_speculative_steps,
+            vocab_size=self.vocab_size,
+            device=self.device,
+            num_prefill_lookahead=num_prefill_lookahead,
+            use_dense_all_token_ids=use_dense_all_token_ids,
+        )
+
         # Speculative decoding.
         self.speculator = None
         self.use_aux_hidden_state_outputs = False
-        self.num_speculative_steps = vllm_config.num_speculative_tokens
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
-                self.speculator = init_speculator(self.vllm_config, self.device)
+                self.speculator = init_speculator(
+                    self.vllm_config, self.device, self.req_states
+                )
 
             if self.speculative_config.method in ("eagle3", "dflash", "dspark"):
                 # Drafting may require auxiliary hidden states from target model outputs
@@ -264,32 +292,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.is_pooling_model = self.model_config.runner_type == "pooling"
         self.pooling_runner: PoolingRunner | None = None
 
-        # Multi-module MTP feeds its modules the next num_speculative_steps prefill
-        # tokens during chunked prefill. Other speculators only read the immediate
-        # next one.
-        num_prefill_lookahead = (
-            self.num_speculative_steps
-            if self.speculative_config is not None
-            and self.speculative_config.use_multi_module_mtp()
-            else 1
-        )
-
         self.step_timing = StepTimingCollector()
-
-        # General request states.
-        use_dense_all_token_ids = (
-            self.speculative_config is not None and self.speculative_config.use_ngram()
-        )
-        self.req_states = RequestState(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
-            max_num_batched_tokens=self.max_num_tokens,
-            num_speculative_steps=self.num_speculative_steps,
-            vocab_size=self.vocab_size,
-            device=self.device,
-            num_prefill_lookahead=num_prefill_lookahead,
-            use_dense_all_token_ids=use_dense_all_token_ids,
-        )
         self.adaptive_verification: AdaptiveVerificationManager | None = None
         self.draft_trimmer: VariableDraftTrimmer | None = None
         self.input_buffers = InputBuffers(
@@ -303,11 +306,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_speculative_steps=self.num_speculative_steps,
                 device=self.device,
             )
-
-        # Inject RequestState into speculators that consume the persistent
-        # token store directly (e.g. NgramGPUSpeculator).
-        if self.speculator is not None and hasattr(self.speculator, "req_states"):
-            self.speculator.req_states = self.req_states
 
         # Samplers and decode_query_len created in load_model() after
         # model_state exists (num_new_sampled_tokens_per_step from ModelState).
