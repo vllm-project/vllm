@@ -4,6 +4,7 @@
 "align") models: scheduler chunk splitting, partial tail registration, CoW
 on partial hits, and same-step deferral."""
 
+from math import lcm
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -24,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
+    SlidingWindowSpec,
 )
 
 
@@ -67,12 +69,62 @@ def test_capable_connector_uses_divergent_partial_hit_lookup():
     manager.get_computed_blocks.assert_not_called()
 
 
-def test_mamba_align_split_partial_tail_schedule():
+def make_full_mamba_manager(
+    *,
+    dcp_world_size: int,
+    hash_block_size: int = 2,
+    full_block_size: int = 4,
+    mamba_block_size: int = 4,
+    num_blocks: int = 32,
+    use_eagle: bool = False,
+):
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=full_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=mamba_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    scheduler_block_size = lcm(
+        full_block_size * dcp_world_size,
+        mamba_block_size,
+    )
+    return make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        dcp_world_size=dcp_world_size,
+        scheduler_block_size=scheduler_block_size,
+        hash_block_size=hash_block_size,
+        use_eagle=use_eagle,
+    )
+
+
+@pytest.mark.parametrize("dcp_world_size", [1, 4])
+def test_mamba_align_split_partial_tail_schedule(dcp_world_size: int):
     """Chunk ends with partial hits on: block-aligned chunks, one extra stop
     at the prompt's last hash boundary (registering the partial tail), then
     the remaining tokens. block=512, hash=32, prompt=10000, budget=8192:
     0 -> 8192 -> 9728 -> 9984 -> 10000."""
     block_size = 512
+    scheduler_block_size = block_size * dcp_world_size
     hash_block_size = 32
     mock = SimpleNamespace(
         cache_config=SimpleNamespace(block_size=block_size),
@@ -80,6 +132,8 @@ def test_mamba_align_split_partial_tail_schedule():
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         use_eagle=False,
         hash_block_size=hash_block_size,
+        dcp_world_size=dcp_world_size,
+        scheduler_block_size=scheduler_block_size,
         mamba_partial_cache_hit=True,
     )
     split = Scheduler._mamba_block_aligned_split
@@ -108,6 +162,7 @@ def test_mamba_align_split_partial_tail_schedule():
     # stops at the next block boundary (10240), later chunk ends re-align.
     req2 = make_request("1", [0] * 12000, hash_block_size, sha256)
     req2.num_computed_tokens = 9984
+    assert req2.num_computed_tokens % scheduler_block_size != 0
     assert split(self=mock, request=req2, num_new_tokens=2016) == 256
     req2.num_computed_tokens = 10240
     assert split(self=mock, request=req2, num_new_tokens=1000) == 512
@@ -258,6 +313,80 @@ def test_hybrid_mamba_align_partial_hash_hit():
         in copies
     )
     assert manager.get_blocks("1").blocks[1][1].block_hash_num_tokens == 8
+
+
+def test_eagle_group_registers_unaligned_tail_under_partial_hash_hits():
+    """An EAGLE group must not re-floor what partial hash hits leaves un-floored.
+
+    ``cache_blocks`` decides once how far a request may be registered, and with
+    fine-grained partial hash hits that bound is the raw token count. The EAGLE
+    branch then re-derives its own bound for the lookahead block; if it rounds
+    down to ``scheduler_block_size`` again, everything between the last aligned
+    boundary and the tail stops being registered -- ``(n % scheduler_block_size)
+    - manager.block_size`` tokens per call, which is most of a segment whenever
+    the group's own block is much smaller than the scheduler block.
+    """
+    hash_block_size = 2
+    mamba_block_size = 4 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=40,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=mamba_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    coordinator = manager.coordinator
+    assert coordinator.enable_partial_hash_hits
+    # The full-attention group is the EAGLE one, and its block is smaller than
+    # the scheduler block -- the geometry where re-flooring loses tokens.
+    eagle_manager = coordinator.single_type_managers[0]
+    eagle_manager.use_eagle = True
+    assert eagle_manager.block_size < coordinator.scheduler_block_size
+
+    # Deliberately not a multiple of the scheduler block, so the two bounds
+    # differ: floor(22/8)*8 + 2 = 18 against 22.
+    num_tokens = coordinator.scheduler_block_size * 2 + hash_block_size * 3
+    req = make_request("0", list(range(num_tokens)), hash_block_size, sha256)
+
+    recorded: list[int] = []
+    for single_type_manager in coordinator.single_type_managers:
+        original = single_type_manager.cache_blocks
+
+        def spy(request, num_tokens_to_cache, *args, _orig=original, **kwargs):
+            recorded.append(num_tokens_to_cache)
+            return _orig(request, num_tokens_to_cache, *args, **kwargs)
+
+        single_type_manager.cache_blocks = spy
+
+    # allocate_slots caches on the way out, so this exercises the real path.
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
+    assert manager.allocate_slots(req, num_tokens, num_computed, computed_blocks)
+
+    # Every group, EAGLE or not, may register the whole unaligned tail.
+    assert recorded == [num_tokens] * len(coordinator.single_type_managers)
 
 
 def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
@@ -1352,4 +1481,223 @@ def test_hybrid_partial_hit_with_eagle_stays_within_group_blocks():
     assert all(
         len(group) * block_size >= num_computed for group in computed_blocks.blocks
     )
+    assert manager.allocate_slots(req1, 4, num_computed, computed_blocks) is not None
+
+
+def test_hybrid_sliding_window_group_disables_partial_hash_hits():
+    hash_block_size = 2
+    sliding_window_block_size = 2 * hash_block_size
+    mamba_block_size = 2 * sliding_window_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=mamba_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["swa_draft"],
+                SlidingWindowSpec(
+                    block_size=sliding_window_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=sliding_window_block_size,
+                ),
+                is_eagle_group=True,
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        use_eagle=True,
+    )
+
+    tokens = list(range(3 * sliding_window_block_size))
+    request = make_request("0", tokens, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(request)
+    assert not manager.coordinator.enable_partial_hash_hits
+    assert (
+        manager.allocate_slots(request, mamba_block_size, num_computed, computed_blocks)
+        is not None
+    )
+    request.num_computed_tokens = mamba_block_size
+    manager.new_step_starts()
+    assert manager.allocate_slots(request, len(tokens) - mamba_block_size) is not None
+    request.num_computed_tokens = len(tokens)
+    manager.free(request)
+    manager.new_step_starts()
+
+    cached_request = make_request(
+        "1", tokens + [len(tokens), len(tokens) + 1], hash_block_size, sha256
+    )
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(cached_request)
+
+    assert num_computed == mamba_block_size
+    assert len(computed_blocks.blocks[0]) * hash_block_size == num_computed
+
+
+@pytest.mark.parametrize("dcp_world_size", [1, 2, 4])
+def test_hybrid_partial_hash_hit_uses_cow_under_dcp(dcp_world_size: int):
+    hash_block_size = 2
+    physical_block_size = 4
+    manager = make_full_mamba_manager(
+        dcp_world_size=dcp_world_size,
+        hash_block_size=hash_block_size,
+        full_block_size=physical_block_size,
+        mamba_block_size=physical_block_size,
+    )
+    assert manager.coordinator.enable_partial_hash_hits
+
+    req0 = make_request("dcp-owner", [0, 0, 1, 1, 2, 2], 2, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 6, num_computed, computed_blocks) is not None
+    manager.free(req0)
+    manager.new_step_starts()
+
+    partial_hash = req0.block_hashes[2]
+    partial_full_block = manager.block_pool.get_cached_block(partial_hash, [0])
+    partial_mamba_block = manager.block_pool.get_cached_block(partial_hash, [1])
+    assert partial_full_block is not None
+    assert partial_mamba_block is not None
+
+    req1 = make_request("dcp-replay", [0, 0, 1, 1, 2, 2, 3, 3], 2, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == 6
+    full_block_size = physical_block_size * dcp_world_size
+    assert [len(group) for group in computed_blocks.blocks] == [
+        (6 + full_block_size - 1) // full_block_size,
+        2,
+    ]
+
+    new_blocks = manager.allocate_slots(req1, 2, num_computed, computed_blocks)
+    assert new_blocks is not None
+    full_new_block_id = new_blocks.get_block_ids()[0][0]
+    mamba_new_block_id = new_blocks.get_block_ids()[1][0]
+    copies, retained = manager.take_kv_cache_block_copies()
+    assert KVCacheBlockCopy(partial_full_block[0].block_id, full_new_block_id) in copies
+    assert (
+        KVCacheBlockCopy(partial_mamba_block[0].block_id, mamba_new_block_id) in copies
+    )
+    manager.block_pool.free_blocks(retained)
+
+
+@pytest.mark.parametrize("dcp_world_size", [2, 4])
+def test_dcp_partial_hit_resumes_on_replicated_mamba_snapshot(
+    dcp_world_size: int,
+):
+    block_size = 4
+    manager = make_full_mamba_manager(
+        dcp_world_size=dcp_world_size,
+        hash_block_size=block_size,
+        full_block_size=block_size,
+        mamba_block_size=block_size,
+    )
+    assert manager.coordinator.enable_partial_hash_hits
+    assert manager.coordinator._cache_hit_alignment_tokens == block_size
+    assert manager.coordinator.single_type_managers[0].block_size == (
+        block_size * dcp_world_size
+    )
+    assert manager.coordinator.single_type_managers[1].block_size == block_size
+
+    prefix = list(range(12))
+    req0 = make_request("snapshot-owner", prefix, block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 12, num_computed, computed_blocks) is not None
+    manager.free(req0)
+    manager.new_step_starts()
+
+    req1 = make_request(
+        "snapshot-replay", prefix + list(range(12, 16)), block_size, sha256
+    )
+
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == 12
+    assert [len(group) for group in computed_blocks.blocks] == [
+        (12 + block_size * dcp_world_size - 1) // (block_size * dcp_world_size),
+        3,
+    ]
+    partial_full_block = computed_blocks.blocks[0][-1]
+    new_blocks = manager.allocate_slots(req1, 4, num_computed, computed_blocks)
+    assert new_blocks is not None
+    full_new_block_id = new_blocks.get_block_ids()[0][0]
+    copies, retained = manager.take_kv_cache_block_copies()
+    assert KVCacheBlockCopy(partial_full_block.block_id, full_new_block_id) in copies
+    assert all(
+        copy.src_block_id != computed_blocks.blocks[1][-1].block_id for copy in copies
+    )
+    manager.block_pool.free_blocks(retained)
+
+
+def test_dcp_joint_hit_is_bounded_by_replicated_mamba_snapshots():
+    block_size = 4
+    manager = make_full_mamba_manager(
+        dcp_world_size=2,
+        hash_block_size=block_size,
+        full_block_size=block_size,
+        mamba_block_size=block_size,
+    )
+    prefix = list(range(12))
+    req0 = make_request("joint-owner", prefix, block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 8, num_computed, computed_blocks) is not None
+    manager.new_step_starts()
+
+    replay_tokens = prefix + list(range(12, 16))
+    req1 = make_request("joint-before", replay_tokens, block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == 8
+    assert [len(group) for group in computed_blocks.blocks] == [1, 2]
+
+    req0.num_computed_tokens = 8
+    assert manager.allocate_slots(req0, 4) is not None
+    manager.new_step_starts()
+
+    req2 = make_request("joint-after", replay_tokens, block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req2)
+    assert num_computed == 12
+    assert [len(group) for group in computed_blocks.blocks] == [2, 3]
+
+
+def test_dcp_partial_hit_with_eagle_rewinds_one_hash_unit():
+    hash_block_size = 2
+    manager = make_full_mamba_manager(
+        dcp_world_size=2,
+        hash_block_size=hash_block_size,
+        full_block_size=4,
+        mamba_block_size=4,
+        use_eagle=True,
+    )
+
+    req0 = make_request("eagle-owner", [7] * 6, hash_block_size, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req0)
+    assert manager.allocate_slots(req0, 4, num_computed, computed_blocks) is not None
+    req0.num_computed_tokens = 4
+    manager.new_step_starts()
+    assert manager.allocate_slots(req0, 2) is not None
+    req0.num_computed_tokens = 6
+    manager.new_step_starts()
+
+    req1 = make_request("eagle-replay", [7] * 6 + [9] * 2, 2, sha256)
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req1)
+    assert num_computed == 4
+    assert [len(group) for group in computed_blocks.blocks] == [1, 1]
     assert manager.allocate_slots(req1, 4, num_computed, computed_blocks) is not None

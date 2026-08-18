@@ -100,6 +100,7 @@ from vllm.model_executor.offloader import (
     get_offloader,
     set_offloader,
 )
+from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import (
@@ -120,6 +121,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
@@ -516,6 +518,7 @@ class GPUModelRunner(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -586,6 +589,9 @@ class GPUModelRunner(
 
         # Async scheduling
         self.use_async_scheduling = self.scheduler_config.async_scheduling
+
+        # Async PP broadcast of sampled token ids, waited on in _prepare_input_ids.
+        self._pp_recv_work: torch.distributed.Work | None = None
 
         # Sampler
         self.sampler = Sampler(
@@ -758,34 +764,37 @@ class GPUModelRunner(
         self._init_kernel_block_sizes = [placeholder_block_size]
         self._init_max_num_blocks = [placeholder_max_num_blocks]
         self._init_slot_mapping_modes = [SlotMappingMode.TOKEN_TO_KV_SLOT]
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            # We need to use the encoder length for encoder-decoder
-            # because of KV cache for cross-attention.
-            max_model_len=max(self.max_model_len, self.max_encoder_len),
-            max_num_batched_tokens=self.max_num_tokens,
-            device=self.device,
-            vocab_size=self.model_config.get_vocab_size(),
-            block_sizes=[placeholder_block_size],
-            kernel_block_sizes=[placeholder_block_size],
-            max_num_blocks_per_req=[placeholder_max_num_blocks],
-            num_spec_tokens=self.num_spec_tokens,
-            logitsprocs=build_logitsprocs(
-                self.vllm_config,
-                self.device,
-                PIN_MEMORY,
-                self.is_pooling_model,
-                custom_logitsprocs,
-            ),
-            # We currently don't know whether a particular custom logits processor
-            # uses output token ids so we set this conservatively. Thinking-budget
-            # tracking is requested dynamically when a budgeted request is in the batch.
-            logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
-            is_pooling_model=self.is_pooling_model,
-            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
-            reasoning_config=self.vllm_config.reasoning_config,
-            use_replayssm=self.cache_config.use_replayssm,
-        )
+        # Capture warmup providers registered by the initial placeholder InputBatch
+        with self.jit_warmup_registry.activate():
+            self.input_batch = InputBatch(
+                max_num_reqs=self.max_num_reqs,
+                # We need to use the encoder length for encoder-decoder
+                # because of KV cache for cross-attention.
+                max_model_len=max(self.max_model_len, self.max_encoder_len),
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+                vocab_size=self.model_config.get_vocab_size(),
+                block_sizes=[placeholder_block_size],
+                kernel_block_sizes=[placeholder_block_size],
+                max_num_blocks_per_req=[placeholder_max_num_blocks],
+                num_spec_tokens=self.num_spec_tokens,
+                logitsprocs=build_logitsprocs(
+                    self.vllm_config,
+                    self.device,
+                    PIN_MEMORY,
+                    self.is_pooling_model,
+                    custom_logitsprocs,
+                ),
+                # We currently don't know whether a particular custom logits processor
+                # uses output token ids so we set this conservatively. Thinking-budget
+                # tracking is requested dynamically when a budgeted request is in the
+                # batch.
+                logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
+                is_pooling_model=self.is_pooling_model,
+                cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+                reasoning_config=self.vllm_config.reasoning_config,
+                use_replayssm=self.cache_config.use_replayssm,
+            )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
@@ -1876,6 +1885,11 @@ class GPUModelRunner(
         (-1 for new requests).
         """
 
+        # Sync the async PP broadcast before reading sampled tokens.
+        if self._pp_recv_work is not None:
+            self._pp_recv_work.wait()
+            self._pp_recv_work = None
+
         if self.input_batch.prev_sampled_token_ids is None:
             # Normal scheduling case
             self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
@@ -2289,10 +2303,20 @@ class GPUModelRunner(
 
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
-            self.mrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.mrope_positions.cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True,
-            )
+            # Copy one row at a time. mrope_positions is allocated as
+            # [3, max_num_tokens + 1] with a dummy trailing column to keep it
+            # non-contiguous for torch.compile, so cpu[:, :N] is a strided view.
+            # copy_() cannot express a strided source as a single
+            # cudaMemcpyAsync, so it first gathers into a contiguous *pageable*
+            # temporary, and a pageable H2D ignores non_blocking=True and
+            # synchronizes the stream before the transfer starts. Each row is
+            # contiguous within the pinned allocation, so per-row copies stay on
+            # the pinned path and are genuinely asynchronous.
+            for row in range(self.mrope_positions.gpu.shape[0]):
+                self.mrope_positions.gpu[row, :total_num_scheduled_tokens].copy_(
+                    self.mrope_positions.cpu[row, :total_num_scheduled_tokens],
+                    non_blocking=True,
+                )
         elif self.uses_xdrope_dim > 0:
             # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
             self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
@@ -3146,18 +3170,24 @@ class GPUModelRunner(
             token_lora_mapping = []
             lora_requests = set()
             encoder_token_counts = []
+            connector_token_counts = []
 
-            for req_id, pos_info in mm_lora_refs:
+            for (req_id, pos_info), (modality, mm_item) in zip(
+                mm_lora_refs,
+                mm_kwargs,
+            ):
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 lora_id = int(self.input_batch.request_lora_mapping[req_idx])
 
-                # Prefer pos_info.get_num_embeds to count precise MM embedding tokens.
-                num_tokens = self.model.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
-                    pos_info.get_num_embeds()
+                tower_tokens, connector_tokens = self.model.get_mm_lora_token_counts(  # type: ignore[attr-defined]
+                    modality=modality,
+                    mm_kwargs=mm_item,
+                    num_mm_embeds=pos_info.get_num_embeds(),
                 )
                 prompt_lora_mapping.append(lora_id)
-                token_lora_mapping.extend([lora_id] * num_tokens)
-                encoder_token_counts.append(num_tokens)
+                token_lora_mapping.extend([lora_id] * tower_tokens)
+                encoder_token_counts.append(tower_tokens)
+                connector_token_counts.append(connector_tokens)
 
                 if lora_id > 0:
                     lora_request = self.input_batch.lora_id_to_lora_request.get(lora_id)
@@ -3185,16 +3215,11 @@ class GPUModelRunner(
             if (
                 mm_mapping is not None
                 and mm_mapping.connector
-                and hasattr(self.model, "get_num_mm_connector_tokens")
+                and all(count is not None for count in connector_token_counts)
             ):
-                post_op_counts = [
-                    self.model.get_num_mm_connector_tokens(num_tokens)  # type: ignore[attr-defined]
-                    for num_tokens in encoder_token_counts
-                ]
-
                 connector_token_mapping = np.repeat(
                     np.array(prompt_lora_mapping, dtype=np.int32),
-                    np.array(post_op_counts, dtype=np.int32),
+                    np.array(connector_token_counts, dtype=np.int32),
                 )
                 connector_mapping = LoRAMapping(
                     index_mapping=tuple(connector_token_mapping.tolist()),
@@ -3862,26 +3887,28 @@ class GPUModelRunner(
                     self.routed_experts_slot_mapping_device[:total],
                     non_blocking=True,
                 )
+            with gpu_sync_allowed():
+                # Get the valid generated tokens.
+                max_gen_len = sampled_token_ids.shape[-1]
+                if max_gen_len == 1:
+                    # No spec decode tokens.
+                    valid_sampled_token_ids = self._to_list(sampled_token_ids)
+                    # Mask out the sampled tokens that should not be sampled.
+                    for i in discard_sampled_tokens_req_indices:
+                        valid_sampled_token_ids[int(i)].clear()
 
-            # Get the valid generated tokens.
-            max_gen_len = sampled_token_ids.shape[-1]
-            if max_gen_len == 1:
-                # No spec decode tokens.
-                valid_sampled_token_ids = self._to_list(sampled_token_ids)
-                # Mask out the sampled tokens that should not be sampled.
-                for i in discard_sampled_tokens_req_indices:
-                    valid_sampled_token_ids[int(i)].clear()
-
-                if logprobs_tensors is not None:
-                    logprobs_lists = logprobs_tensors.tolists()
-            else:
-                # Includes spec decode tokens.
-                valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(
-                    sampled_token_ids,
-                    self.input_batch.vocab_size,
-                    discard_sampled_tokens_req_indices,
-                    logprobs_tensors=logprobs_tensors,
-                )
+                    if logprobs_tensors is not None:
+                        logprobs_lists = logprobs_tensors.tolists()
+                else:
+                    # Includes spec decode tokens.
+                    valid_sampled_token_ids, logprobs_lists = (
+                        RejectionSampler.parse_output(
+                            sampled_token_ids,
+                            self.input_batch.vocab_size,
+                            discard_sampled_tokens_req_indices,
+                            logprobs_tensors=logprobs_tensors,
+                        )
+                    )
         else:
             valid_sampled_token_ids = []
             invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
@@ -4988,7 +5015,9 @@ class GPUModelRunner(
         recv = torch.empty((num_reqs, 1), dtype=torch.int32, device=self.device)
         # skip for chunked prefill.
         if not self._is_all_reqs_chunked_prefill():
-            torch.distributed.broadcast(recv, src=pp.last_rank, group=pp.device_group)
+            self._pp_recv_work = torch.distributed.broadcast(
+                recv, src=pp.last_rank, group=pp.device_group, async_op=True
+            )
         self.input_batch.prev_sampled_token_ids = recv
 
         # construct `prev_req_id_to_index` here so `_prepare_input_ids`
@@ -5864,7 +5893,10 @@ class GPUModelRunner(
         on device instead; see`AsyncGPUModelRunnerOutput`.
         """
         try:
-            counts = [] if logits is None else count_nans_per_row(logits).tolist()
+            # Reporting per-request NaN counts requires them on the host; this
+            # path is opt-in diagnostics, so the D2H is intended.
+            with gpu_sync_allowed():
+                counts = [] if logits is None else count_nans_per_row(logits).tolist()
             num_nans_in_logits = nans_to_dict(counts, self.input_batch.req_id_to_index)
             if envs.VLLM_RAISE_ON_LOGIT_NANS:
                 raise_if_nan_logits(num_nans_in_logits)
@@ -7441,24 +7473,26 @@ class GPUModelRunner(
             self._init_kernel_block_sizes = kernel_block_sizes
             self._init_max_num_blocks = max_num_blocks
             self._init_slot_mapping_modes = slot_mapping_modes
-            self.input_batch = InputBatch(
-                max_num_reqs=self.max_num_reqs,
-                max_model_len=max_model_len,
-                max_num_batched_tokens=self.max_num_tokens,
-                device=self.device,
-                vocab_size=self.model_config.get_vocab_size(),
-                block_sizes=block_sizes,
-                kernel_block_sizes=kernel_block_sizes,
-                max_num_blocks_per_req=max_num_blocks,
-                num_spec_tokens=self.num_spec_tokens,
-                logitsprocs=self.input_batch.logitsprocs,
-                logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
-                is_pooling_model=self.is_pooling_model,
-                cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
-                reasoning_config=self.vllm_config.reasoning_config,
-                use_replayssm=self.cache_config.use_replayssm,
-                slot_mapping_modes=slot_mapping_modes,
-            )
+            # Capture warmup providers registered after final KV-cache geometry is known
+            with self.jit_warmup_registry.activate():
+                self.input_batch = InputBatch(
+                    max_num_reqs=self.max_num_reqs,
+                    max_model_len=max_model_len,
+                    max_num_batched_tokens=self.max_num_tokens,
+                    device=self.device,
+                    vocab_size=self.model_config.get_vocab_size(),
+                    block_sizes=block_sizes,
+                    kernel_block_sizes=kernel_block_sizes,
+                    max_num_blocks_per_req=max_num_blocks,
+                    num_spec_tokens=self.num_spec_tokens,
+                    logitsprocs=self.input_batch.logitsprocs,
+                    logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
+                    is_pooling_model=self.is_pooling_model,
+                    cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+                    reasoning_config=self.vllm_config.reasoning_config,
+                    use_replayssm=self.cache_config.use_replayssm,
+                    slot_mapping_modes=slot_mapping_modes,
+                )
 
         assert self._init_block_sizes == block_sizes, (
             f"InputBatch block_sizes {self._init_block_sizes} != "
@@ -7956,6 +7990,7 @@ class GPUModelRunner(
                     with set_current_vllm_config(self.vllm_config):
                         indexes = backend.indexes_kv_by_block_stride()
                     spec = replace(spec, indexes_kv_by_block_stride=indexes)
+                    spec = backend.customize_spec(spec)
                 kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec
