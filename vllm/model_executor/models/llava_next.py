@@ -15,13 +15,18 @@ from transformers.models.llava_next.modeling_llava_next import (
 
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItem
 from vllm.multimodal.parse import ImageSize
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from .llava import (
     BaseLlavaMultiModalProcessor,
     BaseLlavaProcessingInfo,
@@ -30,6 +35,7 @@ from .llava import (
     LlavaMultiModalProjector,
     init_vision_tower_for_llava,
 )
+from .module_mapping import MultiModelKeys
 from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
@@ -37,7 +43,7 @@ from .utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
-from .vision import get_num_selected_vision_tokens
+from .vision import get_num_selected_vision_tokens, get_vision_encoder_info
 
 
 class LlavaNextImagePixelInputs(TensorSchema):
@@ -222,7 +228,14 @@ class LlavaNextMultiModalProcessor(BaseLlavaNextMultiModalProcessor[_I]):
     info=LlavaNextProcessingInfo,
     dummy_inputs=LlavaDummyInputsBuilder,
 )
-class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class LlavaNextForConditionalGeneration(
+    nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
+):
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -582,3 +595,38 @@ model_executor.models.llava_next.LlavaNextProcessingInfo.get_num_image_tokens].
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="multi_modal_projector",
+            tower_model="vision_tower",
+        )
+
+    def get_mm_lora_token_counts(
+        self,
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality
+
+        pixel_values = mm_kwargs.get("pixel_values") if mm_kwargs else None
+        if pixel_values is None or not isinstance(pixel_values.data, torch.Tensor):
+            return num_mm_embeds, num_mm_embeds
+
+        # Unpad runs after the connector, so `num_mm_embeds` is not invertible.
+        num_tiles = pixel_values.data.shape[0]
+        encoder_info = get_vision_encoder_info(self.config)
+        tile_size = encoder_info.get_image_size()
+        tokens_per_tile = encoder_info.get_num_image_tokens(
+            image_width=tile_size, image_height=tile_size
+        )
+        selected_per_tile = get_num_selected_vision_tokens(
+            tokens_per_tile, self.config.vision_feature_select_strategy
+        )
+        return num_tiles * tokens_per_tile, num_tiles * selected_per_tile
