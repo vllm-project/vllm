@@ -52,7 +52,7 @@ _INDEXER_LOGITS_DTYPES = {
 
 
 def _get_indexer_logits_dtype() -> torch.dtype:
-    setting = envs.VLLM_INDEXER_LOGITS_DTYPE
+    setting = get_current_vllm_config().attention_config.indexer_logits_dtype
     if setting != "auto":
         return _INDEXER_LOGITS_DTYPES[setting]
     if not current_platform.is_cuda():
