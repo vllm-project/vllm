@@ -36,7 +36,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.utils import (
-    resolve_model_fused_shared_expert_fusion,
+    is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm as Qwen3_5RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -257,7 +257,7 @@ class Qwen3_5Model(Qwen3NextModel):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
-        self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.layers,
             Qwen3NextSparseMoeBlock,
             "mlp",

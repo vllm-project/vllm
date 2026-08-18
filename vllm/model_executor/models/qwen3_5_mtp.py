@@ -12,7 +12,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, tensor_model_parallel_all_gather
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.utils import (
-    resolve_model_fused_shared_expert_fusion,
+    is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -124,7 +124,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             for idx in range(self.num_mtp_layers)
         )
         vllm_config.quant_config = original_quant
-        self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.layers,
             Qwen3NextSparseMoeBlock,
             "mlp",

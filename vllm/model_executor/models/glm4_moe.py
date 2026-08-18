@@ -45,8 +45,8 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    resolve_fused_shared_expert_fusion,
-    resolve_model_fused_shared_expert_fusion,
+    is_model_fused_shared_expert_compatible,
+    resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -164,7 +164,7 @@ class Glm4MoE(nn.Module):
 
         self.is_fused_shared_expert_enabled = False
         if config.n_shared_experts is not None:
-            self.is_fused_shared_expert_enabled = resolve_fused_shared_expert_fusion(
+            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
                 quant_config, prefix
             )
 
@@ -444,7 +444,7 @@ class Glm4MoeModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-        self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.layers,
             Glm4MoE,
             "mlp",

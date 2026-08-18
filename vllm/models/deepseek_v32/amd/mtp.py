@@ -14,7 +14,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    resolve_model_fused_shared_expert_fusion,
+    is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -169,7 +169,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.set_moe_parameters()
-        self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.model.layers.values(),
             DeepseekV2MoE,
             "mtp_block.mlp",

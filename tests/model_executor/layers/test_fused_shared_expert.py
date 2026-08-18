@@ -283,7 +283,7 @@ def test_determine_expert_counts_fuse_shared_experts_override(
     assert determine_expert_counts(*common_args, None)[2] == 0
 
 
-def test_resolve_fused_shared_expert_fusion_skips_compatibility_when_disabled(
+def test_resolve_layer_fused_shared_expert_skips_compatibility_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -299,12 +299,12 @@ def test_resolve_fused_shared_expert_fusion_skips_compatibility_when_disabled(
         ),
     )
 
-    assert not fused_moe_utils.resolve_fused_shared_expert_fusion(
+    assert not fused_moe_utils.resolve_layer_fused_shared_expert(
         object(), "model.layers.0.mlp"
     )
 
 
-def test_resolve_fused_shared_expert_fusion_normalizes_unavailable_aiter(
+def test_resolve_layer_fused_shared_expert_normalizes_unavailable_aiter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -314,14 +314,14 @@ def test_resolve_fused_shared_expert_fusion_normalizes_unavailable_aiter(
     )
 
     assert (
-        fused_moe_utils.resolve_fused_shared_expert_fusion(
+        fused_moe_utils.resolve_layer_fused_shared_expert(
             object(), "model.layers.0.mlp"
         )
         is False
     )
 
 
-def test_resolve_fused_shared_expert_fusion_passes_module_prefixes(
+def test_resolve_layer_fused_shared_expert_passes_module_prefixes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     quant_config = object()
@@ -343,7 +343,7 @@ def test_resolve_fused_shared_expert_fusion_passes_module_prefixes(
         fused_moe_utils, "is_shared_expert_quant_fse_compatible", check_compatibility
     )
 
-    assert fused_moe_utils.resolve_fused_shared_expert_fusion(
+    assert fused_moe_utils.resolve_layer_fused_shared_expert(
         quant_config,
         "model.layers.0.mlp",
         shared_expert_name="shared_expert",
@@ -357,7 +357,7 @@ def test_resolve_fused_shared_expert_fusion_passes_module_prefixes(
     ]
 
 
-def test_resolve_fused_shared_expert_fusion_rejects_incompatible_quantization(
+def test_resolve_layer_fused_shared_expert_rejects_incompatible_quantization(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -372,7 +372,7 @@ def test_resolve_fused_shared_expert_fusion_rejects_incompatible_quantization(
         lambda *_: (False, "shared experts are excluded"),
     )
 
-    assert not fused_moe_utils.resolve_fused_shared_expert_fusion(
+    assert not fused_moe_utils.resolve_layer_fused_shared_expert(
         object(), "model.layers.0.mlp"
     )
     assert "shared experts are excluded" in caplog.text
@@ -415,7 +415,7 @@ def test_deepseek_v4_shared_expert_fse_uses_mtp_quantization_config_prefix(
     assert reason is None
 
 
-def test_resolve_model_fused_shared_expert_fusion_requires_consistent_layers() -> None:
+def test_is_model_fused_shared_expert_compatible() -> None:
     class MoE(nn.Module):
         def __init__(self, enabled: bool) -> None:
             super().__init__()
@@ -432,20 +432,20 @@ def test_resolve_model_fused_shared_expert_fusion_requires_consistent_layers() -
     empty_layers = nn.ModuleList()
     pipeline_layers = nn.ModuleList([Layer(True), PPMissingLayer()])
 
-    assert fused_moe_utils.resolve_model_fused_shared_expert_fusion(
+    assert fused_moe_utils.is_model_fused_shared_expert_compatible(
         enabled_layers, MoE, "mlp"
     )
-    assert not fused_moe_utils.resolve_model_fused_shared_expert_fusion(
+    assert not fused_moe_utils.is_model_fused_shared_expert_compatible(
         disabled_layers, MoE, "mlp"
     )
-    assert not fused_moe_utils.resolve_model_fused_shared_expert_fusion(
+    assert not fused_moe_utils.is_model_fused_shared_expert_compatible(
         empty_layers, MoE, "mlp"
     )
-    assert fused_moe_utils.resolve_model_fused_shared_expert_fusion(
+    assert fused_moe_utils.is_model_fused_shared_expert_compatible(
         pipeline_layers, MoE, "mlp"
     )
     with pytest.raises(NotImplementedError, match="1 enabled and 1 disabled layers"):
-        fused_moe_utils.resolve_model_fused_shared_expert_fusion(
+        fused_moe_utils.is_model_fused_shared_expert_compatible(
             mixed_layers, MoE, "mlp"
         )
 

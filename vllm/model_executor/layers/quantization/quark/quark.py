@@ -597,8 +597,8 @@ class QuarkConfig(QuantizationConfig):
             ):
                 raise ValueError(
                     f"Found a different quantization configuration for "
-                    f"{shard_proj_names} in {layer_name}. vLLM requires all "
-                    "to use the same scheme."
+                    f"{shard_proj_names} in {layer_name}. vLLM "
+                    "requires all to use the same scheme."
                 )
             if matched_configs:
                 return matched_configs[0]

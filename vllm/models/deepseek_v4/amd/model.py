@@ -24,7 +24,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    resolve_model_fused_shared_expert_fusion,
+    is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -229,7 +229,7 @@ class DeepseekV4MoE(nn.Module):
 
         # TODO: Historically, only `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`
         # is checked to enable FSE for DeepSeek-v4, despite AITER not being used.
-        # This should be cleaned up and use `resolve_fused_shared_expert_fusion`.
+        # This should be cleaned up and use `resolve_layer_fused_shared_expert`.
         fse_requested = _fuse_shared_experts_enabled(config)
         if fse_requested:
             fse_compatible, fse_reason = is_shared_expert_quant_fse_compatible(
@@ -570,7 +570,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.layers,
             DeepseekV4MoE,
             "ffn",

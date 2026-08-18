@@ -52,7 +52,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def resolve_fused_shared_expert_fusion(
+def resolve_layer_fused_shared_expert(
     quant_config: "QuantizationConfig | None",
     prefix: str,
     shared_expert_name: str = "shared_experts",
@@ -92,7 +92,7 @@ def resolve_fused_shared_expert_fusion(
     return is_fused_shared_expert_enabled
 
 
-def resolve_model_fused_shared_expert_fusion(
+def is_model_fused_shared_expert_compatible(
     layers: nn.ModuleList | Iterable[nn.Module],
     moe_cls: type[nn.Module],
     moe_name: str,

@@ -20,8 +20,8 @@ from vllm.distributed import (
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.utils import (
-    resolve_fused_shared_expert_fusion,
-    resolve_model_fused_shared_expert_fusion,
+    is_model_fused_shared_expert_compatible,
+    resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
 from vllm.model_executor.layers.layernorm import (
@@ -139,7 +139,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
 
         self.is_fused_shared_expert_enabled = False
         if config.shared_expert_intermediate_size > 0:
-            self.is_fused_shared_expert_enabled = resolve_fused_shared_expert_fusion(
+            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
                 quant_config,
                 prefix,
                 shared_expert_name="shared_expert",
@@ -583,7 +583,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
-        self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.layers,
             Qwen3NextSparseMoeBlock,
             "mlp",

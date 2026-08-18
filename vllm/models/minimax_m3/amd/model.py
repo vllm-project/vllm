@@ -47,7 +47,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    resolve_model_fused_shared_expert_fusion,
+    is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -370,7 +370,7 @@ class MiniMaxM3MoE(nn.Module):
         # the routed top-k, which the EP expert-mapping path does not handle).
         # TODO: Historically, only `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`
         # is checked to enable FSE for MiniMax-M3, despite AITER not being used.
-        # This should be cleaned up and use `resolve_fused_shared_expert_fusion`.
+        # This should be cleaned up and use `resolve_layer_fused_shared_expert`.
         fse_requested = envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
 
         self.is_fused_shared_expert_enabled = False
@@ -1132,7 +1132,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             ),
             prefix=f"{prefix}.layers",
         )
-        self.is_fused_shared_expert_enabled = resolve_model_fused_shared_expert_fusion(
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
             self.layers,
             MiniMaxM3MoE,
             "block_sparse_moe",
