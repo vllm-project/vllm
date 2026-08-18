@@ -111,16 +111,30 @@ def is_shared_expert_quant_fse_compatible(
             return False, f"Quark excludes shared experts at {shared_expert_prefix}"
 
         global_quant_config = quant_config.quant_config["global_quant_config"]
+
+        def get_projection_quant_configs(layer_name: str) -> list[object]:
+            module_prefix, _, projection_name = layer_name.rpartition(".")
+            packed_projection_names = quant_config.packed_modules_mapping.get(
+                projection_name, [projection_name]
+            )
+            return [
+                quant_config.get_layer_quant_config_from_name(
+                    f"{module_prefix}.{packed_projection_name}"
+                )
+                or global_quant_config
+                for packed_projection_name in packed_projection_names
+            ]
+
         expert_quant_config = (
             quant_config.get_layer_quant_config_from_name(expert_prefix)
             or global_quant_config
         )
         shared_expert_quant_configs = [
-            quant_config.get_layer_quant_config_from_name(
+            config
+            for projection_name in projection_names
+            for config in get_projection_quant_configs(
                 f"{shared_expert_prefix}.{projection_name}"
             )
-            or global_quant_config
-            for projection_name in projection_names
         ]
         if all(config == expert_quant_config for config in shared_expert_quant_configs):
             return True, None

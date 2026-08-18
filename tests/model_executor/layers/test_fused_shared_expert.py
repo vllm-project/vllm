@@ -610,6 +610,35 @@ def test_quark_shared_expert_fse_requires_matching_layer_quant_configs() -> None
     )
 
 
+def test_quark_shared_expert_fse_rejects_partial_packed_projection_override() -> None:
+    fp4_config = {"weight": {"dtype": "fp4"}}
+    fp8_config = {"weight": {"dtype": "fp8"}}
+    quant_config = QuarkConfig(
+        {
+            "exclude": [],
+            "global_quant_config": fp4_config,
+            "layer_quant_config": {
+                "model.layers.0.mlp.experts": fp8_config,
+                "model.layers.0.mlp.shared_expert.gate_proj": fp8_config,
+                "model.layers.0.mlp.shared_expert.down_proj": fp8_config,
+            },
+        }
+    )
+    quant_config.packed_modules_mapping = {"gate_up_proj": ["gate_proj", "up_proj"]}
+
+    compatible, reason = is_shared_expert_quant_fse_compatible(
+        quant_config,
+        "model.layers.0.mlp.experts",
+        "model.layers.0.mlp.shared_expert",
+    )
+
+    assert not compatible
+    assert reason == (
+        "Quark uses different quantization configurations for routed and "
+        "shared experts at model.layers.0.mlp.shared_expert"
+    )
+
+
 def test_quark_layer_config_from_name_checks_packed_projections() -> None:
     quant_config = QuarkConfig(
         {
