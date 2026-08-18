@@ -5505,8 +5505,13 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "vllm-build-info",
  "vllm-tracing",
 ]
+
+[[package]]
+name = "vllm-build-info"
+version = "0.1.0"
 
 [[package]]
 name = "vllm-chat"
@@ -5574,6 +5579,7 @@ dependencies = [
  "tracing",
  "uuid",
  "vllm-bench",
+ "vllm-build-info",
  "vllm-chat",
  "vllm-engine-core-client",
  "vllm-managed-engine",
@@ -5755,6 +5761,7 @@ dependencies = [
  "url",
  "uuid",
  "validator",
+ "vllm-build-info",
  "vllm-chat",
  "vllm-engine-core-client",
  "vllm-llm",
