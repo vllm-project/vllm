@@ -237,6 +237,22 @@ def test_get_finished_reports_failure_when_event_query_raises() -> None:
     assert handler._stream_pool == [ready.stream]
 
 
+def test_get_finished_propagates_non_device_errors() -> None:
+    """Only device faults are downgraded to a failed transfer.
+
+    A missing op or a bad argument is a programming error; swallowing it would
+    turn a loud, one-line diagnosis into a silently degraded cache.
+    """
+    handler = _bare_handler()
+    broken = MagicMock()
+    broken.job_id = 5
+    broken.end_event.query.side_effect = AttributeError("no such op")
+    handler._transfers.append(broken)
+
+    with pytest.raises(AttributeError, match="no such op"):
+        handler.get_finished()
+
+
 def test_wait_swallows_synchronize_failure() -> None:
     """wait() must not raise; the failure is reported by the next poll."""
     handler = _bare_handler()
