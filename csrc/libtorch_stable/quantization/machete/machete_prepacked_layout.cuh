@@ -236,14 +236,6 @@ struct PrepackedLayoutBTemplate {
     auto tiled_A = zipped_divide(make_layout(shape_mkl), tile);
     return tiled_A.compose(ppblock_TV_to_NK(), _);
   }
-
-  // (N, K, L) -> ((athrid, val), (BlocksN, BlocksK), L)
-  template <class Shape_NKL>
-  CUTE_HOST_DEVICE static auto NKL_to_TVbNbK(Shape_NKL shape_mkl) {
-    auto TVbNbK_to_NKL_layout = TVbNbK_to_NKL(shape_mkl);
-    return blocked_product(ppblock_NK_to_TV(),
-                           make_layout(shape<1>(TVbNbK_to_NKL_layout)));
-  }
 };
 
 };  // namespace machete
