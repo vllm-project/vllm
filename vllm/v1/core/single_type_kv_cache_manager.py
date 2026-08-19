@@ -835,6 +835,16 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         block_idx = boundary_tokens // self.block_size
         if block_idx >= len(blocks):
             return
+        # If this block has already been promoted to a full-block hash that
+        # covers at least as many tokens as the partial boundary, skip
+        # re-registering the stale partial entry (it was already superseded
+        # by the promotion and re-inserting it corrupts the cache index).
+        target_block = blocks[block_idx]
+        if (
+            target_block.block_hash_num_tokens is not None
+            and target_block.block_hash_num_tokens >= boundary_tokens
+        ):
+            return
         self.block_pool.cache_partial_block(
             request=request,
             block=blocks[block_idx],
