@@ -320,6 +320,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GraniteMoeSharedForCausalLM": _HfExamplesInfo(
         "ibm-research/moe-7b-1b-active-shared-experts"
     ),
+    "GraniteMoeSWAForCausalLM": _HfExamplesInfo(
+        "ibm-granite/granite-swash-3b-a600m", min_transformers_version="5.15.1"
+    ),
+    "GraniteSWAForCausalLM": _HfExamplesInfo(
+        "ibm-granite/granite-swash-2b", min_transformers_version="5.15.1"
+    ),
     "HrmTextForCausalLM": _HfExamplesInfo(
         "sapientinc/HRM-Text-1B",
         min_transformers_version="5.9.0",
@@ -1672,6 +1678,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "luccafong/deepseek_mtp_main_random",
         speculative_model="luccafong/deepseek_mtp_draft_random",
         trust_remote_code=True,
+    ),
+    "DeepseekV32MTPModel": _HfExamplesInfo(
+        "nvidia/DeepSeek-V3.2-NVFP4",
+        speculative_model="nvidia/DeepSeek-V3.2-NVFP4",
+        is_available_online=False,
     ),
     "DeepSeekV4MTPModel": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V4-Flash",
