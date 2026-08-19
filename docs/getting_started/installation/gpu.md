@@ -28,7 +28,7 @@ vLLM is a Python library that supports the following GPU variants. Select your G
 - Python: 3.10 -- 3.13
 
 !!! note
-    vLLM does not support Windows natively. To run vLLM on Windows, you can use the Windows Subsystem for Linux (WSL) with a compatible Linux distribution, or use some community-maintained forks, e.g. [https://github.com/SystemPanic/vllm-windows](https://github.com/SystemPanic/vllm-windows).
+    vLLM does not support Windows natively. To run vLLM on Windows, you can use the Windows Subsystem for Linux (WSL) with a compatible Linux distribution, or use some community-maintained forks, e.g. [https://github.com/SystemPanic/vllm-windows](https://github.com/SystemPanic/vllm-windows) for NVIDIA GPUs and [https://github.com/sebastianmechno-sys/vllm-rocm-windows-rdna2](https://github.com/sebastianmechno-sys/vllm-rocm-windows-rdna2) for AMD Radeon RX 6000-series (RDNA2) GPUs (native ROCm runtime, no WSL2).
 
 === "NVIDIA CUDA"
 
