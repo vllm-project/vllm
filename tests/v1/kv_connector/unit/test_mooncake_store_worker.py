@@ -41,6 +41,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import 
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 
+_TP_SHARED_NAMESPACE = "@store_tp:4@store_pp:1@store_format:tp_shared_v1"
+
+
+def _tp_shared_prefix(tp_rank: int) -> str:
+    return (
+        f"test-model{_TP_SHARED_NAMESPACE}@tp_rank:{tp_rank}"
+        "@pcp0@dcp0@pp_rank:0@group:0"
+    )
+
 
 class _RecordingBlockHashes:
     def __init__(self, values: list[bytes]):
@@ -99,7 +108,14 @@ def _make_tp_shared_db(
         dtype=torch.float16,
     )
     db = TPSharedChunkedTokenDatabase(
-        KeyMetadata("test-model", 0, 0, 0, 0, store_tp_size=4),
+        KeyMetadata(
+            "test-model",
+            0,
+            0,
+            0,
+            0,
+            store_namespace=_TP_SHARED_NAMESPACE,
+        ),
         block_size,
         local_tp_size=2,
         store_tp_size=4,
@@ -272,11 +288,12 @@ def _make_vllm_config(
     rank: int = 0,
     decode_context_parallel_size: int = 1,
     kv_role: str = "kv_both",
+    pipeline_parallel_size: int = 1,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         model_config=_FakeModelConfig(),
         parallel_config=SimpleNamespace(
-            pipeline_parallel_size=1,
+            pipeline_parallel_size=pipeline_parallel_size,
             rank=rank,
             data_parallel_index=0,
             decode_context_parallel_size=decode_context_parallel_size,
@@ -350,6 +367,7 @@ def _patch_worker_runtime(
     monkeypatch.setattr(worker, "get_pcp_group", lambda: single_rank_group)
     monkeypatch.setattr(worker, "get_dcp_group", lambda: dcp_group)
     monkeypatch.setattr(worker, "get_ip", lambda: local_ip)
+    monkeypatch.setattr(worker, "get_kv_cache_layout", lambda: "NHD")
     monkeypatch.setattr(worker, "LookupKeyServer", MagicMock())
 
 
@@ -364,31 +382,48 @@ def test_pool_key_to_string_without_prefix_is_unchanged():
 
 def test_pool_key_store_tp_namespace():
     key = PoolKey(
-        KeyMetadata("test-model", 2, 0, 0, 0, store_tp_size=4),
+        KeyMetadata(
+            "test-model",
+            2,
+            0,
+            0,
+            0,
+            store_namespace=_TP_SHARED_NAMESPACE,
+        ),
         "deadbeef",
     )
 
-    assert key.to_string() == (
-        "test-model@store_tp:4@tp_rank:2@pcp0@dcp0@pp_rank:0@group:0@deadbeef"
-    )
+    assert key.to_string() == f"{_tp_shared_prefix(2)}@deadbeef"
 
 
-@pytest.mark.parametrize("layout", ["NHD", "HND"])
-def test_tp_shared_layout_round_trips_prefill_shards_into_decode(layout: str):
+@pytest.mark.parametrize(
+    ("producer_layout", "consumer_layout"),
+    tuple(itertools.product(("NHD", "HND"), repeat=2)),
+)
+def test_tp_shared_layout_round_trips_prefill_shards_into_decode(
+    producer_layout: str, consumer_layout: str
+):
     block_size = 16
     shape = (1, 2, block_size, 4)
-    strides = (128, 4, 8, 1) if layout == "NHD" else (128, 64, 4, 1)
+    producer_strides = (128, 4, 8, 1) if producer_layout == "NHD" else (128, 64, 4, 1)
 
     stored: dict[int, bytes] = {}
     producer_tensors = []
     for tp_rank in range(4):
-        tensor = torch.empty_strided(shape, strides, dtype=torch.float16)
+        tensor = torch.empty_strided(shape, producer_strides, dtype=torch.float16)
         tensor.copy_(
             torch.arange(128, dtype=torch.float16).view(shape) + tp_rank * 1000
         )
         producer_tensors.append(tensor)
         db = TPSharedChunkedTokenDatabase(
-            KeyMetadata("test-model", tp_rank, 0, 0, 0, store_tp_size=4),
+            KeyMetadata(
+                "test-model",
+                tp_rank,
+                0,
+                0,
+                0,
+                store_namespace=_TP_SHARED_NAMESPACE,
+            ),
             block_size,
             local_tp_size=4,
             store_tp_size=4,
@@ -407,12 +442,19 @@ def test_tp_shared_layout_round_trips_prefill_shards_into_decode(layout: str):
     for tp_rank in range(2):
         tensor = torch.empty_strided(
             (1, 4, block_size, 4),
-            (256, 4, 16, 1) if layout == "NHD" else (256, 64, 4, 1),
+            (256, 4, 16, 1) if consumer_layout == "NHD" else (256, 64, 4, 1),
             dtype=torch.float16,
         )
         tensor.zero_()
         db = TPSharedChunkedTokenDatabase(
-            KeyMetadata("test-model", tp_rank, 0, 0, 0, store_tp_size=4),
+            KeyMetadata(
+                "test-model",
+                tp_rank,
+                0,
+                0,
+                0,
+                store_namespace=_TP_SHARED_NAMESPACE,
+            ),
             block_size,
             local_tp_size=2,
             store_tp_size=4,
@@ -450,10 +492,10 @@ def test_tp_shared_sending_writes_each_canonical_shard():
 
     keys, addrs, sizes, _ = store.batch_put_from_multi_buffers.call_args.args
     assert keys == [
-        "test-model@store_tp:4@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6830",
-        "test-model@store_tp:4@tp_rank:1@pcp0@dcp0@pp_rank:0@group:0@6830",
-        "test-model@store_tp:4@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6831",
-        "test-model@store_tp:4@tp_rank:1@pcp0@dcp0@pp_rank:0@group:0@6831",
+        f"{_tp_shared_prefix(0)}@6830",
+        f"{_tp_shared_prefix(1)}@6830",
+        f"{_tp_shared_prefix(0)}@6831",
+        f"{_tp_shared_prefix(1)}@6831",
     ]
     assert len(addrs) == len(sizes) == 4
 
@@ -484,10 +526,10 @@ def test_tp_shared_receiving_reads_each_local_canonical_shard():
 
     keys, addrs, sizes = store.batch_get_into_multi_buffers.call_args.args
     assert keys == [
-        "test-model@store_tp:4@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6830",
-        "test-model@store_tp:4@tp_rank:1@pcp0@dcp0@pp_rank:0@group:0@6830",
-        "test-model@store_tp:4@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6831",
-        "test-model@store_tp:4@tp_rank:1@pcp0@dcp0@pp_rank:0@group:0@6831",
+        f"{_tp_shared_prefix(0)}@6830",
+        f"{_tp_shared_prefix(1)}@6830",
+        f"{_tp_shared_prefix(0)}@6831",
+        f"{_tp_shared_prefix(1)}@6831",
     ]
     assert len(addrs) == len(sizes) == 4
 
@@ -1921,6 +1963,7 @@ def test_worker_enables_canonical_store_tp_layout(tmp_path, monkeypatch):
     )
 
     assert w.store_tp_size == 4
+    assert w.token_dbs[0].metadata.store_namespace == _TP_SHARED_NAMESPACE
     assert isinstance(w.token_dbs[0], TPSharedChunkedTokenDatabase)
     assert w.token_dbs[0].store_shard_ids == (0, 1)
     assert len(w._lookup_key_prefixes[0]) == 4
@@ -1956,7 +1999,44 @@ def test_worker_keeps_rank_local_layout_for_unsupported_store_tp(
 
     assert w.store_tp_size is None
     assert type(w.token_dbs[0]) is ChunkedTokenDatabase
-    assert "@store_tp:" not in w.token_dbs[0].key_for(BlockHash(b"h"))
+    key = w.token_dbs[0].key_for(BlockHash(b"h"))
+    assert "@store_tp:" not in key
+    assert "@store_pp:1" in key
+    assert "@store_format:rank_local_tp2_layout_NHD" in key
+
+
+def test_store_tp_opt_in_isolates_different_pp_sizes(tmp_path, monkeypatch):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch, tp_size=2)
+    monkeypatch.setattr(_FakeModelConfig, "get_total_num_kv_heads", lambda _self: 8)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+
+    keys = []
+    for pp_size in (1, 2):
+        w = worker.MooncakeStoreWorker(
+            _make_vllm_config(
+                extra_config={"store_tp_size": 4},
+                pipeline_parallel_size=pp_size,
+            ),
+            _make_kv_cache_config(),
+        )
+        keys.append(w.token_dbs[0].key_for(BlockHash(b"h")))
+
+    assert "@store_pp:1" in keys[0]
+    assert "@store_pp:2" in keys[1]
+    assert keys[0] != keys[1]
 
 
 def test_save_decode_cache_keeps_transfer_path_enabled(tmp_path, monkeypatch):
@@ -2130,7 +2210,10 @@ def test_mqa_p4_to_d2_uses_shared_rank_zero_namespace(tmp_path, monkeypatch):
     assert (
         put_keys
         == get_keys
-        == {"test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@68617368"}
+        == {
+            "test-model@store_pp:1@store_format:tp_shared_mqa_v1"
+            "@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@68617368"
+        }
     )
 
 
@@ -2774,7 +2857,7 @@ def test_lookup_key_prefixes_cover_canonical_store_tp_shards():
                 0,
                 0,
                 group_id=0,
-                store_tp_size=4,
+                store_namespace=_TP_SHARED_NAMESPACE,
             ),
             block_size=16,
         )
@@ -2782,10 +2865,7 @@ def test_lookup_key_prefixes_cover_canonical_store_tp_shards():
     worker._init_lookup_key_prefixes()
 
     assert worker._lookup_key_prefixes[0] == (
-        "test-model@store_tp:4@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0",
-        "test-model@store_tp:4@tp_rank:1@pcp0@dcp0@pp_rank:0@group:0",
-        "test-model@store_tp:4@tp_rank:2@pcp0@dcp0@pp_rank:0@group:0",
-        "test-model@store_tp:4@tp_rank:3@pcp0@dcp0@pp_rank:0@group:0",
+        *(_tp_shared_prefix(tp_rank) for tp_rank in range(4)),
     )
 
 

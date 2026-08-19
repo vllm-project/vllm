@@ -59,7 +59,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, get_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     maybe_convert_block_hash,
@@ -105,12 +105,10 @@ def _make_mooncake_group_id(metadata: KeyMetadata, chunk_hash: str) -> str:
     # Mooncake group ids describe the lifecycle unit. For vLLM, that unit is
     # a prefix chunk, so shard dimensions stay only in the object key.
     prefix = f"{metadata.cache_prefix}@" if metadata.cache_prefix else ""
-    store_tp = (
-        f"@store_tp:{metadata.store_tp_size}"
-        if metadata.store_tp_size is not None
-        else ""
+    return (
+        f"vllm-mooncake-store:{prefix}{metadata.model_name}"
+        f"{metadata.store_namespace}@{chunk_hash}"
     )
-    return f"vllm-mooncake-store:{prefix}{metadata.model_name}{store_tp}@{chunk_hash}"
 
 
 # Mirrors FileStorageConfig::local_buffer_size in Mooncake C++.
@@ -1571,7 +1569,10 @@ class MooncakeStoreWorker:
             use_eagle=use_eagle,
             retention_interval=kv_cache_config.prefix_cache_retention_interval,
         )
-        requested_store_tp_size = extra_config.get("store_tp_size")
+        configured_store_tp_size = extra_config.get("store_tp_size")
+        requested_store_tp_size = (
+            configured_store_tp_size if type(configured_store_tp_size) is int else None
+        )
         share_tp_topology = (
             self.pcp_size == 1
             and self.dcp_size == 1
@@ -1580,38 +1581,44 @@ class MooncakeStoreWorker:
             and str(extra_config.get("enable_cross_layers_blocks", "False")).lower()
             != "true"
         )
-        share_tp_layout = (
-            type(requested_store_tp_size) is int
+        valid_tp_mapping = (
+            requested_store_tp_size is not None
             and requested_store_tp_size >= self.tp_size
             and requested_store_tp_size % self.tp_size == 0
-            and self.num_kv_head % requested_store_tp_size == 0
             and share_tp_topology
         )
-        share_replicated_mqa = (
-            type(requested_store_tp_size) is int
-            and requested_store_tp_size >= self.tp_size
-            and requested_store_tp_size % self.tp_size == 0
-            and self.num_kv_head == 1
-            and share_tp_topology
-        )
+        share_tp_layout = False
+        share_replicated_mqa = False
+        if valid_tp_mapping:
+            assert requested_store_tp_size is not None
+            share_tp_layout = self.num_kv_head % requested_store_tp_size == 0
+            share_replicated_mqa = self.num_kv_head == 1
         self.store_tp_size = requested_store_tp_size if share_tp_layout else None
-        if share_replicated_mqa:
+        store_namespace = ""
+        if share_tp_layout:
+            store_namespace = (
+                f"@store_tp:{requested_store_tp_size}@store_pp:{self.pp_size}"
+                "@store_format:tp_shared_v1"
+            )
+        elif share_replicated_mqa:
+            store_namespace = f"@store_pp:{self.pp_size}@store_format:tp_shared_mqa_v1"
             logger.info(
                 "Mooncake heterogeneous-TP store sharing uses the replicated "
                 "MQA layout for store_tp_size=%d",
                 requested_store_tp_size,
             )
-        elif requested_store_tp_size is not None and not share_tp_layout:
-            logger.info(
-                "Mooncake heterogeneous-TP store sharing is disabled for "
-                "store_tp_size=%r; using the rank-local store layout",
-                requested_store_tp_size,
+        elif configured_store_tp_size is not None:
+            layout = get_kv_cache_layout() or "unknown"
+            store_namespace = (
+                f"@store_pp:{self.pp_size}@store_format:"
+                f"rank_local_tp{self.tp_size}_layout_{layout}"
             )
-        # One ChunkedTokenDatabase per group; addresses populated in
-        # register_kv_caches once the kv-cache layout is known. Each group's
-        # key namespace is its TP shard id: ranks holding identical bytes
-        # (MLA / shared GQA KV heads) share a namespace, TP-sharded Mamba
-        # state gets one namespace per rank.
+            logger.warning(
+                "Mooncake heterogeneous-TP store sharing is disabled for "
+                "store_tp_size=%r; using a compatibility-namespaced "
+                "rank-local store layout",
+                configured_store_tp_size,
+            )
         metadata = KeyMetadata(
             model_name=model_config.model.rstrip("/").split("/")[-1],
             tp_rank=self.tp_rank,
@@ -1623,12 +1630,13 @@ class MooncakeStoreWorker:
                     "cache_prefix", ""
                 )
             ),
-            store_tp_size=self.store_tp_size,
+            store_namespace=store_namespace,
         )
         self._group_tp_replication_factors: tuple[int, ...] = (
             self._compute_group_tp_replication_factors()
         )
         if self.store_tp_size is not None:
+            # Canonical DBs map each local rank to one or more Store TP shards.
             group = self._kv_cache_groups[0]
             self.token_dbs = [
                 TPSharedChunkedTokenDatabase(
@@ -1642,6 +1650,7 @@ class MooncakeStoreWorker:
                 )
             ]
         else:
+            # Rank-local DBs collapse byte-identical TP replicas to one key.
             self.token_dbs = [
                 ChunkedTokenDatabase(
                     dataclasses.replace(

@@ -111,9 +111,9 @@ class KeyMetadata:
     # share one Mooncake master without colliding on identical block hashes.
     # Empty (the default) keeps keys byte-identical to the unprefixed format.
     cache_prefix: str = ""
-    # Canonical TP width used by heterogeneous-TP store sharing. Unset keeps
-    # the existing key format and rank-local value layout.
-    store_tp_size: int | None = None
+    # Complete namespace for an opt-in Store payload format. Empty keeps
+    # historical keys byte-identical.
+    store_namespace: str = ""
 
 
 @dataclass(order=True)
@@ -128,7 +128,7 @@ class PoolKey:
             (
                 self.key_metadata.cache_prefix,
                 self.key_metadata.model_name,
-                self.key_metadata.store_tp_size,
+                self.key_metadata.store_namespace,
                 self.key_metadata.tp_rank,
                 self.key_metadata.pcp_rank,
                 self.key_metadata.dcp_rank,
@@ -149,15 +149,10 @@ class PoolKey:
     ) -> str:
         """Return the stable prefix for a Mooncake pool key."""
         prefix = f"{key_metadata.cache_prefix}@" if key_metadata.cache_prefix else ""
-        store_tp = (
-            f"@store_tp:{key_metadata.store_tp_size}"
-            if key_metadata.store_tp_size is not None
-            else ""
-        )
         return (
             f"{prefix}"
             f"{key_metadata.model_name}"
-            f"{store_tp}"
+            f"{key_metadata.store_namespace}"
             f"@tp_rank:{key_metadata.tp_rank if tp_rank is None else tp_rank}"
             f"@pcp{key_metadata.pcp_rank if pcp_rank is None else pcp_rank}"
             f"@dcp{key_metadata.dcp_rank if dcp_rank is None else dcp_rank}"
@@ -423,14 +418,17 @@ class TPSharedChunkedTokenDatabase(ChunkedTokenDatabase):
             ) in self._layer_layouts:
                 block_addr = base_addr + block_id * block_stride
                 if is_nhd:
-                    segment_size = self.heads_per_store_shard * content_bytes
-                    for token_idx in range(self.block_size):
-                        addrs.append(
-                            block_addr
-                            + token_idx * token_stride
-                            + head_start * head_stride
-                        )
-                        sizes.append(segment_size)
+                    # Store objects always use canonical HND byte order. NHD
+                    # tensors gather/scatter one content cell at a time so P
+                    # and D can share the same object across local layouts.
+                    for head_idx in range(self.heads_per_store_shard):
+                        for token_idx in range(self.block_size):
+                            addrs.append(
+                                block_addr
+                                + token_idx * token_stride
+                                + (head_start + head_idx) * head_stride
+                            )
+                            sizes.append(content_bytes)
                 else:
                     addrs.append(block_addr + head_start * head_stride)
                     sizes.append(self.heads_per_store_shard * head_stride)
