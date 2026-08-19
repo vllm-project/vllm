@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from transformers import PretrainedConfig
 
     from vllm.config import CacheConfig, ModelConfig, VllmConfig
-    from vllm.config.cache import MambaDType
+    from vllm.config.cache import MambaSSMCacheDType
 
 
 logger = init_logger(__name__)
@@ -638,7 +638,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
 
 class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
-    DEFAULT_MAMBA_SSM_CACHE_DTYPE: "MambaDType" = "float32"
+    DEFAULT_MAMBA_SSM_CACHE_DTYPE: "MambaSSMCacheDType" = "float32"
     """Only `float32` is known to have no accuracy issues by default."""
 
     @classmethod
@@ -650,7 +650,7 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
         `float32` if not specified.
         """
         if cache_config.mamba_ssm_cache_dtype == "auto":
-            mamba_ssm_cache_dtype: MambaDType = getattr(
+            mamba_ssm_cache_dtype: MambaSSMCacheDType = getattr(
                 hf_config, "mamba_ssm_cache_dtype", cls.DEFAULT_MAMBA_SSM_CACHE_DTYPE
             )
             logger.info(

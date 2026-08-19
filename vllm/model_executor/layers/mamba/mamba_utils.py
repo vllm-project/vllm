@@ -9,7 +9,7 @@ from typing import Literal, TypeAlias
 import torch
 
 import vllm.envs as envs
-from vllm.config.cache import MambaDType
+from vllm.config.cache import MambaDType, MambaSSMCacheDType
 from vllm.config.mamba import MambaBackendEnum
 from vllm.config.model import ModelDType
 from vllm.distributed import divide
@@ -22,6 +22,8 @@ from vllm.utils.torch_utils import (
 logger = init_logger(__name__)
 
 ConvStateLayoutType = Literal["SD", "DS"]
+
+QUANTIZED_SSM_STATE_DTYPES = (torch.int8, torch.float8_e4m3fn)
 
 
 @functools.lru_cache
@@ -64,7 +66,7 @@ class MambaStateDtypeCalculator:
         cls,
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
-        mamba_ssm_cache_dtype: MambaDType,
+        mamba_ssm_cache_dtype: MambaSSMCacheDType,
     ) -> tuple[torch.dtype, ...]:
         return cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
@@ -75,7 +77,7 @@ class MambaStateDtypeCalculator:
         cls,
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
-        mamba_ssm_cache_dtype: MambaDType,
+        mamba_ssm_cache_dtype: MambaSSMCacheDType,
     ) -> tuple[torch.dtype, ...]:
         return cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
@@ -98,7 +100,7 @@ class MambaStateDtypeCalculator:
         cls,
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
-        mamba_ssm_cache_dtype: MambaDType,
+        mamba_ssm_cache_dtype: MambaSSMCacheDType,
     ) -> tuple[torch.dtype, ...]:
         conv_state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
         if mamba_ssm_cache_dtype == "auto":
@@ -122,7 +124,7 @@ class MambaStateDtypeCalculator:
         cls,
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
-        mamba_ssm_cache_dtype: MambaDType = "auto",
+        mamba_ssm_cache_dtype: MambaSSMCacheDType = "auto",
     ) -> tuple[torch.dtype, torch.dtype]:
         return cls._mamba_state_dtype(
             model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
@@ -329,6 +331,22 @@ class MambaStateShapeCalculator:
             (local_num_heads, spec_query_len, head_dim),
             (local_num_heads, spec_query_len, 2 * head_dim),
         )
+
+
+def quantize_ssm_state(
+    state: torch.Tensor, dtype: torch.dtype
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize SSM state with one decode scale per head and head dimension."""
+    if dtype not in QUANTIZED_SSM_STATE_DTYPES:
+        raise ValueError(f"Unsupported quantized SSM state dtype: {dtype}")
+    quant_max = (
+        torch.finfo(dtype).max if dtype.is_floating_point else torch.iinfo(dtype).max
+    )
+    amax = state.abs().amax(dim=-1, keepdim=True)
+    encode_scale = torch.where(amax == 0, 1, quant_max / amax)
+    quantized = (state * encode_scale).to(dtype)
+    decode_scale = encode_scale.reciprocal().squeeze(-1)
+    return quantized, decode_scale
 
 
 @dataclass

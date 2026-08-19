@@ -47,6 +47,14 @@ def _get_prefix_cache_retention_interval() -> int | None:
 
 
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
+MambaSSMCacheDType = Literal[
+    "auto",
+    "float32",
+    "float16",
+    "bfloat16",
+    "fp8_e4m3fn",
+    "int8",
+]
 MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
@@ -150,7 +158,7 @@ class CacheConfig:
     """The data type to use for the Mamba cache (both the conv as well as the
     ssm state). If set to 'auto', the data type will be inferred from the model
     config."""
-    mamba_ssm_cache_dtype: MambaDType = "auto"
+    mamba_ssm_cache_dtype: MambaSSMCacheDType = "auto"
     """The data type to use for the Mamba cache (ssm state only, conv state will
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
     for the ssm state will be determined by mamba_cache_dtype."""

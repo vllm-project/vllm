@@ -72,6 +72,7 @@ from vllm.config.cache import (
     KVOffloadingBackend,
     MambaCacheMode,
     MambaDType,
+    MambaSSMCacheDType,
     PrefixCachingHashAlgo,
 )
 from vllm.config.device import Device
@@ -709,7 +710,7 @@ class EngineArgs:
         CacheConfig, "kv_cache_dtype_skip_layers"
     )
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
-    mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
+    mamba_ssm_cache_dtype: MambaSSMCacheDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode

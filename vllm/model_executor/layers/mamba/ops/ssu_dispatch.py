@@ -481,6 +481,7 @@ def selective_state_update_replayssm_flashinfer(
     dt_bias: torch.Tensor | None = None,
     dt_softplus: bool = False,
     state_batch_indices: torch.Tensor | None = None,
+    state_scale: torch.Tensor | None = None,
     null_block_id: int = NULL_BLOCK_ID,
     scratch: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     algorithm: str = "auto",
@@ -539,6 +540,7 @@ def selective_state_update_replayssm_flashinfer(
         dt_softplus=dt_softplus,
         state_batch_indices=indices,
         pad_slot_id=null_block_id,
+        state_scale=state_scale,
         rand_seed=rand_seed,
         philox_rounds=stochastic_rounding_philox_rounds or 10,
         cu_seqlens=cu_seqlens,
@@ -621,7 +623,12 @@ def initialize_mamba_ssu_backend(
             ) from e
         if not callable(CheckpointingSSURunner):
             raise ImportError("FlashInfer ReplaySSM requires native autotuning support")
-        required_parameters = {"cu_seqlens", "max_seqlen", "enable_pdl"}
+        required_parameters = {
+            "cu_seqlens",
+            "max_seqlen",
+            "enable_pdl",
+            "state_scale",
+        }
         missing_parameters = (
             required_parameters - signature(checkpointing_ssu).parameters.keys()
         )

@@ -44,6 +44,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "int8_per_token_head": torch.int8,
     "fp8_per_token_head": torch.uint8,
     "fp8_inc": torch.float8_e4m3fn,
+    "fp8_e4m3fn": torch.float8_e4m3fn,
     "fp8_ds_mla": torch.uint8,
     "turboquant_k8v4": torch.uint8,
     "turboquant_4bit_nc": torch.uint8,

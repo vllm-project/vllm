@@ -24,9 +24,11 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    QUANTIZED_SSM_STATE_DTYPES,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
+    quantize_ssm_state,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
@@ -511,6 +513,16 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.use_replayssm = (
             cache_config.use_replayssm if cache_config is not None else False
         )
+        self._quantized_ssm_state = (
+            model_config is not None
+            and cache_config is not None
+            and MambaStateDtypeCalculator.mamba2_state_dtype(
+                model_config.dtype,
+                cache_config.mamba_cache_dtype,
+                cache_config.mamba_ssm_cache_dtype,
+            )[1]
+            in QUANTIZED_SSM_STATE_DTYPES
+        )
         self.replayssm_buffer_len = (
             cache_config.replayssm_buffer_len
             if cache_config is not None and cache_config.use_replayssm
@@ -521,8 +533,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
             raise ValueError(
                 "--use-replayssm requires tensor-parallel heads to divide evenly"
             )
-        # ReplaySSM appends x/dt/B rings to (conv_state, ssm_state).
-        _n_state = 5 if self.use_replayssm else 2
+        # Quantized ReplaySSM appends one FP32 scale page after its ring pages.
+        _n_state = 5 + self._quantized_ssm_state if self.use_replayssm else 2
         self.kv_cache = tuple(torch.tensor([]) for _ in range(_n_state))
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
@@ -621,6 +633,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # Triton's autotuner includes tensor dtypes in its cache key,
         # so state_dtype must match what real inference uses.
         ssm_state_dtype = self.get_state_dtype()[1]
+        kernel_state_dtype = (
+            torch.float32
+            if ssm_state_dtype in QUANTIZED_SSM_STATE_DTYPES
+            else ssm_state_dtype
+        )
 
         # SSD kernel autotune keys depend on dtype and head dimensions,
         # not on sequence length or batch size, so a single shape suffices.
@@ -656,7 +673,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     headdim,
                     dstate,
                     device=device,
-                    dtype=ssm_state_dtype,
+                    dtype=kernel_state_dtype,
                 )
                 if use_initial_states
                 else None
@@ -680,7 +697,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     initial_states=initial_states,
                     dt_softplus=True,
                     dt_limit=(0.0, float("inf")),
-                    state_dtype=ssm_state_dtype,
+                    state_dtype=kernel_state_dtype,
                 )
             except Exception:
                 logger.warning(
@@ -732,6 +749,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 else self.kv_cache[0].transpose(-1, -2)
             )
             ssm_state = self.kv_cache[1]
+            ssm_state_scale = self.kv_cache[5] if self._quantized_ssm_state else None
             if self.use_replayssm:
                 x_cache, dt_cache, B_cache = self.kv_cache[2:5]
                 if self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
@@ -881,6 +899,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     ssm_state[kernel_ssm_indices],
                     0,
                 )
+                if ssm_state_scale is not None:
+                    initial_states = initial_states.float() * ssm_state_scale[
+                        kernel_ssm_indices
+                    ].unsqueeze(-1)
 
             # NOTE: final output is an in-place update of out tensor
             assert preallocated_ssm_out_p is not None
@@ -905,7 +927,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
-                state_dtype=ssm_state.dtype,
+                state_dtype=(
+                    torch.float32 if ssm_state_scale is not None else ssm_state.dtype
+                ),
             )
 
             if is_mamba_cache_all:
@@ -996,6 +1020,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 # - varlen state is a (num_prefills, nheads, headdim, dstate)
                 #   tensor
                 assert state_indices_tensor_p is not None
+                if ssm_state_scale is not None:
+                    varlen_states, decode_scale = quantize_ssm_state(
+                        varlen_states, ssm_state.dtype
+                    )
+                    ssm_state_scale[state_indices_tensor_p] = decode_scale
                 ssm_state[state_indices_tensor_p] = varlen_states
                 if ring_start is not None and self._updates_replayssm_trackers:
                     assert prev_num_accepted is not None
@@ -1159,6 +1188,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         dt_bias=dt_bias,
                         dt_softplus=True,
                         state_batch_indices=replayssm_state_indices_d,
+                        state_scale=ssm_state_scale,
                         scratch=attn_metadata.replayssm_scratch,
                         update_trackers=(
                             self._updates_replayssm_trackers and self.num_spec == 0
@@ -1228,9 +1258,12 @@ class MambaMixer2(MambaBase, PluggableLayer):
             self.cache_config.mamba_ssm_cache_dtype,
         )
         if self.use_replayssm:
-            return MambaStateDtypeCalculator.append_replayssm_ring(
+            state_dtypes = MambaStateDtypeCalculator.append_replayssm_ring(
                 base_dtype, self.model_config.dtype
             )
+            if self._quantized_ssm_state:
+                return (*state_dtypes, torch.float32)
+            return state_dtypes
         return base_dtype
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
@@ -1247,7 +1280,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         if self.use_replayssm:
             assert self.replayssm_buffer_len is not None
-            return MambaStateShapeCalculator.append_replayssm_ring(
+            state_shapes = MambaStateShapeCalculator.append_replayssm_ring(
                 base_shapes=base_shape,
                 n_groups=self.n_groups,
                 tp_world_size=tp_world_size,
@@ -1255,6 +1288,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 backend=self.mamba_config.backend,
                 num_speculative_tokens=self.num_spec,
             )
+            if self._quantized_ssm_state:
+                return (*state_shapes, base_shape[1][:-1])
+            return state_shapes
         return base_shape
 
     @property

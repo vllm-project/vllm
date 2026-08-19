@@ -1145,15 +1145,17 @@ class VllmConfig:
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
 
+        stochastic_rounding_dtypes = ("float16", "fp8_e4m3fn", "int8")
         if (
             self.mamba_config.enable_stochastic_rounding
-            and self.cache_config.mamba_ssm_cache_dtype != "float16"
+            and self.cache_config.mamba_ssm_cache_dtype
+            not in stochastic_rounding_dtypes
         ):
             raise ValueError(
-                "Stochastic rounding for Mamba cache requires "
-                "the SSM cache to be float16. Please set it explicitly, "
-                "by specifying `--mamba-ssm-cache-dtype float16`, or disable "
-                "stochastic rounding by not specifying "
+                "Stochastic rounding for Mamba cache requires the SSM cache "
+                f"dtype to be one of {stochastic_rounding_dtypes}. Please set "
+                "it explicitly with `--mamba-ssm-cache-dtype`, or disable "
+                "stochastic rounding by omitting "
                 "`--enable-mamba-cache-stochastic-rounding`."
             )
 
@@ -2561,6 +2563,18 @@ class VllmConfig:
 
     @model_validator(mode="after")
     def validate_mamba_cached_kernel(self) -> "VllmConfig":
+        quantized_ssm_cache = self.cache_config.mamba_ssm_cache_dtype in (
+            "fp8_e4m3fn",
+            "int8",
+        )
+        if quantized_ssm_cache and (
+            not self.cache_config.use_replayssm
+            or self.mamba_config.backend != MambaBackendEnum.FLASHINFER
+        ):
+            raise ValueError(
+                "Quantized Mamba SSM caches require FlashInfer ReplaySSM; pass "
+                "--use-replayssm --mamba-backend flashinfer"
+            )
         if not self.cache_config.use_replayssm:
             self.cache_config.use_kda_recoverssm = False
             return self

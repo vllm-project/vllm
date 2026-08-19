@@ -44,6 +44,7 @@ def test_kda_recoverssm_derivation_is_revalidated():
             use_replayssm=True,
             use_kda_recoverssm=False,
             mamba_cache_mode="none",
+            mamba_ssm_cache_dtype="float32",
             replayssm_buffer_len=16,
         ),
         num_speculative_tokens=3,
@@ -135,11 +136,15 @@ def _replayssm_config(
         cache_config=SimpleNamespace(
             use_replayssm=True,
             mamba_cache_mode="none",
+            mamba_ssm_cache_dtype="float32",
             replayssm_buffer_len=16,
         ),
         model_config=None,
         num_speculative_tokens=0,
-        mamba_config=SimpleNamespace(backend=backend),
+        mamba_config=SimpleNamespace(
+            backend=backend,
+            enable_stochastic_rounding=False,
+        ),
         use_v2_model_runner=use_v2_model_runner,
         kv_transfer_config=None,
     )
@@ -169,6 +174,22 @@ def test_flashinfer_replayssm_rejects_unsupported_buffer_length():
     config.cache_config.replayssm_buffer_len = 17
 
     with pytest.raises(ValueError, match="replayssm-buffer-len <= 16"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+
+
+@pytest.mark.parametrize("dtype", ["fp8_e4m3fn", "int8"])
+def test_quantized_ssm_cache_requires_flashinfer_replayssm(dtype):
+    config = _replayssm_config(backend=MambaBackendEnum.FLASHINFER)
+    config.cache_config.mamba_ssm_cache_dtype = dtype
+    assert VllmConfig.validate_mamba_cached_kernel(config) is config
+
+    config.mamba_config.backend = MambaBackendEnum.TRITON
+    with pytest.raises(ValueError, match="require FlashInfer ReplaySSM"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+
+    config.mamba_config.backend = MambaBackendEnum.FLASHINFER
+    config.cache_config.use_replayssm = False
+    with pytest.raises(ValueError, match="require FlashInfer ReplaySSM"):
         VllmConfig.validate_mamba_cached_kernel(config)
 
 
