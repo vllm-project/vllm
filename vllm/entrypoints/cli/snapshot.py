@@ -102,12 +102,6 @@ def _add_restore_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--port", type=int, default=8000)
 
 
-def run_restore_cli(argv: list[str]) -> None:
-    parser = argparse.ArgumentParser(prog="vllm snapshot restore")
-    _add_restore_arguments(parser)
-    run_restore(parser.parse_args(argv))
-
-
 class SnapshotSubcommand(CLISubcommand):
     """The `snapshot` subcommand for the vLLM CLI."""
 

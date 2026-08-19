@@ -21,6 +21,7 @@ from unittest.mock import create_autospec, patch
 import pytest
 
 import vllm.snapshot.controller as snapshot_controller
+import vllm.snapshot.runtime as snapshot_runtime
 from vllm.entrypoints.cli import snapshot as snapshot_cli
 from vllm.entrypoints.cli.launch import (
     LaunchSubcommand,
@@ -253,7 +254,7 @@ def test_snapshot_actions_preserve_the_complete_vllm_environment(
         snapshot_cli, "run_create", lambda _args: calls.append("create")
     )
     monkeypatch.setattr(
-        snapshot_cli, "run_restore_cli", lambda _argv: calls.append("restore")
+        snapshot_cli, "run_restore", lambda _args: calls.append("restore")
     )
     monkeypatch.setenv("VLLM_USER_SETTING", "configured")
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
@@ -308,10 +309,51 @@ def test_snapshot_help_and_restore_dispatch_stay_lazy(
         assert "snapshot" in stdout.lower()
         assert loaded == set()
 
-    calls: list[list[str]] = []
-    monkeypatch.setattr(snapshot_cli, "run_restore_cli", calls.append)
+    calls: list[argparse.Namespace] = []
+    monkeypatch.setattr(snapshot_cli, "run_restore", calls.append)
     _run_cli(["snapshot", "restore", "/tmp/qwen-snapshot"])
-    assert calls == [["/tmp/qwen-snapshot"]]
+    assert len(calls) == 1
+    assert calls[0].snapshot_dir == "/tmp/qwen-snapshot"
+
+    script = """
+import os
+import sys
+
+from vllm.entrypoints.cli import snapshot as snapshot_cli
+from vllm.entrypoints.cli.main import main
+
+events = []
+
+def dispatch(args):
+    events.append(f"dispatch:{args.snapshot_action}")
+    args.snapshot_dispatch(args)
+
+snapshot_cli.SnapshotSubcommand.cmd = staticmethod(dispatch)
+snapshot_cli.run_restore = lambda _args: events.append("restore")
+os.environ["VLLM_SNAPSHOT_IMPORT_PROBE"] = "preserved"
+before = dict(os.environ)
+sys.argv = ["vllm", "snapshot", "restore", "/tmp/qwen-snapshot"]
+main()
+
+assert events == ["dispatch:restore", "restore"], events
+assert dict(os.environ) == before
+blocked = {
+    "torch",
+    "uvloop",
+    "vllm.entrypoints.openai.cli_args",
+    "vllm.snapshot.controller",
+    "vllm.snapshot.server",
+    "vllm.utils.argparse_utils",
+}
+loaded = sorted(blocked.intersection(sys.modules))
+assert not loaded, loaded
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_snapshot_create_cli_accepts_compact_and_full_state(
@@ -499,6 +541,31 @@ def _fake_snapshot_tools(*, fail_dump: bool = False) -> Any:
     if fail_dump:
         tools.dump.side_effect = RuntimeError("dump failed")
     return tools
+
+
+def test_snapshot_create_abort_kills_surviving_child_process_group(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    tools = LocalSnapshotTools()
+    process = create_autospec(subprocess.Popen, instance=True)
+    process.poll.return_value = 1
+    process.wait.return_value = 1
+    tools._children[100] = process
+    (tmp_path / "child.log").write_text("root failed")
+    killed: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(
+        os,
+        "killpg",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    with pytest.raises(SnapshotCreateError, match="root failed"):
+        tools.wait_ready(tmp_path, 100)
+    tools.abort_create(100)
+
+    assert killed == [(100, signal.SIGKILL)]
+    assert 100 not in tools._children
+    process.wait.assert_called_once_with(timeout=10)
 
 
 async def _record(events: list[str], event: str, value=None):
@@ -695,6 +762,43 @@ def test_snapshot_create_outcomes_and_child_paths(
     assert not failed_manifest.exists()
 
 
+def _restore_fixture(tmp_path: Path) -> argparse.Namespace:
+    artifact = tmp_path / "snapshot"
+    artifact.mkdir(mode=0o700)
+    write_manifest_atomic(artifact, _manifest())
+    return argparse.Namespace(snapshot_dir=str(artifact), host="127.0.0.1", port=9000)
+
+
+def test_snapshot_restore_rejects_identity_mismatch(tmp_path: Path):
+    args = _restore_fixture(tmp_path)
+
+    identity_mismatch = _fake_snapshot_tools()
+    identity_mismatch.current_identity.side_effect = lambda _gpu_uuid: (
+        _runtime_identity(binary_revision="different")
+    )
+    with pytest.raises(SnapshotCompatibilityError, match="binary_revision"):
+        restore_snapshot(args, tools=identity_mismatch)
+    identity_mismatch.restore.assert_not_called()
+
+
+def test_snapshot_restore_completes_successful_transaction(tmp_path: Path):
+    args = _restore_fixture(tmp_path)
+    successful = _fake_snapshot_tools()
+    restore_snapshot(args, tools=successful)
+    successful.complete_restore.assert_called_once_with(100)
+    successful.cleanup.assert_not_called()
+
+
+def test_snapshot_restore_cleans_oracle_mismatch(tmp_path: Path):
+    args = _restore_fixture(tmp_path)
+    oracle_mismatch = _fake_snapshot_tools()
+    oracle_mismatch.request_oracle.return_value = _oracle(logprob=-0.5)
+    with pytest.raises(SnapshotRestoreError, match="oracle mismatch"):
+        restore_snapshot(args, tools=oracle_mismatch)
+    oracle_mismatch.cleanup.assert_called_once()
+    oracle_mismatch.complete_restore.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("invalid_update", "diagnostic"),
     [
@@ -781,7 +885,7 @@ def test_snapshot_create_outcomes_and_child_paths(
         ),
     ],
 )
-def test_snapshot_manifest_validation_and_restore_lifecycle(
+def test_snapshot_manifest_validation(
     tmp_path: Path,
     invalid_update: dict[str, object],
     diagnostic: str,
@@ -790,26 +894,6 @@ def test_snapshot_manifest_validation_and_restore_lifecycle(
     artifact.mkdir(mode=0o700)
     write_manifest_atomic(artifact, _manifest())
     args = argparse.Namespace(snapshot_dir=str(artifact), host="127.0.0.1", port=9000)
-
-    identity_mismatch = _fake_snapshot_tools()
-    identity_mismatch.current_identity.side_effect = lambda _gpu_uuid: (
-        _runtime_identity(binary_revision="different")
-    )
-    with pytest.raises(SnapshotCompatibilityError, match="binary_revision"):
-        restore_snapshot(args, tools=identity_mismatch)
-    identity_mismatch.restore.assert_not_called()
-
-    successful = _fake_snapshot_tools()
-    restore_snapshot(args, tools=successful)
-    successful.complete_restore.assert_called_once_with(100)
-    successful.cleanup.assert_not_called()
-
-    oracle_mismatch = _fake_snapshot_tools()
-    oracle_mismatch.request_oracle.return_value = _oracle(logprob=-0.5)
-    with pytest.raises(SnapshotRestoreError, match="oracle mismatch"):
-        restore_snapshot(args, tools=oracle_mismatch)
-    oracle_mismatch.cleanup.assert_called_once()
-    oracle_mismatch.complete_restore.assert_not_called()
 
     invalid = _manifest().model_dump(mode="json")
     invalid.update(invalid_update)
@@ -836,7 +920,7 @@ def _mark_snapshot_pids_free(monkeypatch: pytest.MonkeyPatch) -> list[int]:
         probed_pids.append(pid)
         raise ProcessLookupError
 
-    monkeypatch.setattr(snapshot_controller.os, "kill", missing)
+    monkeypatch.setattr(snapshot_runtime.os, "kill", missing)
     return probed_pids
 
 
@@ -931,7 +1015,7 @@ def test_snapshot_restore_pid_probe_is_fail_closed(
     def fail_probe(_pid: int, _signal: int) -> None:
         raise probe_error
 
-    monkeypatch.setattr(snapshot_controller.os, "kill", fail_probe)
+    monkeypatch.setattr(snapshot_runtime.os, "kill", fail_probe)
     monkeypatch.setattr(
         tools, "_criu", lambda action, *_args: criu_calls.append(action)
     )
@@ -961,7 +1045,7 @@ def _fake_pidfds(
     pid_by_fd = {read_fd: pid for pid, (read_fd, _write_fd) in pipes.items()}
     signals: list[tuple[int, signal.Signals]] = []
     monkeypatch.setattr(
-        snapshot_controller.os,
+        snapshot_runtime.os,
         "pidfd_open",
         lambda pid: pipes[pid][0],
         raising=False,
@@ -974,7 +1058,7 @@ def _fake_pidfds(
             os.write(pipes[pid][1], b"x")
 
     monkeypatch.setattr(
-        snapshot_controller.signal, "pidfd_send_signal", send, raising=False
+        snapshot_runtime.signal, "pidfd_send_signal", send, raising=False
     )
     return signals, pipes
 
@@ -1128,7 +1212,7 @@ def test_snapshot_restore_pins_and_cleans_the_exact_process_tree(
 ):
     states = {100: (1, 100, 100, 10), 101: (100, 101, 100, 11)}
     artifact, tools, signals, pipes = _restored_tools(tmp_path, monkeypatch, states)
-    monkeypatch.setattr(snapshot_controller.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(snapshot_runtime.time, "sleep", lambda _seconds: None)
     try:
         assert tools.restore(artifact, _manifest()) == 100
         with socket.socket() as available:

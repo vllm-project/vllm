@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-set -eux
+set -euxo pipefail
 
 readonly CRIU_VERSION="4.2.1"
 readonly CRIU_SOURCE_SHA256="feffdf4638125ebb12d2434754f80a1d7bbba85a3e6bee98c216f88fb99a5d96"
@@ -60,7 +60,7 @@ echo "${CRIU_SOURCE_SHA256}  ${snapshot_build_dir}/criu.tar.gz" | sha256sum -c -
 mkdir "${snapshot_build_dir}/criu"
 tar -xzf "${snapshot_build_dir}/criu.tar.gz" \
     --strip-components=1 -C "${snapshot_build_dir}/criu"
-make -C "${snapshot_build_dir}/criu" -j"$(nproc)" criu cuda_plugin
+make -C "${snapshot_build_dir}/criu" -j"${MAX_JOBS:-$(nproc)}" criu cuda_plugin
 install -D -m 0755 "${snapshot_build_dir}/criu/criu/criu" \
     /usr/local/sbin/criu
 install -D -m 0755 \

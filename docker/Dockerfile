@@ -599,6 +599,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 FROM ${FINAL_BASE_IMAGE} AS vllm-runtime-base
 
 ARG TARGETPLATFORM
+ARG max_jobs=2
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
 ARG NCCL_VERSION
@@ -675,7 +676,7 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
 # redistributing NVIDIA's proprietary cuda-checkpoint binary.
 COPY docker/install_snapshot_runtime.sh /usr/local/bin/install_snapshot_runtime.sh
 RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ]; then \
-        /usr/local/bin/install_snapshot_runtime.sh; \
+        MAX_JOBS="${max_jobs}" /usr/local/bin/install_snapshot_runtime.sh; \
     else \
         echo "Initialized snapshots are not installed for ${TARGETPLATFORM}"; \
     fi
