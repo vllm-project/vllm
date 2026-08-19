@@ -7,6 +7,7 @@ the fourth transformer layer. Activations can be synthetic or loaded from a
 ``torch.save`` file containing ``hidden_states`` and, when attn-res is enabled,
 ``prefix_sum`` and ``residual`` tensors. Set ``--benchmark-iters`` to measure
 steady-state, host-observed decoder-layer forward latency. Set
+``--context-length`` to populate cache before one-token decode. Set
 ``--profile-output`` to export a trace for Perfetto.
 """
 
@@ -51,6 +52,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--layer-index", type=int, default=3)
     parser.add_argument("--num-tokens", type=int, default=1)
     parser.add_argument(
+        "--context-length",
+        type=int,
+        default=0,
+        help="Populate this many historical tokens before one-token decode.",
+    )
+    parser.add_argument(
         "--warmup-iters",
         type=int,
         default=5,
@@ -75,7 +82,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input-state",
         type=Path,
-        help="Optional torch file with hidden_states, prefix_sum, and residual.",
+        help=(
+            "Optional torch file with hidden_states, prefix_sum, and residual; "
+            "cached decode requires prefill and decode sub-dictionaries."
+        ),
     )
     parser.add_argument("--save-output", type=Path)
     parser.add_argument(
@@ -124,31 +134,40 @@ def make_model_config(
 
 
 def make_common_metadata(
-    num_tokens: int,
+    query_length: int,
+    context_length: int,
     block_size: int,
     device: torch.device,
 ) -> CommonAttentionMetadata:
+    sequence_length = context_length + query_length
     query_start_loc = torch.tensor(
-        [0, num_tokens], dtype=torch.int32, device=device
+        [0, query_length], dtype=torch.int32, device=device
     )
-    seq_lens = torch.tensor([num_tokens], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([sequence_length], dtype=torch.int32, device=device)
     seq_lens_cpu = seq_lens.cpu()
-    num_blocks = cdiv(num_tokens, block_size)
+    num_blocks = cdiv(sequence_length, block_size)
     return CommonAttentionMetadata(
         query_start_loc=query_start_loc,
         query_start_loc_cpu=query_start_loc.cpu(),
         seq_lens=seq_lens,
         seq_lens_cpu_upper_bound=seq_lens_cpu,
         _seq_lens_cpu=seq_lens_cpu,
-        _num_computed_tokens_cpu=torch.zeros(1, dtype=torch.int32),
+        _num_computed_tokens_cpu=torch.tensor(
+            [context_length], dtype=torch.int32
+        ),
         num_reqs=1,
-        num_actual_tokens=num_tokens,
-        max_query_len=num_tokens,
-        max_seq_len=num_tokens,
+        num_actual_tokens=query_length,
+        max_query_len=query_length,
+        max_seq_len=sequence_length,
         block_table_tensor=torch.arange(
             num_blocks, dtype=torch.int32, device=device
         ).view(1, num_blocks),
-        slot_mapping=torch.arange(num_tokens, dtype=torch.int64, device=device),
+        slot_mapping=torch.arange(
+            context_length,
+            sequence_length,
+            dtype=torch.int64,
+            device=device,
+        ),
         causal=True,
     )
 
@@ -156,9 +175,15 @@ def make_common_metadata(
 def bind_mla_cache_and_metadata(
     layer: KimiDecoderLayer,
     vllm_config: VllmConfig,
-    num_tokens: int,
+    query_length: int,
+    context_length: int,
     device: torch.device,
-) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+) -> tuple[
+    dict[str, Any],
+    dict[str, torch.Tensor],
+    dict[str, Any] | None,
+    dict[str, torch.Tensor] | None,
+]:
     mla = layer.self_attn.mla_attn.mla_attn
     layer_name = mla.layer_name
     backend = mla.get_attn_backend()
@@ -169,16 +194,18 @@ def bind_mla_cache_and_metadata(
         vllm_config=vllm_config,
         device=device,
     )
-    common = make_common_metadata(
-        num_tokens,
+    decode_common = make_common_metadata(
+        query_length,
+        context_length,
         vllm_config.cache_config.block_size,
         device,
     )
-    metadata = builder.build(
+    decode_metadata = builder.build(
         common_prefix_len=0,
-        common_attn_metadata=common,
+        common_attn_metadata=decode_common,
     )
-    num_cache_blocks = cdiv(num_tokens, cache_spec.block_size)
+    sequence_length = context_length + query_length
+    num_cache_blocks = cdiv(sequence_length, cache_spec.block_size)
     cache_shape = backend.get_kv_cache_shape(
         num_cache_blocks,
         cache_spec.block_size,
@@ -186,15 +213,42 @@ def bind_mla_cache_and_metadata(
         cache_spec.head_size,
     )
     mla.kv_cache = torch.zeros(cache_shape, dtype=cache_spec.dtype, device=device)
-    return {layer_name: metadata}, {layer_name: common.slot_mapping}
+    context_metadata = None
+    context_slot_mapping = None
+    if context_length > 0:
+        context_common = make_common_metadata(
+            context_length,
+            0,
+            vllm_config.cache_config.block_size,
+            device,
+        )
+        context_metadata = {
+            layer_name: builder.build(
+                common_prefix_len=0,
+                common_attn_metadata=context_common,
+            )
+        }
+        context_slot_mapping = {layer_name: context_common.slot_mapping}
+    return (
+        {layer_name: decode_metadata},
+        {layer_name: decode_common.slot_mapping},
+        context_metadata,
+        context_slot_mapping,
+    )
 
 
 def bind_kda_cache_and_metadata(
     layer: KimiDecoderLayer,
     vllm_config: VllmConfig,
-    num_tokens: int,
+    query_length: int,
+    context_length: int,
     device: torch.device,
-) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+) -> tuple[
+    dict[str, Any],
+    dict[str, torch.Tensor],
+    dict[str, Any] | None,
+    dict[str, torch.Tensor] | None,
+]:
     kda = layer.self_attn
     if not isinstance(kda, KimiK3DeltaAttention):
         raise ProbeError("Selected layer does not use XPU KDA")
@@ -209,14 +263,20 @@ def bind_kda_cache_and_metadata(
         vllm_config=vllm_config,
         device=device,
     )
-    common = make_common_metadata(num_tokens, cache_spec.block_size, device)
-    metadata = builder.build(
-        common_prefix_len=0,
-        common_attn_metadata=common,
+    decode_common = make_common_metadata(
+        query_length,
+        context_length,
+        cache_spec.block_size,
+        device,
     )
+    decode_metadata = builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=decode_common,
+    )
+    sequence_length = context_length + query_length
     num_cache_blocks = cache_spec.max_num_blocks_per_req(
         vllm_config,
-        num_tokens,
+        sequence_length,
     )
     raw_cache = torch.zeros(
         num_cache_blocks,
@@ -227,23 +287,57 @@ def bind_kda_cache_and_metadata(
         device=device,
     )
     kda.bind_kv_cache(raw_cache)
-    return {layer_name: metadata}, {layer_name: common.slot_mapping}
+    context_metadata = None
+    context_slot_mapping = None
+    if context_length > 0:
+        context_common = make_common_metadata(
+            context_length,
+            0,
+            cache_spec.block_size,
+            device,
+        )
+        context_metadata = {
+            layer_name: builder.build(
+                common_prefix_len=0,
+                common_attn_metadata=context_common,
+            )
+        }
+        context_slot_mapping = {layer_name: context_common.slot_mapping}
+    return (
+        {layer_name: decode_metadata},
+        {layer_name: decode_common.slot_mapping},
+        context_metadata,
+        context_slot_mapping,
+    )
 
 
 def bind_attention_cache_and_metadata(
     layer: KimiDecoderLayer,
     vllm_config: VllmConfig,
-    num_tokens: int,
+    query_length: int,
+    context_length: int,
     device: torch.device,
-) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+) -> tuple[
+    dict[str, Any],
+    dict[str, torch.Tensor],
+    dict[str, Any] | None,
+    dict[str, torch.Tensor] | None,
+]:
     if isinstance(layer.self_attn, KimiK3DeltaAttention):
         return bind_kda_cache_and_metadata(
             layer,
             vllm_config,
-            num_tokens,
+            query_length,
+            context_length,
             device,
         )
-    return bind_mla_cache_and_metadata(layer, vllm_config, num_tokens, device)
+    return bind_mla_cache_and_metadata(
+        layer,
+        vllm_config,
+        query_length,
+        context_length,
+        device,
+    )
 
 
 def load_direct_parameter(
@@ -333,14 +427,15 @@ def load_layer_weights(
 
 
 def make_input_state(
-    args: argparse.Namespace,
     layer: KimiDecoderLayer,
     device: torch.device,
+    num_tokens: int,
+    seed: int,
+    state: dict[str, Any] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    if args.input_state is not None:
-        state = torch.load(args.input_state, map_location=device, weights_only=True)
+    if state is not None:
         hidden_states = state["hidden_states"]
-        expected_shape = (args.num_tokens, layer.hidden_size)
+        expected_shape = (num_tokens, layer.hidden_size)
         if tuple(hidden_states.shape) != expected_shape:
             raise ProbeError(
                 f"Input hidden_states shape {tuple(hidden_states.shape)} does not "
@@ -357,8 +452,8 @@ def make_input_state(
             prefix_sum,
             residual,
         )
-    generator = torch.Generator(device=device).manual_seed(17)
-    shape = (args.num_tokens, layer.hidden_size)
+    generator = torch.Generator(device=device).manual_seed(seed)
+    shape = (num_tokens, layer.hidden_size)
     hidden_states = torch.randn(
         shape, dtype=torch.bfloat16, device=device, generator=generator
     )
@@ -370,7 +465,7 @@ def make_input_state(
         )
         num_blocks = layer.prev_valid_blocks + int(layer.is_block_write_layer)
         residual = torch.randn(
-            args.num_tokens,
+            num_tokens,
             num_blocks,
             layer.hidden_size,
             dtype=torch.bfloat16,
@@ -418,6 +513,7 @@ def benchmark_layer_forward(
     slot_mapping: dict[str, torch.Tensor],
     vllm_config: VllmConfig,
     cache_state: tuple[torch.Tensor, ...],
+    context_length: int,
     warmup_iters: int,
     benchmark_iters: int,
 ) -> dict[str, Any]:
@@ -466,8 +562,19 @@ def benchmark_layer_forward(
         "latency_p99_ms": percentile(latencies_ms, 0.99),
         "tokens_per_second_median": hidden_states.size(0) * 1000 / median_ms,
         "attention_mode": (
-            "cold_decode" if hidden_states.size(0) == 1 else "prefill"
+            "cached_decode"
+            if context_length > 0
+            else "cold_decode"
+            if hidden_states.size(0) == 1
+            else "prefill"
         ),
+        "query_length": hidden_states.size(0),
+        "context_length": context_length,
+        "sequence_length": context_length + hidden_states.size(0),
+        "cache_snapshot": (
+            "post_context_population" if context_length > 0 else "initial"
+        ),
+        "context_population_timed": False,
         "cache_reset_between_iters": True,
         "input_reset_between_iters": True,
         "timing_method": "synchronized_host_wall_clock",
@@ -536,6 +643,12 @@ def main() -> int:
             raise ProbeError("--layer-index must be non-negative")
         if args.num_tokens < 1:
             raise ProbeError("--num-tokens must be positive")
+        if args.context_length < 0:
+            raise ProbeError("--context-length must be non-negative")
+        if args.context_length > 0 and args.num_tokens != 1:
+            raise ProbeError(
+                "--context-length currently requires --num-tokens 1"
+            )
         if args.warmup_iters < 0 or args.benchmark_iters < 0:
             raise ProbeError("Benchmark iteration counts must be non-negative")
         raw_config = load_checkpoint_config(args.checkpoint_dir)
@@ -580,15 +693,18 @@ def main() -> int:
 
         device = torch.device("xpu:0")
         torch.xpu.set_device(device)
+        sequence_length = args.context_length + args.num_tokens
         model_config = make_model_config(
             source_config,
             args.checkpoint_dir,
-            args.num_tokens,
+            sequence_length,
         )
         cache_config = CacheConfig(
             block_size=16,
             cache_dtype="auto",
+            enable_prefix_caching=False,
             mamba_block_size=model_config.max_model_len,
+            mamba_cache_mode="none",
         )
         vllm_config = VllmConfig(
             model_config=model_config,
@@ -646,15 +762,98 @@ def main() -> int:
                 layer.self_attn.mla_attn.mla_attn.process_weights_after_loading(
                     torch.bfloat16
                 )
-            metadata, slot_mapping = bind_attention_cache_and_metadata(
+            (
+                metadata,
+                slot_mapping,
+                context_metadata,
+                context_slot_mapping,
+            ) = bind_attention_cache_and_metadata(
                 layer,
                 vllm_config,
                 args.num_tokens,
+                args.context_length,
                 device,
             )
-            hidden_states, prefix_sum, residual = make_input_state(args, layer, device)
-            positions = torch.zeros(args.num_tokens, dtype=torch.int64, device=device)
-            initial_cache_state = capture_attention_cache(layer)
+            loaded_input_state = None
+            if args.input_state is not None:
+                loaded_input_state = torch.load(
+                    args.input_state,
+                    map_location=device,
+                    weights_only=True,
+                )
+            if args.context_length > 0:
+                if loaded_input_state is not None:
+                    if not all(
+                        key in loaded_input_state for key in ("prefill", "decode")
+                    ):
+                        raise ProbeError(
+                            "Cached decode input-state requires prefill and "
+                            "decode sub-dictionaries"
+                        )
+                    context_input_state = loaded_input_state["prefill"]
+                    decode_input_state = loaded_input_state["decode"]
+                else:
+                    context_input_state = None
+                    decode_input_state = None
+                context_hidden_states, context_prefix_sum, context_residual = (
+                    make_input_state(
+                        layer,
+                        device,
+                        args.context_length,
+                        seed=17,
+                        state=context_input_state,
+                    )
+                )
+                assert context_metadata is not None
+                assert context_slot_mapping is not None
+                context_positions = torch.arange(
+                    args.context_length,
+                    dtype=torch.int64,
+                    device=device,
+                )
+                with torch.inference_mode(), set_forward_context(
+                    context_metadata,
+                    vllm_config,
+                    num_tokens=args.context_length,
+                    slot_mapping=context_slot_mapping,
+                ):
+                    context_output, _, _ = layer(
+                        context_positions,
+                        context_hidden_states.clone(),
+                        (
+                            None
+                            if context_residual is None
+                            else context_residual.clone()
+                        ),
+                        (
+                            None
+                            if context_prefix_sum is None
+                            else context_prefix_sum.clone()
+                        ),
+                    )
+                torch.xpu.synchronize()
+                if not bool(torch.isfinite(context_output).all()):
+                    raise ProbeError(
+                        "Context population output contains non-finite values"
+                    )
+                benchmark_cache_state = capture_attention_cache(layer)
+            else:
+                decode_input_state = loaded_input_state
+                benchmark_cache_state = capture_attention_cache(layer)
+            hidden_states, prefix_sum, residual = make_input_state(
+                layer,
+                device,
+                args.num_tokens,
+                seed=18 if args.context_length > 0 else 17,
+                state=decode_input_state,
+            )
+            positions = torch.arange(
+                args.context_length,
+                sequence_length,
+                dtype=torch.int64,
+                device=device,
+            )
+            restore_attention_cache(layer, benchmark_cache_state)
             with torch.inference_mode():
                 with set_forward_context(
                     metadata,
@@ -697,7 +896,8 @@ def main() -> int:
                     metadata=metadata,
                     slot_mapping=slot_mapping,
                     vllm_config=vllm_config,
-                    cache_state=initial_cache_state,
+                    cache_state=benchmark_cache_state,
+                    context_length=args.context_length,
                     warmup_iters=args.warmup_iters,
                     benchmark_iters=args.benchmark_iters,
                 )
@@ -711,7 +911,7 @@ def main() -> int:
                     metadata=metadata,
                     slot_mapping=slot_mapping,
                     vllm_config=vllm_config,
-                    cache_state=initial_cache_state,
+                    cache_state=benchmark_cache_state,
                     output_path=args.profile_output,
                 )
             if args.save_output is not None:
@@ -727,6 +927,11 @@ def main() -> int:
                 loaded_parameters=len(loaded),
                 loaded_moe_tensors=len(moe_records),
                 input_state="file" if args.input_state else "synthetic",
+                query_length=args.num_tokens,
+                context_length=args.context_length,
+                sequence_length=sequence_length,
+                context_population_executed=args.context_length > 0,
+                mamba_cache_mode=vllm_config.cache_config.mamba_cache_mode,
                 output_shape=list(output.shape),
                 output_dtype=str(output.dtype),
                 output_all_finite=True,
