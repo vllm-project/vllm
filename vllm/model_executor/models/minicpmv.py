@@ -472,12 +472,12 @@ def get_version_by_config(config: PretrainedConfig) -> tuple[int, ...]:
 def _minicpmv_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     return dict(
         pixel_values=MultiModalFieldConfig.batched("image"),
-        image_sizes=MultiModalFieldConfig.batched("image"),
-        tgt_sizes=MultiModalFieldConfig.batched("image"),
+        image_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+        tgt_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         image_embeds=MultiModalFieldConfig.batched("image"),
         video_pixel_values=MultiModalFieldConfig.batched("video"),
-        video_image_sizes=MultiModalFieldConfig.batched("video"),
-        video_tgt_sizes=MultiModalFieldConfig.batched("video"),
+        video_image_sizes=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+        video_tgt_sizes=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         video_embeds=MultiModalFieldConfig.batched("video"),
     )
 
@@ -653,7 +653,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
     def get_data_parser(self):
         return MiniCPMVMultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
-            embeds_from_ec_connector=self.embeds_from_ec_connector,
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def get_model_version(self):
