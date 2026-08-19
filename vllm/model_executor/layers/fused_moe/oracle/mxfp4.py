@@ -1219,12 +1219,9 @@ def convert_weight_to_mxfp4_moe_kernel_format(  # noqa: C901
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
     ):
-        # FlashInfer CUTLASS consumes [w3; w1]: swap halves.
-        w13_weight = swap_w13_to_w31(w13_weight.data)
-        w13_weight_scale = swap_w13_to_w31(w13_weight_scale.data)
+        # FlashInfer CUTLASS consumes [w3; w1]
         if w13_bias is not None:
-            b1, b3 = torch.chunk(w13_bias.data, 2, dim=-1)
-            w13_bias = torch.cat([b3, b1], dim=-1).to(torch.bfloat16)
+            w13_bias = w13_bias.data.to(torch.bfloat16)
         if w2_bias is not None:
             w2_bias = w2_bias.data.to(torch.bfloat16)
 
