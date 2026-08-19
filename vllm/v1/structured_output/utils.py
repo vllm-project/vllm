@@ -6,6 +6,7 @@ import hashlib
 import importlib.metadata
 import os
 import sqlite3
+import sys
 import tempfile
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
@@ -14,11 +15,9 @@ from typing import TYPE_CHECKING, TypeVar
 import regex as re
 import torch
 from cachetools import LRUCache
-from transformers import MistralCommonBackend
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -323,10 +322,23 @@ def maybe_wrap_mistral_common_tokenizer(tokenizer: TokenizerLike) -> TokenizerLi
     Mixtral-8x7B-v0.1) -- because both fail the same way unwrapped.
 
     Any other tokenizer is returned unchanged.
+
+    The Mistral imports are deferred: pulling them in at module scope costs about
+    a second on `import vllm.v1.worker.gpu_model_runner`, which imports this
+    module, and every worker would pay it whether or not a Mistral model is
+    served. A live `MistralCommonBackend` can only exist once transformers has
+    imported the module that defines it, so a `sys.modules` lookup is enough to
+    rule it out without importing anything.
     """
-    if isinstance(tokenizer, MistralCommonBackend):
-        return MistralTokenizer(tokenizer)
-    return tokenizer
+    mistral_common_module = sys.modules.get("transformers.tokenization_mistral_common")
+    if mistral_common_module is None or not isinstance(
+        tokenizer, mistral_common_module.MistralCommonBackend
+    ):
+        return tokenizer
+
+    from vllm.tokenizers.mistral import MistralTokenizer
+
+    return MistralTokenizer(tokenizer)
 
 
 def _reduced_vocabulary(tokenizer: TokenizerLike) -> dict[bytes, list[int]]:
