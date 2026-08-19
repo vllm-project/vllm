@@ -1208,10 +1208,8 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
             images=MultiModalFieldConfig.flat_from_sizes("image", num_crops),
             image_masks=MultiModalFieldConfig.flat_from_sizes("image", num_crops),
             image_input_idx=MultiModalFieldConfig.flat_from_sizes("image", num_crops),
-            num_crops=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
-            img_patch_id=MultiModalFieldConfig.shared(
-                "image", num_images, keep_on_cpu=True
-            ),
+            num_crops=MultiModalFieldConfig.batched("image"),
+            img_patch_id=MultiModalFieldConfig.shared("image", num_images),
         )
 
     def _get_prompt_updates(

@@ -2127,30 +2127,26 @@ class Molmo2MultiModalProcessor(BaseMultiModalProcessor[Molmo2ProcessingInfo]):
             image_token_pooling=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_num_pooled_patches
             ),
-            image_num_crops=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
-            image_num_pooled_patches=MultiModalFieldConfig.batched(
-                "image", keep_on_cpu=True
-            ),
-            image_num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            image_num_crops=MultiModalFieldConfig.batched("image"),
+            image_num_pooled_patches=MultiModalFieldConfig.batched("image"),
+            image_num_patches=MultiModalFieldConfig.batched("image"),
             image_tokens=MultiModalFieldConfig.flat_from_sizes(
                 "image", num_image_tokens
             ),
-            num_image_tokens=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            num_image_tokens=MultiModalFieldConfig.batched("image"),
             pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_num_crops
             ),
             video_token_pooling=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_num_pooled_patches
             ),
-            video_num_crops=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
-            video_num_pooled_patches=MultiModalFieldConfig.batched(
-                "video", keep_on_cpu=True
-            ),
-            video_num_patches=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            video_num_crops=MultiModalFieldConfig.batched("video"),
+            video_num_pooled_patches=MultiModalFieldConfig.batched("video"),
+            video_num_patches=MultiModalFieldConfig.batched("video"),
             video_tokens=MultiModalFieldConfig.flat_from_sizes(
                 "video", num_video_tokens
             ),
-            num_video_tokens=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            num_video_tokens=MultiModalFieldConfig.batched("video"),
         )
 
     def _get_prompt_updates(

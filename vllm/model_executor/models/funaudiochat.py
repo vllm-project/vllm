@@ -695,9 +695,7 @@ class FunAudioChatMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return {
             "speech_ids": MultiModalFieldConfig.batched("audio"),
-            "speech_attention_mask": MultiModalFieldConfig.batched(
-                "audio", keep_on_cpu=True
-            ),
+            "speech_attention_mask": MultiModalFieldConfig.batched("audio"),
             "input_features": MultiModalFieldConfig.batched("audio"),
             "feature_attention_mask": MultiModalFieldConfig.batched("audio"),
             "feature_exist_mask": MultiModalFieldConfig.batched("audio"),
