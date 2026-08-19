@@ -57,9 +57,12 @@ class SymmMemPeerAllocation:
         return self.multicast_ptr + (local_view.data_ptr() - self.storage.data_ptr())
 
     def close(self) -> None:
-        self.peer_ptrs = torch.empty(0, dtype=torch.int64, device=self.storage.device)
+        device = self.peer_ptrs.device
+        self._peer_views.clear()
+        self.peer_ptrs = torch.empty(0, dtype=torch.int64, device=device)
         self.handle = None
-        self.storage = torch.empty(0, dtype=self.storage.dtype, device="cpu")
+        self.multicast_ptr = 0
+        self.storage = torch.empty(0, dtype=torch.int8, device="cpu")
 
 
 def allocate_symm_mem_peer(
