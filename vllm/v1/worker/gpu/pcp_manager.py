@@ -6,15 +6,15 @@ from dataclasses import dataclass, replace
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pcp_group,
     in_the_same_node_as,
 )
-import vllm.envs as envs
-from vllm.platforms import current_platform
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
@@ -80,14 +80,6 @@ class PCPManager:
         self._gathered_kv_write_mask: torch.Tensor | None = None
         self._pad_slot_id = torch.tensor(PAD_SLOT_ID, dtype=torch.int64, device=device)
 
-    @property
-    def direct_kv_enabled(self) -> bool:
-        from vllm.model_executor.layers.attention.pcp_direct_kv import (
-            pcp_direct_kv_active,
-        )
-
-        return self._direct_kv_requested and pcp_direct_kv_active()
-
         max_num_local_reqs = 2 * max_num_reqs if max_num_reqs is not None else None
         self._input_buffers = (
             InputBuffers(max_num_local_reqs, max_num_tokens, device)
@@ -137,6 +129,14 @@ class PCPManager:
             if max_num_tokens is not None and num_kv_cache_groups > 0
             else None
         )
+
+    @property
+    def direct_kv_enabled(self) -> bool:
+        from vllm.model_executor.layers.attention.pcp_direct_kv import (
+            pcp_direct_kv_active,
+        )
+
+        return self._direct_kv_requested and pcp_direct_kv_active()
 
     @staticmethod
     def validate_config(
@@ -739,7 +739,8 @@ def select_pcp_direct_slot_row(
     if gathered_slot_mappings.ndim != 2:
         raise ValueError(
             "Expected gathered slot mappings with shape "
-            f"[num_groups, pcp_world_size * padded_tokens], got {tuple(gathered_slot_mappings.shape)}"
+            f"[num_groups, pcp_world_size * padded_tokens], "
+            f"got {tuple(gathered_slot_mappings.shape)}"
         )
     _, expanded = gathered_slot_mappings.shape
     if expanded % pcp_world_size != 0:
