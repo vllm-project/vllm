@@ -120,6 +120,27 @@ fn factory_new_resolves_default_patterns() {
     let factory = ToolParserFactory::new();
 
     assert_eq!(
+        factory.resolve_name_for_model("stepfun-ai/Step-3.5-Flash"),
+        Some(names::STEP3P5)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("stepfun-ai/step3p5"),
+        Some(names::STEP3P5)
+    );
+
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/Qwen3.5-0.8B"),
+        Some(names::QWEN3_CODER)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/Qwen3-0.6B"),
+        Some(names::QWEN3_XML)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("Qwen/Qwen3-Coder-30B"),
+        Some(names::QWEN3_CODER)
+    );
+    assert_eq!(
         factory.resolve_name_for_model("meta-llama-4-maverick"),
         Some(names::LLAMA4_JSON)
     );
