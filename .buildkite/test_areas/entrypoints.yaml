@@ -14,6 +14,14 @@ steps:
   commands:
   - pytest -v -s entrypoints/unit_tests
   - pytest -v -s entrypoints/weight_transfer
+  mirror:
+    amd:
+      label: ":amd: (MI355) Entrypoints Unit"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 35
+      depends_on:
+      - image-build-amd
 
 - label: ":nvidia: (H200) Entrypoints Integration (LLM)"
   device: h200_35gb
@@ -144,6 +152,14 @@ steps:
   - tests/entrypoints/openai/responses
   commands:
   - pytest -v -s entrypoints/openai/responses
+  mirror:
+    amd:
+      label: ":amd: (MI355) Entrypoints Integration (Responses API)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 50
+      depends_on:
+      - image-build-amd
 
 - label: ":nvidia: (H200) Entrypoints Integration (Speech to Text)"
   device: h200_35gb
@@ -170,6 +186,14 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/multimodal
+  mirror:
+    amd:
+      label: ":amd: (MI355) Entrypoints Integration (Multimodal)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 55
+      depends_on:
+      - image-build-amd
 
 - label: ":nvidia: (H200) Entrypoints Integration (Pooling)"
   device: h200_35gb
