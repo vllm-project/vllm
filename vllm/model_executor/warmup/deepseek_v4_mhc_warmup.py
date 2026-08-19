@@ -2,14 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Warm up DeepSeek V4 mHC TileLang kernels before serving requests.
 
+Two dispatch paths are supported:
+- Layers that lack ``hc_pre`` / ``hc_post`` CustomOp attributes (the
+  ``nvidia/`` backend) call the tilelang functions directly.
+- Layers that have ``hc_pre`` / ``hc_post`` (the ``amd/`` and ``xpu/``
+  backends) go through the CustomOp wrappers.
+
 Ported from lucifer1004/vllm-jasl with the two env-var knobs removed
-(`VLLM_ENABLE_DEEPSEEK_V4_MHC_WARMUP`, `VLLM_DEEPSEEK_V4_MHC_WARMUP_TOKEN_SIZES`).
+(``VLLM_ENABLE_DEEPSEEK_V4_MHC_WARMUP``, ``VLLM_DEEPSEEK_V4_MHC_WARMUP_TOKEN_SIZES``).
 Gating is intrinsic: non-DSv4 models and layers without hc_* attributes
 return early, so the warmup is a no-op except where it's needed.
 """
 
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from typing import Any
 
 import torch
 
@@ -19,20 +26,50 @@ from vllm.tracing import instrument
 logger = init_logger(__name__)
 
 _AUTO_WARMUP_MAX_TOKENS = 16_384
+# Powers of two plus all grid-threshold values that cover every unique n_splits
+# for both broadcast (21 thresholds) and fused (26 thresholds) kernels. Each
+# entry sits in the middle of a 64-token grid cell so that the exact token
+# count from the chat template still lands in the intended cell.
 _DEFAULT_TOKEN_SIZE_CANDIDATES = (
     1,
     2,
+    3,
     4,
     8,
     16,
     32,
     64,
+    96,
     128,
+    160,
+    192,
+    224,
     256,
+    288,
+    352,
+    416,
+    480,
     512,
+    544,
+    608,
+    672,
+    736,
+    800,
+    864,
+    928,
+    992,
     1024,
+    1120,
+    1184,
+    1312,
+    1504,
+    1696,
     2048,
+    2400,
+    3040,
+    4000,
     4096,
+    6048,
     8192,
     16_384,
 )
@@ -65,11 +102,9 @@ def _find_first_mhc_layer(model: torch.nn.Module) -> torch.nn.Module | None:
     for module in model.modules():
         if module.__class__.__name__ != "DeepseekV4DecoderLayer":
             continue
-        if all(
+        has_mhc_parameters = all(
             hasattr(module, attr)
             for attr in (
-                "hc_pre",
-                "hc_post",
                 "hc_attn_fn",
                 "hc_attn_scale",
                 "hc_attn_base",
@@ -77,7 +112,14 @@ def _find_first_mhc_layer(model: torch.nn.Module) -> torch.nn.Module | None:
                 "hc_ffn_scale",
                 "hc_ffn_base",
             )
-        ):
+        )
+        has_custom_ops = all(
+            callable(getattr(module, attr, None)) for attr in ("hc_pre", "hc_post")
+        )
+        has_nvidia_tilelang_ops = all(
+            hasattr(module, attr) for attr in ("attn_norm", "ffn_norm")
+        )
+        if has_mhc_parameters and (has_custom_ops or has_nvidia_tilelang_ops):
             return module
     return None
 
@@ -92,6 +134,100 @@ def _find_deepseek_v4_model(model: torch.nn.Module) -> torch.nn.Module | None:
         ):
             return module
     return None
+
+
+def _get_tilelang_mhc_ops() -> tuple[Callable[..., Any], ...]:
+    from vllm.model_executor.kernels.mhc.tilelang import (
+        hc_head_fused_kernel_tilelang,
+        mhc_fused_post_pre_tilelang,
+        mhc_post_tilelang,
+        mhc_pre_broadcast_tilelang,
+        mhc_pre_tilelang,
+    )
+
+    return (
+        mhc_pre_tilelang,
+        mhc_pre_broadcast_tilelang,
+        mhc_fused_post_pre_tilelang,
+        mhc_post_tilelang,
+        hc_head_fused_kernel_tilelang,
+    )
+
+
+def _warmup_nvidia_layer_mhc(
+    layer: torch.nn.Module,
+    residual: torch.Tensor,
+    token_sizes: list[int],
+) -> None:
+    """Warmup path for nvidia models that call tilelang functions directly.
+
+    Args:
+        layer: The first ``DeepseekV4DecoderLayer`` with HC attributes.
+        residual: Pre-allocated 3-D buffer ``(max_tokens, hc_mult, hidden_size)``.
+        token_sizes: Token counts to warm up (slices of ``residual``).
+    """
+    (mhc_pre, mhc_pre_broadcast, mhc_fused_post_pre, mhc_post, _) = (
+        _get_tilelang_mhc_ops()
+    )
+
+    fn_broadcast = getattr(layer, "hc_attn_fn_broadcast", None)
+    if fn_broadcast is not None:
+        broadcast_residual = torch.zeros(
+            residual.shape[0],
+            residual.shape[2],
+            dtype=residual.dtype,
+            device=residual.device,
+        )
+        for size in token_sizes:
+            mhc_pre_broadcast(
+                broadcast_residual[:size],
+                layer.hc_attn_fn,
+                layer.hc_attn_scale,
+                layer.hc_attn_base,
+                layer.rms_norm_eps,
+                layer.hc_eps,
+                layer.hc_eps,
+                layer.hc_post_alpha,
+                layer.hc_sinkhorn_iters,
+                norm_weight=layer.attn_norm.weight.data,
+                norm_eps=layer.attn_norm.variance_epsilon,
+                fn_broadcast=fn_broadcast,
+            )
+
+    for size in token_sizes:
+        residual_slice = residual[:size]
+        post_mix, res_mix, layer_input = mhc_pre(
+            residual_slice,
+            layer.hc_attn_fn,
+            layer.hc_attn_scale,
+            layer.hc_attn_base,
+            layer.rms_norm_eps,
+            layer.hc_eps,
+            layer.hc_eps,
+            layer.hc_post_alpha,
+            layer.hc_sinkhorn_iters,
+            norm_weight=layer.attn_norm.weight.data,
+            norm_eps=layer.attn_norm.variance_epsilon,
+        )
+        residual_cur, post_mix_cur, res_mix_cur, layer_input_cur = mhc_fused_post_pre(
+            layer_input,
+            residual_slice,
+            post_mix,
+            res_mix,
+            layer.hc_ffn_fn,
+            layer.hc_ffn_scale,
+            layer.hc_ffn_base,
+            layer.rms_norm_eps,
+            layer.hc_eps,
+            layer.hc_eps,
+            layer.hc_post_alpha,
+            layer.hc_sinkhorn_iters,
+            n_splits=1,
+            tile_n=1,
+            norm_weight=layer.ffn_norm.weight.data,
+            norm_eps=layer.ffn_norm.variance_epsilon,
+        )
+        mhc_post(layer_input_cur, residual_cur, post_mix_cur, res_mix_cur)
 
 
 def _warmup_layer_mhc(
@@ -110,19 +246,25 @@ def _warmup_layer_mhc(
         device=device,
     )
 
+    hc_pre = getattr(layer, "hc_pre", None)
+    hc_post = getattr(layer, "hc_post", None)
+    if not callable(hc_pre) or not callable(hc_post):
+        _warmup_nvidia_layer_mhc(layer, residual, token_sizes)
+        return
+
     for size in token_sizes:
         residual_slice = residual[:size]
         for fn, scale, base in (
             (layer.hc_attn_fn, layer.hc_attn_scale, layer.hc_attn_base),
             (layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base),
         ):
-            layer_input, post_mix, comb_mix = layer.hc_pre(
+            layer_input, post_mix, comb_mix = hc_pre(
                 residual_slice,
                 fn,
                 scale,
                 base,
             )
-            layer.hc_post(layer_input, residual_slice, post_mix, comb_mix)
+            hc_post(layer_input, residual_slice, post_mix, comb_mix)
 
 
 def _warmup_hc_head(
@@ -133,10 +275,11 @@ def _warmup_hc_head(
     # ``hc_head`` from a free function into the ``HCHeadOp`` CustomOp
     # instance attached to the model as ``hc_head_op``. We call through
     # that instance so the warmup exercises the same dispatched
-    # implementation as the inference path.
+    # implementation as the inference path.  When the CustomOp is absent
+    # (nvidia backend) we fall back to the underlying tilelang function.
     hc_head_op = getattr(model, "hc_head_op", None)
     if hc_head_op is None:
-        return
+        _, _, _, _, hc_head_op = _get_tilelang_mhc_ops()
 
     max_tokens = max(token_sizes)
     hidden_size = int(model.config.hidden_size)
