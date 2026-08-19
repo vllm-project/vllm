@@ -512,6 +512,18 @@ def test_thinking_only_sentencepiece_normalized_in_content(
     assert "First, I need to check the weather." in out.content
 
 
+def test_thinking_only_output_not_leaked_into_content(parser: ToolParser) -> None:
+    # Thinking-only output (nothing after </think>) must not leak the raw
+    # reasoning text back as visible content.
+    request = make_request(make_tools_weather())
+    text = "Let me reason about the request.</think>"
+    out = parser.extract_tool_calls(text, request)
+    assert not out.tools_called
+    assert out.tool_calls == []
+    assert out.content == ""
+    assert "</think>" not in (out.content or "")
+
+
 def test_properties_wrapped_arguments(parser: ToolParser) -> None:
     tools = [
         _tool(
