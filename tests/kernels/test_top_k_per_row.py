@@ -374,6 +374,55 @@ def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "batch_size,num_speculative_tokens",
+    [
+        pytest.param(1, 2, id="eight-splits"),
+        pytest.param(7, 4, id="four-splits"),
+        pytest.param(13, 4, id="baseline-fallback"),
+    ],
+)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
+@torch.inference_mode()
+def test_top_k_per_row_decode_gfx950_long_c4a(
+    batch_size: int, num_speculative_tokens: int
+) -> None:
+    properties = torch.cuda.get_device_properties(0)
+    if not properties.gcnArchName.startswith("gfx950"):
+        pytest.skip("This test exercises the gfx950 launch configuration")
+
+    query_tokens = num_speculative_tokens + 1
+    num_rows = batch_size * query_tokens
+    stride = 262_144
+    top_k = 1024
+    offsets = torch.arange(num_rows, dtype=torch.int32, device="cuda")
+    seq_lens = 125_000 + offsets * 125_000 // max(num_rows - 1, 1)
+    seq_lens = seq_lens.reshape(batch_size, query_tokens)
+    logits = torch.randn(num_rows, stride, dtype=torch.float32, device="cuda")
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+
+    torch.ops._C.top_k_per_row_decode(
+        logits,
+        query_tokens,
+        seq_lens,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+
+    row_starts = torch.zeros(num_rows, dtype=torch.int32, device="cuda")
+    validate_topk_against_reference(
+        logits,
+        indices,
+        row_starts,
+        seq_lens.reshape(-1),
+        top_k,
+        "gfx950 long C4A top-k",
+    )
+
+
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
 @torch.inference_mode()
 def test_aiter_c4a_prefill_topk_returns_sequence_local_indices() -> None:

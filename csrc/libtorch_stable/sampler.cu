@@ -2,6 +2,8 @@
 #include "dispatch_utils.h"
 #include "torch_utils.h"
 
+#include <cstring>
+
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
 #else
@@ -693,7 +695,21 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
             static_cast<int>(next_n), seqLensIs2D);
   } else {
     // Long sequences are run in two steps
-    constexpr auto multipleBlocksPerRowConfig = 10;
+#ifdef USE_ROCM
+    const bool useGfx950TopK1024 =
+        topK == 1024 && numRows <= 64 &&
+        std::strncmp(get_device_prop()->gcnArchName, "gfx950", 6) == 0;
+#else
+    constexpr bool useGfx950TopK1024 = false;
+#endif
+    int multipleBlocksPerRowConfig = 10;
+    if (useGfx950TopK1024) {
+      if (numRows <= 32) {
+        multipleBlocksPerRowConfig = 8;
+      } else {
+        multipleBlocksPerRowConfig = 4;
+      }
+    }
 
     const auto outIndicesAux = torch::stable::empty(
         {numRows, multipleBlocksPerRowConfig, topK},
@@ -702,14 +718,26 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
         {numRows, multipleBlocksPerRowConfig, topK},
         torch::headeronly::ScalarType::Float, std::nullopt, logits.device());
 
-    vllm::topKPerRowDecode<kNumThreadsPerBlock, true, true>
-        <<<dim3(numRows, multipleBlocksPerRowConfig), kNumThreadsPerBlock,
-           2 * topK * sizeof(int32_t), stream>>>(
-            logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
-            outIndicesAux.mutable_data_ptr<int>(), static_cast<int>(stride0),
-            static_cast<int>(stride1), static_cast<int>(topK),
-            static_cast<int>(next_n), seqLensIs2D,
-            outLogitsAux.mutable_data_ptr<float>());
+    if (useGfx950TopK1024) {
+      constexpr int kNumThreadsPerSplitBlock = 1024;
+      vllm::topKPerRowDecode<kNumThreadsPerSplitBlock, true, true>
+          <<<dim3(numRows, multipleBlocksPerRowConfig),
+             kNumThreadsPerSplitBlock, 2 * topK * sizeof(int32_t), stream>>>(
+              logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
+              outIndicesAux.mutable_data_ptr<int>(), static_cast<int>(stride0),
+              static_cast<int>(stride1), static_cast<int>(topK),
+              static_cast<int>(next_n), seqLensIs2D,
+              outLogitsAux.mutable_data_ptr<float>());
+    } else {
+      vllm::topKPerRowDecode<kNumThreadsPerBlock, true, true>
+          <<<dim3(numRows, multipleBlocksPerRowConfig), kNumThreadsPerBlock,
+             2 * topK * sizeof(int32_t), stream>>>(
+              logits.const_data_ptr<float>(), seqLens.const_data_ptr<int>(),
+              outIndicesAux.mutable_data_ptr<int>(), static_cast<int>(stride0),
+              static_cast<int>(stride1), static_cast<int>(topK),
+              static_cast<int>(next_n), seqLensIs2D,
+              outLogitsAux.mutable_data_ptr<float>());
+    }
 
     constexpr int kNumThreadsPerBlockMerge = 1024;
     vllm::topKPerRowDecode<kNumThreadsPerBlockMerge, true, false, true>
