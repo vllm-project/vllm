@@ -1471,7 +1471,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_USE_DEEP_GEMM=0
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-fp8.txt --tp-size=4
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-tp4.txt --tp-size=4
 
 #---------------------------------------------------------  mi300 · examples  ----------------------------------------------------------#
 
@@ -3318,7 +3318,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_USE_DEEP_GEMM=0
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-fp8.txt --tp-size=4
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-tp4.txt --tp-size=4
 
 #---------------------------------------------------------  mi355 · examples  ----------------------------------------------------------#
 
