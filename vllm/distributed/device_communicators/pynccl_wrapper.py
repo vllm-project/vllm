@@ -51,8 +51,15 @@ class ncclUniqueId(ctypes.Structure):
     _fields_ = [("internal", ctypes.c_byte * 128)]
 
 
-# NCCL 2.30+ ncclCommProperties_t. Only fields through ginType are read;
-# trailing fields keep the layout aligned with NCCL's versioned structure.
+# Mirror of NCCL's versioned ncclCommProperties_t (nccl_device/core.h,
+# v2.31.2-1, 144 bytes). ncclCommQueryProperties fills fields gated by the
+# version the caller declares in props.version, not by props.size, so never
+# declare a version newer than this layout: clamp to
+# NCCL_COMM_PROPERTIES_LAYOUT_VERSION. To use fields added in a newer NCCL,
+# extend the layout and bump the constant.
+NCCL_COMM_PROPERTIES_LAYOUT_VERSION = 23102  # NCCL_VERSION(2, 31, 2)
+
+
 class ncclCommProperties(ctypes.Structure):
     _fields_ = [
         ("size", ctypes.c_size_t),
@@ -68,6 +75,12 @@ class ncclCommProperties(ctypes.Structure):
         ("nLsaTeams", ctypes.c_int),
         ("hostRmaSupport", ctypes.c_bool),
         ("railedGinType", ctypes.c_int),
+        # Filled only when the declared version is >= NCCL_VERSION(2, 31, 0).
+        ("commHash", ctypes.c_uint64),
+        ("ginMinStride", ctypes.c_int),
+        ("ginConnectionType", ctypes.c_int),
+        ("ginSupport", ctypes.c_bool * 64),
+        ("devCommRuntimeVersionSize", ctypes.c_size_t),
     ]
 
 
