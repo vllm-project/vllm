@@ -84,22 +84,12 @@ annotate_image_tags() {
         "${IMAGE_TAG:-}" "${IMAGE_TAG_LATEST:-}"
 }
 
-run_ci_post_build_hook() {
-    if [[ -n "${VLLM_CI_IMAGE_POST_BUILD_HOOK:-}" ]] && ! bash \
-            "${VLLM_CI_IMAGE_POST_BUILD_HOOK}" "${IMAGE_TAG}" \
-            "${VLLM_BAKE_FILE_PATH}" "${CI_HCL_PATH}" "${CI_HCL_URL}" "${TARGET}" \
-            "${PWD}"; then
-        echo "Optional CI post-build hook failed; continuing image build." >&2
-    fi
-}
-
 check_and_skip_if_image_exists() {
     if [[ -n "${IMAGE_TAG:-}" ]]; then
         echo "--- :mag: Checking if image exists"
         if docker manifest inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
             echo "Image already exists: ${IMAGE_TAG}"
             echo "Skipping build"
-            run_ci_post_build_hook
             annotate_image_tags
             exit 0
         fi
@@ -283,5 +273,4 @@ docker --debug buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" --pro
 
 echo "--- :white_check_mark: Build complete"
 
-run_ci_post_build_hook
 annotate_image_tags
