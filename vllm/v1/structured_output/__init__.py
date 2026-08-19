@@ -371,22 +371,34 @@ class StructuredOutputManager:
                 constraint_start = self._get_constraint_start(request, req_tokens)
                 state_advancements = 0
                 seen_padding = False
+                failed = False
                 for i, token in enumerate(req_tokens):
-                    apply_bitmask = not seen_padding and i >= constraint_start
+                    apply_bitmask = (
+                        not failed and not seen_padding and i >= constraint_start
+                    )
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
                     if token == -1:
                         seen_padding = True
                     elif apply_bitmask and not grammar.is_terminated():
-                        accepted = grammar.accept_tokens(req_id, [token])
-                        # grammar_bitmask should only see validated drafts tokens
-                        assert accepted, (token, req_id, scheduled_spec_decode_tokens)
-                        state_advancements += 1
+                        if grammar.accept_tokens(req_id, [token]):
+                            state_advancements += 1
+                        else:
+                            failed = True
+                            logger.error(
+                                "Unexpected: grammar rejected draft token %s "
+                                "for request %s during bitmask fill.",
+                                token,
+                                req_id,
+                            )
                     cumulative_index += 1
+
                 # Diffusion LLMs don't sample a bonus token after the
                 # scheduled positions, so skip its bitmask in that case.
                 if not (self.vllm_config.model_config.is_diffusion and req_tokens):
-                    bonus_apply = not seen_padding and constraint_start <= len(
-                        req_tokens
+                    bonus_apply = (
+                        not failed
+                        and not seen_padding
+                        and constraint_start <= len(req_tokens)
                     )
                     self._fill_bitmasks(((grammar, cumulative_index, bonus_apply),))
                     cumulative_index += 1
