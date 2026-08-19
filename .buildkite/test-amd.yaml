@@ -411,8 +411,9 @@ steps:
 
 - label: Python-only Installation # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  dind: false
+  agent_pool: mi300_1
   optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -989,10 +990,12 @@ steps:
   - vllm/entrypoints
   - tests/entrypoints/unit_tests
   - tests/entrypoints/weight_transfer
+  - tests/entrypoints/launchers
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s entrypoints/unit_tests
   - pytest -v -s entrypoints/weight_transfer
+  - pytest -v -s entrypoints/launchers
 
 - label: Entrypoints Integration (LLM) # TBD
   timeout_in_minutes: 180
@@ -1543,11 +1546,13 @@ steps:
   - vllm/_aiter_ops.py
   - tests/kernels/attention/test_rocm_aiter_mla_decode.py
   - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+  - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
   - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
   commands:
   - rocm-smi
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
 
 - label: Kernels Attention Test %N # TBD
@@ -1663,6 +1668,7 @@ steps:
   - tests/kernels/quant_utils.py
   - tests/kernels/utils.py
   - vllm/_aiter_ops.py
+  - vllm/kernels/aiter_ops.py
   - vllm/_custom_ops.py
   - vllm/envs.py
   - vllm/platforms/rocm.py
@@ -1988,8 +1994,8 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
-  - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: Language Models Tests (Hybrid) %N # TBD
@@ -2004,8 +2010,8 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
-  - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 #----------------------------------------------------  mi300 · models / multimodal  ----------------------------------------------------#
@@ -2092,7 +2098,7 @@ steps:
   - tests/models/multimodal/generation
   - tests/models/multimodal/test_mapping.py
   commands:
-  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing
+  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing
   - pytest -v -s models/multimodal/generation/test_memory_leak.py -m core_model
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
@@ -2316,9 +2322,9 @@ steps:
   - tests/benchmarks/test_serve_cli.py
   - tests/entrypoints/openai/chat_completion/test_chat_completion.py
   - tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
-  - tests/entrypoints/openai/completion/test_shutdown.py
+  - tests/entrypoints/launchers/test_shutdown.py
   - tests/entrypoints/openai/test_return_token_ids.py
-  - tests/entrypoints/openai/test_uds.py
+  - tests/entrypoints/serve/instrumentator/test_uds.py
   - tests/v1/sample/test_logprobs_e2e.py
   - vllm/platforms/rocm.py
   commands:
@@ -2327,9 +2333,9 @@ steps:
   - pytest -v -s benchmarks/test_serve_cli.py -k "not insecure and not (test_bench_serve and not test_bench_serve_chat)"
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_invalid_json_schema and not test_invalid_regex and not test_kv_transfer_prompt_token_ids_round_trip and not test_kv_transfer_prompt_token_ids_streaming"
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
-  - pytest -v -s entrypoints/openai/completion/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
+  - pytest -v -s entrypoints/launchers/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
   - pytest -v -s entrypoints/openai/test_return_token_ids.py -k "not test_comparison"
-  - pytest -v -s entrypoints/openai/test_uds.py
+  - pytest -v -s entrypoints/serve/instrumentator/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
 
 - label: Rust Frontend Serve Admin Coverage # TBD
@@ -2355,7 +2361,7 @@ steps:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
-  - pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not show_version and not server_load"
+  - pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not server_load"
   - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py -k "not stream and not lora and not test_generate_logprobs and not stop_string_workflow"
   - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist"
   - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
@@ -2413,6 +2419,7 @@ steps:
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/utils.py
+  - tests/v1/distributed/test_dense_dp_world_size.py
   - tests/v1/distributed/test_external_lb_dp.py
   - tests/v1/distributed/test_hybrid_lb_dp.py
   - tests/v1/distributed/test_internal_lb_dp.py
@@ -2420,6 +2427,7 @@ steps:
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_dense_dp_world_size.py
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py -k "not 4 and not server_info"
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k "not 4 and not server_info"
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py -k "not 4 and not server_info"
@@ -2450,24 +2458,6 @@ steps:
   - uv pip install --system torchao==0.17.0
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
-
-#-----------------------------------------------------------  mi300 · rocm  ------------------------------------------------------------#
-
-- label: ROCm AITER Ops Test # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  dind: false
-  agent_pool: mi300_1
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/_aiter_ops.py
-  - vllm/envs.py
-  - vllm/platforms/rocm.py
-  - tests/rocm/aiter/
-  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
-  - vllm/v1/attention/selector.py
-  commands:
-  - pytest -v -s rocm/aiter/
 
 #---------------------------------------------------------  mi300 · samplers  ----------------------------------------------------------#
 
@@ -2896,6 +2886,7 @@ steps:
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
   - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_dense_dp_world_size.py
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py
   - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
@@ -3403,6 +3394,24 @@ steps:
 
 #----------------------------------------------------------  mi355 · kernels  ----------------------------------------------------------#
 
+- label: Kernels Core Operation Test %N # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_1
+  parallelism: 3
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - csrc/
+  - tests/kernels/core
+  - tests/kernels/test_top_k_per_row.py
+  - tests/kernels/test_concat_mla_q.py
+  - vllm/model_executor/layers/rotary_embedding/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
 - label: Kernels (B200-MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
@@ -3442,11 +3451,13 @@ steps:
   - vllm/_aiter_ops.py
   - tests/kernels/attention/test_rocm_aiter_mla_decode.py
   - tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
+  - tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
   - tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
   commands:
   - rocm-smi
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode_metadata.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_decode.py
+  - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
   - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
 
 - label: Kernels Attention Test %N # TBD
@@ -3506,6 +3517,7 @@ steps:
   - tests/kernels/quant_utils.py
   - tests/kernels/utils.py
   - vllm/_aiter_ops.py
+  - vllm/kernels/aiter_ops.py
   - vllm/_custom_ops.py
   - vllm/envs.py
   - vllm/platforms/rocm.py
@@ -3544,8 +3556,8 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
-  - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@rocm-7.0-v2.3.0'
-  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
+  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@rocm-7.0-v2.3.0'
+  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: Language Models Test (Extended Pooling) # TBD
@@ -3671,7 +3683,8 @@ steps:
   - vllm/
   - tests/models/multimodal/generation
   commands:
-  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing
+  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing
+  - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
   - pytest -v -s models/multimodal/generation/test_memory_leak.py -m core_model
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
@@ -3771,6 +3784,7 @@ steps:
   - tests/v1/executor
   - tests/v1/kv_offload
   - tests/v1/worker
+  - tests/v1/cudagraph
   - tests/v1/kv_connector/unit
   - tests/v1/metrics
   - tests/entrypoints/openai/correctness/test_lmeval.py
@@ -3780,6 +3794,7 @@ steps:
   - pytest -v -s v1/executor
   - pytest -v -s v1/kv_offload
   - pytest -v -s v1/worker
+  - pytest -v -s v1/cudagraph/test_encoder_cudagraph.py
   - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
   - pytest -v -s -m 'not cpu_test' v1/metrics
   - pip install -U git+https://github.com/vllm-project/lm-evaluation-harness.git@streaming-api
