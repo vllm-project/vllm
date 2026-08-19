@@ -2243,6 +2243,9 @@ def compile_factors() -> dict[str, object]:
         "S3_ACCESS_KEY_ID",
         "S3_SECRET_ACCESS_KEY",
         "S3_ENDPOINT_URL",
+        # Credential; never affects compiled artifacts and must not be
+        # persisted in cache_key_factors.json.
+        "VLLM_API_KEY",
         "VLLM_USAGE_STATS_SERVER",
         "VLLM_NO_USAGE_STATS",
         "VLLM_DO_NOT_TRACK",
