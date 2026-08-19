@@ -1674,9 +1674,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "DeepseekV32MTPModel": _HfExamplesInfo(
-        "zai-org/GLM-5",
-        speculative_model="zai-org/GLM-5",
-        min_transformers_version="5.0.1",
+        "nvidia/DeepSeek-V3.2-NVFP4",
+        speculative_model="nvidia/DeepSeek-V3.2-NVFP4",
         is_available_online=False,
     ),
     "DeepSeekV4MTPModel": _HfExamplesInfo(

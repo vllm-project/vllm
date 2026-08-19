@@ -69,6 +69,7 @@ logger = init_logger(__name__)
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
         "DeepseekV2ForCausalLM",
+        "DeepseekV32ForCausalLM",
         "DeepseekV4ForCausalLM",
         "GlmMoeDsaForCausalLM",
         "GraniteMoeForCausalLM",
@@ -83,6 +84,7 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
 DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     {
         "DeepseekV32MTPModel",
+        "DeepseekV32ForCausalLM",
         "DeepseekV4ForCausalLM",
         "DeepSeekV4MTPModel",
         "GlmMoeDsaForCausalLM",

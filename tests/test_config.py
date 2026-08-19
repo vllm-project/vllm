@@ -128,11 +128,17 @@ def test_rocm_defaults_deepseek_v4_to_mrv1(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "model",
-    ["nvidia/GLM-5.2-NVFP4", "zai-org/GLM-5.2-FP8"],
+    ("model", "architecture"),
+    [
+        ("nvidia/GLM-5.2-NVFP4", "GlmMoeDsaForCausalLM"),
+        ("zai-org/GLM-5.2-FP8", "GlmMoeDsaForCausalLM"),
+        ("nvidia/DeepSeek-V3.2-NVFP4", "DeepseekV32ForCausalLM"),
+    ],
 )
 @pytest.mark.parametrize("with_mtp", [False, True], ids=["no-mtp", "mtp"])
-def test_glm52_defaults_to_mrv2_and_breakable_cudagraph(monkeypatch, model, with_mtp):
+def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
+    monkeypatch, model, architecture, with_mtp
+):
     from vllm.compilation.breakable_cudagraph import (
         is_breakable_cudagraph_enabled,
     )
@@ -145,7 +151,7 @@ def test_glm52_defaults_to_mrv2_and_breakable_cudagraph(monkeypatch, model, with
 
     model_config = SimpleNamespace(
         model=model,
-        architectures=["GlmMoeDsaForCausalLM"],
+        architectures=[architecture],
         runner_type="generate",
         is_moe=True,
         is_hybrid=False,
@@ -181,9 +187,14 @@ def test_glm52_defaults_to_mrv2_and_breakable_cudagraph(monkeypatch, model, with
 
 
 @pytest.mark.parametrize(
-    "architecture", ["GlmMoeDsaForCausalLM", "DeepseekV32MTPModel"]
+    "architecture",
+    [
+        "DeepseekV32ForCausalLM",
+        "DeepseekV32MTPModel",
+        "GlmMoeDsaForCausalLM",
+    ],
 )
-def test_glm52_breakable_cudagraph_default_is_platform_independent(
+def test_dsa_breakable_cudagraph_default_is_platform_independent(
     monkeypatch, architecture
 ):
     from vllm.platforms import current_platform
@@ -207,6 +218,28 @@ def test_glm52_breakable_cudagraph_default_is_platform_independent(
         assert config.compilation_config.mode == CompilationMode.NONE
     finally:
         os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+
+
+@pytest.mark.parametrize(
+    ("model_type", "expected_architecture"),
+    [
+        ("deepseek_v32", "DeepseekV32MTPModel"),
+        ("glm_moe_dsa", "DeepseekV32MTPModel"),
+        ("deepseek_v3", "DeepSeekMTPModel"),
+    ],
+)
+def test_dsa_models_select_matching_mtp(model_type, expected_architecture):
+    from transformers import PretrainedConfig
+
+    hf_config = PretrainedConfig(
+        architectures=["DeepseekV32ForCausalLM"],
+        num_nextn_predict_layers=1,
+    )
+    hf_config.model_type = model_type
+
+    SpeculativeConfig.hf_config_override(hf_config)
+
+    assert hf_config.architectures == [expected_architecture]
 
 
 @pytest.mark.parametrize(
