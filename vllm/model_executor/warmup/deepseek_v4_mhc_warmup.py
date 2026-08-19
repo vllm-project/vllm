@@ -26,30 +26,22 @@ from vllm.tracing import instrument
 logger = init_logger(__name__)
 
 _AUTO_WARMUP_MAX_TOKENS = 16_384
-# Powers of two plus all grid-threshold values that cover every unique n_splits
-# for both broadcast (21 thresholds) and fused (26 thresholds) kernels. Each
-# entry sits in the middle of a 64-token grid cell so that the exact token
-# count from the chat template still lands in the intended cell.
+# One token count per unique grid, covering every n_splits transition for both
+# broadcast (21 thresholds) and fused (26 thresholds) kernels. ``1`` compiles
+# ``mhc_fused_tilelang`` (small-FMA decode path); the remaining entries are
+# > 16 and trigger the big-prefill path. Each value sits in the middle of its
+# 64-token grid cell so that minor chat-template shifts still land in the
+# intended cell.
 _DEFAULT_TOKEN_SIZE_CANDIDATES = (
     1,
-    2,
-    3,
-    4,
-    8,
-    16,
     32,
-    64,
     96,
-    128,
     160,
-    192,
     224,
-    256,
     288,
     352,
     416,
     480,
-    512,
     544,
     608,
     672,
@@ -58,7 +50,6 @@ _DEFAULT_TOKEN_SIZE_CANDIDATES = (
     864,
     928,
     992,
-    1024,
     1120,
     1184,
     1312,
@@ -68,10 +59,8 @@ _DEFAULT_TOKEN_SIZE_CANDIDATES = (
     2400,
     3040,
     4000,
-    4096,
     6048,
-    8192,
-    16_384,
+    8160,
 )
 
 
