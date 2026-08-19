@@ -1209,9 +1209,12 @@ def test_varlen_with_paged_kv_amx_fp8(
 
     Verifies that:
     - QK uses _tile_dpfp8ps (native FP8 MMA, no K dequant).
-    - PV uses _tile_dpbf16ps with V dequanted to BF16 on-the-fly.
+    - E4M3 PV uses native FP8 MMA; E5M2 uses the BF16 fallback.
     - Output cosine similarity vs fp32 reference > 0.99.
     """
+    if kv_cache_dtype == "fp8_e4m3" and block_size % 64 != 0:
+        pytest.skip("native E4M3 PV requires block_size divisible by 64")
+
     varlen_with_paged_kv(
         seq_lens=seq_lens,
         num_heads=num_heads,
@@ -1227,3 +1230,67 @@ def test_varlen_with_paged_kv_amx_fp8(
         kv_cache_dtype=kv_cache_dtype,
     )
 
+
+@pytest.mark.skipif(
+    not _amx_fp8_available(), reason="no AMX_FP8 support (requires Diamond Rapids)."
+)
+def test_amx_fp8_qk_covers_full_64_token_group() -> None:
+    head_size = 64
+    block_size = 64
+    query = torch.ones((1, 1, head_size), dtype=torch.bfloat16)
+    key = torch.empty((block_size, 1, head_size), dtype=torch.bfloat16)
+    value = torch.empty_like(key)
+    key[:32].fill_(-1)
+    key[32:].fill_(1)
+    value[:32].fill_(-1)
+    value[32:].fill_(1)
+
+    key_cache = torch.empty((1, 1, block_size, head_size), dtype=torch.uint8)
+    value_cache = torch.empty_like(key_cache)
+    slot_mapping = torch.arange(block_size, dtype=torch.int64)
+    cpu_attn_reshape_and_cache(
+        key=key,
+        value=value,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        slot_mapping=slot_mapping,
+        isa="amx_fp8",
+        kv_cache_dtype="fp8_e4m3",
+    )
+
+    query_start_loc = torch.tensor([0, 1], dtype=torch.int32)
+    seq_lens = torch.tensor([block_size], dtype=torch.int32)
+    metadata = cpu_attn_get_scheduler_metadata(
+        num_reqs=1,
+        num_heads=1,
+        num_kv_heads=1,
+        head_dim=head_size,
+        seq_lens=seq_lens,
+        dtype=torch.bfloat16,
+        query_start_loc=query_start_loc,
+        causal=True,
+        sliding_window_size=-1,
+        isa="amx_fp8",
+        enable_kv_split=False,
+        kv_cache_dtype="fp8_e4m3",
+    )
+    output = torch.empty_like(query)
+    cpu_attention_with_kv_cache(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        output=output,
+        query_start_loc=query_start_loc,
+        seq_lens=seq_lens,
+        scale=head_size**-0.5,
+        causal=True,
+        alibi_slopes=None,
+        sliding_window=-1,
+        block_table=torch.tensor([[0]], dtype=torch.int32),
+        softcap=0,
+        scheduler_metadata=metadata,
+        s_aux=None,
+        kv_cache_dtype="fp8_e4m3",
+    )
+
+    torch.testing.assert_close(output, torch.ones_like(output), atol=0.05, rtol=0)
