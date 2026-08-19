@@ -1406,10 +1406,8 @@ class VllmConfig:
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
         if self.attention_config.hisparse_config is not None:
-            if current_platform.is_rocm():
-                raise ValueError(
-                    "HiSparse currently requires NVIDIA CUDA; ROCm is not supported."
-                )
+            if not current_platform.is_cuda():
+                raise ValueError("HiSparse currently requires NVIDIA CUDA.")
             if self.parallel_config.pipeline_parallel_size > 1:
                 raise ValueError("HiSparse does not support pipeline parallelism.")
             # PD-decode instances (KV arrives via a consumer connector) are

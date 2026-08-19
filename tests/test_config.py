@@ -130,7 +130,8 @@ def test_hisparse_requires_v2_model_runner():
         _ = config.use_v2_model_runner
 
 
-def test_hisparse_rejects_decode_context_parallelism():
+def test_hisparse_rejects_decode_context_parallelism(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     with pytest.raises(ValueError, match="decode context parallelism"):
         VllmConfig(
             attention_config=AttentionConfig(
@@ -143,7 +144,8 @@ def test_hisparse_rejects_decode_context_parallelism():
         )
 
 
-def test_hisparse_rejects_pipeline_parallelism():
+def test_hisparse_rejects_pipeline_parallelism(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     with pytest.raises(ValueError, match="pipeline parallelism"):
         VllmConfig(
             attention_config=AttentionConfig(
@@ -153,9 +155,9 @@ def test_hisparse_rejects_pipeline_parallelism():
         )
 
 
-def test_hisparse_rejects_rocm(monkeypatch):
-    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
-    with pytest.raises(ValueError, match="ROCm is not supported"):
+def test_hisparse_rejects_non_cuda(monkeypatch):
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: False)
+    with pytest.raises(ValueError, match="requires NVIDIA CUDA"):
         VllmConfig(
             attention_config=AttentionConfig(
                 hisparse_config=HiSparseConfig(host_pool_gib=1.0)
