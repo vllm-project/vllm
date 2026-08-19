@@ -1553,15 +1553,17 @@ def _asm_rotary_embedding_impl(
     # Modifies query and key in-place via aiter's asm cached rope kernel.
     from aiter.ops.rope import rope_cached_positions_2c_fwd_inplace
 
-    num_tokens = positions.numel()
     rotate_style = 0 if is_neox else 1
 
     cos, sin = cos_sin_cache.chunk(2, dim=-1)
     cos = cos.reshape(-1, 1, 1, rotary_dim // 2)
     sin = sin.reshape(-1, 1, 1, rotary_dim // 2)
 
-    query = query.view(1, num_tokens, -1, head_size)
-    key = key.view(1, num_tokens, -1, head_size)
+    # unsqueeze (not view) preserves strides, so a strided q_pe/k_pe view that
+    # aliases the parent q/kv tensor can be rotated in place. This avoids a
+    # contiguous copy here and the caller's write-back of the rotated slice.
+    query = query.unsqueeze(0)
+    key = key.unsqueeze(0)
     query_ = query[..., :rotary_dim]
     key_ = key[..., :rotary_dim]
     positions = positions.view(*query.shape[:2])

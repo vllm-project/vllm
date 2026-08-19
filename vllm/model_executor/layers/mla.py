@@ -87,6 +87,9 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.kv_a_layernorm = mla_modules.kv_a_layernorm
         self.kv_b_proj = mla_modules.kv_b_proj
         self.rotary_emb = mla_modules.rotary_emb
+        # When the rope kernel rotates q/k in place, the strided q_pe/k_pe views
+        # alias q/kv_lora, so writing the rotated slice back into q is redundant.
+        self.is_inplace_rope = getattr(self.rotary_emb, "mutates_qk_inplace", False)
         self.o_proj = mla_modules.o_proj
         self.indexer = mla_modules.indexer
         self.indexer_rope_emb = mla_modules.indexer_rotary_emb
@@ -198,9 +201,14 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         q = q.view(-1, heads, self.qk_head_dim)
 
         if self.rotary_emb is not None:
-            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim :], k_pe
-            )
+            if self.is_inplace_rope:
+                # rope mutates the strided q_pe/k_pe views in place (they alias
+                # q/kv_lora), so no write-back of the rotated slice is needed.
+                self.rotary_emb(positions, q[..., self.qk_nope_head_dim :], k_pe)
+            else:
+                q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                    positions, q[..., self.qk_nope_head_dim :], k_pe
+                )
 
         if self.indexer and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)

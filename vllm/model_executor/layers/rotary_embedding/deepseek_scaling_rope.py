@@ -211,10 +211,8 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             and offsets is None
         ):
             cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-            # aiter reshapes q/k with .view(); the rotary_dim slice requires
-            # contiguous inputs.
-            query = query.contiguous()
-            key = key.contiguous()
+            # The op rotates query/key in place, preserving strides, so callers
+            # may pass strided views that alias a parent tensor.
             torch.ops.vllm.rocm_aiter_asm_rotary_embedding(
                 positions,
                 query,
@@ -226,6 +224,15 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             )
             return query, key
         return self.forward_native(positions, query, key, offsets)
+
+    @property
+    def mutates_qk_inplace(self) -> bool:
+        """Whether forward_hip rotates q/k in place (aiter asm path).
+
+        Lets MLA callers pass strided views and skip writing the rotated
+        slice back into the parent tensor.
+        """
+        return rocm_aiter_ops.is_asm_rotary_embed_enabled()
 
     def forward_cuda(
         self,
@@ -335,6 +342,11 @@ class DeepseekV4ScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         inverse: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return self.forward_native(positions, query, key, offsets)
+
+    @property
+    def mutates_qk_inplace(self) -> bool:
+        # forward_hip stays on the native path (returns new tensors).
+        return False
 
     def forward_cuda(
         self,
