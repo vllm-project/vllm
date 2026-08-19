@@ -175,11 +175,47 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             index_rope_interleave=self._index_rope_interleave,
         )
 
+    def _project_index_q(self, q_c: torch.Tensor) -> torch.Tensor | None:
+        """Indexer query projection [T, q_lora] -> [T, n_head, head_dim], or None."""
+        active_indexer = self._active_indexer
+        if active_indexer is None:
+            return None
+        index_q = active_indexer.wq_b(q_c)[0]  # [T, q_lora] -> [T, n_head*head_dim]
+        return index_q.view(-1, active_indexer.n_head, active_indexer.head_dim)
+
+    def _rope_and_pack_q(
+        self,
+        positions: torch.Tensor,
+        q_pe: torch.Tensor,
+        ql_nope: torch.Tensor,
+        index_q: torch.Tensor | None,
+        index_weights: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """RoPE q_pe/index_q, quant index_q, pack [ql_nope; q_pe] into mqa_q."""
+        active_indexer = self._active_indexer
+        return fused_q(
+            positions,
+            q_pe,
+            self.rotary_emb.cos_sin_cache,
+            index_q,
+            self.indexer_rope_emb.cos_sin_cache if active_indexer is not None else None,
+            ql_nope,
+            self._q_scale,
+            index_weights,
+            active_indexer.softmax_scale if active_indexer is not None else 0.0,
+            active_indexer.n_head**-0.5 if active_indexer is not None else 0.0,
+            has_indexer=active_indexer is not None,
+            index_rope_interleave=self._index_rope_interleave,
+            quantize_mqa=self._fp8_kv,
+        )
+
     def _compute_ql_nope(self, q_c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Project q_c per-head, split nope/rope, absorb W_UK into nope."""
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        q_nope = q_nope.transpose(0, 1)  # (N, tokens, P)
+        q_nope = q_nope.transpose(0, 1)  # [T, N, nope] -> [N, T, nope]
 
+        # W_UK absorb: [N, T, nope] x [N, nope, kv_lora] -> [T, N, kv_lora]
         if self.is_aiter_triton_fp4_bmm_enabled:
             ql_nope = rocm_aiter_ops.batched_gemm_a16wfp4(
                 q_nope, self.W_K, self.W_K_scale, transpose_bm=True, prequant=True
@@ -262,28 +298,10 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         )
 
         ql_nope, q_pe = self._compute_ql_nope(q_c)
+        index_q = self._project_index_q(q_c)
 
-        active_indexer = self._active_indexer
-        if active_indexer is not None:
-            index_q = active_indexer.wq_b(q_c)[0]
-            index_q = index_q.view(-1, active_indexer.n_head, active_indexer.head_dim)
-        else:
-            index_q = None
-
-        index_q_fp8, index_weights_out, mqa_q = fused_q(
-            positions,
-            q_pe,
-            self.rotary_emb.cos_sin_cache,
-            index_q,
-            self.indexer_rope_emb.cos_sin_cache if active_indexer is not None else None,
-            ql_nope,
-            self._q_scale,
-            index_weights,
-            active_indexer.softmax_scale if active_indexer is not None else 0.0,
-            active_indexer.n_head**-0.5 if active_indexer is not None else 0.0,
-            has_indexer=active_indexer is not None,
-            index_rope_interleave=self._index_rope_interleave,
-            quantize_mqa=self._fp8_kv,
+        index_q_fp8, index_weights_out, mqa_q = self._rope_and_pack_q(
+            positions, q_pe, ql_nope, index_q, index_weights
         )
 
         if self._active_indexer is not None:
