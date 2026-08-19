@@ -296,13 +296,11 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
 
 
 class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
-    # The native KDA spec-decode kernels (causal_conv1d_update /
-    # fused_recurrent_kda) run off device per-request query_start_loc +
-    # num_accepted_tokens with a fixed max_query_len = num_spec + 1 window, and
-    # build stages that metadata into the persistent decode-cudagraph buffers.
-    # A graph captured at the uniform k+1 promise therefore replays any
-    # 1..k+1 ragged mix, so adaptive verification can capture full varlen decode
-    # graphs (ALWAYS) instead of the UNIFORM_BATCH default inherited from GDN.
+    # The KDA spec-decode kernels run off device per-request query_start_loc +
+    # num_accepted_tokens within a fixed k+1 window, and build stages that into the
+    # persistent decode-cudagraph buffers, so a graph captured at the uniform k+1
+    # promise replays any 1..k+1 ragged mix. Overrides the UNIFORM_BATCH default
+    # inherited from GDN.
     _cudagraph_support = AttentionCGSupport.ALWAYS
 
     def __init__(
@@ -670,13 +668,9 @@ class KimiK3KDAAttentionBackend(GDNAttentionBackend):
 
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
-        # Unlike the generic SSM opt-out (GDNAttentionBackend.is_ssm -> False),
-        # K3 KDA plans its speculative decode from the DEVICE query offsets:
-        # KimiK3KDAMetadataBuilder.build derives spec_query_start_loc from
-        # query_start_loc.diff() (device), and RecoverSSM commits per request via
-        # commit_len = min(num_accepted[device], query_len) with spec_query_len
-        # only a fixed upper-bound window. Adaptive verification's on-device draft
-        # trimming (ragged lengths <= 1 + num_speculative_tokens) is therefore a
-        # special case the existing kernels already handle, so K3 KDA can run a
-        # device/CPU query-length mismatch that plain SSM backends cannot.
+        # Unlike the generic SSM opt-out, K3 KDA plans spec decode from the DEVICE
+        # offsets: build derives spec_query_start_loc from query_start_loc.diff(),
+        # and RecoverSSM commits min(num_accepted[device], query_len) with
+        # spec_query_len only an upper-bound window. Adaptive's on-device trimming is
+        # therefore a case the existing kernels already handle.
         return True
