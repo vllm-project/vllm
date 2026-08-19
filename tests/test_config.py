@@ -153,12 +153,18 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     from vllm.compilation.breakable_cudagraph import (
         is_breakable_cudagraph_enabled,
     )
-    from vllm.config.vllm import default_v2_model_runner_architectures
+    from vllm.config.vllm import (
+        default_breakable_cudagraph_architectures,
+        default_v2_model_runner_architectures,
+    )
+    from vllm.platforms import current_platform
 
     monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
     monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
     monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
     default_v2_model_runner_architectures.cache_clear()
+    default_breakable_cudagraph_architectures.cache_clear()
 
     model_config = SimpleNamespace(
         model=model,
@@ -195,6 +201,7 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     finally:
         os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
         default_v2_model_runner_architectures.cache_clear()
+        default_breakable_cudagraph_architectures.cache_clear()
 
 
 @pytest.mark.parametrize(
