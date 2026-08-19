@@ -86,6 +86,34 @@ def test_arch_mapping_applies_before_callable_override():
 
 
 @pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "architecture",
+    [
+        "NemotronH_Omni_Reasoning_V3",
+        "NemotronH_Super_Omni_Reasoning_V3",
+    ],
+)
+def test_nemotron_super_omni_override_promotes_text_config(architecture):
+    text_config = _make_hf_config(
+        architectures=["NemotronHForCausalLM"],
+        model_type="nemotron_h",
+        num_nextn_predict_layers=1,
+    )
+    config = _make_hf_config(
+        architectures=[architecture],
+        model_type="nemotron_h_omni",
+        text_config=text_config,
+    )
+
+    out = SpeculativeConfig.hf_config_override(config)
+
+    assert out is text_config
+    assert out.model_type == "nemotron_h_mtp"
+    assert out.architectures == ["NemotronHMTPModel"]
+    assert out.n_predict == 1
+
+
+@pytest.mark.cpu_test
 def test_inkling_override_exposes_only_first_mtp_depth():
     text_config = _make_hf_config(
         architectures=["InklingForCausalLM"],
