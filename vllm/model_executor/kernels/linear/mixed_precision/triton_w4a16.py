@@ -251,17 +251,48 @@ def triton_w4a16_gemm(
             # int4 weight), which no tile choice changes; these tiles recover
             # the idle-CU loss and cap out near 17% of HBM ceiling.
             #
-            # The narrow tiles are bounded at M<=8 deliberately. They were
+            # The narrow tiles are bounded above deliberately. They were
             # searched at M=1 and hold at M=8, but at M=32 they REGRESS the
             # wide shape: gate_up measured 125 -> 99 GB/s, a 21% loss, because
             # once M is large enough to fill the machine the small BLOCK_N
             # stops buying occupancy and only costs reuse.
             #
-            # Above 8 this ladder still differs from the MI300 one below --
-            # it uses 64x64x32 from M=9 rather than MI300's 32x64x32 up to
+            # Above the rung this ladder still differs from the MI300 one
+            # below -- it uses 64x64x32 rather than MI300's 32x64x32 up to
             # M=32 -- and that is also a win here, measured at M=32:
             #   q_proj 60 -> 68, o_proj 53 -> 61, gate_up 125 -> 165 GB/s.
-            if M <= 8:
+            #
+            # The rung runs to M<=16, measured, not assumed: M=9/12/16 gain
+            # 1.44/1.45/1.37x on gate_up, 1.40/1.38/1.39x on q_proj and
+            # 1.43/1.40/1.41x on o_proj (GB/s of int4 bytes, median of 31,
+            # interleaved). It stops at 16 because M=24 measures 0.79x on
+            # gate_up -- past that the narrow tile stops buying occupancy and
+            # only costs reuse.
+            #
+            # Widening the rung also widens where the magic-bias path applies:
+            # _use_magic_bias is keyed on BLOCK_M <= 16, so M=9..16 picks it up
+            # automatically, and the gate's own argument survives that -- it
+            # bounds the correction cost by BLOCK_M, which stays 16 here
+            # however large M gets. The two effects were measured apart,
+            # because the headline number hides opposite mechanisms:
+            #
+            #              new/old   tile alone   magic-bias alone
+            #   gate_up     1.44x       0.97x          1.49x
+            #   q_proj      1.40x       1.30x          1.08x
+            #   o_proj      1.43x       1.33x          1.07x
+            #
+            # On gate_up the tile change alone is slightly negative and the
+            # whole win is the dequant arriving with it; on the narrower
+            # shapes it is mostly the tile.
+            #
+            # DELIBERATELY NOT the (M, N)-keyed ladder that the fp8 W8A16
+            # kernel carries, nor its BLOCK_M=32 rung. Those were measured
+            # against fp8 decode, which costs ~4.5 VALU ops per weight against
+            # int4's ~19, and decode cost is what sets the occupancy-versus-
+            # reuse balance a crossover expresses. The M=24 numbers above are
+            # the direct evidence: fp8 wants a wider rung there, this kernel
+            # regresses. This kernel keeps its own searched N >= 16384 split.
+            if M <= 16:
                 if N >= 16384:
                     BLOCK_M, BLOCK_N, BLOCK_K = 16, 32, 64
                 else:
