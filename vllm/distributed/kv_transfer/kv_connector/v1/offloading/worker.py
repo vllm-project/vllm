@@ -376,8 +376,9 @@ class OffloadingConnectorWorker:
                 self._handle_failed_transfer(job_id, is_load)
                 # A failed job must still be marked completed, or the
                 # scheduler's per-job pending count never reaches zero and
-                # the request is never resumed.
-                self._connector_worker_meta.mark_completed(job_id)
+                # the request is never resumed. success=False tells the
+                # scheduler not to publish a failed store's blocks as cache.
+                self._connector_worker_meta.mark_completed(job_id, success=False)
                 self._load_dst_block_ids.pop(job_id, None)
                 req_id = self._load_jobs.pop(job_id, None)
                 if req_id is not None:
