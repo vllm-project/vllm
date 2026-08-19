@@ -15,7 +15,16 @@ if not current_platform.has_device_capability(100):
         allow_module_level=True,
     )
 else:
-    from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+    from flashinfer.mla import batch_mla_paged_attention
+
+
+def test_flashinfer_mla_backend_imports_unified_public_api():
+    from flashinfer.mla import batch_mla_paged_attention as public_api
+
+    from vllm.v1.attention.backends.mla import flashinfer_mla as backend
+
+    assert backend.batch_mla_paged_attention is public_api
+
 
 # Deepseek R1 MLA config.
 NUM_HEADS = 128
@@ -103,7 +112,7 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int, block_size: int):
     # where q_len_per_request is the MTP query length (=1 without MTP)
     q = q.unsqueeze(1)
 
-    out_ans = trtllm_batch_decode_with_kv_cache_mla(
+    out_ans = batch_mla_paged_attention(
         query=q,
         kv_cache=kv_cache.unsqueeze(1),
         workspace_buffer=workspace_buffer,
@@ -147,7 +156,7 @@ def test_flashinfer_mla_decode_workspace_supports_autotune():
     # Under the autotuner the CuteDSL tactic is instantiated with our workspace;
     # a uint8 buffer raises AssertionError here, an int8 buffer succeeds.
     with torch.inference_mode(), autotune(True):
-        trtllm_batch_decode_with_kv_cache_mla(
+        batch_mla_paged_attention(
             query=q.unsqueeze(1),
             kv_cache=kv_cache.unsqueeze(1),
             workspace_buffer=workspace_buffer,
