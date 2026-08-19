@@ -1,14 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import dataclasses
 import json
 import math
 import os
 import stat
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NoReturn, cast
+from typing import Annotated, Any, Literal, Self
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+from pydantic_core import PydanticCustomError
 
 
 class SnapshotError(RuntimeError):
@@ -23,8 +31,9 @@ class SnapshotSecurityError(SnapshotError):
     """The snapshot artifact does not meet the private-path contract."""
 
 
-@dataclass(frozen=True)
-class SocketIdentity:
+class SocketIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
     family: str
     socket_type: str
     local_address: str
@@ -32,13 +41,22 @@ class SocketIdentity:
     state: str
 
 
-@dataclass(frozen=True)
-class SnapshotManifest:
-    schema_version: int
-    boundary: str
-    complete: bool
+_MAX_PID = 2**31 - 1
+_PositivePid = Annotated[int, Field(gt=0, le=_MAX_PID)]
+_OracleTokenId = Annotated[int, Field(ge=0)]
+
+
+class SnapshotManifest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    schema_version: Literal[1]
+    boundary: Literal[
+        "post-engine-init-pre-http-bind",
+        "post-engine-init-reloadable-state-released",
+    ]
+    complete: Literal[True]
     created_at: str
-    artifact_bytes: int
+    artifact_bytes: Annotated[int, Field(ge=0)]
     source_revision: str
     binary_revision: str
     python_version: str
@@ -57,12 +75,52 @@ class SnapshotManifest:
     tokenizer_revision: str
     engine_argv: tuple[str, ...]
     environment: tuple[tuple[str, str], ...]
-    process_tree: tuple[int, ...]
-    cuda_holders: tuple[int, ...]
+    process_tree: Annotated[tuple[_PositivePid, ...], Field(min_length=1)]
+    cuda_holders: Annotated[tuple[_PositivePid, ...], Field(min_length=1)]
     socket_inventory: tuple[SocketIdentity, ...]
-    oracle_token_ids: tuple[int, ...]
+    oracle_token_ids: Annotated[
+        tuple[_OracleTokenId, ...], Field(min_length=1, max_length=1)
+    ]
     oracle_text: str
     oracle_sampled_token_logprob: float
+
+    @field_validator("schema_version", mode="before")
+    @classmethod
+    def _require_schema_version_one(cls, value: Any) -> Any:
+        if type(value) is not int or value != 1:
+            raise ValueError("schema version must be integer 1")
+        return value
+
+    @field_validator("complete", mode="before")
+    @classmethod
+    def _require_complete_true(cls, value: Any) -> Any:
+        if type(value) is not bool or value is not True:
+            raise ValueError("complete must be boolean true")
+        return value
+
+    @field_validator("oracle_sampled_token_logprob", mode="before")
+    @classmethod
+    def _require_finite_float(cls, value: Any) -> Any:
+        if type(value) is not float or not math.isfinite(value):
+            raise ValueError("sampled token log probability must be a finite float")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_process_relationships(self) -> Self:
+        if len(set(self.process_tree)) != len(self.process_tree):
+            raise PydanticCustomError(
+                "snapshot_process_tree", "process_tree contains duplicate PIDs"
+            )
+        if len(set(self.cuda_holders)) != len(self.cuda_holders):
+            raise PydanticCustomError(
+                "snapshot_cuda_holders", "cuda_holders contains duplicate PIDs"
+            )
+        if not set(self.cuda_holders).issubset(self.process_tree):
+            raise PydanticCustomError(
+                "snapshot_cuda_holders",
+                "cuda_holders must be a subset of process_tree",
+            )
+        return self
 
 
 _NON_IDENTITY_FIELDS = frozenset(
@@ -79,16 +137,15 @@ _NON_IDENTITY_FIELDS = frozenset(
         "served_model_name",
     }
 )
-_MAX_PID = 2**31 - 1
 
 
 def validate_identity(expected: SnapshotManifest, actual: SnapshotManifest) -> None:
     """Require an exact match for every field that can affect compatibility."""
-    for field in dataclasses.fields(SnapshotManifest):
-        if field.name in _NON_IDENTITY_FIELDS:
+    for field_name in SnapshotManifest.model_fields:
+        if field_name in _NON_IDENTITY_FIELDS:
             continue
-        if getattr(expected, field.name) != getattr(actual, field.name):
-            raise SnapshotCompatibilityError(f"snapshot mismatch: {field.name}")
+        if getattr(expected, field_name) != getattr(actual, field_name):
+            raise SnapshotCompatibilityError(f"snapshot mismatch: {field_name}")
 
 
 def _existing_path_chain(path: Path):
@@ -149,135 +206,35 @@ def validate_artifact_root(path: Path, *, creating: bool) -> None:
             )
 
 
-def _manifest_to_dict(manifest: SnapshotManifest) -> dict[str, object]:
-    return dataclasses.asdict(manifest)
+_ORACLE_FIELDS = frozenset(
+    {"oracle_token_ids", "oracle_text", "oracle_sampled_token_logprob"}
+)
+_ROOT_VALIDATION_FIELDS = {
+    "snapshot_process_tree": "process_tree",
+    "snapshot_cuda_holders": "cuda_holders",
+}
 
 
-def _invalid_manifest(field: str) -> NoReturn:
-    raise SnapshotCompatibilityError(f"invalid snapshot manifest: {field}")
-
-
-def _validate_manifest_dict(value: dict[str, object]) -> None:
-    expected_fields = {field.name for field in dataclasses.fields(SnapshotManifest)}
-    if set(value) != expected_fields:
-        _invalid_manifest("fields")
-
-    schema_version = value["schema_version"]
-    if type(schema_version) is not int or schema_version != 1:
-        _invalid_manifest("schema_version")
-    if value["complete"] is not True:
-        _invalid_manifest("complete")
-    boundary = value["boundary"]
-    if type(boundary) is not str or boundary not in {
-        "post-engine-init-pre-http-bind",
-        "post-engine-init-reloadable-state-released",
-    }:
-        _invalid_manifest("boundary")
-
-    artifact_bytes = value["artifact_bytes"]
-    if type(artifact_bytes) is not int or artifact_bytes < 0:
-        _invalid_manifest("artifact_bytes")
-    for field in (
-        "created_at",
-        "source_revision",
-        "binary_revision",
-        "python_version",
-        "torch_version",
-        "cuda_runtime",
-        "driver_version",
-        "criu_version",
-        "cuda_checkpoint_sha256",
-        "kernel_release",
-        "host_id",
-        "gpu_name",
-        "gpu_uuid",
-        "model",
-        "served_model_name",
-        "model_revision",
-        "tokenizer_revision",
-    ):
-        if type(value[field]) is not str:
-            _invalid_manifest(field)
-
-    engine_argv = value["engine_argv"]
-    if type(engine_argv) is not list or not all(
-        type(item) is str for item in engine_argv
-    ):
-        _invalid_manifest("engine_argv")
-    environment = value["environment"]
-    if type(environment) is not list or not all(
-        type(item) is list
-        and len(item) == 2
-        and all(type(part) is str for part in item)
-        for item in environment
-    ):
-        _invalid_manifest("environment")
-
-    process_tree = value["process_tree"]
-    process_tree_values = cast(list[int], process_tree)
-    if (
-        type(process_tree) is not list
-        or not process_tree
-        or any(type(pid) is not int or not 0 < pid <= _MAX_PID for pid in process_tree)
-        or len(set(process_tree)) != len(process_tree)
-    ):
-        _invalid_manifest("process_tree")
-    cuda_holders = value["cuda_holders"]
-    cuda_holder_values = cast(list[int], cuda_holders)
-    if (
-        type(cuda_holders) is not list
-        or not cuda_holders
-        or any(type(pid) is not int or not 0 < pid <= _MAX_PID for pid in cuda_holders)
-        or len(set(cuda_holders)) != len(cuda_holders)
-        or not set(cuda_holder_values).issubset(process_tree_values)
-    ):
-        _invalid_manifest("cuda_holders")
-
-    socket_inventory = value["socket_inventory"]
-    socket_fields = {field.name for field in dataclasses.fields(SocketIdentity)}
-    if type(socket_inventory) is not list:
-        _invalid_manifest("socket_inventory")
-    for item in cast(list[dict[str, object]], socket_inventory):
-        if type(item) is not dict or set(item) != socket_fields:
-            _invalid_manifest("socket_inventory")
-        if any(
-            type(item[field]) is not str for field in socket_fields - {"remote_address"}
-        ) or (
-            item["remote_address"] is not None
-            and type(item["remote_address"]) is not str
-        ):
-            _invalid_manifest("socket_inventory")
-
-    token_ids = value["oracle_token_ids"]
-    oracle_text = value["oracle_text"]
-    logprob = value["oracle_sampled_token_logprob"]
-    if (
-        type(token_ids) is not list
-        or len(token_ids) != 1
-        or type(token_ids[0]) is not int
-        or token_ids[0] < 0
-        or type(oracle_text) is not str
-        or type(logprob) is not float
-        or not math.isfinite(logprob)
-    ):
-        _invalid_manifest("oracle")
-
-
-def _manifest_from_dict(value: dict[str, object]) -> SnapshotManifest:
-    value = dict(value)
-    _validate_manifest_dict(value)
-    engine_argv = cast(list[str], value["engine_argv"])
-    environment = cast(list[list[str]], value["environment"])
-    socket_inventory = cast(list[dict[str, Any]], value["socket_inventory"])
-    value["engine_argv"] = tuple(str(item) for item in engine_argv)
-    value["environment"] = tuple((str(key), str(item)) for key, item in environment)
-    value["process_tree"] = tuple(cast(list[int], value["process_tree"]))
-    value["cuda_holders"] = tuple(cast(list[int], value["cuda_holders"]))
-    value["socket_inventory"] = tuple(
-        SocketIdentity(**item) for item in socket_inventory
-    )
-    value["oracle_token_ids"] = tuple(cast(list[int], value["oracle_token_ids"]))
-    return SnapshotManifest(**value)  # type: ignore[arg-type]
+def _validation_diagnostic(error: ValidationError) -> str | None:
+    for detail in error.errors(include_url=False):
+        error_type = detail["type"]
+        location = detail["loc"]
+        if error_type == "json_invalid":
+            return "JSON"
+        if error_type == "model_type" and not location:
+            return "root"
+        if error_type in _ROOT_VALIDATION_FIELDS:
+            return _ROOT_VALIDATION_FIELDS[error_type]
+        if not location:
+            continue
+        field = location[0]
+        if len(location) == 1 and error_type in {"extra_forbidden", "missing"}:
+            return "fields"
+        if field in _ORACLE_FIELDS:
+            return "oracle"
+        if isinstance(field, str):
+            return field
+    return None
 
 
 def _fsync_directory(path: Path) -> None:
@@ -307,7 +264,7 @@ def write_manifest_atomic(path: Path, manifest: SnapshotManifest) -> None:
 
     try:
         payload = json.dumps(
-            _manifest_to_dict(manifest), sort_keys=True, separators=(",", ":")
+            manifest.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
         ).encode()
         with os.fdopen(file_descriptor, "wb", closefd=True) as manifest_file:
             manifest_file.write(payload)
@@ -335,21 +292,21 @@ def read_manifest(path: Path) -> SnapshotManifest:
         ) from error
     try:
         with os.fdopen(file_descriptor, encoding="utf-8") as manifest_file:
-            value = json.load(manifest_file)
-    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            payload = manifest_file.read()
+    except UnicodeDecodeError as error:
         raise SnapshotCompatibilityError("invalid snapshot manifest: JSON") from error
-    if not isinstance(value, dict):
-        _invalid_manifest("root")
     try:
-        return _manifest_from_dict(value)
-    except SnapshotCompatibilityError:
-        raise
-    except (KeyError, OverflowError, TypeError, ValueError) as error:
-        raise SnapshotCompatibilityError("invalid snapshot manifest") from error
+        return SnapshotManifest.model_validate_json(payload, strict=True)
+    except ValidationError as error:
+        diagnostic = _validation_diagnostic(error)
+        suffix = f": {diagnostic}" if diagnostic is not None else ""
+        raise SnapshotCompatibilityError(
+            f"invalid snapshot manifest{suffix}"
+        ) from error
 
 
 def inspect_snapshot(path: Path) -> dict[str, object]:
-    inspected = dataclasses.asdict(read_manifest(path))
+    inspected: dict[str, object] = read_manifest(path).model_dump(mode="json")
     inspected["support_boundary"] = "same-host Linux x86_64 TP1"
     inspected["private_artifact_path_validated"] = True
     return inspected
