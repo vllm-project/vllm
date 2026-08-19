@@ -1179,14 +1179,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # if CUDA endif
   endif()
 
-  # HIP counterpart of the FUSED_KDA_DECODE block above and fused prefill KDA
-  # kernels. Only measured on gfx950, so it is only built when gfx950 is in
-  # the arch list. A multi-arch build that includes gfx950 still emits this
-  # source for every arch in that list. The runtime gates in kda_decode.py and
-  # kda_chunk.py keep the kernels off non-gfx950 devices.
+  # HIP counterpart of the FUSED_KDA_DECODE block above: same `fused_kda_decode`
+  # op, same VLLM_ENABLE_FUSED_KDA_DECODE guard in torch_bindings.cpp 
+  # Built for the CDNA archs the kernel supports 
+  # (gfx942 / gfx950), so it is only emitted when one of those is in the arch 
+  # list. A multi-arch build that includes them still emits this source for 
+  # every arch in that list. The runtime gate in kda_decode.py keeps the kernel
+  # off unsupported devices. Fused prefill KDA kernels is Only measured on 
+  # gfx950, so it is only built when gfx950 is in the arch list.
   if(VLLM_GPU_LANG STREQUAL "HIP")
     set(FUSED_KDA_DECODE_HIP_ARCHS ${VLLM_GPU_ARCHES})
-    list(FILTER FUSED_KDA_DECODE_HIP_ARCHS INCLUDE REGEX "gfx950")
+    list(FILTER FUSED_KDA_DECODE_HIP_ARCHS INCLUDE REGEX "gfx942|gfx950")
     if(FUSED_KDA_DECODE_HIP_ARCHS)
       set(FUSED_KDA_DECODE_HIP_SRC
         "csrc/libtorch_stable/kimi_k3/fused_kda_decode_kernel_rocm.cu")

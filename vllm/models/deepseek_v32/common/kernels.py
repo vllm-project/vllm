@@ -6,6 +6,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import is_quantized_kv_cache
 
 # Cache of tiny 1-element dummy tensors (per device, dtype) reused by the
 # has_indexer=False path so the indexer args don't allocate every call.
@@ -103,12 +104,16 @@ def _fused_norm_rope_kernel(
     kv_stride,
     kv_rms_norm_w_ptr,
     kv_rms_eps,
+    kv_out_ptr,
+    kv_out_stride,
     KV_DIM: tl.constexpr,
     # KV RoPE
     kpe_ptr,
     kpe_stride,
     kpe_rope_cos_sin_cache_ptr,
     kpe_rope_cos_sin_cache_stride,
+    kpe_out_ptr,
+    kpe_out_stride,
     KPE_HALF_ROT_DIM: tl.constexpr,
     # Index K layer norm
     index_k_ptr,
@@ -121,6 +126,8 @@ def _fused_norm_rope_kernel(
     # Index K RoPE
     index_k_rope_cos_sin_cache_ptr,
     index_k_rope_cos_sin_cache_stride,
+    index_k_out_ptr,
+    index_k_out_stride,
     INDEX_K_HALF_ROT_DIM: tl.constexpr,
     # Cache params (shared by indexer K and MLA)
     slot_mapping_ptr,
@@ -152,8 +159,8 @@ def _fused_norm_rope_kernel(
     INDEX_ROPE_INTERLEAVE: tl.constexpr,
     USE_PDL: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    tok_idx = tl.program_id(1)
+    tok_idx = tl.program_id(0).to(tl.int64)
+    pid = tl.program_id(1)
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
@@ -174,10 +181,9 @@ def _fused_norm_rope_kernel(
         return
 
     if slot_mapping_ptr is None:
-        # Memory profiling run.
-        return
-    slot_idx = tl.load(slot_mapping_ptr + tok_idx)
-    if slot_idx < 0:
+        if kv_out_ptr is None and kpe_out_ptr is None and index_k_out_ptr is None:
+            return
+    elif tl.load(slot_mapping_ptr + tok_idx) < 0:
         # Padding
         return
 
@@ -217,63 +223,81 @@ def _fused_norm_rope_kernel(
         r1 = x1 * cos - x2 * sin
         r2 = x2 * cos + x1 * sin
 
-        # MLA concat_and_cache: write [kv_c_normed, k_pe_roped] to cache.
-        if mla_cache_entry_stride == 0:
-            return
+        # PCP materializes K for the cross-rank gather, then inserts it into cache.
+        if kv_out_ptr is not None:
+            tl.store(kv_out_ptr + tok_idx * kv_out_stride + kv_block, kv_c)
+        if kpe_out_ptr is not None:
+            tl.store(
+                kpe_out_ptr + tok_idx * kpe_out_stride + dim_off * 2,
+                r1.to(kpe_out_ptr.dtype.element_ty),
+            )
+            tl.store(
+                kpe_out_ptr + tok_idx * kpe_out_stride + dim_off * 2 + 1,
+                r2.to(kpe_out_ptr.dtype.element_ty),
+            )
 
-        mla_block_size = mla_cache_block_stride // mla_cache_entry_stride
-        mla_block_idx = slot_idx // mla_block_size
-        mla_block_off = slot_idx % mla_block_size
+        if slot_mapping_ptr is not None:
+            # MLA concat_and_cache: write [kv_c_normed, k_pe_roped] to cache.
+            if mla_cache_entry_stride == 0:
+                return
 
-        if MLA_CACHE_DS_MLA:
-            # fp8_ds_mla layout (DeepSeek-V3.2, KV_DIM == 512): per-128-element
-            # tile of the NoPE is dynamically quantized to fp8 with its own
-            # float32 scale; the RoPE tail is stored unquantized in bf16.
-            #   bytes [0, KV_DIM)            : KV_DIM fp8 NoPE values
-            #   bytes [KV_DIM, KV_DIM + 16)  : MLA_NUM_TILES float32 scales
-            #   bytes [KV_DIM + 16, ...)     : 2 * KPE_HALF_ROT_DIM bf16 RoPE
-            # mla_cache_block_stride / mla_cache_entry_stride are byte strides
-            # (mla_cache_ptr is the 1-byte fp8 view of the uint8 cache).
-            byte_base = (
-                mla_block_idx * mla_cache_block_stride
+            slot_idx = tl.load(slot_mapping_ptr + tok_idx)
+            mla_block_size = mla_cache_block_stride // mla_cache_entry_stride
+            mla_block_idx = slot_idx // mla_block_size
+            mla_block_off = slot_idx % mla_block_size
+
+            if MLA_CACHE_DS_MLA:
+                # fp8_ds_mla layout (DeepSeek-V3.2, KV_DIM == 512): per-128-element
+                # tile of the NoPE is dynamically quantized to fp8 with its own
+                # float32 scale; the RoPE tail is stored unquantized in bf16.
+                #   bytes [0, KV_DIM)            : KV_DIM fp8 NoPE values
+                #   bytes [KV_DIM, KV_DIM + 16)  : MLA_NUM_TILES float32 scales
+                #   bytes [KV_DIM + 16, ...)     : 2 * KPE_HALF_ROT_DIM bf16 RoPE
+                # mla_cache_block_stride / mla_cache_entry_stride are byte strides
+                # (mla_cache_ptr is the 1-byte fp8 view of the uint8 cache).
+                byte_base = (
+                    mla_block_idx * mla_cache_block_stride
+                    + mla_block_off * mla_cache_entry_stride
+                )
+                kv_2d = tl.reshape(kv_c, (MLA_NUM_TILES, MLA_TILE_DIM))
+                tile_amax = tl.max(tl.abs(kv_2d), axis=1, keep_dims=True)
+                # scale = amax / 448 (fp8 e4m3 max), matching the reference
+                # concat_and_cache_ds_mla kernel; floored to FLT_MIN.
+                tile_scale = tl.maximum(tile_amax * (1.0 / 448.0), 1.1754944e-38)
+                kv_c_fp8 = tl.reshape((kv_2d / tile_scale).to(tl.float8e4nv), (KV_DIM,))
+                tl.store(mla_cache_ptr + byte_base + kv_block, kv_c_fp8)
+                tile_off = tl.arange(0, MLA_NUM_TILES)
+                tl.store(
+                    mla_cache_ds_scale_ptr + byte_base // 4 + KV_DIM // 4 + tile_off,
+                    tl.reshape(tile_scale, (MLA_NUM_TILES,)),
+                )
+                rope_dst = mla_cache_ds_rope_ptr + byte_base // 2 + (KV_DIM // 2 + 8)
+                tl.store(rope_dst + dim_off * 2, r1.to(tl.bfloat16))
+                tl.store(rope_dst + dim_off * 2 + 1, r2.to(tl.bfloat16))
+                return
+
+            dst = (
+                mla_cache_ptr
+                + mla_block_idx * mla_cache_block_stride
                 + mla_block_off * mla_cache_entry_stride
             )
-            kv_2d = tl.reshape(kv_c, (MLA_NUM_TILES, MLA_TILE_DIM))
-            tile_amax = tl.max(tl.abs(kv_2d), axis=1, keep_dims=True)
-            # scale = amax / 448 (fp8 e4m3 max), matching the reference
-            # concat_and_cache_ds_mla kernel; floored to FLT_MIN.
-            tile_scale = tl.maximum(tile_amax * (1.0 / 448.0), 1.1754944e-38)
-            kv_c_fp8 = tl.reshape((kv_2d / tile_scale).to(tl.float8e4nv), (KV_DIM,))
-            tl.store(mla_cache_ptr + byte_base + kv_block, kv_c_fp8)
-            tile_off = tl.arange(0, MLA_NUM_TILES)
-            tl.store(
-                mla_cache_ds_scale_ptr + byte_base // 4 + KV_DIM // 4 + tile_off,
-                tl.reshape(tile_scale, (MLA_NUM_TILES,)),
-            )
-            rope_dst = mla_cache_ds_rope_ptr + byte_base // 2 + (KV_DIM // 2 + 8)
-            tl.store(rope_dst + dim_off * 2, r1.to(tl.bfloat16))
-            tl.store(rope_dst + dim_off * 2 + 1, r2.to(tl.bfloat16))
-            return
-
-        dst = (
-            mla_cache_ptr
-            + mla_block_idx * mla_cache_block_stride
-            + mla_block_off * mla_cache_entry_stride
-        )
-        # kv_c_normed (KV_DIM elements)
-        if MLA_CACHE_FP8:
-            scale = tl.load(mla_cache_scale_ptr)
-            kv_c_fp8 = (kv_c.to(tl.float32) / scale).to(tl.float8e4nv)
-            tl.store(dst + kv_block, kv_c_fp8)
-        else:
-            tl.store(dst + kv_block, kv_c)
-        # k_pe_roped (from registers, interleaved layout)
-        if MLA_CACHE_FP8:
-            tl.store(dst + KV_DIM + dim_off * 2, (r1 / scale).to(tl.float8e4nv))
-            tl.store(dst + KV_DIM + dim_off * 2 + 1, (r2 / scale).to(tl.float8e4nv))
-        else:
-            tl.store(dst + KV_DIM + dim_off * 2, r1)
-            tl.store(dst + KV_DIM + dim_off * 2 + 1, r2)
+            # kv_c_normed (KV_DIM elements)
+            if MLA_CACHE_FP8:
+                scale = tl.load(mla_cache_scale_ptr)
+                kv_c_fp8 = (kv_c.to(tl.float32) / scale).to(tl.float8e4nv)
+                tl.store(dst + kv_block, kv_c_fp8)
+            else:
+                tl.store(dst + kv_block, kv_c)
+            # k_pe_roped (from registers, interleaved layout)
+            if MLA_CACHE_FP8:
+                tl.store(dst + KV_DIM + dim_off * 2, (r1 / scale).to(tl.float8e4nv))
+                tl.store(
+                    dst + KV_DIM + dim_off * 2 + 1,
+                    (r2 / scale).to(tl.float8e4nv),
+                )
+            else:
+                tl.store(dst + KV_DIM + dim_off * 2, r1)
+                tl.store(dst + KV_DIM + dim_off * 2 + 1, r2)
     elif pid == 0:
         if not HAS_INDEXER:
             # Shared layer: no indexer K to process.
@@ -354,20 +378,27 @@ def _fused_norm_rope_kernel(
         roped = normed * cos_full + sign * normed_partner * sin_full
         result = tl.where(in_rope, roped, normed)
 
-        # 3. FP8 quantize + cache write from registers.
-        #    No need to write back to index_k_ptr — the only consumer
-        #    (sparse_attn_indexer) reads from the cache, not index_k.
-        _fp8_quant_and_cache_write(
-            result,
-            index_k_mask,
-            slot_idx,
-            indexer_cache_ptr,
-            indexer_cache_scale_ptr,
-            indexer_cache_block_size,
-            indexer_cache_stride,
-            index_k_block,
-            INDEX_K_DIM,
-        )
+        if index_k_out_ptr is not None:
+            tl.store(
+                index_k_out_ptr + tok_idx * index_k_out_stride + index_k_block,
+                result.to(index_k_out_ptr.dtype.element_ty),
+                mask=index_k_mask,
+            )
+
+        # PCP inserts index K after gathering; other paths write it directly.
+        if indexer_cache_ptr is not None and slot_mapping_ptr is not None:
+            slot_idx = tl.load(slot_mapping_ptr + tok_idx)
+            _fp8_quant_and_cache_write(
+                result,
+                index_k_mask,
+                slot_idx,
+                indexer_cache_ptr,
+                indexer_cache_scale_ptr,
+                indexer_cache_block_size,
+                indexer_cache_stride,
+                index_k_block,
+                INDEX_K_DIM,
+            )
 
 
 def fused_norm_rope(
@@ -395,6 +426,9 @@ def fused_norm_rope(
     has_indexer: bool = True,
     index_rope_interleave: bool = False,
     q_c_out: torch.Tensor | None = None,
+    kv_c_out: torch.Tensor | None = None,
+    k_pe_out: torch.Tensor | None = None,
+    index_k_out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert positions.ndim == 1
     assert q_c.ndim == 2
@@ -420,6 +454,10 @@ def fused_norm_rope(
     assert index_k_rope_cos_sin_cache is not None
     index_k_dim = index_k.shape[-1]
     topk = topk_indices_buffer.shape[-1]
+    if indexer_k_cache is not None or mla_kv_cache is not None:
+        assert slot_mapping is not None
+    else:
+        slot_mapping = None
 
     # --- Indexer K cache setup ---
     if indexer_k_cache is not None:
@@ -430,21 +468,13 @@ def fused_norm_rope(
         if indexer_k_cache.dtype == torch.uint8:
             indexer_k_cache = indexer_k_cache.view(torch.float8_e4m3fn)
     else:
-        # No indexer cache (shared layer / MLA-only fusion). Use dummies but
-        # KEEP the caller's slot_mapping so the MLA write (pid 1) still runs.
-        idx_cache_scale_view = torch.empty(0, dtype=torch.float32, device=device)
-        indexer_k_cache = torch.empty(0, dtype=torch.float8_e4m3fn, device=device)
+        idx_cache_scale_view = None
         idx_cache_block_size = 1
-        idx_cache_stride = 1
-        if mla_kv_cache is None:
-            # Pure profiling run (no caches at all): skip all per-token writes.
-            slot_mapping = torch.full(
-                (num_tokens,), -1, dtype=torch.int64, device=device
-            )
+        idx_cache_stride = 0
 
     # --- MLA KV cache setup ---
     mla_cache_ds_mla = mla_kv_cache_dtype == "fp8_ds_mla"
-    mla_cache_fp8 = mla_kv_cache_dtype not in ("auto", "fp8_ds_mla")
+    mla_cache_fp8 = is_quantized_kv_cache(mla_kv_cache_dtype) and not mla_cache_ds_mla
     mla_num_tiles = 1
     mla_ds_scale_view = torch.empty(0, dtype=torch.float32, device=device)
     mla_ds_rope_view = torch.empty(0, dtype=torch.bfloat16, device=device)
@@ -469,17 +499,28 @@ def fused_norm_rope(
         if mla_k_scale is None:
             mla_k_scale = torch.ones(1, dtype=torch.float32, device=device)
     else:
-        # Dummy values — pid 2 will skip the MLA cache write because
-        # slot_mapping is all -1.
+        # Dummy cache values; a zero entry stride disables the cache write.
         mla_kv_cache = torch.empty(0, dtype=torch.bfloat16, device=device)
         mla_block_stride = 0
         mla_entry_stride = 0
-        mla_k_scale = torch.ones(1, dtype=torch.float32, device=device)
+        mla_k_scale = _dummy((1,), torch.float32, device)
 
     if q_c_out is None:
         q_c_out = torch.empty_like(q_c)
+    kv_c_out_stride = 0
+    k_pe_out_stride = 0
+    index_k_out_stride = 0
+    if kv_c_out is not None:
+        assert kv_c_out.shape == kv_c.shape
+        kv_c_out_stride = kv_c_out.stride(0)
+    if k_pe_out is not None:
+        assert k_pe_out.shape == k_pe.shape
+        k_pe_out_stride = k_pe_out.stride(0)
+    if index_k_out is not None:
+        assert index_k_out.shape == index_k.shape
+        index_k_out_stride = index_k_out.stride(0)
     use_pdl = current_platform.is_arch_support_pdl()
-    _fused_norm_rope_kernel[(4, num_tokens)](
+    _fused_norm_rope_kernel[(num_tokens, 4)](
         positions,
         # Q RMS norm
         q_c,
@@ -495,12 +536,16 @@ def fused_norm_rope(
         kv_c.stride(0),
         kv_rms_norm_w,
         kv_rms_eps,
+        kv_c_out,
+        kv_c_out_stride,
         kv_dim,
         # KV RoPE
         k_pe,
         k_pe.stride(0),
         k_rope_cos_sin_cache,
         k_rope_cos_sin_cache.stride(0),
+        k_pe_out,
+        k_pe_out_stride,
         k_rope_cos_sin_cache.shape[-1] // 2,
         # Index K layer norm + RoPE + FP8 quant
         index_k,
@@ -512,6 +557,8 @@ def fused_norm_rope(
         triton.next_power_of_2(index_k_dim),
         index_k_rope_cos_sin_cache,
         index_k_rope_cos_sin_cache.stride(0),
+        index_k_out,
+        index_k_out_stride,
         index_k_rope_cos_sin_cache.shape[-1] // 2,
         # Cache params
         slot_mapping,
@@ -594,8 +641,8 @@ def _fused_q_kernel(
     QUANTIZE_MQA: tl.constexpr,
     USE_PDL: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    tok_idx = tl.program_id(1)
+    tok_idx = tl.program_id(0).to(tl.int64)
+    pid = tl.program_id(1)
     head_idx = tl.program_id(2)
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
@@ -793,7 +840,6 @@ def fused_q(
     assert ql_nope.ndim == 3
     assert ql_nope.shape[:2] == q_pe.shape[:2]
     assert q_scale.dtype == torch.float32 and q_scale.numel() == 1
-
     num_tokens = positions.shape[0]
     num_q_heads = q_pe.shape[1]
     # Grid's 3rd dim must cover the MQA-pack heads (pid 0/2 iterate 2 heads
@@ -869,7 +915,7 @@ def fused_q(
         return index_q_fp8, index_weights_out, mqa_q
 
     use_pdl = current_platform.is_arch_support_pdl()
-    _fused_q_kernel[(3, num_tokens, grid_heads)](
+    _fused_q_kernel[(num_tokens, 3, grid_heads)](
         positions,
         q_pe,
         q_pe.stride(0),
