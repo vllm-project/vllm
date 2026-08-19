@@ -406,8 +406,10 @@ def warmup_kernels(
         elif use_spec_decode:
             decode_steps.append(([0], [False]))
 
-        for step_indices, step_spec_flags in decode_steps:
-            _run_decode_step(step_indices, step_spec_flags)
+        pcp_manager = getattr(model_runner, "pcp_manager", None)
+        if not (pcp_manager is not None and pcp_manager.prefill_only_mtp):
+            for step_indices, step_spec_flags in decode_steps:
+                _run_decode_step(step_indices, step_spec_flags)
 
     # Clean up - process finish_req_ids.
     cleanup_output = SchedulerOutput.make_empty()

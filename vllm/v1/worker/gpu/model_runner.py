@@ -598,6 +598,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.block_tables,
             cls=self.pcp_manager_cls,
         )
+        if self.pcp_manager is not None and self.speculator is not None:
+            self.speculator.set_pcp_manager(self.pcp_manager)  # type: ignore[attr-defined]
         initialize_mamba_ssu_backend(
             self.vllm_config.mamba_config, self.kv_cache_config
         )
@@ -767,18 +769,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if hasattr(self.model, "get_mtp_target_hidden_states"):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+            spec_input_batch = input_batch
+            if self.pcp_manager is not None:
+                spec_hidden_states, spec_input_batch = (
+                    pcp.maybe_restore_pcp_for_sampling(
+                        self.pcp_manager,
+                        spec_hidden_states,
+                        input_batch,
+                    )
+                )
             with use_workspace_lane(self._draft_workspace_lane):
                 self.speculator.propose(
-                    input_batch=input_batch,
+                    input_batch=spec_input_batch,
                     attn_metadata=attn_metadata,
                     slot_mappings=slot_mappings_by_layer,
                     last_hidden_states=spec_hidden_states,
                     aux_hidden_states=aux_hidden_states,
                     num_sampled=torch.ones(
-                        input_batch.num_reqs, dtype=torch.int32, device=self.device
+                        spec_input_batch.num_reqs,
+                        dtype=torch.int32,
+                        device=self.device,
                     ),
                     num_rejected=torch.zeros(
-                        input_batch.num_reqs, dtype=torch.int32, device=self.device
+                        spec_input_batch.num_reqs,
+                        dtype=torch.int32,
+                        device=self.device,
                     ),
                     last_sampled=self.req_states.last_sampled_tokens,
                     next_prefill_tokens=self.req_states.next_prefill_tokens,
@@ -1803,9 +1818,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return ModelRunnerOutput.with_ec_conn_output(output, ec_connector_output)
 
         # Last rank: sample tokens
+        local_hidden_states = hidden_states
+        spec_hidden_states = hidden_states
+        if self.speculator is not None and hasattr(
+            self.model, "get_mtp_target_hidden_states"
+        ):
+            pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
+            spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
         hidden_states, input_batch = pcp.maybe_restore_pcp_for_sampling(
             self.pcp_manager, hidden_states, input_batch
         )
+        if spec_hidden_states is local_hidden_states:
+            spec_hidden_states = hidden_states
+        elif self.pcp_manager is not None:
+            spec_hidden_states = self.pcp_manager.restore_hidden_states(
+                spec_hidden_states
+            )
 
         sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
@@ -1877,14 +1905,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.speculator is not None:
             assert self.sampler is not None
-            # Let the target override the hidden state fed to the drafter
-            # (e.g. DeepSeek V4 MTP needs the pre-hc_head residual). The
-            # target returns a persistent buffer sized at max_num_batched_tokens;
-            # slice to the active token count that propose() expects.
-            spec_hidden_states = hidden_states
-            if hasattr(self.model, "get_mtp_target_hidden_states"):
-                pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
             with use_workspace_lane(self._draft_workspace_lane):
                 draft_tokens = self.speculator.propose(
                     input_batch,
@@ -1905,6 +1925,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.adaptive_verification.record_confidences(
                     self.speculator.draft_token_confidence_probs, input_batch
                 )
+            kv_config = self.vllm_config.kv_transfer_config
+            if kv_config is not None and kv_config.is_kv_producer:
+                self.output_copy_stream.wait_stream(self.main_stream)
+                async_output.copy_event.record(self.output_copy_stream)
 
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does

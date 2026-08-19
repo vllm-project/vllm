@@ -3,6 +3,7 @@
 
 import torch.nn as nn
 
+from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
@@ -11,6 +12,10 @@ from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 
 class MTPSpeculator(AutoRegressiveSpeculator):
     share_mtp_topk_indices: bool = False
+
+    def set_pcp_manager(self, manager: PCPManager) -> None:
+        super().set_pcp_manager(manager)
+        self.share_mtp_topk_indices = False
 
     def load_draft_model(
         self,
