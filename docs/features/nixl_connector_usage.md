@@ -132,6 +132,34 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - In bidirectional mode, the decoder caches KV blocks for multi-turn conversations. This TTL controls how long those blocks are held before being released. Unlike the prefiller lease, this TTL is not renewed via heartbeats.
     - Example: `--kv-transfer-config '{"kv_connector_extra_config": {"decoder_kv_blocks_ttl": 600}}'`
 
+## Connector lifecycle tracing
+
+Both `NixlConnector` (pull) and `NixlPushConnector` can emit structured
+control-plane and data-plane lifecycle records. Tracing is disabled by
+default. Enable deterministic request sampling on every producer and consumer
+with `kv_connector_lifecycle_trace_sample_rate` in
+`kv_connector_extra_config`:
+
+```bash
+vllm serve <MODEL> \
+  --kv-transfer-config '{
+    "kv_connector": "NixlConnector",
+    "kv_role": "kv_producer",
+    "kv_connector_extra_config": {
+      "kv_connector_lifecycle_trace_sample_rate": 0.01
+    }
+  }'
+```
+
+The value must be between `0.0` and `1.0`. Sampled records use the
+`KV_CONNECTOR_LIFECYCLE` log prefix and the `vllm-kv-connector-v1` schema.
+They include the connector, transfer mode, component, producer/consumer role,
+event, timestamps, and optional block counts. Request identifiers are never
+logged directly: records contain hashed request and request-group identifiers,
+and related IDs with different trailing vLLM random suffixes share a sampling
+decision. Wall timestamps may be compared across processes after clock
+normalization; monotonic timestamps are process-local.
+
 ## Bidirectional KV Transfer (Multi-turn)
 
 In standard disaggregated prefilling, KV cache flows in one direction: Prefill (P) computes the KV cache and Decode (D) reads from P. For multi-turn conversations this is wasteful — D already holds the KV cache corresponding to the generated tokens from prior turns, yet P must recompute it from scratch on every new turn. Bidirectional KV transfer lets P **pull** existing KV blocks from D via RDMA before computing only the new tokens, significantly reducing Time-To-First-Token (TTFT) for long-prefill such as **multi-turn heavy scenarios**.

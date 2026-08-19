@@ -31,6 +31,9 @@ from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.lifecycle import (
+    KVConnectorLifecycleEvent,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
     NixlBaseConnectorScheduler,
 )
@@ -193,6 +196,13 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         self._push_registration_deadlines[request.request_id] = (
             time.perf_counter() + self._push_registration_timeout
         )
+        self._lifecycle_sink.emit(
+            KVConnectorLifecycleEvent.REGISTRATION_STAGED,
+            request.request_id,
+            role="consumer",
+            remote_request_id=params.get("remote_request_id"),
+            block_count=sum(len(group) for group in local_block_ids),
+        )
         # In push mode D doesn't know P's blocks; P determines them
         # from the registration. We still track the request as
         # needing recv so the engine waits for P's WRITE completion.
@@ -280,6 +290,12 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
             # registrations (via NIXL notifications).
             self._finished_request_blocks[request.request_id] = block_ids
             self._newly_finished_push_blocks[request.request_id] = block_ids
+            self._lifecycle_sink.emit(
+                KVConnectorLifecycleEvent.TRANSFER_STAGED,
+                request.request_id,
+                role="producer",
+                block_count=sum(len(group) for group in block_ids),
+            )
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -326,6 +342,11 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 "after %.1fs without a push completion",
                 rid,
                 self._push_registration_timeout,
+            )
+            self._lifecycle_sink.emit(
+                KVConnectorLifecycleEvent.REGISTRATION_FAILED,
+                rid,
+                role="consumer",
             )
 
         # D side: package pending registrations for D workers to send out.

@@ -32,6 +32,9 @@ from unittest.mock import MagicMock, patch
 import msgspec
 import pytest
 
+from vllm.distributed.kv_transfer.kv_connector.v1.lifecycle import (
+    KVConnectorLifecycleEvent,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
@@ -121,6 +124,7 @@ class TestPushScheduler:
         """D scheduler stashes registration data + arms watchdog deadline."""
         sched = make_nixl_push_scheduler()
         _stub_sw_clipping(sched)
+        sched._lifecycle_sink = MagicMock()
 
         request = _make_request(request_id="req-d-1")
         blocks = _BlocksMock(block_ids=([10, 11, 12],))
@@ -144,12 +148,20 @@ class TestPushScheduler:
         assert request.kv_transfer_params["do_remote_prefill"] is False
         # Tracked as awaiting a recv.
         assert request.request_id in sched._reqs_need_recv
+        sched._lifecycle_sink.emit.assert_called_once_with(
+            KVConnectorLifecycleEvent.REGISTRATION_STAGED,
+            request.request_id,
+            role="consumer",
+            remote_request_id="prefill-req-d-1",
+            block_count=3,
+        )
 
     def test_p_side_request_finished_stages_blocks(self):
         """P scheduler pushes blocks into both _finished_request_blocks (lease)
         and _newly_finished_push_blocks (metadata for next step)."""
         sched = make_nixl_push_scheduler()
         _stub_sw_clipping(sched)
+        sched._lifecycle_sink = MagicMock()
 
         request = _make_request(request_id="req-p-1", is_d_side=False)
         block_ids = ([20, 21, 22, 23],)
@@ -163,6 +175,12 @@ class TestPushScheduler:
         assert request.request_id in sched._finished_request_blocks
         assert request.request_id in sched._newly_finished_push_blocks
         assert request.request_id in sched._reqs_need_send  # lease armed
+        sched._lifecycle_sink.emit.assert_called_once_with(
+            KVConnectorLifecycleEvent.TRANSFER_STAGED,
+            request.request_id,
+            role="producer",
+            block_count=4,
+        )
 
     def test_build_connector_meta_drains_both_sides(self):
         """meta.push_registrations and meta.push_finished_blocks are filled
@@ -390,6 +408,7 @@ class TestPushWriterMatching:
     def test_handle_push_reg_matches_existing_finished_blocks(self):
         """PUSH_REG arrives second (P finished first): match + fire."""
         w = _StubWriterWorker.fresh()
+        w._lifecycle_sink = MagicMock()
         # P had already finished; its blocks were stashed via metadata.
         w._push_finished_blocks["req-A"] = ([200, 201, 202],)
 
@@ -406,6 +425,19 @@ class TestPushWriterMatching:
         # Finished blocks consumed.
         assert "req-A" not in w._push_finished_blocks
         assert w._pending_d_registrations == {}
+        w._lifecycle_sink.emit.assert_any_call(
+            KVConnectorLifecycleEvent.REGISTRATION_RECEIVED,
+            "req-A",
+            role="producer",
+            block_count=3,
+        )
+        w._lifecycle_sink.emit.assert_any_call(
+            KVConnectorLifecycleEvent.BLOCKS_MATCHED,
+            "req-A",
+            role="producer",
+            remote_request_id="req-A",
+            block_count=3,
+        )
 
     def test_handle_push_reg_stashes_when_no_finished_blocks_yet(self):
         """PUSH_REG arrives first (D registered first): stash, no fire."""

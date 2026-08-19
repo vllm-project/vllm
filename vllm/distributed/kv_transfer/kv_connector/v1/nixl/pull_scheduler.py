@@ -6,6 +6,9 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.v1.lifecycle import (
+    KVConnectorLifecycleEvent,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
     NixlBaseConnectorScheduler,
 )
@@ -165,6 +168,13 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
                         request,
                         local_block_ids,
                     )
+                    self._lifecycle_sink.emit(
+                        KVConnectorLifecycleEvent.TRANSFER_STAGED,
+                        request.request_id,
+                        role="consumer",
+                        remote_request_id=params["remote_request_id"],
+                        block_count=sum(len(group) for group in local_block_ids),
+                    )
 
                 else:
                     logger.warning(
@@ -265,6 +275,13 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             block_ids = self.get_exchange_clipped_blocks(block_ids)
 
             remote_num_tokens = request.num_computed_tokens
+
+            self._lifecycle_sink.emit(
+                KVConnectorLifecycleEvent.TRANSFER_STAGED,
+                request.request_id,
+                role="producer",
+                block_count=sum(len(group) for group in block_ids),
+            )
 
         return delay_free_blocks, dict(
             do_remote_prefill=is_p_node,

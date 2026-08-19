@@ -31,6 +31,12 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     kv_postprocess_layout_on_receive,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import CopyBlocksOp
+from vllm.distributed.kv_transfer.kv_connector.v1.lifecycle import (
+    KVConnectorLifecycleEvent,
+    KVConnectorLifecycleSink,
+    NoOpKVConnectorLifecycleSink,
+    create_kv_connector_lifecycle_sink,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
@@ -95,6 +101,8 @@ class NixlBaseConnectorWorker:
     # (WRITE) connector and a pull (READ) connector never handshake together.
     # Overridden by NixlPushConnectorWorker.
     _TRANSFER_MODE: str = "pull"
+    # Class default keeps light-weight ``__new__`` test doubles disabled.
+    _lifecycle_sink: KVConnectorLifecycleSink = NoOpKVConnectorLifecycleSink()
 
     def _compute_desc_ids(
         self,
@@ -272,6 +280,11 @@ class NixlBaseConnectorWorker:
         if vllm_config.kv_transfer_config is None:
             raise ValueError("kv_transfer_config must be set for NixlConnector")
         self.kv_transfer_config = vllm_config.kv_transfer_config
+        self._lifecycle_sink = create_kv_connector_lifecycle_sink(
+            vllm_config,
+            transfer_mode=self._TRANSFER_MODE,
+            component="worker",
+        )
 
         self.nixl_backends = vllm_config.kv_transfer_config.get_from_extra_config(
             "backends", ["UCX"]
@@ -2064,6 +2077,7 @@ class NixlBaseConnectorWorker:
         assert self.transfer_topo is not None
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
+        expired_sending = set[ReqId]()
 
         # Drain queue of requests where handshake or transfer setup failed.
         failed_recv_reqs = set[ReqId]()
@@ -2094,6 +2108,19 @@ class NixlBaseConnectorWorker:
             meta = self._recving_metadata.pop(req_id, None)
             assert meta is not None, f"{req_id} not found in recving_metadata list"
 
+            assert meta.remote is not None
+            self._lifecycle_sink.emit(
+                (
+                    KVConnectorLifecycleEvent.TRANSFER_FAILED
+                    if req_id in failed_recv_reqs
+                    else KVConnectorLifecycleEvent.TRANSFER_COMPLETED
+                ),
+                req_id,
+                role="consumer",
+                remote_request_id=meta.remote.request_id,
+                block_count=sum(len(group) for group in meta.local_block_ids),
+            )
+
             # Skip KV sync and post-processing for failed requests
             if req_id in failed_recv_reqs:
                 logger.warning(
@@ -2102,7 +2129,6 @@ class NixlBaseConnectorWorker:
                 )
                 continue
 
-            assert meta.remote is not None
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
 
@@ -2174,6 +2200,18 @@ class NixlBaseConnectorWorker:
             self._reqs_to_process.remove(req_id)
             del self._reqs_to_send[req_id]
             done_sending.add(req_id)
+            expired_sending.add(req_id)
+
+        for req_id in done_sending:
+            self._lifecycle_sink.emit(
+                (
+                    KVConnectorLifecycleEvent.TRANSFER_FAILED
+                    if req_id in expired_sending
+                    else KVConnectorLifecycleEvent.TRANSFER_COMPLETED
+                ),
+                req_id,
+                role="producer",
+            )
 
         return done_sending, done_recving
 

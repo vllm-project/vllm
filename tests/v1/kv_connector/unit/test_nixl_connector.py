@@ -29,6 +29,9 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1 import nixl
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.lifecycle import (
+    KVConnectorLifecycleEvent,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiKVConnectorStats,
@@ -3285,8 +3288,17 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
             )
         )
         worker._read_blocks = MagicMock()  # type: ignore[method-assign]
+        worker._lifecycle_sink = MagicMock()
 
         worker._read_blocks_for_req(decode_req_id, meta)
+
+        worker._lifecycle_sink.emit.assert_called_once_with(
+            KVConnectorLifecycleEvent.TRANSFER_STARTED,
+            decode_req_id,
+            role="consumer",
+            remote_request_id=prefill_req_id,
+            block_count=3,
+        )
 
         # MLA: read once from rank 0 and broadcast to the other ranks.
         worker._read_blocks.assert_called_once()

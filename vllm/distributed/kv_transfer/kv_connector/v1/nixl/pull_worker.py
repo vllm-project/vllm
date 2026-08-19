@@ -5,6 +5,9 @@
 import time
 from typing import TYPE_CHECKING
 
+from vllm.distributed.kv_transfer.kv_connector.v1.lifecycle import (
+    KVConnectorLifecycleEvent,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -139,6 +142,14 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             self.xfer_stats.record_kv_expired_req()
             self._handle_failed_transfer(req_id, None)
             return
+
+        self._lifecycle_sink.emit(
+            KVConnectorLifecycleEvent.TRANSFER_STARTED,
+            req_id,
+            role="consumer",
+            remote_request_id=meta.remote.request_id,
+            block_count=sum(len(group) for group in meta.local_block_ids),
+        )
 
         plan = self.tp_mappings[engine_id]
         remote_info = self.transfer_topo.get_engine_info(engine_id)

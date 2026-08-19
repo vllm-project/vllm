@@ -41,6 +41,9 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 
 from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
+from vllm.distributed.kv_transfer.kv_connector.v1.lifecycle import (
+    KVConnectorLifecycleEvent,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
     NixlBaseConnectorWorker,
 )
@@ -180,6 +183,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         if metadata.push_registrations:
             for req_id, reg_data in metadata.push_registrations.items():
                 self._reg_send_inbox.put((req_id, reg_data))
+                self._lifecycle_sink.emit(
+                    KVConnectorLifecycleEvent.REGISTRATION_QUEUED,
+                    req_id,
+                    role="consumer",
+                    block_count=sum(
+                        len(group) for group in reg_data["local_block_ids"]
+                    ),
+                )
             self._push_writer_wake.set()
 
         # --- P-side: newly finished blocks awaiting a D registration match ---
@@ -239,6 +250,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                         break
                     matched = self._pop_matching_registration(rid)
                     if matched is not None:
+                        self._lifecycle_sink.emit(
+                            KVConnectorLifecycleEvent.BLOCKS_MATCHED,
+                            rid,
+                            role="producer",
+                            remote_request_id=matched["request_id"],
+                            block_count=sum(len(group) for group in blocks),
+                        )
                         self._do_start_push_kv(rid, blocks, matched)
                     else:
                         self._push_finished_blocks[rid] = blocks
@@ -285,9 +303,23 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             logger.warning("PUSH_REG notif missing request_id; dropping")
             return
 
+        self._lifecycle_sink.emit(
+            KVConnectorLifecycleEvent.REGISTRATION_RECEIVED,
+            rid,
+            role="producer",
+            block_count=sum(len(group) for group in reg_data["local_block_ids"]),
+        )
+
         match = self._pop_matching_finished_blocks(rid)
         if match is not None:
             fin_id, blocks = match
+            self._lifecycle_sink.emit(
+                KVConnectorLifecycleEvent.BLOCKS_MATCHED,
+                fin_id,
+                role="producer",
+                remote_request_id=rid,
+                block_count=sum(len(group) for group in blocks),
+            )
             self._do_start_push_kv(fin_id, blocks, reg_data)
         else:
             self._pending_d_registrations[rid] = reg_data
@@ -331,6 +363,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._log_failure(
                     failure_type="push_reg_handshake_failed", req_id=rid, error=e
                 )
+                self._lifecycle_sink.emit(
+                    KVConnectorLifecycleEvent.REGISTRATION_FAILED,
+                    rid,
+                    role="consumer",
+                )
                 self._handle_failed_transfer(rid, None)
                 return
             # Re-queue for the writer to send now that the handshake is done.
@@ -352,7 +389,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 req_id,
             )
             self._handle_failed_transfer(req_id, None)
+            self._lifecycle_sink.emit(
+                KVConnectorLifecycleEvent.REGISTRATION_FAILED,
+                req_id,
+                role="consumer",
+            )
             return
+        send_succeeded = True
         for rank, agent_name in agents.items():
             try:
                 self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_msg)
@@ -363,6 +406,17 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     error=e,
                     remote_rank=rank,
                 )
+                send_succeeded = False
+        self._lifecycle_sink.emit(
+            (
+                KVConnectorLifecycleEvent.REGISTRATION_SENT
+                if send_succeeded
+                else KVConnectorLifecycleEvent.REGISTRATION_FAILED
+            ),
+            req_id,
+            role="consumer",
+            block_count=sum(len(group) for group in reg_data["local_block_ids"]),
+        )
         logger.debug(
             "Sent PUSH_REG for %s to engine %s (%dB)", req_id, engine_id, len(notif_msg)
         )
@@ -476,6 +530,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             ),
         )
 
+        self._lifecycle_sink.emit(
+            KVConnectorLifecycleEvent.TRANSFER_STARTED,
+            request_id,
+            role="producer",
+            remote_request_id=decode_request_id,
+            block_count=sum(len(group) for group in logical_local),
+        )
         t0 = time.perf_counter()
         self._xfer_blocks_for_req(req_id=request_id, meta=push_meta)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
@@ -780,6 +841,11 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             self._reqs_to_process.discard(req_id)
             self.consumer_notification_counts_by_req.pop(req_id, None)
             done_sending.add(req_id)
+            self._lifecycle_sink.emit(
+                KVConnectorLifecycleEvent.TRANSFER_COMPLETED,
+                req_id,
+                role="producer",
+            )
 
         # Tell the writer to drop any state it still holds for any
         # request that just finished (push completed) or expired
