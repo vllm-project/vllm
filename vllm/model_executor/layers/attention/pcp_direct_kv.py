@@ -137,7 +137,6 @@ class PCPDirectKVState:
     rank: int = 0
     allocations: list[SymmMemPeerAllocation] = field(default_factory=list)
     layer_peer_ptrs: dict[str, torch.Tensor] = field(default_factory=dict)
-    layer_mcast_ptrs: dict[str, int] = field(default_factory=dict)
     fence: PCPPeerCacheFence | None = None
 
     def close(self) -> None:
@@ -148,7 +147,6 @@ class PCPDirectKVState:
             allocation.close()
         self.allocations.clear()
         self.layer_peer_ptrs.clear()
-        self.layer_mcast_ptrs.clear()
         self.enabled = False
 
 
@@ -171,12 +169,6 @@ def get_layer_peer_ptrs(layer_name: str) -> torch.Tensor | None:
     if not _STATE.enabled:
         return None
     return _STATE.layer_peer_ptrs.get(layer_name)
-
-
-def get_layer_mcast_ptr(layer_name: str) -> int:
-    if not _STATE.enabled or not bool(envs.VLLM_PCP_DIRECT_KV_MULTIMEM):
-        return 0
-    return int(_STATE.layer_mcast_ptrs.get(layer_name, 0))
 
 
 def publish_pcp_direct_kv() -> None:
@@ -226,7 +218,6 @@ def bind_pcp_direct_layer_views(
             "with PyTorch symmetric memory"
         )
     layer_peer_ptrs: dict[str, torch.Tensor] = {}
-    layer_mcast_ptrs: dict[str, int] = {}
     missing: list[str] = []
     for layer_name, cache in kv_caches.items():
         tensor = _as_cache_tensor(cache)
@@ -237,28 +228,23 @@ def bind_pcp_direct_layer_views(
             missing.append(layer_name)
             continue
         layer_peer_ptrs[layer_name] = allocation.peer_ptrs_for_view(tensor)
-        layer_mcast_ptrs[layer_name] = allocation.multicast_ptr_for_view(tensor)
     if missing:
         raise RuntimeError(
             "VLLM_USE_PCP_DIRECT_KV=1: cache layers not on symmetric-memory "
             f"backing: {', '.join(missing)}"
         )
     if not layer_peer_ptrs:
-        raise RuntimeError(
-            "VLLM_USE_PCP_DIRECT_KV=1: no bindable KV cache tensors"
-        )
+        raise RuntimeError("VLLM_USE_PCP_DIRECT_KV=1: no bindable KV cache tensors")
     _STATE.layer_peer_ptrs = layer_peer_ptrs
-    _STATE.layer_mcast_ptrs = layer_mcast_ptrs
     _STATE.world_size = group.size()
     _STATE.rank = group.rank()
     _STATE.fence = PCPPeerCacheFence(group, device)
     _STATE.enabled = True
     logger.info(
-        "PCP direct-KV enabled: world_size=%d layers=%d allocations=%d multicast=%s",
+        "PCP direct-KV enabled: world_size=%d layers=%d allocations=%d",
         _STATE.world_size,
         len(layer_peer_ptrs),
         len(_STATE.allocations),
-        any(ptr != 0 for ptr in layer_mcast_ptrs.values()),
     )
 
 
