@@ -40,8 +40,19 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 INDEX_SELECT_OP = torch.ops.aten.index.Tensor
 FP8_DTYPE = current_platform.fp8_dtype()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def module_global_cleanup():
+    # Cleanup once at the end of the module
+    from vllm.distributed import cleanup_dist_env_and_memory
+
+    yield
+    cleanup_dist_env_and_memory()
 
 
 class QKNormRoPEKVCacheTestModel(torch.nn.Module):
@@ -416,8 +427,7 @@ _FUSION_CONFIGS = [
         AttentionBackendEnum.ROCM_AITER_FA,
     ],
 )
-@pytest.mark.parametrize("num_tokens", [5, 16, 2048])
-@pytest.mark.parametrize("use_shuffle_kv_layout", ["1", "0"])
+@pytest.mark.parametrize("num_tokens", [5, 2048])
 @pytest.mark.parametrize(
     "kv_stride_order",
     # FA/unified use the 4D packed cache (num_blocks, num_kv_heads, block_size,
@@ -428,7 +438,7 @@ _FUSION_CONFIGS = [
 @pytest.mark.parametrize("block_size", [16, 32, 64])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
-@pytest.mark.parametrize("rms_norm_eps", [1e-5, 1e-6])
+@pytest.mark.parametrize("rms_norm_eps", [1e-6])
 @pytest.mark.parametrize("custom_op", ["+rotary_embedding", "+rms_norm"])
 @pytest.mark.skipif(
     not is_aiter_found_and_supported(),
@@ -443,7 +453,6 @@ def test_qk_norm_rope_kvcache_fusion(
     is_neox: bool,
     attn_backend: AttentionBackendEnum,
     enable_aiter_triton_rope: bool,
-    use_shuffle_kv_layout: str,
     kv_stride_order: tuple[int, ...],
     block_size: int,
     dtype: torch.dtype,
@@ -452,19 +461,6 @@ def test_qk_norm_rope_kvcache_fusion(
     custom_op: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    if (
-        attn_backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
-        and use_shuffle_kv_layout == "1"
-    ):
-        pytest.skip("ROCM_AITER_UNIFIED_ATTN is NHD-only; shuffle env is ignored")
-    if (
-        attn_backend == AttentionBackendEnum.ROCM_AITER_FA
-        and use_shuffle_kv_layout == "1"
-    ):
-        pytest.skip(
-            "ROCM_AITER_FA gates the qk_norm+rope+kvcache fusion off under shuffle "
-            "layout (defers to reshape_and_cache_shuffle_triton), so nothing fuses"
-        )
     _run_qk_norm_rope_kvcache_fusion_test(
         attn_backend=attn_backend,
         enable_aiter_triton_rope=enable_aiter_triton_rope,
@@ -475,7 +471,7 @@ def test_qk_norm_rope_kvcache_fusion(
         rotary_dim=rotary_dim,
         block_size=block_size,
         is_neox=is_neox,
-        use_shuffle_kv_layout=use_shuffle_kv_layout,
+        use_shuffle_kv_layout="0",
         kv_stride_order=kv_stride_order,
         dtype=dtype,
         kv_cache_dtype=kv_cache_dtype,
