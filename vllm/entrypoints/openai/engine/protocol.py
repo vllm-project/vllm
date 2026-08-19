@@ -195,6 +195,8 @@ def structured_outputs_from_response_format(
     elif response_format.type == "json_schema":
         json_schema = response_format.json_schema
         assert json_schema is not None
+        if json_schema.strict is False:
+            return structured_outputs
         overrides = {"json": json_schema.json_schema}
     else:
         assert isinstance(
