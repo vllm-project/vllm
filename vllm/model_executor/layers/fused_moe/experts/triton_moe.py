@@ -315,6 +315,19 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         )
         intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
+        fuse_w13_silu = self.moe_config.w13_swiglu_interleaved
+        if fuse_w13_silu:
+            assert (
+                self.quant_dtype is None
+                and hidden_states.dtype == torch.bfloat16
+                and activation == MoEActivation.SILU
+                and self.activation_config.clamp_limit is None
+                and self.activation_config.alpha == 1.0
+                and self.activation_config.beta == 0.0
+                and self._lora_context is None
+                and self.w1_bias is None
+            )
+
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
             _prepare_expert_assignment(
                 topk_ids,
@@ -372,7 +385,11 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             invoke_fused_moe_triton_kernel(
                 hidden_states,
                 w1,
-                intermediate_cache1,
+                (
+                    intermediate_cache2.view(num_tokens, top_k_num, cache2_dim)
+                    if fuse_w13_silu
+                    else intermediate_cache1
+                ),
                 input_scale,
                 self.w1_scale,
                 None,  # topk_weights
@@ -390,6 +407,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 per_channel_quant=self.per_act_token_quant,
                 block_shape=self.block_shape,
                 B_bias=self.w1_bias,
+                fuse_w13_silu=fuse_w13_silu,
             )
 
         if lora_context is not None and lora_context.aux_stream is not None:
@@ -455,7 +473,9 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # Fuse SiLU+Mul + FP8 block quantize into a single kernel
         # when conditions permit (gated SiLU, fp8 block quant with
         # group_size=128, no LoRA requiring the BF16 intermediate).
-        if (
+        if fuse_w13_silu:
+            qintermediate_cache2 = intermediate_cache2
+        elif (
             activation == MoEActivation.SILU
             and self.quant_config.use_fp8_w8a8
             and self.block_shape == [128, 128]

@@ -352,6 +352,8 @@ def fused_moe_kernel(
     SWAP_AB: tl.constexpr,
     # Tensor-descriptor path for the A gather and B load in the K-loop.
     USE_TD: tl.constexpr = False,
+    # W13 rows are [gate0, up0, gate1, up1, ...]; apply SwiGLU in epilogue.
+    FUSE_W13_SILU: tl.constexpr = False,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
@@ -425,18 +427,29 @@ def fused_moe_kernel(
         # -----------------------------------------------------------
         # Write back zeros to the output when the expert is not
         # in the current expert parallel rank.
-        write_zeros_to_output(
-            c_ptr,
-            stride_cm,
-            stride_cn,
-            pid_n,
-            N,
-            offs_token,
-            token_mask,
-            BLOCK_SIZE_M,
-            BLOCK_SIZE_N,
-            compute_type,
-        )
+        if FUSE_W13_SILU:
+            offs_cn = pid_n * (BLOCK_SIZE_N // 2) + tl.arange(0, BLOCK_SIZE_N // 2)
+            c_ptrs = (
+                c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
+            )
+            tl.store(
+                c_ptrs,
+                0.0,
+                mask=token_mask[:, None] & (offs_cn[None, :] < N // 2),
+            )
+        else:
+            write_zeros_to_output(
+                c_ptr,
+                stride_cm,
+                stride_cn,
+                pid_n,
+                N,
+                offs_token,
+                token_mask,
+                BLOCK_SIZE_M,
+                BLOCK_SIZE_N,
+                compute_type,
+            )
         return
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
@@ -605,9 +618,43 @@ def fused_moe_kernel(
     # -----------------------------------------------------------
     # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
-    tl.store(c_ptrs, accumulator, mask=c_mask)
+    if FUSE_W13_SILU:
+        tl.static_assert(BLOCK_SIZE_N % 2 == 0)
+        pairs = tl.reshape(accumulator, (BLOCK_SIZE_M, BLOCK_SIZE_N // 2, 2))
+        gate, up = tl.split(pairs)
+        gate = gate.to(tl.float32)
+        # Match the fast-math contract of the CUDA silu_and_mul kernel this
+        # replaces. Triton's regular sigmoid uses more accurate operations,
+        # whose small difference can cross a BF16 rounding boundary.
+        exp_neg = tl.inline_asm_elementwise(
+            "{ mul.ftz.f32 $0, $1, 0fBFB8AA3B; ex2.approx.ftz.f32 $0, $0; }",
+            "=f,f",
+            [gate],
+            dtype=tl.float32,
+            is_pure=True,
+            pack=1,
+        )
+        silu = tl.inline_asm_elementwise(
+            "div.approx.ftz.f32 $0, $1, $2;",
+            "=f,f,f",
+            [gate, 1.0 + exp_neg],
+            dtype=tl.float32,
+            is_pure=True,
+            pack=1,
+        )
+        # silu_kernel returns the input scalar type before the gated multiply,
+        # so preserve that BF16 rounding point as well as the fast exp/div.
+        activated = silu.to(compute_type).to(tl.float32) * up.to(tl.float32)
+        offs_half = pid_n * (BLOCK_SIZE_N // 2) + tl.arange(0, BLOCK_SIZE_N // 2)
+        c_ptrs = (
+            c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_half[None, :]
+        )
+        c_mask = token_mask[:, None] & (offs_half[None, :] < N // 2)
+        tl.store(c_ptrs, activated.to(compute_type), mask=c_mask)
+    else:
+        c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
+        c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+        tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
 # NOTE(zyongye): we can remove all the wna16 kernel
@@ -781,10 +828,18 @@ def invoke_fused_moe_triton_kernel(
     per_channel_quant: bool,
     block_shape: list[int] | None = None,
     B_bias: torch.Tensor | None = None,
+    fuse_w13_silu: bool = False,
 ):
     assert topk_weights is not None or not mul_routed_weight
     assert topk_weights is None or topk_weights.stride(1) == 1
     assert sorted_token_ids is None or sorted_token_ids.stride(0) == 1
+    if fuse_w13_silu:
+        assert not (use_fp8_w8a8 or use_int8_w8a8 or use_int8_w8a16 or use_int4_w4a16)
+        assert B_bias is None
+        assert not mul_routed_weight
+        assert compute_type == tl.bfloat16
+        assert B.size(1) % 2 == 0
+        assert config["BLOCK_SIZE_N"] % 2 == 0
 
     if use_fp8_w8a8:
         SWAP_AB = enable_swap_ab(config["BLOCK_SIZE_M"], config["BLOCK_SIZE_N"])
@@ -900,6 +955,7 @@ def invoke_fused_moe_triton_kernel(
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         SWAP_AB=SWAP_AB,
         USE_TD=use_td,
+        FUSE_W13_SILU=fuse_w13_silu,
         **config,
     )
 

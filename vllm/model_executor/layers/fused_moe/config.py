@@ -1336,6 +1336,11 @@ class FusedMoEConfig:
     rocm_aiter_fmoe_enabled: bool = False
     aiter_fmoe_shared_expert_enabled: bool = False
 
+    # Runtime-only weight layout used by the Triton fused W13 SwiGLU epilogue.
+    # Set during unquantized kernel-format conversion; checkpoint weights are
+    # always loaded in the standard separated gate/up layout.
+    w13_swiglu_interleaved: bool = False
+
     def __post_init__(self):
         from vllm._aiter_ops import rocm_aiter_ops
 
