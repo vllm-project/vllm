@@ -122,8 +122,10 @@ steps:
   - vllm/
   - tests/models/test_utils.py
   - tests/models/test_vision.py
+  - tests/models/test_adapters.py
+  - tests/models/transformers/fusers/
   commands:
-  - pytest -v -s models/test_utils.py models/test_vision.py
+  - pytest -v -s models/test_utils.py models/test_vision.py models/test_adapters.py models/transformers/fusers/
 
 - label: ":computer: (CPU) Multimodal Processor Shard %N" # TBD
   timeout_in_minutes: 180
@@ -154,7 +156,10 @@ steps:
   - pytest -v -s -m 'cpu_test' v1/core
   - pytest -v -s v1/structured_output
   - pytest -v -s v1/test_serial_utils.py
+  - pytest -v -s v1/test_kv_cache_spec_registry.py
+  - pytest -v -s v1/cudagraph/test_cudagraph_manager.py
   - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
+  - pytest -v -s -m 'cpu_test' v1/ec_connector/unit
   - pytest -v -s -m 'cpu_test' v1/metrics
 
 - label: ":computer: (CPU) Async Engine, Inputs, Utils, Worker, Config" # TBD
@@ -166,6 +171,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - tests/test_envs.py
   - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/test_pooling_params.py
@@ -182,6 +188,7 @@ steps:
   - tests/config
   commands:
   - python3 standalone_tests/lazy_imports.py
+  - pytest -v -s test_envs.py
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pooling_params.py
@@ -236,6 +243,7 @@ steps:
   source_file_dependencies:
   - .buildkite/scripts/docker-build-metadata-args.sh
   - .buildkite/scripts/ci-bake-rocm.sh
+  - .buildkite/release-pipeline.yaml
   - docker/Dockerfile
   - docker/Dockerfile.cpu
   - docker/Dockerfile.rocm
@@ -423,6 +431,7 @@ steps:
   source_file_dependencies:
   - vllm/v1/
   - tests/v1/engine/
+  - tests/v1/test_tensor_ipc_queue.py
   - tests/config/test_mp_reducer.py
   - vllm/config/
   - vllm/engine/arg_utils.py
@@ -431,6 +440,7 @@ steps:
   commands:
   - pytest -v -s v1/engine/test_preprocess_error_handling.py
   - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+  - pytest -v -s v1/test_tensor_ipc_queue.py
   - pytest -v -s config/test_mp_reducer.py
 
 - label: ":amd: (MI250) Spec Decode Draft Model" # TBD
@@ -986,6 +996,8 @@ steps:
   - tests/test_config
   - tests/test_logger
   - tests/test_vllm_port
+  - tests/jit_monitor/test_hooks.py
+  - tests/jit_monitor/test_hooks_gpu.py
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py jit_monitor/test_hooks.py jit_monitor/test_hooks_gpu.py
 
@@ -1446,6 +1458,7 @@ steps:
   - tests/evals/
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - export PYTORCH_ROCM_ARCH=gfx942
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
 
 - label: ":amd: (MI300) LM Eval Large Models ROCm Harness" # TBD
@@ -1735,6 +1748,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/lora
+  - vllm/model_executor/layers/fused_moe/
   - tests/lora
   - vllm/platforms/rocm.py
   commands:
@@ -1744,6 +1758,7 @@ steps:
   - pytest -v -s -x lora/test_olmoe_tp.py
   - pytest -v -s -x lora/test_gptoss_tp.py
   - pytest -v -s -x lora/test_qwen35_densemodel_lora.py
+  - pytest -v -s -x lora/test_gemma4_tp.py
 
 #------------------------------------------------------  mi300 · model_executor  -------------------------------------------------------#
 
@@ -2110,10 +2125,10 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal/generation
-  - tests/models/multimodal/test_mapping.py
+  - tests/models/multimodal
   commands:
-  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing
+  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing
+  - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
   - pytest -v -s models/multimodal/generation/test_memory_leak.py -m core_model
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
@@ -2156,6 +2171,7 @@ steps:
   - tests/models/multimodal
   commands:
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma"
+  - pytest -v -s models/multimodal/generation/test_mm_prefix_lm.py -m core_model
   - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
 
 #-----------------------------------------------------  mi300 · models / quantized  -----------------------------------------------------#
@@ -2622,9 +2638,11 @@ steps:
   - vllm/v1/sample/
   - vllm/model_executor/layers/
   - tests/v1/e2e/spec_decode/
+  - tests/spec_decode/
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s v1/e2e/spec_decode/ngram_suffix/
+  - python3 spec_decode/test_custom_proposer.py
 
 - label: ":amd: (MI300) Spec Decode Speculators + MTP" # TBD
   timeout_in_minutes: 180
@@ -2688,6 +2706,7 @@ steps:
   - vllm/
   - tests/v1/spec_decode
   commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -m 'not slow_test' v1/spec_decode
 
 - label: ":amd: (MI300) Extract Hidden States Integration" # TBD
@@ -2752,17 +2771,24 @@ steps:
   - tests/v1/core
   - tests/v1/executor
   - tests/v1/kv_offload
+  - tests/v1/simple_kv_offload
   - tests/v1/worker
+  - tests/v1/streaming_input
   - tests/v1/kv_connector/unit
+  - tests/v1/ec_connector/unit
   - tests/v1/metrics
   - tests/entrypoints/openai/correctness/test_lmeval.py
   commands:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -m 'not cpu_test' v1/core
   - pytest -v -s v1/executor
   - pytest -v -s v1/kv_offload
+  - pytest -v -s v1/simple_kv_offload
   - pytest -v -s v1/worker
+  - pytest -v -s v1/streaming_input
   - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
+  - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit
   - pytest -v -s -m 'not cpu_test' v1/metrics
   - pip install -U git+https://github.com/vllm-project/lm-evaluation-harness.git@streaming-api
   # - export HSA_NO_SCRATCH_RECLAIM=1
@@ -2783,6 +2809,7 @@ steps:
   - tests/v1/test_request.py
   - tests/v1/test_outputs.py
   commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s v1/sample
   - pytest -v -s v1/logits_processors
   - pytest -v -s v1/test_oracle.py
@@ -2825,6 +2852,7 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/v1/tracing
+  - tests/tracing/
   commands:
   - "pip install \
       'opentelemetry-sdk>=1.26.0' \
@@ -2832,6 +2860,7 @@ steps:
       'opentelemetry-exporter-otlp>=1.26.0' \
       'opentelemetry-semantic-conventions-ai>=0.4.1'"
   - pytest -v -s v1/tracing
+  - pytest -v -s tracing
 
 - label: ":amd: (MI300) V1 E2E" # TBD
   timeout_in_minutes: 180
@@ -3753,9 +3782,9 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal/generation
+  - tests/models/multimodal
   commands:
-  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing
+  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_mm_prefix_lm.py --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing
   - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
   - pytest -v -s models/multimodal/generation/test_memory_leak.py -m core_model
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
