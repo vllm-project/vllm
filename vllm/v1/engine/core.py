@@ -1318,6 +1318,7 @@ class EngineCoreProc(EngineCore):
 
         engine_core: EngineCoreProc | None = None
         signal_callback: SignalCallback | None = None
+        clean_shutdown = False
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
@@ -1380,8 +1381,15 @@ class EngineCoreProc(EngineCore):
 
             engine_core.run_busy_loop()
 
-        except SystemExit:
+        except SystemExit as e:
             logger.info_once("[shutdown] EngineCore: exiting busy loop")
+            clean_shutdown = (
+                e.code in (None, 0)
+                and engine_core is not None
+                and engine_core.shutdown_state == EngineShutdownState.SHUTTING_DOWN
+                and not engine_core.has_work()
+                and engine_core.vllm_config.shutdown_timeout == 0
+            )
             raise
         except Exception as e:
             if engine_core is None:
@@ -1397,6 +1405,14 @@ class EngineCoreProc(EngineCore):
                 signal_callback.stop()
             if engine_core is not None:
                 engine_core.shutdown()
+            if clean_shutdown:
+                from vllm.platforms import current_platform
+
+                if current_platform.is_rocm():
+                    # Cleanup above already unfreezes and collects the heap.
+                    # Freeze the surviving graph to skip another slow cyclic-GC
+                    # scan during finalization; process exit reclaims it.
+                    gc.freeze()
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
@@ -1684,6 +1700,12 @@ class EngineCoreProc(EngineCore):
             max_num_seqs=scheduler_config.max_num_seqs,
             max_num_batched_tokens=scheduler_config.max_num_batched_tokens,
             instance_id=self.vllm_config.instance_id,
+            supports_lora=self.vllm_config.lora_config is not None,
+            max_loras=(
+                self.vllm_config.lora_config.max_loras
+                if self.vllm_config.lora_config is not None
+                else 0
+            ),
             kv_events_config=self.scheduler.get_kv_event_publisher_config(),
             weight_transfer_backend=(
                 self.vllm_config.weight_transfer_config.backend
@@ -2207,6 +2229,7 @@ class DPEngineCoreProc(EngineCoreProc):
         # Loop until process is sent a SIGINT or SIGTERM
         while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
+            was_running = self.engines_running
             self._process_input_queue()
             # Publish request counts before and after GPU step to ensure freshness.
             self._maybe_publish_request_counts()
@@ -2267,6 +2290,19 @@ class DPEngineCoreProc(EngineCoreProc):
                 # Increment wave count and reset step counter.
                 self.current_wave += 1
                 self.step_counter = 0
+            elif (
+                not was_running
+                and self.has_coordinator
+                and self.dp_rank == 0
+                and not self.pending_pause
+            ):
+                # Mirror of the wave_complete notification above: the
+                # coordinator must observe this edge too rather than assume
+                # that a START_DP_WAVE it sent was acted upon, since a paused
+                # engine discards it.
+                self.output_queue.put_nowait(
+                    (-1, EngineCoreOutputs(start_wave=self.current_wave))
+                )
 
         raise SystemExit
 
