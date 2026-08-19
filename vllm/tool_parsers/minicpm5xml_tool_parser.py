@@ -75,8 +75,7 @@ def _strip_thinking_content(text: str) -> str:
     """Return only user-visible content after MiniCPM5 thinking, when present."""
     if "</think>" not in text:
         return text
-    visible = text.rsplit("</think>", 1)[-1].lstrip()
-    return visible if visible else text
+    return text.rsplit("</think>", 1)[-1].lstrip()
 
 
 def _streaming_args_snapshot(args_json: str, *, is_complete: bool) -> str:
