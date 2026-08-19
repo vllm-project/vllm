@@ -30,6 +30,7 @@ from vllm.utils.system_utils import (
     kill_process_tree,
     set_process_title,
 )
+from vllm.v1.engine.utils import get_engine_process_shutdown_timeout
 
 logger = init_logger(__name__)
 
@@ -513,7 +514,11 @@ class DPSupervisor:
 
     async def _shutdown_children(self) -> None:
         """Terminate the vLLM DP servers."""
-        timeout = self.args.shutdown_timeout + CHILD_EXIT_GRACE_S
+        process_timeout = get_engine_process_shutdown_timeout(
+            self.args.shutdown_timeout, self.args.shutdown_timeout
+        )
+        assert process_timeout is not None
+        timeout = process_timeout + CHILD_EXIT_GRACE_S
 
         try:
             logger.info(
