@@ -22,14 +22,12 @@
 namespace vec_op::arm_vec {
 
 #ifdef ARM_BF16_SUPPORT
-using neon_bf16x8_t = bfloat16x8_t;
-using neon_bf16x4_t = bfloat16x4_t;
+using neon_bfloat16x8_t = bfloat16x8_t;
+using neon_bfloat16x4_t = bfloat16x4_t;
 #else
-using neon_bf16x8_t = uint16x8_t;
-using neon_bf16x4_t = uint16x4_t;
+using neon_bfloat16x8_t = uint16x8_t;
+using neon_bfloat16x4_t = uint16x4_t;
 #endif
-
-using at_bfloat16x8_t = neon_bf16x8_t;
 
 template <typename T>
 struct Vectorized;
@@ -41,7 +39,7 @@ inline void copy_partial(T* dst, const T* src, int count) {
   std::memcpy(dst, src, static_cast<size_t>(count) * sizeof(T));
 }
 
-inline float32x4_t bf16x4_to_f32(neon_bf16x4_t v) {
+inline float32x4_t bf16x4_to_f32(neon_bfloat16x4_t v) {
 #ifdef ARM_BF16_SUPPORT
   return vcvt_f32_bf16(v);
 #else
@@ -49,7 +47,7 @@ inline float32x4_t bf16x4_to_f32(neon_bf16x4_t v) {
 #endif
 }
 
-inline neon_bf16x4_t f32_to_bf16x4(float32x4_t v) {
+inline neon_bfloat16x4_t f32_to_bf16x4(float32x4_t v) {
 #ifdef ARM_BF16_SUPPORT
   return vcvt_bf16_f32(v);
 #else
@@ -57,7 +55,7 @@ inline neon_bf16x4_t f32_to_bf16x4(float32x4_t v) {
 #endif
 }
 
-inline neon_bf16x8_t load_bf16x8(const c10::BFloat16* ptr) {
+inline neon_bfloat16x8_t load_bf16x8(const c10::BFloat16* ptr) {
 #ifdef ARM_BF16_SUPPORT
   return vld1q_bf16(reinterpret_cast<const bfloat16_t*>(ptr));
 #else
@@ -65,7 +63,7 @@ inline neon_bf16x8_t load_bf16x8(const c10::BFloat16* ptr) {
 #endif
 }
 
-inline void store_bf16x8(c10::BFloat16* ptr, neon_bf16x8_t v) {
+inline void store_bf16x8(c10::BFloat16* ptr, neon_bfloat16x8_t v) {
 #ifdef ARM_BF16_SUPPORT
   vst1q_bf16(reinterpret_cast<bfloat16_t*>(ptr), v);
 #else
@@ -73,7 +71,7 @@ inline void store_bf16x8(c10::BFloat16* ptr, neon_bf16x8_t v) {
 #endif
 }
 
-inline neon_bf16x4_t bf16_low(neon_bf16x8_t v) {
+inline neon_bfloat16x4_t bf16_low(neon_bfloat16x8_t v) {
 #ifdef ARM_BF16_SUPPORT
   return vget_low_bf16(v);
 #else
@@ -81,7 +79,7 @@ inline neon_bf16x4_t bf16_low(neon_bf16x8_t v) {
 #endif
 }
 
-inline neon_bf16x4_t bf16_high(neon_bf16x8_t v) {
+inline neon_bfloat16x4_t bf16_high(neon_bfloat16x8_t v) {
 #ifdef ARM_BF16_SUPPORT
   return vget_high_bf16(v);
 #else
@@ -89,7 +87,8 @@ inline neon_bf16x4_t bf16_high(neon_bf16x8_t v) {
 #endif
 }
 
-inline neon_bf16x8_t bf16_combine(neon_bf16x4_t lo, neon_bf16x4_t hi) {
+inline neon_bfloat16x8_t bf16_combine(neon_bfloat16x4_t lo,
+                                      neon_bfloat16x4_t hi) {
 #ifdef ARM_BF16_SUPPORT
   return vcombine_bf16(lo, hi);
 #else
@@ -97,7 +96,7 @@ inline neon_bf16x8_t bf16_combine(neon_bf16x4_t lo, neon_bf16x4_t hi) {
 #endif
 }
 
-inline neon_bf16x8_t bf16_dup(c10::BFloat16 v) {
+inline neon_bfloat16x8_t bf16_dup(c10::BFloat16 v) {
   uint16_t bits;
   std::memcpy(&bits, &v, sizeof(bits));
 #ifdef ARM_BF16_SUPPORT
@@ -199,7 +198,7 @@ inline Vectorized<float> fmadd(const Vectorized<float>& a,
 }
 
 template <typename AccT>
-inline AccT vec_reduce_all(const Vectorized<float>& v) {
+inline AccT vec_reduce_add(const Vectorized<float>& v) {
   return static_cast<AccT>(vaddvq_f32(v));
 }
 
@@ -266,16 +265,16 @@ inline Vectorized<c10::Half> convert_float_half(const Vectorized<float>& a,
 
 template <>
 struct Vectorized<c10::BFloat16> {
-  neon_bf16x8_t values;
+  neon_bfloat16x8_t values;
   static constexpr int size_ = 8;
 
   Vectorized() : values{} {}
-  Vectorized(neon_bf16x8_t v) : values(v) {}
+  Vectorized(neon_bfloat16x8_t v) : values(v) {}
   explicit Vectorized(c10::BFloat16 v) : values(bf16_dup(v)) {}
 
   static constexpr int size() { return size_; }
 
-  operator neon_bf16x8_t() const { return values; }
+  operator neon_bfloat16x8_t() const { return values; }
 
   static Vectorized loadu(const c10::BFloat16* ptr) { return load_bf16x8(ptr); }
   static Vectorized loadu(const c10::BFloat16* ptr, int count) {
@@ -294,7 +293,7 @@ struct Vectorized<c10::BFloat16> {
 
 inline std::tuple<Vectorized<float>, Vectorized<float>> convert_bfloat16_float(
     const Vectorized<c10::BFloat16>& a) {
-  neon_bf16x8_t x = a;
+  neon_bfloat16x8_t x = a;
   return {Vectorized<float>(bf16x4_to_f32(bf16_low(x))),
           Vectorized<float>(bf16x4_to_f32(bf16_high(x)))};
 }

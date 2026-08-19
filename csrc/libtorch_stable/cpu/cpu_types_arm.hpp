@@ -277,7 +277,7 @@ struct BF16Vec8 : public VectorizedRegWrapper<BF16Vec8, 1, c10::BFloat16> {
   using Base::get_elem_num;
   using Base::VEC_ELEM_NUM;
 
-  explicit BF16Vec8(at_bfloat16x8_t data) : Base(VectorizedT(data)) {};
+  explicit BF16Vec8(neon_bfloat16x8_t data) : Base(VectorizedT(data)) {};
 
   explicit BF16Vec8(float32x4x2_t v) {
     reg.val[0] = convert_float_bfloat16(v.val[0], v.val[1]);
@@ -377,7 +377,7 @@ struct FP32Vec8 : public VectorizedRegWrapper<FP32Vec8, 2, float> {
     reg.val[0] = Vectorized<float>(vcvt_f32_f16(vget_low_f16(v)));
     reg.val[1] = Vectorized<float>(vcvt_f32_f16(vget_high_f16(v)));
   };
-  explicit FP32Vec8(at_bfloat16x8_t v) {
+  explicit FP32Vec8(neon_bfloat16x8_t v) {
     std::tie(reg.val[0], reg.val[1]) =
         convert_bfloat16_float(Vectorized<c10::BFloat16>(v));
   };
@@ -397,7 +397,7 @@ struct FP32Vec8 : public VectorizedRegWrapper<FP32Vec8, 2, float> {
     float answer = 0;
 
     unroll_loop<int, VEC_REG_NUM>(
-        [&](int i) { answer += vec_reduce_all<float>(reg.val[i]); });
+        [&](int i) { answer += vec_reduce_add<float>(reg.val[i]); });
     return answer;
   }
 
@@ -704,7 +704,7 @@ struct FP32Vec16 : public VectorizedRegWrapper<FP32Vec16, 4, float> {
   float reduce_sum() const {
     float answer = 0;
     unroll_loop<int, VEC_REG_NUM>(
-        [&](int i) { answer += vec_reduce_all<float>(reg.val[i]); });
+        [&](int i) { answer += vec_reduce_add<float>(reg.val[i]); });
 
     return answer;
   }
