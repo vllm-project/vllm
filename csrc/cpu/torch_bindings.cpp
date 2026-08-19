@@ -91,6 +91,39 @@ at::Tensor fp8_scaled_mm_cpu(at::Tensor& mat1, at::Tensor& mat2,
                              const std::optional<at::Tensor>& bias,
                              at::ScalarType out_dtype, bool is_vnni);
 
+// Adapted from sglang: MLA CPU kernels (AMX-only)
+void decode_attention_cpu(at::Tensor& query, at::Tensor& k_buffer,
+                          at::Tensor& v_buffer, at::Tensor& output,
+                          const std::optional<at::Tensor>& key,
+                          const std::optional<at::Tensor>& value,
+                          const std::optional<at::Tensor>& loc,
+                          at::Tensor& attn_logits, at::Tensor& req_to_token,
+                          at::Tensor& req_pool_indices, at::Tensor& seq_lens,
+                          double sm_scale, double logit_cap, bool is_cross_attn,
+                          int64_t sliding_window_size,
+                          std::optional<at::Tensor> encoder_lens,
+                          std::optional<at::Tensor> sinks);
+
+void extend_attention_cpu(
+    at::Tensor& q_extend, const std::optional<at::Tensor>& k_extend,
+    const std::optional<at::Tensor>& v_extend, at::Tensor& o_extend,
+    at::Tensor& k_buffer, at::Tensor& v_buffer, at::Tensor& req_to_token,
+    at::Tensor& req_pool_indices, at::Tensor& seq_lens,
+    at::Tensor& extend_seq_lens, at::Tensor& extend_start_loc,
+    int64_t max_len_extend, double sm_scale, double logit_cap,
+    bool is_cross_attn, int64_t sliding_window_size,
+    std::optional<at::Tensor> encoder_lens, std::optional<at::Tensor> sinks,
+    std::optional<at::Tensor> tree_mask);
+
+void bmm_cpu(at::Tensor& out, at::Tensor& mat1, at::Tensor& mat2, bool is_vnni,
+             const std::optional<at::Tensor>& scale);
+
+// vLLM-native: CPU cache-write op for MLA's single-latent-buffer KV cache
+// (the CUDA-only `concat_and_cache_mla` has no CPU dispatch).
+void concat_and_cache_mla_cpu(const at::Tensor& kv_c_normed,
+                              const at::Tensor& k_pe, at::Tensor& kv_cache,
+                              const at::Tensor& slot_mapping);
+
 // Adapted from sglang: INT4 W4A8 kernels
 std::tuple<at::Tensor, at::Tensor, at::Tensor> convert_weight_packed_scale_zp(
     at::Tensor qweight,  // awq: (*, K, N / 8)  ||  gptq: (*, K / 8, N) , int32
@@ -521,6 +554,35 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "pad_slot_id, "
       "bool is_vnni) -> Tensor");
   ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
+
+  // Adapted from sglang: MLA CPU kernels (AMX-only, DeepSeek V2/V3/R1)
+  ops.def(
+      "decode_attention_cpu(Tensor query, Tensor k_buffer, Tensor v_buffer, "
+      "Tensor(a!) output, Tensor? key, Tensor? value, Tensor? loc, Tensor "
+      "attn_logits, Tensor req_to_token, Tensor req_pool_indices, Tensor "
+      "seq_lens, float sm_scale, float logit_cap, bool is_cross_attn, int "
+      "sliding_window_size, Tensor? encoder_lens, Tensor? sinks) -> ()");
+  ops.impl("decode_attention_cpu", torch::kCPU, &decode_attention_cpu);
+
+  ops.def(
+      "extend_attention_cpu(Tensor q_extend, Tensor? k_extend, Tensor? "
+      "v_extend, Tensor(a!) o_extend, Tensor k_buffer, Tensor v_buffer, "
+      "Tensor req_to_token, Tensor req_pool_indices, Tensor seq_lens, Tensor "
+      "extend_seq_lens, Tensor extend_start_loc, int max_len_extend, float "
+      "sm_scale, float logit_cap, bool is_cross_attn, int "
+      "sliding_window_size, Tensor? encoder_lens, Tensor? sinks, Tensor? "
+      "tree_mask=None) -> ()");
+  ops.impl("extend_attention_cpu", torch::kCPU, &extend_attention_cpu);
+
+  ops.def(
+      "bmm_cpu(Tensor(a!) out, Tensor mat1, Tensor mat2, bool is_vnni, "
+      "Tensor? scale) -> ()");
+  ops.impl("bmm_cpu", torch::kCPU, &bmm_cpu);
+
+  ops.def(
+      "concat_and_cache_mla_cpu(Tensor kv_c_normed, Tensor k_pe, "
+      "Tensor(a!) kv_cache, Tensor slot_mapping) -> ()");
+  ops.impl("concat_and_cache_mla_cpu", torch::kCPU, &concat_and_cache_mla_cpu);
 #endif
 
 #if (defined(__AVX512BF16__) && defined(__AVX512F__) && \
