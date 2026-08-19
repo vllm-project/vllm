@@ -638,6 +638,10 @@ def resolve_kv_cache_block_sizes(
     ]
     scheduler_block_size = math.lcm(*group_block_sizes)
 
+    logger.info("KV groups %s", groups)
+    logger.info("KV group block sizes %s", group_block_sizes)
+    logger.info("KV LCM block sizes %s", scheduler_block_size)
+
     # Block hashes are only consumed by prefix caching and KV connectors
     # (P/D, offloading); when neither is active, keep hash_block_size equal
     # to the scheduler block size.
@@ -1095,6 +1099,100 @@ def unify_kv_cache_spec_page_size(
                 )
             assert new_spec.page_size_bytes == max_page_size
             new_kv_cache_spec[layer_name] = new_spec
+
+    return new_kv_cache_spec
+
+
+# When the LCM of block sizes across groups exceeds this multiple of the
+# most common block size, outlier attention groups are switched from
+# block-size scaling to page padding to bring the LCM down.
+_MAX_LCM_BLOCK_SIZE_RATIO = 4
+
+
+def _reduce_block_size_lcm(
+    kv_cache_spec: dict[str, KVCacheSpec],
+    max_page_size: int,
+) -> dict[str, KVCacheSpec]:
+    """Re-unify outlier block sizes that inflate the scheduler LCM.
+
+    After the initial page-size unification, different per-token byte
+    costs across layer types can produce block sizes whose LCM is much
+    larger than any individual block size (e.g., MLA=1536 and SWA=1728
+    give LCM=13824). This hurts scheduler granularity because
+    ``resolve_kv_cache_block_sizes`` rounds to the LCM.
+
+    When the LCM exceeds ``_MAX_LCM_BLOCK_SIZE_RATIO`` times the most
+    common block size, this function switches outlier attention layers
+    from the integer-ratio path (large block, exact page fill) to the
+    padded-page path (target block size, some wasted bytes per page).
+    This is only possible for attention layers whose backend supports
+    ``indexes_kv_by_block_stride``.
+
+    The outlier's new block_size is set to ``target_block_size`` (the
+    majority block size). The attention backend must support this as a
+    kernel block size — if it doesn't, ``init_attn_backend`` will
+    attempt to find a compatible backend (see
+    ``_maybe_remediate_padded_page_backends`` in ``attn_utils.py``).
+    """
+    block_sizes = [spec.block_size for spec in kv_cache_spec.values()]
+    unique_sizes = set(block_sizes)
+    if len(unique_sizes) <= 1:
+        return kv_cache_spec
+
+    current_lcm = math.lcm(*unique_sizes)
+    size_counts: dict[int, int] = {}
+    for bs in block_sizes:
+        size_counts[bs] = size_counts.get(bs, 0) + 1
+    target_block_size = max(size_counts, key=size_counts.get)  # type: ignore[arg-type]
+
+    if current_lcm <= target_block_size * _MAX_LCM_BLOCK_SIZE_RATIO:
+        return kv_cache_spec
+
+    new_kv_cache_spec = dict(kv_cache_spec)
+    changed = False
+    for layer_name, layer_spec in kv_cache_spec.items():
+        if layer_spec.block_size == target_block_size:
+            continue
+        if not (
+            isinstance(layer_spec, AttentionSpec)
+            and layer_spec.indexes_kv_by_block_stride
+        ):
+            continue
+
+        per_token = layer_spec.real_page_size_bytes // layer_spec.block_size
+        new_block_size = target_block_size
+        if new_block_size * per_token > max_page_size:
+            new_block_size = _largest_divisor_at_most(
+                target_block_size, max_page_size // per_token
+            )
+        if new_block_size == layer_spec.block_size:
+            continue
+
+        new_spec = replace(
+            layer_spec,
+            block_size=new_block_size,
+            page_size_padded=max_page_size,
+        )
+        assert new_spec.page_size_bytes == max_page_size
+        new_kv_cache_spec[layer_name] = new_spec
+        changed = True
+
+    if changed:
+        new_sizes = {spec.block_size for spec in new_kv_cache_spec.values()}
+        new_lcm = math.lcm(*new_sizes)
+        logger.info(
+            "Reduced KV cache block size LCM from %d to %d by padding "
+            "%d outlier attention layer(s) to block_size=%d",
+            current_lcm,
+            new_lcm,
+            sum(
+                1
+                for name in kv_cache_spec
+                if kv_cache_spec[name].block_size != new_kv_cache_spec[name].block_size
+            ),
+            target_block_size,
+        )
+
     return new_kv_cache_spec
 
 
@@ -1798,6 +1896,27 @@ def get_kv_cache_groups(
         if fallback_groups is None:
             raise
         return fallback_groups
+
+    # When backend_per_kind overrides the sliding-window backend to one
+    # that supports large (non-power-of-2) kernel block sizes (e.g.
+    # FLASH_ATTN which supports MultipleOf(16)), we can reduce the LCM
+    # by switching outlier SWA groups to page_size_padded with the
+    # majority block size. Without the override, the default backend
+    # (e.g. FlashInfer TRTLLM) requires power-of-2 kernel blocks and
+    # sub-block splitting + padded pages would crash.
+    #
+    # To enable, add to config:
+    #   attention:
+    #     backend_per_kind:
+    #       sliding_window: FLASH_ATTN
+    attention_config = vllm_config.attention_config
+    logger.info("backend_per_kind=%s", attention_config.backend_per_kind)
+    if attention_config.backend_per_kind.get("sliding_window"):
+        page_sizes = {s.page_size_bytes for s in filtered_spec.values()}
+        if len(page_sizes) == 1:
+            max_page_size = page_sizes.pop()
+            filtered_spec = _reduce_block_size_lcm(filtered_spec, max_page_size)
+
     groups = _get_kv_cache_groups_uniform_page_size(filtered_spec)
 
     # Add hidden-state layers back with page aligned to the common page.
