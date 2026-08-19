@@ -21,6 +21,9 @@ from tests.models.utils import check_logprobs_close
 from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    MarlinFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
@@ -527,9 +530,14 @@ def test_compressed_tensors_transforms_perplexity(
         assert perplexity <= exp_perplexity
 
 
-def test_compressed_tensors_fp8_block_enabled(vllm_runner):
+@pytest.mark.parametrize(
+    "linear_backend", ["auto", "marlin"] if current_platform.is_cuda() else ["auto"]
+)
+def test_compressed_tensors_fp8_block_enabled(vllm_runner, linear_backend):
     model_path = "RedHatAI/Qwen3-0.6B-FP8-BLOCK"
-    with vllm_runner(model_path, enforce_eager=True) as llm:
+    with vllm_runner(
+        model_path, enforce_eager=True, linear_backend=linear_backend
+    ) as llm:
         fp8_dtype = current_platform.fp8_dtype()
 
         def check_model(model):
@@ -538,20 +546,29 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
             qkv_proj = layer.self_attn.qkv_proj
             assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
             assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
-            assert isinstance(qkv_proj.scheme.fp8_linear, Fp8BlockScaledMMLinearKernel)
-
-            assert qkv_proj.weight.dtype is fp8_dtype
-            assert qkv_proj.weight_scale.dtype is torch.float32
+            if linear_backend == "marlin":
+                assert isinstance(
+                    qkv_proj.scheme.fp8_linear, MarlinFP8ScaledMMLinearKernel
+                )
+                assert qkv_proj.weight.dtype is torch.int32
+                assert qkv_proj.weight_scale.dtype is qkv_proj.orig_dtype
+            else:
+                assert isinstance(
+                    qkv_proj.scheme.fp8_linear, Fp8BlockScaledMMLinearKernel
+                )
+                assert qkv_proj.weight.dtype is fp8_dtype
+                assert qkv_proj.weight_scale.dtype is torch.float32
             assert len(qkv_proj.weight.shape) == 2
             assert len(qkv_proj.weight_scale.shape) == 2
 
-            input_quant_op = qkv_proj.scheme.fp8_linear.quant_fp8
-            assert isinstance(input_quant_op, QuantFP8)
-            assert input_quant_op._forward_method in (
-                input_quant_op.forward_cuda,
-                input_quant_op.forward_hip,
-                input_quant_op.forward_xpu,
-            )
+            if linear_backend == "auto":
+                input_quant_op = qkv_proj.scheme.fp8_linear.quant_fp8
+                assert isinstance(input_quant_op, QuantFP8)
+                assert input_quant_op._forward_method in (
+                    input_quant_op.forward_cuda,
+                    input_quant_op.forward_hip,
+                    input_quant_op.forward_xpu,
+                )
 
         llm.apply_model(check_model)
 
