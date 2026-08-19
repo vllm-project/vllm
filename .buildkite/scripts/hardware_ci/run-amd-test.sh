@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# shellcheck disable=SC2329  # Every function in this file is only ever reached
+# transitively through handle_amd_runner_exit, the EXIT trap handler - shellcheck's
+# unused-function check doesn't do full reachability analysis from an indirectly
+# invoked entry point, so it flags the whole diagnostic-collection call chain as
+# dead code even though it runs live on every nonzero exit.
+
 # This script runs ROCm tests either directly in a native CI pod or inside the
 # corresponding Docker container. Multi-node tests continue to use Docker.
 #
@@ -582,7 +588,6 @@ is_multi_node() {
   return 1
 }
 
-# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 append_failure_diagnostic_section() {
   local log_file=$1
   local title=$2
@@ -594,14 +599,12 @@ append_failure_diagnostic_section() {
     >> "${log_file}"
 }
 
-# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 append_failure_diagnostic_note() {
   local log_file=$1
   shift
   printf '%s\n' "$@" >> "${log_file}"
 }
 
-# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 run_failure_diagnostic() {
   local log_file=$1
   local probe_deadline=$2
@@ -640,7 +643,6 @@ run_failure_diagnostic() {
   return 0
 }
 
-# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 append_failure_diagnostic_file() {
   local log_file=$1
   local label=$2
@@ -663,7 +665,6 @@ append_failure_diagnostic_file() {
   return 0
 }
 
-# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 decode_mountinfo_path() {
   local value=$1
 
@@ -674,7 +675,6 @@ decode_mountinfo_path() {
   printf '%s\n' "${value}"
 }
 
-# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 resolve_current_cgroup_v2_dir() {
   local cgroup_path=""
   local mount_root=""
@@ -721,7 +721,6 @@ resolve_current_cgroup_v2_dir() {
   return 1
 }
 
-# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 collect_cgroup_files() {
   local log_file=$1
   local title=$2
@@ -752,7 +751,6 @@ collect_cgroup_files() {
   fi
 }
 
-# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 collect_cgroup_diagnostics() {
   local log_file=$1
   local cgroup_dir=""
@@ -780,7 +778,6 @@ collect_cgroup_diagnostics() {
   fi
 }
 
-# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 collect_process_diagnostics() {
   local log_file=$1
   local probe_deadline=$2
@@ -813,7 +810,6 @@ collect_process_diagnostics() {
   return 0
 }
 
-# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 collect_mount_diagnostic() {
   local log_file=$1
   local probe_deadline=$2
@@ -837,7 +833,6 @@ collect_mount_diagnostic() {
   return 0
 }
 
-# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 collect_execution_resource_diagnostics() {
   local log_file=$1
   local probe_deadline=$2
@@ -880,7 +875,6 @@ collect_execution_resource_diagnostics() {
   return 0
 }
 
-# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 collect_amd_device_nodes() {
   local log_file=$1
   local probe_deadline=$2
@@ -906,7 +900,6 @@ collect_amd_device_nodes() {
   return 0
 }
 
-# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 collect_rocm_failure_diagnostics() {
   local exit_code=$1
   local job_id="${BUILDKITE_JOB_ID:-local}"
@@ -1299,7 +1292,7 @@ re_quote_pytest_markers() {
   echo "${output% }"
 }
 
-# shellcheck disable=SC2317,SC2329  # Called indirectly by the EXIT trap.
+# shellcheck disable=SC2317  # Called indirectly by the EXIT trap.
 handle_amd_runner_exit() {
   local exit_code=${1:-$?}
   if [[ "${exit_code}" -ne 0 ]]; then
@@ -1320,7 +1313,7 @@ if is_native_runtime; then
   echo "--- Native in-pod ROCm CI (AMD_CI_RUNTIME=${AMD_CI_RUNTIME:-unset}, NATIVE_CI=${NATIVE_CI:-unset})"
   artifact_work_dir=""
 
-  # shellcheck disable=SC2317,SC2329  # Called indirectly by the EXIT trap.
+  # shellcheck disable=SC2317  # Called indirectly by the EXIT trap.
   cleanup_native_workspace() {
     local exit_code=$?
     if [[ -n "${artifact_work_dir}" ]]; then
@@ -1390,7 +1383,7 @@ image_name="${VLLM_CI_FALLBACK_IMAGE:-rocm/vllm-ci:${BUILDKITE_COMMIT:-local}}"
 artifact_work_dir=""
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 
-# shellcheck disable=SC2317,SC2329  # Called indirectly by the EXIT trap.
+# shellcheck disable=SC2317  # Called indirectly by the EXIT trap.
 remove_docker_container() {
   local exit_code=$?
   if docker container inspect "${container_name}" >/dev/null 2>&1; then
@@ -1544,7 +1537,7 @@ if is_multi_node "$commands"; then
   #   BASH_REMATCH[2] = comma-separated node0 commands
   #   BASH_REMATCH[3] = comma-separated node1 commands
   if [[ "$commands" =~ ^(.*)\[(.*)"] && ["(.*)\]$ ]]; then
-    # shellcheck disable=SC2001  # verified equivalent behavior; switch to param expansion in a follow-up cleanup PR
+    # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
     prefix=$(echo "${BASH_REMATCH[1]}" | sed 's/;//g')
     echo "PREFIX: ${prefix}"
 
@@ -1560,9 +1553,9 @@ if is_multi_node "$commands"; then
     fi
 
     for i in "${!node0[@]}"; do
-      # shellcheck disable=SC2001  # verified equivalent behavior; switch to param expansion in a follow-up cleanup PR
+      # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
       command_node_0=$(echo "${node0[i]}" | sed 's/\"//g')
-      # shellcheck disable=SC2001  # verified equivalent behavior; switch to param expansion in a follow-up cleanup PR
+      # shellcheck disable=SC2001  # verified equivalent behavior; TODO: switch to param expansion in a follow-up cleanup PR
       command_node_1=$(echo "${node1[i]}" | sed 's/\"//g')
 
       step_cmd="./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
