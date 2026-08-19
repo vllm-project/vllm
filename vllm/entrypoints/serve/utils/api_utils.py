@@ -10,7 +10,6 @@ from logging import Logger
 from string import Template
 from typing import Any
 
-import regex as re
 from fastapi import Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -268,9 +267,23 @@ def jsonify_non_default_args(
     return {key: _jsonify_arg_value(value) for key, value in non_default_args.items()}
 
 
+# Fields whose values must never be logged verbatim.
+_SENSITIVE_ARG_FIELDS = frozenset({"api_key"})
+
+
+def _redact_sensitive_args(args: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of `args` with sensitive values redacted for logging."""
+    if not any(key in _SENSITIVE_ARG_FIELDS for key in args):
+        return args
+    return {
+        key: ("***" if key in _SENSITIVE_ARG_FIELDS else value)
+        for key, value in args.items()
+    }
+
+
 def log_non_default_args(args: Namespace | EngineArgs):
     non_default_args = get_non_default_args(args)
-    logger.info("non-default args: %s", non_default_args)
+    logger.info("non-default args: %s", _redact_sensitive_args(non_default_args))
 
 
 def should_include_usage(
@@ -307,17 +320,6 @@ def process_lora_modules(
         else:
             lora_modules += default_mm_lora_paths
     return lora_modules
-
-
-def sanitize_message(message: str) -> str:
-    """Strip memory addresses, tracebacks, and file paths from error messages."""
-    message = re.sub(r" at 0x[0-9a-f]+>", ">", message)
-    message = re.sub(r'\n?\s*File "[^"]+", line \d+, in \S+(\n\s+.*)?', "", message)
-    message = re.sub(
-        r"/(?:home|usr|opt|var|tmp|root|lib|mnt|srv)(?:/[\w.\-]+)+", "<path>", message
-    )
-    message = re.sub(r"(?:/[\w\-]+)+/[\w\-]+\.\w+", "<path>", message)
-    return message.strip()
 
 
 def log_version_and_model(lgr: Logger, version: str, model_name: str) -> None:

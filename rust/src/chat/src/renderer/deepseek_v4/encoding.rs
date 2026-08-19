@@ -3,8 +3,8 @@
 
 //! DeepSeek V4 prompt renderer.
 //!
-//! Original Python implementation:
-//! <https://github.com/vllm-project/vllm/blob/main/vllm/tokenizers/deepseek_v4_encoding.py>
+//! Official Python reference:
+//! <https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/encoding/encoding_dsv4.py>
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -156,7 +156,7 @@ fn resolve_thinking_options(request: &ChatRequest) -> Result<(ThinkingMode, &'st
 /// Return request-level tools only when native tool parsing is enabled.
 fn request_tools(request: &ChatRequest) -> &[ChatTool] {
     if request.tool_parsing_enabled() {
-        request.tools.as_slice()
+        request.initial_tools()
     } else {
         &[]
     }
