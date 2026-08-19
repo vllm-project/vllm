@@ -47,10 +47,12 @@ def restore_default_version(server_url):
 
 class TestWeightInfoEndpoint:
     def test_initial_schema(self, server_state):
+        """Verify a fresh server exposes the default weight version."""
         _, initial_weight_info = server_state
         assert initial_weight_info == {"weight_version": "default"}
 
     def test_does_not_affect_generation(self, server_url):
+        """Verify version reads and updates do not change model output."""
         before = gen(server_url)
         assert ok(before)
 
@@ -68,6 +70,7 @@ class TestWeightInfoEndpoint:
 
 class TestUpdateWeightVersion:
     def test_update_is_visible(self, server_url):
+        """Verify a version update is immediately visible through /weight_info."""
         response = update_weight_version_response(server_url, "step-42")
 
         assert response.status_code == 200
@@ -78,6 +81,7 @@ class TestUpdateWeightVersion:
         assert info_response.json() == {"weight_version": "step-42"}
 
     def test_version_can_be_overwritten(self, server_url):
+        """Verify later version updates replace the previously reported value."""
         for version in ("step-1", "checkpoint/final"):
             response = update_weight_version_response(server_url, version)
             assert response.status_code == 200
@@ -96,6 +100,7 @@ class TestUpdateWeightVersion:
         ],
     )
     def test_invalid_update_preserves_state(self, server_url, payload):
+        """Verify invalid version updates leave the committed version unchanged."""
         update_weight_version_response(server_url, "stable").raise_for_status()
 
         response = requests.post(

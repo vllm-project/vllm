@@ -50,6 +50,7 @@ def assert_elapsed_ms(value):
 class TestSleepResponseSchema:
     @pytest.mark.parametrize("level", [0, 1, 2])
     def test_sleep_response_schema(self, server_url, level):
+        """Verify /sleep reports the applied level and resulting state."""
         response = sleep_response(server_url, level=level)
 
         assert response.status_code == 200
@@ -61,6 +62,7 @@ class TestSleepResponseSchema:
         assert is_sleeping(server_url)
 
     def test_is_sleeping_response_schema(self, server_url):
+        """Verify /is_sleeping reports both awake and sleeping states."""
         response = requests.get(f"{server_url}/is_sleeping", timeout=5)
         assert response.status_code == 200
         assert response.json() == {"is_sleeping": False}
@@ -80,6 +82,7 @@ class TestSleepResponseSchema:
         ],
     )
     def test_invalid_parameters_preserve_state(self, server_url, params, invalid_param):
+        """Verify invalid sleep parameters identify the field without sleeping."""
         assert not is_sleeping(server_url)
 
         response = requests.post(f"{server_url}/sleep", params=params, timeout=15)
@@ -91,6 +94,7 @@ class TestSleepResponseSchema:
 
 class TestWakeResponseSchema:
     def test_full_wake_response_schema(self, server_url):
+        """Verify a full wake reports all allocations and scheduling as awake."""
         sleep_response(server_url, level=1).raise_for_status()
 
         response = wake_response(server_url)
@@ -104,6 +108,7 @@ class TestWakeResponseSchema:
         assert not is_sleeping(server_url)
 
     def test_partial_wake_response_tracks_engine_state(self, server_url):
+        """Verify staged wake responses track the engine's remaining sleep tags."""
         sleep_response(server_url, level=1).raise_for_status()
 
         weights_response = wake_response(server_url, tags=["weights"])
