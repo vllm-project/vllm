@@ -23,7 +23,7 @@ import uvloop
 from fastapi import FastAPI, Response
 
 import vllm.envs as envs
-from vllm.entrypoints.launcher import NoSignalServer
+from vllm.entrypoints.launchers.launcher import NoSignalServer
 from vllm.logger import init_logger
 from vllm.utils.system_utils import (
     decorate_logs,
@@ -236,7 +236,7 @@ def _build_dp_supervisor_app(supervisor: DPSupervisor) -> FastAPI:
 
 
 def _run_python_vllm_dp_server(child_args: argparse.Namespace) -> None:
-    from vllm.entrypoints.openai.api_server import run_server
+    from vllm.entrypoints.launchers.api_server.entry import run_server
 
     uvloop.run(run_server(child_args))
 
