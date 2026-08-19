@@ -354,6 +354,23 @@ class XPUPlatform(Platform):
                 "weight offloading is enabled."
             )
 
+        # Inductor's compile-time autotuning (triton.autotune_at_compile_time,
+        # enabled by default under AOT compile) benchmarks each generated
+        # Triton kernel once at compile time using synthetic random inputs.
+        # Kernels whose index is derived from floating-point intermediate
+        # data (e.g. RoPE/MLA position or offset arithmetic) get a genuinely
+        # randomized index at that point, which can be out of range and trip
+        # the tl.device_assert bounds check Inductor emits for indirect
+        # indexing. On XPU a failed device-side assert is fatal to the whole
+        # process (unlike CPU/CUDA), aborting profile_run with an opaque,
+        # contentless "Failed to run autotuning code block:" error. Defer
+        # autotuning to the first real runtime call, where indices are
+        # always in range. See https://github.com/pytorch/pytorch/issues/194018.
+        if compilation_config.mode != CompilationMode.NONE:
+            compilation_config.inductor_compile_config.setdefault(
+                "triton.autotune_at_compile_time", False
+            )
+
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         # Only override worker_cls if it's still the default "auto"
