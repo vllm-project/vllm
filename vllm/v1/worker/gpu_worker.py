@@ -1389,6 +1389,13 @@ class Worker(WorkerBase):
 
         self.elastic_ep_executor.shutdown()
 
+        # Drop SymmMem peer views before the runner releases KV tensors.
+        from vllm.model_executor.layers.attention.pcp_direct_kv import (
+            close_pcp_direct_kv,
+        )
+
+        close_pcp_direct_kv()
+
         # Release GPU resources held by the model runner so that memory
         # can be reclaimed when running in-process
         if model_runner := getattr(self, "model_runner", None):
