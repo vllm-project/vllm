@@ -19,7 +19,8 @@ def mhc_pre_torch(
     Forward pass for mHC pre block.
 
     Args:
-        residual: shape (..., hc_mult, hidden_size), dtype torch.bfloat16
+        residual: shape (..., hc_mult, hidden_size), dtype torch.float16 or
+            torch.bfloat16
         fn: shape (hc_mult3, hc_mult * hidden_size), dtype torch.float32
         hc_scale: shape (3,), dtype torch.float32
         hc_base: shape (hc_mult3,), dtype torch.float32
@@ -33,11 +34,12 @@ def mhc_pre_torch(
     Returns:
         post_mix: shape (..., hc_mult), dtype torch.float32
         comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
-        layer_input: shape (..., hidden_size), dtype torch.bfloat16
+        layer_input: shape (..., hidden_size), dtype torch.float16 or
+            torch.bfloat16 (matches *residual*)
     """
 
     # Validate shapes
-    assert residual.dtype == torch.bfloat16
+    assert residual.dtype in (torch.float16, torch.bfloat16)
     assert fn.dtype == torch.float32
     assert hc_scale.dtype == torch.float32
     assert hc_base.dtype == torch.float32
@@ -83,7 +85,7 @@ def mhc_pre_torch(
 
     layer_input = torch.sum(
         pre_mix.unsqueeze(-1) * residual_flat.to(torch.float32), dim=1
-    ).to(torch.bfloat16)
+    ).to(residual.dtype)
     return (
         post_mix.view(*outer_shape, hc_mult, 1),
         comb_mix.view(*outer_shape, hc_mult, hc_mult),
