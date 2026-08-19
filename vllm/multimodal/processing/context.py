@@ -367,15 +367,10 @@ class BaseProcessingInfo:
         return None
 
     @property
-    def embeds_from_ec_connector(self) -> bool:
-        """Whether pre-computed embeddings may arrive outside the request.
-
-        True only on an EC consumer, where an encode/prefill/decode encoder
-        instance publishes them through the connector instead, so the request
-        carries only the metadata that sizes the placeholder range.
-        """
+    def allow_missing_mm_embeddings(self) -> bool:
+        """Whether pre-computed embedding tensors may be omitted."""
         mm_config = self.ctx.model_config.multimodal_config
-        return mm_config is not None and mm_config.mm_embeds_from_ec_connector
+        return mm_config is not None and mm_config.allow_missing_mm_embeddings
 
     def get_data_parser(self) -> MultiModalDataParser:
         """
@@ -389,7 +384,7 @@ class BaseProcessingInfo:
         """
         return MultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
-            embeds_from_ec_connector=self.embeds_from_ec_connector,
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     @cached_property

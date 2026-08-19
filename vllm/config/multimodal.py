@@ -236,17 +236,17 @@ class MultiModalConfig:
     - "direct_rpc": Use msgspec serialization via RPC
     - "torch_shm": Use torch.multiprocessing shared memory for zero-copy IPC
     Defaults to "direct_rpc". """
-    mm_embeds_from_ec_connector: bool = False
+    allow_missing_mm_embeddings: bool = False
     """Whether a pre-computed-embedding input may omit the `*_embeds` tensor.
 
     In an encode/prefill/decode (EPD) deployment the encoder instance publishes
-    embeddings through the EC connector, so the request that reaches the
-    prefill/decode instance only needs to carry the grid/size metadata that
-    sizes the placeholder range — the embeddings themselves come from the
-    connector, keyed by `mm_hash`.
+    embeddings through the EC connector. An EC consumer loads those embeddings
+    from the connector, while a KV consumer receives the resulting prompt KV
+    cache. Their requests only need the grid/size metadata that sizes the
+    placeholder range.
 
     Derived, not user-settable: `VllmConfig.__post_init__` sets this to True
-    exactly on EC consumers. Everywhere else it stays False so that a request
+    on EC and KV consumers. Everywhere else it stays False so that a request
     which forgets its embeddings still fails fast in the frontend, with a clear
     error, rather than deep inside the model."""
 

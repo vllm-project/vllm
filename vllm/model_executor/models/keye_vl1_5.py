@@ -363,7 +363,7 @@ class KeyeVL1_5ProcessingInfo(KeyeProcessingInfo):
     def get_data_parser(self):
         return KeyeVL1_5MultiModalDataParser(
             expected_hidden_size=self._get_expected_hidden_size(),
-            embeds_from_ec_connector=self.embeds_from_ec_connector,
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def get_max_frame_per_video(self) -> int:
