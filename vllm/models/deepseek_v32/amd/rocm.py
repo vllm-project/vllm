@@ -108,10 +108,10 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
-        if (idx := self._active_indexer) is not None:
-            kw = idx.wk_weights_proj(hidden_states)[0]
-            index_k = kw[:, : idx.head_dim]
-            index_weights = kw[:, idx.head_dim :]
+        if (active_indexer := self._active_indexer) is not None:
+            kw = active_indexer.wk_weights_proj(hidden_states)[0]
+            index_k = kw[:, : active_indexer.head_dim]
+            index_weights = kw[:, active_indexer.head_dim :]
         else:
             index_k = None
             index_weights = None
@@ -126,6 +126,54 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             positions, q_c, kv_c, k_pe, index_k, index_weights, output
         )
         return self.o_proj(output)[0]
+
+    def _norm_rope_and_cache(
+        self,
+        positions: torch.Tensor,
+        q_c: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        index_k: torch.Tensor | None,
+        mla_slot: torch.Tensor | None,
+        attn_metadata,
+    ) -> torch.Tensor:
+        """Norm q_c/kv_c, RoPE k_pe, cache [kv_c; k_pe] + indexer K -> normed q_c."""
+        active_indexer = self._active_indexer
+        # A profiling run has no caches allocated, so skip every per-token write.
+        has_caches = attn_metadata is not None
+        return fused_norm_rope(
+            positions,
+            q_c,
+            self.q_a_layernorm.weight,
+            self.q_a_layernorm.variance_epsilon,
+            kv_c,
+            self.kv_a_layernorm.weight,
+            self.kv_a_layernorm.variance_epsilon,
+            k_pe,
+            self.rotary_emb.cos_sin_cache,
+            index_k,
+            active_indexer.k_norm.weight if active_indexer is not None else None,
+            active_indexer.k_norm.bias if active_indexer is not None else None,
+            active_indexer.k_norm.eps if active_indexer is not None else 1e-6,
+            self.indexer_rope_emb.cos_sin_cache if active_indexer is not None else None,
+            self.topk_indices_buffer,
+            slot_mapping=mla_slot if has_caches else None,
+            indexer_k_cache=(
+                active_indexer.k_cache.kv_cache
+                if active_indexer is not None and has_caches
+                else None
+            ),
+            indexer_cache_shuffled=(
+                active_indexer.k_cache.uses_shuffled_layout
+                if active_indexer is not None
+                else False
+            ),
+            mla_kv_cache=self.kv_cache if has_caches else None,
+            mla_kv_cache_dtype=self.kv_cache_dtype,
+            mla_k_scale=self._k_scale if has_caches else None,
+            has_indexer=active_indexer is not None,
+            index_rope_interleave=self._index_rope_interleave,
+        )
 
     def _compute_ql_nope(self, q_c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
@@ -209,67 +257,16 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
     ) -> None:
         attn_metadata, mla_slot = self.get_layer_forward_context()
 
-        if (idx := self._active_indexer) is not None:
-            has_indexer = True
-            indexer_k_norm_w = idx.k_norm.weight
-            indexer_k_norm_bias = idx.k_norm.bias
-            indexer_k_norm_eps = idx.k_norm.eps
-            indexer_k_rope_cos_sin_cache = self.indexer_rope_emb.cos_sin_cache
-            indexer_k_cache = idx.k_cache.kv_cache
-            indexer_cache_shuffled = idx.k_cache.uses_shuffled_layout
-            indexer_softmax_scale = idx.softmax_scale
-            indexer_n_head_scale = idx.n_head**-0.5
-        else:
-            has_indexer = False
-            indexer_k_norm_w = None
-            indexer_k_norm_bias = None
-            indexer_k_norm_eps = 1e-6
-            indexer_k_rope_cos_sin_cache = None
-            indexer_k_cache = None
-            indexer_cache_shuffled = False
-            indexer_softmax_scale = 0.0
-            indexer_n_head_scale = 0.0
-
-        if attn_metadata is None:
-            mla_kv_cache = None
-            mla_k_scale = None
-            indexer_k_cache = None
-            mla_slot = None
-        else:
-            mla_kv_cache = self.kv_cache
-            mla_k_scale = self._k_scale
-
-        q_c = fused_norm_rope(
-            positions,
-            q_c,
-            self.q_a_layernorm.weight,
-            self.q_a_layernorm.variance_epsilon,
-            kv_c,
-            self.kv_a_layernorm.weight,
-            self.kv_a_layernorm.variance_epsilon,
-            k_pe,
-            self.rotary_emb.cos_sin_cache,
-            index_k,
-            indexer_k_norm_w,
-            indexer_k_norm_bias,
-            indexer_k_norm_eps,
-            indexer_k_rope_cos_sin_cache,
-            self.topk_indices_buffer,
-            slot_mapping=mla_slot,
-            indexer_k_cache=indexer_k_cache,
-            indexer_cache_shuffled=indexer_cache_shuffled,
-            mla_kv_cache=mla_kv_cache,
-            mla_kv_cache_dtype=self.kv_cache_dtype,
-            mla_k_scale=mla_k_scale,
-            has_indexer=has_indexer,
-            index_rope_interleave=self._index_rope_interleave,
+        q_c = self._norm_rope_and_cache(
+            positions, q_c, kv_c, k_pe, index_k, mla_slot, attn_metadata
         )
 
         ql_nope, q_pe = self._compute_ql_nope(q_c)
 
-        if (idx := self._active_indexer) is not None:
-            index_q = idx.wq_b(q_c)[0]
-            index_q = index_q.view(-1, idx.n_head, idx.head_dim)
+        active_indexer = self._active_indexer
+        if active_indexer is not None:
+            index_q = active_indexer.wq_b(q_c)[0]
+            index_q = index_q.view(-1, active_indexer.n_head, active_indexer.head_dim)
         else:
             index_q = None
 
@@ -278,13 +275,13 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             q_pe,
             self.rotary_emb.cos_sin_cache,
             index_q,
-            self.indexer_rope_emb.cos_sin_cache if has_indexer else None,
+            self.indexer_rope_emb.cos_sin_cache if active_indexer is not None else None,
             ql_nope,
             self._q_scale,
             index_weights,
-            indexer_softmax_scale,
-            indexer_n_head_scale,
-            has_indexer=has_indexer,
+            active_indexer.softmax_scale if active_indexer is not None else 0.0,
+            active_indexer.n_head**-0.5 if active_indexer is not None else 0.0,
+            has_indexer=active_indexer is not None,
             index_rope_interleave=self._index_rope_interleave,
             quantize_mqa=self._fp8_kv,
         )
