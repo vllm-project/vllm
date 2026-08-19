@@ -21,7 +21,7 @@ from typing import ClassVar
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -62,12 +62,34 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 
+def _minimax_m3_speculative_decoding_enabled() -> bool:
+    vllm_config = get_current_vllm_config_or_none()
+    return vllm_config is not None and vllm_config.speculative_config is not None
+
+
 def _minimax_m3_aiter_sparse_pa_requested() -> bool:
-    return rocm_aiter_ops.is_enabled() and rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+    if not (
+        rocm_aiter_ops.is_enabled() and rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+    ):
+        return False
+    # Prototype: known to corrupt output under spec decode (#52860).
+    if _minimax_m3_speculative_decoding_enabled():
+        logger.warning_once(
+            "MiniMax-M3 AITER sparse PA prototype is disabled when "
+            "speculative decoding is enabled because it corrupts output; "
+            "falling back to the Triton sparse path. See "
+            "https://github.com/vllm-project/vllm/issues/52860"
+        )
+        return False
+    return True
 
 
 def minimax_m3_use_aiter_sparse_pa(num_kv_heads: int) -> bool:
-    """Whether to use the ROCm AITER page-16 sparse PA prototype."""
+    """Whether to use the ROCm AITER page-16 sparse PA prototype.
+
+    Skipped under speculative decoding: the prototype corrupts output
+    while the Triton sparse path does not (issue #52860).
+    """
     requested = _minimax_m3_aiter_sparse_pa_requested()
     if requested and num_kv_heads != 1:
         raise ValueError(
@@ -429,8 +451,9 @@ def select_main_backend_and_impl_cls(
 
     Blackwell (SM100) uses the MSA attend for supported top-k block counts
     when the KV cache is BF16 or FP8 E4M3; MI355 uses AITER sparse PA
-    with shuffle KV cache layout; Other platforms and FP8 E5M2 fall
-    back to Triton. The MSA modules are imported lazily to avoid import errors
+    with shuffle KV cache layout, except under speculative decoding
+    (issue #52860); other platforms and FP8 E5M2 fall back to Triton.
+    The MSA modules are imported lazily to avoid import errors
     on unsupported platforms.
     """
     use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(num_kv_heads)
