@@ -10,6 +10,7 @@ This is similar in concept to the `importlib` module.
 import importlib.metadata
 import importlib.util
 import os
+import platform
 import sys
 from functools import cache
 from types import ModuleType
@@ -427,6 +428,39 @@ def _has_module_spec(module_name: str) -> bool:
         return False
 
 
+_X86_MACHINES = ("x86_64", "amd64", "i386", "i686", "x86")
+
+_CPUINFO_PATH = "/proc/cpuinfo"
+
+
+@cache
+def cpu_supports_avx() -> bool:
+    """Whether AVX is available on the current CPU.
+
+    Always ``True`` on non-x86 CPUs, and whenever the CPU capabilities
+    cannot be determined (fail-open). The UCX library bundled with the
+    NIXL wheels is compiled with AVX and terminates the process from its
+    native initializer when the CPU does not support it
+    (https://github.com/ai-dynamo/nixl/issues/2119), so NIXL-backed
+    features must not be loaded on hosts where this returns ``False``.
+    """
+    if platform.machine().lower() not in _X86_MACHINES:
+        return True
+    try:
+        with open(_CPUINFO_PATH) as f:
+            for line in f:
+                if line.startswith("flags"):
+                    return "avx" in line.split()
+    except OSError:
+        pass
+    # /proc/cpuinfo is unavailable (e.g. macOS); fall back to torch, which
+    # resolves the CPU capability via CPUID at runtime. "DEFAULT" is the
+    # pre-AVX baseline.
+    import torch
+
+    return torch.backends.cpu.get_cpu_capability() != "DEFAULT"
+
+
 def has_deep_ep() -> bool:
     """Whether the optional `deep_ep` package is available."""
     return _has_module("deep_ep")
@@ -498,7 +532,20 @@ def has_deep_gemm() -> bool:
 
 
 def has_nixl_ep() -> bool:
-    """Whether the optional `nixl_ep` package is available."""
+    """Whether the optional `nixl_ep` package is usable on this host.
+
+    Importing `nixl_ep` loads its bundled UCX library, which terminates the
+    process at load time on x86 CPUs without AVX
+    (https://github.com/vllm-project/vllm/issues/52885), so it is reported
+    as unavailable on those hosts.
+    """
+    if not cpu_supports_avx():
+        logger.warning_once(
+            "Skipping nixl_ep: the UCX library bundled with NIXL is compiled "
+            "with AVX, which this x86 CPU does not support. Importing it "
+            "would terminate the process."
+        )
+        return False
     return _has_module("nixl_ep")
 
 
