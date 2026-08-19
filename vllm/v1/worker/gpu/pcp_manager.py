@@ -55,6 +55,7 @@ class PCPManager:
         dcp_world_size: int = 1,
         dcp_rank: int = 0,
         cp_interleave: int = 1,
+        prefill_only_mtp: bool = False,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
@@ -62,8 +63,11 @@ class PCPManager:
         self.dcp_world_size = dcp_world_size
         self.dcp_rank = dcp_rank
         self.cp_interleave = cp_interleave
+        self.prefill_only_mtp = prefill_only_mtp
 
         self._global_batch: InputBatch | None = None
+        self._local_batch: InputBatch | None = None
+        self._local_gather_idx: torch.Tensor | None = None
         self._req_states = req_states
         self._block_tables = block_tables
         self._hidden_restore_idx: torch.Tensor | None = None
@@ -144,9 +148,10 @@ class PCPManager:
             raise NotImplementedError("MRV2 PCP does not support MM inputs yet.")
         if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
-        if vllm_config.speculative_config is not None:
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None and speculative_config.method != "mtp":
             raise NotImplementedError(
-                "MRV2 PCP does not support speculative decoding yet."
+                "MRV2 PCP only supports prefill-only MTP speculative decoding."
             )
         is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
         if (
@@ -364,6 +369,14 @@ class PCPManager:
         input_buffers = self._input_buffers
         if input_batch.num_draft_tokens > 0:
             raise NotImplementedError("MRV2 PCP does not support spec decode yet.")
+        if (
+            self.prefill_only_mtp
+            and input_batch.num_reqs > 0
+            and (not input_batch.has_prefill or not input_batch.is_prefilling_np.all())
+        ):
+            raise NotImplementedError(
+                "MRV2 PCP with MTP only supports pure prefill batches."
+            )
 
         global_batch = input_batch
         self._global_batch = global_batch
@@ -458,6 +471,7 @@ class PCPManager:
         local_gather_idx = self._padded_gather_idx[
             rank_token_start : rank_token_start + num_local_tokens_padded
         ]
+        self._local_gather_idx = local_gather_idx
         torch.index_select(
             global_batch.input_ids,
             0,
@@ -536,7 +550,19 @@ class PCPManager:
         seq_lens_cpu_upper_bound_np = np.zeros(num_local_reqs, dtype=np.int32)
         seq_lens_cpu_upper_bound_np[:] = local_start_pos_np + local_num_scheduled_tokens
 
-        return replace(
+        dcp_local_seq_lens = None
+        if self.dcp_world_size > 1:
+            prepare_dcp_local_seq_lens(
+                input_buffers.dcp_local_seq_lens,
+                seq_lens,
+                num_local_reqs,
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.cp_interleave,
+            )
+            dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_local_reqs]
+
+        local_batch = replace(
             input_batch,
             req_ids=local_req_ids,
             num_reqs=num_local_reqs,
@@ -556,7 +582,7 @@ class PCPManager:
             query_start_loc_np=local_query_start_loc_np[: num_local_reqs + 1],
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_cpu_upper_bound_np),
-            dcp_local_seq_lens=None,
+            dcp_local_seq_lens=dcp_local_seq_lens,
             num_computed_tokens_np=local_start_pos_np,
             prefill_len_np=local_prefill_len_np,
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
@@ -570,6 +596,8 @@ class PCPManager:
             cu_num_logits_np=cu_num_logits_np,
             prompt_lens=None,
         )
+        self._local_batch = local_batch
+        return local_batch
 
     def prepare_attn(
         self, input_batch: InputBatch
@@ -639,6 +667,26 @@ class PCPManager:
             return hidden_states
         gathered = get_pcp_group().all_gather(hidden_states, dim=0)
         return gathered[self._hidden_restore_idx]
+
+    @property
+    def local_batch(self) -> InputBatch:
+        assert self._local_batch is not None
+        return self._local_batch
+
+    def localize_tensor(
+        self,
+        tensor: torch.Tensor,
+        out: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self._local_gather_idx is not None
+        num_local_tokens = self._local_gather_idx.shape[0]
+        torch.index_select(
+            tensor,
+            0,
+            self._local_gather_idx,
+            out=out[:num_local_tokens],
+        )
+        return out[:num_local_tokens]
 
     def restore_for_sampling(
         self,
@@ -712,4 +760,5 @@ def maybe_build_pcp_manager(
         dcp_world_size=dcp_size,
         dcp_rank=dcp_rank,
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
+        prefill_only_mtp=vllm_config.speculative_config is not None,
     )
