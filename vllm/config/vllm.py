@@ -105,11 +105,25 @@ def default_v2_model_runner_architectures() -> frozenset[str]:
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
-        # TODO(rocm): DeepSeek V4 is still faster on MRV1 on ROCm. The
-        # attention layer picks the eager cudagraph region MRV1 needs, so
-        # this is a perf default only; drop it once MRV2 catches up.
-        return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES - {"DeepseekV4ForCausalLM"}
+        # TODO(rocm): These models are still faster on the compiled MRV1 path.
+        return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES - {
+            "DeepseekV32ForCausalLM",
+            "DeepseekV4ForCausalLM",
+        }
     return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
+
+
+@lru_cache
+def default_breakable_cudagraph_architectures() -> frozenset[str]:
+    """Architectures defaulting to breakable CUDA graphs on this platform."""
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES - {
+            "DeepseekV32ForCausalLM",
+            "DeepseekV32MTPModel",
+        }
+    return DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES
 
 
 class OptimizationLevel(IntEnum):
@@ -719,7 +733,7 @@ class VllmConfig:
             return False
 
         architectures = set(model_config.architectures)
-        return bool(architectures & DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES)
+        return bool(architectures & default_breakable_cudagraph_architectures())
 
     def _maybe_enable_breakable_cudagraph(self) -> bool:
         if (

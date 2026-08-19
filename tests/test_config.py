@@ -113,18 +113,29 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
 
 
-def test_rocm_defaults_deepseek_v4_to_mrv1(monkeypatch):
-    """ROCm keeps DeepSeek V4 on MRV1, which is still faster there."""
-    from vllm.config.vllm import default_v2_model_runner_architectures
+def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
+    """ROCm keeps DeepSeek V3.2 and V4 on their compiled MRV1 paths."""
+    from vllm.config.vllm import (
+        default_breakable_cudagraph_architectures,
+        default_v2_model_runner_architectures,
+    )
     from vllm.platforms import current_platform
 
     monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
     # The lookup is lru_cached against a fixed platform.
     default_v2_model_runner_architectures.cache_clear()
+    default_breakable_cudagraph_architectures.cache_clear()
     try:
-        assert "DeepseekV4ForCausalLM" not in default_v2_model_runner_architectures()
+        v2_architectures = default_v2_model_runner_architectures()
+        breakable_architectures = default_breakable_cudagraph_architectures()
+
+        assert "DeepseekV32ForCausalLM" not in v2_architectures
+        assert "DeepseekV4ForCausalLM" not in v2_architectures
+        assert "DeepseekV32ForCausalLM" not in breakable_architectures
+        assert "DeepseekV32MTPModel" not in breakable_architectures
     finally:
         default_v2_model_runner_architectures.cache_clear()
+        default_breakable_cudagraph_architectures.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -187,24 +198,25 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
 
 
 @pytest.mark.parametrize(
-    "architecture",
+    ("architecture", "is_rocm", "expected"),
     [
-        "DeepseekV32ForCausalLM",
-        "DeepseekV32MTPModel",
-        "GlmMoeDsaForCausalLM",
+        ("DeepseekV32ForCausalLM", False, True),
+        ("DeepseekV32ForCausalLM", True, False),
+        ("DeepseekV32MTPModel", False, True),
+        ("DeepseekV32MTPModel", True, False),
+        ("GlmMoeDsaForCausalLM", False, True),
+        ("GlmMoeDsaForCausalLM", True, True),
     ],
 )
-def test_dsa_breakable_cudagraph_default_is_platform_independent(
-    monkeypatch, architecture
+def test_dsa_breakable_cudagraph_platform_default(
+    monkeypatch, architecture, is_rocm, expected
 ):
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
     from vllm.platforms import current_platform
 
     monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
-    monkeypatch.setattr(
-        current_platform,
-        "is_device_capability_family",
-        lambda family: False,
-    )
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
+    default_breakable_cudagraph_architectures.cache_clear()
     config = SimpleNamespace(
         model_config=SimpleNamespace(architectures=[architecture]),
         compilation_config=CompilationConfig(),
@@ -214,10 +226,12 @@ def test_dsa_breakable_cudagraph_default_is_platform_independent(
     )
 
     try:
-        assert VllmConfig._maybe_enable_breakable_cudagraph(config)
-        assert config.compilation_config.mode == CompilationMode.NONE
+        assert VllmConfig._maybe_enable_breakable_cudagraph(config) is expected
+        if expected:
+            assert config.compilation_config.mode == CompilationMode.NONE
     finally:
         os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        default_breakable_cudagraph_architectures.cache_clear()
 
 
 @pytest.mark.parametrize(
