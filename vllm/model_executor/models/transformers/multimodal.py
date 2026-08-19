@@ -18,7 +18,7 @@
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -53,8 +53,8 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     TimingContext,
 )
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 if TYPE_CHECKING:
     from transformers import BatchFeature, PreTrainedModel
@@ -300,11 +300,17 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
         # Keep these as batched, as they always have batch size as first dim
         if "audio" in modalities:
-            mm_fields["num_audio_tokens"] = MultiModalFieldConfig.batched("audio")
+            mm_fields["num_audio_tokens"] = MultiModalFieldConfig.batched(
+                "audio", keep_on_cpu=True
+            )
         if "image" in modalities:
-            mm_fields["image_grid_thw"] = MultiModalFieldConfig.batched("image")
+            mm_fields["image_grid_thw"] = MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            )
             # TODO: route to "video" once the video modality is supported
-            mm_fields["video_grid_thw"] = MultiModalFieldConfig.batched("image")
+            mm_fields["video_grid_thw"] = MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            )
             mm_fields["num_image_patches"] = MultiModalFieldConfig.batched(
                 "image", keep_on_cpu=True
             )
@@ -390,6 +396,14 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         mm_placeholders: dict[str, list[PlaceholderRange]] = {}
         split_sizes = mm_tokens_per_modality["num_image_tokens"]
         if split_sizes:
+            image_token_ids = getattr(hf_processor, "image_token_ids", None)
+            if image_token_ids is None:
+                # Transformers <5.10.0
+                image_token_ids = [hf_processor.image_token_id]
+            image_token_ids = torch.tensor(
+                [i for i in image_token_ids if i is not None]
+            )
+
             chunked_mm_positions = torch.split(mm_positions, split_sizes)
             mm_tokens = torch.tensor(prompt_ids)[mm_token_type_ids[0].bool()]
             chunked_mm_tokens = torch.split(mm_tokens, split_sizes)
@@ -397,7 +411,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
                 PlaceholderRange(
                     offset=positions[0].item(),
                     length=positions.shape[0],
-                    is_embed=(mm_tokens == hf_processor.image_token_id).bool(),
+                    is_embed=torch.isin(mm_tokens, image_token_ids),
                 )
                 for positions, mm_tokens in zip(chunked_mm_positions, chunked_mm_tokens)
             ]
@@ -719,18 +733,17 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         kwargs.pop("token_type_ids", None)
         kwargs.pop("mm_token_type_ids", None)
 
-        context = nullcontext()
-        if current_platform.is_rocm():
-            context = torch.nn.attention.sdpa_kernel(
-                backends=[torch.nn.attention.SDPBackend.MATH]
-            )
-        with context:
+        # HuggingFace's `get_audio_features` implementations branch on
+        # per-sample feature lengths internally.
+        with gpu_sync_allowed():
             audio_output = self.model.get_audio_features(
                 input_features, return_dict=True, **kwargs
             )
         audio_embeddings = audio_output.pooler_output
 
-        split_sizes = num_audio_tokens.flatten().tolist()
+        # Per-audio token counts are needed as Python ints to split.
+        with gpu_sync_allowed():
+            split_sizes = num_audio_tokens.flatten().tolist()
         return self._split_embeddings(audio_embeddings, split_sizes)
 
     def _process_image_input(self, **kwargs) -> list[torch.Tensor] | None:
@@ -748,22 +761,17 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         num_image_patches = kwargs.pop("num_image_patches")
 
-        context = nullcontext()
-        if current_platform.is_rocm():
-            # ROCm: Force math SDP backend for vision encoder to avoid accuracy issues
-            # with flash_sdp and mem_efficient_sdp
-            # TODO: [ROCm] Fix accuracy issues with flash backend
-            logger.debug(
-                "ROCm platform detected. Forcing math SDP backend "
-                "for vision encoder. Currently ROCm platform has "
-                "accuracy issues with `flash_sdp` and"
-                "`mem_efficient_sdp` backends. See issue: "
-                "https://github.com/vllm-project/vllm/issues/30167"
-            )
-            context = torch.nn.attention.sdpa_kernel(
-                backends=[torch.nn.attention.SDPBackend.MATH]
-            )
-        with context:
+        # grid_thw fields are registered keep_on_cpu; restore the on-device
+        # placement that HF get_image_features implementations expect.
+        for key, value in kwargs.items():
+            if isinstance(value, torch.Tensor):
+                kwargs[key] = value.to(pixel_values.device, non_blocking=True)
+
+        # The underlying HuggingFace `get_image_features` implementations
+        # contain model-internal syncs (e.g. Idefics3 filters all-zero
+        # padding images via boolean-mask indexing, LlavaOnevision
+        # branches on per-sample batch counts).
+        with gpu_sync_allowed():
             vision_embeddings = self.model.get_image_features(pixel_values, **kwargs)
 
         # Transformers `v5`, `self.get_image_features` returns a tuple
