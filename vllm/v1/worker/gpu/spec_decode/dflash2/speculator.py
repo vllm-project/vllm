@@ -39,11 +39,14 @@ def _selector_walk_kernel(
     for step in range(num_steps):
         flat = row * num_steps + step
         score_base = (flat * top_k + previous) * top_k
+        # Load at the width the argmax will reduce in. Loading fp32 and letting
+        # the noise promote to fp64 gives the two arms of that branch different
+        # types, which Triton rejects on ROCm.
         scores = tl.load(
             scores_ptr + score_base + offsets,
             mask=mask & valid,
             other=float("-inf"),
-        ).to(tl.float32)
+        ).to(tl.float64 if USE_FP64 else tl.float32)
         candidate_base = flat * top_k
         candidates = tl.load(
             candidate_ptr + candidate_base + offsets,
