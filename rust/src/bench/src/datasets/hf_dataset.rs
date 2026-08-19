@@ -314,7 +314,7 @@ async fn native_data_files(dataset: &str, config: &str, split: &str) -> Result<V
         ))
     })?;
 
-    let matched = select_native_files(files, config, split);
+    let matched = select_native_files(files, config, split)?;
     if matched.is_empty() {
         return Err(BenchError::Config(format!(
             "HF dataset '{dataset}' has no usable data for config '{config}' split \
@@ -332,7 +332,12 @@ async fn native_data_files(dataset: &str, config: &str, split: &str) -> Result<V
 /// Mirrors the datasets library's defaults: files may be scoped under a config
 /// directory; split-named files are preferred; a repo whose data files carry no split
 /// names at all maps everything to the "train" split.
-fn select_native_files(files: Vec<String>, config: &str, split: &str) -> Vec<String> {
+///
+/// Errors when the config matches no directory but the selection still spans several
+/// directories: the config never got resolved (e.g. a private dataset whose `/info`
+/// lookup failed falls back to the literal "default"), and pooling those directories
+/// would silently mix subsets.
+fn select_native_files(files: Vec<String>, config: &str, split: &str) -> Result<Vec<String>> {
     let data: Vec<String> = files
         .into_iter()
         .filter(|f| NATIVE_DATA_EXTENSIONS.iter().any(|ext| f.ends_with(ext)))
@@ -340,7 +345,8 @@ fn select_native_files(files: Vec<String>, config: &str, split: &str) -> Vec<Str
 
     // Multi-config layout scopes files under a config directory (e.g. "main/test-*.parquet")
     let config_prefix = format!("{config}/");
-    let scoped: Vec<String> = if data.iter().any(|f| f.starts_with(&config_prefix)) {
+    let config_scoped = data.iter().any(|f| f.starts_with(&config_prefix));
+    let scoped: Vec<String> = if config_scoped {
         data.into_iter().filter(|f| f.starts_with(&config_prefix)).collect()
     } else {
         data
@@ -348,19 +354,41 @@ fn select_native_files(files: Vec<String>, config: &str, split: &str) -> Vec<Str
 
     let matched: Vec<String> =
         scoped.iter().filter(|f| path_matches_split(f, split)).cloned().collect();
-    if !matched.is_empty() {
-        return matched;
-    }
 
-    // No file carries the requested split name. If no file carries any split name,
-    // the datasets library maps them all to "train".
-    let split_keywords = ["train", "test", "validation", "valid", "dev"];
-    let any_labeled =
-        scoped.iter().any(|f| split_keywords.iter().any(|s| path_matches_split(f, s)));
-    if split == "train" && !any_labeled {
-        return scoped;
+    let selected = if !matched.is_empty() {
+        matched
+    } else {
+        // No file carries the requested split name. If no file carries any split name,
+        // the datasets library maps them all to "train".
+        let split_keywords = ["train", "test", "validation", "valid", "dev"];
+        let any_labeled =
+            scoped.iter().any(|f| split_keywords.iter().any(|s| path_matches_split(f, s)));
+        if split == "train" && !any_labeled {
+            scoped
+        } else {
+            Vec::new()
+        }
+    };
+
+    if !config_scoped {
+        let dirs = top_level_dirs(&selected);
+        if dirs.len() > 1 {
+            return Err(BenchError::Config(format!(
+                "config '{config}' matches no directory in this dataset, and split '{split}' \
+                 data spans multiple config directories {dirs:?}. Pass --hf-subset to pick one."
+            )));
+        }
     }
-    Vec::new()
+    Ok(selected)
+}
+
+/// Distinct leading path segments of files that live in a directory.
+fn top_level_dirs(files: &[String]) -> Vec<&str> {
+    let mut dirs: Vec<&str> =
+        files.iter().filter_map(|f| f.split_once('/').map(|(d, _)| d)).collect();
+    dirs.sort_unstable();
+    dirs.dedup();
+    dirs
 }
 
 /// Split match on a repo file path: a split-named file ("{split}-00000-of-00001.parquet",
@@ -1546,7 +1574,7 @@ mod tests {
             "data/train-00001-of-00002.parquet".to_string(),
             "data/test-00000-of-00001.parquet".to_string(),
         ];
-        let selected = select_native_files(files, "default", "test");
+        let selected = select_native_files(files, "default", "test").unwrap();
         assert_eq!(
             selected,
             vec!["data/test-00000-of-00001.parquet".to_string()]
@@ -1559,17 +1587,17 @@ mod tests {
             "README.md".to_string(),
             "codex_swebenchpro.json".to_string(),
         ];
-        let selected = select_native_files(files.clone(), "default", "train");
+        let selected = select_native_files(files.clone(), "default", "train").unwrap();
         assert_eq!(selected, vec!["codex_swebenchpro.json".to_string()]);
         // ...but only for the train split
-        assert!(select_native_files(files, "default", "test").is_empty());
+        assert!(select_native_files(files, "default", "test").unwrap().is_empty());
     }
 
     #[test]
     fn test_select_native_files_labeled_files_do_not_leak_to_train() {
         // A repo with only test-labeled files has no train split
         let files = vec!["data/test-00000-of-00001.parquet".to_string()];
-        assert!(select_native_files(files, "default", "train").is_empty());
+        assert!(select_native_files(files, "default", "train").unwrap().is_empty());
     }
 
     #[test]
@@ -1578,11 +1606,34 @@ mod tests {
             "main/test-00000-of-00001.parquet".to_string(),
             "socratic/test-00000-of-00001.parquet".to_string(),
         ];
-        let selected = select_native_files(files, "socratic", "test");
+        let selected = select_native_files(files, "socratic", "test").unwrap();
         assert_eq!(
             selected,
             vec!["socratic/test-00000-of-00001.parquet".to_string()]
         );
+    }
+
+    #[test]
+    fn test_select_native_files_unresolved_config_does_not_pool_configs() {
+        // A private dataset whose /info lookup failed falls back to config "default";
+        // pooling both config directories would silently mix subsets.
+        let files = vec![
+            "main/test-00000-of-00001.parquet".to_string(),
+            "socratic/test-00000-of-00001.parquet".to_string(),
+        ];
+        let err = select_native_files(files, "default", "test").unwrap_err().to_string();
+        assert!(err.contains("--hf-subset"), "{err}");
+    }
+
+    #[test]
+    fn test_select_native_files_split_dirs_are_not_ambiguous() {
+        // Split directories are not config directories
+        let files = vec![
+            "train/0000.parquet".to_string(),
+            "test/0000.parquet".to_string(),
+        ];
+        let selected = select_native_files(files, "default", "test").unwrap();
+        assert_eq!(selected, vec!["test/0000.parquet".to_string()]);
     }
 
     // --- native JSON data file reading ---
