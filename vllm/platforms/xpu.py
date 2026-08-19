@@ -135,6 +135,10 @@ class XPUPlatform(Platform):
             import vllm._moe_C  # noqa: F401
 
     @classmethod
+    def check_runner_kv_caches_multi_layer(cls) -> None:
+        pass
+
+    @classmethod
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
@@ -301,13 +305,8 @@ class XPUPlatform(Platform):
             )
         else:
             logger.warning_once(
-                "XPU Graph support is experimental and has known limitations: "
-                "(1) only single-GPU execution is supported; "
-                "(2) FLASH_ATTN supports PIECEWISE mode only; use TRITON_ATTN "
-                "for FULL mode; "
-                "(3) XPU Graph may increase device memory usage, "
-                "potentially causing OOM errors or leaving less memory "
-                "for the KV cache and reducing performance."
+                "XPU Graph support is experimental and currently only supports "
+                "single-GPU execution."
             )
 
         # Disable fusion passes not yet supported on XPU.
@@ -330,6 +329,30 @@ class XPUPlatform(Platform):
                         feature_name,
                     )
                     setattr(pass_config, flag, False)
+
+        # UVA-offloaded weights are host USM allocations, which Inductor's
+        # static Triton launcher rejects ("Pointer argument doesn't reference
+        # XPU device memory"). Fall back to Triton's own launcher. Remove once
+        # the released torch contains pytorch/pytorch#188240, which relaxes
+        # that check to any memory type known by the driver.
+        offload_config = vllm_config.offload_config
+        uva_offloading = offload_config.offload_backend == "uva" or (
+            offload_config.offload_backend == "auto"
+            and offload_config.prefetch.offload_group_size == 0
+            and offload_config.uva.cpu_offload_gb > 0
+        )
+        if (
+            uva_offloading
+            and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
+            and compilation_config.mode != CompilationMode.NONE
+        ):
+            compilation_config.inductor_compile_config.setdefault(
+                "use_static_cuda_launcher", False
+            )
+            logger.info_once(
+                "Disabling Inductor's static Triton launcher because UVA "
+                "weight offloading is enabled."
+            )
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config

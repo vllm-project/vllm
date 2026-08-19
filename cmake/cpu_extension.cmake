@@ -345,7 +345,7 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
             FetchContent_Declare(
                 oneDNN
                 GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-                GIT_TAG        v3.10
+                GIT_TAG        v3.13
                 GIT_PROGRESS   TRUE
                 GIT_SHALLOW    TRUE
             )
@@ -461,11 +461,18 @@ set(VLLM_EXT_SRC
     "csrc/cpu/pos_encoding.cpp"
     "csrc/cpu/mamba_cpu.cpp"
     "csrc/moe/dynamic_4bit_int_moe_cpu.cpp"
+    "csrc/cpu/cpu_fused_moe.cpp"
     "csrc/cpu/cpu_attn.cpp"
     "csrc/cpu/torch_bindings.cpp")
 
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64" AND VLLM_RVV_VLEN AND
         VLLM_RVV_VLEN GREATER 0 AND (RVV_FP16_FOUND OR RVV_BF16_FOUND))
+    set(VLLM_EXT_SRC
+        "csrc/cpu/cpu_wna16.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
+if (S390_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/cpu_wna16.cpp"
         ${VLLM_EXT_SRC})
@@ -478,7 +485,6 @@ if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
         "csrc/cpu/cpu_tanhf_neon.hpp"
         ${VLLM_EXT_SRC})
     if (ARM_BF16_FOUND)
-        set(VLLM_EXT_SRC "csrc/cpu/cpu_fused_moe.cpp" ${VLLM_EXT_SRC})
         if (ARM_I8MM_FOUND)
             set(VLLM_EXT_SRC "csrc/cpu/cpu_fused_moe_int8.cpp" ${VLLM_EXT_SRC})
         endif()
@@ -535,6 +541,7 @@ if (ENABLE_X86_ISA)
 
     set(VLLM_EXT_SRC_AVX2
         "csrc/cpu/sgl-kernels/fla.cpp"
+        "csrc/cpu/cpu_fused_moe.cpp"
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"

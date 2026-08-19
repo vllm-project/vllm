@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from functools import partial
+from typing import Protocol, runtime_checkable
 
 import numpy as np
 import torch
@@ -15,44 +18,29 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
+from vllm.v1.outputs import RoutedExpertsTensors
 
 logger = logging.getLogger(__name__)
 
 
-def _get_num_experts_per_tok(hf_config) -> int:
-    """Resolve the per-token expert count from the HF config.
+@runtime_checkable
+class RoutedExpertsCaptureSource(Protocol):
+    layer_id: int
+    capture_fn: Callable[[torch.Tensor], None] | None
 
-    Different model families store this under different attribute names
-    (e.g. ``num_experts_per_tok`` for DeepSeek, ``top_k_experts`` for Gemma 4).
-    """
-    val = getattr(hf_config, "num_experts_per_tok", None)
-    if val is None:
-        val = getattr(hf_config, "top_k_experts", None)
-    if val is None:
+
+def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
+    model_config = vllm_config.model_config
+    num_layers = model_config.get_total_num_hidden_layers()
+    num_experts = model_config.get_num_experts()
+    num_experts_per_tok = model_config.get_num_experts_per_tok()
+    if num_layers <= 0 or num_experts <= 0 or num_experts_per_tok <= 0:
         raise ValueError(
-            "Cannot determine num_experts_per_tok: HF config has neither "
-            "'num_experts_per_tok' nor 'top_k_experts'"
+            "Routed-experts capture requires positive layer, expert, and "
+            "experts-per-token counts, got "
+            f"{num_layers=}, {num_experts=}, {num_experts_per_tok=}."
         )
-    return val
-
-
-def get_num_experts(hf_config) -> int:
-    """Resolve ``num_experts`` across HuggingFace config naming conventions.
-
-    Different MoE model families expose this under different keys:
-      - ``num_experts``: Mixtral, Qwen2-MoE, Qwen3-MoE
-      - ``n_routed_experts``: DeepSeek-V2/V3
-      - ``num_local_experts``: Mixtral (older exports)
-    """
-    for key in ("num_experts", "n_routed_experts", "num_local_experts"):
-        val = getattr(hf_config, key, None)
-        if val is not None:
-            return val
-    raise ValueError(
-        "Could not resolve num_experts from model config. "
-        "Expected one of 'num_experts', 'n_routed_experts', "
-        "or 'num_local_experts'."
-    )
+    return num_layers, num_experts, num_experts_per_tok
 
 
 class RoutedExpertsCapturer:
@@ -78,8 +66,7 @@ class RoutedExpertsCapturer:
     Invariants:
         - One instance per worker; shape is fixed at init and covers the
           worst-case step (``max_num_batched_tokens`` tokens).
-        - :meth:`clear_buffer` is called at the start of every step, so
-          unused slots stay zero.
+        - Every routed layer overwrites the current step's token rows.
         - ``device_buffer.dtype`` is ``torch.int32``.
     """
 
@@ -87,10 +74,9 @@ class RoutedExpertsCapturer:
         self,
         max_num_batched_tokens: int,
         vllm_config: VllmConfig,
+        kv_cache_config: KVCacheConfig,
     ) -> None:
-        hf_config = vllm_config.model_config.hf_text_config
-        num_experts_per_tok = _get_num_experts_per_tok(hf_config)
-        num_layers = hf_config.num_hidden_layers
+        num_layers, _, num_experts_per_tok = _get_routed_experts_shape(vllm_config)
         logger.info(
             "RoutedExpertsCapturer: allocating buffer with "
             "max_tokens=%d, num_layers=%d, num_experts_per_tok=%d "
@@ -98,7 +84,7 @@ class RoutedExpertsCapturer:
             max_num_batched_tokens,
             num_layers,
             num_experts_per_tok,
-            getattr(hf_config, "model_type", "unknown"),
+            vllm_config.model_config.hf_text_config.model_type,
         )
         self.device_buffer = torch.zeros(
             (
@@ -116,19 +102,26 @@ class RoutedExpertsCapturer:
         )
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        # KV cache group whose slot layout the routing data is keyed by.
+        self.attn_gid = get_routed_experts_attn_gid(kv_cache_config)
 
     def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         """Capture expert routing decisions for a specific layer.
 
-        Under data parallelism, ``topk_ids`` may have three different batch
+        Under data parallelism, ``topk_ids`` may have four different batch
         layouts depending on where the DP combine happens and whether
-        Sequence Parallelism (SP) is active for the MoE layer:
+        Expert Parallelism (EP) or Sequence Parallelism (SP) is active for the
+        MoE layer:
           - ``n == total`` (naive dispatch): all DP ranks' tokens are
             concatenated before routing; we slice out this rank's span
             using the cumulative per-rank counts.
           - ``n == token_num_per_dp`` (modular-kernel path): DP combine
             happens inside ``quant_method.apply``; ``select_experts`` only
             ever sees this rank's tokens, so we take the whole tensor.
+          - ``n == sum(dp_metadata.local_sizes)`` (naive DP+EP dispatch):
+            sequence-parallel shards from every DP rank are gathered through
+            the flattened EP group. The shard sizes include CUDA-graph / SP
+            padding, so we use them to locate this DP rank's unpadded rows.
           - ``n == ceil(token_num_per_dp / tp_size)`` (SP + modular-kernel
             path): tokens were split along dim=0 across the TP group by
             ``_sequence_parallel_context``
@@ -155,6 +148,8 @@ class RoutedExpertsCapturer:
             token_num_per_dp = int(num_tokens_dp[self.dp_rank].item())
             total = int(num_tokens_dp.sum().item())
             n = topk_ids.shape[0]
+            shard_sizes = getattr(ctx.dp_metadata, "local_sizes", None)
+            gathered_size = sum(shard_sizes) if shard_sizes is not None else -1
 
             if n == total:
                 # Naive dispatch: all DP ranks' tokens concatenated
@@ -169,6 +164,17 @@ class RoutedExpertsCapturer:
                 # rank's tokens, take the whole tensor.
                 start_loc = 0
                 end_loc = token_num_per_dp
+            elif shard_sizes is not None and n == gathered_size:
+                # Naive DP+EP dispatch gathers the sequence-parallel shards in
+                # flattened DP-then-TP order. ``local_sizes`` is the exact
+                # all-gatherv layout, including padding. Select this DP rank's
+                # contiguous shard group, then trim its trailing padding.
+                num_dp_ranks = len(num_tokens_dp)
+                assert len(shard_sizes) % num_dp_ranks == 0
+                shards_per_dp_rank = len(shard_sizes) // num_dp_ranks
+                first_shard = self.dp_rank * shards_per_dp_rank
+                start_loc = sum(shard_sizes[:first_shard])
+                end_loc = start_loc + token_num_per_dp
             elif (
                 self.tp_size > 1
                 and n != token_num_per_dp
@@ -201,33 +207,109 @@ class RoutedExpertsCapturer:
                 raise AssertionError(
                     "RoutedExpertsCapturer: unexpected topk_ids batch "
                     f"dim {n} (expected {total}, {token_num_per_dp}, "
-                    f"or {sp_expected} for dp_rank={self.dp_rank}, "
-                    f"tp_size={self.tp_size})"
+                    f"{gathered_size}, or {sp_expected} for "
+                    f"dp_rank={self.dp_rank}, tp_size={self.tp_size})"
                 )
 
-        # Defensive: model may expose more layers than the capture buffer
-        # was sized for (unusual, but guards against miss-config).
         if layer_id >= self.device_buffer.shape[1]:
-            return
+            raise IndexError(
+                f"routed-experts layer {layer_id} exceeds capture buffer "
+                f"layer count {self.device_buffer.shape[1]}"
+            )
 
         self.device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[
             start_loc:end_loc, :
         ]
 
-    def clear_buffer(self) -> None:
-        """Zero the device buffer. Called at the start of every step so
-        slots belonging to finished / preempted tokens don't leak into
-        the next step.
-        """
-        self.device_buffer.zero_()
-
     def get_device_buffer(self) -> torch.Tensor:
         """Return the underlying device buffer so the model runner can
         issue the D2H copy. The tensor is shared; callers must either
-        clone or fully drain it before the next forward pass runs
-        :meth:`clear_buffer`.
+        clone or fully drain it before the next forward pass overwrites it.
         """
         return self.device_buffer
+
+    def get_routed_experts(
+        self, slot_mappings: torch.Tensor, num_tokens: int
+    ) -> RoutedExpertsTensors:
+        """Snapshot this step's routing data and its attention slot mapping.
+
+        Both tensors are cloned since the capture buffer and the shared
+        ``slot_mappings`` are overwritten by the next step, which may race
+        with an in-flight D2H copy.
+
+        Args:
+            slot_mappings: Per-KV-cache-group slot mappings for this step,
+                shape ``(num_kv_cache_groups, max_num_batched_tokens)``.
+            num_tokens: Total number of tokens scheduled in this step.
+        """
+        return RoutedExpertsTensors(
+            routing_data=self.device_buffer[:num_tokens].clone(),
+            slot_mapping=slot_mappings[self.attn_gid, :num_tokens].clone(),
+        )
+
+
+def bind_routed_experts_capturer(
+    model: torch.nn.Module,
+    capturer: RoutedExpertsCapturer,
+) -> None:
+    """Attach capture callbacks to the target model's MoE routers."""
+    from vllm.model_executor.layers.fused_moe.layer import MoERunner
+    from vllm.model_executor.layers.fused_moe.modular_kernel import (
+        FusedMoEExpertsMonolithic,
+    )
+    from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
+
+    num_bound = 0
+    for module in model.modules():
+        if isinstance(module, RoutedExpertsCaptureSource):
+            module.capture_fn = partial(capturer.capture, module.layer_id)
+            num_bound += 1
+            continue
+        if not isinstance(module, MoERunner):
+            continue
+        layer_id = module.layer_id
+
+        def capture_fn(
+            topk_ids: torch.Tensor,
+            layer_id: int = layer_id,
+            capturer: RoutedExpertsCapturer = capturer,
+        ) -> None:
+            capturer.capture(layer_id, topk_ids)
+
+        quant_method = module._quant_method
+        moe_kernel = getattr(quant_method, "moe_kernel", None)
+        impl = getattr(moe_kernel, "impl", None)
+        fused_experts = getattr(impl, "fused_experts", None)
+        if quant_method.is_monolithic:
+            if not (
+                isinstance(fused_experts, FusedMoEExpertsMonolithic)
+                and fused_experts.supports_routing_replay_capture()
+            ):
+                raise ValueError(
+                    "Routed-experts capture is not supported with monolithic "
+                    f"MoE kernel {type(fused_experts).__name__}."
+                )
+            fused_experts.set_capture_fn(capture_fn)
+            num_bound += 1
+        elif isinstance(module.router, BaseRouter):
+            module.router.set_capture_fn(capture_fn)
+            num_bound += 1
+        else:
+            raise ValueError(
+                "Routed-experts capture is not supported with router "
+                f"{type(module.router).__name__}."
+            )
+
+    if num_bound == 0:
+        raise ValueError("No supported MoE router found for routed-experts capture.")
+
+
+def get_routed_experts_attn_gid(kv_cache_config: KVCacheConfig) -> int:
+    """Return the full-attention KV cache group used for routed experts."""
+    for gid, group in enumerate(kv_cache_config.kv_cache_groups):
+        if isinstance(group.kv_cache_spec, FullAttentionSpec):
+            return gid
+    raise ValueError("Routed-experts capture requires a full-attention KV cache group.")
 
 
 class RoutedExpertsManager:
@@ -260,17 +342,8 @@ class RoutedExpertsManager:
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
     ) -> None:
-        # Pick the attention group for block/slot mapping. We require
-        # a FullAttentionSpec group rather than any AttentionSpec to
-        # stay consistent with the worker-side lookup in
-        # ``GPUModelRunner._get_attention_kv_cache_gid``; hybrid models
-        # (Mamba / linear attention) also have other AttentionSpec
-        # groups whose slot layout differs.
-        self.attn_gid = next(
-            gid
-            for gid, g in enumerate(kv_cache_config.kv_cache_groups)
-            if isinstance(g.kv_cache_spec, FullAttentionSpec)
-        )
+        # Hybrid models also have KV groups whose slot layout differs.
+        self.attn_gid = get_routed_experts_attn_gid(kv_cache_config)
         attn_group = kv_cache_config.kv_cache_groups[self.attn_gid]
         self.block_size = attn_group.kv_cache_spec.block_size
 
@@ -278,9 +351,9 @@ class RoutedExpertsManager:
         # block IDs span [0, num_blocks) regardless of how many groups
         # exist. Sizing to the full pool avoids index-out-of-range
         # when different groups happen to land on the same block.
-        hf_config = vllm_config.model_config.hf_text_config
-        num_experts = get_num_experts(hf_config)
-        num_experts_per_tok = _get_num_experts_per_tok(hf_config)
+        num_layers, num_experts, num_experts_per_tok = _get_routed_experts_shape(
+            vllm_config
+        )
         max_num_slots = kv_cache_config.num_blocks * self.block_size
         # Expert IDs are 0..num_experts-1; uint8 fits 256 distinct
         # values so the boundary is ``<= 256`` (NOT ``< 256``). Keeping
@@ -290,7 +363,7 @@ class RoutedExpertsManager:
         self.routed_experts_by_slot = np.zeros(
             (
                 max_num_slots,
-                hf_config.num_hidden_layers,
+                num_layers,
                 num_experts_per_tok,
             ),
             dtype=expert_id_dtype,
@@ -300,8 +373,8 @@ class RoutedExpertsManager:
             "(slots=%d, layers=%d, top_k=%d, dtype=%s)",
             self.routed_experts_by_slot.nbytes / 1e9,
             max_num_slots,
-            hf_config.num_hidden_layers,
-            hf_config.num_experts_per_tok,
+            num_layers,
+            num_experts_per_tok,
             self.routed_experts_by_slot.dtype.name,
         )
 
