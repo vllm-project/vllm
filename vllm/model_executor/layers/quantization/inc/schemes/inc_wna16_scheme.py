@@ -252,12 +252,8 @@ def _build_humming_linear_method(layer_config: "INCLayerConfig"):
     return HummingLinearMethod(_build_humming_quant_config(layer_config))
 
 
-def _build_humming_moe_method(
-    layer: "torch.nn.Module", layer_config: "INCLayerConfig"
-):
+def _build_humming_moe_method(layer: "torch.nn.Module", layer_config: "INCLayerConfig"):
     from vllm.model_executor.layers.quantization.humming import HummingMoEMethod
 
-    return HummingMoEMethod(
-        _build_humming_quant_config(layer_config), layer.moe_config
-    )
+    return HummingMoEMethod(_build_humming_quant_config(layer_config), layer.moe_config)
 
