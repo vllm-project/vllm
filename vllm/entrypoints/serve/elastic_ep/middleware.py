@@ -8,6 +8,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 # Global variable to track scaling state
 _scaling_elastic_ep = False
+_SCALING_OBSERVABILITY_PATHS = frozenset({"/health", "/is_scaling_elastic_ep"})
 
 
 def get_scaling_elastic_ep():
@@ -36,7 +37,10 @@ class ScalingMiddleware:
             return self.app(scope, receive, send)
 
         # Check global scaling state
-        if get_scaling_elastic_ep():
+        if (
+            get_scaling_elastic_ep()
+            and scope["path"] not in _SCALING_OBSERVABILITY_PATHS
+        ):
             # Return 503 Service Unavailable response
             response = JSONResponse(
                 content={

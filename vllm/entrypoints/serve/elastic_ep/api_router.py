@@ -84,7 +84,13 @@ async def scale_elastic_ep(raw_request: Request):
 
 @router.post("/is_scaling_elastic_ep")
 async def is_scaling_elastic_ep(raw_request: Request):
-    return JSONResponse({"is_scaling_elastic_ep": get_scaling_elastic_ep()})
+    phase = await engine_client(raw_request).get_external_elastic_ep_phase()
+    is_scaling = get_scaling_elastic_ep()
+    if phase is None:
+        phase = "committing" if is_scaling else "idle"
+    else:
+        is_scaling = phase in ("preparing", "committing")
+    return JSONResponse({"is_scaling_elastic_ep": is_scaling, "phase": phase})
 
 
 def attach_router(app: FastAPI):
