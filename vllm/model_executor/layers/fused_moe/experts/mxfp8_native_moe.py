@@ -341,6 +341,29 @@ class Mxfp8NativeTritonExperts(Mxfp8TritonExpertsBase):
         return True
 
     @staticmethod
+    def is_supported_config(
+        cls, moe_config, weight_key, activation_key, activation_format
+    ):
+        is_supported, reason = super().is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+        # The grouped GEMM leaves its K loop unmasked, so both GEMMs need a
+        # K divisible by 128: hidden_dim for w13, the per-partition
+        # intermediate for w2. Declining here lets the oracle fall through to
+        # the emulation backend instead of asserting mid-init.
+        if is_supported:
+            for name, dim in (
+                ("hidden_dim", moe_config.hidden_dim),
+                (
+                    "intermediate_size_per_partition",
+                    moe_config.intermediate_size_per_partition,
+                ),
+            ):
+                if dim % 128 != 0:
+                    return False, f"kernel requires {name} % 128 == 0, got {dim}"
+        return is_supported, reason
+
+    @staticmethod
     def _supports_current_device() -> bool:
         return current_platform.is_rocm() and current_platform.supports_mx()
 

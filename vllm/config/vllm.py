@@ -1686,6 +1686,34 @@ class VllmConfig:
                 "Disabling cascade attention when VLLM_BATCH_INVARIANT is enabled.",
             )
 
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
+            pcp_size = self.parallel_config.prefill_context_parallel_size
+            if pcp_size > 1:
+                # Unmeasured rather than known-bad: the V2 runner rejects PCP
+                # before this point, so the branch only bites once that
+                # changes. Revisit once that changes.
+                raise ValueError(
+                    "Prefill context parallelism is not supported with "
+                    "VLLM_BATCH_INVARIANT (prefill_context_parallel_size="
+                    f"{pcp_size}). It recombines each request's partial "
+                    "attention across ranks with a collective whose reduction "
+                    "order has not been measured under the mode. Set it to 1, "
+                    "raising --tensor-parallel-size or "
+                    "--decode-context-parallel-size to keep the same GPU "
+                    "count, or unset VLLM_BATCH_INVARIANT."
+                )
+
+            # These passes rewrite the collective the communicator would have
+            # run -- sequence parallelism and AsyncTP into reduce-scatter +
+            # all-gather, the fusions into a fused all-reduce+RMSNorm kernel
+            pass_config = self.compilation_config.pass_config
+            for name in ("enable_sp", "fuse_gemm_comms", "fuse_allreduce_rms"):
+                if getattr(pass_config, name):
+                    setattr(pass_config, name, False)
+                    logger.warning_once(
+                        "Disabling %s when VLLM_BATCH_INVARIANT is enabled.", name
+                    )
+
         if self.parallel_config.use_ubatching:
             a2a_backend = self.parallel_config.all2all_backend
             assert a2a_backend in [

@@ -452,7 +452,7 @@ class CustomAllreduce:
         return out
 
     def should_custom_reduce_scatter(self, inp: torch.Tensor) -> bool:
-        if self.disabled or not current_platform.is_cuda():
+        if self.disabled or not current_platform.is_cuda_alike():
             return False
         if self.world_size == 16 and not self.mnnvl_only:
             return False

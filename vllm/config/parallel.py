@@ -1001,7 +1001,7 @@ class ParallelConfig:
         from vllm.v1.executor import Executor
 
         # Enable batch invariance settings if requested
-        if envs.VLLM_BATCH_INVARIANT:
+        if envs.VLLM_BATCH_INVARIANT and not current_platform.is_rocm():
             self.disable_custom_all_reduce = True
 
         if (

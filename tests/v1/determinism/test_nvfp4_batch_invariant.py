@@ -1,18 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 import os
 import random
 
 import pytest
 import torch
-from utils import (
-    _extract_step_logprobs,
-    _random_prompt,
-    skip_if_not_cuda,
-)
 
 from vllm import LLM, SamplingParams
+from vllm.platforms import current_platform
+
+from .utils import (
+    _extract_step_logprobs,
+    _random_prompt,
+    shutdown_llm,
+    skip_if_not_cuda_alike,
+)
+
+# ROCm has no CUTLASS NVFP4 kernel, so batch-invariant mode falls back to the
+# emulation kernel there; FLASH_ATTN is CUDA-only.
+E2E_BACKENDS = ["TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"]
 
 pytestmark = pytest.mark.skipif(
     not hasattr(torch, "float8_e4m3fn"),
@@ -35,13 +41,12 @@ def _make_llm(max_num_seqs: int, backend: str) -> LLM:
         dtype="auto",
         tensor_parallel_size=int(os.getenv("VLLM_NVFP4_TEST_TP_SIZE", "1")),
         enable_prefix_caching=False,
-        enforce_eager=True,
         attention_config={"backend": backend},
     )
 
 
-@skip_if_not_cuda
-@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
+@skip_if_not_cuda_alike
+@pytest.mark.parametrize("backend", E2E_BACKENDS)
 def test_dense_nvfp4_generation_is_deterministic_across_batch_sizes_e2e(backend):
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
@@ -96,5 +101,4 @@ def test_dense_nvfp4_generation_is_deterministic_across_batch_sizes_e2e(backend)
             torch.testing.assert_close(needle_logprobs, baseline_logprobs)
     finally:
         if llm is not None:
-            with contextlib.suppress(Exception):
-                llm.shutdown()
+            shutdown_llm(llm)

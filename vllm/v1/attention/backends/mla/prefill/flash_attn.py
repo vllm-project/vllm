@@ -414,13 +414,13 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             kwargs["return_softmax_lse"] = return_softmax_lse
             kwargs["out"] = out
             kwargs["output_scale"] = output_scale
+            if envs.VLLM_BATCH_INVARIANT:
+                kwargs["num_splits"] = 1
         else:
             # ROCm leverages the upstream flash_attn, which takes a parameter
             # called "return_attn_probs" instead of return_softmax_lse
             kwargs["return_attn_probs"] = return_softmax_lse
             assert out is None and output_scale is None
-        if envs.VLLM_BATCH_INVARIANT:
-            kwargs["num_splits"] = 1
 
         attn_out = FA4_MLA_PREFILL_KERNEL(
             q=q,

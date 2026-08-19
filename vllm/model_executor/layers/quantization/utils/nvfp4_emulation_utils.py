@@ -4,6 +4,10 @@ from types import SimpleNamespace
 
 import torch
 
+import vllm.envs as envs
+from vllm.model_executor.layers.batch_invariant import (
+    matmul_batch_invariant,
+)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
@@ -478,5 +482,7 @@ def run_nvfp4_emulations(
     )
 
     # matmul
+    if envs.VLLM_BATCH_INVARIANT:
+        return matmul_batch_invariant(x_dq, w_dq.t())
     out = torch.matmul(x_dq, w_dq.t())
     return out

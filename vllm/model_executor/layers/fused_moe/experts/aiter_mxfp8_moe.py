@@ -89,6 +89,10 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
         return True
 
     @staticmethod
+    def _supports_batch_invariance() -> bool:
+        return False
+
+    @staticmethod
     def is_supported_config(
         cls, moe_config, weight_key, activation_key, activation_format
     ):

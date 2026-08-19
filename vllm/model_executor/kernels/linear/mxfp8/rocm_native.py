@@ -12,6 +12,7 @@ matrix cores. Falls back (via the kernel selector) to the BF16
 import torch
 from torch.nn.parameter import Parameter
 
+import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
@@ -90,6 +91,12 @@ def _mxfp8_dot_scaled_linear(
     x_q, x_scale = mxfp8_e4m3_quantize(x)
     out = torch.empty((M, N), dtype=x.dtype, device=x.device)
     BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages = _select_cfg(M, N, K)
+    if envs.VLLM_BATCH_INVARIANT:
+        # BLOCK_K alone decides the order an output element's K contributions
+        # accumulate in. _select_cfg varies BLOCK_K with M, so pin it to a
+        # K-divisible constant and leave the rest of the tile M-tuned. The
+        # kernel selector already requires K % 128 == 0.
+        BLOCK_K = 256 if K % 256 == 0 else 128
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
     _mxfp8_linear_kernel[grid](
         x_q,

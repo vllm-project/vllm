@@ -1,23 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 import os
 import random
 
 import pytest
 import torch
-from utils import (
-    BACKENDS,
-    TEST_MODEL,
-    _extract_step_logprobs,
-    _random_prompt,
-    skip_if_not_cuda,
-    skip_unsupported,
-)
 
 import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
+
+from .utils import (
+    BACKENDS,
+    TEST_MODEL,
+    _extract_step_logprobs,
+    _random_prompt,
+    shutdown_llm,
+    skip_if_not_cuda,
+    skip_unsupported,
+)
 
 
 @skip_unsupported
@@ -159,8 +160,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     finally:
         # Ensure engines are shutdown to free GPU/VRAM across test sessions
         if llm is not None:
-            with contextlib.suppress(Exception):
-                llm.shutdown()
+            shutdown_llm(llm)
 
 
 @skip_unsupported
@@ -446,8 +446,7 @@ def test_simple_generation(backend):
         print(f"{'=' * 80}\n")
 
     finally:
-        with contextlib.suppress(Exception):
-            llm.shutdown()
+        shutdown_llm(llm)
 
 
 @skip_unsupported

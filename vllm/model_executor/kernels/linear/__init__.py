@@ -210,6 +210,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
     TritonFp8BlockScaledMMKernel,
+    TritonFP8ScaledMMLinearKernel,
     TritonInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
@@ -678,6 +679,11 @@ def init_fp8_linear_kernel(
     )
 
     if activation_quant_key.scale.group_shape.is_per_group():
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
+            # AiterFp8BlockScaledMMKernel is first in the ROCm priority list and
+            # is not batch invariant; the Triton block kernel is.
+            force_kernel = TritonFp8BlockScaledMMKernel  # type: ignore[assignment]
+
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
             possible_kernels=_POSSIBLE_FP8_BLOCK_KERNELS,  # type: ignore[misc]
@@ -709,6 +715,9 @@ def init_fp8_linear_kernel(
         )
 
     else:
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
+            force_kernel = TritonFP8ScaledMMLinearKernel
+
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
             possible_kernels=_POSSIBLE_FP8_KERNELS,  # type: ignore[arg-type]

@@ -273,6 +273,28 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
 
     def all_reduce(self, input_):
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
+            # This path should be batch-invariant on all platforms but is
+            # not enabled there because speed has not been measured
+            ca_comm = self.ca_comm
+            if (
+                ca_comm is not None
+                and not ca_comm.disabled
+                and ca_comm.should_custom_ar(input_)
+            ):
+                out = ca_comm.custom_all_reduce(input_)
+                assert out is not None
+                return out
+            # Above the custom kernel's size bound, fall back to an
+            # all-to-all plus a fixed rank-order local sum. This is only benign
+            # while the two agree bitwise -- see
+            # tests/v1/determinism/test_tp_all_reduce_batch_invariant.py.
+            from vllm.model_executor.layers.batch_invariant import (
+                all_reduce_batch_invariant,
+            )
+
+            return all_reduce_batch_invariant(input_, self.device_group)
+
         # since currently we perform copy input -> symm_input -> out-of-place AR
         # return symm_output, we don't need to check if input is symmetric
         if self.pynccl_comm is not None and should_nccl_symm_mem_allreduce(
@@ -404,7 +426,22 @@ class CudaCommunicator(DeviceCommunicatorBase):
         chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
-        if should_nccl_symm_mem_ag_rs():
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
+            ca_comm = self.ca_comm
+            output = (
+                None if ca_comm is None else ca_comm.custom_reduce_scatter(input_tensor)
+            )
+            if output is None:
+                # Above the custom kernel's size bound, fall back to an
+                # all-to-all plus a fixed rank-order local sum. This is only benign
+                # while the two agree bitwise -- see
+                # tests/v1/determinism/test_tp_reduce_scatter_batch_invariant.py.
+                from vllm.model_executor.layers.batch_invariant import (
+                    reduce_scatter_batch_invariant,
+                )
+
+                output = reduce_scatter_batch_invariant(input_tensor, self.device_group)
+        elif should_nccl_symm_mem_ag_rs():
             output = self._reduce_scatter_symm_mem(input_tensor)
         else:
             output = torch.empty(
@@ -442,7 +479,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # ncclCommWindowRegister is collective: asymmetric pool allocations
         # from variable per-rank sizes cause deadlocks.
         use_symm_mem = sizes is None and should_nccl_symm_mem_ag_rs()
-        if use_symm_mem:
+        if envs.VLLM_BATCH_INVARIANT and current_platform.is_rocm():
+            from vllm.model_executor.layers.batch_invariant import (
+                reduce_scatter_batch_invariant,
+            )
+
+            output = reduce_scatter_batch_invariant(
+                input_tensor, self.device_group, sizes=sizes
+            )
+        elif use_symm_mem:
             output = self._reduce_scatter_symm_mem(input_tensor)
         else:
             output = torch.empty(

@@ -20,6 +20,8 @@ from .BlockScaledMMLinearKernel import (
 )
 from .cutlass import CutlassInt8ScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
+    FP8ScaledMMLinearKernel,
+    FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearLayerConfig,
 )
 
@@ -154,6 +156,42 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
                 out -= (x_s * w_s_row * azp_adj).to(x.dtype)
 
         return out
+
+
+class TritonFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_cuda_alike():
+            return False, "requires ROCm or CUDA."
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        act_group = c.activation_quant_key.scale.group_shape
+        weight_group = c.weight_quant_key.scale.group_shape
+        if not (act_group.is_per_tensor() or act_group.is_per_token()):
+            return False, "requires per-tensor or per-token activation scales."
+        if not (weight_group.is_per_tensor() or weight_group.is_per_channel()):
+            return False, "requires per-tensor or per-channel weight scales."
+        return True, None
+
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_shape: list,
+    ) -> torch.Tensor:
+        out = triton_scaled_mm(
+            A, B, scale_a=As, scale_b=Bs, out_dtype=out_dtype, bias=bias
+        )
+        return out.view(*output_shape)
 
 
 class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):

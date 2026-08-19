@@ -9,10 +9,11 @@ item doesn't change based on other items in the batch).
 
 import pytest
 import torch
-from utils import skip_unsupported
 
 from vllm.model_executor.layers.batch_invariant import matmul_batch_invariant
 from vllm.platforms import current_platform
+
+from .utils import skip_unsupported
 
 DEVICE_TYPE = current_platform.device_type
 

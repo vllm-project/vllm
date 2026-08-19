@@ -44,7 +44,9 @@ __global__ void __launch_bounds__(512, 1)
 #pragma unroll
   for (int i = 0; i < ngpus; i++) {
     int target = (rank + i) % ngpus;
-    ptrs[i] = (const P*)_dp->ptrs[target];
+    // Reduce in plain rank order, matching the 1stage algo: this preserves
+    // batch invariance.
+    ptrs[i] = (const P*)_dp->ptrs[i];
     tmps[i] = get_tmp_buf<P>(sg.signals[target]);
   }
   auto tmp_out = tmps[0];
