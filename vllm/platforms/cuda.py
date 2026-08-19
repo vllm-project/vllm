@@ -133,13 +133,49 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM120,
             ]
         else:
+            # NoPE sparse MLA (GLM-5-Next shape: qk_rope_head_dim=0 with an
+            # indexer): prefer FlashInfer's SM90 FA3 path for every KV dtype
+            # -- BF16 and FP8 alike (in-kernel dequant, no query
+            # quantization). Without FlashInfer SM90 support the backend's
+            # feature gate rejects it and selection falls through to the
+            # FA/FlashMLA sparse paths unchanged. Rope sparse models
+            # (DeepSeek-style) keep their existing order; the FlashInfer
+            # backend stays reachable there via explicit --attention-backend
+            # or as the fp8 fallback the FA path cannot serve.
+            from vllm.config import get_current_vllm_config_or_none
+
+            cfg = get_current_vllm_config_or_none()
+            hf = (
+                cfg.model_config.hf_text_config
+                if cfg is not None and cfg.model_config is not None
+                else None
+            )
+            prefer_fi_sm90 = (
+                hf is not None
+                and getattr(hf, "qk_rope_head_dim", None) == 0
+                and hasattr(hf, "index_topk")
+            )
+            sparse_tail = [
+                AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE,
+                AttentionBackendEnum.FLASHMLA_SPARSE,
+                AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM90,
+            ]
+            if prefer_fi_sm90:
+                sparse_tail.pop()  # dedupe the head entry
+                return [
+                    AttentionBackendEnum.FLASH_ATTN_MLA,
+                    AttentionBackendEnum.FLASHMLA,
+                    AttentionBackendEnum.FLASHINFER_MLA,
+                    AttentionBackendEnum.TRITON_MLA,
+                    AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM90,
+                    *sparse_tail,
+                ]
             return [
                 AttentionBackendEnum.FLASH_ATTN_MLA,
                 AttentionBackendEnum.FLASHMLA,
                 AttentionBackendEnum.FLASHINFER_MLA,
                 AttentionBackendEnum.TRITON_MLA,
-                AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE,
-                AttentionBackendEnum.FLASHMLA_SPARSE,
+                *sparse_tail,
             ]
     else:
         # SM100f defaults to FlashInfer for TRTLLM causal attention, but its non-causal

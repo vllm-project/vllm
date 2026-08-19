@@ -217,6 +217,32 @@ def has_flashinfer_moe() -> bool:
 
 
 @functools.cache
+def has_flashinfer_sm90_nope_mla() -> bool:
+    """FlashInfer SM90 NoPE MLA (FP8 KV with in-kernel dequant, kpe=0).
+
+    Feature-detected via the ``ckv_scale_arr`` run() kwarg introduced with
+    the SM90 NoPE support (FlashInfer >= 0.6.18), so dev builds carry the
+    gate without a version parse.
+    """
+    if not has_flashinfer():
+        return False
+    try:
+        import inspect
+
+        from flashinfer.mla import BatchMLAPagedAttentionWrapper
+    except ImportError:
+        return False
+    try:
+        params = inspect.signature(BatchMLAPagedAttentionWrapper.run).parameters
+    except (TypeError, ValueError):
+        return False
+    return (
+        "ckv_scale_arr" in params
+        and params["ckv_scale_arr"].kind is inspect.Parameter.KEYWORD_ONLY
+    )
+
+
+@functools.cache
 def has_flashinfer_sparse_mla_sm120() -> bool:
     """Return ``True`` if FlashInfer sparse MLA decode support is available."""
     if not has_flashinfer():
