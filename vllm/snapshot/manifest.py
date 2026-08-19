@@ -6,7 +6,7 @@ import math
 import os
 import stat
 from pathlib import Path
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
@@ -17,6 +17,7 @@ from pydantic import (
     model_validator,
 )
 from pydantic_core import PydanticCustomError
+from typing_extensions import Self
 
 
 class SnapshotError(RuntimeError):
