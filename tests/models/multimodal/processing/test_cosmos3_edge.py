@@ -4,9 +4,14 @@
 import os
 
 import pytest
+import torch
 
 from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
+from vllm.model_executor.models.cosmos3_edge import (
+    blockmajor_to_raster,
+    patch_merging_by_param,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from ....conftest import ImageTestAssets
@@ -111,3 +116,97 @@ def test_process_video(processor) -> None:
     )
 
     _assert_video_outputs(processor, processed)
+
+
+def _pack_blockmajor(grid_thw: list[list[int]], merge_size: int) -> torch.Tensor:
+    """Pack raster patch ids the way the processor's ``patchify()`` does.
+
+    Mirrors ``image_processing_cosmos3_edge.patchify``: reshape into
+    ``merge_size x merge_size`` blocks and emit block-major, per frame.
+    """
+    streams = []
+    offset = 0
+    for t, h, w in grid_thw:
+        for _ in range(t):
+            ids = torch.arange(offset, offset + h * w).reshape(h, w)
+            streams.append(
+                ids.reshape(h // merge_size, merge_size, w // merge_size, merge_size)
+                .permute(0, 2, 1, 3)
+                .reshape(-1)
+            )
+            offset += h * w
+    return torch.cat(streams)
+
+
+@pytest.mark.parametrize(
+    "grid_thw,merge_size",
+    [
+        # w // merge_size not in {1, merge_size}: the permutation is not
+        # self-inverse here, so a reversed direction cannot pass.
+        ([[1, 4, 6]], 2),
+        ([[1, 6, 10]], 2),
+        ([[1, 6, 9]], 3),
+        # multiple images and a multi-frame video in one packed batch
+        ([[1, 4, 6], [1, 6, 10]], 2),
+        ([[3, 4, 6]], 2),
+        ([[1, 4, 6], [2, 6, 10], [1, 4, 4]], 2),
+    ],
+)
+def test_blockmajor_to_raster_recovers_raster_order(
+    grid_thw: list[list[int]],
+    merge_size: int,
+) -> None:
+    """Reordering a block-major stream must yield raster order."""
+    spatial_shapes = torch.tensor(
+        [[h, w] for t, h, w in grid_thw for _ in range(t)],
+        dtype=torch.int64,
+    )
+    packed = _pack_blockmajor(grid_thw, merge_size).unsqueeze(-1).float()
+
+    reordered = blockmajor_to_raster(packed, spatial_shapes, merge_size)
+
+    expected = torch.arange(packed.shape[0], dtype=torch.float32).unsqueeze(-1)
+    assert torch.equal(reordered, expected)
+
+
+def test_blockmajor_to_raster_is_noop_without_merging() -> None:
+    packed = torch.randn(12, 3)
+    spatial_shapes = torch.tensor([[3, 4]], dtype=torch.int64)
+
+    assert blockmajor_to_raster(packed, spatial_shapes, 1) is packed
+
+
+def test_blockmajor_to_raster_rejects_patch_count_mismatch() -> None:
+    packed = torch.randn(20, 3)
+    spatial_shapes = torch.tensor([[4, 6]], dtype=torch.int64)
+
+    with pytest.raises(ValueError, match="do not match spatial_shapes"):
+        blockmajor_to_raster(packed, spatial_shapes, 2)
+
+
+@pytest.mark.parametrize("grid_thw", [[[1, 4, 6]], [[2, 6, 10], [1, 4, 4]]])
+def test_reorder_then_merge_matches_processor_block_order(
+    grid_thw: list[list[int]],
+) -> None:
+    """The projector must receive each 2x2 block as one contiguous group.
+
+    ``patch_merging_by_param`` on the reordered stream has to reproduce what a
+    plain reshape of the *un*-reordered block-major stream gives, which is what
+    HF's ``Cosmos3EdgePatchMerger`` consumes.
+    """
+    merge_size = 2
+    hidden_size = 8
+    spatial_shapes = torch.tensor(
+        [[h, w] for t, h, w in grid_thw for _ in range(t)],
+        dtype=torch.int64,
+    )
+    order = _pack_blockmajor(grid_thw, merge_size)
+    packed = torch.randn(order.shape[0], hidden_size)
+
+    reordered = blockmajor_to_raster(packed, spatial_shapes, merge_size)
+    merged = patch_merging_by_param(
+        reordered, torch.tensor(grid_thw, dtype=torch.int64), merge_size
+    )
+
+    expected = packed.reshape(-1, merge_size * merge_size * hidden_size)
+    assert torch.equal(merged, expected)

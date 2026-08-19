@@ -59,6 +59,40 @@ from .vision import (
 )
 
 
+def blockmajor_to_raster(
+    pixel_values: torch.Tensor,
+    spatial_shapes: torch.Tensor,
+    merge_size: int,
+) -> torch.Tensor:
+    """Reorder packed patches from Cosmos block-major order to raster order.
+
+    Cosmos3-Edge's processors pack patches grouped by ``merge_size x
+    merge_size`` spatial blocks, while the packed positional embeddings and
+    ``patch_merging_by_param`` both index the stream row-major.
+    """
+    if merge_size == 1:
+        return pixel_values
+
+    shapes = spatial_shapes.tolist()
+    num_patches = sum(h * w for h, w in shapes)
+    if num_patches != pixel_values.shape[-2]:
+        raise ValueError(
+            "packed patches do not match spatial_shapes: "
+            f"got {pixel_values.shape[-2]}, expected {num_patches}."
+        )
+
+    indices: list[torch.Tensor] = []
+    offset = 0
+    for h, w in shapes:
+        index = torch.arange(h * w).reshape(
+            h // merge_size, w // merge_size, merge_size, merge_size
+        )
+        indices.append(index.transpose(1, 2).reshape(-1) + offset)
+        offset += h * w
+
+    return pixel_values.index_select(-2, torch.cat(indices).to(pixel_values.device))
+
+
 class Cosmos3EdgeVisionEncoder(Siglip2VisionTransformer):
     """Adapts Cosmos (T, H, W) metadata to vLLM packed SigLIP2."""
 
@@ -79,6 +113,15 @@ class Cosmos3EdgeVisionEncoder(Siglip2VisionTransformer):
             grid_thw_cpu[:, 0],
             dim=0,
         )
+        # The processor packs patches block-major, but the packed positional
+        # embeddings and patch_merging_by_param both index this stream raster
+        # (row-major). Normalize once here so both see the order they assume.
+        pixel_values = blockmajor_to_raster(
+            pixel_values,
+            spatial_shapes,
+            self.config.spatial_merge_size,
+        )
+
         lengths_cpu = spatial_shapes.prod(dim=-1).to(torch.int32)
         lengths = lengths_cpu.to(
             device=pixel_values.device,
