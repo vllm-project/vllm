@@ -358,7 +358,7 @@ httpx==0.27.2
     #   schemathesis
 httpx-sse==0.4.3
     # via mcp
-huggingface-hub==1.27.0
+huggingface-hub==1.28.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -406,7 +406,9 @@ inflect==5.6.2
 iniconfig==2.0.0
     # via pytest
 instanttensor==0.1.9
-    # via -r requirements/test/cuda.in
+    # via
+    #   -c requirements/cuda.txt
+    #   -r requirements/test/cuda.in
 interegular==0.3.3
     # via lm-format-enforcer
 isodate==0.7.2
