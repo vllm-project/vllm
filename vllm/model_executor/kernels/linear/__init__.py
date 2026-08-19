@@ -157,6 +157,9 @@ from vllm.model_executor.kernels.linear.nvfp4.humming import (
 from vllm.model_executor.kernels.linear.nvfp4.marlin import (
     MarlinNvFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.nvfp4.triton_gfx90a import (
+    TritonNvFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm import (
     Fp8BlockScaledMMLinearKernel,
     FP8ScaledMMLinearKernel,
@@ -535,6 +538,9 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
         HummingNvFp4LinearKernel,
     ],
     PlatformEnum.ROCM: [
+        # gfx90a only; is_supported() rejects every other ROCm target, same
+        # pattern as TritonW8A16Fp8LinearKernel.
+        TritonNvFp4LinearKernel,
         EmulationNvFp4LinearKernel,
     ],
 }
@@ -1006,7 +1012,13 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform."""
     config = NvFp4LinearLayerConfig()
-    a16_kernels = (MarlinNvFp4LinearKernel, HummingNvFp4LinearKernel)
+    # Not platform-filtered by construction -- Marlin/Humming are CUDA-only
+    # (see their own is_supported()), TritonNvFp4LinearKernel is gfx90a-only.
+    # A kernel absent from this tuple is silently dropped by the `use_a16`
+    # filter below even if it's correctly registered in
+    # _POSSIBLE_NVFP4_KERNELS, so a new W4A16-capable kernel MUST be added
+    # here too, not just to the platform registry.
+    a16_kernels = (MarlinNvFp4LinearKernel, HummingNvFp4LinearKernel, TritonNvFp4LinearKernel)
 
     # VLLM_BATCH_INVARIANT forces deterministic execution. Prefer the
     # batch-invariant CUTLASS implementation when available, otherwise fall
@@ -1042,8 +1054,17 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
                 reason,
             )
             force_kernel = EmulationNvFp4LinearKernel
-    elif linear_backend == "auto" and use_a16:
-        # Force a16 (Marlin) when running weight-only quantization.
+    elif linear_backend == "auto" and use_a16 and current_platform.is_cuda():
+        # Force a16 (Marlin) when running weight-only quantization on CUDA.
+        # Platform-gated deliberately: unguarded, this fired on every
+        # platform (ROCm included) and raised before ever reaching the
+        # registry search below, since MarlinNvFp4LinearKernel.is_supported()
+        # is CUDA-only -- the exact d74ce3db1d-class bug (a CUDA-shaped
+        # capability check asserting hardware it doesn't have), just in the
+        # NVFP4 dispatcher instead of the FP8 scheme-selection one. On other
+        # platforms this now falls through to the registry search, which is
+        # where a platform's own W4A16 kernel (e.g. TritonNvFp4LinearKernel
+        # on gfx90a) gets a chance to be picked.
         force_kernel = MarlinNvFp4LinearKernel
 
     if force_kernel is not None:
@@ -1228,6 +1249,7 @@ __all__ = [
     "FlashInferTrtllmNvFp4LinearKernel",
     "FlashInferCudnnNvFp4LinearKernel",
     "MarlinNvFp4LinearKernel",
+    "TritonNvFp4LinearKernel",
     "_KernelT",
     "DeepGemmFp8BlockScaledMMKernel",
     "FlashInferFp8DeepGEMMDynamicBlockScaledKernel",
