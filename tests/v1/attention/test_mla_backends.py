@@ -27,6 +27,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
     QueryLenSupport,
     _DecodeConcatQuantFP8,
+    build_mla_chunked_context_metadata,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
@@ -93,6 +94,48 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
         assert spec.page_size_bytes == 64 * 656
 
 
+@pytest.mark.cpu_test
+def test_dcp_chunked_context_accepts_non_virtual_block_aligned_prefix():
+    context_lens_cpu = torch.tensor([65, 96], dtype=torch.int32)
+    prefill_query_start_loc_cpu = torch.tensor([0, 1, 2], dtype=torch.int32)
+
+    metadata = build_mla_chunked_context_metadata(
+        context_lens_cpu=context_lens_cpu,
+        prefill_query_start_loc_cpu=prefill_query_start_loc_cpu,
+        chunked_prefill_workspace=torch.empty(0),
+        chunked_prefill_workspace_size=128,
+        block_size=64,
+        align_chunk_to_block=True,
+        device=torch.device("cpu"),
+        dcp_world_size=4,
+        dcp_local_block_size=1,
+        dcp_virtual_block_size=4,
+    )
+
+    assert metadata is not None
+    assert metadata.context_lens.tolist() == [65, 96]
+    assert [chunk.seq_lens.tolist() for chunk in metadata.chunks] == [[65], [96]]
+    assert [chunk.starts.tolist() for chunk in metadata.chunks] == [[0], [0]]
+    assert [chunk.local_context_lens_allranks for chunk in metadata.chunks] == [
+        [[17, 16, 16, 16]],
+        [[24, 24, 24, 24]],
+    ]
+    assert [chunk.padded_local_seq_lens for chunk in metadata.chunks] == [
+        [17],
+        [24],
+    ]
+    assert [chunk.padded_local_cu_seq_lens.tolist() for chunk in metadata.chunks] == [
+        [0, 17],
+        [0, 24],
+    ]
+    assert [chunk.cu_seq_lens.tolist() for chunk in metadata.chunks] == [
+        [0, 65],
+        [0, 96],
+    ]
+    assert [chunk.num_context_tokens for chunk in metadata.chunks] == [65, 96]
+    assert [chunk.num_local_context_tokens for chunk in metadata.chunks] == [17, 24]
+
+
 # Remove sm100 backends from the list if not using sm100
 if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 10:
     BACKENDS_TO_TEST.remove(AttentionBackendEnum.CUTLASS_MLA)
@@ -129,9 +172,11 @@ def test_mla_post_load_preserves_runtime_weight_addresses(monkeypatch):
     layer.kv_b_proj.quant_method = None
     layer.is_aiter_triton_fp4_bmm_enabled = False
     layer.is_aiter_triton_fp8_bmm_enabled = False
+    layer.is_amx_bmm_enabled = False
     layer.dcp_q_replicate = False
     layer.quant_config = None
     layer.layer_name = "test"
+    layer.impl = SimpleNamespace(process_weights_after_loading=lambda act_dtype: None)
 
     monkeypatch.setattr(
         mla_attention_module, "set_default_quant_scales", lambda *_, **__: None
