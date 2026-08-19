@@ -84,7 +84,8 @@ def maybe_retie_word_embeddings(model: nn.Module, model_config: ModelConfig) -> 
     if (untied := _get_untied_lm_head(model)) is None:
         return
 
-    if not torch.equal(untied.lm_head.weight, untied.embed_tokens.weight):
+    # On device, torch.equal segfaults on ROCm when sleep mode is enabled
+    if not torch.equal(untied.lm_head.weight.cpu(), untied.embed_tokens.weight.cpu()):
         logger.warning(
             "The config for %s says the word embeddings are tied, but the checkpoint "
             "contains a different %s, which has been used instead of tying. "
