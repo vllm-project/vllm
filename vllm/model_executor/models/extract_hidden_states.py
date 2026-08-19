@@ -23,7 +23,12 @@ from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
 )
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.utils import (
+    make_empty_intermediate_tensors_factory,
+    maybe_prefix,
+)
+from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import is_quantized_kv_cache, kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -336,7 +341,7 @@ class CacheOnlyAttentionLayer(nn.Module, AttentionLayerBase):
 ############ ExtractHiddenStatesModel definition ##########
 
 
-class ExtractHiddenStatesModel(nn.Module):
+class ExtractHiddenStatesModel(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -348,6 +353,9 @@ class ExtractHiddenStatesModel(nn.Module):
         )
         self.num_hidden_states = len(
             getattr(self.hf_config, "eagle_aux_hidden_state_layer_ids", [])
+        )
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states"], self.hidden_size
         )
 
         cache_config = vllm_config.cache_config
@@ -374,20 +382,19 @@ class ExtractHiddenStatesModel(nn.Module):
             }
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> None:
-        """Process and cache hidden states.
+    def forward(
+        self,
+        hidden_states: torch.Tensor | None = None,
+        *,
+        intermediate_tensors: IntermediateTensors | None = None,
+    ) -> None:
+        """Write extracted hidden states to the cache-only layer."""
 
-        Args:
-            hidden_states: Hidden states from target model
-                          shape: [num_tokens, num_hidden_states, hidden_size]
+        if hidden_states is None:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
 
-        Returns:
-            Tuple of (dummy_output, dummy_output) - both unused
-        """
-
-        # Call dummy attention layer to cache hidden states
-        # Output is ignored - we only care about the KV cache side effects
-        _ = self.cache_only_layers[str(self.target_num_hidden_layers)](hidden_states)
+        self.cache_only_layers[str(self.target_num_hidden_layers)](hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """No weights to load for this dummy model."""

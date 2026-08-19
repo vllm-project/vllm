@@ -1850,11 +1850,13 @@ def get_kv_cache_groups(
     # Add hidden-state layers back with page aligned to the common page.
     if hidden_specs:
         common_page = get_uniform_page_size([g.kv_cache_spec for g in groups])
-        group_block_size = math.gcd(*(g.kv_cache_spec.block_size for g in groups))
+        scheduler_block_size = math.lcm(
+            *(g.kv_cache_spec.block_size for g in groups)
+        )
         for name, spec in hidden_specs.items():
             per_token = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
             max_block_size = max(common_page // per_token, 1)
-            new_bs = _largest_divisor_at_most(group_block_size, max_block_size)
+            new_bs = _largest_divisor_at_most(scheduler_block_size, max_block_size)
             wasted_bytes = common_page - new_bs * per_token
             logger.info(
                 "Using block size %d for hidden-state cache layer %s; "

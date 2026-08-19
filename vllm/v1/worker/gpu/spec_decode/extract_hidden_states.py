@@ -8,6 +8,8 @@ import torch.nn as nn
 from vllm.compilation.backends import set_model_tag
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.utils import get_pp_indices
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -47,7 +49,9 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
                 "model config for extract_hidden_states method"
             )
 
-        self.num_hidden_states = len(layer_ids)
+        self.layer_ids = tuple(layer_ids)
+        self.num_hidden_states = len(self.layer_ids)
+        self.local_hidden_state_indices = self._get_local_hidden_state_indices()
         assert isinstance(self.dtype, torch.dtype)
         self.hidden_states = torch.zeros(
             self.max_num_tokens,
@@ -55,6 +59,20 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
             self.vllm_config.model_config.get_hidden_size(),
             dtype=self.dtype,
             device=device,
+        )
+
+    def _get_local_hidden_state_indices(self) -> tuple[int, ...]:
+        pp_size = self.vllm_config.parallel_config.pipeline_parallel_size
+        if pp_size == 1:
+            return tuple(range(self.num_hidden_states))
+
+        num_layers = self.vllm_config.model_config.get_total_num_hidden_layers()
+        pp_rank = get_pp_group().rank_in_group
+        start_layer, end_layer = get_pp_indices(num_layers, pp_rank, pp_size)
+        return tuple(
+            index
+            for index, layer_id in enumerate(self.layer_ids)
+            if (layer_id == 0 and pp_rank == 0) or (start_layer < layer_id <= end_layer)
         )
 
     def load_draft_model(
@@ -118,19 +136,46 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
         draft_tokens = last_sampled[input_batch.idx_mapping, :1]
         if skip_attn_for_dummy_run:
             return draft_tokens
+        self.cache_hidden_states(
+            input_batch=input_batch,
+            attn_metadata=attn_metadata,
+            slot_mappings=slot_mappings,
+            aux_hidden_states=aux_hidden_states,
+            num_tokens_across_dp=num_tokens_across_dp,
+        )
+
+        return draft_tokens
+
+    def cache_hidden_states(
+        self,
+        input_batch: InputBatch,
+        attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_tokens_across_dp: torch.Tensor | None = None,
+    ) -> None:
         if aux_hidden_states is None:
             raise ValueError(
                 "aux_hidden_states are required when using extract_hidden_states"
             )
-        if len(aux_hidden_states) != self.num_hidden_states:
+        if len(aux_hidden_states) != len(self.local_hidden_state_indices):
             raise ValueError(
-                f"Expected {self.num_hidden_states} auxiliary hidden states, "
+                f"Expected {len(self.local_hidden_state_indices)} local auxiliary "
+                "hidden states, "
                 f"got {len(aux_hidden_states)}"
             )
 
-        stacked_hidden_states = torch.stack(aux_hidden_states, dim=1)
-        num_tokens = stacked_hidden_states.shape[0]
-        self.hidden_states[:num_tokens].copy_(stacked_hidden_states)
+        num_tokens = (
+            aux_hidden_states[0].shape[0]
+            if aux_hidden_states
+            else input_batch.num_tokens_after_padding
+        )
+
+        self.hidden_states[:num_tokens].zero_()
+        for index, hidden_state in zip(
+            self.local_hidden_state_indices, aux_hidden_states
+        ):
+            self.hidden_states[:num_tokens, index].copy_(hidden_state)
 
         draft_attn_metadata = {
             name: attn_metadata[name] for name in self.draft_attn_layer_names
@@ -149,5 +194,3 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
             is_padding=input_batch.is_padding[:num_tokens],
         ):
             self.model(hidden_states=self.hidden_states[:num_tokens])
-
-        return draft_tokens

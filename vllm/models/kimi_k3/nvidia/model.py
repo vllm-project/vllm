@@ -1171,6 +1171,18 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             if self.use_attn_res:
                 self.output_attn_res_norm = PPMissingLayer()
                 self.output_attn_res_proj = PPMissingLayer()
+                self.boundary_attn_res_norm = RMSNorm(
+                    config.hidden_size, eps=config.rms_norm_eps
+                )
+                self.boundary_attn_res_proj = ReplicatedLinear(
+                    config.hidden_size,
+                    1,
+                    bias=False,
+                    quant_config=None,
+                    prefix=f"{prefix}.boundary_attn_res_proj",
+                )
+                self.boundary_attn_res_norm.weight.data.fill_(float("nan"))
+                self.boundary_attn_res_proj.weight.data.fill_(float("nan"))
 
         world_size = get_tensor_model_parallel_world_size()
         assert config.num_attention_heads % world_size == 0, (
@@ -1203,10 +1215,24 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         super()._set_aux_hidden_state_layers(layers)
         if self.use_attn_res:
-            # Emitted once, at configuration time. Which layers are tapped and
-            # which convention is in force are the two things you need to
-            # confirm from a running process, and neither is recoverable from
-            # the served output.
+            if (
+                self._aux_attn_res_stream
+                and not get_pp_group().is_last_rank
+                and self.end_layer in layers
+            ):
+                missing = [
+                    f"layers.{self.end_layer}.self_attention_res_{kind}.weight"
+                    for kind, param in (
+                        ("norm", self.boundary_attn_res_norm.weight),
+                        ("proj", self.boundary_attn_res_proj.weight),
+                    )
+                    if not torch.isfinite(param).all()
+                ]
+                if missing:
+                    raise ValueError(
+                        f"Missing AttnRes weights for PP boundary {self.end_layer}: "
+                        f"{', '.join(missing)}"
+                    )
             logger.info_once(
                 "Kimi-K3 aux hidden capture: layers=%s mode=%s "
                 "(VLLM_KIMI_K3_AUX_ATTN_RES_STREAM=%d)",
@@ -1226,26 +1252,9 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         pending_mlp_out: torch.Tensor | None,
         block_residual: torch.Tensor,
     ) -> torch.Tensor:
-        """Auxiliary feature tapped after ``layer_idx`` under AttnRes.
-
-        The wire between layers only carries the current block's running prefix;
-        the committed blocks live in the bank. The value the next consumer
-        actually reads is the pre-norm AttnRes mixture over
-        ``bank[:num_blocks] + prefix``, which is what the DFlash drafters were
-        trained against. ``attn_res`` with no delta, no block write and no
-        output norm computes exactly that and leaves both the prefix and the
-        bank untouched.
-
-        Folding the pending MLP output into the prefix rather than passing it as
-        ``delta`` is deliberate: the kernel writes an applied delta back into
-        the prefix in place, which would double-add it into the live residual
-        stream.
-        """
+        """Return the pre-norm AttnRes state consumed after ``layer_idx``."""
         prefix = prefix_sum if pending_mlp_out is None else prefix_sum + pending_mlp_out
-        # `use_attn_res` is what constructs the norm and projection weights this
-        # reads; without it there is no mixture to compute and the attribute
-        # lookups below would raise.
-        if not (self._aux_attn_res_stream and self.use_attn_res):
+        if not self._aux_attn_res_stream:
             return prefix
 
         if layer_idx + 1 < self.end_layer:
@@ -1254,17 +1263,14 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             score_proj = consumer.self_attention_res_proj
             num_blocks = consumer.prev_valid_blocks
         elif get_pp_group().is_last_rank:
-            # Nothing downstream but the model's own output-side aggregation.
             score_norm = self.output_attn_res_norm
             score_proj = self.output_attn_res_proj
             num_blocks = self.num_attn_res_blocks
         else:
-            # Last layer of a non-final pipeline stage: the consumer lives on
-            # the next rank and the output-side aggregation only exists on the
-            # last one, so there is nothing here to mix against. Falling back
-            # to the running prefix keeps the tap defined rather than reaching
-            # for weights this rank does not construct.
-            return prefix
+            # Boundary capture uses the next layer's AttnRes weights.
+            score_norm = self.boundary_attn_res_norm
+            score_proj = self.boundary_attn_res_proj
+            num_blocks = self.num_attn_res_blocks
 
         return attn_res(
             prefix,
@@ -1289,7 +1295,11 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+    ) -> (
+        torch.Tensor
+        | IntermediateTensors
+        | tuple[torch.Tensor | IntermediateTensors, list[torch.Tensor]]
+    ):
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1314,7 +1324,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         # sharded aux hidden states when sp is enabled
         aux_hidden_states: list[torch.Tensor] = []
-        if self.start_layer in self.aux_hidden_state_layers:
+        if self.start_layer == 0 and self.start_layer in self.aux_hidden_state_layers:
             if self.use_attn_res or residual is None:
                 aux_hidden_states.append(hidden_states)
             else:
@@ -1331,6 +1341,12 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
                 block_residual[:, : residual.size(1), :].copy_(residual)
             prefix_sum = hidden_states
             hidden_states = None
+            if (
+                not get_pp_group().is_first_rank
+                and not self.layers[self.start_layer].is_block_write_layer
+            ):
+                # The handoff already folded the pending delta into prefix_sum.
+                hidden_states = torch.zeros_like(prefix_sum)
             residual = block_residual
 
         for layer_idx, layer in enumerate(
@@ -1364,9 +1380,12 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             )
             if prefix_sum is not None:
                 hidden_states = hidden_states + prefix_sum
-            return IntermediateTensors(
+            intermediate_tensors = IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
+            if self.aux_hidden_state_layers:
+                return intermediate_tensors, aux_hidden_states
+            return intermediate_tensors
 
         if self.use_attn_res:
             assert prefix_sum is not None
@@ -1402,9 +1421,20 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
 
         # NOTE: the final norm is applied in compute_logits instead of here, so
         # the MTP draft model receives the pre-norm hidden states.
-        if aux_hidden_states:
+        if self.aux_hidden_state_layers:
             return hidden_states, aux_hidden_states
         return hidden_states
+
+    def _maybe_boundary_attn_res_name(self, name: str) -> str | None:
+        if not self.use_attn_res or get_pp_group().is_last_rank:
+            return None
+        for suffix, target in (
+            ("self_attention_res_norm.weight", "boundary_attn_res_norm.weight"),
+            ("self_attention_res_proj.weight", "boundary_attn_res_proj.weight"),
+        ):
+            if name.endswith(f"layers.{self.end_layer}.{suffix}"):
+                return target
+        return None
 
     def load_weights(
         self,
@@ -1482,6 +1512,13 @@ class KimiLinearModel(nn.Module, EagleModelMixin, SupportsQuant):
             if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
+                continue
+            boundary_name = self._maybe_boundary_attn_res_name(name)
+            if boundary_name is not None:
+                # Load before the PP filter drops next-stage weights.
+                param = params_dict[boundary_name]
+                default_weight_loader(param, loaded_weight)
+                loaded_params.add(boundary_name)
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:

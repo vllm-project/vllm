@@ -61,6 +61,7 @@ def test_propose_caches_hidden_states_and_returns_sampled_tokens(monkeypatch):
     speculator = object.__new__(ExtractHiddenStatesSpeculator)
     speculator.vllm_config = cast(Any, SimpleNamespace())
     speculator.num_hidden_states = 2
+    speculator.local_hidden_state_indices = (0, 1)
     speculator.hidden_states = torch.zeros(4, 2, 3)
     speculator.draft_attn_layer_names = {layer_name}
     speculator.model = _RecordingModel()
@@ -112,6 +113,7 @@ def test_propose_caches_hidden_states_and_returns_sampled_tokens(monkeypatch):
 def test_propose_requires_aux_hidden_states():
     speculator = object.__new__(ExtractHiddenStatesSpeculator)
     speculator.num_hidden_states = 2
+    speculator.local_hidden_state_indices = (0, 1)
     input_batch = cast(
         Any, SimpleNamespace(idx_mapping=torch.tensor([0], dtype=torch.int32))
     )
@@ -130,3 +132,41 @@ def test_propose_requires_aux_hidden_states():
             temperature=torch.empty(0),
             seeds=torch.empty(0),
         )
+
+
+def test_cache_hidden_states_places_local_pp_layers_in_global_slots(monkeypatch):
+    monkeypatch.setattr(
+        spec_module, "set_forward_context", lambda *a, **k: nullcontext()
+    )
+
+    layer_name = "cache_only_layers.93"
+    speculator = object.__new__(ExtractHiddenStatesSpeculator)
+    speculator.vllm_config = cast(Any, SimpleNamespace())
+    speculator.num_hidden_states = 4
+    speculator.local_hidden_state_indices = (1, 3)
+    speculator.hidden_states = torch.full((3, 4, 2), -1.0)
+    speculator.draft_attn_layer_names = {layer_name}
+    speculator.model = _RecordingModel()
+
+    input_batch = cast(
+        Any,
+        SimpleNamespace(
+            is_padding=torch.zeros(3, dtype=torch.bool),
+            num_tokens_after_padding=3,
+        ),
+    )
+    local_states = [
+        torch.full((3, 2), 11.0),
+        torch.full((3, 2), 33.0),
+    ]
+    speculator.cache_hidden_states(
+        input_batch=input_batch,
+        attn_metadata={layer_name: object()},
+        slot_mappings={layer_name: torch.arange(3)},
+        aux_hidden_states=local_states,
+    )
+
+    expected = torch.zeros(3, 4, 2)
+    expected[:, 1] = 11.0
+    expected[:, 3] = 33.0
+    assert torch.equal(speculator.model.hidden_states, expected)

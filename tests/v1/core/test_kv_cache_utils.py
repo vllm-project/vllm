@@ -2318,6 +2318,64 @@ def test_hidden_state_group_preserves_hybrid_prefix_cache_granularity():
     ) == (544, 136)
 
 
+def test_hidden_state_group_uses_hybrid_scheduler_block_lcm():
+    full_spec = FullAttentionSpec(
+        block_size=256,
+        num_kv_heads=1,
+        # 256 * 1 * (864 + 864) * 2 = 884,736 bytes.
+        head_size=864,
+        dtype=torch.bfloat16,
+    )
+    mamba_spec = MambaSpec(
+        block_size=3,
+        shapes=((442368,),),
+        dtypes=(torch.bfloat16,),
+        mamba_cache_mode="align",
+    )
+    hidden_spec = HiddenStateCacheSpec(
+        block_size=256,
+        num_kv_heads=2,
+        head_size=7168,
+        dtype=torch.bfloat16,
+    )
+    assert full_spec.page_size_bytes == mamba_spec.page_size_bytes == 884736
+
+    groups = get_kv_cache_groups(
+        _grouping_config(),
+        {
+            "model.full_attn": full_spec,
+            "model.mamba": mamba_spec,
+            "cache_only_layers.0": hidden_spec,
+        },
+    )
+
+    hidden_group = next(
+        group
+        for group in groups
+        if isinstance(group.kv_cache_spec, HiddenStateCacheSpec)
+    )
+    # The largest divisor of lcm(256, 3) that fits the page is 24.
+    assert hidden_group.kv_cache_spec.block_size == 24
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            block_size=16,
+            enable_prefix_caching=True,
+            prefix_match_unit=None,
+        ),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        kv_transfer_config=object(),
+    )
+    assert kv_cache_utils.resolve_kv_cache_block_sizes(
+        kv_cache_config, vllm_config
+    ) == (768, 1)
+
+
 def test_mla_draft_prefers_standard_layout_when_pages_can_be_unified():
     specs = {
         "target.0.attn": new_mla_spec(),

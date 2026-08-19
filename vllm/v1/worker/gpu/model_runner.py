@@ -137,6 +137,9 @@ from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
+from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
+    ExtractHiddenStatesSpeculator,
+)
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     get_max_chunk_logits,
@@ -243,8 +246,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculator = None
         self.use_aux_hidden_state_outputs = False
         self.num_speculative_steps = vllm_config.num_speculative_tokens
+        self.is_extract_hidden_states = (
+            self.speculative_config is not None
+            and self.speculative_config.method == "extract_hidden_states"
+        )
         if self.speculative_config is not None:
-            if self.is_last_pp_rank:
+            if self.is_last_pp_rank or self.is_extract_hidden_states:
                 self.speculator = init_speculator(self.vllm_config, self.device)
 
             if self.speculative_config.method in (
@@ -255,7 +262,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             ):
                 # Drafting may require auxiliary hidden states from target model outputs
                 self.use_aux_hidden_state_outputs = True
-                if self.use_pp:
+                if self.use_pp and not self.is_extract_hidden_states:
                     raise ValueError(
                         f"{self.speculative_config.method} with pipeline parallel "
                         "is not supported."
@@ -1682,10 +1689,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 aux_hidden_states = None
             output_intermediate_tensors = None
         else:
-            assert isinstance(model_output, IntermediateTensors)
+            if self.use_aux_hidden_state_outputs:
+                assert isinstance(model_output, tuple)
+                output_intermediate_tensors, aux_hidden_states = model_output
+                assert isinstance(output_intermediate_tensors, IntermediateTensors)
+            else:
+                assert isinstance(model_output, IntermediateTensors)
+                output_intermediate_tensors = model_output
+                aux_hidden_states = None
             hidden_states = None
-            aux_hidden_states = None
-            output_intermediate_tensors = model_output
 
         routed_experts = None
         if not dummy_run and (capturer := self.routed_experts_capturer) is not None:
@@ -1727,6 +1739,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ec_connector_output = self.execute_model_state.ec_connector_output
         routed_experts = self.execute_model_state.routed_experts
         self.execute_model_state = None
+
+        if self.is_extract_hidden_states and not self.is_last_pp_rank:
+            assert isinstance(self.speculator, ExtractHiddenStatesSpeculator)
+            assert attn_metadata is not None
+            assert slot_mappings_by_layer is not None
+            self.speculator.cache_hidden_states(
+                input_batch=input_batch,
+                attn_metadata=attn_metadata,
+                slot_mappings=slot_mappings_by_layer,
+                aux_hidden_states=aux_hidden_states,
+            )
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: hidden_states is None because this rank produced
