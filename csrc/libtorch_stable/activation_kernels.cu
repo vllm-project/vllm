@@ -11,7 +11,6 @@
 #include <type_traits>
 
 #include "../cuda_compat.h"
-#include "async_util.cuh"
 #include "cuda_vec_utils.cuh"
 #include "dispatch_utils.h"
 #include "torch_utils.h"
@@ -479,40 +478,20 @@ __global__ void swigluoai_and_mul_kernel(
 //   gate_out = beta * tanh(gate / beta) * sigmoid(gate)
 //   up_out   = (linear_beta > 0) ? linear_beta * tanh(up / linear_beta) : up
 //   out      = gate_out * up_out
-// Compute is done in fp32 and written straight to `out` -- no intermediate
-// tensors and no full-tensor fp32 upcast (the pure-torch forward_native
-// allocated ~8 fp32 temporaries per call, which blows up MoE profiling).
-// Single shared implementation of the SITU math, called from every kernel
-// below. __forceinline__ since it runs inside #pragma-unrolled per-element
-// loops, where an out-of-line call would spike register pressure for no gain.
-//
-// tanh via the sm_75+ hardware tanh.approx.f32 (single MUFU). Both tanhf and
-// libdevice __tanhf compile to an out-of-line range-reduction CALL, which drags
-// in a stack frame and ABI register spills; the PTX intrinsic has no slow path.
-__device__ __forceinline__ float tanh_approx(float x) {
-  float r;
-  asm("tanh.approx.f32 %0, %1;" : "=f"(r) : "f"(x));
-  return r;
-}
+__device__ __forceinline__ float situ_tanh(float x) { return tanhf(x); }
 
-// Kimi-K3 SITU activation params (config.json text_config). The pipelined
-// kernel bakes these so its reciprocals and up-clamp fold at compile time; the
-// host launch falls back to the runtime scalar kernel if a model differs.
+// Kimi-K3 SITU params; baked into the fused LDG kernel to fold at compile time.
 static constexpr float SITU_BETA = 4.0f;
 static constexpr float SITU_LINEAR_BETA = 25.0f;
 __device__ __forceinline__ float situ_activation(float g, float u, float beta,
                                                  float linear_beta,
                                                  bool clamp_up, float inv_beta,
                                                  float inv_linear_beta) {
-  // sigmoid(g) == (1 + tanh(g/2)) / 2, an exact identity, so the whole gate
-  // runs on two tanh.approx (2 MUFU) instead of tanh + __expf + reciprocal (3
-  // MUFU). The two tanh are independent (better ILP) and there is no divide;
-  // error stays the tanh.approx class, negligible under the FP8 quant that
-  // follows.
-  const float gate_out = (0.5f * beta) * tanh_approx(g * inv_beta) *
-                         (1.0f + tanh_approx(g * 0.5f));
+  // sigmoid(g) == (1 + tanh(g/2)) / 2.
+  const float gate_out =
+      (0.5f * beta) * situ_tanh(g * inv_beta) * (1.0f + situ_tanh(g * 0.5f));
   const float up_out =
-      clamp_up ? linear_beta * tanh_approx(u * inv_linear_beta) : u;
+      clamp_up ? linear_beta * situ_tanh(u * inv_linear_beta) : u;
   return gate_out * up_out;
 }
 
@@ -538,8 +517,8 @@ __global__ void situ_and_mul_kernel(
   }
 }
 
-  // Match Humming's hardware FP8 conversion. c10::Float8_e4m3fn's software cast
-  // can round ties differently from `cvt.rn.satfinite.e4m3.f32`.
+// Match Humming's hardware FP8 conversion. c10::Float8_e4m3fn's software cast
+// can round ties differently from `cvt.rn.satfinite.e4m3.f32`.
 __device__ __forceinline__ c10::Float8_e4m3fn cvt_fp8_hw(float x) {
 #if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
   return c10::Float8_e4m3fn(__nv_cvt_float_to_fp8(x, __NV_SATFINITE, __NV_E4M3),
@@ -569,12 +548,21 @@ __device__ __forceinline__ float warp_reduce_max(float v) {
   return v;
 }
 
-// Fused SITU + block-FP8 (per-128-group) quant, one warp per group. Persistent
-// grid: each block strides over valid rows only, so padding rows past
-// *valid_rows are never touched. cp.async stages gate+up into smem per group.
-template <typename scalar_t, typename fp8_type, int THREADS, int NUM_STAGES,
-          int GROUP_SIZE, int GRID_DIM, int D>
-__global__ void situ_and_mul_quant_group_pipelined_kernel(
+// Warp abs-max via one redux.sync.max (sm_80+). For non-negative v the uint32
+// bit pattern is monotonic, so this is bit-identical to the fmaxf shuffle tree.
+__device__ __forceinline__ float warp_reduce_absmax(float v) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && !defined(USE_ROCM)
+  return __uint_as_float(__reduce_max_sync(0xffffffffu, __float_as_uint(v)));
+#else
+  return warp_reduce_max(v);
+#endif
+}
+
+// Fused SITU + block-FP8 (per-128-group) quant, one warp per group, persistent
+// grid. Direct LDG loads route through LSU, leaving the MIO pipe for the tanh.
+template <typename scalar_t, typename fp8_type, int THREADS, int GROUP_SIZE,
+          int GRID_DIM, int D>
+__global__ void situ_and_mul_quant_group_ldg_kernel(
     fp8_type* __restrict__ out,          // [num_tokens, D]
     float* __restrict__ scale_out,       // [num_tokens, NUM_GROUPS]
     const scalar_t* __restrict__ input,  // [num_tokens, 2, D]
@@ -585,14 +573,11 @@ __global__ void situ_and_mul_quant_group_pipelined_kernel(
   static constexpr int NUM_WARPS = THREADS / WARP_SIZE;
   static constexpr int NUM_GROUPS = D / GROUP_SIZE;
   const int64_t row_bound =
-      valid_rows_ptr != nullptr ? *valid_rows_ptr : num_rows;
+      valid_rows_ptr != nullptr
+          ? max((int64_t)0, min(*valid_rows_ptr, num_rows))
+          : num_rows;
 
-  // Padding rows past *valid_rows are never streamed below; fill their scales
-  // with 1.0 so masked-out rows don't feed NaN/Inf into the w2 GEMM. NUM_GROUPS
-  // is a multiple of 4, so the run is float4-aligned and exact (scale_out is a
-  // tensor base, >=16B aligned).
-  static_assert(NUM_GROUPS % 4 == 0,
-                "float4 scale fill needs NUM_GROUPS % 4 == 0");
+  static_assert(NUM_GROUPS % 4 == 0, "float4 scale fill needs NUM_GROUPS%4==0");
   static constexpr int NG4 = NUM_GROUPS / 4;
   const int64_t pad_start4 = row_bound * NG4;
   const int64_t pad_end4 = num_rows * NG4;
@@ -603,142 +588,74 @@ __global__ void situ_and_mul_quant_group_pipelined_kernel(
     scale4[i] = ones;
   }
 
-  // Vectorized loads/stores assume a 2-byte scalar_t; the fp32 dispatch branch
-  // is compiled out here and served by the scalar group kernel instead.
   if constexpr (sizeof(scalar_t) == 2) {
-    static constexpr int LD_ELTS = 16 / sizeof(scalar_t);         // 8 (load)
-    static constexpr int ELTS_PER_LANE = GROUP_SIZE / WARP_SIZE;  // 4 (compute)
-    static constexpr int STAGE_ELTS = 2 * GROUP_SIZE;  // gate+up per stage/warp
+    static constexpr int ELTS_PER_LANE = GROUP_SIZE / WARP_SIZE;  // 4
+    static_assert(ELTS_PER_LANE == 4, "expects GROUP_SIZE == 4 * WARP_SIZE");
+    static_assert(NUM_GROUPS % NUM_WARPS == 0,
+                  "groups must split across warps");
+    static constexpr int num_iters = NUM_GROUPS / NUM_WARPS;
 
-    extern __shared__ __align__(16) unsigned char smem_raw[];
-    scalar_t* warp_smem = reinterpret_cast<scalar_t*>(smem_raw) +
-                          (size_t)warp_id * NUM_STAGES * STAGE_ELTS;
-
-    // beta/linear_beta are baked (Kimi-K3): every reciprocal and the up-clamp
-    // fold at compile time. The host gates this launch on the runtime values
-    // matching, else falls back to the scalar kernel.
     static constexpr float beta = SITU_BETA;
     static constexpr float linear_beta = SITU_LINEAR_BETA;
     static constexpr bool clamp_up = linear_beta > 0.0f;
     static constexpr float inv_beta = 1.0f / beta;
     static constexpr float inv_linear_beta =
         clamp_up ? 1.0f / linear_beta : 0.0f;
-    // fp8_max is fixed by the output type -> compile-time reciprocal, no RCP.
     static constexpr float FP8_MAX =
         std::is_same_v<fp8_type, c10::Float8_e4m3fn> ? 448.0f : 224.0f;
     static constexpr float inv_fp8_max = 1.0f / FP8_MAX;
 
-    // Groups per warp. When NUM_GROUPS splits evenly across warps every warp
-    // does the same count, so this folds to a constant (no per-warp register,
-    // compile-time loop bound). D=SITU_D satisfies this.
-    static_assert(
-        NUM_GROUPS % NUM_WARPS == 0,
-        "constexpr num_iters requires groups evenly split across warps");
-    static constexpr int num_iters = NUM_GROUPS / NUM_WARPS;
+    union V {
+      float2 f2;
+      scalar_t s[ELTS_PER_LANE];
+    };
 
-    // Per-lane load offsets, hoisted out of the loops: lanes 0..15 take the
-    // gate half, 16..31 the up half (+D), each a 16B cp.async. Only the base
-    // bumps.
-    const bool up_half = lane_id >= WARP_SIZE / 2;
-    const int lane_l = up_half ? lane_id - WARP_SIZE / 2 : lane_id;
-    const int lane_src_off = (up_half ? D : 0) + lane_l * LD_ELTS;
-    const int lane_dst_off = (up_half ? GROUP_SIZE : 0) + lane_l * LD_ELTS;
-    static constexpr int warp_stride = NUM_WARPS * GROUP_SIZE;
+    for (int64_t row = blockIdx.x; row < row_bound; row += GRID_DIM) {
+      const scalar_t* row_in = input + row * 2 * (int64_t)D;
+      uint32_t* out_row = reinterpret_cast<uint32_t*>(out + row * D);
+      float* scale_row = scale_out + row * NUM_GROUPS;
 
-    // Invariant per-lane source base; the row term folds into the running
-    // pointer so the loop bumps by a compile-time stride instead of
-    // recomputing row * 2 * D each iteration. All offsets fit int32 (stride
-    // GRID_DIM*2*D ~6.5M); the pointer stays 64-bit, so num_tokens is
-    // unbounded.
-    const scalar_t* src_ptr = input + warp_id * GROUP_SIZE + lane_src_off;
-    static constexpr int src_row_stride = GRID_DIM * 2 * D;
-    const scalar_t* row_src = src_ptr + blockIdx.x * 2 * D;
-
-    // Same reduction for the store bases (out uint32 view = 4 fp8/lane, and
-    // scale). Per-row strides fit int32 (out ~0.8M, scale ~25K); ptrs stay 64b.
-    uint32_t* out_ptr =
-        reinterpret_cast<uint32_t*>(out + warp_id * GROUP_SIZE) + lane_id;
-    static constexpr int out_row_stride = GRID_DIM * D / 4;
-    uint32_t* row_out = out_ptr + blockIdx.x * (D / 4);
-    float* scale_ptr = scale_out + warp_id;
-    static constexpr int scale_row_stride = GRID_DIM * NUM_GROUPS;
-    float* row_scale = scale_ptr + blockIdx.x * NUM_GROUPS;
-
-    // Persistent outer loop kept sequential (nounroll): it wraps the whole
-    // pipeline, and GRID_DIM is compile-time so the stride folds to a constant.
-#pragma unroll 1
-    for (int64_t row = blockIdx.x; row < row_bound; row += GRID_DIM,
-                 row_src += src_row_stride, row_out += out_row_stride,
-                 row_scale += scale_row_stride) {
-      // Per-lane source for this row; issue_load bumps `src` by warp_stride.
-      const scalar_t* src = row_src;
-
-      // Stage the next group into `slot` (rotating 0..NUM_STAGES-1). Called
-      // once per group in increasing order, so the bumping load pointer stays
-      // in step.
-      auto issue_load = [&](int it, int slot) {
-        if (it < num_iters) {
-          cuda_async::cp_async_shared_global_16_cg(
-              warp_smem + (size_t)slot * STAGE_ELTS + lane_dst_off, src);
-          src += warp_stride;
-        }
-        cuda_async::cp_async_commit_group();
-      };
-
-      int load_slot = 0;
-      auto bump = [](int s) { return s + 1 == NUM_STAGES ? 0 : s + 1; };
+      V gv[num_iters], uv[num_iters];
 #pragma unroll
-      for (int s = 0; s < NUM_STAGES - 1; s++) {
-        issue_load(s, load_slot);
-        load_slot = bump(load_slot);
+      for (int it = 0; it < num_iters; it++) {
+        const int gid = warp_id + it * NUM_WARPS;
+        const float2* gate2 =
+            reinterpret_cast<const float2*>(row_in + gid * GROUP_SIZE);
+        const float2* up2 =
+            reinterpret_cast<const float2*>(row_in + D + gid * GROUP_SIZE);
+        gv[it].f2 = gate2[lane_id];
+        uv[it].f2 = up2[lane_id];
       }
 
-      // Compute/store bases for this row (bumped per group below).
-      uint32_t* out_st = row_out;
-      float* scale_st = row_scale;
-
-      int comp_slot = 0;
+      float acts[num_iters][ELTS_PER_LANE];
+      float thread_max[num_iters];
+#pragma unroll
       for (int it = 0; it < num_iters; it++) {
-        issue_load(it + NUM_STAGES - 1, load_slot);
-        load_slot = bump(load_slot);
-        cuda_async::cp_async_wait_group<NUM_STAGES - 1>();
-
-        const scalar_t* stage = warp_smem + (size_t)comp_slot * STAGE_ELTS;
-        comp_slot = bump(comp_slot);
-        // Lane L owns 4 contiguous group elements {4L..4L+3}: one 64-bit smem
-        // load (float2) each for gate and up, vs 4x 32-bit before. lane L ->
-        // word L is the conflict-free 64-bit pattern, and float2 is 8B-aligned
-        // (stage is 512B-aligned, up half at +256B).
-        static_assert(ELTS_PER_LANE == 4,
-                      "expects GROUP_SIZE == 4 * WARP_SIZE");
-        union V {
-          float2 f2;
-          scalar_t s[ELTS_PER_LANE];
-        };
-        const float2* gate2 = reinterpret_cast<const float2*>(stage);
-        const float2* up2 = reinterpret_cast<const float2*>(stage + GROUP_SIZE);
-        const V gv{gate2[lane_id]};
-        const V uv{up2[lane_id]};
-        const scalar_t* gs = gv.s;
-        const scalar_t* us = uv.s;
-
-        float acts[ELTS_PER_LANE];
-        float thread_max = 0.0f;
+        const scalar_t* gs = gv[it].s;
+        const scalar_t* us = uv[it].s;
+        float tmax = 0.0f;
 #pragma unroll
         for (int e = 0; e < ELTS_PER_LANE; e++) {
-          acts[e] = (float)(scalar_t)situ_activation(
+          acts[it][e] = (float)(scalar_t)situ_activation(
               (float)gs[e], (float)us[e], beta, linear_beta, clamp_up, inv_beta,
               inv_linear_beta);
-          thread_max = fmaxf(thread_max, fabsf(acts[e]));
+          tmax = fmaxf(tmax, fabsf(acts[it][e]));
         }
-        const float absmax = fmaxf(warp_reduce_max(thread_max), 1e-30f);
-        const float scale = absmax * inv_fp8_max;
-        if (lane_id == 0) *scale_st = scale;
-        scale_st += NUM_WARPS;
-        const float inv_scale = __fdividef(1.0f, scale);
+        thread_max[it] = tmax;
+      }
 
-        // 4 contiguous fp8 outputs -> one 32-bit coalesced store: lanes 0..31
-        // write out[0..127] of the group as 128 contiguous bytes.
+      float inv_scale[num_iters];
+#pragma unroll
+      for (int it = 0; it < num_iters; it++) {
+        const float absmax = fmaxf(warp_reduce_absmax(thread_max[it]), 1e-30f);
+        const float scale = absmax * inv_fp8_max;
+        if (lane_id == 0) scale_row[warp_id + it * NUM_WARPS] = scale;
+        inv_scale[it] = __fdividef(1.0f, scale);
+      }
+
+#pragma unroll
+      for (int it = 0; it < num_iters; it++) {
+        const int gid = warp_id + it * NUM_WARPS;
         union O {
           uint32_t u;
           fp8_type f[ELTS_PER_LANE];
@@ -746,20 +663,15 @@ __global__ void situ_and_mul_quant_group_pipelined_kernel(
         O o;
 #pragma unroll
         for (int e = 0; e < ELTS_PER_LANE; e++) {
-          o.f[e] = quant_to_fp8<fp8_type>(acts[e], inv_scale, FP8_MAX);
+          o.f[e] = quant_to_fp8<fp8_type>(acts[it][e], inv_scale[it], FP8_MAX);
         }
-        out_st[0] = o.u;
-        out_st += NUM_WARPS * GROUP_SIZE / 4;
+        out_row[gid * (GROUP_SIZE / 4) + lane_id] = o.u;
       }
-      // Drain before reusing smem slots for the next row.
-      cuda_async::cp_async_wait_group<0>();
     }
   }
 }
 
-// Scalar fallback for the group path (odd d or the otherwise-unreachable fp32
-// dispatch branch). Persistent grid; each block strides over valid rows, and
-// within a row warp `w` owns groups w, w+num_warps, ... (GROUP_SIZE % 32 == 0).
+// Scalar fallback for the group path (odd d or the fp32 dispatch branch).
 template <typename scalar_t, typename fp8_type, int GROUP_SIZE>
 __global__ void situ_and_mul_quant_group_scalar_kernel(
     fp8_type* __restrict__ out,          // [num_tokens, d]
@@ -774,14 +686,13 @@ __global__ void situ_and_mul_quant_group_scalar_kernel(
   const int lane_id = tid % WARP_SIZE;
   const int num_warps = blockDim.x / WARP_SIZE;
   const int64_t row_bound =
-      valid_rows_ptr != nullptr ? *valid_rows_ptr : num_rows;
+      valid_rows_ptr != nullptr
+          ? max((int64_t)0, min(*valid_rows_ptr, num_rows))
+          : num_rows;
 
   const bool clamp_up = linear_beta > 0.0f;
-  // __fdividef reciprocal: single MUFU.RCP, no IEEE-div FCHK/CALL slow path
-  // (~2 ulp, folds into the pending accuracy eval).
   const float inv_beta = __fdividef(1.0f, beta);
   const float inv_linear_beta = clamp_up ? __fdividef(1.0f, linear_beta) : 0.0f;
-  // fp8_max is fixed by the output type -> compile-time reciprocal, no RCP.
   static constexpr float FP8_MAX =
       std::is_same_v<fp8_type, c10::Float8_e4m3fn> ? 448.0f : 224.0f;
   static constexpr float inv_fp8_max = 1.0f / FP8_MAX;
@@ -817,8 +728,7 @@ __global__ void situ_and_mul_quant_group_scalar_kernel(
     }
   }
 
-  // Padding rows past *valid_rows are never streamed above; fill their scales
-  // with a finite value so masked-out rows don't feed NaN/Inf into the w2 GEMM.
+  // Fill skipped padding-row scales with 1 so they don't feed NaN into w2.
   const int64_t pad_start = row_bound * (int64_t)num_groups;
   const int64_t pad_end = num_rows * (int64_t)num_groups;
   for (int64_t i = pad_start + (int64_t)blockIdx.x * blockDim.x + tid;
@@ -960,6 +870,10 @@ void situ_and_mul(torch::stable::Tensor& out,    // [..., d]
   dim3 block(std::min(d, 1024));
   const int64_t* valid_rows_ptr = nullptr;
   if (valid_rows.has_value()) {
+    STD_TORCH_CHECK(valid_rows->is_cuda() && valid_rows->get_device_index() ==
+                                                 input.get_device_index(),
+                    "situ_and_mul: valid_rows must be a CUDA tensor on the "
+                    "same device as input");
     valid_rows_ptr = valid_rows->const_data_ptr<int64_t>();
   }
   const torch::stable::accelerator::DeviceGuard device_guard(
@@ -998,15 +912,8 @@ void masked_situ_and_mul(torch::stable::Tensor& out,    // [E, T, d]
       });
 }
 
-// Fused Kimi SITU activation + dynamic FP8 quantization. Produces the fp8
-// down-projection input (`out`) and its scale (`scale`, dequant = q * scale) in
-// one pass, replacing the separate situ_and_mul + quant_input kernels on the
-// Humming w2 path. `group_size == 128` selects k-major block-FP8 group scales
-// (scale [.., d / 128], matching humming quant_input(group_size=128, float32)).
-// `linear_beta <= 0` means "unset" (up passed through), matching
-// SituAndMul(linear_beta=None). `valid_rows` (int64 scalar tensor) is the
-// DeepEP v2 contiguous-layout valid row count; padding rows are skipped and
-// receive a benign scale.
+// Fused SITU activation and block-FP8 quantization for Humming w2.
+// `valid_rows` excludes DeepEP padding; skipped rows receive scale 1.
 void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
                         torch::stable::Tensor& scale,  // [..., 1 or d/128]
                         torch::stable::Tensor& input,  // [..., 2 * d]
@@ -1022,30 +929,35 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
       "situ_and_mul_quant input must be FP16 or BF16");
   STD_TORCH_CHECK(scale.scalar_type() == torch::headeronly::ScalarType::Float,
                   "situ_and_mul_quant scale must be float32");
+  STD_TORCH_CHECK(input.is_cuda() && out.is_cuda() && scale.is_cuda() &&
+                      out.get_device_index() == input.get_device_index() &&
+                      scale.get_device_index() == input.get_device_index(),
+                  "situ_and_mul_quant: input, out and scale must be CUDA "
+                  "tensors on the same device");
   int d = input.size(-1) / 2;
   int64_t num_tokens = input.numel() / input.size(-1);
   if (num_tokens == 0) {
     return;
   }
+  STD_TORCH_CHECK(out.size(-1) == d && out.numel() == num_tokens * (int64_t)d,
+                  "situ_and_mul_quant: out shape must be [num_tokens, d]");
   const int64_t* valid_rows_ptr = nullptr;
   if (valid_rows.has_value()) {
+    STD_TORCH_CHECK(valid_rows->is_cuda() && valid_rows->get_device_index() ==
+                                                 input.get_device_index(),
+                    "situ_and_mul_quant: valid_rows must be a CUDA tensor on "
+                    "the same device as input");
     valid_rows_ptr = valid_rows->const_data_ptr<int64_t>();
   }
-  // fp8_max (448 e4m3fn / 224 fnuz) is derived from fp8_type inside the kernel.
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
   static constexpr int THREADS = 256;
-  static constexpr int GROUP_STAGES = 4;   // warp-per-group cp.async depth
   static constexpr int BLOCKS_PER_SM = 8;  // matches kernel __launch_bounds__
   static constexpr int SM_COUNT = 132;     // H200 (GH100, 132 SMs)
-  // Fixed persistent grid so the kernel's grid stride is a compile-time
-  // constant.
   static constexpr int GRID_DIM = SM_COUNT * BLOCKS_PER_SM;
   static constexpr int SITU_D = 3072;  // fixed Kimi-K3 hidden dim (fused w2 in)
 
-  // Block-FP8 group path only: k-major float32 group scales [num_tokens,
-  // d / group_size], matching humming quant_input(group_size, float32).
   STD_TORCH_CHECK(group_size == 128,
                   "situ_and_mul_quant: only group_size 128 (block-FP8) "
                   "supported, got ",
@@ -1054,38 +966,28 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
                   ") must be divisible by group_size ", group_size);
   {
     const int num_groups = d / (int)group_size;
-    // Persistent grid: always launch the fixed GRID_DIM block pool so the
-    // kernel's grid stride is a constant; blocks past num_tokens just no-op.
+    STD_TORCH_CHECK(scale.size(-1) == num_groups &&
+                        scale.numel() == num_tokens * (int64_t)num_groups,
+                    "situ_and_mul_quant: scale shape must be "
+                    "[num_tokens, d/group_size]");
     dim3 grid(GRID_DIM);
     VLLM_STABLE_DISPATCH_FLOATING_TYPES(
         input.scalar_type(), "situ_and_mul_quant_group_kernel", [&] {
           VLLM_STABLE_DISPATCH_FP8_TYPES(
               out.scalar_type(), "situ_and_mul_quant_group_kernel_fp8", [&] {
-                // Warp-per-group pipelined kernel: one warp owns a whole
-                // 128-group, so the full-warp abs-max reduction is always safe
-                // (no partial-warp mask hazard) and any d % 128 == 0 works.
-                // Only 2-byte scalar_t is vectorized; the fp32 dispatch branch
-                // falls back to the scalar group kernel. Pipelined path only
-                // for the fixed hidden dim; other d (and the fp32 branch) fall
-                // through to the runtime scalar kernel.
+                // Warp-per-group; only 2-byte scalar_t takes the fast LDG path.
                 if constexpr (sizeof(scalar_t) == 2) {
                   if (d == SITU_D && (float)beta == vllm::SITU_BETA &&
                       (float)linear_beta == vllm::SITU_LINEAR_BETA) {
                     constexpr int D = SITU_D;
-                    constexpr int NUM_WARPS = THREADS / 32;
-                    constexpr int STAGE_ELTS = 2 * 128;  // gate + up per group
-                    auto kernel =
-                        &vllm::situ_and_mul_quant_group_pipelined_kernel<
-                            scalar_t, fp8_t, THREADS, GROUP_STAGES, 128,
-                            GRID_DIM, D>;
-                    size_t smem_bytes = (size_t)NUM_WARPS * GROUP_STAGES *
-                                        STAGE_ELTS * sizeof(scalar_t);
                     dim3 block(THREADS);
-                    kernel<<<grid, block, smem_bytes, stream>>>(
-                        out.mutable_data_ptr<fp8_t>(),
-                        scale.mutable_data_ptr<float>(),
-                        input.const_data_ptr<scalar_t>(), num_tokens,
-                        valid_rows_ptr);
+                    vllm::situ_and_mul_quant_group_ldg_kernel<
+                        scalar_t, fp8_t, THREADS, 128, GRID_DIM, D>
+                        <<<grid, block, 0, stream>>>(
+                            out.mutable_data_ptr<fp8_t>(),
+                            scale.mutable_data_ptr<float>(),
+                            input.const_data_ptr<scalar_t>(), num_tokens,
+                            valid_rows_ptr);
                     return;
                   }
                 }
