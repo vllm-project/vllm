@@ -181,13 +181,16 @@ class CpuPlatform(Platform):
                 "otherwise the performance is not optimized."
             )
 
-        # Accelerated GDN (AMX tiles or AVX-512BF16 VDPBF16PS) requires float32 SSM state.
+        # Accelerated GDN (AMX tiles or AVX-512BF16 VDPBF16PS) requires
+        # float32 SSM state.
         if (
             torch.cpu._is_avx512_bf16_supported()
             and cache_config.mamba_ssm_cache_dtype != "float32"
         ):
             cache_config.mamba_ssm_cache_dtype = "float32"
-            logger.warning("Reset SSM cache type to float32 for accelerated GDN mamba attention.")
+            logger.warning(
+                "Reset SSM cache type to float32 for accelerated GDN mamba attention."
+            )
 
         # Lagecy setting
         env_key = "VLLM_CPU_KVCACHE_SPACE"
