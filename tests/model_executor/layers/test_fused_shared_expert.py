@@ -479,6 +479,8 @@ def test_models_fse_init(
         is_mm_prefix_lm=False,
         multimodal_config=None,
         quantization_config=None,
+        runner_type="generate",
+        is_moe=True,
     )
     vllm_config.parallel_config.enable_expert_parallel = False
     if model_type == "deepseek_v4":
@@ -535,7 +537,8 @@ def test_models_fse_init(
                 )
 
                 vllm_config.speculative_config = SimpleNamespace(
-                    draft_model_config=SimpleNamespace(hf_config=config)
+                    draft_model_config=SimpleNamespace(hf_config=config),
+                    method="mtp",
                 )
                 mtp = DeepSeekV4MTP(vllm_config=vllm_config)
         assert model.is_fused_shared_expert_enabled is (fse_enabled and not exclude)
