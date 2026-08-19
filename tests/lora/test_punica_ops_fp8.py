@@ -17,6 +17,7 @@ from threading import Lock
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 import vllm.lora.ops.torch_ops as torch_ops
 import vllm.lora.ops.triton_ops as triton_ops
@@ -30,6 +31,8 @@ from vllm.lora.ops.triton_ops.lora_shrink_fp8_op import (
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 DEVICE_TYPE = current_platform.device_type
 DEVICES = [f"{DEVICE_TYPE}:{0}"]
@@ -206,43 +209,32 @@ def quantize_to_fp8_blockwise(
     if tensor.ndim == 2:
         M, K = tensor.shape
         n_blocks_k = math.ceil(K / group_k)
-        scale = torch.zeros(M, n_blocks_k, dtype=torch.float32, device=tensor.device)
-        fp8_tensor = torch.zeros_like(tensor, dtype=FP8_DTYPE)
-        for m in range(M):
-            for bk in range(n_blocks_k):
-                k_start = bk * group_k
-                k_end = min(k_start + group_k, K)
-                block = tensor[m, k_start:k_end].float()
-                amax = block.abs().max().clamp(min=1e-12)
-                s = (amax / FP8_MAX).to(torch.float32)
-                scale[m, bk] = s
-                fp8_tensor[m, k_start:k_end] = (
-                    (block / s).clamp(FP8_MIN, FP8_MAX).to(FP8_DTYPE)
-                )
-        return fp8_tensor, scale
+        # Zero padding leaves the per-block amax unchanged, so the padded
+        # columns are dropped again after quantizing.
+        padded = F.pad(tensor.float(), (0, n_blocks_k * group_k - K))
+        blocks = padded.view(M, n_blocks_k, group_k)
+        scale = blocks.abs().amax(dim=-1).clamp(min=1e-12) / FP8_MAX
+        fp8_tensor = (
+            (blocks / scale.unsqueeze(-1)).clamp(FP8_MIN, FP8_MAX).to(FP8_DTYPE)
+        )
+        return fp8_tensor.view(M, -1)[:, :K].contiguous(), scale
     elif tensor.ndim == 3:
         L, N, K = tensor.shape
         n_blocks_n = math.ceil(N / group_n)
         n_blocks_k = math.ceil(K / group_k)
-        scale = torch.zeros(
-            L, n_blocks_n, n_blocks_k, dtype=torch.float32, device=tensor.device
+        padded = F.pad(
+            tensor.float(),
+            (0, n_blocks_k * group_k - K, 0, n_blocks_n * group_n - N),
         )
-        fp8_tensor = torch.zeros_like(tensor, dtype=FP8_DTYPE)
-        for li in range(L):
-            for bn in range(n_blocks_n):
-                for bk in range(n_blocks_k):
-                    n_start = bn * group_n
-                    n_end = min(n_start + group_n, N)
-                    k_start = bk * group_k
-                    k_end = min(k_start + group_k, K)
-                    block = tensor[li, n_start:n_end, k_start:k_end].float()
-                    amax = block.abs().max().clamp(min=1e-12)
-                    s = (amax / FP8_MAX).to(torch.float32)
-                    scale[li, bn, bk] = s
-                    fp8_tensor[li, n_start:n_end, k_start:k_end] = (
-                        (block / s).clamp(FP8_MIN, FP8_MAX).to(FP8_DTYPE)
-                    )
-        return fp8_tensor, scale
+        blocks = padded.view(L, n_blocks_n, group_n, n_blocks_k, group_k)
+        scale = blocks.abs().amax(dim=(2, 4)).clamp(min=1e-12) / FP8_MAX
+        fp8_tensor = (
+            (blocks / scale[:, :, None, :, None])
+            .clamp(FP8_MIN, FP8_MAX)
+            .to(FP8_DTYPE)
+            .view(L, n_blocks_n * group_n, n_blocks_k * group_k)
+        )
+        return fp8_tensor[:, :N, :K].contiguous(), scale
     else:
         raise ValueError(f"Unsupported tensor ndim: {tensor.ndim}")
 
@@ -301,33 +293,23 @@ def dequantize_fp8_blockwise(
     """Dequantize FP8 tensor with block-wise scale back to output_dtype."""
     if fp8_tensor.ndim == 2:
         M, K = fp8_tensor.shape
-        out = torch.zeros(M, K, dtype=output_dtype, device=fp8_tensor.device)
         n_blocks_k = math.ceil(K / group_k)
-        for m in range(M):
-            for bk in range(n_blocks_k):
-                k_start = bk * group_k
-                k_end = min(k_start + group_k, K)
-                out[m, k_start:k_end] = (
-                    fp8_tensor[m, k_start:k_end].float() * scale[m, bk].float()
-                ).to(output_dtype)
-        return out
+        padded = F.pad(fp8_tensor.float(), (0, n_blocks_k * group_k - K))
+        blocks = padded.view(M, n_blocks_k, group_k)
+        out = (blocks * scale.float().unsqueeze(-1)).to(output_dtype)
+        return out.view(M, -1)[:, :K].contiguous()
     elif fp8_tensor.ndim == 3:
         L, N, K = fp8_tensor.shape
-        out = torch.zeros(L, N, K, dtype=output_dtype, device=fp8_tensor.device)
         n_blocks_n = math.ceil(N / group_n)
         n_blocks_k = math.ceil(K / group_k)
-        for l_idx in range(L):
-            for bn in range(n_blocks_n):
-                for bk in range(n_blocks_k):
-                    n_start = bn * group_n
-                    n_end = min(n_start + group_n, N)
-                    k_start = bk * group_k
-                    k_end = min(k_start + group_k, K)
-                    out[l_idx, n_start:n_end, k_start:k_end] = (
-                        fp8_tensor[l_idx, n_start:n_end, k_start:k_end].float()
-                        * scale[l_idx, bn, bk].float()
-                    ).to(output_dtype)
-        return out
+        padded = F.pad(
+            fp8_tensor.float(),
+            (0, n_blocks_k * group_k - K, 0, n_blocks_n * group_n - N),
+        )
+        blocks = padded.view(L, n_blocks_n, group_n, n_blocks_k, group_k)
+        out = (blocks * scale.float()[:, :, None, :, None]).to(output_dtype)
+        out = out.view(L, n_blocks_n * group_n, n_blocks_k * group_k)
+        return out[:, :N, :K].contiguous()
     else:
         raise ValueError(f"Unsupported tensor ndim: {fp8_tensor.ndim}")
 
@@ -519,45 +501,22 @@ def generate_fp8_expand_data(
         # shared across slices. Compute shared scale across slices, then quantize.
         # First compute per-token-per-block scale across all slices
         n_blocks_k = math.ceil(rank / group_k)
-        a_scale = torch.zeros(
-            total_tokens, n_blocks_k, dtype=torch.float32, device=device
+        padded = F.pad(inputs_bf16.float(), (0, n_blocks_k * group_k - rank))
+        blocks = padded.view(nslices, total_tokens, n_blocks_k, group_k)
+        # Take the block amax across all slices so every slice shares the scale.
+        a_scale = blocks.abs().amax(dim=-1).clamp(min=1e-12).amax(dim=0) / FP8_MAX
+        fp8_blocks = (
+            (blocks / a_scale[None, :, :, None]).clamp(FP8_MIN, FP8_MAX).to(FP8_DTYPE)
         )
-        for m in range(total_tokens):
-            for bk in range(n_blocks_k):
-                k_start = bk * group_k
-                k_end = min(k_start + group_k, rank)
-                # Max across all slices for this token and block
-                block_amax = torch.tensor(0.0, device=device)
-                for s in range(nslices):
-                    block = inputs_bf16[s, m, k_start:k_end].float()
-                    block_amax = torch.max(
-                        block_amax, block.abs().max().clamp(min=1e-12)
-                    )
-                a_scale[m, bk] = (block_amax / FP8_MAX).to(torch.float32)
-
-        # Quantize all slices with the shared scale
-        inputs_fp8_list = []
-        inputs_dequant_list = []
-        for s in range(nslices):
-            slice_2d = inputs_bf16[s]  # (total_tokens, rank)
-            fp8_slice = torch.zeros_like(slice_2d, dtype=FP8_DTYPE)
-            dequant_slice = torch.zeros_like(slice_2d)
-            for m in range(total_tokens):
-                for bk in range(n_blocks_k):
-                    k_start = bk * group_k
-                    k_end = min(k_start + group_k, rank)
-                    block = slice_2d[m, k_start:k_end].float()
-                    s_val = a_scale[m, bk]
-                    fp8_slice[m, k_start:k_end] = (
-                        (block / s_val).clamp(FP8_MIN, FP8_MAX).to(FP8_DTYPE)
-                    )
-                    dequant_slice[m, k_start:k_end] = (
-                        fp8_slice[m, k_start:k_end].float() * s_val.float()
-                    ).to(dtype)
-            inputs_fp8_list.append(fp8_slice)
-            inputs_dequant_list.append(dequant_slice)
-        inputs_fp8 = torch.stack(inputs_fp8_list, dim=0)
-        inputs_dequant = torch.stack(inputs_dequant_list, dim=0)
+        inputs_fp8 = fp8_blocks.view(nslices, total_tokens, -1)[
+            :, :, :rank
+        ].contiguous()
+        inputs_dequant = (
+            (fp8_blocks.float() * a_scale[None, :, :, None])
+            .to(dtype)
+            .view(nslices, total_tokens, -1)[:, :, :rank]
+            .contiguous()
+        )
     elif quant_mode == "per_tensor":
         # Per-tensor: kernel loads a single scalar from a_scale_ptr
         inputs_fp8_2d, a_scale = quantize_to_fp8_per_tensor(inputs_2d_all)

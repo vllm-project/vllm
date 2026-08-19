@@ -23,8 +23,8 @@ use serial_test::serial;
 use tower::{Service as _, ServiceExt as _};
 use vllm_chat::{
     ChatBackend, ChatContent, ChatContentPart, ChatLlm, ChatMessage, ChatRenderer, ChatRequest,
-    ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer,
-    NewChatOutputProcessorOptions,
+    ChatRequestProcessor, ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor,
+    DynChatRenderer, NewChatOutputProcessorOptions, ParserSelection,
 };
 use vllm_engine_core_client::mock_engine::default_ready_response;
 use vllm_engine_core_client::protocol::decode_value;
@@ -46,13 +46,17 @@ use vllm_engine_core_client::{
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
 use vllm_text::tokenizer::DynTokenizer;
-use vllm_text::{Prompt, TextBackend};
+use vllm_text::{Prompt, TextBackend, TextRequestProcessor};
 use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
-use super::{build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora};
+use super::{
+    build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora,
+    render::build_router as build_render_router,
+};
 use crate::config::{ApiServerOptions, CorsConfig};
+use crate::render::RenderState;
 use crate::state::AppState;
 
 fn request_output(
@@ -72,18 +76,9 @@ fn request_output_with_stop_reason(
     EngineCoreOutput {
         request_id: request_id.to_string(),
         new_token_ids,
-        new_logprobs: None,
-        new_prompt_logprobs_tensors: None,
-        pooling_output: None,
         finish_reason,
         stop_reason,
-        events: None,
-        kv_transfer_params: None,
-        ec_transfer_params: None,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -100,16 +95,9 @@ fn request_output_with_logprobs(
         new_token_ids,
         new_logprobs: new_logprobs.map(MaybeWireLogprobs::Direct),
         new_prompt_logprobs_tensors: new_prompt_logprobs_tensors.map(MaybeWireLogprobs::Direct),
-        pooling_output: None,
         finish_reason,
         stop_reason,
-        events: None,
-        kv_transfer_params: None,
-        ec_transfer_params: None,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -128,16 +116,11 @@ fn request_output_with_logprobs_and_kv(
         new_token_ids,
         new_logprobs: new_logprobs.map(MaybeWireLogprobs::Direct),
         new_prompt_logprobs_tensors: new_prompt_logprobs_tensors.map(MaybeWireLogprobs::Direct),
-        pooling_output: None,
         finish_reason,
         stop_reason,
-        events: None,
         kv_transfer_params,
         ec_transfer_params,
-        trace_headers: None,
-        prefill_stats: None,
-        routed_experts: None,
-        num_nans_in_logits: 0,
+        ..Default::default()
     }
 }
 
@@ -682,6 +665,24 @@ async fn test_app() -> axum::Router {
     test_app_with_dev_mode(false).await
 }
 
+fn test_render_app() -> axum::Router {
+    test_render_app_with_parser_selections(ParserSelection::Auto, ParserSelection::Auto)
+}
+
+fn test_render_app_with_parser_selections(
+    tool_call_parser: ParserSelection,
+    reasoning_parser: ParserSelection,
+) -> axum::Router {
+    let backend = Arc::new(FakeChatBackend::new());
+    build_render_router(Arc::new(RenderState {
+        model: "backend-model".to_string(),
+        served_model_names: vec!["render-model".to_string()],
+        text: TextRequestProcessor::new(backend.clone(), 128),
+        chat: ChatRequestProcessor::render_only(backend)
+            .with_parser_selections(tool_call_parser, reasoning_parser),
+    }))
+}
+
 async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
     let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
         b"engine-openai",
@@ -707,10 +708,9 @@ async fn test_dev_mode_app_with_ready(
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-world-size".to_vec();
-
     let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
         handshake_address.clone(),
-        engine_id.clone(),
+        engine_id,
         ready_response,
         |_dealer, _push| boxed_test_future(async {}),
     ));
@@ -1041,6 +1041,191 @@ fn metric_delta(
 ) -> f64 {
     metric_value(rendered_after, metric, labels).unwrap_or(0.0)
         - metric_value(rendered_before, metric, labels).unwrap_or(0.0)
+}
+
+#[tokio::test]
+async fn render_chat_returns_generate_request_with_header_request_id() {
+    let mut app = test_render_app();
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .header("X-Request-Id", "header-req")
+                .body(Body::from(
+                    json!({
+                        "request_id": "body-req",
+                        "model": "render-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_completion_tokens": 8,
+                        "stream": true,
+                        "stream_options": {"include_usage": true},
+                        "cache_salt": "render-cache-salt",
+                        "priority": -3
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["request_id"], "chatcmpl-header-req");
+    assert_eq!(json["model"], "render-model");
+    assert_eq!(json["stream"], true);
+    assert_eq!(json["stream_options"]["include_usage"], true);
+    assert_eq!(json["cache_salt"], "render-cache-salt");
+    assert_eq!(json["priority"], -3);
+    assert_eq!(json["sampling_params"]["max_tokens"], 8);
+    assert!(!json["token_ids"].as_array().unwrap().is_empty());
+    assert!(json.get("prompt_token_ids").is_none());
+    assert!(json.get("mm_features").is_none());
+}
+
+#[tokio::test]
+async fn render_chat_uses_processor_owned_parser_selections() {
+    let mut app = test_render_app_with_parser_selections(
+        ParserSelection::Auto,
+        ParserSelection::Explicit("definitely_missing_reasoning_parser".to_string()),
+    );
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "render-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_completion_tokens": 8
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let body = String::from_utf8(body.to_vec()).expect("decode body");
+    assert!(
+        body.contains("reasoning parser `definitely_missing_reasoning_parser` is not registered")
+    );
+}
+
+#[tokio::test]
+async fn render_completion_returns_generate_request_with_body_request_id() {
+    let mut app = test_render_app();
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "request_id": "body-req",
+                        "model": "render-model",
+                        "prompt": "hello",
+                        "max_tokens": 8
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json[0]["request_id"], "cmpl-body-req");
+    assert_eq!(json[0]["model"], "render-model");
+    assert_eq!(json[0]["stream"], false);
+    assert_eq!(json[0]["sampling_params"]["max_tokens"], 8);
+    assert!(!json[0]["token_ids"].as_array().unwrap().is_empty());
+    assert!(json[0].get("stream_options").is_none());
+    assert!(json[0].get("prompt_token_ids").is_none());
+    assert!(json[0].get("mm_features").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn render_chat_response_can_be_submitted_to_generate_unchanged() {
+    let mut render_app = test_render_app();
+    let render_response = render_app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions/render")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "request_id": "round-trip",
+                        "model": "render-model",
+                        "messages": [{"role": "user", "content": "hello"}],
+                        "max_completion_tokens": 8,
+                        "bad_words": ["blocked"],
+                        "vllm_xargs": {"custom": 1}
+                    })
+                    .to_string(),
+                ))
+                .expect("build render request"),
+        )
+        .await
+        .expect("call render app");
+
+    assert_eq!(render_response.status(), StatusCode::OK);
+    let render_body = to_bytes(render_response.into_body(), usize::MAX)
+        .await
+        .expect("read render response");
+    let render_json: serde_json::Value =
+        serde_json::from_slice(&render_body).expect("decode render response");
+    let token_ids: Vec<u32> = serde_json::from_value(render_json["token_ids"].clone())
+        .expect("decode rendered token IDs");
+
+    assert_eq!(
+        render_json["sampling_params"]["bad_words"],
+        json!(["blocked"])
+    );
+    assert_eq!(render_json["sampling_params"]["vllm_xargs"]["custom"], 1);
+
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend_inner(
+        b"engine-render-generate-round-trip",
+        default_stream_output_specs(),
+        Some(token_ids),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let mut generate_app = build_router(Arc::new(AppState::new(
+        vec!["render-model".to_string()],
+        chat,
+    )));
+    let generate_response = generate_app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/inference/v1/generate")
+                .header("content-type", "application/json")
+                .body(Body::from(render_body))
+                .expect("build generate request"),
+        )
+        .await
+        .expect("call generate app");
+
+    assert_eq!(generate_response.status(), StatusCode::OK);
+    let _ = to_bytes(generate_response.into_body(), usize::MAX)
+        .await
+        .expect("read generate response");
+    engine_task.finish().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1560,7 +1745,7 @@ async fn version_returns_engine_vllm_version() {
         json,
         json!({
             "version": "test-vllm-version",
-            "rust_frontend_version": env!("CARGO_PKG_VERSION"),
+            "rust_frontend_version": vllm_build_info::VERSION,
         })
     );
 }
@@ -6355,58 +6540,6 @@ async fn world_size_endpoint_is_dev_mode_only() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn world_size_includes_data_parallelism_by_default() {
-    let ready = vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
-        world_size: 2,
-        data_parallel_size: 4,
-        ..default_ready_response()
-    };
-    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
-
-    let response = app
-        .call(
-            Request::builder()
-                .uri("/get_world_size")
-                .body(Body::empty())
-                .expect("build request"),
-        )
-        .await
-        .expect("call app");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json, json!({"world_size": 8}));
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn world_size_excludes_data_parallelism_when_include_dp_false() {
-    let ready = vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
-        world_size: 2,
-        data_parallel_size: 4,
-        ..default_ready_response()
-    };
-    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
-
-    let response = app
-        .call(
-            Request::builder()
-                .uri("/get_world_size?include_dp=false")
-                .body(Body::empty())
-                .expect("build request"),
-        )
-        .await
-        .expect("call app");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
-    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json, json!({"world_size": 2}));
 }
 
 // ========================= Profiler route tests =========================

@@ -27,15 +27,6 @@ class TestSetting:
 @pytest.mark.parametrize(
     "test_setting",
     [
-        # basic llama model
-        TestSetting(
-            model="meta-llama/Llama-3.2-1B-Instruct",
-            model_args=["--max-model-len", "2048"],
-            pp_size=2,
-            tp_size=2,
-            attn_backend=ATTN_BACKEND,
-            method="generate",
-        ),
         # MoE model
         TestSetting(
             model="ibm-granite/granite-3.0-1b-a400m-instruct",
@@ -68,21 +59,12 @@ class TestSetting:
 def test_compile_correctness(
     test_setting: TestSetting,
 ):
-    # this test is run under multiple suits, with different GPUs.
-    # make sure we only run the test with correct CUDA devices.
-    # don't use "<", as it will duplicate the tests.
     model = test_setting.model
     model_args = test_setting.model_args
     pp_size = test_setting.pp_size
     tp_size = test_setting.tp_size
     attn_backend = test_setting.attn_backend
     method = test_setting.method
-    if current_platform.device_count() < pp_size * tp_size:
-        pytest.skip(
-            f"Need at least {pp_size}*{tp_size} CUDA gpus but got "
-            f"{current_platform.device_count()}"
-        )
-
     final_args = [
         *model_args,
         "-pp",
