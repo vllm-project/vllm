@@ -126,6 +126,7 @@ flashinfer_cutedsl_grouped_gemm_nt_masked = _lazy_import_wrapper(
     "flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"
 )
 flashinfer_fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
+flashinfer_mxfp4_quantize = _lazy_import_wrapper("flashinfer", "mxfp4_quantize")
 nvfp4_batched_quantize = _lazy_import_wrapper("flashinfer", "nvfp4_batched_quantize")
 silu_and_mul_scaled_nvfp4_experts_quantize = _lazy_import_wrapper(
     "flashinfer", "silu_and_mul_scaled_nvfp4_experts_quantize"
@@ -157,6 +158,10 @@ flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _lazy_import_wrapper(
     "flashinfer.decode",
     "trtllm_batch_decode_sparse_mla_dsv4",
     fallback_fn=_missing_sparse_mla,
+)
+flashinfer_xqa_batch_decode_with_kv_cache = _lazy_import_wrapper(
+    "flashinfer.decode",
+    "xqa_batch_decode_with_kv_cache",
 )
 
 
@@ -230,6 +235,22 @@ def has_flashinfer_sparse_mla_sm120() -> bool:
         and callable(trtllm_batch_decode_with_kv_cache_mla)
         and callable(autotune)
     )
+
+
+@functools.cache
+def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool:
+    """Return whether FlashInfer ships an SM120 DSV4 decode specialization.
+
+    The public sparse MLA API predates some DSV4 shapes, so checking only that
+    the callable exists can select a package that later aborts or rejects a
+    valid vLLM configuration. Inspect FlashInfer's dispatch table until it
+    exposes a public capability query.
+    """
+    if not has_flashinfer_sparse_mla_sm120():
+        return False
+    mod = _get_submodule("flashinfer.mla._sparse_mla_sm120")
+    dispatch = getattr(mod, "_DECODE_DSV4_DISPATCH", None) if mod else None
+    return dispatch is not None and (int(num_q_heads), int(top_k)) in dispatch
 
 
 @functools.cache
@@ -375,8 +396,8 @@ def supports_trtllm_attention(is_prefill: bool = False) -> bool:
     """Return whether TRTLLM attention is available on the current platform
     for the given attention phase.
 
-    SM90 (Hopper) supports the XQA decode kernel but not TRTLLM prefill.
-    SM100+ supports TRTLLM for both phases. All others are unsupported.
+    SM90 (Hopper) and SM12x support the XQA decode kernel but not TRTLLM
+    prefill. SM100+ supports TRTLLM for both phases. All others are unsupported.
     """
     # Batch-invariant mode disables TRTLLM attention
     if envs.VLLM_BATCH_INVARIANT:
@@ -386,8 +407,10 @@ def supports_trtllm_attention(is_prefill: bool = False) -> bool:
     if not has_nvidia_artifactory():
         return False
 
-    # SM90 has XQA decode; prefill is not supported.
-    if current_platform.is_device_capability(90):
+    # SM90 and SM12x have XQA decode only.
+    if current_platform.is_device_capability(
+        90
+    ) or current_platform.is_device_capability_family(120):
         return not is_prefill
 
     # SM100/SM103 has both prefill and decode TRTLLM kernels.
@@ -490,11 +513,11 @@ def use_trtllm_attention(
         if is_prefill:
             # Prefill auto-detection
             use_trtllm = kv_cache_dtype == "auto"
-        elif current_platform.is_device_capability(90) and kv_cache_dtype.startswith(
-            "fp8"
-        ):
-            # SM90 + FP8 KV cache: prefer the XQA decode kernel. XQA does not
-            # support NVFP4 KV (that is an SM100 trtllm-gen path only).
+        elif (
+            current_platform.is_device_capability(90)
+            or current_platform.is_device_capability_family(120)
+        ) and kv_cache_dtype.startswith("fp8"):
+            # SM90/SM12x + FP8 KV cache: prefer the XQA decode kernel.
             use_trtllm = True
         else:
             # Decode auto-detection
@@ -618,14 +641,16 @@ if has_flashinfer():
     )
     def flashinfer_mxfp4_quantize(
         a: torch.Tensor,
+        backend: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from flashinfer import mxfp4_quantize as _mxfp4_quantize
 
-        return _mxfp4_quantize(a)
+        return _mxfp4_quantize(a, backend=backend)
 
     @torch.library.register_fake("vllm::flashinfer_mxfp4_quantize")
     def flashinfer_mxfp4_quantize_fake(
         a: torch.Tensor,
+        backend: str,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         m, k = a.shape
         sf_vec_size = 32
@@ -1034,6 +1059,7 @@ __all__ = [
     "trtllm_fp4_block_scale_moe",
     "flashinfer_trtllm_batch_decode_with_kv_cache_mla",
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
+    "flashinfer_xqa_batch_decode_with_kv_cache",
     "autotune",
     "has_flashinfer_moe",
     "has_flashinfer_comm",

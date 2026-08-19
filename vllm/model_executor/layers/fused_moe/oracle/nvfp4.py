@@ -4,7 +4,6 @@ from enum import Enum
 
 import torch
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
@@ -19,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+    nvfp4_swizzled_scale_to_cutedsl_mma_view,
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
     prepare_nvfp4_moe_layer_for_flashinfer_cutedsl,
 )
@@ -190,7 +190,11 @@ def select_nvfp4_moe_backend(
     NVFP4_BACKENDS_WITH_CLAMP = {
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
+        NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
+        NvFp4MoeBackend.EMULATION,
+        NvFp4MoeBackend.HUMMING,
     }
 
     if config.swiglu_limit is not None:
@@ -258,17 +262,12 @@ def select_nvfp4_moe_backend(
             raise ValueError(
                 f"Model sets swiglu_limit={config.swiglu_limit}, but the "
                 f"explicitly requested moe_backend={runner_backend!r} does "
-                f"not apply the SwiGLU clamp. Use 'flashinfer_trtllm' or "
-                f"'flashinfer_cutlass' instead."
+                f"not apply the SwiGLU clamp. Use 'flashinfer_trtllm', "
+                f"'flashinfer_cutlass', 'flashinfer_cutedsl', 'cutlass', "
+                f"'marlin', or 'humming' instead."
             )
         return _return_or_raise(
             requested_backend, config, weight_key, activation_key, activation_format
-        )
-
-    if envs.VLLM_TEST_FORCE_FP8_MARLIN:
-        backend = NvFp4MoeBackend.MARLIN
-        return _return_or_raise(
-            backend, config, weight_key, activation_key, activation_format
         )
 
     # Select kernels in order of backend.
@@ -392,10 +391,10 @@ def convert_to_nvfp4_moe_kernel_format(
         a2_scale = None
         w13 = layer.w13_weight
         w13_scale = layer.w13_weight_scale
-        w13_scale_2 = getattr(layer, "w13_global_scale", None)
+        w13_scale_2 = getattr(layer, "w13_weight_scale_2", None)
         w2 = layer.w2_weight
         w2_scale = layer.w2_weight_scale
-        w2_scale_2 = getattr(layer, "w2_global_scale", None)
+        w2_scale_2 = getattr(layer, "w2_weight_scale_2", None)
     elif nvfp4_backend == NvFp4MoeBackend.MARLIN:
         a13_scale = None
         a2_scale = None
@@ -468,6 +467,8 @@ def make_nvfp4_moe_quant_config(
     a13_scale: torch.Tensor,
     a2_scale: torch.Tensor,
     swiglu_limit: float | None = None,
+    swiglu_alpha: float | None = None,
+    swiglu_beta: float | None = None,
     layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig:
     if backend == NvFp4MoeBackend.HUMMING:
@@ -477,7 +478,12 @@ def make_nvfp4_moe_quant_config(
         )
 
         assert isinstance(layer, RoutedExperts)
-        return get_humming_moe_quant_config(layer)
+        return get_humming_moe_quant_config(
+            layer,
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
+            gemm1_clamp_limit=swiglu_limit,
+        )
     elif backend == NvFp4MoeBackend.MARLIN:
         return nvfp4_w4a16_moe_quant_config(
             g1_alphas=w13_scale_2,
@@ -494,8 +500,14 @@ def make_nvfp4_moe_quant_config(
             a2_gscale=a2_scale,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
+            gemm1_alpha=swiglu_alpha,
+            gemm1_beta=swiglu_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
+
+    if backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL:
+        w13_scale = nvfp4_swizzled_scale_to_cutedsl_mma_view(w13_scale)
+        w2_scale = nvfp4_swizzled_scale_to_cutedsl_mma_view(w2_scale)
 
     # Pass w13_scale_2 / w2_scale_2 directly as g1/g2_alphas.
     # The expert's process_weights_after_loading will fuse activation
@@ -518,6 +530,8 @@ def make_nvfp4_moe_quant_config(
                 NvFp4MoeBackend.FLASHINFER_CUTEDSL,
             )
         ),
+        gemm1_alpha=swiglu_alpha,
+        gemm1_beta=swiglu_beta,
         gemm1_clamp_limit=swiglu_limit,
     )
 
@@ -528,7 +542,7 @@ def make_nvfp4_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     backend: NvFp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    layer: torch.nn.Module | None = None,
+    per_token_activation: bool = False,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -543,9 +557,8 @@ def make_nvfp4_moe_kernel(
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     extra_kwargs = {}
-    if backend == NvFp4MoeBackend.HUMMING:
-        assert layer is not None
-        extra_kwargs = {"layer": layer}
+    if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM and per_token_activation:
+        extra_kwargs["per_token_activation"] = True
 
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
