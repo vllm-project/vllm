@@ -589,11 +589,6 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
-        # Copy to avoid potential race condition during multi-stream overlap, caused
-        # if routed and/or shared experts mutate the inputs (e.g. Qwen3.5)
-        if shared_experts_overlapping and shared_experts_input is not None:
-            hidden_states = hidden_states.clone()
-
         if self.routed_experts.quant_method.is_monolithic:
             # Monolithic kernels: pass router_logits to routed_experts
             fused_out = self.routed_experts.forward_monolithic(

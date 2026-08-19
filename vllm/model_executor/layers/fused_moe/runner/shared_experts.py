@@ -99,11 +99,9 @@ class SharedExperts(torch.nn.Module):
 
     @property
     def _should_enable_stream_overlap_heuristic(self) -> bool:
-        # On ROCm, empirically it's shown that only DPA deployments benefit from
-        # multi-stream shared experts
         if not current_platform.is_rocm():
             return True
-        return self._moe_config.moe_parallel_config.dp_size > 1
+        return envs.VLLM_ROCM_ENABLE_SHARED_EXPERTS_STREAM
 
     def _determine_shared_experts_order(
         self,
@@ -142,7 +140,6 @@ class SharedExperts(torch.nn.Module):
         assert self._stream is not None
         idx = self._output_idx
         assert self._output[idx] is None
-
         self._input_ready_event[idx].record(current_stream())
         with torch.cuda.stream(self._stream):
             self._input_ready_event[idx].wait(self._stream)
