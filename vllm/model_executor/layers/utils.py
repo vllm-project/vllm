@@ -270,6 +270,10 @@ def dispatch_cpu_unquantized_gemm(
     layer: torch.nn.Module,
     remove_weight: bool,
 ) -> None:
+    if layer.weight.ndim != 2:
+        layer.original_weight = None
+        layer.packed_weight = None
+
     # skip for missing layers
     if layer.weight.is_meta:
         layer.cpu_linear = torch.nn.functional.linear
@@ -284,7 +288,7 @@ def dispatch_cpu_unquantized_gemm(
             ops, "causal_conv1d_weight_pack"
         ):
             # prepack conv weight
-            unpacked = (
+            layer.original_weight = (
                 layer.weight.view(
                     layer.weight.size(0),
                     layer.weight.size(2),
@@ -292,10 +296,8 @@ def dispatch_cpu_unquantized_gemm(
                 .contiguous()
                 .clone()
             )
-            # Stash the un-packed (dim, width) weight so the speculative-decode
-            # GDN path (which uses torch conv, not the AMX kernel) can use it.
-            layer._cpu_unpacked_conv_weight = unpacked
-            layer.weight.data = ops.causal_conv1d_weight_pack(unpacked)
+            layer.packed_weight = ops.causal_conv1d_weight_pack(layer.original_weight)
+            layer.weight.data = layer.packed_weight
         return
 
     N, K = layer.weight.size()
