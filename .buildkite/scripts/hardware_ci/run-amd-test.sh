@@ -582,6 +582,7 @@ is_multi_node() {
   return 1
 }
 
+# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 append_failure_diagnostic_section() {
   local log_file=$1
   local title=$2
@@ -593,12 +594,14 @@ append_failure_diagnostic_section() {
     >> "${log_file}"
 }
 
+# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 append_failure_diagnostic_note() {
   local log_file=$1
   shift
   printf '%s\n' "$@" >> "${log_file}"
 }
 
+# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 run_failure_diagnostic() {
   local log_file=$1
   local probe_deadline=$2
@@ -637,6 +640,7 @@ run_failure_diagnostic() {
   return 0
 }
 
+# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 append_failure_diagnostic_file() {
   local log_file=$1
   local label=$2
@@ -659,6 +663,7 @@ append_failure_diagnostic_file() {
   return 0
 }
 
+# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 decode_mountinfo_path() {
   local value=$1
 
@@ -669,6 +674,7 @@ decode_mountinfo_path() {
   printf '%s\n' "${value}"
 }
 
+# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 resolve_current_cgroup_v2_dir() {
   local cgroup_path=""
   local mount_root=""
@@ -715,6 +721,7 @@ resolve_current_cgroup_v2_dir() {
   return 1
 }
 
+# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 collect_cgroup_files() {
   local log_file=$1
   local title=$2
@@ -745,6 +752,7 @@ collect_cgroup_files() {
   fi
 }
 
+# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 collect_cgroup_diagnostics() {
   local log_file=$1
   local cgroup_dir=""
@@ -772,6 +780,7 @@ collect_cgroup_diagnostics() {
   fi
 }
 
+# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 collect_process_diagnostics() {
   local log_file=$1
   local probe_deadline=$2
@@ -804,6 +813,7 @@ collect_process_diagnostics() {
   return 0
 }
 
+# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 collect_mount_diagnostic() {
   local log_file=$1
   local probe_deadline=$2
@@ -827,6 +837,7 @@ collect_mount_diagnostic() {
   return 0
 }
 
+# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 collect_execution_resource_diagnostics() {
   local log_file=$1
   local probe_deadline=$2
@@ -869,6 +880,7 @@ collect_execution_resource_diagnostics() {
   return 0
 }
 
+# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 collect_amd_device_nodes() {
   local log_file=$1
   local probe_deadline=$2
@@ -894,6 +906,7 @@ collect_amd_device_nodes() {
   return 0
 }
 
+# shellcheck disable=SC2329  # Called transitively from the EXIT trap handler; see handle_amd_runner_exit.
 collect_rocm_failure_diagnostics() {
   local exit_code=$1
   local job_id="${BUILDKITE_JOB_ID:-local}"
