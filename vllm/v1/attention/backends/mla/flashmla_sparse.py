@@ -384,6 +384,9 @@ class FlashMLASparseMetadataBuilder(
         The scheduler initializes lazily from the runtime query shape, which may
         be the full batch or only decodes when prefills use dense MHA. This avoids
         the BF16 prefill kernel's head-padding overhead at high TP.
+
+        The batch is split into chunks so the kernel's internal o_accum scratch stays
+        bounded regardless of the actual query token count.
         """
         num_tokens = (
             metadata.num_decode_tokens
