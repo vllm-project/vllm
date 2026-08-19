@@ -299,7 +299,6 @@ def situ_and_mul_quant(
     linear_beta: float | None,
     group_size: int = 0,
     valid_rows: torch.Tensor | None = None,
-    topk: int = 1,
 ) -> None:
     """Fused Kimi SITU activation + dynamic FP8 quantization.
 
@@ -314,11 +313,10 @@ def situ_and_mul_quant(
     [M, d // 128], matching humming ``quant_input(group_size=128, float32)``.
 
     ``linear_beta`` <= 0 (or None) means "unset" (up passed through), matching
-    ``SituAndMul(linear_beta=None)``. ``valid_rows`` (int32 scalar tensor) is the
-    DeepEP v2 contiguous-layout valid *token* count (e.g. ``psum[-1:]``); the
-    kernel multiplies it by ``topk`` to bound rows, so no host-side cast/multiply
-    is needed. Padding rows are skipped and receive a benign scale of 1.0. Kept
-    in this module so that every ``torch.ops._C.situ*`` call lives in one file.
+    ``SituAndMul(linear_beta=None)``. ``valid_rows`` (int64 scalar tensor) is the
+    DeepEP v2 contiguous-layout valid row count; padding rows are skipped and
+    receive a benign scale of 1.0. Kept in this module so that every
+    ``torch.ops._C.situ*`` call lives in one file.
     """
     torch.ops._C.situ_and_mul_quant(
         output,
@@ -328,5 +326,4 @@ def situ_and_mul_quant(
         -1.0 if linear_beta is None else linear_beta,
         group_size,
         valid_rows,
-        topk,
     )
