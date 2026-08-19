@@ -6,6 +6,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING
 
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
+from vllm.multimodal.utils import strip_covered_mm_data
 
 if TYPE_CHECKING:
     import numpy as np
@@ -53,11 +54,16 @@ class NewRequestData:
         request: Request,
         block_ids: tuple[list[int], ...],
         prefill_token_ids: list[int] | None = None,
+        uses_mrope: bool = False,
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
-            mm_features=request.mm_features,
+            mm_features=strip_covered_mm_data(
+                request.mm_features,
+                request.num_computed_tokens,
+                uses_mrope=uses_mrope,
+            ),
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
             block_ids=block_ids,
