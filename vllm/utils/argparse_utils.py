@@ -393,6 +393,8 @@ class FlexibleArgumentParser(ArgumentParser):
                         # False positive, '.' was only in the value
                         continue
                 else:
+                    if i + 1 >= len(processed_args):
+                        self.error(f"argument {processed_arg}: expected one argument")
                     value_str = processed_args[i + 1]
                     delete.add(i + 1)
 

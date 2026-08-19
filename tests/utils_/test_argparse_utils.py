@@ -93,6 +93,13 @@ def test_missing_required_argument(parser):
         parser.parse_args([])
 
 
+def test_dotted_arg_missing_value(parser):
+    # A dotted config arg given as the last token with no following value
+    # must fail cleanly (argparse SystemExit) instead of raising IndexError.
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--hf-overrides.key1"])
+
+
 def test_cli_override_to_config(parser_with_config, cli_config_file):
     args = parser_with_config.parse_args(
         ["serve", "mymodel", "--config", cli_config_file, "--tensor-parallel-size", "3"]
