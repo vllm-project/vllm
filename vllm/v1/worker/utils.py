@@ -394,22 +394,18 @@ def allocate_kv_cache(
     assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
     buf = torch.zeros(sizes.pop(), dtype=torch.int8, device=device)
 
-    layer_group_ids: dict[str, int] = {}
-    layer_specs: dict[str, KVCacheSpec] = {}
-    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-        spec = group.kv_cache_spec
-        for layer_name in group.layer_names:
-            layer_group_ids[layer_name] = group_id
-            layer_specs[layer_name] = (
-                spec.kv_cache_specs[layer_name]
-                if isinstance(spec, UniformTypeKVCacheSpecs)
-                else spec
-            )
-
     kv_caches: dict[str, torch.Tensor] = {}
     for tensor in kv_cache_config.kv_cache_tensors:
-        spec = layer_specs[tensor.layers[0]]
-        group_id = layer_group_ids[tensor.layers[0]]
+        layer_name = tensor.layers[0]
+        group_id, group = next(
+            (group_id, group)
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+            if layer_name in group.layer_names
+        )
+        spec = group.kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            spec = spec.kv_cache_specs[layer_name]
+
         num_blocks = kv_cache_config.num_blocks
         kernel_block_size = None
         if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
