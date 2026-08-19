@@ -708,11 +708,23 @@ class AiterFlashAttentionMetadataBuilder(
         skip split_decodes_prefills_and_extends() and avoid all .cpu() /
         .item() calls that would otherwise break CUDA graph capture.
         """
-        num_reqs = common_attn_metadata.num_reqs
-        num_tokens = common_attn_metadata.num_actual_tokens
+        # Uniform-decode assumption does not hold for the
+        # drafter's first forward after a target step: it inherits the target's
+        # per-request query lengths, so rows can be longer than gluon's limit or
+        # ragged. Those batches need the real split, which costs a sync.
+        if rocm_aiter_ops.is_shuffle_kv_cache_enabled() and (
+            max_query_len > _PA_GLUON_MAX_QUERY_LEN
+            or num_tokens != num_reqs * max_query_len
+        ):
+            return self.build(
+                common_prefix_len=0, common_attn_metadata=common_attn_metadata
+            )
 
         decode_metadata = AiterFlashAttentionDecodeMetadata(
-            max_query_len=common_attn_metadata.max_query_len,
+            max_query_len=max_query_len,
+            uniform_query_len=(
+                max_query_len if num_tokens == num_reqs * max_query_len else None
+            ),
         )
 
         return AiterFlashAttentionMetadata(
