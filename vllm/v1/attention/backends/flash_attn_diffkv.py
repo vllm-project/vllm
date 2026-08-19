@@ -131,6 +131,10 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             head_size_v=FlashAttentionDiffKVBackend.head_size_v,
             has_sinks=self.sinks is not None,
         )
+        # The dedicated hd256 kernel needs head_size_v == head_size == 256 and
+        # the call-shape fixups in FlashAttentionImpl.forward, which this
+        # subclass's KV path does not apply.
+        self.fa4_hd256 = False
 
     def do_kv_cache_update(
         self,
