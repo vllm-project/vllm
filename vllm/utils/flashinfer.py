@@ -259,7 +259,7 @@ def has_flashinfer_sparse_mla_sm89() -> bool:
 
     NOTE: reaches into FlashInfer's private ``mla._core``. If FlashInfer renames
     or removes it this returns False and the SM89 backend is refused — loud, not
-    silent. See 手册 §7 风险 1.
+    silent.
     """
     if not has_flashinfer_sparse_mla_sm120():
         return False
