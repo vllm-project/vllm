@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    OffloadingConnectorMetadata,
+    TransferJob,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
@@ -23,7 +26,17 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
+    GPULoadStoreSpec,
+    LoadStoreSpec,
+    OffloadingManager,
     OffloadingSpec,
+    OffloadingWorker,
+)
+from vllm.v1.kv_offload.config import (
+    OffloadingCacheConfig,
+    OffloadingConfig,
+    OffloadingModelConfig,
+    OffloadingParallelConfig,
 )
 
 NUM_BLOCKS = 10
@@ -31,6 +44,7 @@ BLOCK_SIZE = 16
 NUM_KV_HEADS = 4
 HEAD_SIZE = 64
 DTYPE = torch.float16
+DEVICE_TYPE = current_platform.device_type
 
 # Attention backends to test
 ATTN_BACKENDS: list[str] = []
@@ -43,6 +57,8 @@ if current_platform.is_cuda():
     ]
 elif current_platform.is_rocm():
     ATTN_BACKENDS = ["TRITON_ATTN"]
+elif current_platform.is_xpu():
+    ATTN_BACKENDS = ["TRITON_ATTN", "FLASH_ATTN"]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -85,16 +101,26 @@ def _allocate_and_reshape_kv_caches(
         set_kv_cache_layout(None)
 
 
-def _make_mock_layer(backend_cls: type[AttentionBackend]):
-    """
-    Create a mock AttentionLayerBase whose get_attn_backend returns backend_cls.
-    """
-    layer = MagicMock()
-    layer.get_attn_backend.return_value = backend_cls
-    return layer
+def _single_rank_vllm_config(total_kv_heads: int):
+    """A one-rank (TP=1) parallel config, as canonical mappings are derived
+    from it."""
+    vllm_config = MagicMock()
+    parallel_config = vllm_config.parallel_config
+    parallel_config.tensor_parallel_size = 1
+    parallel_config.decode_context_parallel_size = 1
+    parallel_config.prefill_context_parallel_size = 1
+    parallel_config.cp_kv_cache_interleave_size = 1
+    parallel_config.world_size = 1
+    parallel_config.rank = 0
+    vllm_config.model_config.get_total_num_kv_heads.return_value = total_kv_heads
+    return vllm_config
 
 
-def _make_worker(kv_cache_config: KVCacheConfig):
+def _make_worker(
+    kv_cache_config: KVCacheConfig,
+    replicated_layout: bool = False,
+    rank: int = 0,
+):
     """
     Create an OffloadingConnectorWorker with mocked dependencies.
     """
@@ -103,14 +129,81 @@ def _make_worker(kv_cache_config: KVCacheConfig):
     )
 
     spec = MagicMock(spec=OffloadingSpec)
-    spec.kv_cache_config = kv_cache_config
-    spec.vllm_config = MagicMock()
-    spec.get_handlers.return_value = iter([])
+    spec.replicated_layout = replicated_layout
+    spec.config = MagicMock()
+    spec.config.parallel.rank = rank
+    spec.get_worker.return_value = MagicMock()
 
-    worker = OffloadingConnectorWorker(spec=spec)
+    worker = OffloadingConnectorWorker(
+        spec=spec,
+        vllm_config=_single_rank_vllm_config(NUM_KV_HEADS),
+        kv_cache_config=kv_cache_config,
+    )
     worker.worker = MagicMock()
 
     return worker, spec
+
+
+def _store_metadata(job_id: int) -> OffloadingConnectorMetadata:
+    return OffloadingConnectorMetadata(
+        load_jobs={},
+        store_jobs={
+            job_id: TransferJob(
+                req_id="req",
+                src_spec=GPULoadStoreSpec([0], group_sizes=(1,), block_indices=(0,)),
+                dst_spec=LoadStoreSpec(),
+            )
+        },
+    )
+
+
+def _load_metadata(job_id: int) -> OffloadingConnectorMetadata:
+    return OffloadingConnectorMetadata(
+        load_jobs={
+            job_id: TransferJob(
+                req_id="req",
+                src_spec=LoadStoreSpec(),
+                dst_spec=GPULoadStoreSpec([0], group_sizes=(1,), block_indices=(0,)),
+            )
+        },
+        store_jobs={},
+    )
+
+
+def _empty_metadata() -> OffloadingConnectorMetadata:
+    return OffloadingConnectorMetadata(load_jobs={}, store_jobs={})
+
+
+def _offloading_config(rank: int = 0) -> OffloadingConfig:
+    return OffloadingConfig(
+        groups=(),
+        worker_kv_bytes_per_block=0,
+        enable_kv_cache_events=False,
+        extra_config={},
+        engine_id="test-engine",
+        model=OffloadingModelConfig(name="test-model", dtype="float16"),
+        cache=OffloadingCacheConfig(tokens_per_hash=16, blocks_per_chunk=1),
+        parallel=OffloadingParallelConfig(
+            rank=rank,
+            world_size=2,
+            tp_size=2,
+            pp_size=1,
+            pcp_size=1,
+            dcp_size=1,
+            data_parallel_index=0,
+            data_parallel_size=1,
+            data_parallel_rank_local=None,
+            is_parallelism_agnostic=False,
+        ),
+    )
+
+
+class BareExternalOffloadingSpec(OffloadingSpec):
+    def get_manager(self) -> OffloadingManager:
+        raise NotImplementedError
+
+    def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
+        raise NotImplementedError
 
 
 # ---------------------------------------------------------------------------
@@ -118,12 +211,111 @@ def _make_worker(kv_cache_config: KVCacheConfig):
 # ---------------------------------------------------------------------------
 
 
+def test_prepare_store_kv_non_writer_marks_completed_without_submit():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+        replicated_layout=True,
+        rank=1,
+    )
+
+    worker.prepare_store_kv(_store_metadata(7))
+    worker.start_kv_transfers(_empty_metadata())
+
+    assert worker._unsubmitted_store_jobs == []
+    assert worker.worker is not None
+    worker.worker.submit_store.assert_not_called()
+    meta = worker.build_connector_worker_meta()
+    assert meta is not None
+    assert meta.completed_jobs == {7: 1}
+
+
+def test_prepare_store_kv_writer_submits_store():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+        replicated_layout=True,
+        rank=0,
+    )
+
+    worker.prepare_store_kv(_store_metadata(8))
+    assert worker.build_connector_worker_meta() is None
+    worker.start_kv_transfers(_empty_metadata())
+
+    assert worker.worker is not None
+    worker.worker.submit_store.assert_called_once()
+
+
+def test_prepare_store_kv_non_replicated_rank_gt_zero_queues_store():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+        replicated_layout=False,
+        rank=1,
+    )
+
+    worker.prepare_store_kv(_store_metadata(9))
+    assert worker.build_connector_worker_meta() is None
+    assert len(worker._unsubmitted_store_jobs) == 1
+
+    worker.start_kv_transfers(_empty_metadata())
+
+    assert worker.worker is not None
+    worker.worker.submit_store.assert_called_once()
+    assert worker._unsubmitted_store_jobs == []
+
+
+def test_handle_preemptions_non_writer_acks_flushed_store():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+        replicated_layout=True,
+        rank=1,
+    )
+    metadata = _store_metadata(10)
+    metadata.jobs_to_flush = {10}
+
+    worker.handle_preemptions(metadata)
+
+    assert worker.worker is not None
+    worker.worker.submit_store.assert_not_called()
+    worker.worker.wait.assert_called_once_with({10})
+    assert metadata.store_jobs == {}
+    meta = worker.build_connector_worker_meta()
+    assert meta is not None
+    assert meta.completed_jobs == {10: 1}
+
+
+def test_start_kv_transfers_non_writer_still_submits_load():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]),
+        replicated_layout=True,
+        rank=1,
+    )
+
+    worker.start_kv_transfers(_load_metadata(10))
+
+    assert worker.worker is not None
+    worker.worker.submit_load.assert_called_once()
+    assert worker.build_connector_worker_meta() is None
+
+
+def test_offloading_connector_worker_accepts_plugin_spec_default_layout():
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
+        OffloadingConnectorWorker,
+    )
+
+    spec = BareExternalOffloadingSpec(_offloading_config(rank=1))
+
+    OffloadingConnectorWorker(
+        spec=spec,
+        vllm_config=_single_rank_vllm_config(NUM_KV_HEADS),
+        kv_cache_config=KVCacheConfig(
+            num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
+        ),
+    )
+
+    assert spec.replicated_layout is False
+
+
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.offloading"
-    ".worker.get_layers_from_vllm_config"
-)
-def test_register_kv_caches(mock_get_layers, backend):
+def test_register_kv_caches(backend):
     """Test register_kv_caches with multiple groups covering all layer types.
 
     Creates one FullAttention group, one MLA group, one Mamba group, and
@@ -135,8 +327,7 @@ def test_register_kv_caches(mock_get_layers, backend):
     own dedicated tensors.
 
     Uses the real GPUModelRunner.initialize_kv_cache_tensors to produce
-    kv_caches, which automatically applies
-    _update_hybrid_attention_mamba_layout for hybrid models.
+    the raw per-layer kv_caches registered by the connector.
 
     Verifies that the canonicalized CanonicalKVCaches has the correct
     block tensors, tensor_idx references, and page sizes across all groups.
@@ -284,20 +475,13 @@ def test_register_kv_caches(mock_get_layers, backend):
     kv_caches = _allocate_and_reshape_kv_caches(
         kv_cache_config,
         attn_groups,
-        device=torch.device("cuda:0"),
+        device=torch.device(f"{DEVICE_TYPE}:0"),
     )
-
-    mock_layers: dict[str, MagicMock] = {}
-    for layer_name in attn_layer_names:
-        mock_layers[layer_name] = _make_mock_layer(backend_cls)
-    for layer_name in mla_layer_names:
-        mock_layers[layer_name] = _make_mock_layer(DeepseekV32IndexerBackend)
-    mock_get_layers.return_value = mock_layers
 
     worker, spec = _make_worker(kv_cache_config)
     worker.register_kv_caches(kv_caches)
 
-    canonical = spec.get_handlers.call_args[0][0]
+    canonical = spec.get_worker.call_args[0][0]
     assert isinstance(canonical, CanonicalKVCaches)
 
     # -- Expected block tensors ----------------------------------------------
@@ -357,14 +541,12 @@ def test_register_kv_caches(mock_get_layers, backend):
         for actual, expected in zip(actual_refs, exp_refs):
             assert actual.tensor_idx == expected.tensor_idx
             assert actual.page_size_bytes == expected.page_size_bytes
+            # Every layer gets a canonical mapping, certified or opaque
+            assert actual.mapping is not None
 
 
 @pytest.mark.parametrize("backend", ATTN_BACKENDS)
-@patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.offloading"
-    ".worker.get_layers_from_vllm_config"
-)
-def test_register_kv_caches_uniform_type(mock_get_layers, backend):
+def test_register_kv_caches_uniform_type(backend):
     """Test register_kv_caches with UniformTypeKVCacheSpecs.
 
     Two attention layers use the same backend but different num_kv_heads,
@@ -438,22 +620,14 @@ def test_register_kv_caches_uniform_type(mock_get_layers, backend):
     kv_caches = _allocate_and_reshape_kv_caches(
         kv_cache_config,
         attn_groups,
-        device=torch.device("cuda:0"),
+        device=torch.device(f"{DEVICE_TYPE}:0"),
     )
-
-    mock_get_layers.return_value = {
-        layer_a: _make_mock_layer(backend_cls),
-        layer_b: _make_mock_layer(backend_cls),
-    }
 
     worker, spec = _make_worker(kv_cache_config)
     worker.register_kv_caches(kv_caches)
 
-    canonical = spec.get_handlers.call_args[0][0]
+    canonical = spec.get_worker.call_args[0][0]
     assert isinstance(canonical, CanonicalKVCaches)
-
-    unbinds = backend_cls.get_name() in ("FLASH_ATTN", "FLEX_ATTENTION")
-    tensors_per_layer = 2 if unbinds else 1
 
     for block_tensor in canonical.tensors:
         assert block_tensor.tensor.dtype == torch.int8
@@ -461,44 +635,23 @@ def test_register_kv_caches_uniform_type(mock_get_layers, backend):
     # Single group with refs from both layers
     assert len(canonical.group_data_refs) == 1
     group_refs = canonical.group_data_refs[0]
-    assert len(group_refs) == 2 * tensors_per_layer
+    assert len(group_refs) == 2
 
-    if unbinds:
-        half_a = spec_a.page_size_bytes // 2
-        half_b = spec_b.page_size_bytes // 2
+    assert len(canonical.tensors) == 2
+    assert canonical.tensors[0].page_size_bytes == spec_a.page_size_bytes
+    assert canonical.tensors[1].page_size_bytes == spec_b.page_size_bytes
+    assert canonical.tensors[0].tensor.shape == (NUM_BLOCKS, spec_a.page_size_bytes)
+    assert canonical.tensors[1].tensor.shape == (NUM_BLOCKS, spec_b.page_size_bytes)
 
-        assert len(canonical.tensors) == 4
-        assert canonical.tensors[0].page_size_bytes == half_a
-        assert canonical.tensors[1].page_size_bytes == half_a
-        assert canonical.tensors[2].page_size_bytes == half_b
-        assert canonical.tensors[3].page_size_bytes == half_b
-        assert canonical.tensors[0].tensor.shape == (NUM_BLOCKS, half_a)
-        assert canonical.tensors[1].tensor.shape == (NUM_BLOCKS, half_a)
-        assert canonical.tensors[2].tensor.shape == (NUM_BLOCKS, half_b)
-        assert canonical.tensors[3].tensor.shape == (NUM_BLOCKS, half_b)
+    for ref, expected_tensor_idx, expected_spec in (
+        (group_refs[0], 0, spec_a),
+        (group_refs[1], 1, spec_b),
+    ):
+        assert ref.tensor_idx == expected_tensor_idx
+        assert ref.page_size_bytes == expected_spec.page_size_bytes
+        assert ref.mapping is not None
 
-        assert group_refs[0] == CanonicalKVCacheRef(
-            tensor_idx=0, page_size_bytes=half_a
-        )
-        assert group_refs[1] == CanonicalKVCacheRef(
-            tensor_idx=1, page_size_bytes=half_a
-        )
-        assert group_refs[2] == CanonicalKVCacheRef(
-            tensor_idx=2, page_size_bytes=half_b
-        )
-        assert group_refs[3] == CanonicalKVCacheRef(
-            tensor_idx=3, page_size_bytes=half_b
-        )
-    else:
-        assert len(canonical.tensors) == 2
-        assert canonical.tensors[0].page_size_bytes == spec_a.page_size_bytes
-        assert canonical.tensors[1].page_size_bytes == spec_b.page_size_bytes
-        assert canonical.tensors[0].tensor.shape == (NUM_BLOCKS, spec_a.page_size_bytes)
-        assert canonical.tensors[1].tensor.shape == (NUM_BLOCKS, spec_b.page_size_bytes)
-
-        assert group_refs[0] == CanonicalKVCacheRef(
-            tensor_idx=0, page_size_bytes=spec_a.page_size_bytes
-        )
-        assert group_refs[1] == CanonicalKVCacheRef(
-            tensor_idx=1, page_size_bytes=spec_b.page_size_bytes
-        )
+    # Only layer_a matches the model's total KV head count, so layer_b gets an
+    # opaque mapping rather than a certified, parallelism-agnostic one
+    assert group_refs[0].mapping.parallelism_agnostic
+    assert not group_refs[1].mapping.parallelism_agnostic

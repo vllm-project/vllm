@@ -8,7 +8,9 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import torch
+from transformers import MistralCommonBackend
 
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
@@ -95,13 +97,20 @@ class GuidanceBackend(StructuredOutputBackend):
 
         if is_mistral_tokenizer(self.tokenizer):
             self.ll_tokenizer = self.tokenizer.llg_tokenizer
+        elif isinstance(self.tokenizer, MistralCommonBackend):
+            from mistral_common.guidance.tokenizer import from_mistral_tokenizer
+
+            self.ll_tokenizer = from_mistral_tokenizer(self.tokenizer.tokenizer)
         else:
             self.ll_tokenizer = llguidance_hf.from_tokenizer(
                 self.tokenizer, max(self.vocab_size, len(self.tokenizer))
             )
 
     def compile_grammar(
-        self, request_type: StructuredOutputOptions, grammar_spec: str
+        self,
+        request_type: StructuredOutputOptions,
+        grammar_spec: str,
+        stop_token_ids: set[int] | None = None,
     ) -> StructuredOutputGrammar:
         self.serialized_grammar = serialize_guidance_grammar(
             request_type,
@@ -261,7 +270,7 @@ def serialize_guidance_grammar(
                 begin: str = s["begin"]
                 trig = next((t for t in triggers if begin.startswith(t)), None)
                 if trig is None:
-                    raise ValueError(
+                    raise VLLMValidationError(
                         f"Trigger {begin} not found in triggers {triggers}"
                     )
                 tags.append(
@@ -273,7 +282,9 @@ def serialize_guidance_grammar(
                     )
                 )
             if not tags:
-                raise ValueError("No structural tags found in the grammar spec.")
+                raise VLLMValidationError(
+                    "No structural tags found in the grammar spec."
+                )
             return llguidance.StructTag.to_grammar(tags)
         else:
             logger.error(
@@ -292,7 +303,10 @@ def validate_guidance_grammar(
     if sampling_params.structured_outputs is None:
         return
     tp, grm = get_structured_output_key(sampling_params.structured_outputs)
-    guidance_grm = serialize_guidance_grammar(tp, grm)
+    try:
+        guidance_grm = serialize_guidance_grammar(tp, grm)
+    except (ValueError, KeyError, TypeError) as e:
+        raise VLLMValidationError(f"Invalid grammar specification: {e}") from e
     err = llguidance.LLMatcher.validate_grammar(guidance_grm, tokenizer)
     if err:
-        raise ValueError(f"Grammar error: {err}")
+        raise VLLMValidationError(f"Grammar error: {err}")

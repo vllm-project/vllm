@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.utils import fp8_utils, int8_utils
+from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
 
 
@@ -16,7 +17,9 @@ from vllm.platforms import current_platform
 @pytest.mark.parametrize("tma_aligned", [False, True])
 @pytest.mark.parametrize("scale_ue8m0", [False, True])
 @pytest.mark.parametrize("group_size", [64, 128])
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(), reason="Only test on CUDA/ROCm."
+)
 def test_per_token_group_quant_fp8(
     shape, column_major: bool, tma_aligned: bool, scale_ue8m0: bool, group_size: int
 ):
@@ -37,7 +40,7 @@ def test_per_token_group_quant_fp8(
     )
 
     # triton ref
-    with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
+    with patch("vllm.platforms.current_platform.is_cuda_alike", return_value=False):
         ref_q, ref_s = fp8_utils.per_token_group_quant_fp8(
             x,
             group_size,
@@ -77,7 +80,8 @@ def test_per_token_group_quant_fp8(
 )
 @pytest.mark.parametrize("poisoned_scales", [False, True])
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="DeepGEMM not available on this platform"
+    not current_platform.is_cuda_alike(),
+    reason="DeepGEMM not available on this platform",
 )
 def test_per_token_group_quant_fp8_packed(
     num_tokens, hidden_dim, group_size, poisoned_scales
@@ -99,8 +103,8 @@ def test_per_token_group_quant_fp8_packed(
     if poisoned_scales:
         # Call the kernel with poisoned scale buffer to
         # ensure padded indices are correctly zeroed.
-        fp8_dtype = torch.float8_e4m3fn
-        finfo = torch.finfo(fp8_dtype)
+        fp8_dtype = current_platform.fp8_dtype()
+        fp8_min, fp8_max = get_fp8_min_max()
         out_q = torch.empty_like(x, dtype=fp8_dtype)
         out_s_packed = torch.empty_strided(
             (mn, k_num_packed),
@@ -115,8 +119,8 @@ def test_per_token_group_quant_fp8_packed(
             out_s_packed,
             group_size,
             1e-10,
-            finfo.min,
-            finfo.max,
+            fp8_min,
+            fp8_max,
         )
     else:
         out_q, out_s_packed = fp8_utils.per_token_group_quant_fp8_packed_for_deepgemm(
@@ -126,7 +130,7 @@ def test_per_token_group_quant_fp8_packed(
         )
 
     # Triton reference (row-major float32 scales, UE8M0)
-    with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
+    with patch("vllm.platforms.current_platform.is_cuda_alike", return_value=False):
         ref_q, ref_s = fp8_utils.per_token_group_quant_fp8(
             x,
             group_size,
@@ -157,7 +161,8 @@ def test_per_token_group_quant_fp8_packed(
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="DeepGEMM not available on this platform"
+    not current_platform.is_cuda_alike(),
+    reason="DeepGEMM not available on this platform",
 )
 def test_per_token_group_quant_fp8_packed_all_zero():
     """All-zero input must produce well-defined UE8M0 scale bytes via the eps
@@ -216,7 +221,8 @@ def test_per_token_group_quant_fp8_packed_all_zero():
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="DeepGEMM not available on this platform"
+    not current_platform.is_cuda_alike(),
+    reason="DeepGEMM not available on this platform",
 )
 def test_per_token_group_quant_fp8_packed_mantissa_rounds_up():
     """Inputs whose absmax/max_8bit produces a non-power-of-2 force the
@@ -244,7 +250,7 @@ def test_per_token_group_quant_fp8_packed_mantissa_rounds_up():
         use_ue8m0=True,
     )
 
-    with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
+    with patch("vllm.platforms.current_platform.is_cuda_alike", return_value=False):
         ref_q, ref_s = fp8_utils.per_token_group_quant_fp8(
             x,
             group_size,
@@ -286,7 +292,8 @@ def test_per_token_group_quant_fp8_packed_mantissa_rounds_up():
     ],
 )
 @pytest.mark.skipif(
-    not current_platform.is_cuda(), reason="DeepGEMM not available on this platform"
+    not current_platform.is_cuda_alike(),
+    reason="DeepGEMM not available on this platform",
 )
 def test_per_token_group_quant_fp8_packed_zero_fills_padded_output_q(
     num_tokens, hidden_dim
@@ -305,8 +312,8 @@ def test_per_token_group_quant_fp8_packed_zero_fills_padded_output_q(
     k_num_packed = (groups_per_row + 3) // 4
     tma_aligned_mn = ((mn + 3) // 4) * 4
 
-    fp8_dtype = torch.float8_e4m3fn
-    finfo = torch.finfo(fp8_dtype)
+    fp8_dtype = current_platform.fp8_dtype()
+    fp8_min, fp8_max = get_fp8_min_max()
     # Allocate output_q with the padded mn extent and pre-fill with 0xFF
     # so the kernel cannot rely on a clean buffer.
     out_q = torch.empty((tma_aligned_mn, hidden_dim), device=device, dtype=fp8_dtype)
@@ -320,11 +327,11 @@ def test_per_token_group_quant_fp8_packed_zero_fills_padded_output_q(
     )
 
     torch.ops._C.per_token_group_fp8_quant_packed(
-        x, out_q, out_s_packed, group_size, 1e-10, finfo.min, finfo.max
+        x, out_q, out_s_packed, group_size, 1e-10, fp8_min, fp8_max
     )
 
     # Live rows must match the Triton reference.
-    with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
+    with patch("vllm.platforms.current_platform.is_cuda_alike", return_value=False):
         ref_q, _ = fp8_utils.per_token_group_quant_fp8(x, group_size, use_ue8m0=True)
     assert torch.equal(out_q[:mn], ref_q), "Live region mismatch"
 
@@ -336,6 +343,63 @@ def test_per_token_group_quant_fp8_packed_zero_fills_padded_output_q(
             f"Padded rows [{mn}, {tma_aligned_mn}) not zeroed; "
             f"{padded_bytes.ne(0).sum().item()} non-zero bytes"
         )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="packed FP8 per-token-group quant kernel requires a CUDA-alike GPU",
+)
+def test_per_token_group_quant_fp8_packed_large_mn():
+    """Regression test for https://github.com/vllm-project/vllm/issues/45099.
+
+    Some background: gridDim.x and gridDim.y have different limits of 2^31 - 1 and
+    2^16 - 1, respectively.
+    Prior code introduced a bug where it incorrectly assumed grid.x and y both have
+    2^31 - 1 limits and mixed them up, which doesn't surface until the kernel is
+    launched with a large mn that exceeds grid.y limit (2^16 - 1).
+
+    This issue doesn't surface often because each forward pass only processes a
+    bounded token batch, not the full context.
+    Quantizing tensors with more rows than that will fail at launch with
+    "CUDA error: invalid argument".
+    This is a differential test that compares fp8 output against Triton output
+    reference when token size sits just above the gridDim.y 2^16 - 1 limit.
+    """
+
+    device = "cuda"
+    group_size = 128
+    # hidden 2048 -> 2048/128 = 16 groups per row -> kx=16, ry=1: one grid row per mn
+    # row, so any mn > 65535 overflowed grid.y before the fix.
+    num_tokens, hidden_dim = 65537, 2048
+    torch.manual_seed(42)
+    x = torch.randn((num_tokens, hidden_dim), device=device, dtype=torch.bfloat16) * 8
+
+    out_q, out_s_packed = fp8_utils.per_token_group_quant_fp8_packed_for_deepgemm(
+        x,
+        group_size=group_size,
+        use_ue8m0=True,
+    )
+
+    with patch("vllm.platforms.current_platform.is_cuda_alike", return_value=False):
+        ref_q, ref_s = fp8_utils.per_token_group_quant_fp8(
+            x, group_size, use_ue8m0=True
+        )
+
+    assert torch.equal(out_q, ref_q), "Quantized output mismatch"
+
+    # Vectorized packed-scale check; the per-element loop used by the smaller
+    # tests is too slow at this size. groups_per_row is a multiple of 4 here,
+    # so there is no K padding and the packed view lines up.
+    mn = num_tokens
+    groups_per_row = hidden_dim // group_size
+    k_num_packed = (groups_per_row + 3) // 4
+    assert groups_per_row % 4 == 0
+    ref_exponents = (ref_s.reshape(mn, groups_per_row).view(torch.int32) >> 23) & 0xFF
+    exp = ref_exponents.view(mn, k_num_packed, 4)
+    expected = (
+        exp[..., 0] | (exp[..., 1] << 8) | (exp[..., 2] << 16) | (exp[..., 3] << 24)
+    )
+    assert torch.equal(out_s_packed.cpu(), expected.cpu()), "Packed scale mismatch"
 
 
 @pytest.mark.parametrize("shape", [(32, 128), (64, 256), (16, 512)])
@@ -356,7 +420,7 @@ def test_per_token_group_quant_int8(shape, group_size: int):
     )
 
     # triton ref
-    with patch("vllm.platforms.current_platform.is_cuda", return_value=False):
+    with patch("vllm.platforms.current_platform.is_cuda_alike", return_value=False):
         ref_q, ref_s = int8_utils.per_token_group_quant_int8(
             x,
             group_size,

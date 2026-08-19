@@ -125,6 +125,10 @@ class WorkerBase:
     def get_model(self) -> nn.Module:
         raise NotImplementedError
 
+    def supports_draft_weight_updates(self) -> bool:
+        """Whether this worker can update its configured speculative model."""
+        return False
+
     def apply_model(self, fn: Callable[[nn.Module], _R]) -> _R:
         """Apply a function on the model inside this worker."""
         return fn(self.get_model())
@@ -285,6 +289,12 @@ class WorkerWrapperBase:
                     worker_class,
                     extended_calls,
                 )
+
+        assigned_physical_gpu_ids = kwargs.pop("assigned_physical_gpu_ids", None)
+        if assigned_physical_gpu_ids is not None:
+            vllm_config.parallel_config.assigned_physical_gpu_ids = (
+                assigned_physical_gpu_ids
+            )
 
         shared_worker_lock = kwargs.pop("shared_worker_lock", None)
         if shared_worker_lock is None:

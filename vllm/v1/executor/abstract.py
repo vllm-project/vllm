@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.distributed.ec_transfer.ec_connector.utils import ECOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
@@ -110,17 +111,18 @@ class Executor(ABC):
         self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
         self.kv_output_aggregator: KVOutputAggregator | None = None
+        self.ec_output_aggregator: ECOutputAggregator | None = None
 
     @abstractmethod
     def _init_executor(self) -> None:
         raise NotImplementedError
 
     def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
-        """
-        Initialize the KV caches and begin the model execution loop of the
-        underlying workers.
-        """
+        """Initialize the KV caches on the underlying workers."""
         self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
+
+    def compile_or_warm_up_model(self) -> None:
+        """Compile/warm up the model and capture cudagraphs on workers."""
         compilation_times: list[CompilationTimes] = self.collective_rpc(
             "compile_or_warm_up_model"
         )
@@ -203,7 +205,7 @@ class Executor(ABC):
 
     def get_kv_connector_handshake_metadata(
         self,
-    ) -> list[dict[int, KVConnectorHandshakeMetadata]]:
+    ) -> list[dict[tuple[int, int], KVConnectorHandshakeMetadata]]:
         return self.collective_rpc("get_kv_connector_handshake_metadata")
 
     @overload
@@ -253,10 +255,6 @@ class Executor(ABC):
         output: list[DraftTokenIds] = self.collective_rpc("take_draft_token_ids")
         return output[0]
 
-    @property
-    def max_concurrent_batches(self) -> int:
-        return 1
-
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.collective_rpc("profile", args=(is_start, profile_prefix))
 
@@ -287,11 +285,20 @@ class Executor(ABC):
             connector, self.parallel_config.world_size
         )
 
+    def init_ec_output_aggregator(self) -> None:
+        self.ec_output_aggregator = ECOutputAggregator()
+
     @cached_property  # Avoid unnecessary RPC calls
     def supported_tasks(self) -> tuple[SupportedTask, ...]:
         output: list[tuple[SupportedTask, ...]]
         output = self.collective_rpc("get_supported_tasks")
         return output[0]
+
+    def supports_draft_weight_updates(self) -> bool:
+        worker_support: list[bool] = self.collective_rpc(
+            "supports_draft_weight_updates"
+        )
+        return all(worker_support)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         assert lora_request.lora_int_id > 0, "lora_id must be greater than 0."

@@ -5,15 +5,17 @@
 # (vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/).
 """Scheduler-side logic for MooncakeStoreConnector."""
 
-from typing import Any
-
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
+    partial_hash_hits_enabled,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     LoadSpec,
     MooncakeStoreConnectorMetadata,
+    MooncakeStoreWorkerMetadata,
     ReqMeta,
     RequestTracker,
 )
@@ -21,10 +23,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (
     LookupKeyClient,
 )
 from vllm.logger import init_logger
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -54,52 +58,66 @@ class MooncakeStoreScheduler:
     ):
         assert vllm_config.kv_transfer_config is not None
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "load_async", True
-        )
+        kvc_extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        self.load_async = kvc_extra_config.get("load_async", True)
+        self.lookup_async = kvc_extra_config.get("lookup_async", False)
+        # Skips lookup CPU cost on instances that never load KV from the store.
+        self.enable_lookup = kvc_extra_config.get("enable_lookup", True)
         self.client = LookupKeyClient(vllm_config)
 
-        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
-        self.dcp_size = vllm_config.parallel_config.decode_context_parallel_size
-        self.original_block_size = vllm_config.cache_config.block_size
-        # LCM for multi-group HMA; bs * pcp * dcp for single-group. Matches
-        # the engine's own scheduler block size by construction.
+        # Align with the engine's own scheduler_block_size and hash_block_size.
         self._block_size, self._hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
-
-        self._discard_partial_chunks = (
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "discard_partial_chunks", True
-            )
+        self.enable_partial_hash_hits = partial_hash_hits_enabled(
+            kv_cache_config.kv_cache_groups, self._hash_block_size
         )
 
         # Per-request state
         self.load_specs: dict[str, LoadSpec] = {}  # to be loaded
         self._request_trackers: dict[str, RequestTracker] = {}  # scheduled new requests
-        self._preempted_req_ids: set[str] = set()  # preempted requests
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
+
+        self._gpu_block_pool: BlockPool | None = None
+        self._num_workers = vllm_config.parallel_config.world_size
+        self._next_store_job_id = 0
+        # store_job_id -> (referenced block ids, ranks yet to report completion)
+        self._pinned_saves: dict[int, tuple[list[int], int]] = {}
+
+    def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
+        self._gpu_block_pool = gpu_block_pool
 
     def get_num_new_matched_tokens(
         self,
         request: Request,
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
-        """Check for external KV cache hit."""
-        # Look up against the full prefill range, not just the prompt.
-        if self._discard_partial_chunks:
-            token_len = request.num_tokens // self._block_size * self._block_size
-        else:
-            token_len = request.num_tokens
+    ) -> tuple[int | None, bool]:
+        """Check for external KV cache hit.
 
-        if token_len < self._block_size:
+        Returns ``(None, False)`` when an async lookup is still in flight,
+        signaling the scheduler to retry this request on a later step.
+        """
+        if not self.enable_lookup:
             return 0, False
 
-        num_external_hit_tokens = self.client.lookup(token_len, request.block_hashes)
+        # Fine-grained hits may land on a hash boundary inside a block; without
+        # partial hits, prefixes shorter than one physical block are skipped.
+        align = (
+            self._hash_block_size if self.enable_partial_hash_hits else self._block_size
+        )
+        if request.num_tokens < align:
+            return 0, False
 
-        if num_external_hit_tokens == request.num_tokens:
-            num_external_hit_tokens -= 1
+        num_external_hit_tokens = self.client.lookup(
+            request.request_id,
+            request.num_tokens,
+            request.block_hashes,
+            non_block=self.lookup_async,
+        )
+        if num_external_hit_tokens is None:
+            # Lookup not ready yet; scheduler will retry on a later step.
+            return None, False
 
         if num_external_hit_tokens < num_computed_tokens:
             need_to_allocate = 0
@@ -167,16 +185,17 @@ class MooncakeStoreScheduler:
         force_skip_save = self.kv_role == "kv_consumer"
 
         for finished_req_id in scheduler_output.finished_req_ids:
+            self.client.discard(finished_req_id)
             self.load_specs.pop(finished_req_id, None)
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._unfinished_request_ids.discard(finished_req_id)
-            self._preempted_req_ids.discard(finished_req_id)
 
         preempted_ids = scheduler_output.preempted_req_ids or set()
-        self._preempted_req_ids.update(preempted_ids)
         for req_id in preempted_ids:
-            self._request_trackers.pop(req_id, None)
+            self.load_specs.pop(req_id, None)
+            if request_tracker := self._request_trackers.get(req_id):
+                request_tracker.reset()
             self._unfinished_requests.pop(req_id, None)
 
         meta = MooncakeStoreConnectorMetadata(
@@ -214,9 +233,7 @@ class MooncakeStoreScheduler:
             self._request_trackers[request.req_id] = request_tracker
 
             last_chunk_tokens_num = (
-                (len(prefill_tokens) // self._block_size * self._block_size)
-                if self._discard_partial_chunks
-                else len(prefill_tokens)
+                len(prefill_tokens) // self._block_size * self._block_size
             )
 
             req_meta = ReqMeta.from_request_tracker(
@@ -226,8 +243,6 @@ class MooncakeStoreScheduler:
                 skip_save=force_skip_save,
                 block_hashes=request_real.block_hashes,
                 is_last_chunk=(request_tracker.token_len >= last_chunk_tokens_num),
-                discard_partial_chunks=self._discard_partial_chunks,
-                original_block_size=self.original_block_size,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -241,13 +256,12 @@ class MooncakeStoreScheduler:
                     continue
 
                 req_meta = None
-                if req_id in self._preempted_req_ids:
+                if req_id in cached_reqs.resumed_req_ids:
                     # Resumed after preemption
                     if isinstance(new_block_ids, tuple):
                         new_block_ids = tuple(b.copy() for b in new_block_ids)
                     else:
                         new_block_ids = (new_block_ids.copy(),)
-                    self._preempted_req_ids.discard(req_id)
                     load_spec = self.load_specs.pop(req_id, None)
                     request_tuple = self._unfinished_requests.get(req_id)
                     request_real = request_tuple[0]  # type: ignore[index]
@@ -269,9 +283,7 @@ class MooncakeStoreScheduler:
                     self._request_trackers[req_id] = request_tracker
 
                     last_chunk_tokens_num = (
-                        (len(prefill_tokens) // self._block_size * self._block_size)
-                        if self._discard_partial_chunks
-                        else len(prefill_tokens)
+                        len(prefill_tokens) // self._block_size * self._block_size
                     )
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
@@ -282,8 +294,6 @@ class MooncakeStoreScheduler:
                         is_last_chunk=(
                             request_tracker.token_len >= last_chunk_tokens_num
                         ),
-                        discard_partial_chunks=self._discard_partial_chunks,
-                        original_block_size=self.original_block_size,
                     )
                 else:
                     # Decode/chunked request
@@ -310,9 +320,7 @@ class MooncakeStoreScheduler:
                     request_tracker.update(new_block_ids)
 
                     last_chunk_tokens_num = (
-                        (prefill_end // self._block_size * self._block_size)
-                        if self._discard_partial_chunks
-                        else prefill_end
+                        prefill_end // self._block_size * self._block_size
                     )
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
@@ -323,8 +331,6 @@ class MooncakeStoreScheduler:
                         is_last_chunk=(
                             request_tracker.token_len >= last_chunk_tokens_num
                         ),
-                        discard_partial_chunks=self._discard_partial_chunks,
-                        original_block_size=self.original_block_size,
                     )
 
                 if req_meta is not None:
@@ -341,10 +347,6 @@ class MooncakeStoreScheduler:
                 if not load_spec:
                     continue
                 num_tokens_to_compute = load_spec.kvpool_cached_tokens
-                if (num_tokens_to_compute % self._block_size != 0) and (
-                    num_tokens_to_compute == unfinished_req.num_tokens - 1
-                ):
-                    num_tokens_to_compute = num_tokens_to_compute + 1
                 request_tracker = RequestTracker(
                     req_id=request_id,
                     token_len=num_tokens_to_compute,
@@ -358,31 +360,141 @@ class MooncakeStoreScheduler:
                     load_spec=load_spec,
                     skip_save=None,
                     block_hashes=unfinished_req.block_hashes,
-                    discard_partial_chunks=self._discard_partial_chunks,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
 
+        # Flush partial-tail offloads in the step they arrive: the CoW copy is
+        # enqueued before the connector event records, so this step's event
+        # fences the cow block. Ride the request's save meta when present, else
+        # emit an offload-only ReqMeta (token_len_chunk=0 skips the normal
+        # save; can_save=True takes the normal enqueue path).
+        step_partial_tails = getattr(scheduler_output, "partial_tail_offloads", None)
+        if step_partial_tails and not force_skip_save:
+            pending = dict(step_partial_tails)
+            for req_meta in meta.requests:
+                if req_meta.can_save:
+                    groups = pending.pop(req_meta.req_id, None)
+                    if groups:
+                        req_meta.partial_tail_offloads = groups
+                        tracker = self._request_trackers.get(req_meta.req_id)
+                        if tracker is not None:
+                            tracker.has_pending_offload = True
+            for req_id, groups in pending.items():
+                tracker = self._request_trackers.get(req_id)
+                req_tuple = self._unfinished_requests.get(req_id)
+                if tracker is None or req_tuple is None:
+                    # Request finished/preempted within this step; its blocks
+                    # are going away, so the offload is conservatively dropped.
+                    logger.debug("Dropping partial-tail offload for request %s", req_id)
+                    continue
+                assert len({boundary for _, _, boundary in groups}) == 1
+                tracker.has_pending_offload = True
+                meta.add_request(
+                    ReqMeta(
+                        req_id=req_id,
+                        token_len_chunk=0,
+                        block_ids=tracker.allocated_block_ids,
+                        block_hashes=req_tuple[0].block_hashes,
+                        can_save=True,
+                        num_prompt_tokens=tracker.prefill_end_tokens,
+                        partial_tail_offloads=groups,
+                    )
+                )
+
+        self._reference_save_blocks(meta)
         return meta
 
-    def request_finished(
-        self,
-        request: Request,
-        block_ids: tuple[list[int], ...],
-    ) -> tuple[bool, dict[str, Any] | None]:
-        """Determine whether to delay freeing blocks for async save."""
-        if self.kv_role == "kv_consumer":
-            return False, None
-        tracker = self._request_trackers.get(request.request_id)
-        assert tracker is not None
-        if tracker.num_saved_tokens <= 0:
-            return False, None
-        total_blocks = sum(len(g) for g in block_ids)
-        delay_free_blocks = total_blocks > 0
-        if delay_free_blocks:
-            logger.debug(
-                "Delaying free of %d blocks for request %s",
-                total_blocks,
-                request.request_id,
+    def _reference_save_blocks(self, meta: MooncakeStoreConnectorMetadata) -> None:
+        """Take a GPU block reference for every store job this step emits.
+
+        The worker DMAs out of these blocks after the step that scheduled them,
+        so a reference keeps them out of the free queue even once the request
+        itself is freed, until every rank reports the job done.
+        """
+        pool = self._gpu_block_pool
+        for req_meta in meta.requests:
+            if not req_meta.can_save:
+                continue
+            assert pool is not None, (
+                "GPU block pool must be bound before any store job is emitted"
             )
-        return delay_free_blocks, None
+            req_meta.store_job_id = store_job_id = self._next_store_job_id
+            self._next_store_job_id += 1
+            block_ids: list[int] = []
+            if req_meta.partial_tail_offloads:
+                # A partial-tail CoW block is deliberately kept out of the
+                # request's block table, so it is absent from `block_ids` even
+                # though the worker DMAs out of it just as asynchronously.
+                # It leads the list, as in `pop_blocks_for_free`.
+                block_ids += [bid for _, bid, _ in req_meta.partial_tail_offloads]
+            # Every allocated block is referenced, not just the ones covering
+            # this job's token range: a rank resumes from its own last
+            # successful offset, which lags the scheduler's whenever a save was
+            # skipped or failed, so it may read anywhere below the range.
+            block_ids += [bid for group in req_meta.block_ids for bid in group]
+            if not block_ids:
+                continue
+            self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
+            pool.touch([pool.blocks[bid] for bid in block_ids])
+
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
+        """Drop the block references of store jobs every rank has finished."""
+        meta = connector_output.kv_connector_worker_meta
+        if not isinstance(meta, MooncakeStoreWorkerMetadata):
+            return
+        pool = self._gpu_block_pool
+        assert pool is not None
+        for store_job_id, count in meta.completed_saves.items():
+            pinned = self._pinned_saves.get(store_job_id)
+            if pinned is None:
+                # The job referenced no blocks, so nothing was recorded for it.
+                continue
+            block_ids, remaining = pinned
+            remaining -= count
+            if remaining > 0:
+                self._pinned_saves[store_job_id] = (block_ids, remaining)
+                continue
+            assert remaining == 0, (
+                f"store job {store_job_id} reported by too many ranks"
+            )
+            del self._pinned_saves[store_job_id]
+            # Tail-first, as elsewhere, so the shared prefix is evicted last.
+            pool.free_blocks(pool.blocks[bid] for bid in reversed(block_ids))
+
+    def has_pending_push_work(self) -> bool:
+        """Keep the engine stepping while any store job still holds block refs.
+
+        Completions only reach the scheduler as worker metadata on a step, so an
+        engine that quiesced with jobs in flight would leave those references
+        held indefinitely. Nothing else keeps it alive now that a finishing
+        request no longer defers its own free.
+        """
+        return bool(self._pinned_saves)
+
+    def reset_store(self) -> bool:
+        """Trigger a global ``remove_all(force=True)`` on the Mooncake master.
+
+        Routes through the existing LookupKey ZMQ admin channel to worker
+        rank 0, which owns the ``MooncakeDistributedStore`` handle.
+
+        Ordering assumption: caller (typically
+        ``Scheduler.reset_connector_cache``, invoked via
+        ``reset_prefix_cache(reset_connector=True)``) MUST ensure no
+        in-flight Mooncake lookups or transfers. For RL workflows this is
+        satisfied at the step boundary after weight updates and rollout
+        drain. Violating this can allow stale KV to be served on the next
+        request, defeating the hard-reset guarantee.
+
+        Returns True on ACK from worker, False on NACK or RPC error.
+        """
+        try:
+            ok = self.client.reset()
+            if ok:
+                logger.info("Mooncake store reset via remove_all succeeded.")
+            else:
+                logger.warning("Mooncake store reset returned NACK from worker.")
+            return ok
+        except Exception as e:
+            logger.error("Mooncake reset_store RPC failed: %s", e)
+            return False

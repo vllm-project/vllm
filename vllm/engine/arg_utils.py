@@ -6,6 +6,7 @@ import copy
 import dataclasses
 import functools
 import json
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
@@ -38,8 +39,11 @@ from vllm.config import (
     CompilationConfig,
     ConfigType,
     DeviceConfig,
+    DiffusionConfig,
     ECTransferConfig,
+    EncoderCacheManagerConfig,
     EPLBConfig,
+    FaultToleranceConfig,
     KernelConfig,
     KVEventsConfig,
     KVTransferConfig,
@@ -72,8 +76,9 @@ from vllm.config.cache import (
 )
 from vllm.config.device import Device
 from vllm.config.kernel import IrOpPriorityConfig, LinearBackend, MoEBackend
+from vllm.config.load import SafetensorsLoadStrategy
 from vllm.config.lora import MaxLoRARanks
-from vllm.config.mamba import MambaBackendEnum
+from vllm.config.mamba import MambaBackendEnum, MambaSSUAlgorithm
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -82,7 +87,13 @@ from vllm.config.model import (
     RunnerOption,
     TokenizerMode,
 )
-from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MMTensorIPC
+from vllm.config.multimodal import (
+    MMCacheType,
+    MMEncoderTPMode,
+    MMHasherAlgorithm,
+    MMProcessorDevice,
+    MMTensorIPC,
+)
 from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import (
     All2AllBackend,
@@ -98,11 +109,7 @@ from vllm.logger import init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
-from vllm.transformers_utils.config import (
-    is_interleaved,
-    maybe_override_with_speculators,
-)
-from vllm.transformers_utils.gguf_utils import is_gguf
+from vllm.transformers_utils.config import maybe_override_with_speculators
 from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage
 from vllm.utils.argparse_utils import (
@@ -125,8 +132,8 @@ if TYPE_CHECKING:
     from vllm.v1.executor import Executor
 else:
     Executor = Any
-    QuantizationMethods = Any
-    LoadFormats = Any
+    QuantizationMethods = str
+    LoadFormats = str
     UsageContext = Any
 
 
@@ -247,17 +254,19 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
 
 NEEDS_HELP = (
     any("--help" in arg for arg in sys.argv)  # vllm SUBCOMMAND --help
-    or (argv0 := sys.argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
-    or argv0.endswith("mkdocs/__main__.py")  # python -m mkdocs SUBCOMMAND
+    or "mkdocs" in sys.modules  # mkdocs SUBCOMMAND
 )
 
 
 def _maybe_add_docs_url(cls: Any) -> str:
     """Generate API docs URL for a vllm config class."""
-    if not cls.__module__.startswith("vllm.config"):
+    import vllm.config
+
+    name = cls.__name__
+    if getattr(vllm.config, name, None) is not cls:
         return ""
     version = f"v{VLLM_VERSION}" if "dev" not in VLLM_VERSION else "latest"
-    return f"\n\nAPI docs: https://docs.vllm.ai/en/{version}/api/vllm/config/#vllm.config.{cls.__name__}"
+    return f"\n\nAPI docs: https://docs.vllm.ai/en/{version}/api/vllm/config/#vllm.config.{name}"
 
 
 def _expand_json_human_readable_numbers(val: str) -> str:
@@ -352,14 +361,17 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
         elif contains_type(type_hints, set):
             kwargs[name].update(collection_to_kwargs(type_hints, set))
         elif contains_type(type_hints, int):
+            # Arguments that accept human-readable integer strings (e.g., 1K, 2M, 1G)
+            human_readable_int_args = {
+                "max_num_batched_tokens",
+                "max_num_scheduled_tokens",
+                "kv_cache_memory_bytes",
+                "safetensors_prefetch_block_size",
+            }
             if name == "max_model_len":
                 kwargs[name]["type"] = human_readable_int_or_auto
                 kwargs[name]["help"] += f"\n\n{human_readable_int_or_auto.__doc__}"
-            elif name in (
-                "max_num_batched_tokens",
-                "kv_cache_memory_bytes",
-                "safetensors_prefetch_block_size",
-            ):
+            elif name in human_readable_int_args:
                 kwargs[name]["type"] = human_readable_int
                 kwargs[name]["help"] += f"\n\n{human_readable_int.__doc__}"
             else:
@@ -414,6 +426,7 @@ class EngineArgs:
 
     model: str = ModelConfig.model
     enable_return_routed_experts: bool = ModelConfig.enable_return_routed_experts
+    return_sampling_mask: bool = ModelConfig.return_sampling_mask
     model_weights: str = ModelConfig.model_weights
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
     tokenizer: str | None = ModelConfig.tokenizer
@@ -427,7 +440,9 @@ class EngineArgs:
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     allowed_media_domains: list[str] | None = ModelConfig.allowed_media_domains
     download_dir: str | None = LoadConfig.download_dir
-    safetensors_load_strategy: str | None = LoadConfig.safetensors_load_strategy
+    safetensors_load_strategy: SafetensorsLoadStrategy | None = (
+        LoadConfig.safetensors_load_strategy
+    )
     safetensors_prefetch_num_threads: int = LoadConfig.safetensors_prefetch_num_threads
     safetensors_prefetch_block_size: int = LoadConfig.safetensors_prefetch_block_size
     load_format: str | LoadFormats = LoadConfig.load_format
@@ -456,9 +471,13 @@ class EngineArgs:
     nnodes: int = ParallelConfig.nnodes
     node_rank: int = ParallelConfig.node_rank
     distributed_timeout_seconds: int | None = ParallelConfig.distributed_timeout_seconds
+    cpu_distributed_timeout_seconds: int | None = (
+        ParallelConfig.cpu_distributed_timeout_seconds
+    )
     numa_bind: bool = ParallelConfig.numa_bind
     numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
     numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
+    device_ids: list[int | str] | None = None
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -473,6 +492,7 @@ class EngineArgs:
     data_parallel_rpc_port: int | None = None
     data_parallel_hybrid_lb: bool = False
     data_parallel_external_lb: bool = False
+    data_parallel_multi_port_external_lb: bool = False
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
@@ -502,6 +522,9 @@ class EngineArgs:
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
     )
+    prefix_cache_retention_interval: int | None = get_field(
+        CacheConfig, "prefix_cache_retention_interval"
+    )
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
     offload_backend: str = OffloadConfig.offload_backend
@@ -514,8 +537,7 @@ class EngineArgs:
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = None
-    max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
-    max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
+    max_num_scheduled_tokens: int | None = None
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
     max_num_seqs: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
@@ -527,6 +549,9 @@ class EngineArgs:
     code_revision: str | None = ModelConfig.code_revision
     hf_token: bool | str | None = ModelConfig.hf_token
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
+    model_class_overrides: dict[str, str] = get_field(
+        ModelConfig, "model_class_overrides"
+    )
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
     quantization: QuantizationMethods | str | None = ModelConfig.quantization
     quantization_config: "dict[str, Any] | QuantizationConfigArgs | None" = None
@@ -552,6 +577,9 @@ class EngineArgs:
     mm_processor_cache_type: MMCacheType | None = (
         MultiModalConfig.mm_processor_cache_type
     )
+    mm_hasher_algorithm: MMHasherAlgorithm = get_field(
+        MultiModalConfig, "mm_hasher_algorithm"
+    )
     mm_shm_cache_max_object_size_mb: int = (
         MultiModalConfig.mm_shm_cache_max_object_size_mb
     )
@@ -572,7 +600,11 @@ class EngineArgs:
     renderer_num_workers: int = 1
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
+    video_pruning_method: str = MultiModalConfig.video_pruning_method
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
+    mm_processor_device: MMProcessorDevice = "auto"
+    mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
+    mm_device_do_normalize: bool | None = MultiModalConfig.mm_device_do_normalize
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
@@ -585,6 +617,7 @@ class EngineArgs:
     enable_tower_connector_lora: bool = LoRAConfig.enable_tower_connector_lora
     specialize_active_lora: bool = LoRAConfig.specialize_active_lora
     enable_mixed_moe_lora_format: bool = LoRAConfig.enable_mixed_moe_lora_format
+    enable_moe_shared_loras: bool = LoRAConfig.enable_moe_shared_loras
 
     ray_workers_use_nsight: bool = ParallelConfig.ray_workers_use_nsight
     num_gpu_blocks_override: int | None = CacheConfig.num_gpu_blocks_override
@@ -595,6 +628,9 @@ class EngineArgs:
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
+    prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
+
+    watermark: float = SchedulerConfig.watermark
 
     disable_hybrid_kv_cache_manager: bool | None = (
         SchedulerConfig.disable_hybrid_kv_cache_manager
@@ -610,6 +646,7 @@ class EngineArgs:
     spec_method: str | None = None
     spec_model: str | None = None
     spec_tokens: int | None = None
+    diffusion_config: dict[str, Any] | None = None
 
     show_hidden_metrics_for_version: str | None = (
         ObservabilityConfig.show_hidden_metrics_for_version
@@ -630,6 +667,8 @@ class EngineArgs:
     enable_logging_iteration_details: bool = (
         ObservabilityConfig.enable_logging_iteration_details
     )
+    jit_monitor_mode: Literal["warn", "error"] = ObservabilityConfig.jit_monitor_mode
+    jit_monitor_verbose: bool = ObservabilityConfig.jit_monitor_verbose
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
@@ -642,6 +681,7 @@ class EngineArgs:
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
     )
+    enable_bf16x3_router_gemm: bool | None = None
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -651,27 +691,33 @@ class EngineArgs:
     kv_events_config: KVEventsConfig | None = None
 
     ec_transfer_config: ECTransferConfig | None = None
+    ec_manager_config: EncoderCacheManagerConfig = get_field(
+        VllmConfig, "ec_manager_config"
+    )
     reasoning_config: ReasoningConfig = get_field(VllmConfig, "reasoning_config")
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
+    enable_cumem_allocator: bool = ModelConfig.enable_cumem_allocator
     override_generation_config: dict[str, Any] = get_field(
         ModelConfig, "override_generation_config"
     )
     model_impl: str = ModelConfig.model_impl
-    override_attention_dtype: str | None = ModelConfig.override_attention_dtype
     attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
 
-    calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     kv_cache_dtype_skip_layers: list[str] = get_field(
         CacheConfig, "kv_cache_dtype_skip_layers"
     )
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
+    prefix_match_unit: int | None = get_field(CacheConfig, "prefix_match_unit")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+    replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
+    use_replayssm: bool = CacheConfig.use_replayssm
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
+    mamba_ssu_algorithm: MambaSSUAlgorithm | None = None
     enable_mamba_cache_stochastic_rounding: bool = (
         MambaConfig.enable_stochastic_rounding
     )
@@ -695,6 +741,11 @@ class EngineArgs:
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
     performance_mode: PerformanceMode = VllmConfig.performance_mode
 
+    fault_tolerance_config: FaultToleranceConfig = get_field(
+        ParallelConfig, "fault_tolerance_config"
+    )
+    enable_fault_tolerance: bool = ParallelConfig.enable_fault_tolerance
+
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
@@ -707,7 +758,8 @@ class EngineArgs:
     )
 
     fail_on_environ_validation: bool = False
-    gdn_prefill_backend: Literal["flashinfer", "triton"] | None = None
+    gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
+    kda_prefill_backend: Literal["auto", "triton", "flashkda"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -721,11 +773,23 @@ class EngineArgs:
             self.mamba_config = MambaConfig(**self.mamba_config)
         if isinstance(self.kernel_config, dict):
             self.kernel_config = KernelConfig(**self.kernel_config)
+        if isinstance(self.ec_manager_config, dict):
+            self.ec_manager_config = EncoderCacheManagerConfig(**self.ec_manager_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
         if isinstance(self.weight_transfer_config, dict):
             self.weight_transfer_config = WeightTransferConfig(
                 **self.weight_transfer_config
+            )
+        if isinstance(self.fault_tolerance_config, dict):
+            if not self.enable_fault_tolerance:
+                logger.warning(
+                    "--fault-tolerance-config was passed. Fault tolerance is being "
+                    "automatically enabled."
+                )
+                self.enable_fault_tolerance = True
+            self.fault_tolerance_config = FaultToleranceConfig(
+                **self.fault_tolerance_config
             )
         if isinstance(self.ir_op_priority, dict):
             self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
@@ -742,15 +806,20 @@ class EngineArgs:
         load_general_plugins()
         # when use hf offline,replace model and tokenizer id to local model path
         if huggingface_hub.constants.HF_HUB_OFFLINE:
-            model_id = self.model
-            self.model = get_model_path(self.model, self.revision)
-            if model_id is not self.model:
-                logger.info(
-                    "HF_HUB_OFFLINE is True, replace model_id [%s] to model_path [%s]",
-                    model_id,
-                    self.model,
-                )
-            if self.tokenizer is not None:
+            # Skip cloud storage URIs (s3://, gs://, az://) — they are not
+            # HF repo IDs and will be resolved later by
+            # ModelConfig.maybe_pull_model_tokenizer_for_runai().
+            if not is_cloud_storage(self.model):
+                model_id = self.model
+                self.model = get_model_path(self.model, self.revision)
+                if model_id is not self.model:
+                    logger.info(
+                        "HF_HUB_OFFLINE is True, replace model_id "
+                        "[%s] to model_path [%s]",
+                        model_id,
+                        self.model,
+                    )
+            if self.tokenizer is not None and not is_cloud_storage(self.tokenizer):
                 tokenizer_id = self.tokenizer
                 self.tokenizer = get_model_path(self.tokenizer, self.tokenizer_revision)
                 if tokenizer_id is not self.tokenizer:
@@ -808,6 +877,10 @@ class EngineArgs:
             "--enable-return-routed-experts",
             **model_kwargs["enable_return_routed_experts"],
         )
+        model_group.add_argument(
+            "--return-sampling-mask",
+            **model_kwargs["return_sampling_mask"],
+        )
         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode", **model_kwargs["logprobs_mode"])
         model_group.add_argument("--use-fp64-gumbel", **model_kwargs["use_fp64_gumbel"])
@@ -829,6 +902,9 @@ class EngineArgs:
         model_group.add_argument("--config-format", **model_kwargs["config_format"])
         model_group.add_argument("--hf-token", **model_kwargs["hf_token"])
         model_group.add_argument("--hf-overrides", **model_kwargs["hf_overrides"])
+        model_group.add_argument(
+            "--model-class-overrides", **model_kwargs["model_class_overrides"]
+        )
         model_group.add_argument("--pooler-config", **model_kwargs["pooler_config"])
         model_group.add_argument(
             "--generation-config", **model_kwargs["generation_config"]
@@ -839,10 +915,10 @@ class EngineArgs:
         model_group.add_argument(
             "--enable-sleep-mode", **model_kwargs["enable_sleep_mode"]
         )
-        model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
         model_group.add_argument(
-            "--override-attention-dtype", **model_kwargs["override_attention_dtype"]
+            "--enable-cumem-allocator", **model_kwargs["enable_cumem_allocator"]
         )
+        model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
         model_group.add_argument(
             "--logits-processors", **model_kwargs["logits_processors"]
         )
@@ -900,6 +976,9 @@ class EngineArgs:
         )
         mamba_group.add_argument("--mamba-backend", **mamba_kwargs["backend"])
         mamba_group.add_argument(
+            "--mamba-ssu-algorithm", **mamba_kwargs["ssu_algorithm"]
+        )
+        mamba_group.add_argument(
             "--enable-mamba-cache-stochastic-rounding",
             **mamba_kwargs["enable_stochastic_rounding"],
         )
@@ -947,12 +1026,30 @@ class EngineArgs:
             "--distributed-timeout-seconds",
             **parallel_kwargs["distributed_timeout_seconds"],
         )
+        parallel_group.add_argument(
+            "--cpu-distributed-timeout-seconds",
+            **parallel_kwargs["cpu_distributed_timeout_seconds"],
+        )
         parallel_group.add_argument("--numa-bind", **parallel_kwargs["numa_bind"])
         parallel_group.add_argument(
             "--numa-bind-nodes", **parallel_kwargs["numa_bind_nodes"]
         )
         parallel_group.add_argument(
             "--numa-bind-cpus", **parallel_kwargs["numa_bind_cpus"]
+        )
+        parallel_group.add_argument(
+            "--device-ids",
+            type=lambda s: [
+                int(device_id) if device_id.isdigit() else device_id
+                for device_id in (part.strip() for part in s.split(","))
+            ],
+            default=None,
+            help="Comma-separated physical GPU device IDs or UUIDs to use "
+            '(e.g. --device-ids "2,3,5,7"). Avoids setting '
+            "CUDA_VISIBLE_DEVICES, preserving full GPU topology "
+            "visibility for GPU-NIC affinity and DeepGEMM. "
+            "Note: has no effect with Ray executors; use Ray "
+            "placement groups for GPU selection instead.",
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
@@ -1013,7 +1110,8 @@ class EngineArgs:
             "--data-parallel-rpc-port",
             "-dpp",
             type=int,
-            help="Port for data parallel RPC communication.",
+            help="Fixed port for data parallel RPC communication. All nodes "
+            "must use the same port.",
         )
         parallel_group.add_argument(
             "--data-parallel-backend",
@@ -1031,6 +1129,15 @@ class EngineArgs:
             "--data-parallel-external-lb",
             "-dpe",
             **parallel_kwargs["data_parallel_external_lb"],
+        )
+        parallel_group.add_argument(
+            "--data-parallel-multi-port-external-lb",
+            "-dpm",
+            action="store_true",
+            default=False,
+            help="Run a node-local supervisor that launches one external-LB API "
+            "server per local data parallel rank and exposes aggregated health on "
+            "a supervisor port.",
         )
         parallel_group.add_argument(
             "--enable-expert-parallel",
@@ -1086,6 +1193,12 @@ class EngineArgs:
         parallel_group.add_argument(
             "--worker-extension-cls", **parallel_kwargs["worker_extension_cls"]
         )
+        parallel_group.add_argument(
+            "--enable-fault-tolerance", **parallel_kwargs["enable_fault_tolerance"]
+        )
+        parallel_group.add_argument(
+            "--fault-tolerance-config", **parallel_kwargs["fault_tolerance_config"]
+        )
 
         # KV cache arguments
         cache_kwargs = get_kwargs(CacheConfig)
@@ -1115,7 +1228,8 @@ class EngineArgs:
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
         )
         cache_group.add_argument(
-            "--calculate-kv-scales", **cache_kwargs["calculate_kv_scales"]
+            "--prefix-cache-retention-interval",
+            **cache_kwargs["prefix_cache_retention_interval"],
         )
         cache_group.add_argument(
             "--kv-cache-dtype-skip-layers", **cache_kwargs["kv_cache_dtype_skip_layers"]
@@ -1133,8 +1247,15 @@ class EngineArgs:
             "--mamba-block-size", **cache_kwargs["mamba_block_size"]
         )
         cache_group.add_argument(
+            "--prefix-match-unit", **cache_kwargs["prefix_match_unit"]
+        )
+        cache_group.add_argument(
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
         )
+        cache_group.add_argument(
+            "--replayssm-buffer-len", **cache_kwargs["replayssm_buffer_len"]
+        )
+        cache_group.add_argument("--use-replayssm", **cache_kwargs["use_replayssm"])
         cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
         )
@@ -1201,6 +1322,9 @@ class EngineArgs:
             "--mm-processor-cache-type", **multimodal_kwargs["mm_processor_cache_type"]
         )
         multimodal_group.add_argument(
+            "--mm-hasher-algorithm", **multimodal_kwargs["mm_hasher_algorithm"]
+        )
+        multimodal_group.add_argument(
             "--mm-shm-cache-max-object-size-mb",
             **multimodal_kwargs["mm_shm_cache_max_object_size_mb"],
         )
@@ -1241,7 +1365,46 @@ class EngineArgs:
             "--video-pruning-rate", **multimodal_kwargs["video_pruning_rate"]
         )
         multimodal_group.add_argument(
+            "--video-pruning-method",
+            **multimodal_kwargs["video_pruning_method"],
+        )
+        multimodal_group.add_argument(
             "--mm-tensor-ipc", **multimodal_kwargs["mm_tensor_ipc"]
+        )
+        multimodal_group.add_argument(
+            "--mm-processor-device",
+            choices=["auto", "cpu"]
+            + (
+                [current_platform.device_type]
+                if current_platform.device_type not in ("", "cpu")
+                else []
+            ),
+            default="auto",
+            help="Device the HF multi-modal processor runs the image/video "
+            "transform on. Convenience for `--mm-processor-kwargs "
+            "'{\"device\": ...}'`: the value is resolved here and stored there, "
+            "it is not kept as separate state. Only takes effect for HF "
+            '"fast" (torchvision-backed) processors, which accept a `device` '
+            "argument; the others ignore it and stay on CPU.\n\n"
+            '"auto" uses the accelerator on encoder instances of an '
+            "encode/prefill/decode deployment -- an EC producer that is not "
+            "also a consumer allocates no KV cache, so its accelerator is not "
+            "contended by the language model -- and then only when "
+            "`--mm-tensor-ipc=torch_shm` can carry device tensors, since every "
+            "other transport would copy the result back to the host and that "
+            'copy costs more than it saves. "auto" resolves to "cpu" '
+            "everywhere else.",
+        )
+        multimodal_group.add_argument(
+            "--mm-ipc-gpu-memory-gb",
+            **multimodal_kwargs["mm_ipc_gpu_memory_gb"],
+        )
+        multimodal_group.add_argument(
+            "--mm-device-do-normalize",
+            **{
+                **multimodal_kwargs["mm_device_do_normalize"],
+                "default": None,
+            },
         )
 
         # LoRA related configs
@@ -1279,6 +1442,10 @@ class EngineArgs:
         lora_group.add_argument(
             "--enable-mixed-moe-lora-format",
             **lora_kwargs["enable_mixed_moe_lora_format"],
+        )
+        lora_group.add_argument(
+            "--enable-moe-shared-loras",
+            **lora_kwargs["enable_moe_shared_loras"],
         )
 
         # Observability arguments
@@ -1328,6 +1495,14 @@ class EngineArgs:
             "--enable-logging-iteration-details",
             **observability_kwargs["enable_logging_iteration_details"],
         )
+        observability_group.add_argument(
+            "--jit-monitor-mode",
+            **observability_kwargs["jit_monitor_mode"],
+        )
+        observability_group.add_argument(
+            "--jit-monitor-verbose",
+            **observability_kwargs["jit_monitor_verbose"],
+        )
 
         # Scheduler arguments
         scheduler_kwargs = get_kwargs(SchedulerConfig)
@@ -1343,18 +1518,18 @@ class EngineArgs:
             },
         )
         scheduler_group.add_argument(
+            "--max-num-scheduled-tokens",
+            **{
+                **scheduler_kwargs["max_num_scheduled_tokens"],
+                "default": None,
+            },
+        )
+        scheduler_group.add_argument(
             "--max-num-seqs",
             **{
                 **scheduler_kwargs["max_num_seqs"],
                 "default": None,
             },
-        )
-        scheduler_group.add_argument(
-            "--max-num-partial-prefills", **scheduler_kwargs["max_num_partial_prefills"]
-        )
-        scheduler_group.add_argument(
-            "--max-long-partial-prefills",
-            **scheduler_kwargs["max_long_partial_prefills"],
         )
         scheduler_group.add_argument(
             "--long-prefill-token-threshold",
@@ -1381,6 +1556,11 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--scheduler-reserve-full-isl",
             **scheduler_kwargs["scheduler_reserve_full_isl"],
+        )
+        scheduler_group.add_argument("--watermark", **scheduler_kwargs["watermark"])
+        scheduler_group.add_argument(
+            "--prefill-schedule-interval",
+            **scheduler_kwargs["prefill_schedule_interval"],
         )
         scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
@@ -1418,6 +1598,10 @@ class EngineArgs:
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
         )
+        kernel_group.add_argument(
+            "--enable-bf16x3-router-gemm",
+            **kernel_kwargs["enable_bf16x3_router_gemm"],
+        )
         moe_backend_kwargs = kernel_kwargs["moe_backend"]
         moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--moe-backend", **moe_backend_kwargs)
@@ -1444,12 +1628,19 @@ class EngineArgs:
         vllm_group.add_argument(
             "--spec-tokens", **speculative_kwargs["num_speculative_tokens"]
         )
+        vllm_kwargs["diffusion_config"]["type"] = optional_type(json.loads)
+        vllm_group.add_argument(
+            "--diffusion-config", "-dc", **vllm_kwargs["diffusion_config"]
+        )
         vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
         )
         vllm_group.add_argument("--kv-events-config", **vllm_kwargs["kv_events_config"])
         vllm_group.add_argument(
             "--ec-transfer-config", **vllm_kwargs["ec_transfer_config"]
+        )
+        vllm_group.add_argument(
+            "--ec-manager-config", **vllm_kwargs["ec_manager_config"]
         )
         vllm_group.add_argument(
             "--compilation-config", "-cc", **vllm_kwargs["compilation_config"]
@@ -1506,9 +1697,16 @@ class EngineArgs:
         parser.add_argument(
             "--gdn-prefill-backend",
             dest="gdn_prefill_backend",
-            choices=["flashinfer", "triton"],
+            choices=["flashinfer", "triton", "cutedsl"],
             default=None,
             help="Select GDN prefill backend.",
+        )
+        parser.add_argument(
+            "--kda-prefill-backend",
+            dest="kda_prefill_backend",
+            choices=["auto", "triton", "flashkda"],
+            default=None,
+            help="Select KDA prefill backend.",
         )
         return parser
 
@@ -1516,6 +1714,7 @@ class EngineArgs:
     def from_cli_args(cls, args: argparse.Namespace):
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
+
         # Set the attributes from the parsed arguments.
         engine_args = cls(
             **{attr: getattr(args, attr) for attr in attrs if hasattr(args, attr)}
@@ -1523,10 +1722,6 @@ class EngineArgs:
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
-        # gguf file needs a specific model loader
-        if is_gguf(self.model):
-            self.quantization = self.load_format = "gguf"
-
         if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
             logger.warning(
                 "The global random seed is set to %d. Since "
@@ -1553,6 +1748,7 @@ class EngineArgs:
             code_revision=self.code_revision,
             hf_token=self.hf_token,
             hf_overrides=self.hf_overrides,
+            model_class_overrides=self.model_class_overrides,
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
             quantization=self.quantization,
@@ -1560,6 +1756,7 @@ class EngineArgs:
             allow_deprecated_quantization=self.allow_deprecated_quantization,
             enforce_eager=self.enforce_eager,
             enable_return_routed_experts=self.enable_return_routed_experts,
+            return_sampling_mask=self.return_sampling_mask,
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
             use_fp64_gumbel=self.use_fp64_gumbel,
@@ -1579,6 +1776,7 @@ class EngineArgs:
             mm_processor_cache_gb=self.mm_processor_cache_gb,
             mm_processor_cache_type=self.mm_processor_cache_type,
             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,
+            mm_hasher_algorithm=self.mm_hasher_algorithm,
             mm_encoder_only=self.mm_encoder_only,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
             mm_encoder_attn_backend=self.mm_encoder_attn_backend,
@@ -1590,11 +1788,15 @@ class EngineArgs:
             generation_config=self.generation_config,
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
+            enable_cumem_allocator=self.enable_cumem_allocator,
             model_impl=self.model_impl,
-            override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
+            video_pruning_method=self.video_pruning_method,
             mm_tensor_ipc=self.mm_tensor_ipc,
+            mm_ipc_gpu_memory_gb=self.mm_ipc_gpu_memory_gb,
+            mm_device_do_normalize=self.mm_device_do_normalize,
+            mm_processor_device=self.mm_processor_device,
             io_processor_plugin=self.io_processor_plugin,
             renderer_num_workers=self.renderer_num_workers,
         )
@@ -1609,9 +1811,6 @@ class EngineArgs:
                 )
 
     def create_load_config(self) -> LoadConfig:
-        if self.quantization == "bitsandbytes":
-            self.load_format = "bitsandbytes"
-
         if self.load_format == "tensorizer":
             if hasattr(self.model_loader_extra_config, "to_serializable"):
                 self.model_loader_extra_config = (
@@ -1661,6 +1860,10 @@ class EngineArgs:
         if self.speculative_config is None:
             return None
 
+        self.speculative_config = {
+            k.replace("-", "_"): v for k, v in self.speculative_config.items()
+        }
+
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
         # config.
@@ -1671,6 +1874,71 @@ class EngineArgs:
             }
         )
         return SpeculativeConfig(**self.speculative_config)
+
+    def _resolve_device_ids(self) -> list[int] | None:
+        if not self.device_ids:
+            return None
+        if self.distributed_executor_backend == "ray":
+            logger.warning(
+                "--device-ids has no effect when using the Ray executor. "
+                "Use Ray placement groups for GPU selection instead."
+            )
+        ids = self.device_ids
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"--device-ids must not contain duplicates: {ids}")
+        if all(isinstance(i, str) for i in ids):
+            return [
+                current_platform.device_control_id_to_physical_device_id(i)
+                for i in cast(list[str], ids)
+            ]
+        if any(isinstance(i, str) for i in ids):
+            raise ValueError("--device-ids must not mix integer IDs and UUIDs")
+        int_ids = cast(list[int], ids)
+        # Compose with CUDA_VISIBLE_DEVICES: if CVD is set, treat
+        # --device-ids values as indices into the CVD-visible set.
+        cvd = getattr(
+            envs,
+            current_platform.device_control_env_var,
+            os.environ.get(current_platform.device_control_env_var),
+        )
+        if cvd:
+            cvd_ids = [
+                current_platform.device_control_id_to_physical_device_id(x)
+                for x in cvd.split(",")
+            ]
+            for i in int_ids:
+                if i >= len(cvd_ids):
+                    raise ValueError(
+                        f"--device-ids index {i} is out of range for "
+                        f"{current_platform.device_control_env_var}"
+                        f"={cvd} ({len(cvd_ids)} devices visible)"
+                    )
+            return [cvd_ids[i] for i in int_ids]
+        return int_ids
+
+    def create_diffusion_config(self) -> DiffusionConfig | None:
+        if self.diffusion_config is None:
+            return None
+        cfg = self.diffusion_config
+        if isinstance(cfg, str):
+            cfg = json.loads(cfg)
+        return DiffusionConfig(**cfg)
+
+    def create_observability_config(self) -> ObservabilityConfig:
+        return ObservabilityConfig(
+            show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
+            otlp_traces_endpoint=self.otlp_traces_endpoint,
+            collect_detailed_traces=self.collect_detailed_traces,
+            kv_cache_metrics=self.kv_cache_metrics,
+            kv_cache_metrics_sample=self.kv_cache_metrics_sample,
+            cudagraph_metrics=self.cudagraph_metrics,
+            enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
+            enable_mfu_metrics=self.enable_mfu_metrics,
+            enable_mm_processor_stats=self.enable_mm_processor_stats,
+            enable_logging_iteration_details=self.enable_logging_iteration_details,
+            jit_monitor_mode=self.jit_monitor_mode,
+            jit_monitor_verbose=self.jit_monitor_verbose,
+        )
 
     def create_engine_config(
         self,
@@ -1714,7 +1982,8 @@ class EngineArgs:
         self._set_default_chunked_prefill_and_prefix_caching_args(model_config)
         self._set_default_reasoning_config_args()
         sliding_window: int | None = None
-        if not is_interleaved(model_config.hf_text_config):
+        layer_types = getattr(model_config.hf_text_config, "layer_types", None)
+        if layer_types is None or all(lt == "sliding_attention" for lt in layer_types):
             # Only set CacheConfig.sliding_window if the model is all sliding
             # window. Otherwise CacheConfig.sliding_window will override the
             # global layers in interleaved sliding window models.
@@ -1739,13 +2008,16 @@ class EngineArgs:
             sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
-            calculate_kv_scales=self.calculate_kv_scales,
+            prefix_cache_retention_interval=self.prefix_cache_retention_interval,
             kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
+            prefix_match_unit=self.prefix_match_unit,
             mamba_cache_mode=self.mamba_cache_mode,
+            replayssm_buffer_len=self.replayssm_buffer_len,
+            use_replayssm=self.use_replayssm,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
@@ -1791,12 +2063,21 @@ class EngineArgs:
         assert not headless or not self.data_parallel_hybrid_lb, (
             "data_parallel_hybrid_lb is not applicable in headless mode"
         )
-        assert not (self.data_parallel_hybrid_lb and self.data_parallel_external_lb), (
-            "data_parallel_hybrid_lb and data_parallel_external_lb cannot both be True."
-        )
-        assert self.data_parallel_backend == "mp" or self.nnodes == 1, (
-            "nnodes > 1 is only supported with data_parallel_backend=mp"
-        )
+        if self.data_parallel_hybrid_lb and self.data_parallel_external_lb:
+            raise ValueError(
+                "Invalid data-parallel launch options: "
+                "`--data-parallel-hybrid-lb` and "
+                "`--data-parallel-external-lb` cannot be enabled together. "
+                "Enable only one load-balancing mode."
+            )
+        if self.nnodes > 1 and self.data_parallel_backend != "mp":
+            raise ValueError(
+                "Invalid data-parallel launch options: "
+                f"`--nnodes {self.nnodes}` requires "
+                "`--data-parallel-backend mp`; got "
+                f"`--data-parallel-backend {self.data_parallel_backend}`. "
+                "Use the MP backend or set `--nnodes 1`."
+            )
         inferred_data_parallel_rank = 0
         if self.nnodes > 1:
             world_size = (
@@ -1807,13 +2088,22 @@ class EngineArgs:
             world_size_within_dp = (
                 self.pipeline_parallel_size * self.tensor_parallel_size
             )
+            if world_size % self.nnodes != 0:
+                raise ValueError(
+                    "Invalid data-parallel launch options: "
+                    f"`--nnodes {self.nnodes}` must evenly divide the total "
+                    f"world size ({world_size}). Adjust `--nnodes`, "
+                    "`--data-parallel-size`, `--pipeline-parallel-size`, or "
+                    "`--tensor-parallel-size`."
+                )
+            if not 0 <= self.node_rank < self.nnodes:
+                raise ValueError(
+                    "Invalid data-parallel launch options: `--node-rank` must "
+                    f"be between 0 and {self.nnodes - 1}; got "
+                    f"`--node-rank {self.node_rank}`. Set it to this node's "
+                    "zero-based index."
+                )
             local_world_size = world_size // self.nnodes
-            assert world_size % self.nnodes == 0, (
-                f"world_size={world_size} must be divisible by nnodes={self.nnodes}."
-            )
-            assert self.node_rank < self.nnodes, (
-                f"node_rank={self.node_rank} must be less than nnodes={self.nnodes}."
-            )
             inferred_data_parallel_rank = (
                 self.node_rank * local_world_size
             ) // world_size_within_dp
@@ -1832,6 +2122,12 @@ class EngineArgs:
         data_parallel_external_lb = (
             self.data_parallel_external_lb or self.data_parallel_rank is not None
         )
+        if self.enable_fault_tolerance and not data_parallel_external_lb:
+            raise ValueError(
+                "Fault tolerance requires external load balancer mode "
+                "(--data-parallel-external-lb or --data-parallel-rank). "
+                "Internal LB mode is not supported."
+            )
         if (
             self.data_parallel_size > 1
             and data_parallel_external_lb
@@ -1844,21 +2140,28 @@ class EngineArgs:
             )
         # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
-            assert self.data_parallel_rank is not None, (
-                "data_parallel_rank or node_rank must be specified if "
-                "data_parallel_external_lb is enable."
-            )
-            assert self.data_parallel_size_local in (1, None), (
-                "data_parallel_size_local must be 1 or None when data_parallel_rank "
-                "is set"
-            )
+            if self.data_parallel_rank is None:
+                raise ValueError(
+                    "Invalid data-parallel launch options: "
+                    "`--data-parallel-external-lb` requires a data-parallel "
+                    "rank. Set `--data-parallel-rank`, or set "
+                    "`--data-parallel-size` greater than 1 and use `--nnodes` "
+                    "with `--node-rank` so the rank can be inferred."
+                )
+            if self.data_parallel_size_local not in (1, None):
+                raise ValueError(
+                    "Invalid data-parallel launch options: an external "
+                    "data-parallel rank requires `--data-parallel-size-local "
+                    f"1`; got {self.data_parallel_size_local}. Set it to 1 or "
+                    "omit it."
+                )
             data_parallel_size_local = 1
             # Use full external lb if we have local_size of 1.
             self.data_parallel_hybrid_lb = False
         elif self.data_parallel_size_local is not None:
             data_parallel_size_local = self.data_parallel_size_local
 
-            if self.data_parallel_start_rank and not headless:
+            if self.data_parallel_start_rank is not None and not headless:
                 # Infer hybrid LB mode.
                 self.data_parallel_hybrid_lb = True
 
@@ -1877,7 +2180,9 @@ class EngineArgs:
                 self.data_parallel_hybrid_lb = False
 
             self.data_parallel_rank = (
-                self.data_parallel_start_rank or inferred_data_parallel_rank
+                self.data_parallel_start_rank
+                if self.data_parallel_start_rank is not None
+                else inferred_data_parallel_rank
             )
             if self.nnodes > 1:
                 logger.info(
@@ -1886,9 +2191,13 @@ class EngineArgs:
                     self.node_rank,
                 )
         else:
-            assert not self.data_parallel_hybrid_lb, (
-                "data_parallel_size_local must be set to use data_parallel_hybrid_lb."
-            )
+            if self.data_parallel_hybrid_lb:
+                raise ValueError(
+                    "Invalid data-parallel launch options: "
+                    "`--data-parallel-hybrid-lb` requires "
+                    "`--data-parallel-size-local`. Set it to the number of "
+                    "data-parallel ranks on this node."
+                )
 
             if self.data_parallel_backend == "ray" and (
                 envs.VLLM_RAY_DP_PACK_STRATEGY == "span"
@@ -1945,6 +2254,7 @@ class EngineArgs:
             nnodes=self.nnodes,
             node_rank=self.node_rank,
             distributed_timeout_seconds=self.distributed_timeout_seconds,
+            cpu_distributed_timeout_seconds=self.cpu_distributed_timeout_seconds,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
@@ -1976,6 +2286,9 @@ class EngineArgs:
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
+            assigned_physical_gpu_ids=self._resolve_device_ids(),
+            enable_fault_tolerance=self.enable_fault_tolerance,
+            fault_tolerance_config=self.fault_tolerance_config,
             numa_bind=self.numa_bind,
             numa_bind_nodes=self.numa_bind_nodes,
             numa_bind_cpus=self.numa_bind_cpus,
@@ -1985,6 +2298,7 @@ class EngineArgs:
             target_model_config=model_config,
             target_parallel_config=parallel_config,
         )
+        diffusion_config = self.create_diffusion_config()
 
         self._set_default_max_num_seqs_and_batched_tokens_args(
             usage_context,
@@ -2005,6 +2319,7 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
+            max_num_scheduled_tokens=self.max_num_scheduled_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
@@ -2013,10 +2328,10 @@ class EngineArgs:
             is_encoder_decoder=model_config.is_encoder_decoder,
             policy=self.scheduling_policy,
             scheduler_cls=self.scheduler_cls,
-            max_num_partial_prefills=self.max_num_partial_prefills,
-            max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
+            watermark=self.watermark,
+            prefill_schedule_interval=self.prefill_schedule_interval,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
@@ -2039,6 +2354,7 @@ class EngineArgs:
                 enable_tower_connector_lora=self.enable_tower_connector_lora,
                 specialize_active_lora=self.specialize_active_lora,
                 enable_mixed_moe_lora_format=self.enable_mixed_moe_lora_format,
+                enable_moe_shared_loras=self.enable_moe_shared_loras,
                 max_cpu_loras=self.max_cpu_loras
                 if self.max_cpu_loras and self.max_cpu_loras > 0
                 else None,
@@ -2060,10 +2376,6 @@ class EngineArgs:
                 "Consider increasing max_num_batched_tokens or "
                 "decreasing num_speculative_tokens"
             )
-
-        # bitsandbytes pre-quantized model need a specific model loader
-        if model_config.quantization == "bitsandbytes":
-            self.quantization = self.load_format = "bitsandbytes"
 
         # Attention config overrides
         attention_config = copy.deepcopy(self.attention_config)
@@ -2098,6 +2410,8 @@ class EngineArgs:
             mamba_config.backend = MambaBackendEnum[self.mamba_backend.upper()]
         else:
             mamba_config.backend = self.mamba_backend
+        if self.mamba_ssu_algorithm is not None:
+            mamba_config.ssu_algorithm = self.mamba_ssu_algorithm
         if self.enable_mamba_cache_stochastic_rounding:
             mamba_config.enable_stochastic_rounding = (
                 self.enable_mamba_cache_stochastic_rounding
@@ -2106,6 +2420,7 @@ class EngineArgs:
             mamba_config.stochastic_rounding_philox_rounds = (
                 self.mamba_cache_philox_rounds
             )
+        mamba_config.validate_ssu_algorithm()
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)
@@ -2117,6 +2432,8 @@ class EngineArgs:
                     "are mutually exclusive"
                 )
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
+        if self.enable_bf16x3_router_gemm is not None:
+            kernel_config.enable_bf16x3_router_gemm = self.enable_bf16x3_router_gemm
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
         if self.linear_backend != "auto":
@@ -2149,18 +2466,7 @@ class EngineArgs:
                 self.reasoning_parser_plugin
             )
 
-        observability_config = ObservabilityConfig(
-            show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
-            otlp_traces_endpoint=self.otlp_traces_endpoint,
-            collect_detailed_traces=self.collect_detailed_traces,
-            kv_cache_metrics=self.kv_cache_metrics,
-            kv_cache_metrics_sample=self.kv_cache_metrics_sample,
-            cudagraph_metrics=self.cudagraph_metrics,
-            enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
-            enable_mfu_metrics=self.enable_mfu_metrics,
-            enable_mm_processor_stats=self.enable_mm_processor_stats,
-            enable_logging_iteration_details=self.enable_logging_iteration_details,
-        )
+        observability_config = self.create_observability_config()
 
         # Compilation config overrides
         compilation_config = copy.deepcopy(self.compilation_config)
@@ -2197,6 +2503,8 @@ class EngineArgs:
 
         if self.gdn_prefill_backend is not None:
             self.additional_config["gdn_prefill_backend"] = self.gdn_prefill_backend
+        if self.kda_prefill_backend is not None:
+            self.additional_config["kda_prefill_backend"] = self.kda_prefill_backend
 
         config = VllmConfig(
             model_config=model_config,
@@ -2211,12 +2519,14 @@ class EngineArgs:
             kernel_config=kernel_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
+            diffusion_config=diffusion_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
             compilation_config=compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
+            ec_manager_config=self.ec_manager_config,
             reasoning_config=self.reasoning_config,
             profiler_config=self.profiler_config,
             additional_config=self.additional_config,
@@ -2230,14 +2540,6 @@ class EngineArgs:
 
     def _check_feature_supported(self):
         """Raise an error if the feature is not supported."""
-        # No Concurrent Partial Prefills so far.
-        if (
-            self.max_num_partial_prefills != SchedulerConfig.max_num_partial_prefills
-            or self.max_long_partial_prefills
-            != SchedulerConfig.max_long_partial_prefills
-        ):
-            _raise_unsupported_error(feature_name="Concurrent Partial Prefill")
-
         if self.pipeline_parallel_size > 1:
             supports_pp = getattr(
                 self.distributed_executor_backend, "supports_pp", False
@@ -2285,8 +2587,18 @@ class EngineArgs:
         # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
         # throughput, see PR #17885 for more details.
         # So here we do an extra device name check to prevent such regression.
-        if device_memory >= 70 * GiB_bytes and "a100" not in device_name:
-            # For GPUs like H100 and MI300x, use larger default values.
+        if device_memory >= 160 * GiB_bytes:
+            # for GPUs like B200/B300 with >= 160GB memory, use the largest defaults
+            default_max_num_batched_tokens = {
+                UsageContext.LLM_CLASS: 16384,
+                UsageContext.OPENAI_API_SERVER: 16384,
+            }
+            default_max_num_seqs = {
+                UsageContext.LLM_CLASS: 1024,
+                UsageContext.OPENAI_API_SERVER: 1024,
+            }
+        elif device_memory >= 70 * GiB_bytes and "a100" not in device_name:
+            # For GPUs like H100 and H200, use larger offline defaults.
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 16384,
                 UsageContext.OPENAI_API_SERVER: 8192,
@@ -2416,6 +2728,39 @@ class EngineArgs:
             self.reasoning_config = ReasoningConfig()
         self.reasoning_config.reasoning_parser = self.reasoning_parser
 
+    @staticmethod
+    def _get_min_mm_batched_tokens(
+        model_config: ModelConfig,
+    ) -> tuple[int, str] | None:
+        """Get the minimum max_num_batched_tokens needed for a multimodal
+        prefix-LM model to process at least one item of any supported modality.
+
+        Returns (token_count, modality_name) for the most expensive modality,
+        or None if the value cannot be determined at this stage.
+        """
+        try:
+            from vllm.multimodal import MULTIMODAL_REGISTRY
+
+            # get_processing_info returns the model's multimodal processing
+            # metadata (supported modalities, token limits) without loading
+            # model weights or generating dummy data.
+            info = MULTIMODAL_REGISTRY.get_processing_info(model_config)
+            mm_counts = {modality: 1 for modality in info.supported_mm_limits}
+            # get_mm_max_tokens_per_item returns pre-computed per-item token
+            # ceilings for models that override it (e.g., Gemma4), or None
+            # for models that rely on dummy-input profiling. When None is
+            # returned we bail out — no dummy generation is triggered here.
+            max_tokens = info.get_mm_max_tokens_per_item(
+                seq_len=model_config.max_model_len,
+                mm_counts=mm_counts,
+            )
+            if max_tokens is not None:
+                modality = max(max_tokens, key=max_tokens.__getitem__)
+                return (max_tokens[modality], modality)
+        except Exception as e:
+            logger.warning("Failed to determine min multimodal batched tokens: %s", e)
+        return None
+
     def _set_default_max_num_seqs_and_batched_tokens_args(
         self,
         usage_context: UsageContext | None,
@@ -2465,6 +2810,23 @@ class EngineArgs:
                     model_config.max_model_len,
                     self.max_num_batched_tokens,
                 )
+
+            # For multimodal prefix-LM models (e.g., Gemma 4) that disable
+            # chunked MM input, a single multimodal item must fit in one batch.
+            # Raise the floor to accommodate the largest per-item token count.
+            if model_config.is_multimodal_model and model_config.is_mm_prefix_lm:
+                result = self._get_min_mm_batched_tokens(model_config)
+                if result is not None and result[0] > self.max_num_batched_tokens:
+                    mm_min, modality = result
+                    logger.info(
+                        "Raising max_num_batched_tokens from %d to %d to "
+                        "accommodate '%s' input for prefix-LM model %s.",
+                        self.max_num_batched_tokens,
+                        mm_min,
+                        modality,
+                        model_config.model,
+                    )
+                    self.max_num_batched_tokens = mm_min
 
             # When using default settings,
             # Ensure max_num_batched_tokens does not exceed model limit.

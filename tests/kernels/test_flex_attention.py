@@ -13,6 +13,8 @@ from tests.v1.attention.utils import (
     create_standard_kv_cache_spec,
     create_vllm_config,
 )
+from vllm.config import AttentionConfig
+from vllm.model_executor.layers.attention import Attention
 from vllm.v1.attention.backends.flex_attention import (
     BlockSparsityHint,
     FlexAttentionMetadataBuilder,
@@ -24,6 +26,42 @@ from ..models.utils import check_embeddings_close, check_logprobs_close
 TORCH_VERSION = version.parse(torch.__version__)
 MINIMUM_TORCH_VERSION = version.parse("2.7.0")
 DIRECT_BUILD_VERSION = version.parse("2.9.dev0")
+
+
+@pytest.mark.parametrize(
+    ("supports_small_blocks", "uses_paged_kv", "expected"),
+    [
+        (True, True, (16, 16)),
+        (True, False, (128, 128)),
+        (False, True, (128, 128)),
+        (False, False, (128, 128)),
+    ],
+)
+def test_flex_attention_default_block_sizes(
+    supports_small_blocks: bool,
+    uses_paged_kv: bool,
+    expected: tuple[int, int],
+):
+    block_sizes = FlexAttentionMetadataBuilder._get_block_sizes(
+        AttentionConfig(),
+        supports_small_blocks=supports_small_blocks,
+        cache_block_size=16,
+        uses_paged_kv=uses_paged_kv,
+    )
+    assert block_sizes == expected
+
+
+def test_flex_attention_explicit_block_sizes_override_encoder_defaults():
+    block_sizes = FlexAttentionMetadataBuilder._get_block_sizes(
+        AttentionConfig(
+            flex_attn_q_block_size=64,
+            flex_attn_kv_block_size=32,
+        ),
+        supports_small_blocks=True,
+        cache_block_size=16,
+        uses_paged_kv=False,
+    )
+    assert block_sizes == (64, 32)
 
 
 @pytest.mark.skipif(
@@ -76,6 +114,72 @@ def test_flex_attention_full_cudagraphs(vllm_runner):
         outputs_1_lst=output_compile,
         name_0="eager",
         name_1="compile",
+    )
+
+
+def windowed_causal_mask_mod(b, h, q_idx, kv_idx):
+    return (kv_idx <= q_idx) & (q_idx - kv_idx < 4)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or TORCH_VERSION < MINIMUM_TORCH_VERSION,
+    reason="CUDA not available or PyTorch version < 2.7",
+)
+def test_flex_attention_custom_mask_full_cudagraphs(vllm_runner, monkeypatch):
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setattr(
+        Attention,
+        "logical_mask_mod",
+        staticmethod(windowed_causal_mask_mod),
+        raising=False,
+    )
+
+    model_name = "Qwen/Qwen2.5-1.5B-Instruct"
+    seed = 42
+    max_tokens = 24
+    num_logprobs = 5
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+    ]
+
+    set_random_seed(seed)
+    with vllm_runner(
+        model_name,
+        runner="generate",
+        tensor_parallel_size=1,
+        num_gpu_blocks_override=128,
+        enforce_eager=True,
+        attention_config={"backend": "FLEX_ATTENTION"},
+    ) as llm_eager:
+        output_eager = llm_eager.generate_greedy_logprobs(
+            prompts, max_tokens, num_logprobs
+        )
+
+    set_random_seed(seed)
+    with vllm_runner(
+        model_name,
+        runner="generate",
+        tensor_parallel_size=1,
+        num_gpu_blocks_override=128,
+        enforce_eager=False,
+        gpu_memory_utilization=0.85,
+        compilation_config={
+            "cudagraph_mode": "FULL",
+            "cudagraph_capture_sizes": [4],
+        },
+        attention_config={"backend": "FLEX_ATTENTION"},
+    ) as llm_cudagraph:
+        output_cudagraph = llm_cudagraph.generate_greedy_logprobs(
+            prompts, max_tokens, num_logprobs
+        )
+
+    check_logprobs_close(
+        outputs_0_lst=output_eager,
+        outputs_1_lst=output_cudagraph,
+        name_0="eager",
+        name_1="cudagraph",
     )
 
 
@@ -146,10 +250,12 @@ def test_encoder_flex_attention_vs_default_backend(vllm_runner):
     the default backend for encoder models.
     """
     model_name = "BAAI/bge-base-en-v1.5"
+    # Exercise packed sequence boundaries inside 128-token FlexAttention
+    # blocks, including sequences that span more than one block.
     prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
+        "hello " * 120,
+        "world " * 130,
+        "attention " * 254,
     ]
 
     # Run with flex attention
@@ -158,7 +264,7 @@ def test_encoder_flex_attention_vs_default_backend(vllm_runner):
         runner="pooling",
         dtype=torch.bfloat16,
         tensor_parallel_size=1,
-        max_model_len=100,
+        max_model_len=384,
         enforce_eager=True,
         attention_config={"backend": "FLEX_ATTENTION"},
     ) as llm_flex:
@@ -170,7 +276,7 @@ def test_encoder_flex_attention_vs_default_backend(vllm_runner):
         runner="pooling",
         dtype=torch.bfloat16,
         tensor_parallel_size=1,
-        max_model_len=100,
+        max_model_len=384,
         enforce_eager=True,
     ) as llm_default:
         default_outputs = llm_default.embed(prompts)
@@ -197,7 +303,7 @@ def test_block_mask_direct_vs_slow_path():
     device = torch.device("cuda")
 
     vllm_config = create_vllm_config(
-        model_name="meta-llama/Meta-Llama-3-8B", block_size=16, max_model_len=1024
+        model_name="Qwen/Qwen2.5-1.5B-Instruct", block_size=16, max_model_len=1024
     )
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
 
