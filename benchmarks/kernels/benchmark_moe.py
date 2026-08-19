@@ -813,6 +813,19 @@ def get_model_params(config):
         topk = config.thinker_config.text_config.num_experts_per_tok
         intermediate_size = config.thinker_config.text_config.moe_intermediate_size
         hidden_size = config.thinker_config.text_config.hidden_size
+    elif architecture in (
+        "KimiK3ForConditionalGeneration",
+        "KimiLinearForCausalLM",
+    ):
+        # Kimi K3 (multimodal) nests its MoE params in a KimiLinearConfig
+        # text_config and uses ``num_experts_per_token`` rather than the more
+        # common ``num_experts_per_tok``. get_text_config() returns the config
+        # itself for the text-only KimiLinearForCausalLM.
+        text_config = config.get_text_config()
+        E = text_config.num_experts
+        topk = text_config.num_experts_per_token
+        intermediate_size = text_config.moe_intermediate_size
+        hidden_size = text_config.hidden_size
     elif architecture == "PixtralForConditionalGeneration":
         # Pixtral can contain different LLM architectures,
         # recurse to get their parameters
