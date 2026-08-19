@@ -50,6 +50,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_kv_cache_configs,
     get_request_block_hasher,
     init_none_hash,
+    maybe_warn_eagle_prefix_cache_loss,
     resolve_kv_cache_block_sizes,
     update_kv_cache_capacity,
 )
@@ -156,6 +157,9 @@ class EngineCore:
 
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
+        )
+        maybe_warn_eagle_prefix_cache_loss(
+            kv_cache_config, vllm_config, hash_block_size
         )
 
         self.scheduler: SchedulerInterface = Scheduler(
