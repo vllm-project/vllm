@@ -111,9 +111,6 @@ direct_register_custom_op(
 
 
 def fused_gated_qk_norm_rope_and_unified_kv_cache_update_impl(
-    q_out: torch.Tensor,
-    k_out: torch.Tensor,
-    gate_out: torch.Tensor,
     qkv: torch.Tensor,
     positions: torch.Tensor,
     q_weight: torch.Tensor,
@@ -125,7 +122,7 @@ def fused_gated_qk_norm_rope_and_unified_kv_cache_update_impl(
     num_kv_heads: int,
     head_dim: int,
     layer_name: LayerNameType,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     dummy, q, k, _, gate = run_gated_qk_norm_rope_kvcache(
         qkv,
         positions,
@@ -139,16 +136,10 @@ def fused_gated_qk_norm_rope_and_unified_kv_cache_update_impl(
         rms_norm_eps,
         is_neox,
     )
-    q_out.copy_(q.view_as(q_out))
-    k_out.copy_(k.view_as(k_out))
-    gate_out.copy_(gate.view_as(gate_out))
-    return dummy
+    return dummy, q, k, gate
 
 
 def fused_gated_qk_norm_rope_and_unified_kv_cache_update_fake(
-    q_out: torch.Tensor,
-    k_out: torch.Tensor,
-    gate_out: torch.Tensor,
     qkv: torch.Tensor,
     positions: torch.Tensor,
     q_weight: torch.Tensor,
@@ -160,29 +151,34 @@ def fused_gated_qk_norm_rope_and_unified_kv_cache_update_fake(
     num_kv_heads: int,
     head_dim: int,
     layer_name: LayerNameType,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     del (
-        q_out,
-        k_out,
-        gate_out,
         positions,
         q_weight,
         k_weight,
         rms_norm_eps,
         cos_sin_cache,
         is_neox,
-        num_heads,
-        num_kv_heads,
-        head_dim,
         layer_name,
     )
-    return torch.empty(0, device=qkv.device, dtype=qkv.dtype)
+    num_tokens = qkv.shape[0]
+    q_size = num_heads * head_dim
+    return (
+        torch.empty(0, device=qkv.device, dtype=qkv.dtype),
+        torch.empty((num_tokens, q_size), device=qkv.device, dtype=qkv.dtype),
+        torch.empty(
+            (num_tokens, num_kv_heads, head_dim),
+            device=qkv.device,
+            dtype=qkv.dtype,
+        ),
+        torch.empty((num_tokens, q_size), device=qkv.device, dtype=qkv.dtype),
+    )
 
 
 direct_register_custom_op(
     op_name="fused_gated_qk_norm_rope_and_unified_kv_cache_update",
     op_func=fused_gated_qk_norm_rope_and_unified_kv_cache_update_impl,
-    mutates_args=["q_out", "k_out", "gate_out"],
+    mutates_args=[],
     fake_impl=fused_gated_qk_norm_rope_and_unified_kv_cache_update_fake,
 )
 
@@ -612,20 +608,9 @@ class QkNormRopeKvCacheGatedPattern:
         cos_sin_cache: torch.Tensor,
         layer_name: str,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        output_shape = (*qkv.shape[:-1], self.q_size)
-        q_out = torch.empty(output_shape, dtype=qkv.dtype, device=qkv.device)
-        gate_out = torch.empty(output_shape, dtype=qkv.dtype, device=qkv.device)
-        k_out = torch.empty(
-            (qkv.shape[0], self.num_kv_heads, self.head_size),
-            dtype=qkv.dtype,
-            device=qkv.device,
-        )
         _, _, v = qkv.split([self.q_size * 2, self.kv_size, self.kv_size], dim=-1)
         v = v.view(-1, self.num_kv_heads, self.head_size_v)
-        dummy = self.FUSED_OP(
-            q_out=q_out,
-            k_out=k_out,
-            gate_out=gate_out,
+        dummy, q, k, gate = self.FUSED_OP(
             qkv=qkv,
             positions=positions,
             q_weight=q_weight,
@@ -638,7 +623,7 @@ class QkNormRopeKvCacheGatedPattern:
             head_dim=self.head_size,
             layer_name=layer_name,
         )
-        return dummy, q_out, k_out, v, gate_out
+        return dummy, q, k, v, gate
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         trace_fn = QkNormRopeKvCachePattern.wrap_trace_fn(

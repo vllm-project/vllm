@@ -149,7 +149,8 @@ def run_gated_qk_norm_rope_kvcache(
         ).reshape(num_tokens, q_size)
         k = _gemma_rmsnorm_rope_ref(
             k, k_weight, cos_sin_cache, pos, eps, is_neox
-        ).reshape(num_tokens, kv_size)
+        )
+        gate = gate.contiguous()
         return (
             torch.empty(0, device=qkv.device, dtype=qkv.dtype),
             q,
@@ -200,7 +201,7 @@ def run_gated_qk_norm_rope_kvcache(
     return (
         torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype),
         q.reshape(num_tokens, q_size),
-        k.reshape(num_tokens, kv_size),
+        k,
         v.reshape(num_tokens, kv_size),
         gate.reshape(num_tokens, q_size),
     )
