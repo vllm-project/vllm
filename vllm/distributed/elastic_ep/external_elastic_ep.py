@@ -27,6 +27,11 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 POLL_BACKOFF_STEPS_S = (0.1, 0.2, 0.4, 0.8)
+_PHASE_IDLE = "idle"
+_PHASE_PREPARING = "preparing"
+_PHASE_COMMITTING = "committing"
+_PHASE_FAILED = "failed"
+_PHASE_COMPLETED = "completed"
 
 
 @dataclass
@@ -286,6 +291,25 @@ class ExternalElasticEPScaleCoordinator:
             return None
         return store.get(error_key).decode()
 
+    def get_phase(self) -> str:
+        store = self._get_reconfig_store()
+        current_epoch_key = self.key("current_epoch")
+        if not store.check([current_epoch_key]):
+            return _PHASE_IDLE
+
+        epoch = store.get(current_epoch_key).decode()
+        if self._get_error(store, epoch) is not None:
+            return _PHASE_FAILED
+        if store.check([self.key(epoch, "completed")]):
+            return _PHASE_COMPLETED
+        phase_key = self.key(epoch, "phase")
+        if store.check([phase_key]):
+            return store.get(phase_key).decode()
+        return _PHASE_IDLE
+
+    def _set_phase(self, store: Any, epoch: str, phase: str) -> None:
+        store.set(self.key(epoch, "phase"), phase.encode())
+
     async def _wait_for_bootstrap(
         self,
         store: Any,
@@ -370,8 +394,14 @@ class ExternalElasticEPScaleCoordinator:
         )
 
         bootstrap_key = self.key(epoch, "bootstrap")
-        store.set(current_epoch_key, epoch.encode())
-        store.set(bootstrap_key, msgspec.msgpack.encode(bootstrap))
+        bootstrap_payload = msgspec.msgpack.encode(bootstrap)
+        stores = [store]
+        if self.reconfig_store_ref is not None:
+            stores.append(self.reconfig_store_ref)
+        for target_store in stores:
+            target_store.set(current_epoch_key, epoch.encode())
+            target_store.set(bootstrap_key, bootstrap_payload)
+            self._set_phase(target_store, epoch, _PHASE_PREPARING)
         return epoch, bootstrap
 
     def _start_scale_up_handshake_server(
@@ -535,6 +565,7 @@ class ExternalElasticEPScaleCoordinator:
         for store in (prepared.control_store, prepared.reconfig_store):
             with contextlib.suppress(Exception):
                 store.set(error_key, error_payload)
+                self._set_phase(store, prepared.epoch, _PHASE_FAILED)
 
     async def prepare(
         self, cur_data_parallel_size: int, new_data_parallel_size: int
@@ -606,6 +637,7 @@ class ExternalElasticEPScaleCoordinator:
             )
             reconfig_store = self._get_reconfig_store()
             reconfig_store.set(self.key("current_epoch"), epoch.encode())
+            self._set_phase(reconfig_store, epoch, _PHASE_PREPARING)
 
             if scale_up or dp_rank < bootstrap.new_data_parallel_size:
                 reconfig_request = ReconfigureDistributedRequest(
@@ -651,9 +683,16 @@ class ExternalElasticEPScaleCoordinator:
                 error_payload = str(e).encode()
                 with contextlib.suppress(Exception):
                     control_store.set(error_key, error_payload)
-                if reconfig_store is not None:
+                    self._set_phase(control_store, epoch, _PHASE_FAILED)
+                failed_reconfig_store = (
+                    reconfig_store
+                    if reconfig_store is not None
+                    else self.reconfig_store_ref
+                )
+                if failed_reconfig_store is not None:
                     with contextlib.suppress(Exception):
-                        reconfig_store.set(error_key, error_payload)
+                        failed_reconfig_store.set(error_key, error_payload)
+                        self._set_phase(failed_reconfig_store, epoch, _PHASE_FAILED)
             self._stop_handshake_server(handshake_server, suppress_errors=True)
             raise
 
@@ -667,6 +706,8 @@ class ExternalElasticEPScaleCoordinator:
             prepared.dp_rank < bootstrap.new_data_parallel_size
         )
         try:
+            for store in (prepared.control_store, prepared.reconfig_store):
+                self._set_phase(store, prepared.epoch, _PHASE_COMMITTING)
             await self.client.pause_scheduler_async(
                 mode="keep" if remaining else "abort",
                 clear_cache=False,
@@ -706,6 +747,8 @@ class ExternalElasticEPScaleCoordinator:
                 completed_key = self.key(prepared.epoch, "completed")
                 prepared.control_store.set(completed_key, b"1")
                 prepared.reconfig_store.set(completed_key, b"1")
+                for store in (prepared.control_store, prepared.reconfig_store):
+                    self._set_phase(store, prepared.epoch, _PHASE_COMPLETED)
 
             if remaining:
                 self._update_parallel_config(bootstrap, prepared.num_redundant_experts)
