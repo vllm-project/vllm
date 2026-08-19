@@ -29,7 +29,6 @@ from vllm.models.deepseek_v4.common.ops import (
 from vllm.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
 
 if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.eager_scratch import DeepseekV4EagerScratchPool
     from vllm.v1.attention.backends.mla.sparse_swa import (
         DeepseekSparseSWAMetadata,
     )
@@ -185,7 +184,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         prefix: str,
         topk_indices_buffer: torch.Tensor | None = None,
         aux_stream_list: list[torch.cuda.Stream] | None = None,
-        eager_scratch_pool: "DeepseekV4EagerScratchPool | None" = None,
     ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -274,7 +272,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         self.indexer_rotary_emb = self.rotary_emb
         self.topk_indices_buffer = topk_indices_buffer
-        self.eager_scratch_pool = eager_scratch_pool
 
         self.indexer = None
         if self.compress_ratio == 4:
@@ -296,7 +293,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 compress_ratio=self.compress_ratio,
                 prefix=f"{prefix}.indexer",
                 aux_stream=indexer_aux_stream,
-                eager_scratch_pool=eager_scratch_pool,
             )
 
         self._prepare_and_attn_fn = self._prepare_and_attn
@@ -355,7 +351,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 rotate=True,
                 prefix=f"{prefix}.compressor",
                 k_cache_prefix=self.prefix,
-                eager_scratch_pool=eager_scratch_pool,
             )
 
     def forward(
@@ -637,24 +632,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         if cache_dtype == torch.uint8:
             # fp8_ds_mla UE8M0 paged path. Horizontally fused:
             #   Q side:  per-head RMSNorm (no weight) + GPT-J RoPE, zero-filling
-            #            the padding head slots.
+            #            the padding head slots; the kernel allocates and returns
+            #            the padded q tensor.
             #   KV side: GPT-J RoPE + UE8M0 FP8 quant + paged cache insert.
             swa_kv_cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
-            if self.eager_scratch_pool is not None:
-                q_out = self.eager_scratch_pool.q_out(q.shape[0])
-                torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out(
-                    q,
-                    kv,
-                    q_out,
-                    swa_kv_cache_2d,
-                    swa_metadata.slot_mapping,
-                    positions,
-                    cos_sin_cache,
-                    self.padded_heads,
-                    self.eps,
-                    swa_metadata.block_size,
-                )
-                return q_out
             return torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
                 q,
                 kv,
@@ -702,13 +683,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             block_size,
         )
         return q_fp8
-
-    def _global_topk_output_buffers(
-        self, topk_indices: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        if self.compress_ratio != 4 or self.eager_scratch_pool is None:
-            return None
-        return self.eager_scratch_pool.global_topk_outputs(topk_indices)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.backend_cls
@@ -792,7 +766,6 @@ class DeepseekV4Indexer(nn.Module):
         compress_ratio: int = 1,
         prefix: str = "",
         aux_stream: torch.cuda.Stream | None = None,
-        eager_scratch_pool: "DeepseekV4EagerScratchPool | None" = None,
     ):
         super().__init__()
         self.vllm_config = vllm_config
@@ -805,7 +778,6 @@ class DeepseekV4Indexer(nn.Module):
         self.rope_dim = config.qk_rope_head_dim  # 64
         self.q_lora_rank = q_lora_rank  # 1536
         self.compress_ratio = compress_ratio
-        self.eager_scratch_pool = eager_scratch_pool
         self.use_fp4_kv = dsa_indexer_uses_fp4(vllm_config)
         logger.info_once(
             "Using %s indexer cache for Lightning Indexer.",
@@ -869,7 +841,6 @@ class DeepseekV4Indexer(nn.Module):
             prefix=f"{prefix}.compressor",
             k_cache_prefix=self.k_cache.prefix,
             use_fp4_cache=self.use_fp4_kv,
-            eager_scratch_pool=eager_scratch_pool,
         )
 
         self.indexer_op = SparseAttnIndexer(
@@ -933,9 +904,6 @@ class DeepseekV4Indexer(nn.Module):
             # ReplicatedLinear returns (output, bias); bias is None.
             q, _ = self.wq_b(qr)
             q = q.view(-1, self.n_head, self.head_dim)
-            outputs = None
-            if self.eager_scratch_pool is not None and self.use_fp4_kv:
-                outputs = self.eager_scratch_pool.indexer_q_outputs(q.shape[0])
             return fused_indexer_q_rope_quant(
                 positions,
                 q,
@@ -944,7 +912,6 @@ class DeepseekV4Indexer(nn.Module):
                 self.softmax_scale,
                 self.n_head**-0.5,
                 use_fp4=self.use_fp4_kv,
-                output_buffers=outputs,
             )
 
         # compressor returns None and writes K to the indexer KV cache; the
