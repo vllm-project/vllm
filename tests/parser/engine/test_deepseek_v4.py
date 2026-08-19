@@ -1066,3 +1066,70 @@ class TestLongStringParameterStreaming:
 
         reconstructed = "".join(val for _, val in argument_deltas)
         assert json.loads(reconstructed) == {"text": body}
+
+    def test_long_string_parameter_performance_linear_scaling(
+        self, mock_tokenizer
+    ):
+        """Ensure streaming very large arguments (e.g. 128 KiB) scales linearly
+        and does not exhibit O(n^2) converter overhead."""
+        import time
+
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "emit_text",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                },
+            },
+        }
+        parser = DeepSeekV4Parser(mock_tokenizer, tools=[tool])
+        request = _test_request(tools=[tool])
+
+        header = (
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="emit_text">\n'
+            '<｜DSML｜parameter name="text" string="true">'
+        )
+        body = "A" * (128 * 1024)
+        tail = "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
+        chunks = (
+            [header]
+            + [body[i : i + 32] for i in range(0, len(body), 32)]
+            + [tail]
+        )
+
+        t0 = time.perf_counter()
+        previous = ""
+        argument_deltas = []
+        for delta_text in chunks:
+            current = previous + delta_text
+            delta = parser.extract_tool_calls_streaming(
+                previous_text=previous,
+                current_text=current,
+                delta_text=delta_text,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[1],
+                request=request,
+            )
+            previous = current
+            if delta:
+                for tool_call in delta.tool_calls:
+                    if (
+                        tool_call.function
+                        and tool_call.function.arguments is not None
+                    ):
+                        argument_deltas.append(tool_call.function.arguments)
+
+        elapsed = time.perf_counter() - t0
+        # 4096 chunks of 32 chars should finish in well under 2.0 seconds with fast path
+        assert elapsed < 2.0, (
+            f"Streaming 128 KiB string took {elapsed:.2f}s, expected < 2.0s."
+        )
+
+        reconstructed = "".join(argument_deltas)
+        assert json.loads(reconstructed) == {"text": body}
+

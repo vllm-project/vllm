@@ -208,6 +208,9 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
     )
 
 
+_TAG_CHARS = frozenset('<>"\\\r\n\t')
+
+
 class DeepSeekV4Parser(ParserEngine):
     def __init__(
         self,
@@ -236,3 +239,36 @@ class DeepSeekV4Parser(ParserEngine):
             return result
         func_name = next((s.name for s in self._tool_slots if s.args == raw_args), None)
         return _unwrap_wrapper_args(result, self._tools, func_name)
+
+    def _compute_arg_delta(self, idx: int, raw_delta: str) -> str | None:
+        slot = self._tool_slots[idx]
+
+        # Fast path: if currently streaming an open string parameter
+        # and raw_delta contains no tags (<), quotes ("), backslashes (\), or newlines,
+        # directly stream raw_delta without full re-conversion.
+        if (
+            slot.active_string_param is not None
+            and slot.streamed_json
+            and _TAG_CHARS.isdisjoint(raw_delta)
+        ):
+            slot.streamed_json += raw_delta
+            return raw_delta
+
+        diff = super()._compute_arg_delta(idx, raw_delta)
+
+        # Update active_string_param state
+        last_end = 0
+        for m in _PARAM_RE.finditer(slot.args):
+            last_end = m.end()
+        pm = _PARTIAL_PARAM_RE.search(slot.args, last_end)
+        slot.active_string_param = (
+            pm.group(1) if pm and pm.group(2) == "true" else None
+        )
+
+        return diff
+
+    def _flush_arg_converter(self, idx: int) -> str | None:
+        if idx < len(self._tool_slots):
+            self._tool_slots[idx].active_string_param = None
+        return super()._flush_arg_converter(idx)
+
