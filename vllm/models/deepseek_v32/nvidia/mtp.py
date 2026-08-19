@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_embed_norm import (
@@ -344,9 +343,6 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
         return name
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        rocm_aiter_moe_shared_expert_enabled = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        )
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
@@ -360,12 +356,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts
-            + (
-                self.config.n_shared_experts
-                if rocm_aiter_moe_shared_expert_enabled
-                else 0
-            ),
+            num_experts=self.config.n_routed_experts,
         )
 
         pp_missing_layer_names = get_pp_missing_layer_names(self)
@@ -378,9 +369,6 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
                 continue
-            is_fusion_moe_shared_experts_layer = (
-                rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
-            )
             name = self._rewrite_spec_layer_name(spec_layer, name)
 
             if _try_load_fp8_indexer_wk(
@@ -398,8 +386,6 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
                     continue
                 if ("mlp.experts." in name) and name not in params_dict:
                     continue
-                if is_fusion_moe_shared_experts_layer:
-                    continue
                 name_mapped = name.replace(weight_name, param_name)
                 if (
                     param_name == "fused_qkv_a_proj"
@@ -415,32 +401,10 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
                 break
             else:
                 num_chunks = 1
-                if is_fusion_moe_shared_experts_layer:
-                    num_chunks = getattr(self.config, "n_shared_experts", 1) or 1
-                    split_dim = (
-                        1
-                        if ("down_proj.weight" in name and loaded_weight.ndim > 1)
-                        else 0
-                    )
-                    total = loaded_weight.shape[split_dim]
-                    assert total % num_chunks == 0
-                    chunk_size = total // num_chunks
 
                 for j in range(num_chunks):
                     chunk_name = name
                     weight_to_load = loaded_weight
-                    if is_fusion_moe_shared_experts_layer:
-                        chunk_slice = slice(j * chunk_size, (j + 1) * chunk_size)
-                        if loaded_weight.ndim == 1:
-                            weight_to_load = loaded_weight[chunk_slice]
-                        elif split_dim == 0:
-                            weight_to_load = loaded_weight[chunk_slice, :]
-                        else:
-                            weight_to_load = loaded_weight[:, chunk_slice]
-                        chunk_name = name.replace(
-                            "mlp.shared_experts",
-                            f"mlp.experts.{self.config.n_routed_experts + j}",
-                        )
 
                     is_expert_weight = False
                     for mapping in expert_params_mapping:
@@ -462,10 +426,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
                             return_success=True,
                         )
                         if success:
-                            if not is_fusion_moe_shared_experts_layer:
-                                name = name_mapped
-                            else:
-                                loaded_params.add(name_mapped)
+                            name = name_mapped
                             break
                     else:
                         if is_expert_weight:
@@ -485,8 +446,7 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
                             param, "weight_loader", default_weight_loader
                         )
                         weight_loader(param, loaded_weight)
-            if not is_fusion_moe_shared_experts_layer:
-                loaded_params.add(name)
+            loaded_params.add(name)
 
         loaded_layers: set[int] = set()
         for param_name in loaded_params:
