@@ -146,8 +146,8 @@ def assert_fp8(got: torch.Tensor, ref: torch.Tensor, msg: str):
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 512, 4096])
 @pytest.mark.parametrize("index_interleave", [True, False])
-@pytest.mark.parametrize("mla_fp8", [False, True])
-def test_fused_norm_rope(num_tokens: int, index_interleave: bool, mla_fp8: bool):
+@pytest.mark.parametrize("mla_dtype", ["auto", "bfloat16", "fp8"])
+def test_fused_norm_rope(num_tokens: int, index_interleave: bool, mla_dtype: str):
     torch.manual_seed(0)
     dev = "cuda"
     max_pos = 8192
@@ -167,13 +167,12 @@ def test_fused_norm_rope(num_tokens: int, index_interleave: bool, mla_fp8: bool)
 
     bs = max_pos  # single block covering all tokens
     mla_dim = KV_LORA + ROPE_DIM
+    mla_fp8 = mla_dtype == "fp8"
     if mla_fp8:
         mla_cache = torch.zeros(1, bs, mla_dim, device=dev, dtype=torch.uint8)
-        mla_dtype = "fp8"
         mla_k_scale = torch.tensor([0.3], device=dev, dtype=torch.float32)
     else:
         mla_cache = torch.zeros(1, bs, mla_dim, device=dev, dtype=torch.bfloat16)
-        mla_dtype = "auto"
         mla_k_scale = None
     idx_row = INDEX_HEAD_DIM + INDEX_HEAD_DIM // 128 * 4  # 132
     idx_cache = torch.zeros(1, bs, idx_row, device=dev, dtype=torch.uint8)
@@ -292,6 +291,81 @@ def test_fused_norm_rope_no_indexer(num_tokens: int):
     assert (topk == 7).all(), "topk buffer should be untouched on shared layer"
 
 
+@pytest.mark.parametrize("has_indexer", [False, True])
+def test_fused_norm_rope_materializes_pcp_cache_inputs(has_indexer: bool):
+    """PCP gets local normalized/rotated K rows without direct cache writes."""
+    torch.manual_seed(6)
+    dev = "cuda"
+    num_tokens = 17
+    max_pos = 8192
+    pos = torch.arange(num_tokens, device=dev, dtype=torch.int64)
+    q_c = torch.randn(num_tokens, Q_LORA, device=dev, dtype=torch.bfloat16)
+    kv_c = torch.randn(num_tokens, KV_LORA, device=dev, dtype=torch.bfloat16)
+    k_pe = torch.randn(num_tokens, ROPE_DIM, device=dev, dtype=torch.bfloat16)
+    qw = torch.randn(Q_LORA, device=dev, dtype=torch.bfloat16)
+    kvw = torch.randn(KV_LORA, device=dev, dtype=torch.bfloat16)
+    ik = (
+        torch.randn(num_tokens, INDEX_HEAD_DIM, device=dev, dtype=torch.bfloat16)
+        if has_indexer
+        else None
+    )
+    ikw = (
+        torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+        if has_indexer
+        else None
+    )
+    ikb = (
+        torch.randn(INDEX_HEAD_DIM, device=dev, dtype=torch.float32)
+        if has_indexer
+        else None
+    )
+    mla_cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
+    idx_cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev) if has_indexer else None
+    q_out = torch.empty_like(q_c)
+    kv_out = torch.empty_like(kv_c)
+    kpe_out = torch.empty_like(k_pe)
+    ik_out = torch.empty_like(ik) if ik is not None else None
+    topk = torch.full((num_tokens, 2048), 7, device=dev, dtype=torch.int32)
+
+    actual_q = K.fused_norm_rope(
+        pos,
+        q_c,
+        qw,
+        EPS,
+        kv_c,
+        kvw,
+        EPS,
+        k_pe,
+        mla_cos_sin,
+        ik,
+        ikw,
+        ikb,
+        EPS,
+        idx_cos_sin,
+        topk,
+        has_indexer=has_indexer,
+        index_rope_interleave=True,
+        q_c_out=q_out,
+        kv_c_out=kv_out,
+        k_pe_out=kpe_out,
+        index_k_out=ik_out,
+    )
+
+    assert actual_q.data_ptr() == q_out.data_ptr()
+    assert_bf16(actual_q, rms_norm(q_c, qw), "PCP q norm")
+    assert_bf16(kv_out, rms_norm(kv_c, kvw), "PCP kv norm")
+    assert_bf16(
+        kpe_out,
+        rope(k_pe.float(), pos, mla_cos_sin, interleave=True),
+        "PCP k_pe RoPE",
+    )
+    if has_indexer:
+        assert ik is not None and ikw is not None and ikb is not None
+        assert ik_out is not None and idx_cos_sin is not None
+        ik_ref = rope(layer_norm(ik, ikw, ikb), pos, idx_cos_sin, interleave=True)
+        assert_bf16(ik_out, ik_ref, "PCP indexer-K")
+
+
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 512])
 def test_fused_norm_rope_ds_mla(num_tokens: int):
     """fp8_ds_mla MLA cache layout (FlashMLA sparse, bf16-query path; SM90/SM100).
@@ -405,19 +479,29 @@ def test_fused_norm_rope_supports_large_token_count():
 # ── fused_q ──────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("num_tokens", [1, 4, 17, 512, 4096])
+@pytest.mark.parametrize(
+    ("num_tokens", "num_q_heads"),
+    [
+        (1, NUM_HEADS),
+        (4, NUM_HEADS),
+        (17, NUM_HEADS),
+        (512, NUM_HEADS),
+        (4096, NUM_HEADS),
+        (17, 64),
+    ],
+)
 @pytest.mark.parametrize("index_interleave", [True, False])
-def test_fused_q(num_tokens: int, index_interleave: bool):
+def test_fused_q(num_tokens: int, num_q_heads: int, index_interleave: bool):
     torch.manual_seed(2)
     dev = "cuda"
     max_pos = 8192
     pos = torch.arange(num_tokens, device=dev, dtype=torch.int64) % max_pos
 
     q_pe = torch.randn(
-        num_tokens, NUM_HEADS, ROPE_DIM, device=dev, dtype=torch.bfloat16
+        num_tokens, num_q_heads, ROPE_DIM, device=dev, dtype=torch.bfloat16
     )
     ql_nope = torch.randn(
-        num_tokens, NUM_HEADS, KV_LORA, device=dev, dtype=torch.bfloat16
+        num_tokens, num_q_heads, KV_LORA, device=dev, dtype=torch.bfloat16
     )
     index_q = torch.randn(
         num_tokens, INDEX_HEADS, INDEX_HEAD_DIM, device=dev, dtype=torch.bfloat16
@@ -449,7 +533,7 @@ def test_fused_q(num_tokens: int, index_interleave: bool):
     mqa_nope_ref = (ql_nope.float() / s).to(FP8)
     qpe_ref = rope(
         q_pe.float(),
-        pos.unsqueeze(-1).expand(num_tokens, NUM_HEADS),
+        pos.unsqueeze(-1).expand(num_tokens, num_q_heads),
         q_cos_sin,
         interleave=True,
     )
@@ -484,7 +568,6 @@ def test_fused_q_no_indexer(num_tokens: int):
     )
     q_scale = torch.tensor([0.5], device=dev, dtype=torch.float32)
     q_cos_sin = make_cos_sin(max_pos, ROPE_DIM, dev)
-
     _, _, mqa = K.fused_q(
         pos,
         q_pe,
