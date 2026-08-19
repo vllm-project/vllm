@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from concurrent.futures import ThreadPoolExecutor
+
 from fastapi.responses import JSONResponse, Response
 
 from vllm import PoolingParams
@@ -9,6 +11,7 @@ from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.tasks import SCORE_TYPE_MAP, SupportedTask
+from vllm.utils.async_utils import make_async
 from vllm.v1.pool.late_interaction import (
     build_late_interaction_doc_params,
     build_late_interaction_query_params,
@@ -61,6 +64,20 @@ class ServingScores(PoolingServing):
             self.enable_flash_late_interaction = False
 
         super().__init__(engine_client, *args, **kwargs)
+
+        # Scoring requests can contain hundreds of document pairs. Keep their
+        # CPU preprocessing off the renderer executor so long-running scoring
+        # batches do not delay renderer work needed to submit ready requests.
+        self._score_preprocessing_executor = ThreadPoolExecutor(
+            max_workers=engine_client.model_config.renderer_num_workers,
+            thread_name_prefix="score-preprocess",
+        )
+        self._preprocessing_async = make_async(
+            self._preprocessing, executor=self._score_preprocessing_executor
+        )
+
+    def shutdown(self) -> None:
+        self._score_preprocessing_executor.shutdown(wait=False)
 
     def init_io_processor(self, *args, **kwargs) -> PoolingIOProcessor:
         return ScoringIOProcessors[self.io_processor_name](*args, **kwargs)
