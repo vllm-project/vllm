@@ -202,7 +202,7 @@ class Step3VLMultiModalProcessor(BaseMultiModalProcessor[Step3VLProcessingInfo])
             ),
             num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             patch_newline_mask=MultiModalFieldConfig.flat_from_sizes(
-                "image", num_patches
+                "image", num_patches, keep_on_cpu=True
             ),
         )
 

@@ -4,7 +4,7 @@
 from fastapi import Request
 from starlette.responses import JSONResponse
 
-from vllm.entrypoints.launcher import terminate_if_errored
+from vllm.entrypoints.launchers.launcher import terminate_if_errored
 from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.exceptions import VLLMError
 from vllm.logger import init_logger
