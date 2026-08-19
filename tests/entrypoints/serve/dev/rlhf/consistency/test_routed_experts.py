@@ -179,8 +179,7 @@ def server(request):
     runner_type, enforce_eager, moe_backend = request.param
     if moe_backend is not None and not _supports_monolithic_trtllm():
         pytest.skip(
-            "flashinfer_trtllm MoE kernels require flashinfer on "
-            "Blackwell (SM100) GPUs"
+            "flashinfer_trtllm MoE kernels require flashinfer on Blackwell (SM100) GPUs"
         )
     with routed_experts_server(
         runner_type, enforce_eager=enforce_eager, moe_backend=moe_backend
@@ -198,9 +197,7 @@ def test_capture_shape_and_range(server):
     )
     assert chat.token_ids is not None
 
-    no_ids = _generate(
-        server, "Hello, world", max_tokens=4, return_token_ids=False
-    )
+    no_ids = _generate(server, "Hello, world", max_tokens=4, return_token_ids=False)
     assert no_ids.token_ids is None
 
 
@@ -220,9 +217,9 @@ def test_replay_identity(server):
     )
     # Routing is causal: the extended request's rows for the shared
     # prefix tokens must equal the prefix request's rows.
-    assert extended.token_ids[: pref.prompt_tokens] == pref.token_ids[
-        : pref.prompt_tokens
-    ]
+    assert (
+        extended.token_ids[: pref.prompt_tokens] == pref.token_ids[: pref.prompt_tokens]
+    )
     assert np.array_equal(
         extended.routed_experts[: pref.prompt_tokens],
         pref.routed_experts[: pref.prompt_tokens],
