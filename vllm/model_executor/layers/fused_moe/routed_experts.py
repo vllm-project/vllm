@@ -370,6 +370,7 @@ class RoutedExperts(PluggableLayer):
         loaded_weight: torch.Tensor,
         tp_rank: int,
         is_scale: bool = False,
+        is_block_scale: bool = False,
     ):
         """Load grouped weight scales for group quantization or model weights
 
@@ -414,6 +415,7 @@ class RoutedExperts(PluggableLayer):
                 expert_data=expert_data,
                 tp_rank=tp_rank,
                 load_full=padded_tp,
+                is_block_scale=is_block_scale,
             )
         elif shard_id in ("w1", "w3"):
             self._load_w13(
@@ -423,6 +425,7 @@ class RoutedExperts(PluggableLayer):
                 expert_data=expert_data,
                 tp_rank=tp_rank,
                 load_full=padded_tp,
+                is_block_scale=is_block_scale,
             )
 
     def _load_per_channel_weight_scale(
@@ -528,6 +531,7 @@ class RoutedExperts(PluggableLayer):
         loaded_weight: torch.Tensor,
         tp_rank: int,
         load_full: bool = False,
+        is_block_scale: bool = False,
     ):
         # Index the loaded weight for tp sharding.
         # gate_up_proj: "MergedColumnParallel", so tp sharding on output_dim
@@ -543,9 +547,21 @@ class RoutedExperts(PluggableLayer):
             # size.  Compute the offset into the checkpoint weight using
             # the *unpadded* per-rank size so that every TP rank lands at
             # the correct slice.
-            tp_size = self.moe_config.moe_parallel_config.tp_size
-            loaded_per_rank = loaded_weight.shape[shard_dim] // tp_size
-            start_offset = loaded_per_rank * tp_rank
+            if is_block_scale:
+                block_sizes = self.weight_block_size
+                assert block_sizes is not None
+                block_size = block_sizes[0]
+                logical_size = self.moe_config.intermediate_size_per_partition_unpadded
+                assert logical_size is not None
+                start = tp_rank * logical_size
+                start_offset = start // block_size
+                loaded_per_rank = (
+                    start + logical_size + block_size - 1
+                ) // block_size - start_offset
+            else:
+                tp_size = self.moe_config.moe_parallel_config.tp_size
+                loaded_per_rank = loaded_weight.shape[shard_dim] // tp_size
+                start_offset = loaded_per_rank * tp_rank
             available = loaded_weight.shape[shard_dim] - start_offset
             if available <= 0:
                 # If there is no available weight to load for this TP rank
@@ -578,15 +594,28 @@ class RoutedExperts(PluggableLayer):
         loaded_weight: torch.Tensor,
         tp_rank: int,
         load_full: bool = False,
+        is_block_scale: bool = False,
     ):
         # Index the loaded weight for tp sharding.
         # down_proj: "RowParallel" so tp sharding on input_dim
         # Padded TP weights have already been sliced by the grouped loader.
         if not load_full and loaded_weight.ndim > 0:
             # Same padding fix as _load_w13: use unpadded per-rank size.
-            tp_size = self.moe_config.moe_parallel_config.tp_size
-            loaded_per_rank = loaded_weight.shape[shard_dim] // tp_size
-            start_offset = loaded_per_rank * tp_rank
+            if is_block_scale:
+                block_sizes = self.weight_block_size
+                assert block_sizes is not None
+                block_size = block_sizes[1]
+                logical_size = self.moe_config.intermediate_size_per_partition_unpadded
+                assert logical_size is not None
+                start = tp_rank * logical_size
+                start_offset = start // block_size
+                loaded_per_rank = (
+                    start + logical_size + block_size - 1
+                ) // block_size - start_offset
+            else:
+                tp_size = self.moe_config.moe_parallel_config.tp_size
+                loaded_per_rank = loaded_weight.shape[shard_dim] // tp_size
+                start_offset = loaded_per_rank * tp_rank
             available = loaded_weight.shape[shard_dim] - start_offset
             if available <= 0:
                 # If there is no available weight to load for this TP rank
@@ -942,6 +971,8 @@ class RoutedExperts(PluggableLayer):
                     expert_data=expert_data,
                     tp_rank=self.moe_config.tp_rank,
                     is_scale=True,
+                    is_block_scale=quant_method
+                    == FusedMoeWeightScaleSupported.BLOCK.value,
                 )
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
                 self._load_per_tensor_weight_scale(
