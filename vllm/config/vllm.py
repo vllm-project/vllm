@@ -105,7 +105,8 @@ def default_v2_model_runner_architectures() -> frozenset[str]:
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
-        # TODO(rocm): These models are still faster on the compiled MRV1 path.
+        # TODO(rocm): These models are either unsupported by MRV2 or slower with
+        # MRV2 on AMD GPUs.
         return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES - {
             "DeepseekV32ForCausalLM",
             "DeepseekV4ForCausalLM",
