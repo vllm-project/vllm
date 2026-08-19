@@ -539,6 +539,17 @@ def fp8_fp4_mqa_logits(
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
     """
+    # [SM89_ADA_PATCH] mqa logits: DeepGEMM asserts on arch; Ada uses Triton.
+    from vllm.platforms import current_platform as _sm89_cp
+
+    if _sm89_cp.is_cuda() and _sm89_cp.is_device_capability((8, 9)):
+        from vllm.models.deepseek_v4.nvidia.ops.sm12x_deep_gemm_fallbacks import (
+            _fp8_mqa_logits_sm12x,
+        )
+
+        return _fp8_mqa_logits_sm12x(
+            q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits
+        )
     _lazy_init()
     if _fp8_fp4_mqa_logits_impl is None:
         return _missing()
@@ -645,6 +656,22 @@ def fp8_fp4_paged_mqa_logits(
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
     """
+    # [SM89_ADA_PATCH] paged mqa logits: DeepGEMM asserts on arch; Ada uses
+    # Triton. Only the FP8 path (q[1] is None) has a fallback.
+    from vllm.platforms import current_platform as _sm89_cp
+
+    if (
+        _sm89_cp.is_cuda()
+        and _sm89_cp.is_device_capability((8, 9))
+        and q[1] is None
+    ):
+        from vllm.models.deepseek_v4.nvidia.ops.sm12x_deep_gemm_fallbacks import (
+            _fp8_paged_mqa_logits_sm12x,
+        )
+
+        return _fp8_paged_mqa_logits_sm12x(
+            q, kv_cache, weights, context_lens, block_tables, max_model_len
+        )
     _lazy_init()
     if _fp8_fp4_paged_mqa_logits_impl is None:
         return _missing()

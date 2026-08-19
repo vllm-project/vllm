@@ -37,6 +37,31 @@ _FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 _flashinfer_dsv4_workspace_by_device: dict[torch.device, torch.Tensor] = {}
 
 
+def _is_flashinfer_sparse_jit_capability(capability: DeviceCapability) -> bool:
+    """SM12 native; SM89 via ported sparse MLA JIT kernels.  [SM89_ADA_PATCH]"""
+    return capability.major == 12 or (capability.major, capability.minor) == (8, 9)
+
+
+def _flashinfer_sparse_mla_support_error(
+    capability: DeviceCapability,
+) -> str | None:
+    """[SM89_ADA_PATCH] Report why the installed FlashInfer cannot serve this GPU."""
+    from vllm.utils.flashinfer import (
+        has_flashinfer_sparse_mla_sm89,
+        has_flashinfer_sparse_mla_sm120,
+    )
+
+    if (capability.major, capability.minor) == (8, 9):
+        if not has_flashinfer_sparse_mla_sm89():
+            return (
+                "SM89 requires a FlashInfer build carrying the sparse MLA SM89 "
+                "JIT patch"
+            )
+    elif capability.major == 12 and not has_flashinfer_sparse_mla_sm120():
+        return "SM12x requires FlashInfer's sparse MLA decode API"
+    return None
+
+
 def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
     workspace = _flashinfer_dsv4_workspace_by_device.get(device)
     if workspace is None:
@@ -128,7 +153,10 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability.major in [10, 12]
+        # [SM89_ADA_PATCH]
+        return capability.major in [10, 12] or capability == DeviceCapability(
+            8, 9
+        )
 
     @classmethod
     def supports_combination(
@@ -152,18 +180,14 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
             if kv_cache_dtype not in (None, "auto", "bfloat16", "fp8", "fp8_e4m3"):
                 return "kv_cache_dtype not supported"
             return None
-        if device_capability.major == 12:
+        # [SM89_ADA_PATCH] SM89 shares the SM12x JIT path.
+        if _is_flashinfer_sparse_jit_capability(device_capability):
             if kv_cache_dtype not in ("fp8", "fp8_e4m3", "fp8_ds_mla"):
                 return "kv_cache_dtype not supported"
-            from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
-
-            if not has_flashinfer_sparse_mla_sm120():
-                return (
-                    "FLASHINFER_MLA_SPARSE_DSV4 SM120 requires FlashInfer's "
-                    "sparse MLA decode API"
-                )
+            if error := _flashinfer_sparse_mla_support_error(device_capability):
+                return f"FLASHINFER_MLA_SPARSE_DSV4 {error}"
             return None
-        return "FLASHINFER_MLA_SPARSE_DSV4 requires SM10x or SM12x"
+        return "FLASHINFER_MLA_SPARSE_DSV4 requires SM89, SM10x, or SM12x"
 
     @staticmethod
     def get_kv_cache_shape(
@@ -174,7 +198,10 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         device_capability = current_platform.get_device_capability()
-        if device_capability is not None and device_capability.major == 12:
+        # [SM89_ADA_PATCH] kv cache shape: SM89 uses the SM12x layout
+        if device_capability is not None and _is_flashinfer_sparse_jit_capability(
+            device_capability
+        ):
             return DeepseekV4SparseMLABackend.get_kv_cache_shape(
                 num_blocks,
                 block_size,

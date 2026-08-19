@@ -6,8 +6,11 @@ import torch.nn as nn
 from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
     fused_inv_rope_fp8_quant,
 )
+from vllm.models.deepseek_v4.nvidia.ops.fp8_einsum import (  # [SM89_ADA_PATCH]
+    deepseek_v4_fp8_einsum,
+    deepseek_v4_fp8_einsum_config,
+)
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import fp8_einsum
 
 
 def compute_fp8_einsum_recipe() -> tuple[tuple[int, int, int], bool]:
@@ -20,9 +23,9 @@ def compute_fp8_einsum_recipe() -> tuple[tuple[int, int, int], bool]:
     """
     cap = current_platform.get_device_capability()
     assert cap is not None, "DeepseekV4 attention requires a CUDA device"
-    einsum_recipe = (1, 128, 128) if cap.major <= 9 else (1, 1, 128)
-    tma_aligned_scales = cap.major >= 10
-    return einsum_recipe, tma_aligned_scales
+    # [SM89_ADA_PATCH] recipe from the SM89-aware table (SM89/SM12x -> FP32
+    # block scales + Triton fallback; SM100 keeps INT32 packed scales).
+    return deepseek_v4_fp8_einsum_config(cap.major)
 
 
 def deep_gemm_fp8_o_proj(
@@ -63,11 +66,15 @@ def deep_gemm_fp8_o_proj(
     weight_scale = (
         wo_a.weight_scale if hasattr(wo_a, "weight_scale") else wo_a.weight_scale_inv
     )
-    fp8_einsum(
-        "bhr,hdr->bhd",
-        (o_fp8, o_scale),
-        (wo_a.weight, weight_scale),
+    # [SM89_ADA_PATCH] dispatch through the SM89-aware einsum; it forwards to
+    # DeepGEMM on arch 9/10/12 and to the Triton kernel on Ada.
+    deepseek_v4_fp8_einsum(
+        o_fp8,
+        o_scale,
+        wo_a.weight,
+        weight_scale,
         z,
-        recipe=einsum_recipe,
+        "bhr,hdr->bhd",
+        list(einsum_recipe),
     )
     return wo_b(z.flatten(1))

@@ -577,7 +577,17 @@ def has_fbgemm_gpu() -> bool:
 
 def has_cutedsl() -> bool:
     """Whether the optional `cutelass` package is available."""
-    return _has_module("cutlass")
+    if not _has_module("cutlass"):
+        return False
+
+    # [SM89_ADA_PATCH] CuTe-DSL kernels used by DeepSeek V4 target SM90+
+    # instructions. Ada SM89 must use the Triton/torch fallbacks instead.
+    # This single short-circuit flips every `if has_cutedsl()` branch at once.
+    from vllm.platforms import current_platform
+
+    return not (
+        current_platform.is_cuda() and current_platform.is_device_capability((8, 9))
+    )
 
 
 def has_humming() -> bool:

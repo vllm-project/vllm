@@ -609,7 +609,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         # See: DeepGMM/csrc/apis/attention.hpp. Sized for one slot per SM;
         # build() narrows it to whatever the kernel actually schedules.
-        self.scheduler_metadata_buffer = torch.empty(
+        # [SM89_ADA_PATCH] zeros not empty: when the arch gate above skips
+        # metadata generation, this buffer is handed downstream unwritten.
+        self.scheduler_metadata_buffer = torch.zeros(
             (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
         )
 
@@ -1026,7 +1028,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             # DeepGEMM is required for the paged MQA logits on CUDA devices
             schedule_metadata = self.scheduler_metadata_buffer
-            if current_platform.is_cuda() and has_deep_gemm():
+            # [SM89_ADA_PATCH] has_deep_gemm() is a *package* probe; the
+            # scheduler-metadata kernel additionally asserts on arch (9/10/12).
+            # Ada must skip metadata generation and use the Triton fallback.
+            if (
+                current_platform.is_cuda()
+                and has_deep_gemm()
+                and not current_platform.is_device_capability((8, 9))
+            ):
                 metadata = get_paged_mqa_logits_metadata(
                     seq_lens,
                     self.kv_cache_spec.storage_block_size,

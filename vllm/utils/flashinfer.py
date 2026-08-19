@@ -254,6 +254,25 @@ def has_flashinfer_sparse_mla_sm120_config(num_q_heads: int, top_k: int) -> bool
 
 
 @functools.cache
+def has_flashinfer_sparse_mla_sm89() -> bool:
+    """[SM89_ADA_PATCH] Whether the installed FlashInfer enables sparse MLA on SM89.
+
+    NOTE: reaches into FlashInfer's private ``mla._core``. If FlashInfer renames
+    or removes it this returns False and the SM89 backend is refused — loud, not
+    silent. See 手册 §7 风险 1.
+    """
+    if not has_flashinfer_sparse_mla_sm120():
+        return False
+    try:
+        from flashinfer.mla._core import _resolve_dsv4_sparse_mla_backend
+
+        device = torch.device("cuda", torch.accelerator.current_device_index())
+        return _resolve_dsv4_sparse_mla_backend(device) == "sparse"
+    except (ImportError, AttributeError, RuntimeError, TypeError, ValueError):
+        return False
+
+
+@functools.cache
 def has_flashinfer_cutedsl() -> bool:
     """Return ``True`` if FlashInfer cutedsl module is available."""
     return (
