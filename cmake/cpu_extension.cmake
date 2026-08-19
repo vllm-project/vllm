@@ -159,7 +159,7 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR ENABLE_X86_ISA)
     # actual flag support rather than compiler version alone.
     # Option to enable/disable AMX-FP8 support (default: ON)
     option(ENABLE_AMX_FP8 "Enable AMX-FP8 support" ON)
-    
+
     if (ENABLE_AMX_FP8)
         check_cxx_compiler_flag("-mamx-fp8" COMPILER_SUPPORTS_AMX_FP8_FLAG)
         if (COMPILER_SUPPORTS_AMX_FP8_FLAG)
