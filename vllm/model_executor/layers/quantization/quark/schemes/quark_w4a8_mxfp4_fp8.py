@@ -11,7 +11,10 @@ import torch.nn.functional as F
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
     get_fp8_min_max,
+    kFp8StaticTensorSym,
+    kMxfp4Static,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
@@ -38,12 +41,18 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
     Uses the AITER Triton kernel and falls back to emulation if AITER not available.
     """
 
+    @classmethod
+    def get_quant_keys(cls) -> tuple[QuantKey, QuantKey]:
+        """Return the W4A8 MXFP4+FP8 quantization keys."""
+        return kMxfp4Static, kFp8StaticTensorSym
+
     def __init__(
         self,
         weight_quant_spec: dict[str, Any],
         input_quant_spec: dict[str, Any],
     ):
         self.out_dtype = None
+        self.weight_quant_key, self.activation_quant_key = self.get_quant_keys()
 
         self.weight_dtype = "mxfp4"
         self.packed_factor: Fraction = Fraction(2, 1)  # 2 FP4 values per byte

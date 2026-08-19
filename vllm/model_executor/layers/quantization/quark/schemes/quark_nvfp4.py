@@ -14,6 +14,11 @@ from vllm.model_executor.kernels.linear.nvfp4.emulation import (
 from vllm.model_executor.layers.quantization.quark.schemes.quark_scheme import (
     QuarkScheme,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
+    kNvfp4Static,
+)
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
@@ -36,9 +41,15 @@ class QuarkNVFP4(QuarkScheme):
     - input_scale_2: bfloat16/float32, scalar (global input scale)
     """
 
+    @classmethod
+    def get_quant_keys(cls) -> tuple[QuantKey, QuantKey]:
+        """Return the fixed NVFP4 quantization keys."""
+        return kNvfp4Static, kNvfp4Dynamic
+
     def __init__(
         self,
     ):
+        self.weight_quant_key, self.activation_quant_key = self.get_quant_keys()
         self.kernel = init_nvfp4_linear_kernel()
         self.group_size = 16
 

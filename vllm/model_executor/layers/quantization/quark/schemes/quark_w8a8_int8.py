@@ -10,6 +10,13 @@ from vllm.model_executor.kernels.linear import (
     init_int8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kInt8DynamicTensorSym,
+    kInt8DynamicTokenSym,
+    kInt8StaticChannelSym,
+    kInt8StaticTensorSym,
+)
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
     ChannelQuantScaleParameter,
@@ -21,6 +28,21 @@ logger = init_logger(__name__)
 
 
 class QuarkW8A8Int8(QuarkScheme):
+    @classmethod
+    def get_quant_keys(
+        cls, qscheme: str, is_static_input_scheme: bool
+    ) -> tuple[QuantKey, QuantKey]:
+        """Return the quantization keys used by the INT8 linear kernel."""
+        weight_key = (
+            kInt8StaticChannelSym if qscheme == "per_channel" else kInt8StaticTensorSym
+        )
+        if is_static_input_scheme:
+            return weight_key, kInt8StaticTensorSym
+        activation_key = (
+            kInt8DynamicTokenSym if qscheme == "per_channel" else kInt8DynamicTensorSym
+        )
+        return weight_key, activation_key
+
     def __init__(
         self,
         qscheme: str,
@@ -30,6 +52,9 @@ class QuarkW8A8Int8(QuarkScheme):
         self.qscheme = qscheme
         self.is_static_input_scheme = is_static_input_scheme
         self.input_symmetric = input_symmetric
+        self.weight_quant_key, self.activation_quant_key = self.get_quant_keys(
+            qscheme, bool(is_static_input_scheme)
+        )
 
     @classmethod
     def get_min_capability(cls) -> int:

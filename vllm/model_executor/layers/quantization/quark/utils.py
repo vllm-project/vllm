@@ -8,6 +8,8 @@ from typing import Any
 import regex as re
 import torch
 
+QuarkQTensorHint = dict[str, Any] | list[dict[str, Any]] | None
+
 
 def deep_compare(dict1: Any, dict2: Any) -> bool:
     if type(dict1) is not type(dict2):

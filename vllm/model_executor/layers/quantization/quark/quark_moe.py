@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -55,16 +55,22 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
 )
+from vllm.model_executor.layers.quantization.quark.schemes.quark_ocp_mx import (
+    QuarkOCP_MX,
+)
+from vllm.model_executor.layers.quantization.quark.utils import QuarkQTensorHint
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_BLOCK_SIZE,
     OCP_MX_Scheme,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    QuantKey,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4W4A8StaticChannelSym,
     kInt8DynamicTensorSym,
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
@@ -81,6 +87,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+
 logger = init_logger(__name__)
 
 __all__ = [
@@ -95,6 +104,67 @@ class QuarkMoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.has_bias = self.moe.has_bias
+
+    @staticmethod
+    def get_moe_method_target(
+        quant_config: "QuarkConfig",  # type: ignore # noqa: E501
+        layer_type: type[torch.nn.Module],
+        layer_name: str,
+    ) -> tuple[
+        QuantKey | None,
+        QuantKey | None,
+        type["QuarkMoEMethod"] | None,
+    ]:
+        """Return the quantization target for a routed-experts layer."""
+        layer_quant_config = quant_config._find_matched_config(layer_name, layer_type)
+        weight_config: QuarkQTensorHint = layer_quant_config.get("weight")
+        input_config: QuarkQTensorHint = layer_quant_config.get("input_tensors")
+
+        if (
+            isinstance(weight_config, list)
+            and len(weight_config) > 1
+            or isinstance(input_config, list)
+            and len(input_config) > 1
+        ):
+            if quant_config._is_fp8_w4a8(weight_config, input_config):
+                weight_key, activation_key = QuarkW4A8Fp8MoEMethod.get_quant_keys(
+                    weight_config, input_config
+                )
+                return weight_key, activation_key, QuarkW4A8Fp8MoEMethod
+            if quant_config._is_nvfp4(weight_config, input_config):
+                weight_key, activation_key = QuarkNvfp4MoEMethod.get_quant_keys(
+                    weight_config, input_config
+                )
+                return weight_key, activation_key, QuarkNvfp4MoEMethod
+            return None, None, None
+
+        weight_config = quant_config._unwrap_single_quant_config(weight_config)
+        input_config = quant_config._unwrap_single_quant_config(input_config)
+
+        if quant_config._is_fp8_w8a8(weight_config, input_config):
+            assert isinstance(weight_config, dict)
+            assert isinstance(input_config, dict)
+            weight_key, activation_key = QuarkW8A8Fp8MoEMethod.get_quant_keys(
+                weight_config, input_config
+            )
+            return weight_key, activation_key, QuarkW8A8Fp8MoEMethod
+        if quant_config._is_w_ocp_mx_a_x(weight_config, input_config):
+            assert isinstance(weight_config, dict)
+            assert input_config is None or isinstance(input_config, dict)
+            ocp_weight_key, ocp_activation_key = QuarkOCP_MX.get_quant_keys(
+                weight_config, input_config
+            )
+            return ocp_weight_key, ocp_activation_key, QuarkOCP_MX_MoEMethod
+        if quant_config._is_static_tensor_w8a8(
+            weight_config, input_config
+        ) or quant_config._is_dynamic_per_token_w8a8(weight_config, input_config):
+            assert isinstance(weight_config, dict)
+            assert isinstance(input_config, dict)
+            weight_key, activation_key = QuarkW8A8Int8MoEMethod.get_quant_keys(
+                weight_config, input_config
+            )
+            return weight_key, activation_key, QuarkW8A8Int8MoEMethod
+        return None, None, None
 
     @staticmethod
     def get_moe_method(
@@ -114,21 +184,22 @@ class QuarkMoEMethod(FusedMoEMethodBase):
         weight_config = layer_quant_config.get("weight")
         input_config = layer_quant_config.get("input_tensors")
 
-        if quant_config._is_fp8_w4a8(weight_config, input_config):
+        _, _, method_cls = QuarkMoEMethod.get_moe_method_target(
+            quant_config, type(module), layer_name
+        )
+        if method_cls is QuarkW4A8Fp8MoEMethod:
             return QuarkW4A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
-        elif quant_config._is_nvfp4(weight_config, input_config):
+        elif method_cls is QuarkNvfp4MoEMethod:
             return QuarkNvfp4MoEMethod(
                 weight_config, input_config, module.moe_config, quant_config
             )
-        elif quant_config._is_fp8_w8a8(weight_config, input_config):
+        elif method_cls is QuarkW8A8Fp8MoEMethod:
             return QuarkW8A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
-        elif quant_config._is_w_ocp_mx_a_x(weight_config, input_config):
+        elif method_cls is QuarkOCP_MX_MoEMethod:
             # All OCP MX schemes (W4A16, W4A8, etc.) handled by QuarkOCP_MX_MoEMethod
             # Backend selection happens inside via oracle
             return QuarkOCP_MX_MoEMethod(weight_config, input_config, module.moe_config)
-        elif quant_config._is_static_tensor_w8a8(
-            weight_config, input_config
-        ) or quant_config._is_dynamic_per_token_w8a8(weight_config, input_config):
+        elif method_cls is QuarkW8A8Int8MoEMethod:
             return QuarkW8A8Int8MoEMethod(
                 weight_config, input_config, module.moe_config
             )
@@ -137,13 +208,35 @@ class QuarkMoEMethod(FusedMoEMethodBase):
 
 
 class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
+    @classmethod
+    def get_quant_keys(
+        cls,
+        weight_config: dict[str, Any] | None,
+        input_config: dict[str, Any] | None,
+    ) -> tuple[QuantKey, QuantKey]:
+        """Return the quantization keys used for FP8 MoE backend selection."""
+        if weight_config is None or input_config is None:
+            raise ValueError("FP8 MoE requires weight and activation configs.")
+        per_channel = (
+            weight_config.get("qscheme") == "per_channel"
+            and input_config.get("qscheme") == "per_channel"
+        )
+        static_input_scales = not input_config.get("is_dynamic")
+        if per_channel:
+            return kFp8StaticChannelSym, kFp8DynamicTokenSym
+        if static_input_scales:
+            return kFp8StaticTensorSym, kFp8StaticTensorSym
+        return kFp8StaticTensorSym, kFp8DynamicTensorSym
+
     def __init__(
         self,
-        weight_config: dict[str, Any],
-        input_config: dict[str, Any],
+        weight_config: QuarkQTensorHint,
+        input_config: QuarkQTensorHint,
         moe: FusedMoEConfig,
     ):
         super().__init__(moe)
+        assert isinstance(weight_config, dict)
+        assert isinstance(input_config, dict)
         self.weight_quant = weight_config
         self.input_quant = input_config
 
@@ -177,20 +270,14 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             )
 
         # Determine quant keys for oracle backend selection
-        if per_channel:
-            weight_key = kFp8StaticChannelSym
-            activation_key = kFp8DynamicTokenSym
-        elif self.static_input_scales:
-            weight_key = kFp8StaticTensorSym
-            activation_key = kFp8StaticTensorSym
-        else:
-            weight_key = kFp8StaticTensorSym
-            activation_key = kFp8DynamicTensorSym
+        self.weight_quant_key, self.activation_quant_key = self.get_quant_keys(
+            weight_config, input_config
+        )
 
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
             config=moe,
-            weight_key=weight_key,
-            activation_key=activation_key,
+            weight_key=self.weight_quant_key,
+            activation_key=self.activation_quant_key,
         )
 
         self.model_type = getattr(
@@ -499,17 +586,43 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
 class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
     """Quark W8A8 INT8 MoE method."""
 
+    @classmethod
+    def get_quant_keys(
+        cls,
+        weight_config: dict[str, Any] | None,
+        input_config: dict[str, Any] | None,
+    ) -> tuple[QuantKey, QuantKey]:
+        """Return the quantization keys used by the INT8 MoE backend."""
+        if weight_config is None or input_config is None:
+            raise ValueError("INT8 MoE requires weight and activation configs.")
+        qscheme = weight_config.get("qscheme", "per_tensor")
+        is_static_input_scheme = not input_config.get("is_dynamic", False)
+        weight_key = (
+            kInt8StaticChannelSym if qscheme == "per_channel" else kInt8StaticTensorSym
+        )
+        if is_static_input_scheme:
+            return weight_key, kInt8StaticTensorSym
+        activation_key = (
+            kInt8DynamicTokenSym if qscheme == "per_channel" else kInt8DynamicTensorSym
+        )
+        return weight_key, activation_key
+
     def __init__(
         self,
-        weight_config: dict[str, Any],
-        input_config: dict[str, Any],
+        weight_config: QuarkQTensorHint,
+        input_config: QuarkQTensorHint,
         moe: FusedMoEConfig,
     ):
         super().__init__(moe)
+        assert isinstance(weight_config, dict)
+        assert isinstance(input_config, dict)
         self.weight_quant = weight_config
         self.input_quant = input_config
         self.weight_qscheme = self.weight_quant.get("qscheme", "per_tensor")
         self.static_input_scales = not self.input_quant.get("is_dynamic", False)
+        self.weight_quant_key, self.activation_quant_key = self.get_quant_keys(
+            weight_config, input_config
+        )
 
         self.moe_quant_config: FusedMoEQuantConfig | None = None
         self.moe_kernel: mk.FusedMoEKernel | None = None
@@ -527,17 +640,10 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             # Map the Quark weight scheme to oracle quant keys. Per-channel
             # weights pair with dynamic per-token activations; per-tensor
             # weights with dynamic per-tensor activations.
-            if self.weight_qscheme == "per_channel":
-                weight_key = kInt8StaticChannelSym
-                activation_key = kInt8DynamicTokenSym
-            else:
-                weight_key = kInt8StaticTensorSym
-                activation_key = kInt8DynamicTensorSym
-
             self.int8_backend, self.experts_cls = select_int8_moe_backend(
                 config=moe,
-                weight_key=weight_key,
-                activation_key=activation_key,
+                weight_key=self.weight_quant_key,
+                activation_key=self.activation_quant_key,
             )
 
     def create_weights(
@@ -875,15 +981,42 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
 
 
 class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
+    @classmethod
+    def get_quant_keys(
+        cls,
+        weight_config: QuarkQTensorHint,
+        input_config: QuarkQTensorHint,
+    ) -> tuple[QuantKey, QuantKey]:
+        """Return the quantization keys used by W4A8 FP8 MoE weights."""
+        if not isinstance(weight_config, list) or len(weight_config) != 2:
+            raise ValueError("W4A8 FP8 MoE requires two weight configs.")
+        if isinstance(input_config, list):
+            if len(input_config) != 1:
+                raise ValueError("W4A8 FP8 MoE supports one activation config.")
+            input_config = input_config[0]
+        if input_config is None:
+            raise ValueError("W4A8 FP8 MoE requires one activation config.")
+        activation_key = (
+            kFp8DynamicTokenSym
+            if input_config.get("is_dynamic")
+            else kFp8StaticTensorSym
+        )
+        return kInt4W4A8StaticChannelSym, activation_key
+
     def __init__(
         self,
-        weight_config: dict[str, Any],
-        input_config: dict[str, Any],
+        weight_config: QuarkQTensorHint,
+        input_config: QuarkQTensorHint,
         moe: FusedMoEConfig,
     ):
         super().__init__(moe)
+        assert isinstance(weight_config, list) and len(weight_config) == 2
+        assert isinstance(input_config, dict)
         self.weight_quant = weight_config
         self.input_quant = input_config
+        self.weight_quant_key, self.activation_quant_key = self.get_quant_keys(
+            weight_config, input_config
+        )
 
         assert rocm_aiter_ops.is_fused_moe_enabled(), (
             "W4A8 FP8 MoE requires ROCm AITER fused MoE support."
@@ -1033,11 +1166,13 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
 class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
     def __init__(
         self,
-        weight_config: dict[str, Any],
-        input_config: dict[str, Any] | None,
+        weight_config: QuarkQTensorHint,
+        input_config: QuarkQTensorHint,
         moe: FusedMoEConfig,
     ):
         super().__init__(moe)
+        assert isinstance(weight_config, dict)
+        assert input_config is None or isinstance(input_config, dict)
         self.weight_quant = weight_config
         self.input_quant = input_config
 
@@ -1459,24 +1594,40 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
 
 class QuarkNvfp4MoEMethod(QuarkMoEMethod):
+    @classmethod
+    def get_quant_keys(
+        cls, weight_config: QuarkQTensorHint, input_config: QuarkQTensorHint
+    ) -> tuple[QuantKey, QuantKey]:
+        """Return the fixed NVFP4 quantization keys used by the MoE backend."""
+        if not isinstance(weight_config, list) or len(weight_config) != 2:
+            raise ValueError("NVFP4 MoE requires two weight configs.")
+        if not isinstance(input_config, list) or len(input_config) != 2:
+            raise ValueError("NVFP4 MoE requires two activation configs.")
+        return kNvfp4Static, kNvfp4Dynamic
+
     def __init__(
         self,
-        weight_config: dict[str, Any],
-        input_config: dict[str, Any],
+        weight_config: QuarkQTensorHint,
+        input_config: QuarkQTensorHint,
         moe: FusedMoEConfig,
         quant_config: "QuarkConfig",  # type: ignore # noqa E501 # noqa F821
     ):
         super().__init__(moe)
+        assert isinstance(weight_config, list) and len(weight_config) == 2
+        assert isinstance(input_config, list) and len(input_config) == 2
         self.weight_quant = weight_config
         self.input_quant = input_config
         self.quant_config = quant_config
         self.group_size = 16
+        self.weight_quant_key, self.activation_quant_key = self.get_quant_keys(
+            weight_config, input_config
+        )
 
         # Select experts implementation.
         self.nvfp4_backend, self.experts_cls = select_nvfp4_moe_backend(
             config=self.moe,
-            weight_key=kNvfp4Static,
-            activation_key=kNvfp4Dynamic,
+            weight_key=self.weight_quant_key,
+            activation_key=self.activation_quant_key,
         )
 
     def create_weights(

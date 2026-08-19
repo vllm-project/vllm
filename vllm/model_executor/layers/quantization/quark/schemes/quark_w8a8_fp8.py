@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    QuantKey,
     kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
@@ -42,6 +43,34 @@ logger = init_logger(__name__)
 
 
 class QuarkW8A8Fp8(QuarkScheme):
+    @classmethod
+    def get_quant_keys(
+        cls,
+        weight_config: dict[str, Any] | None,
+        input_config: dict[str, Any] | None,
+    ) -> tuple[QuantKey, QuantKey]:
+        """Return the quantization keys used by the FP8 linear kernel."""
+        assert weight_config is not None
+
+        weight_qscheme = cast(str, weight_config.get("qscheme"))
+        input_qscheme = (
+            cast(str, input_config.get("qscheme")) if input_config is not None else None
+        )
+        static_input_scales = input_config is not None and not input_config.get(
+            "is_dynamic"
+        )
+        activation_key = (
+            kFp8DynamicTokenSym
+            if not static_input_scales and input_qscheme == "per_channel"
+            else kFp8StaticTensorSym
+        )
+        weight_key = (
+            kFp8StaticChannelSym
+            if weight_qscheme == "per_channel"
+            else kFp8StaticTensorSym
+        )
+        return weight_key, activation_key
+
     def __init__(
         self, weight_config: dict[str, Any], input_config: dict[str, Any] | None
     ):
@@ -57,20 +86,8 @@ class QuarkW8A8Fp8(QuarkScheme):
                 "Quark W8A8 FP8 per-block weight quantization should use "
                 "QuarkW8A8Fp8PerBlock."
             )
-        per_token_activation = (
-            not self.is_static_input_scheme and self.input_qscheme == "per_channel"
-        )
-        per_channel_weight = self.weight_qscheme == "per_channel"
-
-        self.activation_quant_key = (
-            kFp8DynamicTokenSym if per_token_activation else kFp8StaticTensorSym
-        )
-        # A per-output-channel weight scale is one fp32 value per weight row
-        # (length N). Tag it as ``GroupShape.PER_CHANNEL`` to match the
-        # canonical compressed-tensors CHANNEL strategy, so kernel selection
-        # (e.g. AITER's pre-shuffled FP8 GEMM) treats it uniformly.
-        self.weight_quant_key = (
-            kFp8StaticChannelSym if per_channel_weight else kFp8StaticTensorSym
+        self.weight_quant_key, self.activation_quant_key = self.get_quant_keys(
+            weight_config, input_config
         )
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
@@ -210,6 +227,17 @@ class QuarkW8A8Fp8(QuarkScheme):
 
 
 class QuarkW8A8Fp8PerBlock(QuarkScheme):
+    @classmethod
+    def get_quant_keys(
+        cls,
+        weight_config: dict[str, Any] | None,
+        input_config: dict[str, Any] | None,
+    ) -> tuple[QuantKey, QuantKey]:
+        """Return the quantization keys used by the block-FP8 linear kernel."""
+        assert weight_config is not None
+        assert input_config is not None
+        return kFp8Static128BlockSym, kFp8Dynamic128Sym
+
     def __init__(
         self, weight_config: dict[str, Any], input_config: dict[str, Any] | None
     ):
@@ -224,8 +252,9 @@ class QuarkW8A8Fp8PerBlock(QuarkScheme):
             )
         self.weight_config = weight_config
         self.weight_block_size = list(block_size)
-        self.activation_quant_key = kFp8Dynamic128Sym
-        self.weight_quant_key = kFp8Static128BlockSym
+        self.weight_quant_key, self.activation_quant_key = self.get_quant_keys(
+            weight_config, input_config
+        )
         self.out_dtype = torch.get_default_dtype()
         self.input_dtype = get_current_vllm_config().model_config.dtype
 
