@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from importlib.metadata import version
 
 import pytest
 import torch
+from packaging.version import Version
 
 import vllm.config
 from tests.compile.backend import TestBackend
@@ -443,6 +445,16 @@ _FUSION_CONFIGS = [
 @pytest.mark.skipif(
     not is_aiter_found_and_supported(),
     reason="Only test on ROCm with AITER installed and supported",
+)
+# The fused_qk_norm_rope_cache kernel used by this test aborts on AITER < 0.1.20
+# (fused_qk_norm_rope_cache_quant.cu: "k_cache/v_cache must be contiguous within
+# a block")
+@pytest.mark.skipif(
+    not Version(version("amd_aiter")) >= Version("0.1.20"),
+    reason=(
+        "Requires AITER >= 0.1.20; older kernels abort on "
+        "fused_qk_norm_rope_cache (k_cache/v_cache contiguity)"
+    ),
 )
 def test_qk_norm_rope_kvcache_fusion(
     num_tokens: int,
