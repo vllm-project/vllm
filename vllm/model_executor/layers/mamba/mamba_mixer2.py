@@ -1261,7 +1261,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
             return MambaStateDtypeCalculator.append_replayssm_ring(
                 base_dtype,
                 self.model_config.dtype,
-                include_state_scale=self._quantized_ssm_state,
             )
         return base_dtype
 

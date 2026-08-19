@@ -88,14 +88,17 @@ class MambaStateDtypeCalculator:
         cls,
         base_dtypes: tuple[torch.dtype, ...],
         model_dtype: ModelDType | torch.dtype,
-        include_state_scale: bool = False,
     ) -> tuple[torch.dtype, ...]:
         """Append the ReplaySSM ring dtypes to a base ``(conv, ssm)`` tuple:
         ``(x_cache, dt_cache, B_cache)`` = ``(activation, fp32, activation)``.
         """
         activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
         dtypes = (*base_dtypes, activation_dtype, torch.float32, activation_dtype)
-        return (*dtypes, torch.float32) if include_state_scale else dtypes
+        return (
+            (*dtypes, torch.float32)
+            if base_dtypes[1] in QUANTIZED_SSM_STATE_DTYPES
+            else dtypes
+        )
 
     @classmethod
     def _mamba_state_dtype(
@@ -348,7 +351,10 @@ def quantize_ssm_state(
     )
     amax = state.abs().amax(dim=-1, keepdim=True)
     encode_scale = torch.where(amax == 0, 1, quant_max / amax)
-    quantized = (state * encode_scale).to(dtype)
+    scaled = (state * encode_scale).clamp(-quant_max, quant_max)
+    if dtype == torch.int8:
+        scaled = scaled.round()
+    quantized = scaled.to(dtype)
     decode_scale = encode_scale.reciprocal().squeeze(-1)
     return quantized, decode_scale
 

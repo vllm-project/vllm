@@ -750,7 +750,6 @@ class NemotronHForCausalLM(
             return MambaStateDtypeCalculator.append_replayssm_ring(
                 base_dtype,
                 vllm_config.model_config.dtype,
-                include_state_scale=base_dtype[1] in QUANTIZED_SSM_STATE_DTYPES,
             )
         return base_dtype
 
