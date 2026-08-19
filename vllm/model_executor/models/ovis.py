@@ -386,7 +386,7 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            grids=MultiModalFieldConfig.batched("image"),
+            grids=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             indicator_tokens=MultiModalFieldConfig.batched("image"),
         )
 

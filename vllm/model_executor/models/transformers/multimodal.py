@@ -300,11 +300,17 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
         # Keep these as batched, as they always have batch size as first dim
         if "audio" in modalities:
-            mm_fields["num_audio_tokens"] = MultiModalFieldConfig.batched("audio")
+            mm_fields["num_audio_tokens"] = MultiModalFieldConfig.batched(
+                "audio", keep_on_cpu=True
+            )
         if "image" in modalities:
-            mm_fields["image_grid_thw"] = MultiModalFieldConfig.batched("image")
+            mm_fields["image_grid_thw"] = MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            )
             # TODO: route to "video" once the video modality is supported
-            mm_fields["video_grid_thw"] = MultiModalFieldConfig.batched("image")
+            mm_fields["video_grid_thw"] = MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            )
             mm_fields["num_image_patches"] = MultiModalFieldConfig.batched(
                 "image", keep_on_cpu=True
             )
@@ -754,6 +760,12 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             return None
 
         num_image_patches = kwargs.pop("num_image_patches")
+
+        # grid_thw fields are registered keep_on_cpu; restore the on-device
+        # placement that HF get_image_features implementations expect.
+        for key, value in kwargs.items():
+            if isinstance(value, torch.Tensor):
+                kwargs[key] = value.to(pixel_values.device, non_blocking=True)
 
         # The underlying HuggingFace `get_image_features` implementations
         # contain model-internal syncs (e.g. Idefics3 filters all-zero

@@ -378,12 +378,16 @@ class MuseGlimmerMultiModalProcessor(
         if "image_pixel_values" in hf_inputs:
             fields.update(
                 image_pixel_values=MultiModalFieldConfig.batched("image"),
-                image_feature_sizes=MultiModalFieldConfig.batched("image"),
+                image_feature_sizes=MultiModalFieldConfig.batched(
+                    "image", keep_on_cpu=True
+                ),
             )
         if "video_pixel_values" in hf_inputs:
             fields.update(
                 video_pixel_values=MultiModalFieldConfig.batched("video"),
-                video_feature_sizes=MultiModalFieldConfig.batched("video"),
+                video_feature_sizes=MultiModalFieldConfig.batched(
+                    "video", keep_on_cpu=True
+                ),
             )
         return fields
 

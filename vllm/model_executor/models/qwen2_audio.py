@@ -130,7 +130,7 @@ def _qwen2audio_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     return dict(
         audio_embeds=MultiModalFieldConfig.batched("audio"),
         input_features=MultiModalFieldConfig.batched("audio"),
-        feature_attention_mask=MultiModalFieldConfig.batched("audio"),
+        feature_attention_mask=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
     )
 
 
