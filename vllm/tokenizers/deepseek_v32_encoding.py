@@ -272,7 +272,7 @@ def drop_thinking_messages(
     )
     for idx, msg in enumerate(messages):
         role = msg.get("role")
-        if role in ["user", "system", "tool"] or idx >= last_user_idx:
+        if role in ["user", "system", "tool", "developer"] or idx >= last_user_idx:
             messages_wo_thinking.append(msg)
             continue
 

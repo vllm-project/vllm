@@ -271,3 +271,41 @@ def test_encode_messages_preserves_small_chat_prompt(encoding_module):
         "<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>"
         "Hi<｜end▁of▁sentence｜>Again<｜end▁of▁sentence｜>"
     )
+
+
+# --- DeepSeek V3.2: developer messages must survive drop_thinking ----------
+
+
+def test_v32_drop_thinking_preserves_developer_messages():
+    # `developer` is a first-class role in render_message/find_last_user_index,
+    # so drop_thinking_messages must keep it. Dropping it silently loses the
+    # instructions and desynchronizes encode_messages' render loop.
+    messages = [
+        {"role": "developer", "content": "Always be concise."},
+        {"role": "user", "content": "Q1"},
+        {"role": "assistant", "content": "A1", "reasoning": "secret"},
+        {"role": "user", "content": "Q2"},
+    ]
+
+    kept = deepseek_v32_encoding.drop_thinking_messages(messages)
+
+    assert [m["role"] for m in kept] == ["developer", "user", "assistant", "user"]
+
+
+def test_v32_encode_messages_with_developer_and_drop_thinking():
+    # Regression: a developer turn combined with drop_thinking previously
+    # dropped the message and raised "Index out of range" from render_message.
+    prompt = deepseek_v32_encoding.encode_messages(
+        [
+            {"role": "developer", "content": "Always be concise."},
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1", "reasoning": "secret"},
+            {"role": "user", "content": "Q2"},
+        ],
+        thinking_mode="thinking",
+        drop_thinking=True,
+    )
+
+    assert isinstance(prompt, str)
+    assert "Always be concise." in prompt
+    assert "secret" not in prompt
