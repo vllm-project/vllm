@@ -1258,12 +1258,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
             self.cache_config.mamba_ssm_cache_dtype,
         )
         if self.use_replayssm:
-            state_dtypes = MambaStateDtypeCalculator.append_replayssm_ring(
-                base_dtype, self.model_config.dtype
+            return MambaStateDtypeCalculator.append_replayssm_ring(
+                base_dtype,
+                self.model_config.dtype,
+                include_state_scale=self._quantized_ssm_state,
             )
-            if self._quantized_ssm_state:
-                return (*state_dtypes, torch.float32)
-            return state_dtypes
         return base_dtype
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
@@ -1280,17 +1279,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
         if self.use_replayssm:
             assert self.replayssm_buffer_len is not None
-            state_shapes = MambaStateShapeCalculator.append_replayssm_ring(
+            return MambaStateShapeCalculator.append_replayssm_ring(
                 base_shapes=base_shape,
                 n_groups=self.n_groups,
                 tp_world_size=tp_world_size,
                 logical_window=self.replayssm_buffer_len,
                 backend=self.mamba_config.backend,
                 num_speculative_tokens=self.num_spec,
+                include_state_scale=self._quantized_ssm_state,
             )
-            if self._quantized_ssm_state:
-                return (*state_shapes, base_shape[1][:-1])
-            return state_shapes
         return base_shape
 
     @property

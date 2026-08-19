@@ -88,12 +88,14 @@ class MambaStateDtypeCalculator:
         cls,
         base_dtypes: tuple[torch.dtype, ...],
         model_dtype: ModelDType | torch.dtype,
+        include_state_scale: bool = False,
     ) -> tuple[torch.dtype, ...]:
         """Append the ReplaySSM ring dtypes to a base ``(conv, ssm)`` tuple:
         ``(x_cache, dt_cache, B_cache)`` = ``(activation, fp32, activation)``.
         """
         activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
-        return (*base_dtypes, activation_dtype, torch.float32, activation_dtype)
+        dtypes = (*base_dtypes, activation_dtype, torch.float32, activation_dtype)
+        return (*dtypes, torch.float32) if include_state_scale else dtypes
 
     @classmethod
     def _mamba_state_dtype(
@@ -219,6 +221,7 @@ class MambaStateShapeCalculator:
         logical_window: int,
         backend: MambaBackendEnum,
         num_speculative_tokens: int = 0,
+        include_state_scale: bool = False,
     ) -> tuple[tuple[int, ...], ...]:
         """Append the physical ReplaySSM ring shapes.
 
@@ -231,12 +234,13 @@ class MambaStateShapeCalculator:
             ring_buffer_len += 1 + num_speculative_tokens
         local_nheads, head_dim, state_size = base_shapes[1]
         local_ngroups = divide(n_groups, tp_world_size)
-        return (
+        shapes = (
             *base_shapes,
             (local_nheads, ring_buffer_len, head_dim),
             (local_nheads, ring_buffer_len),
             (local_ngroups, ring_buffer_len, state_size),
         )
+        return (*shapes, (local_nheads, head_dim)) if include_state_scale else shapes
 
     @classmethod
     def short_conv_state_shape(

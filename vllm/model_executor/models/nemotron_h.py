@@ -48,6 +48,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    QUANTIZED_SSM_STATE_DTYPES,
     MambaStateCopyFunc,
     MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
@@ -749,6 +750,7 @@ class NemotronHForCausalLM(
             return MambaStateDtypeCalculator.append_replayssm_ring(
                 base_dtype,
                 vllm_config.model_config.dtype,
+                include_state_scale=base_dtype[1] in QUANTIZED_SSM_STATE_DTYPES,
             )
         return base_dtype
 
@@ -784,6 +786,11 @@ class NemotronHForCausalLM(
             num_spec=vllm_config.num_speculative_tokens,
         )
         if cache_config.use_replayssm:
+            state_dtype = MambaStateDtypeCalculator.mamba2_state_dtype(
+                vllm_config.model_config.dtype,
+                cache_config.mamba_cache_dtype,
+                cache_config.mamba_ssm_cache_dtype,
+            )[1]
             return MambaStateShapeCalculator.append_replayssm_ring(
                 base_shapes=base_shape,
                 n_groups=hf_config.n_groups,
@@ -791,6 +798,7 @@ class NemotronHForCausalLM(
                 logical_window=cache_config.replayssm_buffer_len,
                 backend=vllm_config.mamba_config.backend,
                 num_speculative_tokens=vllm_config.num_speculative_tokens,
+                include_state_scale=state_dtype in QUANTIZED_SSM_STATE_DTYPES,
             )
         return base_shape
 

@@ -522,3 +522,24 @@ def test_replayssm_physical_ring_shape(
         (8, expected_ring_len),
         (2, expected_ring_len, 16),
     )
+
+
+def test_quantized_replayssm_layout_appends_fp32_state_scale():
+    base_shapes = ((64, 3), (8, 4, 16))
+    shapes = MambaStateShapeCalculator.append_replayssm_ring(
+        base_shapes,
+        n_groups=4,
+        tp_world_size=2,
+        logical_window=16,
+        backend=MambaBackendEnum.FLASHINFER,
+        include_state_scale=True,
+    )
+    dtypes = MambaStateDtypeCalculator.append_replayssm_ring(
+        (torch.bfloat16, torch.int8),
+        torch.bfloat16,
+        include_state_scale=True,
+    )
+
+    assert shapes[-1] == base_shapes[1][:-1]
+    assert dtypes[-1] == torch.float32
+    assert len(shapes) == len(dtypes) == 6
