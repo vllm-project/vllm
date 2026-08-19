@@ -5,7 +5,10 @@ import torch.nn as nn
 
 from vllm.config import ModelConfig, VllmConfig, replace
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+logger = init_logger(__name__)
 
 
 def _resolve_dspark_attention_backend(
@@ -18,6 +21,12 @@ def _resolve_dspark_attention_backend(
     # DeepSeek-V4 draft layers share the target's KV-cache layout. Other
     # DSpark architectures may use a different attention kind.
     if draft_model_config.hf_config.model_type == "deepseek_v4":
+        if target_backend is not None:
+            logger.info_once(
+                "Using the target model's %s attention backend for the "
+                "DeepSeek-V4 DSpark drafter.",
+                target_backend.name,
+            )
         return target_backend
     return None
 
