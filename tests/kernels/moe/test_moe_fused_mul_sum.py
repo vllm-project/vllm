@@ -19,21 +19,6 @@ TOP_KS = [2, 8]
 HIDDEN_SIZE = 512
 NUM_EXPERTS = 16
 
-# Both launch paths must satisfy the same behavioral contract: the default
-# grid-per-num_tokens kernel, and the persistent kernel selected by passing
-# num_valid_tokens. For the shared cases we bound the persistent kernel at the
-# full row count so every row stays in range and the assertions are identical.
-PERSISTENT = [False, True]
-
-
-def _valid_tokens(
-    persistent: bool, num_tokens: int, device: str
-) -> torch.Tensor | None:
-    """Device row-count scalar that selects the persistent kernel, or None."""
-    if not persistent:
-        return None
-    return torch.tensor([num_tokens], dtype=torch.int32, device=device)
-
 
 def _reference(
     inputs: torch.Tensor,
@@ -51,11 +36,8 @@ def _reference(
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("top_k", TOP_KS)
 @pytest.mark.parametrize("use_expert_map", [True, False])
-@pytest.mark.parametrize("persistent", PERSISTENT)
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_invalid_slots_excluded(
-    num_tokens: int, top_k: int, use_expert_map: bool, persistent: bool
-):
+def test_invalid_slots_excluded(num_tokens: int, top_k: int, use_expert_map: bool):
     """Slots marked -1 must not contribute, and must not be dereferenced.
 
     The expert GEMM never writes rows for topk slots whose expert id is -1
@@ -98,7 +80,6 @@ def test_invalid_slots_excluded(
         outputs=outputs,
         topk_ids=topk_ids,
         expert_map=expert_map,
-        num_valid_tokens=_valid_tokens(persistent, num_tokens, device),
     )
 
     assert not out.isnan().any(), "invalid slots leaked into the reduction"
@@ -117,9 +98,8 @@ def _local_expert_map(device: str) -> torch.Tensor:
 SENTINEL = 42.0  # exact in bf16; marks output the kernel must leave untouched
 
 
-@pytest.mark.parametrize("persistent", PERSISTENT)
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_nonlocal_row_is_zeroed(persistent: bool):
+def test_nonlocal_row_is_zeroed():
     """A real row whose positive ids all map to non-local experts is written 0.
 
     Such a row is not padding (its ids are >= 0, so row_valid > 0 and the block
@@ -155,16 +135,14 @@ def test_nonlocal_row_is_zeroed(persistent: bool):
         outputs=outputs,
         topk_ids=topk_ids,
         expert_map=expert_map,
-        num_valid_tokens=_valid_tokens(persistent, num_tokens, device),
     )
 
     assert not out.isnan().any(), "non-local row leaked NaN into the output"
     torch.testing.assert_close(out.float(), torch.zeros_like(out.float()))
 
 
-@pytest.mark.parametrize("persistent", PERSISTENT)
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_padding_row_left_untouched(persistent: bool):
+def test_padding_row_left_untouched():
     """An all -1 padding row is skipped: its output row is left untouched.
 
     This is the CUDA-graph decode contract -- padding rows past num_recv are
@@ -195,15 +173,13 @@ def test_padding_row_left_untouched(persistent: bool):
         outputs=outputs,
         topk_ids=topk_ids,
         expert_map=expert_map,
-        num_valid_tokens=_valid_tokens(persistent, num_tokens, device),
     )
 
     assert torch.all(out == SENTINEL), "padding row output was modified"
 
 
-@pytest.mark.parametrize("persistent", PERSISTENT)
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_nonlocal_and_padding_share_tile(persistent: bool):
+def test_nonlocal_and_padding_share_tile():
     """A non-local real row and an all -1 padding row in the same BLOCK_M tile.
 
     The real row keeps the tile alive (no early-return), so the non-local row is
@@ -243,7 +219,6 @@ def test_nonlocal_and_padding_share_tile(persistent: bool):
         outputs=outputs,
         topk_ids=topk_ids,
         expert_map=expert_map,
-        num_valid_tokens=_valid_tokens(persistent, num_tokens, device),
     )
 
     padding = torch.zeros(num_tokens, dtype=torch.bool, device=device)
@@ -252,56 +227,3 @@ def test_nonlocal_and_padding_share_tile(persistent: bool):
     written = out[~padding].float()
     assert not written.isnan().any(), "non-local row leaked NaN into the output"
     torch.testing.assert_close(written, torch.zeros_like(written))
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-def test_persistent_skips_padding_tail():
-    """Rows past num_valid_tokens are never processed, even with valid ids.
-
-    The persistent kernel bounds its grid-stride loop by the device-side
-    num_valid_tokens (num_recv for a decode dispatch). Unlike the all -1
-    early-return -- which only elides rows the id/expert_map masks would already
-    zero -- this skips the whole worst-case padding tail: those rows carry
-    uninitialized data (NaN here) behind perfectly valid-looking ids, yet must
-    be left untouched because downstream combine never gathers them.
-    """
-    set_random_seed(0)
-    device = "cuda"
-    num_tokens, top_k = 256, 8
-    num_valid = 100
-    local = NUM_EXPERTS // 2
-    expert_map = _local_expert_map(device)
-
-    inputs = torch.randn(
-        num_tokens, top_k, HIDDEN_SIZE, dtype=torch.bfloat16, device=device
-    )
-    topk_weights = torch.rand(num_tokens, top_k, dtype=torch.bfloat16, device=device)
-    # Every id is local and valid, so nothing here would be masked out; only the
-    # num_valid_tokens bound elides the tail.
-    topk_ids = torch.randint(
-        0, local, (num_tokens, top_k), dtype=torch.int32, device=device
-    )
-    # Poison the padding tail so any spill past the bound surfaces as NaN.
-    inputs[num_valid:] = float("nan")
-
-    outputs = torch.full(
-        (num_tokens, HIDDEN_SIZE), SENTINEL, dtype=torch.bfloat16, device=device
-    )
-    valid_tokens = torch.tensor([num_valid], dtype=torch.int32, device=device)
-    out = moe_fused_mul_sum(
-        inputs=inputs,
-        topk_weights=topk_weights,
-        outputs=outputs,
-        topk_ids=topk_ids,
-        expert_map=expert_map,
-        num_valid_tokens=valid_tokens,
-    )
-
-    assert torch.all(out[num_valid:] == SENTINEL), (
-        "padding tail past num_valid_tokens was modified"
-    )
-    ref = _reference(
-        inputs[:num_valid], topk_weights[:num_valid], topk_ids[:num_valid], expert_map
-    )
-    assert not out[:num_valid].isnan().any(), "valid head leaked NaN from the tail"
-    torch.testing.assert_close(out[:num_valid].float(), ref, atol=1e-2, rtol=1e-2)

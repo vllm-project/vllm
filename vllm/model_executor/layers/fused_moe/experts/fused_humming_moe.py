@@ -888,7 +888,6 @@ class HummingIndexedExperts(HummingExpertsBase):
             topk_ids=topk_ids,
             expert_map=expert_map,
             outputs=output,
-            num_valid_tokens=valid_tokens,
         )
 
 
