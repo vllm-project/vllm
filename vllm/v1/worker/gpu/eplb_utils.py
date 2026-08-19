@@ -144,7 +144,6 @@ class EPLBController:
         model: nn.Module,
         model_config: Any,
         expanded_physical_to_logical: torch.Tensor,
-        old_num_physical_experts: int,
     ) -> None:
         moe_model = get_mixture_of_experts_model(model)
         assert moe_model is not None
@@ -155,6 +154,5 @@ class EPLBController:
             device=self.device,
             parallel_config=self.parallel_config,
             expanded_physical_to_logical=expanded_physical_to_logical,
-            num_valid_physical_experts=old_num_physical_experts,
         )
         self._has_registered_models = True
