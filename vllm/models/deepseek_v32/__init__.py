@@ -17,6 +17,12 @@ from vllm.platforms import current_platform
 if current_platform.is_rocm():
     # GLM-5.2 keeps the generic implementation here, as it has on main; only
     # DeepSeek V3.2 has an AMD DSA port.
+    from vllm.model_executor.models.deepseek_mtp import (
+        DeepSeekMTP as CudaDeepseekV32MTP,
+    )
+    from vllm.model_executor.models.deepseek_v2 import (
+        DeepseekV3ForCausalLM as CudaDeepseekV32ForCausalLM,
+    )
     from vllm.model_executor.models.deepseek_v2 import GlmMoeDsaForCausalLM
 
     from .amd.model import DeepseekV32ForCausalLM
@@ -25,17 +31,27 @@ elif current_platform.is_cuda():
     # GLM-5.2 (glm_moe_dsa) reuses the CUDA DSA module. Individual optimized
     # kernels remain gated on the device capabilities they support.
     from .nvidia.model import DeepseekV32ForCausalLM
+    from .nvidia.model import DeepseekV32ForCausalLM as CudaDeepseekV32ForCausalLM
     from .nvidia.model import DeepseekV32ForCausalLM as GlmMoeDsaForCausalLM
     from .nvidia.mtp import DeepseekV32MTP
+    from .nvidia.mtp import DeepseekV32MTP as CudaDeepseekV32MTP
 else:
     # XPU and CPU keep the generic implementation.
+    from vllm.model_executor.models.deepseek_mtp import (
+        DeepSeekMTP as CudaDeepseekV32MTP,
+    )
     from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP as DeepseekV32MTP
+    from vllm.model_executor.models.deepseek_v2 import (
+        DeepseekV3ForCausalLM as CudaDeepseekV32ForCausalLM,
+    )
     from vllm.model_executor.models.deepseek_v2 import (
         DeepseekV3ForCausalLM as DeepseekV32ForCausalLM,
     )
     from vllm.model_executor.models.deepseek_v2 import GlmMoeDsaForCausalLM
 
 __all__ = [
+    "CudaDeepseekV32ForCausalLM",
+    "CudaDeepseekV32MTP",
     "DeepseekV32ForCausalLM",
     "DeepseekV32MTP",
     "GlmMoeDsaForCausalLM",
