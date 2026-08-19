@@ -47,6 +47,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.tokenizers.hf import HfTokenizer
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
@@ -173,6 +174,7 @@ class DeepseekOCR2MultiModalProcessor(
 
         else:
             tokenizer = self.info.get_tokenizer()
+            assert isinstance(tokenizer, HfTokenizer)
             processed_outputs = tokenizer(
                 prompt, add_special_tokens=True, return_tensors="pt"
             )
@@ -189,7 +191,9 @@ class DeepseekOCR2MultiModalProcessor(
         patches_per_image = torch.where(is_tiled, images_spatial_crop.prod(dim=-1), 0)
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            images_spatial_crop=MultiModalFieldConfig.batched("image"),
+            images_spatial_crop=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
             images_crop=MultiModalFieldConfig.flat_from_sizes(
                 "image", patches_per_image
             ),
@@ -214,6 +218,7 @@ class DeepseekOCR2MultiModalProcessor(
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 size = images.get_image_size(item_idx)
 
                 num_image_tokens = self.info.get_num_image_tokens(
@@ -284,7 +289,7 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
                 patch_size=16,
                 qkv_bias=True,
                 use_rel_pos=True,
-                global_attn_indexes=[2, 5, 8, 11],
+                global_attn_indexes=(2, 5, 8, 11),
                 window_size=14,
                 out_chans=256,
                 last_conv_output=896,
