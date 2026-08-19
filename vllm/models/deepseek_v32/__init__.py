@@ -14,7 +14,8 @@ if current_platform.is_rocm():
     from .amd.model import DeepseekV32ForCausalLM
     from .amd.mtp import DeepseekV32MTP
 elif current_platform.is_xpu():
-    raise NotImplementedError("deepseek_v32 does not yet support XPU.")
+    from .xpu.model import DeepseekV32ForCausalLM
+    from .xpu.mtp import DeepseekV32MTP
 else:
     # Covers Blackwell (sm100) and all other CUDA devices.
     from .nvidia.model import DeepseekV32ForCausalLM
