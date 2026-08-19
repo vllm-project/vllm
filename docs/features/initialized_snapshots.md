@@ -19,7 +19,7 @@ Snapshots currently require all of the following:
 - One plaintext TCP HTTP API server without built-in API authentication,
   custom middleware, TLS, or a Unix domain socket.
 - No established TCP connections to a peer outside the captured process tree.
-  Snapshot creation records tree-owned connections and rejects external peers.
+  Snapshot creation inspects tree-owned connections and rejects external peers.
 - [CRIU](https://github.com/checkpoint-restore/criu), its matching CUDA plugin,
   and a `cuda-checkpoint`-compatible helper installed in the runtime.
 - `criu`, `cuda-checkpoint`, and `nvidia-smi` available on `PATH`.
