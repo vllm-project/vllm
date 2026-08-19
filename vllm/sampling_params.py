@@ -406,6 +406,7 @@ class SamplingParams(
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
         logprob_token_ids: list[int] | None = None,
+        routed_experts_prompt_start: int = 0,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -468,6 +469,7 @@ class SamplingParams(
             extra_args=extra_args,
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
+            routed_experts_prompt_start=routed_experts_prompt_start,
         )
 
     def __post_init__(self) -> None:
@@ -1027,6 +1029,15 @@ class SamplingParams(
                 "structured_outputs.json_object must be True if set; omit "
                 "structured_outputs to disable structured outputs"
             )
+        # Reject a regex containing a NUL byte early, in every backend mode. A
+        # NUL is never meaningful in a regex pattern and is not handled by the
+        # regex-to-grammar conversion. Checked here, before backend selection,
+        # so it is a clean 400 rather than a silent fallback in the default
+        # "auto" mode.
+        if self.structured_outputs.regex and "\x00" in self.structured_outputs.regex:
+            raise VLLMValidationError(
+                "structured_outputs.regex must not contain a NUL character ('\\x00')"
+            )
 
         from vllm.v1.structured_output.backend_guidance import (
             has_guidance_unsupported_json_features,
@@ -1081,7 +1092,7 @@ class SamplingParams(
             try:
                 validate_xgrammar_grammar(self)
                 self.structured_outputs._backend = "xgrammar"
-            except ValueError:
+            except VLLMValidationError:
                 # The request either failed validation
                 # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar.
@@ -1092,7 +1103,12 @@ class SamplingParams(
                 so_params = self.structured_outputs
                 if not skip_guidance and so_params.json:
                     if isinstance(so_params.json, str):
-                        schema = json_mod.loads(so_params.json)
+                        try:
+                            schema = json_mod.loads(so_params.json)
+                        except json_mod.JSONDecodeError as e:
+                            raise VLLMValidationError(
+                                "Invalid JSON grammar specification."
+                            ) from e
                     else:
                         schema = so_params.json
                     skip_guidance = has_guidance_unsupported_json_features(schema)
