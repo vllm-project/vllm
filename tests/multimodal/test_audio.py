@@ -14,6 +14,7 @@ from vllm.multimodal.audio import (
     AudioResampler,
     AudioSpec,
     ChannelReduction,
+    find_split_point,
     normalize_audio,
     resample_audio_pyav,
     resample_audio_scipy,
@@ -692,7 +693,6 @@ class TestAudioChunking:
 
     def test_find_split_point_finds_quiet_region(self):
         """find_split_point should identify low-energy regions."""
-        from vllm.multimodal.audio import find_split_point
 
         # Create audio with a quiet section in the middle
         segment = np.ones(32000, dtype=np.float32)
@@ -711,7 +711,6 @@ class TestAudioChunking:
 
     def test_find_split_point_handles_uniform_audio(self):
         """find_split_point should handle uniform energy audio gracefully."""
-        from vllm.multimodal.audio import find_split_point
 
         segment = np.ones(32000, dtype=np.float32) * 0.5
 
@@ -726,7 +725,6 @@ class TestAudioChunking:
 
     def test_find_split_point_silence(self):
         """find_split_point should prefer the quietest scanned window."""
-        from vllm.multimodal.audio import find_split_point
 
         # Deterministic signal: constant energy everywhere except silence.
         segment = np.ones(32000, dtype=np.float32)
@@ -752,7 +750,6 @@ class TestAudioChunking:
         window that ends exactly at the region boundary was skipped, so silence
         located there was missed and the split fell back to a louder point.
         """
-        from vllm.multimodal.audio import find_split_point
 
         window = 1600
         # Search region spans exactly three windows.
@@ -804,7 +801,6 @@ class TestAudioChunking:
 
     def test_find_split_point_nan_input(self):
         """find_split_point must not return 0 for all-NaN input."""
-        from vllm.multimodal.audio import find_split_point
 
         nan_audio = np.full(32000, float("nan"), dtype=np.float32)
         start_idx = 16000
