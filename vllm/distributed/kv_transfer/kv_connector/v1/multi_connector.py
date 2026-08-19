@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -296,6 +297,29 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     # ==============================
     # Worker-side methods
     # ==============================
+    def get_mem_pool_context(self) -> AbstractContextManager | None:
+        """Forward a custom KV cache memory pool from a child connector.
+
+        KV cache is allocated once and can only live in one pool, so at
+        most one child may provide a context.
+        """
+        found: list[tuple[str, AbstractContextManager]] = []
+        for connector in self._connectors:
+            get_ctx = getattr(connector, "get_mem_pool_context", None)
+            if get_ctx is None:
+                continue
+            if (ctx := get_ctx()) is not None:
+                found.append((type(connector).__name__, ctx))
+
+        if len(found) > 1:
+            names = [name for name, _ in found]
+            raise ValueError(
+                f"Multiple connectors provide a KV cache memory pool {names}; "
+                "KV cache is allocated once and can only live in one pool. "
+                "Configure custom_mem_pool on at most one connector."
+            )
+        return found[0][1] if found else None
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         for c in self._connectors:
             c.start_load_kv(forward_context, **kwargs)
