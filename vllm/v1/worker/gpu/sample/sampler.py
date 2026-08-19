@@ -137,10 +137,9 @@ class Sampler:
             return_logprobs=return_logprobs,
         )
 
-        # Overwrite sampled tokens with the replay trace (if any) before
-        # computing logprobs, so logprobs and ranks reflect the real
-        # distribution of the forced token.
         if self.trace_replay_state is not None:
+            # Overwrite sampled tokens with the replay trace up-front so that
+            # computed logprobs reflect the real distribution of the forced token.
             self.trace_replay_state.apply_trace(sampled, idx_mapping)
 
         if return_logprobs:
