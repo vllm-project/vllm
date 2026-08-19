@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import hashlib
 import io
+import itertools
 import json
 import logging
 import os
@@ -496,6 +497,7 @@ async def forward_non_stream(
     p_url: str,
     d_url: str,
     consumer_zmq: str | None,
+    dp_rank: int | None = None,
 ) -> dict:
     try:
         for attempt in range(DECODE_RETRIES + 1):
@@ -507,6 +509,8 @@ async def forward_non_stream(
 
             logger.info("[%s] Forwarding to decode: %s", req_id, d_url)
             headers = {"x-request-id": req_id}
+            if dp_rank is not None:
+                headers["X-data-parallel-rank"] = str(dp_rank)
 
             async with decode_session.post(
                 f"{d_url}/v1/chat/completions", json=prepared, headers=headers
@@ -562,6 +566,7 @@ async def forward_stream(
     p_url: str,
     d_url: str,
     consumer_zmq: str | None,
+    dp_rank: int | None = None,
 ) -> AsyncIterator[str]:
     try:
         for attempt in range(DECODE_RETRIES + 1):
@@ -573,6 +578,8 @@ async def forward_stream(
 
             logger.info("[%s] Starting streaming from decode: %s", req_id, d_url)
             headers = {"x-request-id": req_id}
+            if dp_rank is not None:
+                headers["X-data-parallel-rank"] = str(dp_rank)
 
             _first = None
             async with decode_session.post(
@@ -639,19 +646,26 @@ async def chat_completions(request: Request):
         p_url = random.choice(app.state.p_urls) if app.state.p_urls else None
         decode_index = random.randrange(len(app.state.d_urls))
         d_url = app.state.d_urls[decode_index]
-        consumer_zmq = (
-            app.state.d_ec_urls[decode_index] if app.state.d_ec_urls else None
-        )
+        dp_size = app.state.ec_consumer_dp_size
+        # Round-robin the replica, then name it to both halves: the decoder
+        # honours the rank header instead of its own balancer, and the encoder
+        # pushes to that replica's control channel. Choosing once here means a
+        # decode retry re-encodes to the same replica.
+        dp_rank = next(app.state.replica_counter) % dp_size if dp_size > 1 else None
+        ec_index = decode_index * dp_size + (dp_rank or 0)
+        consumer_zmq = app.state.d_ec_urls[ec_index] if app.state.d_ec_urls else None
 
         is_streaming = req_data.get("stream", False)
 
         if is_streaming:
             return StreamingResponse(
-                forward_stream(req_data, req_id, e_urls, p_url, d_url, consumer_zmq),
+                forward_stream(
+                    req_data, req_id, e_urls, p_url, d_url, consumer_zmq, dp_rank
+                ),
                 media_type="text/event-stream",
             )
         result = await forward_non_stream(
-            req_data, req_id, e_urls, p_url, d_url, consumer_zmq
+            req_data, req_id, e_urls, p_url, d_url, consumer_zmq, dp_rank
         )
         return JSONResponse(content=result)
 
@@ -837,12 +851,23 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
-        "--decode-ec-transfer-zmq-addrs",
+        "--ec-consumer-zmq-addrs",
         default="",
         help=(
-            "Comma-separated Mooncake EC consumer ZMQ addresses, aligned "
-            "with --decode-servers-urls. Required when the decoders use the "
-            "Mooncake EC connector."
+            "Comma-separated Mooncake EC consumer control addresses, aligned "
+            "with --decode-servers-urls. Required when the consumers use the "
+            "Mooncake EC connector. With --ec-consumer-dp-size > 1, list each "
+            "server's replicas consecutively: s0r0,s0r1,s1r0,s1r1."
+        ),
+    )
+    parser.add_argument(
+        "--ec-consumer-dp-size",
+        type=int,
+        default=1,
+        help=(
+            "Data-parallel replicas per EC consumer. The proxy picks a replica "
+            "round-robin and names it to both halves of the request, because an "
+            "encoder push has to land where the request will run."
         ),
     )
 
@@ -856,11 +881,19 @@ if __name__ == "__main__":
         u.strip() for u in args.decode_servers_urls.split(",") if u.strip()
     ]
     app.state.d_ec_urls = [
-        u.strip() for u in args.decode_ec_transfer_zmq_addrs.split(",") if u.strip()
+        u.strip() for u in args.ec_consumer_zmq_addrs.split(",") if u.strip()
     ]
-    if app.state.d_ec_urls and len(app.state.d_ec_urls) != len(app.state.d_urls):
+    if args.ec_consumer_dp_size < 1:
+        parser.error("--ec-consumer-dp-size must be at least 1")
+    app.state.ec_consumer_dp_size = args.ec_consumer_dp_size
+    app.state.replica_counter = itertools.count()
+    expected = len(app.state.d_urls) * args.ec_consumer_dp_size
+    if app.state.d_ec_urls and len(app.state.d_ec_urls) != expected:
         parser.error(
-            "--decode-ec-transfer-zmq-addrs must contain one address per decode server"
+            "--ec-consumer-zmq-addrs must contain one address per consumer "
+            f"replica: expected {expected} "
+            f"({len(app.state.d_urls)} servers x {args.ec_consumer_dp_size} replicas), "
+            f"got {len(app.state.d_ec_urls)}"
         )
     # handle prefill instances
     if args.prefill_servers_urls.lower() in ("disable", "none", ""):
@@ -878,6 +911,12 @@ if __name__ == "__main__":
     logger.info("Encode servers: %s", app.state.e_urls)
     logger.info("Prefill instances %s", app.state.p_urls)
     logger.info("Decode servers: %s", app.state.d_urls)
+    if app.state.ec_consumer_dp_size > 1:
+        logger.info(
+            "EC consumer replicas per server: %d (control addresses: %s)",
+            app.state.ec_consumer_dp_size,
+            app.state.d_ec_urls,
+        )
 
     uvicorn.run(
         app,
