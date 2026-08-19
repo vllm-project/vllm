@@ -399,50 +399,50 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #if defined(__AVX512F__) || defined(__AVX2__) ||                               \
     (defined(__aarch64__) && !defined(__APPLE__)) || defined(__powerpc64__) || \
     defined(__riscv_v) || defined(__s390x__)
-//   // Helper function to release oneDNN handlers
-//   ops.def("release_dnnl_matmul_handler(int handler) -> ()",
-//           &release_dnnl_matmul_handler);
+  // Helper function to release oneDNN handlers
+  ops.def("release_dnnl_matmul_handler(int handler) -> ()",
+          &release_dnnl_matmul_handler);
 
-//   // Create oneDNN GEMM handler
-//   ops.def(
-//       "create_onednn_mm_handler(Tensor b, int "
-//       "primitive_cache_size) -> int",
-//       &create_onednn_mm_handler);
+  // Create oneDNN GEMM handler
+  ops.def(
+      "create_onednn_mm_handler(Tensor b, int "
+      "primitive_cache_size) -> int",
+      &create_onednn_mm_handler);
 
-//   // oneDNN GEMM
-//   ops.def(
-//       "onednn_mm(Tensor! c, Tensor a, Tensor? bias, "
-//       "Tensor handler_tensor) -> ()");
-//   ops.impl("onednn_mm", torch::kCPU, &onednn_mm);
+  // oneDNN GEMM
+  ops.def(
+      "onednn_mm(Tensor! c, Tensor a, Tensor? bias, "
+      "Tensor handler_tensor) -> ()");
+  ops.impl("onednn_mm", torch::kCPU, &onednn_mm);
 
-//   // Check if oneDNN was built with ACL backend
-//   ops.def("is_onednn_acl_supported() -> bool", &is_onednn_acl_supported);
+  // Check if oneDNN was built with ACL backend
+  ops.def("is_onednn_acl_supported() -> bool", &is_onednn_acl_supported);
 
-//   // Create oneDNN W8A8 handler
-//   ops.def(
-//       "create_onednn_scaled_mm_handler(Tensor b, Tensor b_scales, ScalarType "
-//       "output_type, bool dynamic_act_quant, bool use_azp, int "
-//       "primitive_cache_size) -> int",
-//       &create_onednn_scaled_mm_handler);
+  // Create oneDNN W8A8 handler
+  ops.def(
+      "create_onednn_scaled_mm_handler(Tensor b, Tensor b_scales, ScalarType "
+      "output_type, bool dynamic_act_quant, bool use_azp, int "
+      "primitive_cache_size) -> int",
+      &create_onednn_scaled_mm_handler);
 
-//   // oneDNN scaled_mm for W8A8 with static per-tensor activation quantization
-//   ops.def(
-//       "onednn_scaled_mm(Tensor! c, Tensor a, Tensor a_scales, Tensor? azp, "
-//       "Tensor? azp_adj, Tensor? bias, Tensor handler_tensor) -> ()");
-//   ops.impl("onednn_scaled_mm", torch::kCPU, &onednn_scaled_mm);
+  // oneDNN scaled_mm for W8A8 with static per-tensor activation quantization
+  ops.def(
+      "onednn_scaled_mm(Tensor! c, Tensor a, Tensor a_scales, Tensor? azp, "
+      "Tensor? azp_adj, Tensor? bias, Tensor handler_tensor) -> ()");
+  ops.impl("onednn_scaled_mm", torch::kCPU, &onednn_scaled_mm);
 
-//   // Compute int8 quantized tensor for given scaling factor.
-//   ops.def(
-//       "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale,"
-//       "Tensor? azp) -> ()");
-//   ops.impl("static_scaled_int8_quant", torch::kCPU, &static_scaled_int8_quant);
+  // Compute int8 quantized tensor for given scaling factor.
+  ops.def(
+      "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale,"
+      "Tensor? azp) -> ()");
+  ops.impl("static_scaled_int8_quant", torch::kCPU, &static_scaled_int8_quant);
 
-//   // Compute int8 quantized tensor and scaling factor
-//   ops.def(
-//       "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale, "
-//       "Tensor!? azp) -> ()");
-//   ops.impl("dynamic_scaled_int8_quant", torch::kCPU,
-//            &dynamic_scaled_int8_quant);
+  // Compute int8 quantized tensor and scaling factor
+  ops.def(
+      "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale, "
+      "Tensor!? azp) -> ()");
+  ops.impl("dynamic_scaled_int8_quant", torch::kCPU,
+           &dynamic_scaled_int8_quant);
 #endif
 
 // SHM CCL
