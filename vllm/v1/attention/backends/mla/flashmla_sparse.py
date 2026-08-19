@@ -863,7 +863,7 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
 
             # Output is (1, T_i, H, D_v), squeeze back to (T_i, H, D_v)
             out[token_slice] = _attn_out.squeeze(0)
-            if self.need_to_return_lse_for_decode:
+            if lse is not None:
                 lse[token_slice] = _lse.squeeze(0).transpose(0, 1)
 
         if not self.need_to_return_lse_for_decode:
