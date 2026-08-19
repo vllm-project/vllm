@@ -12,6 +12,7 @@ from vllm.model_executor.models.transformers.multimodal import (
     MultiModalProcessor,
     OffsetsMultiModalProcessor,
 )
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.processing import InputProcessingContext
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
@@ -35,3 +36,16 @@ def create_processor(model_id: str, processor_cls):
     )
     info = MultiModalProcessingInfo(ctx)
     return processor_cls(info, MultiModalDummyInputsBuilder(info))
+
+
+def create_cached_processor(model_id: str, processor_cls):
+    """Build a processor backed by a real multi-modal processor cache, and hand the
+    cache back so a test can check it was actually used."""
+    model_config = ModelConfig(model=model_id, model_impl="transformers")
+    model_config.multimodal_config.mm_processor_cache_gb = 4
+    ctx = InputProcessingContext(
+        model_config, cached_tokenizer_from_config(model_config)
+    )
+    info = MultiModalProcessingInfo(ctx)
+    cache = MultiModalProcessorOnlyCache(model_config)
+    return processor_cls(info, MultiModalDummyInputsBuilder(info), cache=cache), cache

@@ -10,7 +10,12 @@ from vllm.model_executor.models.transformers.multimodal import (
     OffsetsMultiModalProcessor,
 )
 
-from .transformers_backend import PROCESSOR_CLASSES, create_processor, offsets_only
+from .transformers_backend import (
+    PROCESSOR_CLASSES,
+    create_cached_processor,
+    create_processor,
+    offsets_only,
+)
 
 
 @pytest.mark.parametrize("processor_cls", PROCESSOR_CLASSES)
@@ -225,3 +230,65 @@ def test_text_only_prompt(processor_cls):
 
     assert len(result["prompt_token_ids"]) > 0
     assert not result["mm_placeholders"]
+
+
+@offsets_only
+def test_repeated_image_hits_the_processor_cache():
+    """Check that mm caching is actually working."""
+    mm_processor, cache = create_cached_processor(
+        "llava-hf/llava-onevision-qwen2-0.5b-ov-hf", OffsetsMultiModalProcessor
+    )
+    image = ImageAsset("cherry_blossom").pil_image
+
+    def process():
+        return mm_processor(
+            prompt="<image>\nWhat is this?",
+            mm_items=mm_processor.info.parse_mm_data({"image": image}),
+            hf_processor_mm_kwargs={},
+        )
+
+    first, second = process(), process()
+
+    assert cache.make_stats().hits > 0
+    assert first["prompt_token_ids"] == second["prompt_token_ids"]
+    assert first["mm_hashes"] == second["mm_hashes"]
+
+
+@offsets_only
+@pytest.mark.parametrize(
+    ("model_id", "prompt"),
+    [
+        ("llava-hf/llava-onevision-qwen2-0.5b-ov-hf", "<image>\nWhat is this?"),
+        ("google/gemma-3-4b-it", "<start_of_image> What is this?"),
+        ("HuggingFaceTB/SmolVLM-256M-Instruct", "<image>What is this?"),
+        pytest.param(
+            "BAAI/Emu3-Chat-hf",
+            "<image> and more text",
+            marks=pytest.mark.xfail(
+                reason="Emu3Processor prepends its BOS token only when images are "
+                "passed, so the unexpanded prompt the offsets path tokenizes never "
+                "gets one. Fixed by huggingface/transformers#47924, unreleased.",
+                strict=False,
+            ),
+        ),
+    ],
+)
+def test_spliced_prompt_matches_hf_expansion(model_id, prompt):
+    """The offsets path splices the expansion into a prompt tokenized without any
+    multi-modal data, so its token ids have to come out the same as the ones the HF
+    processor produces itself, which is what the legacy path returns."""
+    prompt_ids = []
+    for processor_cls in (LegacyMultiModalProcessor, OffsetsMultiModalProcessor):
+        mm_processor = create_processor(model_id, processor_cls)
+        prompt_ids.append(
+            mm_processor(
+                prompt=prompt,
+                mm_items=mm_processor.info.parse_mm_data(
+                    {"image": ImageAsset("cherry_blossom").pil_image}
+                ),
+                hf_processor_mm_kwargs={},
+            )["prompt_token_ids"]
+        )
+
+    legacy_ids, offsets_ids = prompt_ids
+    assert legacy_ids == offsets_ids
