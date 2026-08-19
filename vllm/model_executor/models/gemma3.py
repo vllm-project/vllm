@@ -16,7 +16,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections.abc import Iterable
-from itertools import islice
 
 import torch
 from torch import nn
@@ -48,6 +47,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import SupportsLoRA, SupportsPP
+from .recirculation import RecirculationConfig
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -309,6 +309,11 @@ class Gemma3Model(nn.Module):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        self.recirculation_config = RecirculationConfig.from_hf_config(config)
+        if self.recirculation_config is not None and not getattr(
+            config, "is_causal", True
+        ):
+            raise ValueError("Recirculation requires causal attention")
 
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
@@ -323,6 +328,10 @@ class Gemma3Model(nn.Module):
             ),
             prefix=f"{prefix}.layers",
         )
+        if self.recirculation_config is not None and (
+            self.start_layer != 0 or self.end_layer != config.num_hidden_layers
+        ):
+            raise ValueError("Recirculation does not support pipeline parallelism")
         self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         # Normalize the embedding by sqrt(hidden_size)
@@ -358,18 +367,43 @@ class Gemma3Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+
+        destination_states = None
+        source_states = None
+        for layer_idx in range(self.start_layer, self.end_layer):
+            layer = self.layers[layer_idx]
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
                 **kwargs,
             )
+            if self.recirculation_config is not None:
+                if layer_idx == self.recirculation_config.destination_layer:
+                    destination_states = hidden_states + residual
+                if layer_idx == self.recirculation_config.source_layer:
+                    source_states = hidden_states + residual
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if self.recirculation_config is not None:
+            assert destination_states is not None and source_states is not None
+            recirculated_states = self.recirculation_config.mix(
+                source_states, destination_states, positions
+            )
+            recirculated_residual = None
+            for layer_idx in range(
+                self.recirculation_config.destination_layer + 1, self.end_layer
+            ):
+                recirculated_states, recirculated_residual = self.layers[layer_idx](
+                    positions,
+                    recirculated_states,
+                    recirculated_residual,
+                    **kwargs,
+                )
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
