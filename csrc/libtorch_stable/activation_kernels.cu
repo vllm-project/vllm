@@ -549,6 +549,15 @@ __device__ __forceinline__ float warp_reduce_max(float v) {
   return v;
 }
 
+// Non-negative v -> monotone uint bits, so one redux.sync.max (sm_80+).
+__device__ __forceinline__ float warp_reduce_absmax(float v) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && !defined(USE_ROCM)
+  return __uint_as_float(__reduce_max_sync(0xffffffffu, __float_as_uint(v)));
+#else
+  return warp_reduce_max(v);
+#endif
+}
+
 template <typename scalar_t, typename fp8_type, int THREADS, int NUM_STAGES,
           int GROUP_SIZE, int GRID_DIM, int D>
 __global__ void situ_and_mul_quant_group_pipelined_kernel(
@@ -675,7 +684,7 @@ __global__ void situ_and_mul_quant_group_pipelined_kernel(
               inv_linear_beta);
           thread_max = fmaxf(thread_max, fabsf(acts[e]));
         }
-        const float absmax = fmaxf(warp_reduce_max(thread_max), 1e-30f);
+        const float absmax = fmaxf(warp_reduce_absmax(thread_max), 1e-30f);
         const float scale = absmax * inv_fp8_max;
         if (lane_id == 0) *scale_st = scale;
         scale_st += NUM_WARPS;
