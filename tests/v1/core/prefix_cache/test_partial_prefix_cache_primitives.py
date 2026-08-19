@@ -4,6 +4,7 @@
 from collections.abc import Callable
 
 import pytest
+import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
@@ -18,6 +19,8 @@ from vllm.v1.core.kv_cache_utils import (
     hash_block_tokens,
     init_none_hash,
 )
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.request import Request
 
 pytestmark = pytest.mark.cpu_test
@@ -460,3 +463,78 @@ def test_partial_block_promotes_to_direct_full_block_hash(dcp_world_size: int):
     )
     assert pool.get_cached_block(promoted_full_hash, [kv_cache_group_id]) == [blocks[1]]
     assert pool.get_cached_block(partial_hash, [kv_cache_group_id]) is None
+
+
+@pytest.mark.parametrize("dcp_world_size", [1, 2, 4])
+def test_cache_blocks_does_not_resurrect_stale_partial_hash_after_promotion(
+    dcp_world_size: int,
+):
+    """Regression test for partial-hash resurrection after full-block promotion.
+
+    When a request's prompt ends inside a block, _cache_partial_tail_block
+    registers a partial hash for that boundary.  Once decode fills the block
+    completely, cache_full_blocks promotes it to a full-block hash and removes
+    the partial entry.  _cache_partial_tail_block must then skip re-inserting
+    the now-superseded partial hash on every subsequent cache_blocks call,
+    because boundary_tokens is derived from the fixed num_prompt_tokens and
+    does not change across decode steps.
+    """
+    hash_block_size = 2
+    block_size = 6 * dcp_world_size
+    kv_cache_group_id = 0
+
+    # Prompt: 10 tokens, ends 4 tokens into block 1 (partial tail).
+    prompt_token_ids = list(range(10 * dcp_world_size))
+    req = make_request("R", prompt_token_ids, hash_block_size, sha256)
+
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+    )
+    manager = FullAttentionManager(
+        kv_cache_spec=spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=kv_cache_group_id,
+        scheduler_block_size=block_size,
+    )
+    manager.req_to_blocks[req.request_id] = pool.get_new_blocks(2)
+
+    # Prefill: registers partial hash for the prompt boundary.
+    manager.cache_blocks(req, num_tokens=len(prompt_token_ids))
+    partial_hash = boundary_hash(req, hash_block_size, len(prompt_token_ids))
+    block1 = manager.req_to_blocks[req.request_id][1]
+    assert pool.get_cached_block(partial_hash, [kv_cache_group_id]) == [block1]
+
+    # Decode: fill block 1 to completion, triggering promotion.
+    tokens_to_fill = block_size - (len(prompt_token_ids) % block_size)
+    for i in range(tokens_to_fill):
+        req.append_output_token_ids([100 + i])
+        manager.cache_blocks(req, num_tokens=len(prompt_token_ids) + i + 1)
+
+    # After promotion the stale partial hash must not be live in the cache.
+    full_hashes = BlockHashListWithBlockSize(
+        req.block_hashes, hash_block_size, block_size
+    )
+    promoted_full_hash = full_hashes[1]
+    assert pool.get_cached_block(promoted_full_hash, [kv_cache_group_id]) == [block1], (
+        "promoted full-block hash must be cached"
+    )
+    assert pool.get_cached_block(partial_hash, [kv_cache_group_id]) is None, (
+        "stale partial hash must not be resurrected after promotion"
+    )
+
+    # Additional decode steps must not re-insert the stale entry either.
+    for i in range(tokens_to_fill, tokens_to_fill + 3):
+        req.append_output_token_ids([200 + i])
+        manager.cache_blocks(req, num_tokens=len(prompt_token_ids) + i + 1)
+    assert pool.get_cached_block(partial_hash, [kv_cache_group_id]) is None, (
+        "stale partial hash must stay absent on subsequent decode steps"
+    )
