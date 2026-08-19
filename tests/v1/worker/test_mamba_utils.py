@@ -34,6 +34,32 @@ _COPY_FUNCS: tuple[MambaStateCopyFunc, ...] = (
 )
 
 
+@pytest.mark.skip_global_cleanup
+@torch.inference_mode()
+def test_batch_memcpy_falls_back_for_non_launchable_kernel(monkeypatch):
+    """batch_memcpy should work when Triton launch syntax is unavailable."""
+    from vllm.v1.worker import mamba_utils
+
+    def plain_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=None):
+        raise AssertionError("plain kernel should not be launched with [grid]")
+
+    monkeypatch.setattr(mamba_utils, "batch_memcpy_kernel", plain_memcpy_kernel)
+
+    srcs = [
+        torch.arange(64, dtype=torch.float32),
+        torch.arange(17, dtype=torch.float32),
+    ]
+    dsts = [torch.zeros_like(src) for src in srcs]
+    src_ptrs = torch.tensor([src.data_ptr() for src in srcs], dtype=torch.uint64)
+    dst_ptrs = torch.tensor([dst.data_ptr() for dst in dsts], dtype=torch.uint64)
+    sizes = torch.tensor([src.nbytes for src in srcs], dtype=torch.int64)
+
+    batch_memcpy(src_ptrs, dst_ptrs, sizes)
+
+    for src, dst in zip(srcs, dsts):
+        torch.testing.assert_close(dst, src)
+
+
 def postprocess_mamba(
     scheduler_output: "SchedulerOutput",
     kv_cache_config: "KVCacheConfig",
