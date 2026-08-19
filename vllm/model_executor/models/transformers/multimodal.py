@@ -297,7 +297,7 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
 
         # Un-padded fields are already one entry per item, so index rather than slice
         mm_fields: dict[str, MultiModalFieldConfig] = {
-            key: MultiModalFieldConfig.batched(modality, keep_on_cpu=True)
+            key: MultiModalFieldConfig.batched(modality)
             if modality == "audio" or isinstance(hf_inputs[key], list)
             else MultiModalFieldConfig.flat_from_sizes(modality, sizes[modality])
             for modality in modalities
