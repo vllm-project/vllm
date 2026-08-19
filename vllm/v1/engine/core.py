@@ -307,6 +307,7 @@ class EngineCore:
         kv_cache_configs = get_kv_cache_configs(
             vllm_config, kv_cache_specs, available_gpu_memory
         )
+        vllm_config.cache_config.worker_kv_cache_configs = kv_cache_configs
 
         # If auto-fit reduced max_model_len, sync the new value to workers.
         # This is needed because workers were spawned before memory profiling
@@ -327,6 +328,11 @@ class EngineCore:
         vllm_config.validate_block_size()
 
         self.model_executor.initialize_from_config(kv_cache_configs)
+        aligned_num_cpu_blocks = self.model_executor.get_simple_cpu_offload_num_blocks()
+        if aligned_num_cpu_blocks is not None:
+            vllm_config.cache_config.simple_cpu_offload_num_blocks = (
+                aligned_num_cpu_blocks
+            )
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             self.model_executor.compile_or_warm_up_model()
 
