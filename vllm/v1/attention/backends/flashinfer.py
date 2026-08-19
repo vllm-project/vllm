@@ -448,9 +448,19 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
-        # trtllm-gen decode (SM100 family) reads query offsets from the device
-        # tensor; XQA and wrapper decode plan from qo_indptr_cpu.
-        return current_platform.is_device_capability_family(100)
+        # Only trtllm-gen decode (SM100 family) reads query offsets from the
+        # device tensor; XQA and wrapper decode plan from qo_indptr_cpu, and
+        # under DCP spec queries are routed to the prefill path.
+        if not current_platform.is_device_capability_family(100):
+            return False
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is None or vllm_config.model_config is None:
+            return True
+        pc = vllm_config.parallel_config
+        mc = vllm_config.model_config
+        return pc.decode_context_parallel_size == 1 and can_use_trtllm_attention(
+            mc.get_num_attention_heads(pc), mc.get_num_kv_heads(pc), is_prefill=False
+        )
 
     @classmethod
     def supports_sliding_window(cls) -> bool:
@@ -851,16 +861,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             current_platform.is_device_capability_family(120)
             and self.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.XQA
         )
-        if (
+        # Adaptive verification trims drafts on device, so decode query lengths
+        # must come from the device qo_indptr; only trtllm-gen supports that
+        # (the selector already rejects the other configurations).
+        self.use_trtllm_gen_varlen_decode = (
             speculative_config is not None
             and speculative_config.enable_adaptive_verification
             and self.flashinfer_trtllm_api_decode_kernel
-            != FlashInferDecodeKernel.TRTLLM_GEN
-        ):
-            raise ValueError(
-                "Adaptive verification on the FlashInfer backend requires the "
-                "trtllm-gen decode kernel."
-            )
+            == FlashInferDecodeKernel.TRTLLM_GEN
+            and not self.use_dcp
+        )
         supports_spec_as_decode = (
             self.flashinfer_trtllm_api_decode_kernel
             == FlashInferDecodeKernel.TRTLLM_GEN
@@ -1644,12 +1654,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if num_decodes > 0:
             if decode_with_flashinfer_trtllm_api:
                 assert self.flashinfer_trtllm_api_decode_kernel is not None
-                trtllm_gen_varlen = (
-                    self.flashinfer_trtllm_api_decode_kernel
-                    == FlashInferDecodeKernel.TRTLLM_GEN
-                    and not self.use_dcp
-                )
-                if not self.use_dedicated_xqa and not trtllm_gen_varlen:
+                if not self.use_dedicated_xqa and not self.use_trtllm_gen_varlen_decode:
                     assert num_decode_tokens % num_decodes == 0, (
                         "XQA/trtllm-gen decode requires uniform query lengths "
                         f"per request. Got {num_decode_tokens=} and {num_decodes=}."
@@ -1678,9 +1683,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         num_decodes,
                         bool(causal),
                     )
-                elif trtllm_gen_varlen and num_decodes > 0:
-                    # Adaptive verification trims drafts on device: CPU lens
-                    # are only an upper bound, device qo_indptr is the truth.
+                elif self.use_trtllm_gen_varlen_decode:
+                    # CPU lens are only an upper bound, device qo_indptr is
+                    # the truth.
                     decode_q_lens = (
                         qo_indptr_cpu[1 : num_decodes + 1] - qo_indptr_cpu[:num_decodes]
                     )
