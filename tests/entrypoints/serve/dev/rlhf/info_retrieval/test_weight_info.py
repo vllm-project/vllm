@@ -21,7 +21,7 @@ from tests.entrypoints.serve.dev.rlhf.conftest import (
 def server_state():
     with (
         patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"}),
-        server(port=8810, dummy_weights=True) as url,
+        server(dummy_weights=True) as url,
     ):
         initial_response = weight_info_response(url)
         initial_response.raise_for_status()
