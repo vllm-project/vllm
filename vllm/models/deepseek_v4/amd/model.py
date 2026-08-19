@@ -399,13 +399,15 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.mhc_pre = MHCPreOp()
         self.mhc_post = MHCPostOp()
         self.mhc_fused_post_pre = MHCFusedPostPreOp()
+        # AITER mhc kernels (pre/post/fused) require hc_mult == 4.
+        use_aiter_mhc = (
+            HAS_AITER_MHC and self.hidden_size % 256 == 0 and self.hc_mult == 4
+        )
         # Prefer AITER fused post+pre when eligible; otherwise TileLang.
-        self.use_fused_mhc = (
-            HAS_AITER_MHC and self.hidden_size % 256 == 0
-        ) or HAS_TILELANG_MHC
+        self.use_fused_mhc = use_aiter_mhc or HAS_TILELANG_MHC
         # Fold attn/ffn RMSNorm into MHC only when the active backend's
         # fused-rmsnorm path supports this hidden size.
-        if HAS_AITER_MHC and self.hidden_size % 256 == 0:
+        if use_aiter_mhc:
             self.fuse_mhc_rmsnorm = self.hidden_size in _AITER_MHC_FUSED_RMSNORM_SIZES
         else:
             self.fuse_mhc_rmsnorm = HAS_TILELANG_MHC and self.use_fused_mhc

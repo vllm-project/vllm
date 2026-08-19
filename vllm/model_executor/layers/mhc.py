@@ -90,7 +90,8 @@ class MHCPreOp(CustomOp):
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         hidden_size = residual.shape[-1]
-        if HAS_AITER_MHC and hidden_size % 256 == 0:
+        hc_mult = residual.shape[-2]
+        if HAS_AITER_MHC and hidden_size % 256 == 0 and hc_mult == 4:
             return torch.ops.vllm.mhc_pre_aiter(
                 residual,
                 fn,
@@ -225,7 +226,8 @@ class MHCPostOp(CustomOp):
         comb_res_mix: torch.Tensor,
     ) -> torch.Tensor:
         hidden_size = residual.shape[-1]
-        if HAS_AITER_MHC and hidden_size % 256 == 0:
+        hc_mult = residual.shape[-2]
+        if HAS_AITER_MHC and hidden_size % 256 == 0 and hc_mult == 4:
             return torch.ops.vllm.mhc_post_aiter(
                 x,
                 residual,
@@ -448,7 +450,8 @@ class MHCFusedPostPreOp(CustomOp):
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         hidden_size = residual.shape[-1]
-        if HAS_AITER_MHC and hidden_size % 256 == 0:
+        hc_mult = residual.shape[-2]
+        if HAS_AITER_MHC and hidden_size % 256 == 0 and hc_mult == 4:
             return torch.ops.vllm.mhc_fused_post_pre_aiter(
                 x,
                 residual,
