@@ -100,17 +100,21 @@ def _split(
 
 
 @pytest.mark.parametrize(
-    ("prompt_len", "use_eagle", "expected"),
-    [(2002, False, 2002), (3602, True, MAMBA_BLOCK_SIZE)],
+    ("prompt_len", "num_new_tokens", "use_eagle", "expected"),
+    [
+        (2002, 2002, False, 2002),
+        (3602, 2000, False, 2000),
+        (3602, 3602, True, MAMBA_BLOCK_SIZE),
+    ],
 )
 def test_internal_checkpoint_split(
-    prompt_len: int, use_eagle: bool, expected: int
+    prompt_len: int, num_new_tokens: int, use_eagle: bool, expected: int
 ) -> None:
     (request,) = create_requests(1, num_tokens=prompt_len, block_size=ATTN_BLOCK_SIZE)
     assert (
         _split(
             request,
-            prompt_len,
+            num_new_tokens,
             use_eagle=use_eagle,
             num_prefill_checkpoint_blocks=1,
         )

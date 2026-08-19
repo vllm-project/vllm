@@ -408,14 +408,17 @@ class Scheduler(SchedulerInterface):
             last_cache_position = max(last_cache_position - block_size, 0)
 
         end = start + num_new_tokens
-        if self.mamba_has_prefill_checkpoint_blocks and end >= prefill_end:
+        use_internal_checkpoint = (
+            self.mamba_has_prefill_checkpoint_blocks and start % block_size == 0
+        )
+        if use_internal_checkpoint:
             last_cache_position = 0
         # Invariant: slot p holds the state after exactly (p + 1) * block_size
         # tokens. State is written at chunk ends, so chunk ends must be block
         # aligned. Exempt: the prompt's last chunk, whose slot decode advances
         # to the boundary. A block too wide for one chunk advances sub-block
         # and re-aligns at the next boundary.
-        if end < prefill_end:
+        if end < prefill_end and not use_internal_checkpoint:
             max_prefill_tokens = self.max_num_scheduled_tokens
             long_prefill_threshold = self.scheduler_config.long_prefill_token_threshold
             if long_prefill_threshold > 0:
