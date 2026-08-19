@@ -302,10 +302,6 @@ def moe_fused_mul_sum(
     assert expert_map is None or topk_ids is not None, (
         "topk_ids is required to interpret expert_map"
     )
-    if topk_ids is not None:
-        assert topk_ids.shape == (num_tokens, top_k)
-        assert topk_ids.is_contiguous()
-        assert topk_ids.dtype in (torch.int32, torch.int64)
 
     if not isinstance(inputs, FakeTensor):
         BLOCK_M, BLOCK_K, num_warps, num_stages = _heuristic_config(
