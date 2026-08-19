@@ -22,6 +22,7 @@ class RegisterWorkerPayload(BaseModel):
     tp_rank: int
     pp_rank: int
     addr: WorkerAddr
+    dcp_size: int = 1
 
 
 @dataclass
@@ -29,6 +30,7 @@ class EngineEntry:
     engine_id: EngineId
     # {tp_rank: {pp_rank: worker_addr}}
     worker_addr: dict[int, dict[int, WorkerAddr]]
+    dcp_size: int = 1
 
 
 class MooncakeBootstrapServer:
@@ -83,6 +85,7 @@ class MooncakeBootstrapServer:
             self.workers[payload.dp_rank] = EngineEntry(
                 engine_id=payload.engine_id,
                 worker_addr={},
+                dcp_size=payload.dcp_size,
             )
 
         dp_entry = self.workers[payload.dp_rank]
@@ -92,6 +95,14 @@ class MooncakeBootstrapServer:
                 detail=(
                     f"Engine ID mismatch for dp_rank={payload.dp_rank}: "
                     f"expected {dp_entry.engine_id}, got {payload.engine_id}"
+                ),
+            )
+        if dp_entry.dcp_size != payload.dcp_size:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"DCP size mismatch for dp_rank={payload.dp_rank}: "
+                    f"expected {dp_entry.dcp_size}, got {payload.dcp_size}"
                 ),
             )
         if payload.tp_rank not in dp_entry.worker_addr:
@@ -112,11 +123,13 @@ class MooncakeBootstrapServer:
 
         tp_entry[payload.pp_rank] = payload.addr
         logger.debug(
-            "Registered worker: engine_id=%s, dp_rank=%d, tp_rank=%d, pp_rank=%d at %s",
+            "Registered worker: engine_id=%s, dp_rank=%d, tp_rank=%d, "
+            "pp_rank=%d, dcp_size=%d at %s",
             payload.engine_id,
             payload.dp_rank,
             payload.tp_rank,
             payload.pp_rank,
+            payload.dcp_size,
             payload.addr,
         )
 
