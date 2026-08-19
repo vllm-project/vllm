@@ -431,20 +431,20 @@ def _create_field_factory(
             image_embeds=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_embed_grid_sizes
             ),
-            image_grid_thw=MultiModalFieldConfig.batched("image"),
+            image_grid_thw=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             # OV2 first-class MM kwarg: per-patch (t,h,w)
             # positions required by the 3-D vision RoPE.
             patch_positions=MultiModalFieldConfig.flat_from_sizes(
-                "image", image_pixel_grid_sizes
+                "image", image_pixel_grid_sizes, keep_on_cpu=True
             ),
             pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_patch_sizes
             ),
             video_grid_thw=MultiModalFieldConfig.flat_from_sizes(
-                "video", video_num_frames
+                "video", video_num_frames, keep_on_cpu=True
             ),
             patch_positions_videos=MultiModalFieldConfig.flat_from_sizes(
-                "video", video_patch_sizes
+                "video", video_patch_sizes, keep_on_cpu=True
             ),
             video_num_frames=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
             frame_timestamps=MultiModalFieldConfig.batched("video", keep_on_cpu=True),

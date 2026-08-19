@@ -352,9 +352,12 @@ def _mtd_field_config(
             audio_feature_lengths=MultiModalFieldConfig.flat_from_sizes(
                 "audio",
                 audio_chunk_counts,
+                keep_on_cpu=True,
             ),
-            audio_chunk_counts=MultiModalFieldConfig.batched("audio"),
-            audio_token_lengths=MultiModalFieldConfig.batched("audio"),
+            audio_chunk_counts=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
+            audio_token_lengths=MultiModalFieldConfig.batched(
+                "audio", keep_on_cpu=True
+            ),
         )
     return fields
 
