@@ -25,6 +25,7 @@ def _selector_walk_kernel(
     num_steps: tl.constexpr,
     top_k: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    SAMPLE_PROBABILISTIC: tl.constexpr,
     USE_FP64: tl.constexpr,
 ):
     row = tl.program_id(0)
@@ -50,7 +51,7 @@ def _selector_walk_kernel(
             other=0,
         )
 
-        if temperature == 0.0:
+        if not SAMPLE_PROBABILISTIC or temperature == 0.0:
             best = tl.max(scores, axis=0)
             index = tl.min(tl.where(scores == best, offsets, BLOCK_K), axis=0)
         else:
@@ -128,18 +129,21 @@ class DFlash2Speculator(DFlashSpeculator):
             dtype=torch.float32,
             device=device,
         )
-        # The selector samples a probabilistic path for non-greedy requests, so
-        # rejection sampling always needs the realized proposal distribution.
-        self.draft_logits = torch.full(
-            (
-                self.max_num_reqs,
-                self.num_speculative_steps,
-                self.vocab_size,
-            ),
-            -float("inf"),
-            dtype=torch.float32,
-            device=device,
-        )
+        # draft_sample_method decides whether verification needs a proposal
+        # distribution at all, and the base class says so by allocating
+        # draft_logits or leaving it None. Greedy drafting takes the walk's
+        # argmax path and needs no q.
+        if self.draft_logits is not None:
+            self.draft_logits = torch.full(
+                (
+                    self.max_num_reqs,
+                    self.num_speculative_steps,
+                    self.vocab_size,
+                ),
+                -float("inf"),
+                dtype=torch.float32,
+                device=device,
+            )
         self._cached_candidate_ids = torch.zeros(
             self._selector_scores.shape, dtype=torch.int64, device=device
         )
@@ -163,6 +167,7 @@ class DFlash2Speculator(DFlashSpeculator):
             num_steps=self.num_speculative_steps,
             top_k=self.selector_top_k,
             BLOCK_K=block_k,
+            SAMPLE_PROBABILISTIC=self.draft_logits is not None,
             USE_FP64=self.use_fp64_gumbel,
             num_warps=1,
         )
@@ -220,5 +225,6 @@ class DFlash2Speculator(DFlashSpeculator):
             anchor_token_ids,
         )
         self._sample_path(candidate_ids, scores, num_reqs)
-        self._cache_draft_logits(candidate_ids, num_sample)
+        if self.draft_logits is not None:
+            self._cache_draft_logits(candidate_ids, num_sample)
         self.draft_tokens[:num_reqs].copy_(self._selector_tokens[:num_reqs])
