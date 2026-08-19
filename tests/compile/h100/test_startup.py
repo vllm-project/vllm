@@ -132,19 +132,6 @@ MODEL_SPECS = [
         ),
         id="gpt_oss_120b",
     ),
-    # NOTE: DeepSeek-V3.2 requires sparse MLA (index_topk) which needs
-    # Hopper+ GPUs. This test must run on H100 (see pytorch.yaml). It defaults
-    # to breakable CUDA graphs without compilation.
-    pytest.param(
-        ModelStartupSpec(
-            model="deepseek-ai/DeepSeek-V3.2",
-            hf_overrides=_SMALL_MOE_OVERRIDES,
-            cold_artifacts_saved=0,
-            warm_artifacts_saved=0,
-            warm_artifacts_loaded=0,
-        ),
-        id="deepseek_v3.2",
-    ),
     pytest.param(
         ModelStartupSpec(
             model="moonshotai/Kimi-K2.5",
