@@ -309,6 +309,11 @@ class Qwen3_5ForCausalLMBase(
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
+    # Maps PEFT embed/lm_head LoRA targets onto vLLM embedding wrappers.
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings",
+    }
 
     # Some community text-only checkpoints keep the extraneous
     # `model.language_model.` prefix inherited from the VL training stack.
