@@ -7,6 +7,7 @@ from typing import Any
 import torch
 from torch import nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -69,6 +70,9 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
+
+# BF16 router GEMM crossover on gfx950 (MI355X).
+_MAX_BF16_ROUTER_GEMM_TOKENS = 16
 
 
 class KimiMLP(nn.Module):
@@ -208,16 +212,23 @@ class KimiMoE(nn.Module):
             config.activation_situ_linear_beta if config.hidden_act == "situ" else None
         )
 
-        # Route with fp32 logits for numerically stable expert selection.
+        use_mixed_dtype_topk = bool(
+            config.num_expert_group == 1
+            and config.topk_group == 1
+            and config.moe_router_activation_func == "sigmoid"
+            and rocm_aiter_ops.is_fused_moe_enabled()
+            and rocm_aiter_ops.mixed_dtype_biased_topk_available()
+        )
+        self.use_mixed_dtype_topk = use_mixed_dtype_topk
         self.gate = GateLinear(
             input_size=hidden_size,
             output_size=num_experts,
             bias=False,
-            out_dtype=torch.float32,
+            out_dtype=(torch.bfloat16 if use_mixed_dtype_topk else torch.float32),
             prefix=f"{prefix}.gate",
         )
 
-        # Preserve FP32 checkpoint values and match FP32 router logits.
+        # The mixed-dtype AITER kernel consumes the checkpoint bias in FP32.
         self.gate.e_score_correction_bias = nn.Parameter(
             torch.empty(num_experts, dtype=torch.float32)
         )
@@ -308,7 +319,14 @@ class KimiMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_size)
-        router_logits, _ = self.gate(hidden_states)
+        if self.use_mixed_dtype_topk and num_tokens > _MAX_BF16_ROUTER_GEMM_TOKENS:
+            router_logits = torch.mm(
+                hidden_states,
+                self.gate.weight.T,
+                out_dtype=torch.float32,
+            )
+        else:
+            router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
