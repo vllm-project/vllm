@@ -20,11 +20,11 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     validate_chat_template,
 )
-from vllm.entrypoints.openai.models.protocol import LoRAModulePath
-from vllm.entrypoints.serve.utils.constants import (
+from vllm.entrypoints.launchers.utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
+from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.tool_parsers import ToolParserManager
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -412,7 +412,9 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
 
 def validate_parsed_serve_args(args: argparse.Namespace):
     """Quick checks for model serve args that raise prior to loading."""
-    if hasattr(args, "subparser") and args.subparser != "serve":
+    # `vllm launch <component>` builds its parser with make_arg_parser too (see
+    # LaunchSubcommandBase.add_cli_args), so its args are serve args as well.
+    if hasattr(args, "subparser") and args.subparser not in ("serve", "launch"):
         return
 
     # Ensure that the chat template is valid; raises if it likely isn't
@@ -442,6 +444,6 @@ def validate_parsed_serve_args(args: argparse.Namespace):
 
 def create_parser_for_docs() -> FlexibleArgumentParser:
     parser_for_docs = FlexibleArgumentParser(
-        prog="-m vllm.entrypoints.openai.api_server"
+        prog="-m vllm.entrypoints.launchers.api_server.entry"
     )
     return make_arg_parser(parser_for_docs)
