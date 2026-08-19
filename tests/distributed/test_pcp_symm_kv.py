@@ -3,6 +3,7 @@
 """Focused tests for PCP symmetric-memory peer allocation and direct-final writes."""
 
 import multiprocessing as mp
+
 import pytest
 import torch
 import torch.distributed as dist
@@ -41,7 +42,9 @@ def _worker_peer_allocation(env: dict[str, str]) -> None:
     update_environment_variables(env)
     rank = int(env["RANK"])
     torch.cuda.set_device(rank)
-    dist.init_process_group(backend="nccl", rank=rank, world_size=int(env["WORLD_SIZE"]))
+    dist.init_process_group(
+        backend="nccl", rank=rank, world_size=int(env["WORLD_SIZE"])
+    )
     from vllm.distributed.device_communicators.symm_mem import allocate_symm_mem_peer
 
     device = torch.device(f"cuda:{rank}")
@@ -92,9 +95,13 @@ def test_select_pcp_direct_slot_row_uses_this_rank_not_rank0():
         ],
         dtype=torch.int64,
     )
-    rank2 = select_pcp_direct_slot_row(gathered, pcp_world_size=4, pcp_rank=2, local_tokens=2)
+    rank2 = select_pcp_direct_slot_row(
+        gathered, pcp_world_size=4, pcp_rank=2, local_tokens=2
+    )
     assert rank2.tolist() == [[10, 11], [110, 111]]
-    rank0 = select_pcp_direct_slot_row(gathered, pcp_world_size=4, pcp_rank=0, local_tokens=3)
+    rank0 = select_pcp_direct_slot_row(
+        gathered, pcp_world_size=4, pcp_rank=0, local_tokens=3
+    )
     assert rank0.tolist() == [[0, 1, 2], [100, 101, 102]]
 
 
@@ -237,7 +244,9 @@ def run_fp8_ds_mla_indexer_oracle() -> None:
     torch.cuda.synchronize()
     assert torch.equal(mla_view, ref_mla)
     assert torch.equal(idx_view, ref_idx)
-    expected_guard = torch.full((layer_offset,), guard, dtype=torch.uint8, device=device)
+    expected_guard = torch.full(
+        (layer_offset,), guard, dtype=torch.uint8, device=device
+    )
     assert torch.equal(backing.storage[:layer_offset], expected_guard)
     fence.close()
     backing.close()
@@ -248,7 +257,9 @@ def _worker_fused_direct_matches_gather_insert(env: dict[str, str]) -> None:
     update_environment_variables(env)
     rank = int(env["RANK"])
     torch.cuda.set_device(rank)
-    dist.init_process_group(backend="nccl", rank=rank, world_size=int(env["WORLD_SIZE"]))
+    dist.init_process_group(
+        backend="nccl", rank=rank, world_size=int(env["WORLD_SIZE"])
+    )
     run_fp8_ds_mla_indexer_oracle()
     dist.destroy_process_group()
 

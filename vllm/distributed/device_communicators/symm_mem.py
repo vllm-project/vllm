@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
@@ -11,9 +14,6 @@ from vllm.distributed.device_communicators.all_reduce_utils import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-
-from dataclasses import dataclass
-from typing import Any
 
 try:
     import torch.distributed._symmetric_memory as torch_symm_mem
