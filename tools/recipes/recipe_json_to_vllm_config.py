@@ -16,13 +16,24 @@ Examples:
   python3 recipe_json_to_vllm_config.py \
     https://recipes.vllm.ai/meta-llama/Llama-3.1-8B-Instruct/hw/xeon6.json
 
-  # Non-interactive discovery
+  # Non-interactive discovery (recommended strategy)
   python3 recipe_json_to_vllm_config.py \
     --model meta-llama/Llama-3.1-8B-Instruct --hardware xeon6
+
+  # Promoted variant + explicit strategy
+  python3 recipe_json_to_vllm_config.py \
+    --model nvidia/Llama-3.1-8B-Instruct-FP8 \
+    --hardware arc_pro_b70 \
+    --strategy single_node_tp
 
 Then:
   source env.sh
   vllm serve --config config.yml
+
+Variants with a distinct Hugging Face model ID are promoted by the Recipes API
+and selected through --model; this converter does not need a separate --variant
+argument. Strategy selection follows the exact `alternatives` JSON links emitted
+by the Recipes API instead of synthesizing strategy URLs locally.
 
 The converter intentionally targets a single `vllm serve` process. If the
 recipe rendering is multi-node, PD-disaggregated, or another multi-process
@@ -71,13 +82,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--model",
         help=(
-            "Model hf_id or search text for recipe discovery. "
-            "Use with --hardware for non-interactive operation."
+            "Model hf_id or search text for recipe discovery. Promoted recipe "
+            "variants are selected by their own hf_id. Use with --hardware for "
+            "non-interactive operation."
         ),
     )
     p.add_argument(
         "--hardware",
-        help="Hardware ID for recipe discovery, for example xeon6 or h100.",
+        help=(
+            "Hardware ID for recipe discovery, for example xeon6, b200, or arc_pro_b70."
+        ),
+    )
+    p.add_argument(
+        "--strategy",
+        help=(
+            "Serving strategy for recipe discovery, for example single_node_tp. "
+            "When omitted with --model and --hardware, use the Recipes-recommended "
+            "strategy. Interactive discovery offers the recommended strategy and "
+            "all generated alternatives."
+        ),
     )
     p.add_argument(
         "--api-base",
@@ -238,10 +261,74 @@ def select_hardware(
     return selected, by_hardware[selected]
 
 
+def strategy_sources(
+    api_base: str, hardware_json_url: str, recipe: dict[str, Any]
+) -> tuple[str, dict[str, str]]:
+    recommended = recipe.get("strategy")
+    if not isinstance(recommended, str) or not recommended:
+        raise ValueError(
+            "Hardware recipe JSON does not contain a usable `strategy` field."
+        )
+
+    sources = {recommended: hardware_json_url}
+    raw_alternatives = recipe.get("alternatives") or {}
+    if not isinstance(raw_alternatives, dict):
+        raise ValueError(
+            "Hardware recipe JSON `alternatives` must be an object when present."
+        )
+
+    for strategy, path in raw_alternatives.items():
+        if isinstance(strategy, str) and strategy and isinstance(path, str) and path:
+            sources[strategy] = api_url(api_base, path)
+
+    return recommended, sources
+
+
+def select_strategy(
+    api_base: str,
+    hardware_json_url: str,
+    recipe: dict[str, Any],
+    requested: str | None,
+    interactive: bool,
+) -> tuple[str, str]:
+    recommended, sources = strategy_sources(api_base, hardware_json_url, recipe)
+    strategies = [recommended, *sorted(s for s in sources if s != recommended)]
+
+    if requested:
+        selected = next(
+            (
+                strategy
+                for strategy in strategies
+                if strategy.lower() == requested.lower()
+            ),
+            None,
+        )
+        if selected is None:
+            raise ValueError(
+                f"Strategy {requested!r} is not available for this model/hardware. "
+                f"Available: {', '.join(strategies)}"
+            )
+        return selected, sources[selected]
+
+    if not interactive:
+        return recommended, hardware_json_url
+
+    print("\nAvailable strategies:")
+
+    def strategy_label(strategy: str) -> str:
+        if strategy == recommended:
+            return f"{strategy} (recommended)"
+        return strategy
+
+    selected = choose_from_menu(strategies, strategy_label, "Select strategy: ")
+    return selected, sources[selected]
+
+
 def discover_recipe_source(
     api_base: str,
     requested_model: str | None,
     requested_hardware: str | None,
+    requested_strategy: str | None,
 ) -> str:
     print("No recipe JSON supplied; starting Recipes API discovery.")
 
@@ -287,11 +374,24 @@ def discover_recipe_source(
         )
 
     hardware, path = select_hardware(by_hardware, requested_hardware)
-    resolved = api_url(api_base, path)
+    hardware_json_url = api_url(api_base, path)
+    hardware_data = load_json(hardware_json_url)
+    if not isinstance(hardware_data, dict):
+        raise ValueError(f"{hardware_json_url} did not return a JSON object.")
+
+    interactive = requested_model is None or requested_hardware is None
+    strategy, resolved = select_strategy(
+        api_base,
+        hardware_json_url,
+        hardware_data,
+        requested_strategy,
+        interactive,
+    )
 
     print("\nResolved recipe:")
     print(f"  Model:    {model.get('hf_id')}")
     print(f"  Hardware: {hardware}")
+    print(f"  Strategy: {strategy}")
     print(f"  JSON:     {resolved}")
     print()
 
@@ -527,11 +627,13 @@ def main() -> int:
     try:
         source = args.source
         if source is None:
-            source = discover_recipe_source(args.api_base, args.model, args.hardware)
-        elif args.model or args.hardware:
+            source = discover_recipe_source(
+                args.api_base, args.model, args.hardware, args.strategy
+            )
+        elif args.model or args.hardware or args.strategy:
             raise ValueError(
                 "Do not combine a positional recipe JSON source with "
-                "--model/--hardware discovery options."
+                "--model/--hardware/--strategy discovery options."
             )
 
         recipe = load_json(source)

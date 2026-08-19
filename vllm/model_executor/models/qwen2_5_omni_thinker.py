@@ -89,6 +89,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -300,8 +301,12 @@ def create_qwen2_5_omni_thinker_field_factory(
             input_audio_features=MultiModalFieldConfig.flat_from_sizes(
                 "audio", audio_feature_lengths, dim=1
             ),
-            feature_attention_mask=MultiModalFieldConfig.batched("audio"),
-            audio_feature_lengths=MultiModalFieldConfig.batched("audio"),
+            feature_attention_mask=MultiModalFieldConfig.batched(
+                "audio", keep_on_cpu=True
+            ),
+            audio_feature_lengths=MultiModalFieldConfig.batched(
+                "audio", keep_on_cpu=True
+            ),
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "image", image_pixel_grid_sizes
             ),
@@ -317,7 +322,9 @@ def create_qwen2_5_omni_thinker_field_factory(
             ),
             video_grid_thw=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
             second_per_grid_ts=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
-            use_audio_in_video=MultiModalFieldConfig.shared("video", num_videos),
+            use_audio_in_video=MultiModalFieldConfig.shared(
+                "video", num_videos, keep_on_cpu=True
+            ),
         )
 
     return _qwen2_5_omni_thinker_field_config
@@ -372,7 +379,7 @@ class Qwen2_5OmniThinkerProcessingInfo(
             target_sr=feature_extractor.sampling_rate,
             target_channels=self.get_target_channels(),
             expected_hidden_size=self._get_expected_hidden_size(),
-            embeds_from_ec_connector=self.embeds_from_ec_connector,
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def get_target_channels(self) -> int:
@@ -1030,18 +1037,24 @@ class Qwen2_5OmniConditionalGenerationMixin:
         audio_input: Qwen2_5OmniAudioFeatureInputs,
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
-        audio_feature_lengths = audio_input["audio_feature_lengths"]
+        # audio_feature_lengths is keep_on_cpu; the audio tower derives
+        # device placement from feature_lens, so move it explicitly.
+        audio_feature_lengths = audio_input["audio_feature_lengths"].to(
+            input_features.device, non_blocking=True
+        )
 
         audio_feat_lengths, audio_output_lengths = (
             self.audio_tower._get_feat_extract_output_lengths(audio_feature_lengths)
         )
 
-        audio_outputs = self.audio_tower(
-            input_features.to(self.audio_tower.dtype),
-            feature_lens=audio_feature_lengths,
-            aftercnn_lens=audio_feat_lengths,
-        )
-        return audio_outputs.last_hidden_state.split(audio_output_lengths.tolist())
+        with gpu_sync_allowed():
+            audio_outputs = self.audio_tower(
+                input_features.to(self.audio_tower.dtype),
+                feature_lens=audio_feature_lengths,
+                aftercnn_lens=audio_feat_lengths,
+            )
+            split_sizes = audio_output_lengths.tolist()
+        return audio_outputs.last_hidden_state.split(split_sizes)
 
     def _process_image_input(
         self, image_input: Qwen2_5_VLImageInputs
@@ -1526,12 +1539,13 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         video_token_id = self.config.video_token_index
         audio_token_id = self.config.audio_token_index
 
-        input_ids_cpu = input_ids.cpu()
-        is_video = is_multimodal & (input_ids_cpu == video_token_id)
-        is_audio = is_multimodal & (input_ids_cpu == audio_token_id)
+        with gpu_sync_allowed():
+            input_ids_cpu = input_ids.cpu()
+            is_video = is_multimodal & (input_ids_cpu == video_token_id)
+            is_audio = is_multimodal & (input_ids_cpu == audio_token_id)
 
-        num_video = is_video.sum().item()
-        num_audio = is_audio.sum().item()
+            num_video = is_video.sum().item()
+            num_audio = is_audio.sum().item()
 
         if check_interleaved_audio_video(is_video, is_audio, num_video, num_audio):
             inputs_embeds = self._embed_text_input_ids(
