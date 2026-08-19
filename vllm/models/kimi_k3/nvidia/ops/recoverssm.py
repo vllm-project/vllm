@@ -437,7 +437,12 @@ def _commit_kda_state_kernel(
     NUM_HEADS: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
+    LAUNCH_PDL: tl.constexpr,
 ):
+    if LAUNCH_PDL:
+        # KDA is the PDL producer. It launches normally after the plan kernel,
+        # then releases its dependent conv compaction before loading state.
+        tl.extra.cuda.gdc_launch_dependents()
     pid_v = tl.program_id(0)
     pid_b = tl.program_id(1)
     pid_lh = tl.program_id(2)
@@ -509,13 +514,17 @@ def _commit_kda_state_kernel(
         mask=mask_k,
         other=0.0,
     ).to(tl.float32)
-    final_decay = tl.full([BK], 1.0, tl.float32)
-    final_correction = tl.zeros([BV, BK], tl.float32)
-    boundary_decay = tl.full([BK], 1.0, tl.float32)
-    boundary_correction = tl.zeros([BV, BK], tl.float32)
+    state = initial_state
+    if ALIGN_MODE:
+        boundary_ptrs = (
+            state_ptr
+            + boundary_state_idx * state_block_stride
+            + pid_h * stride_state_head
+            + offs_v[:, None] * stride_state_v
+            + offs_k[None, :] * stride_state_k
+        )
 
-    for reverse_offset in range(commit_len):
-        token_offset = commit_len - reverse_offset - 1
+    for token_offset in range(commit_len):
         correction_ptr = (
             correction_cache_ptr + token_offset * stride_correction_cache_pos
         )
@@ -543,34 +552,12 @@ def _commit_kda_state_kernel(
             lower_bound,
             USE_LOWER_BOUND,
         )
-        update = correction[:, None] * normalized_k[None, :]
         decay = tl.exp(gate)
-        final_correction += update * final_decay[None, :]
-        final_decay *= decay
-        if ALIGN_MODE:
-            before_boundary = token_offset < boundary_recovery_len
-            boundary_correction += tl.where(
-                before_boundary,
-                update * boundary_decay[None, :],
-                0.0,
-            )
-            boundary_decay *= tl.where(before_boundary, decay, 1.0)
-
-    state = initial_state * final_decay[None, :] + final_correction
-    if ALIGN_MODE:
-        boundary_ptrs = (
-            state_ptr
-            + boundary_state_idx * state_block_stride
-            + pid_h * stride_state_head
-            + offs_v[:, None] * stride_state_v
-            + offs_k[None, :] * stride_state_k
-        )
-        boundary_state = initial_state * boundary_decay[None, :] + boundary_correction
-        tl.store(
-            boundary_ptrs,
-            boundary_state,
-            mask=mask_state & (boundary_state_idx > null_block_id),
-        )
+        update = correction[:, None] * normalized_k[None, :]
+        state = state * decay[None, :] + update
+        if ALIGN_MODE:  # noqa: SIM102
+            if token_offset == boundary_recovery_len - 1:
+                tl.store(boundary_ptrs, state)
 
     final_ptrs = (
         state_ptr
@@ -915,6 +902,7 @@ class KDARecoverSSMCommitContext:
         block_table: torch.Tensor | None = None,
         num_computed_tokens: torch.Tensor | None = None,
         mamba_block_size: int | None = None,
+        use_pdl: bool = False,
     ) -> None:
         """Fold accepted KDA and convolution inputs into every layer."""
         batch = state_indices.shape[0]
@@ -959,6 +947,9 @@ class KDARecoverSSMCommitContext:
         num_computed_stride = (
             0 if num_computed_tokens is None else num_computed_tokens.stride(0)
         )
+        align_mode = block_table is not None
+        block_v = 32 if align_mode else 16
+        conv_block_d = 64 if align_mode else 128
 
         num_layers = len(self.checkpoints)
         conv_ref = self.conv_states[0]
@@ -988,36 +979,18 @@ class KDARecoverSSMCommitContext:
             SPEC_QUERY_LEN=self.spec_query_len,
             num_warps=1,
         )
-        _compact_conv_state_kernel[(triton.cdiv(conv_dim, 256), batch, num_layers)](
-            conv_ref,
-            self.conv_state_base_addrs,
-            self.conv_state_block_strides,
-            self.conv_state_dim_strides,
-            self.conv_state_token_strides,
-            state_indices,
-            self.commit_lens,
-            self.final_state_indices,
-            self.boundary_state_indices,
-            self.boundary_recovery_lens,
-            NULL_BLOCK_ID,
-            conv_dim,
-            self.conv_history_len,
-            state_indices.stride(0),
-            BLOCK_D=256,
-            BLOCK_HISTORY=block_history,
-            ALIGN_MODE=block_table is not None,
-            num_warps=4,
-        )
-
         state_ref = self.checkpoints[0]
         _, num_heads, value_dim, key_dim = state_ref.shape
         block_k = triton.next_power_of_2(key_dim)
-        block_v = min(triton.next_power_of_2(value_dim), 32)
         grid = (
             triton.cdiv(value_dim, block_v),
             batch,
             num_layers * num_heads,
         )
+        # This deliberately reverses the natural conv-then-KDA order. KDA's
+        # longer execution leaves more useful tail time for compact to overlap.
+        # Do not set launch_pdl here: KDA consumes the plan output and must run
+        # normally; LAUNCH_PDL makes it the producer for compact instead.
         _commit_kda_state_kernel[grid](
             state_ref,
             self.state_base_addrs,
@@ -1058,9 +1031,41 @@ class KDARecoverSSMCommitContext:
             BV=block_v,
             NUM_HEADS=num_heads,
             USE_LOWER_BOUND=self.lower_bound is not None,
-            ALIGN_MODE=block_table is not None,
-            num_warps=4,
+            ALIGN_MODE=align_mode,
+            LAUNCH_PDL=use_pdl,
+            num_warps=1,
             num_stages=2,
+        )
+        # Compact is the PDL-dependent consumer, with no PDL instruction in
+        # its body. Every input it reads is ready before the dependency is
+        # released: stream order completes the plan before KDA starts, and
+        # compact reads no KDA output.
+        _compact_conv_state_kernel[
+            (
+                triton.cdiv(conv_dim, conv_block_d),
+                batch,
+                num_layers,
+            )
+        ](
+            conv_ref,
+            self.conv_state_base_addrs,
+            self.conv_state_block_strides,
+            self.conv_state_dim_strides,
+            self.conv_state_token_strides,
+            state_indices,
+            self.commit_lens,
+            self.final_state_indices,
+            self.boundary_state_indices,
+            self.boundary_recovery_lens,
+            NULL_BLOCK_ID,
+            conv_dim,
+            self.conv_history_len,
+            state_indices.stride(0),
+            BLOCK_D=conv_block_d,
+            BLOCK_HISTORY=block_history,
+            ALIGN_MODE=align_mode,
+            num_warps=1,
+            launch_pdl=use_pdl,
         )
 
 

@@ -283,6 +283,7 @@ class KimiK3KDAMetadata(GDNAttentionMetadata, RecoverSSMMetadata):
                 align.num_computed_tokens if align is not None else None
             ),
             mamba_block_size=align.block_size if align is not None else None,
+            use_pdl=_metadata_launch_pdl(),
         )
         if align is None:
             return None
