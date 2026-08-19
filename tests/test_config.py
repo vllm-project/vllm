@@ -128,6 +128,88 @@ def test_rocm_defaults_deepseek_v4_to_mrv1(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    "model",
+    ["nvidia/GLM-5.2-NVFP4", "zai-org/GLM-5.2-FP8"],
+)
+@pytest.mark.parametrize("with_mtp", [False, True], ids=["no-mtp", "mtp"])
+def test_glm52_defaults_to_mrv2_and_breakable_cudagraph(monkeypatch, model, with_mtp):
+    from vllm.compilation.breakable_cudagraph import (
+        is_breakable_cudagraph_enabled,
+    )
+    from vllm.config.vllm import default_v2_model_runner_architectures
+
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+    default_v2_model_runner_architectures.cache_clear()
+
+    model_config = SimpleNamespace(
+        model=model,
+        architectures=["GlmMoeDsaForCausalLM"],
+        runner_type="generate",
+        is_moe=True,
+        is_hybrid=False,
+        is_attention_free=False,
+        is_diffusion=False,
+    )
+    config = SimpleNamespace(
+        model_config=model_config,
+        speculative_config=SimpleNamespace(method="mtp") if with_mtp else None,
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+        ),
+    )
+    config._dflash_needs_multi_kv_group = lambda: False
+    config._is_default_v2_model_runner_model = lambda: (
+        VllmConfig._is_default_v2_model_runner_model(config)
+    )
+    config._get_v2_model_runner_unsupported_features = lambda: []
+    config._uses_breakable_cudagraph_by_default = lambda: (
+        VllmConfig._uses_breakable_cudagraph_by_default(config)
+    )
+
+    try:
+        assert VllmConfig.use_v2_model_runner.fget(config)
+        assert VllmConfig._maybe_enable_breakable_cudagraph(config)
+        assert is_breakable_cudagraph_enabled()
+        assert config.compilation_config.mode == CompilationMode.NONE
+        assert config.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+    finally:
+        os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        default_v2_model_runner_architectures.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "architecture", ["GlmMoeDsaForCausalLM", "DeepseekV32MTPModel"]
+)
+def test_glm52_breakable_cudagraph_default_is_platform_independent(
+    monkeypatch, architecture
+):
+    from vllm.platforms import current_platform
+
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability_family",
+        lambda family: False,
+    )
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architectures=[architecture]),
+        compilation_config=CompilationConfig(),
+    )
+    config._uses_breakable_cudagraph_by_default = lambda: (
+        VllmConfig._uses_breakable_cudagraph_by_default(config)
+    )
+
+    try:
+        assert VllmConfig._maybe_enable_breakable_cudagraph(config)
+        assert config.compilation_config.mode == CompilationMode.NONE
+    finally:
+        os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+
+
+@pytest.mark.parametrize(
     ("use_v2_model_runner", "expected_capture_sizes"),
     [
         (False, [4, 8, 12, 16]),

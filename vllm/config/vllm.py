@@ -70,12 +70,29 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
         "DeepseekV2ForCausalLM",
         "DeepseekV4ForCausalLM",
+        "GlmMoeDsaForCausalLM",
         "GraniteMoeForCausalLM",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
         "KimiK3ForConditionalGeneration",
         "LongcatFlashNgramForCausalLM",
         "Qwen2MoeForCausalLM",
+    }
+)
+
+DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
+    {
+        "DeepseekV32MTPModel",
+        "DeepseekV4ForCausalLM",
+        "DeepSeekV4MTPModel",
+        "GlmMoeDsaForCausalLM",
+        "InklingForCausalLM",
+        "InklingForConditionalGeneration",
+        "KimiK3ForConditionalGeneration",
+        "KimiK3MTPModel",
+        "KimiLinearForCausalLM",
+        "MiniMaxM3SparseForCausalLM",
+        "MiniMaxM3SparseForConditionalGeneration",
     }
 )
 
@@ -694,6 +711,34 @@ class VllmConfig:
             return False
         return is_default_v2_architecture or not model_config.is_moe
 
+    def _uses_breakable_cudagraph_by_default(self) -> bool:
+        model_config = self.model_config
+        if model_config is None:
+            return False
+
+        architectures = set(model_config.architectures)
+        return bool(architectures & DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES)
+
+    def _maybe_enable_breakable_cudagraph(self) -> bool:
+        if (
+            "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
+            and self._uses_breakable_cudagraph_by_default()
+        ):
+            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
+            logger.info_once(
+                "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
+                "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
+            )
+
+        from vllm.compilation.breakable_cudagraph import (
+            is_breakable_cudagraph_enabled,
+        )
+
+        enabled = is_breakable_cudagraph_enabled()
+        if enabled:
+            self.compilation_config.mode = CompilationMode.NONE
+        return enabled
+
     @property
     def needs_dp_coordinator(self) -> bool:
         """
@@ -1291,41 +1336,7 @@ class VllmConfig:
             )
             self.compilation_config.mode = CompilationMode.NONE
 
-        # For model classes don't carry @support_torch_compile —
-        # the breakable cudagraph is the supported PIECEWISE path. Auto-enable
-        # it unless the user has explicitly opted out via the env var.
-        if (
-            self.model_config is not None
-            and "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
-            and any(
-                a
-                in (
-                    "DeepseekV4ForCausalLM",
-                    "DeepSeekV4MTPModel",
-                    "InklingForCausalLM",
-                    "InklingForConditionalGeneration",
-                    "KimiK3ForConditionalGeneration",
-                    "KimiK3MTPModel",
-                    "KimiLinearForCausalLM",
-                    "MiniMaxM3SparseForCausalLM",
-                    "MiniMaxM3SparseForConditionalGeneration",
-                )
-                for a in self.model_config.architectures
-            )
-        ):
-            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
-            logger.info_once(
-                "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
-                "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
-            )
-
-        from vllm.compilation.breakable_cudagraph import (
-            is_breakable_cudagraph_enabled,
-        )
-
-        breakable_cudagraph_enabled = is_breakable_cudagraph_enabled()
-        if breakable_cudagraph_enabled:
-            self.compilation_config.mode = CompilationMode.NONE
+        breakable_cudagraph_enabled = self._maybe_enable_breakable_cudagraph()
 
         if not breakable_cudagraph_enabled and (
             self.compilation_config.backend == "eager"
