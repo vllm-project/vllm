@@ -12,6 +12,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS_DIR))
 
@@ -59,6 +61,12 @@ def test_otlp_payload_contains_dashboard_identity(monkeypatch):
 
     for value in (b"ci.command", b"ci.span.kind", b"buildkite.job.id", b"job-id"):
         assert value in payload
+
+
+def test_otlp_payload_accepts_negative_integer_attributes():
+    payload = ci_otel.encode_request([_span(**{"process.exit.code": -1})])
+
+    assert b"process.exit.code" in payload
 
 
 def test_spool_round_trip_is_local(monkeypatch, tmp_path):
@@ -130,6 +138,93 @@ def test_export_failure_is_soft_and_bounded(monkeypatch):
     assert time.monotonic() - started < 0.5
 
 
+def test_export_batches_with_one_oidc_token(monkeypatch):
+    monkeypatch.setenv("BUILDKITE", "true")
+    monkeypatch.setattr(ci_otel, "MAX_BATCH_SIZE", 2)
+    token_calls = []
+    requests = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def token(deadline):
+        token_calls.append(deadline)
+        return "token"
+
+    def open_request(request, timeout):
+        requests.append(request)
+        return Response()
+
+    monkeypatch.setattr(ci_otel, "_oidc_token", token)
+    monkeypatch.setattr(ci_otel.urllib.request, "urlopen", open_request)
+
+    assert ci_otel.export_spans([_span() for _ in range(5)]) is True
+    assert len(token_calls) == 1
+    assert len(requests) == 3
+
+
+def test_successful_flush_removes_spool_and_does_not_duplicate(monkeypatch, tmp_path):
+    monkeypatch.setenv("CI_INFRA_OTEL_SPOOL_DIR", str(tmp_path))
+    uploaded = []
+    assert ci_otel.record_spans([_span()]) is True
+    monkeypatch.setattr(
+        ci_otel, "export_spans", lambda spans, timeout: uploaded.extend(spans) or True
+    )
+
+    assert ci_otel.flush_spans() is True
+    assert len(uploaded) == 1
+    assert list(tmp_path.glob("spans-*.jsonl")) == []
+    assert ci_otel.flush_spans() is True
+    assert len(uploaded) == 1
+
+
+def test_failed_flush_preserves_spool(monkeypatch, tmp_path):
+    monkeypatch.setenv("CI_INFRA_OTEL_SPOOL_DIR", str(tmp_path))
+    assert ci_otel.record_spans([_span()]) is True
+    monkeypatch.setattr(ci_otel, "export_spans", lambda spans, timeout: False)
+
+    assert ci_otel.flush_spans() is False
+    assert len(list(tmp_path.glob("spans-*.jsonl"))) == 1
+
+
+def test_cli_rejects_bad_arguments_without_traceback(capsys):
+    assert ci_otel.main(["bogus"]) == 2
+    assert ci_otel.main(["record-command", "too", "short"]) == 2
+    assert (
+        ci_otel.main(["record-command", "t", "s", "-", "not-an-int", "1", "0", "label"])
+        == 1
+    )
+
+    stderr = capsys.readouterr().err
+    assert "usage:" in stderr
+    assert "CI timing helper failed:" in stderr
+    assert "Traceback" not in stderr
+
+
+def test_pytest_spans_are_spooled_incrementally(monkeypatch):
+    recorded = []
+    monkeypatch.setenv("CI_INFRA_TRACE_ID", "01" * 16)
+    monkeypatch.setenv("CI_INFRA_COMMAND_SPAN_ID", "02" * 8)
+    monkeypatch.setattr(ci_otel, "TEST_SPOOL_BATCH_SIZE", 1)
+    monkeypatch.setattr(
+        ci_otel, "record_spans", lambda spans: recorded.extend(spans) or True
+    )
+    ci_otel._test_runs.clear()
+    ci_otel._test_spans.clear()
+    ci_otel._test_runs["test_sample.py::test_one"] = (time.time_ns(), "passed")
+
+    ci_otel.pytest_runtest_logfinish("test_sample.py::test_one", ("", 0, ""))
+
+    assert len(recorded) == 1
+    assert ci_otel._test_spans == []
+
+
 def test_shell_wrapper_records_commands_without_changing_shell_state(tmp_path):
     first = f"ci_otel_start 1 {_encoded('export VALUE=ready')}"
     second = f"ci_otel_start 2 {_encoded('check VALUE')}"
@@ -197,6 +292,73 @@ def test_missing_helpers_do_not_block_the_test_command(tmp_path):
     assert output.read_text() == "ran"
 
 
+def test_unset_helper_dir_does_not_block_the_test_command():
+    shell = f'unset CI_INFRA_OTEL_DIR; . "{SCRIPTS_DIR / "ci_otel.sh"}"; echo ran'
+
+    result = subprocess.run(
+        ["/bin/bash", "-e", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ran"
+
+
+def test_helper_dir_assignment_is_exported():
+    shell = (
+        "unset CI_INFRA_OTEL_DIR; "
+        f'CI_INFRA_OTEL_DIR="{SCRIPTS_DIR}" . "{SCRIPTS_DIR / "ci_otel.sh"}"; '
+        f'/bin/sh -c \'test "$CI_INFRA_OTEL_DIR" = "{SCRIPTS_DIR}"\''
+    )
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", shell], check=False, capture_output=True, text=True
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("failure", ["new-context", "record-command"])
+def test_helper_failure_cannot_change_job_status(tmp_path, failure):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_python = fake_bin / "python3"
+    fake_python.write_text(
+        "#!/bin/sh\n"
+        '[ "$1" = "-c" ] && exit 0\n'
+        '[ "$2" = "new-context" ] && {\n'
+        '  [ "$CI_OTEL_TEST_FAILURE" = "new-context" ] && exit 99\n'
+        '  echo "01010101010101010101010101010101 0202020202020202 - 1"\n'
+        "  exit 0\n"
+        "}\n"
+        '[ "$2" = "record-command" ] && exit 99\n'
+        "exit 99\n"
+    )
+    fake_python.chmod(0o755)
+    shell = (
+        f'PATH="{fake_bin}:$PATH"; . "{SCRIPTS_DIR / "ci_otel.sh"}"; '
+        f"ci_otel_start 1 {_encoded('true')}; ci_otel_finish 0; echo ran"
+    )
+
+    result = subprocess.run(
+        ["/bin/sh", "-e", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CI_INFRA_OTEL_DIR": str(SCRIPTS_DIR),
+            "CI_INFRA_OTEL_RUNTIME_DIR": str(tmp_path / "runtime"),
+            "CI_OTEL_TEST_FAILURE": failure,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "ran"
+
+
 def test_flush_failure_preserves_job_status(tmp_path):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -219,6 +381,152 @@ def test_flush_failure_preserves_job_status(tmp_path):
 
     assert run(0).returncode == 0
     assert run(7).returncode == 7
+
+
+def test_shell_wrapper_uses_private_trace_ids(tmp_path):
+    shell = (
+        f'. "{SCRIPTS_DIR / "ci_otel.sh"}"; '
+        f"ci_otel_start 1 {_encoded('true')}; "
+        'expected="$CI_INFRA_TRACE_ID"; '
+        "CI_INFRA_TRACE_ID=corrupted; CI_INFRA_COMMAND_SPAN_ID=corrupted; "
+        'ci_otel_finish 0; printf "%s" "$expected"'
+    )
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CI_INFRA_OTEL_DIR": str(SCRIPTS_DIR),
+            "CI_INFRA_OTEL_SPOOL_DIR": str(tmp_path),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    record = json.loads(next(tmp_path.glob("spans-*.jsonl")).read_text())
+    assert record["trace_id"] == result.stdout
+    assert record["span_id"] != "corrupted"
+
+
+def test_shell_setup_is_idempotent(tmp_path):
+    runtime = tmp_path / "runtime"
+    shell = (
+        f'. "{SCRIPTS_DIR / "ci_otel.sh"}"; '
+        f'. "{SCRIPTS_DIR / "ci_otel.sh"}"; '
+        'printf "%s\n%s" "$PATH" "$CI_INFRA_OTEL_SHIM_PATHS"'
+    )
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CI_INFRA_OTEL_DIR": str(SCRIPTS_DIR),
+            "CI_INFRA_OTEL_RUNTIME_DIR": str(runtime),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    path, shim_paths = result.stdout.splitlines()
+    assert path.split(":").count(str(runtime / "bin")) == 1
+    assert shim_paths.split(":").count(str(runtime / "bin")) == 1
+
+
+def test_helper_owned_runtime_is_removed_on_exit(tmp_path):
+    runtime_file = tmp_path / "runtime"
+    shell = (
+        f'. "{SCRIPTS_DIR / "ci_otel.sh"}"; '
+        f'printf "%s" "$CI_INFRA_OTEL_RUNTIME_DIR" > "{runtime_file}"'
+    )
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "CI_INFRA_OTEL_DIR": str(SCRIPTS_DIR)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not Path(runtime_file.read_text()).exists()
+
+
+def test_caller_owned_runtime_is_preserved(tmp_path):
+    runtime = tmp_path / "runtime"
+    shell = f'. "{SCRIPTS_DIR / "ci_otel.sh"}"'
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CI_INFRA_OTEL_DIR": str(SCRIPTS_DIR),
+            "CI_INFRA_OTEL_RUNTIME_DIR": str(runtime),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert runtime.exists()
+
+
+def test_pytest_shim_recovers_from_stale_recorded_path(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    real_pytest = bin_dir / "pytest"
+    real_pytest.write_text("#!/bin/sh\nprintf 'CURRENT-PYTEST'")
+    real_pytest.chmod(0o755)
+
+    result = subprocess.run(
+        [str(SCRIPTS_DIR / "ci_pytest.sh"), "--version"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": str(bin_dir),
+            "CI_INFRA_OTEL_REAL_PYTEST": "/missing/pytest",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "CURRENT-PYTEST"
+
+
+def test_path_change_after_source_uses_new_pytest(tmp_path):
+    old_bin = tmp_path / "old"
+    new_bin = tmp_path / "new"
+    runtime = tmp_path / "runtime"
+    old_bin.mkdir()
+    new_bin.mkdir()
+    for directory, output in ((old_bin, "OLD"), (new_bin, "NEW")):
+        executable = directory / "pytest"
+        executable.write_text(f"#!/bin/sh\nprintf '{output}'")
+        executable.chmod(0o755)
+    shell = (
+        f'PATH="{old_bin}:$PATH"; . "{SCRIPTS_DIR / "ci_otel.sh"}"; '
+        f'PATH="{new_bin}:$PATH"; hash -r; pytest'
+    )
+
+    result = subprocess.run(
+        ["/bin/sh", "-c", shell],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CI_INFRA_OTEL_DIR": str(SCRIPTS_DIR),
+            "CI_INFRA_OTEL_RUNTIME_DIR": str(runtime),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "NEW"
 
 
 def test_pytest_shim_records_distinct_test_intervals_with_pythonpath_override(
