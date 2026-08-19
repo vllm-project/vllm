@@ -329,19 +329,35 @@ def cached_tokens(response: dict[str, Any]) -> int:
 # ---------------------------------------------------------------------------
 
 
-def sleep(url, level=1, mode="abort"):
+def sleep_response(url, level=1, mode="abort"):
     return requests.post(
         f"{url}/sleep", params={"level": level, "mode": mode}, timeout=15
-    ).status_code
+    )
+
+
+def sleep(url, level=1, mode="abort"):
+    return sleep_response(url, level=level, mode=mode).status_code
+
+
+def wake_response(url, tags=None):
+    params = {"tags": tags} if tags else {}
+    return requests.post(f"{url}/wake_up", params=params, timeout=20)
 
 
 def wake(url, tags=None):
-    params = {"tags": tags} if tags else {}
-    return requests.post(f"{url}/wake_up", params=params, timeout=20).status_code
+    return wake_response(url, tags=tags).status_code
 
 
 def is_sleeping(url) -> bool:
     return requests.get(f"{url}/is_sleeping", timeout=5).json()["is_sleeping"]
+
+
+def ensure_awake(url, timeout=30.0) -> None:
+    response = wake_response(url)
+    response.raise_for_status()
+    assert poll_until(lambda: not is_sleeping(url), timeout=timeout), (
+        f"engine did not return to the awake state: {response.text}"
+    )
 
 
 def is_paused(url) -> bool:
@@ -376,6 +392,18 @@ def get_world_size(url, include_dp=True):
     return requests.get(
         f"{url}/get_world_size",
         params={"include_dp": include_dp},
+        timeout=5,
+    )
+
+
+def weight_info_response(url):
+    return requests.get(f"{url}/weight_info", timeout=5)
+
+
+def update_weight_version_response(url, new_version):
+    return requests.post(
+        f"{url}/update_weight_version",
+        json={"new_version": new_version},
         timeout=5,
     )
 
