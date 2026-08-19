@@ -251,7 +251,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
                 "audio", num_chunks, keep_on_cpu=True
             ),
             # num_chunks can convert audio_chunked to audio batch dimension
-            audio_num_chunks=MultiModalFieldConfig.batched("audio"),
+            audio_num_chunks=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
             audio_embeds=MultiModalFieldConfig.batched("audio"),
         )
 
