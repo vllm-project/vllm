@@ -289,6 +289,21 @@ os.environ["http_proxy"] = "http://your.proxy.server:port"
 os.environ["https_proxy"] = "http://your.proxy.server:port"
 ```
 
+### MatrixHub
+
+[MatrixHub](https://github.com/matrixhub-ai/matrixhub) is a self-hosted model registry and distribution layer that caches models from upstream hubs and serves them over a Hugging Face-compatible API inside your own network.
+
+Since the API is Hugging Face-compatible, you only need to point `HF_ENDPOINT` at your MatrixHub instance:
+
+```shell
+export HF_ENDPOINT="http://<your-matrixhub-address>"
+vllm serve Qwen/Qwen3-0.6B
+```
+
+vLLM then downloads model weights from MatrixHub over the internal network instead of the public Hugging Face Hub, which is useful for air-gapped clusters and for avoiding repeated downloads across nodes.
+
+See the [MatrixHub guide for vLLM](https://matrixhub.ai/docs/guides/use-with-vllm/) for an end-to-end walkthrough, including Docker and Kubernetes deployment examples.
+
 ### ModelScope
 
 To use models from [ModelScope](https://www.modelscope.cn) instead of Hugging Face Hub, set an environment variable:
@@ -556,7 +571,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `Llama4ForConditionalGeneration` | Llama 4 | T + I<sup>+</sup> | `meta-llama/Llama-4-Scout-17B-16E-Instruct`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`, `meta-llama/Llama-4-Maverick-17B-128E-Instruct`, etc. | ✅︎ | ✅︎ |
 | `Llama_Nemotron_Nano_VL` | Llama Nemotron Nano VL | T + I<sup>E+</sup> | `nvidia/Llama-3.1-Nemotron-Nano-VL-8B-V1` | ✅︎ | ✅︎ |
 | `LlavaForConditionalGeneration` | LLaVA-1.5, Pixtral (HF Transformers) | T + I<sup>E+</sup> | `llava-hf/llava-1.5-7b-hf`, `mistral-community/pixtral-12b`, etc. | ✅︎ | ✅︎ |
-| `LlavaNextForConditionalGeneration` | LLaVA-NeXT, Granite Vision | T + I<sup>E+</sup> | `llava-hf/llava-v1.6-mistral-7b-hf`, `llava-hf/llava-v1.6-vicuna-7b-hf`, `ibm-granite/granite-vision-3.3-2b`, etc. | | ✅︎ |
+| `LlavaNextForConditionalGeneration` | LLaVA-NeXT, Granite Vision | T + I<sup>E+</sup> | `llava-hf/llava-v1.6-mistral-7b-hf`, `llava-hf/llava-v1.6-vicuna-7b-hf`, `ibm-granite/granite-vision-3.3-2b`, etc. | ✅︎ | ✅︎ |
 | `LlavaNextVideoForConditionalGeneration` | LLaVA-NeXT-Video | T + V | `llava-hf/LLaVA-NeXT-Video-7B-hf`, etc. | ✅︎ | ✅︎ |
 | `LlavaOnevision2ForConditionalGeneration` | LLaVA-OneVision-2 | T + I<sup>+</sup> + V<sup>+</sup> | `lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct` | | |
 | `LlavaOnevisionForConditionalGeneration` | LLaVA-Onevision | T + I<sup>+</sup> + V<sup>+</sup> | `llava-hf/llava-onevision-qwen2-7b-ov-hf`, `llava-hf/llava-onevision-qwen2-0.5b-ov-hf`, etc. | | ✅︎ |
