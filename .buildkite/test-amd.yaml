@@ -2353,7 +2353,7 @@ steps:
   - pytest -v -s entrypoints/serve/instrumentator/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
 
-- label: ":amd: (MI300) Rust Frontend Serve/Admin Coverage" # TBD
+- label: ":amd: (MI300) Rust Frontend Serve + Admin Coverage" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
@@ -3263,7 +3263,7 @@ steps:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx950.txt
 
-- label: ":amd: (MI355) LM Eval Qwen3.5 Models" # TBD
+- label: ":amd: (MI355) LM Eval Qwen3-5 Models" # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
