@@ -1886,6 +1886,12 @@ def test_moe_layer(
     if enable_eplb and not use_ep:
         pytest.skip("EPLB requires EP.")
 
+    if on_gfx950() and dp_size == 2 and tp_size == 1 and use_ep:
+        if backend in DEEPEP_BACKENDS:
+            pytest.skip(f"{backend} with DP2/EP is not supported on gfx950.")
+        if backend == "allgather_reducescatter" and enable_eplb:
+            pytest.skip("allgather_reducescatter with EPLB is not supported on gfx950.")
+
     if backend in DEEPEP_BACKENDS and not visible_devices_have_peer_access(world_size):
         pytest.skip("DeepEP backends require peer access between visible GPUs.")
 
