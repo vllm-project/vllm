@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -30,8 +31,77 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two
     FlashInferNVLinkTwoSidedPrepareAndFinalize,
 )
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import (
+    has_deep_ep,
+    has_deep_ep_v2,
+    has_mori,
+    has_nixl_ep,
+)
+
+
+@dataclass(frozen=True)
+class FlashInferOneSidedDispatchLayout:
+    x_bytes_per_token: int
+    x_sf_bytes_per_token: int
+
+
+def flashinfer_one_sided_dispatch_layout(
+    hidden_dim: int, quant_config: FusedMoEQuantConfig
+) -> FlashInferOneSidedDispatchLayout:
+    """Return the one-sided activation payload layout."""
+    if quant_config.quant_dtype is None:
+        return FlashInferOneSidedDispatchLayout(hidden_dim * 2, 0)
+    if quant_config.quant_dtype == "nvfp4":
+        scale_elems = hidden_dim // 16
+        return FlashInferOneSidedDispatchLayout(hidden_dim // 2, scale_elems)
+    if quant_config.quant_dtype == "mxfp8":
+        align = quant_config.mx_alignment
+        padded_k = (
+            ((hidden_dim + align - 1) // align) * align if align > 0 else hidden_dim
+        )
+        scale_elems = padded_k // 32
+        return FlashInferOneSidedDispatchLayout(hidden_dim, scale_elems)
+    if (
+        quant_config.use_fp8_w8a8
+        and quant_config.quant_dtype == current_platform.fp8_dtype()
+        and quant_config.block_shape == [128, 128]
+    ):
+        if hidden_dim % 128 != 0:
+            raise NotImplementedError(
+                "flashinfer_nvlink_one_sided DeepSeek Blockwise FP8 dispatch "
+                f"requires hidden_dim divisible by 128; got {hidden_dim}"
+            )
+        scale_elems = hidden_dim // 128
+        scale_bytes = scale_elems * torch.float32.itemsize
+        return FlashInferOneSidedDispatchLayout(hidden_dim, scale_bytes)
+    raise NotImplementedError(
+        "flashinfer_nvlink_one_sided dispatch supports nvfp4, mxfp8, "
+        "DeepSeek Blockwise FP8 (E4M3 with FP32 1x128 scales), and bf16 "
+        "(quant_dtype=None) today; got "
+        f"quant_dtype={quant_config.quant_dtype!r}, "
+        f"use_fp8_w8a8={quant_config.use_fp8_w8a8!r}, "
+        f"block_shape={quant_config.block_shape!r}"
+    )
+
 
 logger = init_logger(__name__)
+
+if current_platform.is_cuda_alike():
+    if has_deep_ep():
+        from .prepare_finalize.deepep_ht import DeepEPHTPrepareAndFinalize
+        from .prepare_finalize.deepep_ll import (
+            DEEPEP_QUANT_BLOCK_SHAPE,
+            DeepEPLLPrepareAndFinalize,
+        )
+    if has_deep_ep_v2():
+        from .prepare_finalize.deepep_v2 import DeepEPV2PrepareAndFinalize
+    if has_mori():
+        from .prepare_finalize.mori import MoriPrepareAndFinalize
+    if has_nixl_ep():
+        from .prepare_finalize.nixl_ep import (
+            NIXL_EP_QUANT_BLOCK_SHAPE,
+            NixlEPPrepareAndFinalize,
+        )
 
 
 def get_ep_all2all_manager(eep_stage: bool = False) -> Any:
@@ -70,29 +140,21 @@ def maybe_roundup_layer_hidden_size(
         Original hidden size otherwise.
     """
     if moe_parallel_config.use_deepep_ht_kernels:
-        from .prepare_finalize.deepep_ht import DeepEPHTPrepareAndFinalize
-
         hidden_size = DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size, act_dtype
         )
 
     if moe_parallel_config.use_deepep_ll_kernels:
-        from .prepare_finalize.deepep_ll import DeepEPLLPrepareAndFinalize
-
         hidden_size = DeepEPLLPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size
         )
 
     if moe_parallel_config.use_deepep_v2_kernels:
-        from .prepare_finalize.deepep_v2 import DeepEPV2PrepareAndFinalize
-
         hidden_size = DeepEPV2PrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size, act_dtype
         )
 
     if moe_parallel_config.use_nixl_ep_kernels:
-        from .prepare_finalize.nixl_ep import NixlEPPrepareAndFinalize
-
         hidden_size = NixlEPPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size
         )
@@ -108,20 +170,6 @@ def maybe_make_prepare_finalize(
     use_monolithic: bool = False,
     eep_stage: bool = False,
 ) -> FusedMoEPrepareAndFinalize | None:
-    # NOTE(rob): we are migrating each quant_method to hold the MK
-    # in all cases. The allow_new_interface=False flag allow us to fall
-    # back to the old method for methods that have not yet been migrated.
-    #
-    # In old method:
-    #   * maybe_init_modular_kernel() calls this function. If we are
-    #     using no Dp/Ep or naive all2all, we return None this function
-    #     returns None and no ModularKernelMethod is created. If non-naive
-    #     all2all is used, this returns a PrepareAndFinalize object and
-    #     a ModularKernelMethod is created.
-    # In new method:
-    #   * maybe_make_prepare_finalize() is called from the oracle. We
-    #     always return a PrepareAndFinalize object and the quant method
-    #     holds the ModularKernel.
     if not moe.moe_parallel_config.use_all2all_kernels:
         if not allow_new_interface:
             return None
@@ -156,8 +204,6 @@ def maybe_make_prepare_finalize(
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
 
     if moe.use_deepep_ht_kernels:
-        from .prepare_finalize.deepep_ht import DeepEPHTPrepareAndFinalize
-
         assert moe.dp_size == all2all_manager.dp_world_size
 
         all_to_all_args: dict[str, Any] = dict()
@@ -170,11 +216,6 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_deepep_ll_kernels:
-        from .prepare_finalize.deepep_ll import (
-            DEEPEP_QUANT_BLOCK_SHAPE,
-            DeepEPLLPrepareAndFinalize,
-        )
-
         assert quant_config is not None
         global_to_physical = physical_to_global = local_expert_global_ids = None
         if routing_tables is not None:
@@ -209,8 +250,6 @@ def maybe_make_prepare_finalize(
             local_expert_global_ids=local_expert_global_ids,
         )
     elif moe.use_deepep_v2_kernels:
-        from .prepare_finalize.deepep_v2 import DeepEPV2PrepareAndFinalize
-
         assert moe.dp_size == all2all_manager.dp_world_size
 
         use_fp8_dispatch = (
@@ -241,8 +280,6 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_mori_kernels:
-        from .prepare_finalize.mori import MoriPrepareAndFinalize
-
         assert quant_config is not None
 
         # Note: We may want to use FP8 dispatch just to reduce
@@ -292,34 +329,17 @@ def maybe_make_prepare_finalize(
         max_num_tokens = (
             get_current_vllm_config().scheduler_config.max_num_batched_tokens
         )
-        if quant_config.quant_dtype is None:
-            dispatch_dtype_bytes_per_elem = 2
-            dispatch_scale_bytes_per_token = 0
-        elif quant_config.quant_dtype == "nvfp4":
-            dispatch_dtype_bytes_per_elem = 0
-            dispatch_scale_bytes_per_token = moe.hidden_dim // 16
-        elif quant_config.quant_dtype == "mxfp8":
-            dispatch_dtype_bytes_per_elem = 1
-            align = quant_config.mx_alignment
-            if align > 0:
-                padded_k = ((moe.hidden_dim + align - 1) // align) * align
-            else:
-                padded_k = moe.hidden_dim
-            dispatch_scale_bytes_per_token = padded_k // 32
-        else:
-            raise NotImplementedError(
-                "flashinfer_nvlink_one_sided dispatch supports nvfp4, mxfp8, "
-                "and bf16 (quant_dtype=None) today; got "
-                f"quant_dtype={quant_config.quant_dtype!r}"
-            )
+        dispatch_layout = flashinfer_one_sided_dispatch_layout(
+            moe.hidden_dim, quant_config
+        )
         prepare_finalize = FlashInferNVLinkOneSidedPrepareAndFinalize(
             max_num_tokens=max_num_tokens,
             top_k=moe.experts_per_token,
             num_experts=moe.num_experts,
             hidden_size=moe.hidden_dim,
             num_dispatchers=all2all_manager.world_size,
-            dispatch_dtype_bytes_per_elem=dispatch_dtype_bytes_per_elem,
-            dispatch_scale_bytes_per_token=dispatch_scale_bytes_per_token,
+            x_bytes_per_token=dispatch_layout.x_bytes_per_token,
+            x_sf_bytes_per_token=dispatch_layout.x_sf_bytes_per_token,
         )
 
     elif moe.use_ag_rs_all2all_kernels and allow_new_interface:
@@ -330,11 +350,6 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_nixl_ep_kernels:
-        from .prepare_finalize.nixl_ep import (
-            NIXL_EP_QUANT_BLOCK_SHAPE,
-            NixlEPPrepareAndFinalize,
-        )
-
         assert quant_config is not None
         global_to_physical = physical_to_global = local_expert_global_ids = None
         if routing_tables is not None:

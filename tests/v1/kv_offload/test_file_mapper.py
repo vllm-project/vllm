@@ -49,9 +49,12 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
             pcp_size=kwargs.get("pcp_size", 1),
             dcp_size=kwargs.get("dcp_size", 1),
             data_parallel_index=0,
+            data_parallel_size=1,
+            data_parallel_rank_local=None,
             is_parallelism_agnostic=kwargs.get("is_parallelism_agnostic", False),
         ),
         replicated_layout=kwargs.get("replicated_layout", False),
+        canonical_layout=kwargs.get("canonical_layout", False),
     )
     spec = MagicMock(spec=OffloadingSpec)
     spec.config = config
@@ -206,6 +209,22 @@ def test_parallel_agnostic_separates_persistent_layouts():
     assert agnostic.base_path != specific.base_path
     assert "parallel_agnostic" not in agnostic.fields
     assert specific.fields["parallel_agnostic"] is False
+
+
+def test_canonical_layout_changes_storage_namespace():
+    # Canonical bytes are not interchangeable with the direct layout, so the
+    # format id must fork the storage namespace.
+    from vllm.v1.attention.backends.utils import set_kv_cache_layout
+
+    set_kv_cache_layout("NHD")
+    try:
+        direct = make_mapper_from_offloading_spec()
+        canonical = make_mapper_from_offloading_spec(canonical_layout=True)
+    finally:
+        set_kv_cache_layout(None)
+    assert "canonical_format" not in direct.fields
+    assert canonical.fields["canonical_format"] == "v1-nhd"
+    assert direct.base_path != canonical.base_path
 
 
 # ---------------------------------------------------------------------------

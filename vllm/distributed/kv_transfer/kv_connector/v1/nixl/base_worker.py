@@ -67,6 +67,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.network_utils import make_zmq_path
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
@@ -89,6 +90,11 @@ logger = init_logger(__name__)
 
 class NixlBaseConnectorWorker:
     """Base implementation of Worker side methods shared by pull and push."""
+
+    # Transfer mode included in the NIXL compatibility hash so that a push
+    # (WRITE) connector and a pull (READ) connector never handshake together.
+    # Overridden by NixlPushConnectorWorker.
+    _TRANSFER_MODE: str = "pull"
 
     def _compute_desc_ids(
         self,
@@ -976,6 +982,7 @@ class NixlBaseConnectorWorker:
             self.vllm_config,
             self.backend_name,
             self.transfer_topo.cross_layers_blocks,
+            transfer_mode=self._TRANSFER_MODE,
         )
 
         total_size = storage.nbytes()
@@ -1066,7 +1073,10 @@ class NixlBaseConnectorWorker:
             is_mamba=self._has_mamba,
         )
         self.compat_hash = compute_nixl_compatibility_hash(
-            self.vllm_config, self.backend_name, self.transfer_topo.cross_layers_blocks
+            self.vllm_config,
+            self.backend_name,
+            self.transfer_topo.cross_layers_blocks,
+            transfer_mode=self._TRANSFER_MODE,
         )
 
         if self.use_host_buffer:
@@ -1873,14 +1883,16 @@ class NixlBaseConnectorWorker:
 
         local_block_ids = meta.local_physical_block_ids
         # TODO (NickLucche) D2H<>H2D ops could benefit from coalescing io across groups
-        for group_block_ids in local_block_ids:
-            self.copy_blocks(
-                self.host_xfer_buffers,
-                self.device_kv_caches,
-                group_block_ids,
-                group_block_ids,
-                "h2d",
-            )
+        # The h2d block copies below are intentionally synchronous.
+        with gpu_sync_allowed():
+            for group_block_ids in local_block_ids:
+                self.copy_blocks(
+                    self.host_xfer_buffers,
+                    self.device_kv_caches,
+                    group_block_ids,
+                    group_block_ids,
+                    "h2d",
+                )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "synced recved kv of request[%s] to device kv buffer,"
@@ -1894,26 +1906,28 @@ class NixlBaseConnectorWorker:
         assert self.use_host_buffer
         assert self.copy_blocks is not None
 
-        for req_id, meta in metadata.reqs_to_save.items():
-            meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
-                meta.local_block_ids, self._physical_blocks_per_logical_kv_block
-            )
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "save_load_kv for request[%s] to host xfer buffer."
-                    "local_block_ids: %s. ",
-                    req_id,
-                    ",".join(map(str, meta.local_physical_block_ids)),
+        # The d2h block copies below are intentionally synchronous.
+        with gpu_sync_allowed():
+            for req_id, meta in metadata.reqs_to_save.items():
+                meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
+                    meta.local_block_ids, self._physical_blocks_per_logical_kv_block
                 )
-            # blocking
-            for group_block_ids in meta.local_physical_block_ids:
-                self.copy_blocks(
-                    self.device_kv_caches,
-                    self.host_xfer_buffers,
-                    group_block_ids,
-                    group_block_ids,
-                    "d2h",
-                )
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "save_load_kv for request[%s] to host xfer buffer."
+                        "local_block_ids: %s. ",
+                        req_id,
+                        ",".join(map(str, meta.local_physical_block_ids)),
+                    )
+                # blocking
+                for group_block_ids in meta.local_physical_block_ids:
+                    self.copy_blocks(
+                        self.device_kv_caches,
+                        self.host_xfer_buffers,
+                        group_block_ids,
+                        group_block_ids,
+                        "d2h",
+                    )
 
     @cached_property
     def _attention_kv_caches(self) -> list[torch.Tensor]:
@@ -2397,93 +2411,101 @@ class NixlBaseConnectorWorker:
 
     def _apply_prefix_caching(
         self,
-        local_block_ids: BlockIds,
-        remote_block_ids: BlockIds,
-        remote_physical_per_logical: int,
-    ) -> tuple[BlockIds, list]:
-        """Apply prefix caching by trimming local/remote block ID lists.
+        decode_block_ids: BlockIds,
+        prefill_block_ids: BlockIds,
+        decode_physical_per_logical: int,
+        prefill_physical_per_logical: int,
+    ) -> tuple[BlockIds, BlockIds]:
+        """Trim block ID lists so only the uncomputed suffix is transferred.
 
-        For non-Mamba models: end-trim remote to match local count, so that
+        Inputs are *kernel* (physical) block IDs, already expanded from logical IDs
+        with each side's physical-per-logical ratio. Both pull and push call this after
+        that expansion so the trim happens at kernel granularity.
+
+        The prefix-cache hit is always on the decode (D) side, so ``decode``
+        holds only its uncomputed blocks while prefill (P) holds the full
+        sequence. This is mode-independent: pull passes its own (D) blocks as
+        ``decode``, push passes the remote D registration as ``decode``.
+
+        For non-Mamba models: end-trim ``prefill`` to match ``decode`` count, so
         already-cached prefix blocks are skipped in the transfer.
 
-        For Mamba hybrid (prefix caching not yet supported): front-trim both
-        to the minimum count to handle kernel block count discrepancies from
-        logical block rounding in heterogeneous TP.
+        For Mamba hybrid: SSM groups pair state slots by position and FA
+        groups end-trim to the uncomputed suffix when physical-per-logical
+        matches.
         """
-        # Partial prefix cache hit: just read uncomputed blocks.
+        # Partial prefix cache hit: just transfer uncomputed blocks.
         # Skip mamba groups — their blocks represent full state (conv+ssm),
         # not per-token data, so trimming would corrupt the transfer.
-        remote_block_ids = list(remote_block_ids)
+        prefill_block_ids = list(prefill_block_ids)
         if not self._has_mamba:
-            for i, remote_group in enumerate(remote_block_ids):
-                num_local_blocks = len(local_block_ids[i])
-                assert num_local_blocks <= len(remote_group)
-                if num_local_blocks < len(remote_group):
-                    remote_block_ids[i] = remote_group[-num_local_blocks:]
+            for i, prefill_group in enumerate(prefill_block_ids):
+                num_decode_blocks = len(decode_block_ids[i])
+                assert num_decode_blocks <= len(prefill_group)
+                if num_decode_blocks < len(prefill_group):
+                    prefill_block_ids[i] = prefill_group[-num_decode_blocks:]
         else:
-            # (NOTE: ZhanqiuHu) Mamba hybrid: no prefix caching support so far.HeteroTP
-            # can cause different kernel block counts due to logical block rounding.
+            # (NOTE: ZhanqiuHu) HeteroTP can cause different kernel block counts
+            # due to logical block rounding.
             # Example: 640 prompt tokens, kernel_block_size=64
-            #   remote physical_per_logical=10, local physical_per_logical=6
-            #   remote logical ids from kv_transfer_params = [0]
-            #   local logical ids allocated = [0, 1]
-            #   remote kernel blocks: [0..9]  (1*10=10)
-            #   local kernel blocks:  [0..11] (2*6=12)
+            #   prefill physical_per_logical=10, decode physical_per_logical=6
+            #   prefill logical ids from kv_transfer_params = [0]
+            #   decode logical ids allocated = [0, 1]
+            #   prefill kernel blocks: [0..9]  (1*10=10)
+            #   decode kernel blocks:  [0..11] (2*6=12)
             #   actual data blocks = ceil(640/64) = 10, trim both to 10
-            # Vice versa (remote physical_per_logical=6, local=10):
-            #   remote logical ids = [0, 1], local logical ids = [0]
-            #   remote kernel blocks: [0..11] (2*6=12)
-            #   local kernel blocks:  [0..9]  (1*10=10)
+            # Vice versa (prefill physical_per_logical=6, decode=10):
+            #   prefill logical ids = [0, 1], decode logical ids = [0]
+            #   prefill kernel blocks: [0..11] (2*6=12)
+            #   decode kernel blocks:  [0..9]  (1*10=10)
             #   actual data blocks = ceil(640/64) = 10, trim both to 10
-            local_block_ids = list(local_block_ids)
-            for i, remote_group in enumerate(remote_block_ids):
-                num_local_blocks = len(local_block_ids[i])
-                num_remote_blocks = len(remote_group)
+            decode_block_ids = list(decode_block_ids)
+            for i, prefill_group in enumerate(prefill_block_ids):
+                num_decode_blocks = len(decode_block_ids[i])
+                num_prefill_blocks = len(prefill_group)
                 if _is_ssm_spec(self._group_spec_types[i]):
-                    if num_local_blocks == num_remote_blocks:
+                    if num_decode_blocks == num_prefill_blocks:
                         continue
                     # Only state-bearing slots reach here, single-state modes
                     # just one (see get_exchange_clipped_blocks), so differing
                     # counts mean position-indexed "all"-mode lists. A longer
-                    # remote list carries earlier positions the local side
-                    # already has (prefix hit) -> read its tail; a longer local
+                    # prefill list carries earlier positions the decode side
+                    # already has (prefix hit) -> take its tail; a longer decode
                     # list holds the position D recomputes itself, which gets
-                    # no remote state.
-                    assert num_local_blocks - num_remote_blocks <= 1, (
+                    # no prefill state.
+                    assert num_decode_blocks - num_prefill_blocks <= 1, (
                         f"Group {i}: unpairable SSM state slots, "
-                        f"local={num_local_blocks} remote={num_remote_blocks}"
+                        f"decode={num_decode_blocks} prefill={num_prefill_blocks}"
                     )
-                    num_blocks = min(num_local_blocks, num_remote_blocks)
-                    if num_local_blocks < num_remote_blocks:
-                        remote_block_ids[i] = remote_group[-num_blocks:]
+                    num_blocks = min(num_decode_blocks, num_prefill_blocks)
+                    if num_decode_blocks < num_prefill_blocks:
+                        prefill_block_ids[i] = prefill_group[-num_blocks:]
                     else:
-                        local_block_ids[i] = local_block_ids[i][:num_blocks]
+                        decode_block_ids[i] = decode_block_ids[i][:num_blocks]
                 elif (
-                    self._physical_blocks_per_logical_kv_block
-                    == remote_physical_per_logical
-                    and num_local_blocks < num_remote_blocks
+                    decode_physical_per_logical == prefill_physical_per_logical
+                    and num_decode_blocks < num_prefill_blocks
                 ):
                     # Partial prefix cache hit for FA group.
-                    remote_block_ids[i] = remote_group[-num_local_blocks:]
+                    prefill_block_ids[i] = prefill_group[-num_decode_blocks:]
                 else:
                     # TODO Handle prefix caching with different block_sizes
                     # Allocation rounding legitimately leaves up to
                     # ppl - 1 trailing dead kernel blocks per side (plus one
-                    # extra local block for the recomputed final token), so
+                    # extra decode block for the recomputed final token), so
                     # the counts may differ by up to the sum of the two
                     # ratios; anything larger indicates mismatched lists.
                     max_padding = (
-                        self._physical_blocks_per_logical_kv_block
-                        + remote_physical_per_logical
+                        decode_physical_per_logical + prefill_physical_per_logical
                     )
-                    assert abs(num_local_blocks - num_remote_blocks) <= max_padding, (
-                        f"Group {i}: |{num_local_blocks} - "
-                        f"{num_remote_blocks}| > {max_padding}"
+                    assert abs(num_decode_blocks - num_prefill_blocks) <= max_padding, (
+                        f"Group {i}: |{num_decode_blocks} - "
+                        f"{num_prefill_blocks}| > {max_padding}"
                     )
-                    num_blocks = min(num_local_blocks, num_remote_blocks)
-                    local_block_ids[i] = local_block_ids[i][:num_blocks]
-                    remote_block_ids[i] = remote_group[:num_blocks]
-        return local_block_ids, remote_block_ids
+                    num_blocks = min(num_decode_blocks, num_prefill_blocks)
+                    decode_block_ids[i] = decode_block_ids[i][:num_blocks]
+                    prefill_block_ids[i] = prefill_group[:num_blocks]
+        return decode_block_ids, prefill_block_ids
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
@@ -2560,8 +2582,7 @@ class NixlBaseConnectorWorker:
 
         # Drop the cached clock offset; it is re-measured on the next handshake.
         self._engine_clock_offset.pop(engine_id, None)
-        # Push P-side engines are tracked in _remote_agents but not in
-        # _engine_last_active (they don't participate in stale eviction), so
+        # A just-completed handshake may not have recorded activity yet, so
         # tolerate a missing entry.
         last_active = self._engine_last_active.pop(engine_id, None)
         if log_eviction and last_active is not None:
