@@ -57,7 +57,7 @@ class TritonAttentionDiffKVMetadataBuilder(TritonAttentionMetadataBuilder):
         head_size_v_padded = next_power_of_2(head_size_v)
         self.softmax_segm_output = torch.empty(
             (
-                self.seq_threshold_3D,
+                self.seq_threshold_3D * self.max_q_len_3D,
                 self.num_heads_q,
                 self.num_par_softmax_segments,
                 head_size_v_padded,
