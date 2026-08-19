@@ -367,7 +367,7 @@ class DeepseekV32Attention(MLAAttention):
         assert isinstance(slot_mapping, dict)
         mla_slot = slot_mapping.get(self.layer_name)
         indexer_slot = (
-            slot_mapping[self.indexer.k_cache.prefix]
+            slot_mapping.get(self.indexer.k_cache.prefix)
             if self.indexer is not None
             else None
         )
