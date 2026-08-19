@@ -926,6 +926,12 @@ class ModelConfig:
                 f"got {type(self.max_model_len).__name__}: {self.max_model_len!r}. "
                 "Example: max_model_len=2048"
             )
+        if self.enable_prompt_embeds and self.is_encoder_decoder:
+            # No encoder-decoder model accepts `inputs_embeds`; their decoders
+            # embed `input_ids` internally.
+            raise ValueError(
+                "--enable-prompt-embeds is not supported with encoder-decoder models."
+            )
         return self
 
     def _resolve_mm_device_do_normalize(
@@ -1844,7 +1850,7 @@ class ModelConfig:
         # actually contain any non-attention layers.
         layer_types = getattr(self.hf_config, "layer_types", None)
         return layer_types is None or not all(
-            layer == "attention" for layer in layer_types
+            layer in ("attention", "full_attention") for layer in layer_types
         )
 
     @property
@@ -1871,6 +1877,12 @@ class ModelConfig:
             # kv_lora_rank indicates that a Transformers model implementation uses MLA
             return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
         # Manually maintained list of model types for vLLM model implementations
+
+        # Bidirectional DeepSeek variants (is_causal=False, used by some
+        # embedding models) must use the non-MLA attention path, since the
+        # MLA kernels only support causal attention.
+        if not getattr(self.hf_text_config, "is_causal", True):
+            return False
         return self.is_deepseek_mla
 
     @property
