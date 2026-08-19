@@ -830,6 +830,32 @@ class CompressedTensorsConfig(QuantizationConfig):
                     is_fp8_w8a8_supported = self._check_scheme_supported(
                         CompressedTensorsW8A8Fp8.get_min_capability(), error=False
                     )
+                    if is_fp8_w8a8_supported and current_platform.is_rocm():
+                        # _check_scheme_supported compares against a CUDA
+                        # compute capability, and ROCm reports gfx90a as
+                        # (9, 0) -> 90, which clears the fp8 minimum of 89 by
+                        # accident. CDNA2 has no fp8 MFMA, so every W8A8 fp8
+                        # kernel on the ROCm list either declines or, in the
+                        # case of the torch ones, reaches torch._scaled_mm and
+                        # dies with "only supported on ... ROCm MI300+".
+                        #
+                        # Ampere (80 < 89) already fails this check and falls
+                        # through to the weight-only W8A16 scheme below, which
+                        # is the upstream-intended behaviour for hardware
+                        # without fp8 arithmetic. gfx90a just landed on the
+                        # wrong side of a CUDA-shaped test. Put it back on the
+                        # right side, using the same predicate the ROCm fp8
+                        # kernels gate on (see RowWiseTorchFP8ScaledMM and
+                        # ROCmFP8ScaledMM), so gfx942/gfx950 and RDNA4 keep
+                        # W8A8 and only the hardware that cannot do it falls
+                        # back.
+                        from vllm.platforms.rocm import (
+                            get_cdna_version,
+                            on_rdna4,
+                        )
+
+                        if get_cdna_version() <= 2 and not on_rdna4():
+                            is_fp8_w8a8_supported = False
                 if is_fp8_w8a8_supported:
                     return CompressedTensorsW8A8Fp8(
                         weight_quant=weight_quant,
