@@ -47,7 +47,7 @@ def test_supports_async_scheduling_multiproc_executor():
     assert MultiprocExecutor.supports_async_scheduling() is True
 
 
-def test_discard_records_sleep_state_after_worker_failure():
+def test_discard_does_not_record_sleep_state_after_worker_failure():
     collective_rpc = MockCall(side_effect=RuntimeError("discard failed"))
     executor = SimpleNamespace(
         collective_rpc=collective_rpc,
@@ -58,12 +58,11 @@ def test_discard_records_sleep_state_after_worker_failure():
     with pytest.raises(RuntimeError, match="discard failed"):
         Executor.discard(executor, ("kv_cache",))
 
-    assert executor.is_sleeping is True
-    assert executor.sleeping_tags == {"kv_cache"}
+    assert executor.is_sleeping is False
+    assert executor.sleeping_tags == set()
 
 
-@pytest.mark.parametrize("level", [1, 2])
-def test_sleep_after_kv_cache_discard(level):
+def test_sleep_after_kv_cache_discard():
     collective_rpc = MockCall()
     executor = SimpleNamespace(
         collective_rpc=collective_rpc,
@@ -71,10 +70,21 @@ def test_sleep_after_kv_cache_discard(level):
         sleeping_tags={"kv_cache"},
     )
 
-    Executor.sleep(executor, level)
+    assert Executor.sleep(executor, 2) is True
 
-    collective_rpc.assert_called_once_with("sleep", kwargs={"level": level})
+    collective_rpc.assert_called_once_with("sleep", kwargs={"level": 2})
     assert executor.sleeping_tags == {"weights", "kv_cache"}
+
+
+def test_sleep_noop_reports_no_resource_change():
+    executor = SimpleNamespace(
+        collective_rpc=MockCall(),
+        is_sleeping=True,
+        sleeping_tags={"weights", "kv_cache"},
+    )
+
+    assert Executor.sleep(executor, 2) is False
+    executor.collective_rpc.assert_not_called()
 
 
 class _FakeClock:

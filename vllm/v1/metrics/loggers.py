@@ -4,7 +4,7 @@
 import logging
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from prometheus_client import Counter, Gauge, Histogram
 
@@ -17,7 +17,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.logger import init_logger
 from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
-from vllm.v1.engine import FinishReason
+from vllm.v1.engine import (
+    EngineComponentState,
+    EngineSleepComponent,
+    FinishReason,
+)
 from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
@@ -35,6 +39,21 @@ logger = init_logger(__name__)
 # User-facing reason labels for waiting request breakdown
 WAITING_REASON_CAPACITY = "capacity"
 WAITING_REASON_DEFERRED = "deferred"
+
+_ENGINE_SLEEP_COMPONENT_STATES: dict[
+    EngineSleepComponent, tuple[EngineComponentState, ...]
+] = {
+    "scheduler": ("running", "paused"),
+    "weights": ("resident", "offloaded", "discarded"),
+    "kv_cache": ("resident", "discarded"),
+}
+_INITIAL_ENGINE_SLEEP_COMPONENT_STATES: dict[
+    EngineSleepComponent, EngineComponentState
+] = {
+    "scheduler": "running",
+    "weights": "resident",
+    "kv_cache": "resident",
+}
 
 PerEngineStatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
 AggregateStatLoggerFactory = type["AggregateStatLoggerBase"]
@@ -67,7 +86,10 @@ class StatLoggerBase(ABC):
     def log(self):  # noqa
         pass
 
-    def record_sleep_state(self, is_awake: int, level: int):  # noqa
+    def record_sleep_state_updates(  # noqa: B027
+        self,
+        updates: Mapping[EngineSleepComponent, EngineComponentState],
+    ) -> None:
         pass
 
 
@@ -439,6 +461,13 @@ class PerEngineStatLoggerAdapter(AggregateStatLoggerBase):
         for per_engine_stat_logger in self.per_engine_stat_loggers.values():
             per_engine_stat_logger.log_engine_initialized()
 
+    def record_sleep_state_updates(
+        self,
+        updates: Mapping[EngineSleepComponent, EngineComponentState],
+    ) -> None:
+        for per_engine_stat_logger in self.per_engine_stat_loggers.values():
+            per_engine_stat_logger.record_sleep_state_updates(updates)
+
 
 class PrometheusStatLogger(AggregateStatLoggerBase):
     _gauge_cls = Gauge
@@ -532,31 +561,36 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 gauge_waiting_by_reason, per_engine_labelvalues_with_reason
             )
 
-        gauge_engine_sleep_state = self._gauge_cls(
-            name="vllm:engine_sleep_state",
-            documentation=(
-                "Engine sleep state; awake = 0 means engine is sleeping; "
-                "awake = 1 means engine is awake; "
-                "weights_offloaded = 1 means sleep level 1; "
-                "discard_all = 1 means sleep level 2."
-            ),
-            labelnames=labelnames + ["sleep_state"],
+        gauge_engine_sleep_component_state = self._gauge_cls(
+            name="vllm:engine_sleep_component_state",
+            documentation="Current state of each engine sleep component.",
+            labelnames=labelnames + ["component", "state"],
             multiprocess_mode="mostrecent",
         )
 
-        self.gauge_engine_sleep_state = {}
-        sleep_state = ["awake", "weights_offloaded", "discard_all"]
+        self.gauge_engine_sleep_component_state: dict[
+            EngineSleepComponent,
+            dict[EngineComponentState, dict[int, Gauge]],
+        ] = {}
+        for component, states in _ENGINE_SLEEP_COMPONENT_STATES.items():
+            component_gauges = self.gauge_engine_sleep_component_state[component] = {}
+            for state in states:
+                state_gauges = component_gauges[state] = {
+                    idx: gauge_engine_sleep_component_state.labels(
+                        model_name=model_name,
+                        engine=idx,
+                        component=component,
+                        state=state,
+                    )
+                    for idx in engine_indexes
+                }
+                for gauge in state_gauges.values():
+                    gauge.set(0)
 
-        for s in sleep_state:
-            self.gauge_engine_sleep_state[s] = {
-                idx: gauge_engine_sleep_state.labels(
-                    engine=idx, model_name=model_name, sleep_state=s
-                )
-                for idx in engine_indexes
-            }
-
-        # Setting default values
-        self.record_sleep_state()
+        self.engine_sleep_component_states: dict[
+            int, dict[EngineSleepComponent, EngineComponentState]
+        ] = {idx: {} for idx in engine_indexes}
+        self.record_sleep_state_updates(_INITIAL_ENGINE_SLEEP_COMPONENT_STATES)
 
         gauge_kv_cache_usage = self._gauge_cls(
             name="vllm:kv_cache_usage_perc",
@@ -1258,24 +1292,24 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     finished_request.max_tokens_param
                 )
 
-    def record_sleep_state(self, sleep: int = 0, level: int = 0):
-        awake = 1
-        discard_all = 0
-        weights_offloaded = 0
-
-        if sleep == 1:
-            awake = 0
-            if level == 1:
-                weights_offloaded = 1
-            elif level == 2:
-                discard_all = 1
-
+    def record_sleep_state_updates(
+        self,
+        updates: Mapping[EngineSleepComponent, EngineComponentState],
+    ) -> None:
         for engine_idx in self.engine_indexes:
-            self.gauge_engine_sleep_state["discard_all"][engine_idx].set(discard_all)
-            self.gauge_engine_sleep_state["weights_offloaded"][engine_idx].set(
-                weights_offloaded
-            )
-            self.gauge_engine_sleep_state["awake"][engine_idx].set(awake)
+            current_states = self.engine_sleep_component_states[engine_idx]
+            for component, state in updates.items():
+                old_state = current_states.get(component)
+                if old_state == state:
+                    continue
+                if old_state is not None:
+                    self.gauge_engine_sleep_component_state[component][old_state][
+                        engine_idx
+                    ].set(0)
+                self.gauge_engine_sleep_component_state[component][state][
+                    engine_idx
+                ].set(1)
+                current_states[component] = state
 
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
@@ -1389,9 +1423,12 @@ class StatLoggerManager:
                 engine_idx=engine_idx,
             )
 
-    def record_sleep_state(self, sleep: int = 0, level: int = 0):
+    def record_sleep_state_updates(
+        self,
+        updates: Mapping[EngineSleepComponent, EngineComponentState],
+    ) -> None:
         for logger in self.stat_loggers:
-            logger.record_sleep_state(sleep, level)
+            logger.record_sleep_state_updates(updates)
 
     def log(self):
         for logger in self.stat_loggers:

@@ -971,25 +971,22 @@ class AsyncLLM(EngineClient):
     async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         if level >= 1:
             await self.renderer.clear_mm_cache_async()
-        await self.engine_core.sleep_async(level, mode)
+        updates = await self.engine_core.sleep_async(level, mode)
 
         if self.logger_manager is not None:
-            self.logger_manager.record_sleep_state(1, level)
+            self.logger_manager.record_sleep_state_updates(updates)
 
     async def release_kv_cache_memory(self, mode: PauseMode = "abort") -> None:
-        await self.engine_core.release_kv_cache_memory_async(mode)
+        updates = await self.engine_core.release_kv_cache_memory_async(mode)
 
         if self.logger_manager is not None:
-            self.logger_manager.record_sleep_state(1, 0)
+            self.logger_manager.record_sleep_state_updates(updates)
 
     async def wake_up(self, tags: list[str] | None = None) -> None:
-        await self.engine_core.wake_up_async(tags)
+        updates = await self.engine_core.wake_up_async(tags)
 
-        if (
-            self.logger_manager is not None
-            and not await self.engine_core.is_sleeping_async()
-        ):
-            self.logger_manager.record_sleep_state(0, 0)
+        if self.logger_manager is not None:
+            self.logger_manager.record_sleep_state_updates(updates)
 
     async def checkpoint_prepare(self) -> None:
         await self.collective_rpc("checkpoint_prepare")
