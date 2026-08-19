@@ -11,6 +11,7 @@
 #include <type_traits>
 
 #include "../cuda_compat.h"
+#include "async_util.cuh"
 #include "cuda_vec_utils.cuh"
 #include "dispatch_utils.h"
 #include "torch_utils.h"
@@ -548,38 +549,24 @@ __device__ __forceinline__ float warp_reduce_max(float v) {
   return v;
 }
 
-// Warp abs-max via one redux.sync.max (sm_80+). For non-negative v the uint32
-// bit pattern is monotonic, so this is bit-identical to the fmaxf shuffle tree.
-__device__ __forceinline__ float warp_reduce_absmax(float v) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && !defined(USE_ROCM)
-  return __uint_as_float(__reduce_max_sync(0xffffffffu, __float_as_uint(v)));
-#else
-  return warp_reduce_max(v);
-#endif
-}
-
-// Fused SITU + block-FP8 (per-128-group) quant, one warp per group, persistent
-// grid. Direct LDG loads route through LSU, leaving the MIO pipe for the tanh.
-template <typename scalar_t, typename fp8_type, int THREADS, int GROUP_SIZE,
-          int GRID_DIM, int D>
-__global__ void situ_and_mul_quant_group_ldg_kernel(
-    fp8_type* __restrict__ out,          // [num_tokens, D]
-    float* __restrict__ scale_out,       // [num_tokens, NUM_GROUPS]
-    const scalar_t* __restrict__ input,  // [num_tokens, 2, D]
-    const int64_t num_rows, const int32_t* __restrict__ valid_rows_ptr,
-    const int64_t topk) {
+template <typename scalar_t, typename fp8_type, int THREADS, int NUM_STAGES,
+          int GROUP_SIZE, int GRID_DIM, int D>
+__global__ void situ_and_mul_quant_group_pipelined_kernel(
+    fp8_type* __restrict__ out, float* __restrict__ scale_out,
+    const scalar_t* __restrict__ input, const int64_t num_rows,
+    const int32_t* __restrict__ valid_rows_ptr, const int64_t topk) {
   const int tid = threadIdx.x;
   const int warp_id = tid / WARP_SIZE;
   const int lane_id = tid % WARP_SIZE;
   static constexpr int NUM_WARPS = THREADS / WARP_SIZE;
   static constexpr int NUM_GROUPS = D / GROUP_SIZE;
-  // valid_rows_ptr points at psum's last recv count (tokens); *topk -> rows.
   const int64_t row_bound =
       valid_rows_ptr != nullptr
           ? max((int64_t)0, min((int64_t)(*valid_rows_ptr) * topk, num_rows))
           : num_rows;
 
-  static_assert(NUM_GROUPS % 4 == 0, "float4 scale fill needs NUM_GROUPS%4==0");
+  static_assert(NUM_GROUPS % 4 == 0,
+                "float4 scale fill needs NUM_GROUPS % 4 == 0");
   static constexpr int NG4 = NUM_GROUPS / 4;
   const int64_t pad_start4 = row_bound * NG4;
   const int64_t pad_end4 = num_rows * NG4;
@@ -591,11 +578,13 @@ __global__ void situ_and_mul_quant_group_ldg_kernel(
   }
 
   if constexpr (sizeof(scalar_t) == 2) {
-    static constexpr int ELTS_PER_LANE = GROUP_SIZE / WARP_SIZE;  // 4
-    static_assert(ELTS_PER_LANE == 4, "expects GROUP_SIZE == 4 * WARP_SIZE");
-    static_assert(NUM_GROUPS % NUM_WARPS == 0,
-                  "groups must split across warps");
-    static constexpr int num_iters = NUM_GROUPS / NUM_WARPS;
+    static constexpr int LD_ELTS = 16 / sizeof(scalar_t);
+    static constexpr int ELTS_PER_LANE = GROUP_SIZE / WARP_SIZE;
+    static constexpr int STAGE_ELTS = 2 * GROUP_SIZE;
+
+    extern __shared__ __align__(16) unsigned char smem_raw[];
+    scalar_t* warp_smem = reinterpret_cast<scalar_t*>(smem_raw) +
+                          (size_t)warp_id * NUM_STAGES * STAGE_ELTS;
 
     static constexpr float beta = SITU_BETA;
     static constexpr float linear_beta = SITU_LINEAR_BETA;
@@ -607,57 +596,91 @@ __global__ void situ_and_mul_quant_group_ldg_kernel(
         std::is_same_v<fp8_type, c10::Float8_e4m3fn> ? 448.0f : 224.0f;
     static constexpr float inv_fp8_max = 1.0f / FP8_MAX;
 
-    union V {
-      float2 f2;
-      scalar_t s[ELTS_PER_LANE];
-    };
+    static_assert(
+        NUM_GROUPS % NUM_WARPS == 0,
+        "constexpr num_iters requires groups evenly split across warps");
+    static constexpr int num_iters = NUM_GROUPS / NUM_WARPS;
 
-    for (int64_t row = blockIdx.x; row < row_bound; row += GRID_DIM) {
-      const scalar_t* row_in = input + row * 2 * (int64_t)D;
-      uint32_t* out_row = reinterpret_cast<uint32_t*>(out + row * D);
-      float* scale_row = scale_out + row * NUM_GROUPS;
+    const bool up_half = lane_id >= WARP_SIZE / 2;
+    const int lane_l = up_half ? lane_id - WARP_SIZE / 2 : lane_id;
+    const int lane_src_off = (up_half ? D : 0) + lane_l * LD_ELTS;
+    const int lane_dst_off = (up_half ? GROUP_SIZE : 0) + lane_l * LD_ELTS;
+    static constexpr int warp_stride = NUM_WARPS * GROUP_SIZE;
 
-      V gv[num_iters], uv[num_iters];
+    const scalar_t* src_ptr = input + warp_id * GROUP_SIZE + lane_src_off;
+    static constexpr int src_row_stride = GRID_DIM * 2 * D;
+    const scalar_t* row_src = src_ptr + blockIdx.x * 2 * D;
+
+    uint32_t* out_ptr =
+        reinterpret_cast<uint32_t*>(out + warp_id * GROUP_SIZE) + lane_id;
+    static constexpr int out_row_stride = GRID_DIM * D / 4;
+    uint32_t* row_out = out_ptr + blockIdx.x * (D / 4);
+    float* scale_ptr = scale_out + warp_id;
+    static constexpr int scale_row_stride = GRID_DIM * NUM_GROUPS;
+    float* row_scale = scale_ptr + blockIdx.x * NUM_GROUPS;
+
+#pragma unroll 1
+    for (int64_t row = blockIdx.x; row < row_bound; row += GRID_DIM,
+                 row_src += src_row_stride, row_out += out_row_stride,
+                 row_scale += scale_row_stride) {
+      const scalar_t* src = row_src;
+
+      auto issue_load = [&](int it, int slot) {
+        if (it < num_iters) {
+          cuda_async::cp_async_shared_global_16_cg(
+              warp_smem + (size_t)slot * STAGE_ELTS + lane_dst_off, src);
+          src += warp_stride;
+        }
+        cuda_async::cp_async_commit_group();
+      };
+
+      int load_slot = 0;
+      auto bump = [](int s) { return s + 1 == NUM_STAGES ? 0 : s + 1; };
 #pragma unroll
-      for (int it = 0; it < num_iters; it++) {
-        const int gid = warp_id + it * NUM_WARPS;
-        const float2* gate2 =
-            reinterpret_cast<const float2*>(row_in + gid * GROUP_SIZE);
-        const float2* up2 =
-            reinterpret_cast<const float2*>(row_in + D + gid * GROUP_SIZE);
-        gv[it].f2 = gate2[lane_id];
-        uv[it].f2 = up2[lane_id];
+      for (int s = 0; s < NUM_STAGES - 1; s++) {
+        issue_load(s, load_slot);
+        load_slot = bump(load_slot);
       }
 
-      float acts[num_iters][ELTS_PER_LANE];
-      float thread_max[num_iters];
-#pragma unroll
+      uint32_t* out_st = row_out;
+      float* scale_st = row_scale;
+
+      int comp_slot = 0;
       for (int it = 0; it < num_iters; it++) {
-        const scalar_t* gs = gv[it].s;
-        const scalar_t* us = uv[it].s;
-        float tmax = 0.0f;
+        issue_load(it + NUM_STAGES - 1, load_slot);
+        load_slot = bump(load_slot);
+        cuda_async::cp_async_wait_group<NUM_STAGES - 1>();
+
+        const scalar_t* stage = warp_smem + (size_t)comp_slot * STAGE_ELTS;
+        comp_slot = bump(comp_slot);
+        static_assert(ELTS_PER_LANE == 4,
+                      "expects GROUP_SIZE == 4 * WARP_SIZE");
+        union V {
+          float2 f2;
+          scalar_t s[ELTS_PER_LANE];
+        };
+        const float2* gate2 = reinterpret_cast<const float2*>(stage);
+        const float2* up2 = reinterpret_cast<const float2*>(stage + GROUP_SIZE);
+        const V gv{gate2[lane_id]};
+        const V uv{up2[lane_id]};
+        const scalar_t* gs = gv.s;
+        const scalar_t* us = uv.s;
+
+        float acts[ELTS_PER_LANE];
+        float thread_max = 0.0f;
 #pragma unroll
         for (int e = 0; e < ELTS_PER_LANE; e++) {
-          acts[it][e] = (float)(scalar_t)situ_activation(
+          acts[e] = (float)(scalar_t)situ_activation(
               (float)gs[e], (float)us[e], beta, linear_beta, clamp_up, inv_beta,
               inv_linear_beta);
-          tmax = fmaxf(tmax, fabsf(acts[it][e]));
+          thread_max = fmaxf(thread_max, fabsf(acts[e]));
         }
-        thread_max[it] = tmax;
-      }
-
-      float inv_scale[num_iters];
-#pragma unroll
-      for (int it = 0; it < num_iters; it++) {
-        const float absmax = fmaxf(warp_reduce_absmax(thread_max[it]), 1e-30f);
+        const float absmax = fmaxf(warp_reduce_max(thread_max), 1e-30f);
         const float scale = absmax * inv_fp8_max;
-        if (lane_id == 0) scale_row[warp_id + it * NUM_WARPS] = scale;
-        inv_scale[it] = __fdividef(1.0f, scale);
-      }
+        if (lane_id == 0) *scale_st = scale;
+        scale_st += NUM_WARPS;
+        const float inv_scale = __fdividef(1.0f, scale);
 
-#pragma unroll
-      for (int it = 0; it < num_iters; it++) {
-        const int gid = warp_id + it * NUM_WARPS;
         union O {
           uint32_t u;
           fp8_type f[ELTS_PER_LANE];
@@ -665,10 +688,12 @@ __global__ void situ_and_mul_quant_group_ldg_kernel(
         O o;
 #pragma unroll
         for (int e = 0; e < ELTS_PER_LANE; e++) {
-          o.f[e] = quant_to_fp8<fp8_type>(acts[it][e], inv_scale[it], FP8_MAX);
+          o.f[e] = quant_to_fp8<fp8_type>(acts[e], inv_scale, FP8_MAX);
         }
-        out_row[gid * (GROUP_SIZE / 4) + lane_id] = o.u;
+        out_st[0] = o.u;
+        out_st += NUM_WARPS * GROUP_SIZE / 4;
       }
+      cuda_async::cp_async_wait_group<0>();
     }
   }
 }
@@ -982,19 +1007,23 @@ void situ_and_mul_quant(torch::stable::Tensor& out,    // [..., d]  (fp8)
         input.scalar_type(), "situ_and_mul_quant_group_kernel", [&] {
           VLLM_STABLE_DISPATCH_FP8_TYPES(
               out.scalar_type(), "situ_and_mul_quant_group_kernel_fp8", [&] {
-                // Warp-per-group; only 2-byte scalar_t takes the fast LDG path.
                 if constexpr (sizeof(scalar_t) == 2) {
                   if (d == SITU_D && (float)beta == vllm::SITU_BETA &&
                       (float)linear_beta == vllm::SITU_LINEAR_BETA) {
                     constexpr int D = SITU_D;
+                    constexpr int GROUP_STAGES = 4;
+                    constexpr int NUM_WARPS = THREADS / 32;
+                    constexpr int STAGE_ELTS = 2 * 128;
                     dim3 block(THREADS);
-                    vllm::situ_and_mul_quant_group_ldg_kernel<
-                        scalar_t, fp8_t, THREADS, 128, GRID_DIM, D>
-                        <<<grid, block, 0, stream>>>(
-                            out.mutable_data_ptr<fp8_t>(),
-                            scale.mutable_data_ptr<float>(),
-                            input.const_data_ptr<scalar_t>(), num_tokens,
-                            valid_rows_ptr, topk);
+                    size_t smem_bytes = (size_t)NUM_WARPS * GROUP_STAGES *
+                                        STAGE_ELTS * sizeof(scalar_t);
+                    vllm::situ_and_mul_quant_group_pipelined_kernel<
+                        scalar_t, fp8_t, THREADS, GROUP_STAGES, 128, GRID_DIM,
+                        D><<<grid, block, smem_bytes, stream>>>(
+                        out.mutable_data_ptr<fp8_t>(),
+                        scale.mutable_data_ptr<float>(),
+                        input.const_data_ptr<scalar_t>(), num_tokens,
+                        valid_rows_ptr, topk);
                     return;
                   }
                 }
