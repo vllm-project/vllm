@@ -271,6 +271,18 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
 
         return owned
 
+    def _get_slice_dim(self, data: Any, total_rows: int) -> int:
+        """Which dimension of a field holds the rows belonging to each item.
+
+        Some processors (e.g., Idefics3) return image fields with a leading batch
+        dimension, putting the rows one dimension further in.
+        """
+        if not isinstance(data, torch.Tensor) or data.ndim < 2:
+            return 0
+        if data.shape[0] != total_rows and data.shape[1] == total_rows:
+            return 1
+        return 0
+
     def _get_mm_fields_config(
         self,
         hf_inputs: "BatchFeature",
@@ -299,7 +311,11 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
         mm_fields: dict[str, MultiModalFieldConfig] = {
             key: MultiModalFieldConfig.batched(modality)
             if modality == "audio" or isinstance(hf_inputs[key], list)
-            else MultiModalFieldConfig.flat_from_sizes(modality, sizes[modality])
+            else MultiModalFieldConfig.flat_from_sizes(
+                modality,
+                sizes[modality],
+                dim=self._get_slice_dim(hf_inputs[key], int(sizes[modality].sum())),
+            )
             for modality in modalities
             for key in owned[modality]
         }
@@ -757,28 +773,51 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
     def _get_num_image_patches(
         self,
         hf_inputs: "BatchFeature",
+        mm_data: Mapping[str, object],
         num_images: int,
     ) -> torch.Tensor:
         """How many rows of the image fields belong to each image.
 
-        Taken from whichever per-image count the processor reported, falling back
-        to one row each, and checked against the data it has to slice.
+        Taken from whichever per-image count the processor reports,
+        and checked against the data it has to slice.
         """
         if (grid := hf_inputs.get("image_grid_thw")) is not None:
             num_patches = grid.prod(-1)
+        elif (counts := self._get_num_patches_per_image(mm_data)) is not None:
+            num_patches = torch.tensor(counts)
         else:
             num_patches = torch.ones(num_images, dtype=torch.long)
 
         image_data = hf_inputs.get("pixel_values", hf_inputs.get("image_patches"))
-        if image_data is not None and len(image_data) != num_patches.sum():
-            raise ValueError(
-                f"{type(self.info.get_hf_processor()).__name__} returned "
-                f"{len(image_data)} row(s) of image data for {num_images} image(s), "
-                f"which cannot be split into the {num_patches.tolist()} row(s) per "
-                "image derived from its outputs. Gemma3 does this when "
-                "`do_pan_and_scan` crops an image."
-            )
+        if isinstance(image_data, torch.Tensor):
+            total = int(num_patches.sum())
+            rows = image_data.shape[self._get_slice_dim(image_data, total)]
+            if rows != total:
+                raise ValueError(
+                    f"{type(self.info.get_hf_processor()).__name__} returned "
+                    f"{rows} row(s) of image data for {num_images} image(s), which "
+                    f"cannot be split into the {num_patches.tolist()} row(s) per "
+                    "image derived from its outputs, so the rows cannot be "
+                    "attributed to an image. Gemma3 does this when "
+                    "`do_pan_and_scan` crops an image."
+                )
         return num_patches
+
+    def _get_num_patches_per_image(
+        self, mm_data: Mapping[str, object]
+    ) -> list[int] | None:
+        """Ask the HF processor how many rows of image data each image produces."""
+        images = mm_data.get("images")
+        if not images:
+            return None
+        try:
+            sizes = [(image.height, image.width) for image in images]
+            mm_tokens = self.info.get_hf_processor()._get_num_multimodal_tokens(
+                image_sizes=sizes, **self.info.ctx.get_merged_mm_kwargs({})
+            )
+            return list(mm_tokens["num_image_patches"])
+        except (AttributeError, KeyError, TypeError):
+            return None
 
     def _call_hf_processor(
         self,
@@ -828,7 +867,7 @@ class OffsetsMultiModalProcessor(_MultiModalProcessorBase):
             )
             if modality == "image":
                 hf_inputs["num_image_patches"] = self._get_num_image_patches(
-                    hf_inputs, len(seqs)
+                    hf_inputs, mm_data, len(seqs)
                 )
             elif modality == "audio":
                 counts = []

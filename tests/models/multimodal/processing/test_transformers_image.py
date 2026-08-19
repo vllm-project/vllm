@@ -292,3 +292,25 @@ def test_spliced_prompt_matches_hf_expansion(model_id, prompt):
 
     legacy_ids, offsets_ids = prompt_ids
     assert legacy_ids == offsets_ids
+
+
+@pytest.mark.parametrize("processor_cls", PROCESSOR_CLASSES)
+def test_nested_image_fields_split_per_image(processor_cls):
+    """Idefics3 returns image fields with a leading batch dimension, putting the rows
+    belonging to each image one dimension further in. Slicing the batch dimension
+    instead handed the first image every row and the second an empty tensor."""
+    mm_processor = create_processor(
+        "HuggingFaceTB/SmolVLM-256M-Instruct", processor_cls
+    )
+    image = ImageAsset("cherry_blossom").pil_image
+    result = mm_processor(
+        prompt="<image> and <image>",
+        mm_items=mm_processor.info.parse_mm_data({"image": [image, image]}),
+        hf_processor_mm_kwargs={},
+    )
+
+    items = result["mm_kwargs"]["image"]
+    assert len(items) == 2
+    for item in items:
+        pixel_values = item["pixel_values"].data
+        assert pixel_values.shape[1] == int(item["num_image_patches"].data)
