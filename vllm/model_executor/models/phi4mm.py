@@ -918,7 +918,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             input_image_embeds=MultiModalFieldConfig.batched("image"),
             image_attention_mask=MultiModalFieldConfig.batched("image"),
             image_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
-            num_img_tokens=MultiModalFieldConfig.batched("image"),
+            num_img_tokens=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             input_audio_embeds=MultiModalFieldConfig.batched("audio"),
         )
 
