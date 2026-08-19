@@ -78,12 +78,14 @@ def _minicpmv4_6_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         tgt_sizes=MultiModalFieldConfig.batched("image"),
         image_embeds=MultiModalFieldConfig.batched("image"),
         video_pixel_values=MultiModalFieldConfig.batched("video"),
-        video_image_sizes=MultiModalFieldConfig.batched("video"),
+        video_image_sizes=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         video_tgt_sizes=MultiModalFieldConfig.batched("video"),
         video_embeds=MultiModalFieldConfig.batched("video"),
     )
     if "use_vit_merger" in hf_inputs:
-        fields["use_vit_merger"] = MultiModalFieldConfig.batched("image")
+        fields["use_vit_merger"] = MultiModalFieldConfig.batched(
+            "image", keep_on_cpu=True
+        )
     return fields
 
 

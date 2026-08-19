@@ -107,6 +107,8 @@ message ResponseOptions {
   bool output_token_ids = 5;
   bool output_logprobs = 6;
   optional CandidateTokens output_candidates = 7;
+  // Defaults to true when omitted.
+  optional bool skip_special_tokens = 8;
 }
 
 message KVCacheParameters {

@@ -205,10 +205,10 @@ class HpcRopeNorm(CustomOp, HpcModule):
         ):
             return False
 
-        if kv_cache_dtype not in ("fp8_e4m3", "auto"):
+        if kv_cache_dtype not in ("fp8_e4m3", "auto", "bfloat16"):
             logger.warning_once(
                 f"hpc rope_norm not support kv_cache_dtype:{kv_cache_dtype}, "
-                "only support fp8_e4m3, bfloat16"
+                "only support fp8_e4m3, auto, bfloat16"
             )
             return False
 
@@ -414,3 +414,11 @@ class HpcRopeNorm(CustomOp, HpcModule):
                     out_q=out_q_decode,
                     qk_norm_policy=self.qk_norm_policy,
                 )
+
+        # Signal HpcAttentionImpl that KV cache has already been written by
+        # rope_norm_store_kv[_fp8] above, so it should skip its own
+        # reshape_and_cache_flash. Set after the fused kernels ran (either
+        # prefill or decode branch); otherwise the standard KV-write path in
+        # the attention impl would kick in (which is what non-HpcRopeNorm
+        # models rely on).
+        attn_metadata.hpc_kv_written = True

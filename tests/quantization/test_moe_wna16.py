@@ -161,7 +161,6 @@ def test_moe_wna16_setup_forwards_selected_backend(monkeypatch):
 
     assert method.moe_kernel is kernel
     assert captured["backend"] == WNA16MoEBackend.HUMMING
-    assert captured["layer"] is layer
 
 
 def test_moe_wna16_humming_adapter_repacks_uint8_tensors():
@@ -198,7 +197,9 @@ def test_moe_wna16_uses_humming_quant_config(monkeypatch):
     monkeypatch.setattr(
         humming_utils,
         "get_humming_moe_quant_config",
-        lambda actual_layer: quant_config if actual_layer is layer else None,
+        lambda actual_layer, *args, **kwargs: (
+            quant_config if actual_layer is layer else None
+        ),
     )
 
     assert method.get_fused_moe_quant_config(layer) is quant_config

@@ -75,6 +75,8 @@ async def scale_elastic_ep(raw_request: Request):
             detail="Scale failed due to request drain timeout "
             f"after {drain_timeout} seconds",
         ) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error("Scale failed: %s", e)
         raise HTTPException(status_code=500, detail="Scale failed") from e

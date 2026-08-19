@@ -15,6 +15,7 @@ DOCKER_BUILDKIT=1 docker build . \
   -t gh200-test \
   --build-arg max_jobs=66 \
   --build-arg nvcc_threads=2 \
+  --build-arg BUILD_BASE_IMAGE=pytorch/manylinuxaarch64-builder:cuda13.0 \
   --build-arg torch_cuda_arch_list="9.0+PTX"
 
 # Setup cleanup

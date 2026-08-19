@@ -58,6 +58,7 @@ class CohereEagleModel(nn.Module):
         start_layer_id: int = 0,
     ) -> None:
         super().__init__()
+        assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.quant_config = get_draft_quant_config(vllm_config)
 
@@ -137,6 +138,7 @@ class CohereEagleModel(nn.Module):
 class EagleCohereForCausalLM(CohereForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
+        assert vllm_config.speculative_config is not None
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         # Flags checked by the speculative proposer to decide whether to share
         # embed_tokens / lm_head with the target model. Cohere EAGLE checkpoints
@@ -160,7 +162,7 @@ class EagleCohereForCausalLM(CohereForCausalLM):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
-    def forward(
+    def forward(  # type: ignore[override]
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,

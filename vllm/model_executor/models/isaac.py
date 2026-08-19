@@ -440,7 +440,7 @@ class IsaacMultiModalProcessor(BaseMultiModalProcessor):
             "pixel_values": MultiModalFieldConfig.flat_from_sizes(
                 "image", image_grid_sizes
             ),
-            "image_grid_thw": MultiModalFieldConfig.batched("image"),
+            "image_grid_thw": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         }
 
     def _get_prompt_updates(
@@ -961,7 +961,9 @@ class IsaacForConditionalGeneration(
         device = next(self.language_model.parameters()).device
         dtype = self.vision_embedding.linear_fc1.weight.dtype
         pixel_values = pixel_values.to(device=device, dtype=dtype)
-        spatial_grids = image_grid_thw[:, 1:3].to(device, dtype=torch.int32)
+        spatial_grids = image_grid_thw[:, 1:3].to(
+            device, dtype=torch.int32, non_blocking=True
+        )
 
         vision_embeddings = self.vision_embedding((pixel_values, spatial_grids))
         merge_size = self.config.vision_config.pixel_shuffle_scale_factor

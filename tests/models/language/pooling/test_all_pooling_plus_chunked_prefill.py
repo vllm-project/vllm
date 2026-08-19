@@ -15,9 +15,10 @@ from vllm.config import PoolerConfig
     ["Qwen/Qwen3-Embedding-0.6B"],
 )
 @torch.inference_mode
-def test_embed_models(hf_runner, vllm_runner, monkeypatch, model: str):
-    # Keep token_embed on MRV1 when sequence pooling becomes MRV2 by default.
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+def test_decoder_token_embed_model_runner_v2(
+    hf_runner, vllm_runner, monkeypatch, model: str
+):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     chunk_size = 10
     n_prompt_tokens = [55, 56, 57]
     token_prompts = [[1024 + i for i in range(n)] for n in n_prompt_tokens]
@@ -33,6 +34,7 @@ def test_embed_models(hf_runner, vllm_runner, monkeypatch, model: str):
         enable_chunked_prefill=True,
         enable_prefix_caching=True,
     ) as vllm_model:
+        assert vllm_model.llm.llm_engine.vllm_config.use_v2_model_runner
         vllm_outputs = vllm_model.token_embed(
             [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
         )

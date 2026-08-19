@@ -335,6 +335,8 @@ def test_apply_ready_response_syncs_block_size():
             max_num_seqs=256,
             max_num_batched_tokens=8192,
             instance_id="test-instance",
+            supports_lora=False,
+            max_loras=0,
         )
     )
     client._apply_ready_response(payload)
@@ -1066,6 +1068,7 @@ def test_kv_cache_events(
         model=model_name,
         enforce_eager=True,
         enable_prefix_caching=True,
+        prefix_cache_retention_interval=None,
         block_size=block_size,
     )
     engine_args.kv_events_config = publisher_config
@@ -1292,6 +1295,7 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         mock_executor.get_kv_cache_specs.return_value = [{"default": mock_spec}]
         mock_executor.determine_available_memory.return_value = [1024 * 1024 * 1024]
         mock_executor.initialize_from_config.return_value = None
+        mock_executor.supports_draft_weight_updates.return_value = False
 
         return mock_executor
 

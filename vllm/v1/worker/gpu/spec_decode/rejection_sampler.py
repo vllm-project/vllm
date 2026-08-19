@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 
 import numpy as np
 import torch
@@ -30,6 +30,11 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
 # its traffic entirely.
 MAX_CHUNK_BYTES = 2**30  # 1GB
 _FP32_BYTES = 4
+
+
+def get_max_chunk_logits(vocab_size: int) -> int:
+    """Largest number of logits rows one verification chunk may hold."""
+    return max(1, MAX_CHUNK_BYTES // (vocab_size * _FP32_BYTES))
 
 
 def _iter_request_chunks(
@@ -141,6 +146,7 @@ class RejectionSampler:
         processed_logits = self.sampler.apply_sampling_params(
             logits,
             expanded_idx_mapping,
+            idx_mapping,
             idx_mapping_np,
             pos,
             draft_sampled,
@@ -176,11 +182,22 @@ class RejectionSampler:
     ) -> tuple[torch.Tensor, torch.Tensor, LogprobsTensors | None]:
         cu_num_logits_np = input_batch.cu_num_logits_np
         use_processed_logits = self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
+        num_reqs = input_batch.num_reqs
+
+        if logits.shape[0] <= max_chunk_logits:
+            # One chunk covers the batch. Adaptive verification compacts the logits
+            # without updating cu_num_logits_np (it keeps the pre-compacted layout),
+            # so the stale sums must not pick chunk boundaries; its budget cap
+            # guarantees the compacted batch always lands here.
+            request_chunks: Iterable[tuple[int, int]] = ((0, num_reqs),)
+        else:
+            request_chunks = _iter_request_chunks(cu_num_logits_np, max_chunk_logits)
+
         sampled_chunks: list[torch.Tensor] = []
         num_sampled_chunks: list[torch.Tensor] = []
         logprobs_chunks: list[LogprobsTensors] = []
 
-        for start, end in _iter_request_chunks(cu_num_logits_np, max_chunk_logits):
+        for start, end in request_chunks:
             lo = int(cu_num_logits_np[start])
             hi = int(cu_num_logits_np[end])
             chunk_cu_num_logits_np = cu_num_logits_np[start : end + 1] - lo
@@ -245,14 +262,14 @@ class RejectionSampler:
         max_num_logprobs = self.sampler.sampling_states.max_num_logprobs(
             input_batch.idx_mapping_np
         )
-        max_chunk_logits = max(1, MAX_CHUNK_BYTES // (logits.shape[1] * _FP32_BYTES))
+        chunk_logit_limit = get_max_chunk_logits(logits.shape[1])
         sampled, num_sampled, logprobs_tensors = self._verify_in_chunks(
             logits,
             input_batch,
             draft_logits,
             draft_sampled,
             pos,
-            max_chunk_logits,
+            chunk_logit_limit,
             max_num_logprobs,
         )
 

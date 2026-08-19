@@ -722,7 +722,7 @@ def _dsv4_segments(scenario: Scenario, thinking: bool) -> list[tuple[str, bool]]
 
 def _build_deepseek_v4(scenario: Scenario, validate: bool = True) -> Sample:
     thinking = scenario.reasoning is not None
-    chat_kwargs = {"thinking": True} if thinking else None
+    chat_kwargs = {"thinking": thinking}
 
     if thinking:
         expected_reasoning: str | None = scenario.reasoning or ""

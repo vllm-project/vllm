@@ -237,6 +237,7 @@ impl Config {
                 max_logprobs
             );
         }
+        self.transport_mode.validate()?;
 
         Ok(())
     }

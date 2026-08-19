@@ -59,6 +59,11 @@ inline bool can_use_brgemm<at::Float8_e4m3fn>(int M) {
   return brgemm_supported() && M > 4;
 }
 
+template <typename T>
+inline bool can_use_brgemm(int M, int N) {
+  return brgemm_supported() && (can_use_brgemm<T>(M) || N != block_size_n());
+}
+
 // work around compiler internal error
 #define BLOCK_K 128  // 4 * TILE_K
 

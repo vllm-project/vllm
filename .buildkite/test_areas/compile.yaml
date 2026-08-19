@@ -2,7 +2,7 @@ group: Compile
 depends_on: 
   - image-build
 steps:
-- label: Sequence Parallel Correctness Tests (2xB200)
+- label: ":nvidia: (B200) Sequence Parallel Correctness"
   key: sequence-parallel-correctness-tests-2xb200
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/"
@@ -13,7 +13,7 @@ steps:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
 
-- label: AsyncTP Correctness Tests (2xB200)
+- label: ":nvidia: (B200) AsyncTP Correctness"
   key: asynctp-correctness-tests-b200
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
@@ -24,7 +24,7 @@ steps:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py
 
-- label: Distributed Compile Unit Tests (2xH100)
+- label: ":nvidia: (H100) Distributed Compile"
   key: distributed-compile-unit-tests-2xh100
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/"
@@ -38,7 +38,7 @@ steps:
   - export VLLM_TEST_CLEAN_GPU_MEMORY=1
   - pytest -s -v tests/compile/passes/distributed
 
-- label: Fusion and Compile Unit Tests (2xB200)
+- label: ":nvidia: (B200) Fusion and Compile"
   key: fusion-and-compile-unit-tests-2xb200
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
@@ -65,7 +65,7 @@ steps:
     # this runner has 2 GPUs available even though num_devices=2 is not set
     - pytest -v -s tests/compile/passes/distributed/test_fusion_all_reduce.py
 
-- label: Fusion E2E Quick (H100)
+- label: ":nvidia: (H100) Fusion E2E Quick"
   key: fusion-e2e-quick-h100
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/"
@@ -84,7 +84,7 @@ steps:
     # Qwen/Deepseek requires +quant_fp8 as -quant_fp8 rms+quant fusion is not supported
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and not +rms_norm and +quant_fp8 and (qwen3 or deepseek)"
 
-- label: Fusion E2E Config Sweep (H100)
+- label: ":nvidia: (H100) Fusion E2E Config Sweep"
   key: fusion-e2e-config-sweep-h100
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/"
@@ -104,7 +104,7 @@ steps:
     # Run just llama3 (fp8) for all config combinations
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
 
-- label: Fusion E2E Config Sweep (B200)
+- label: ":nvidia: (B200) Fusion E2E Config Sweep"
   key: fusion-e2e-config-sweep-b200
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
@@ -118,7 +118,7 @@ steps:
     # Run just llama3 (fp8 & fp4) for all config combinations (only inductor partition)
     - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "inductor_partition and (FLASHINFER and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek)) or llama-3)"
 
-- label: Fusion E2E TP2 Quick (H100)
+- label: ":nvidia: (H100) Fusion E2E TP2 Quick"
   key: fusion-e2e-tp2-quick-h100
   timeout_in_minutes: 35
   working_dir: "/vllm-workspace/"
@@ -136,7 +136,7 @@ steps:
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "inductor_partition and not +rms_norm and (not +quant_fp8 or +quant_fp8 and (qwen3 or deepseek))"
 
-- label: Fusion E2E TP2 AR-RMS Config Sweep (H100)
+- label: ":nvidia: (H100) Fusion E2E TP2 AR-RMS Config Sweep"
   key: fusion-e2e-tp2-ar-rms-config-sweep-h100
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
@@ -156,7 +156,7 @@ steps:
     # Run just llama3 (fp8 & bf16) for all config combinations
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_ar_rms.py -k "llama-3"
 
-- label: Fusion E2E TP2 AsyncTP Config Sweep (H100)
+- label: ":nvidia: (H100) Fusion E2E TP2 AsyncTP Config Sweep"
   key: fusion-e2e-tp2-asynctp-config-sweep-h100
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
@@ -176,7 +176,7 @@ steps:
     # Run just llama3 (fp8 & bf16) for all config combinations
     - pytest -v -s tests/compile/fusions_e2e/test_tp2_async_tp.py -k "llama-3"
 
-- label: Fusion E2E TP2 (B200)
+- label: ":nvidia: (B200) Fusion E2E TP2"
   key: fusion-e2e-tp2-b200
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/"

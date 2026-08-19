@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
+from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.multimodal.utils import encode_video_url, fetch_video
 from vllm.platforms import current_platform
 
@@ -15,9 +16,9 @@ MODEL_NAME = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
 MAXIMUM_VIDEOS = 3
 
 TEST_VIDEO_URLS = [
-    "https://www.bogotobogo.com/python/OpenCV_Python/images/mean_shift_tracking/slow_traffic_small.mp4",
-    "https://github.com/opencv/opencv/raw/refs/tags/4.12.0/samples/data/vtest.avi",
-    "https://github.com/opencv/opencv/raw/refs/tags/4.12.0/samples/data/Megamind.avi",
+    f"{VLLM_S3_BUCKET_URL}/multimodal_asset/slow_traffic_small.mp4",
+    f"{VLLM_S3_BUCKET_URL}/multimodal_asset/vtest.avi",
+    f"{VLLM_S3_BUCKET_URL}/multimodal_asset/Megamind.avi",
 ]
 
 

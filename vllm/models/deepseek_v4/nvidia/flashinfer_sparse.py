@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
@@ -18,13 +19,16 @@ from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     deep_gemm_fp8_o_proj,
 )
 from vllm.models.deepseek_v4.sparse_mla import (
-    DeepseekV4FlashMLABackend,
     DeepseekV4FlashMLAMetadata,
+    DeepseekV4SparseMLABackend,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
 from vllm.v1.attention.backend import MultipleOf
+from vllm.v1.attention.backends.mla.compressor_utils import (
+    get_dspark_swa_index_width,
+)
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -74,11 +78,23 @@ def _pad_to_supported_q_heads(num_heads: int) -> int:
     )
 
 
-class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLABackend):
+def _required_sm120_sparse_topk(vllm_config: VllmConfig, window_size: int) -> int:
+    """Return the SM120 DSV4 SWA specialization needed by this model."""
+    if not vllm_config.attention_config.use_non_causal:
+        return window_size
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None:
+        return window_size
+    return get_dspark_swa_index_width(
+        window_size,
+        speculative_config.num_speculative_tokens,
+    )
+
+
+class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
     """FlashInfer backend using the DSv4 sparse metadata/cache layout.
 
-    Inheriting from the FlashMLA V4 backend reuses its
-    ``DeepseekV4FlashMLAMetadata`` builder.
+    Inherits the base and backend reuses its``DeepseekV4SparseMLAMetadataBuilder``
     """
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
@@ -159,7 +175,7 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLABackend):
     ) -> tuple[int, ...]:
         device_capability = current_platform.get_device_capability()
         if device_capability is not None and device_capability.major == 12:
-            return DeepseekV4FlashMLABackend.get_kv_cache_shape(
+            return DeepseekV4SparseMLABackend.get_kv_cache_shape(
                 num_blocks,
                 block_size,
                 num_kv_heads,
@@ -310,7 +326,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         assert swa_metadata.block_table is not None
 
         decode_swa_indices = swa_metadata.decode_swa_indices.reshape(
-            num_decode_tokens, self.window_size
+            num_decode_tokens, swa_metadata.decode_swa_width
         )
         decode_compressed_topk_lens = None
         decode_compressed_indices_are_local = False
@@ -489,8 +505,6 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         # uniform-q batches, and this avoids flattening mixed batches into one call.
         if num_decode_tokens > 0:
             decode_cu = query_start_loc[: num_decodes + 1]
-            decode_cu_cpu = query_start_loc_cpu[: num_decodes + 1]
-            decode_lens_cpu = decode_cu_cpu[1:] - decode_cu_cpu[:-1]
             flashinfer_trtllm_batch_decode_sparse_mla_dsv4(
                 query=query[:num_decode_tokens],
                 swa_kv_cache=swa_k_cache,
@@ -504,7 +518,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 bmm2_scale=bmm2_scale,
                 sinks=self.attn_sink,
                 cum_seq_lens_q=decode_cu,
-                max_q_len=int(decode_lens_cpu.max().item()),
+                max_q_len=swa_metadata.max_decode_query_len,
             )
 
         if num_prefill_tokens > 0:
@@ -571,14 +585,18 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
             tma_aligned_scales=self._tma_aligned_scales,
         )
 
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
+    def __init__(self, vllm_config: VllmConfig, *args, **kwargs) -> None:
+        super().__init__(vllm_config, *args, **kwargs)
+        from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120_config
 
-        if not has_flashinfer_sparse_mla_sm120():
+        required_topk = _required_sm120_sparse_topk(vllm_config, self.window_size)
+        if not has_flashinfer_sparse_mla_sm120_config(self.padded_heads, required_topk):
             raise RuntimeError(
-                "FLASHINFER_MLA_SPARSE_DSV4 on SM120 requires FlashInfer's "
-                "sparse MLA decode API."
+                "FLASHINFER_MLA_SPARSE_DSV4 on SM120 requires a FlashInfer "
+                "DSV4 sparse MLA decode specialization for "
+                f"(num_q_heads={self.padded_heads}, top_k={required_topk}). "
+                "Install a FlashInfer build containing "
+                "flashinfer-ai/flashinfer#4380."
             )
         self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe()
         # Per-tensor FP8 cache path scales.
@@ -745,9 +763,6 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                         attn_metadata.block_table[:num_decodes],
                         block_size,
                         is_valid,
-                        output_buffers=self._global_topk_output_buffers(
-                            self.topk_indices_buffer[:num_decode_tokens]
-                        ),
                     )
                 )
                 extra_sparse_indices = global_indices.view(num_decode_tokens, 1, -1)
@@ -837,7 +852,6 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
                     attn_metadata.block_table,
                     block_size,
                     swa_metadata.is_valid_token[prefill_token_slice],
-                    output_buffers=self._global_topk_output_buffers(local_topk_indices),
                 )
             )
 

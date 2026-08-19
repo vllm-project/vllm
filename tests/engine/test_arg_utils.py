@@ -476,6 +476,7 @@ def test_prefix_cache_default():
     # should be None by default (depends on model).
     engine_args = EngineArgs.from_cli_args(args=args)
     assert engine_args.enable_prefix_caching is None
+    assert engine_args.prefix_cache_retention_interval == 0
 
     # with flag to turn it on.
     args = parser.parse_args(["--enable-prefix-caching"])
@@ -486,6 +487,28 @@ def test_prefix_cache_default():
     args = parser.parse_args(["--no-enable-prefix-caching"])
     engine_args = EngineArgs.from_cli_args(args=args)
     assert not engine_args.enable_prefix_caching
+
+    args = parser.parse_args(["--prefix-cache-retention-interval", "64"])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.prefix_cache_retention_interval == 64
+
+
+def test_prefix_cache_retention_interval_from_deprecated_env(
+    monkeypatch, caplog, disable_log_dedup
+):
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "64")
+
+    engine_args = EngineArgs()
+
+    assert engine_args.prefix_cache_retention_interval == 64
+    assert "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in caplog.text
+    assert "deprecated" in caplog.text
+    assert "prefix_cache_retention_interval" in caplog.text
+
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--prefix-cache-retention-interval", "32"])
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.prefix_cache_retention_interval == 32
 
 
 @pytest.mark.parametrize(

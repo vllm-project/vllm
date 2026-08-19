@@ -65,10 +65,13 @@ class CachePolicyFactory:
                 f"Unknown cache policy: {name!r}. Supported: {list(cls._registry)}. "
                 "For an out-of-tree policy, also set cache_policy_module_path."
             )
-        logger.warning(
-            "Loading out-of-tree cache policy '%s' from '%s'. This API is "
-            "experimental and subject to change in the future as we "
-            "iterate the design.",
+        logger.warning_once(
+            "Loading out-of-tree cache policy. This API is "
+            "experimental and subject to change in the future "
+            "as we iterate the design."
+        )
+        logger.info(
+            "Loading out-of-tree cache policy '%s' from '%s'.",
             name,
             module_path,
         )

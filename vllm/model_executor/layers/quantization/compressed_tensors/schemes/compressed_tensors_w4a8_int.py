@@ -27,7 +27,6 @@ __all__ = ["CompressedTensorsW4A8Int"]
 W4A8_SUPPORTED_TYPES_MAP = {
     4: scalar_types.int4,
 }
-W4A8_SUPPORTED_BITS = list(W4A8_SUPPORTED_TYPES_MAP.keys())
 
 
 class CompressedTensorsW4A8Int(CompressedTensorsScheme):

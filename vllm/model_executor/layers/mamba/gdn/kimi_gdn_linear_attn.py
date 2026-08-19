@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 from einops import rearrange
@@ -393,8 +394,16 @@ class KimiGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # Vendor-specific KDA kernels: AMD/ROCm and NVIDIA keep their own copies
         # under kimi_k3/{amd,nvidia}/ops so each can diverge independently.
-        if current_platform.is_rocm():
-            from vllm.models.kimi_k3.amd.ops.third_party.kda import (
+        # These copies may have different signatures for Kimi-K3, but they agree
+        # on the arguments used here.
+        if TYPE_CHECKING:
+            from vllm.models.kimi_k3.nvidia.ops.third_party.kda import (
+                chunk_kda_with_fused_gate,
+                fused_recurrent_kda,
+                fused_recurrent_kda_packed_decode,
+            )
+        elif current_platform.is_rocm():
+            from vllm.models.kimi_k3.amd.ops.third_party.kda import (  # type: ignore[assignment]
                 chunk_kda_with_fused_gate,
                 fused_recurrent_kda,
                 fused_recurrent_kda_packed_decode,

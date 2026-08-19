@@ -1,0 +1,8 @@
+# GFX950 model configurations for GSM8K evaluation
+# TP8 models only
+# DeepSeek-V4-Pro-NVFP4.yaml is temporarily disabled: repeated CI failures due to
+# cold NFS reads of the 850GiB checkpoint exceeding startup_max_wait_seconds
+# (see https://github.com/vllm-project/vllm/pull/47972). Re-enable once the
+# startup timeout fix has landed and is verified green.
+# DeepSeek-V4-Pro-NVFP4.yaml
+DeepSeek-V4-Flash-NVFP4.yaml

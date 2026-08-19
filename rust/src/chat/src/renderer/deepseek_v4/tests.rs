@@ -64,6 +64,14 @@ fn renders_v4_fixture_2_multi_turn_drop_thinking() {
 }
 
 #[test]
+fn renders_developer_tools_like_hf_python() {
+    assert_fixture(
+        "test_input_developer_tools.json",
+        expect_file!["fixtures/test_output_developer_tools.txt"],
+    );
+}
+
+#[test]
 fn reasoning_effort_max_adds_prefix_when_thinking_is_enabled() {
     let mut request = ChatRequest {
         messages: vec![ChatMessage::user("solve it")],

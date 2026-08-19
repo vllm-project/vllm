@@ -324,14 +324,13 @@ class BloomForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         self.transformer = BloomModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "transformer")
         )
+        self.lm_head = ParallelLMHead(
+            self.config.vocab_size,
+            self.config.hidden_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
         if self.config.tie_word_embeddings:
-            self.lm_head = self.transformer.word_embeddings
-        else:
-            self.lm_head = ParallelLMHead(
-                self.config.vocab_size,
-                self.config.hidden_size,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
+            self.lm_head = self.lm_head.tie_weights(self.transformer.word_embeddings)
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (

@@ -36,6 +36,63 @@ ALL_OPCHECK_TEST_UTILS: tuple[str, ...] = (
 )
 
 
+def _assert_accurate(
+    actual: torch.Tensor,
+    expected: torch.Tensor,
+    atol: float,
+    rtol: float = 0.0,
+    pass_rate: float = 0.99999,
+    max_violation_factor: float = 3.0,
+) -> None:
+    """Check numeric accuracy with pass-rate, max-error, and mean-error bounds."""
+    a = actual.detach().float().flatten()
+    e = expected.detach().float().flatten()
+
+    abs_err = (a - e).abs()
+    tol = atol + rtol * e.abs()
+
+    rate = (abs_err <= tol).float().mean().item()
+    assert rate >= pass_rate, (
+        f"Accuracy pass rate {rate:.6f} < {pass_rate} (atol={atol}, rtol={rtol})"
+    )
+
+    max_err = abs_err.max().item()
+    assert max_err <= max_violation_factor * atol, (
+        f"Max absolute error {max_err:.6f} exceeds {max_violation_factor} * atol={atol}"
+    )
+
+    mean_err = abs_err.mean().item()
+    assert mean_err <= atol * 0.25, (
+        f"Mean absolute error {mean_err:.6f} >= atol * 0.25 = {atol * 0.25:.6f}"
+    )
+
+
+def _assert_deterministic(
+    fn,
+    *args,
+    n_runs: int = 4,
+    **kwargs,
+) -> None:
+    """Verify that repeated calls produce bitwise-identical tensor outputs."""
+
+    def _collect(result: Any) -> list[torch.Tensor]:
+        if isinstance(result, torch.Tensor):
+            return [result.detach().clone()]
+        if isinstance(result, (tuple, list)):
+            return [t.detach().clone() for t in result if isinstance(t, torch.Tensor)]
+        raise TypeError(f"Unexpected return type {type(result)}")
+
+    reference = _collect(fn(*args, **kwargs))
+
+    for run in range(1, n_runs):
+        outputs = _collect(fn(*args, **kwargs))
+        for idx, (ref, out) in enumerate(zip(reference, outputs)):
+            assert torch.equal(ref, out), (
+                f"Run {run}: output[{idx}] differs from run 0 "
+                f"(max diff = {(out.float() - ref.float()).abs().max().item():.2e})"
+            )
+
+
 class QKVInputs(NamedTuple):
     """
     Data structure for representing unpacked attention inputs,

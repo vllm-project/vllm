@@ -307,12 +307,12 @@ class InklingMultiModalProcessor(BaseMultiModalProcessor[InklingProcessingInfo])
         return dict(
             # Ragged per-image patches, grouped by num_patches.
             pixel_values=MultiModalFieldConfig.flat_from_sizes("image", num_patches),
-            num_patches=MultiModalFieldConfig.batched("image"),
+            num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             # Ragged per-audio frames, grouped by num_audio_tokens.
             input_audio_features=MultiModalFieldConfig.flat_from_sizes(
                 "audio", num_audio_tokens
             ),
-            num_audio_tokens=MultiModalFieldConfig.batched("audio"),
+            num_audio_tokens=MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(

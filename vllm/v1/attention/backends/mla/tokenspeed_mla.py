@@ -61,6 +61,7 @@ class TokenspeedMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     # The kernel accepts an explicit causal mask, so a non-causal DSpark
     # block can remain fused instead of being flattened to single tokens.
     supports_non_causal_multi_token_decode: ClassVar[bool] = True
+    supports_non_causal_multi_token_dcp: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -289,8 +290,9 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
             self.output_scale = layer._k_scale_float
 
         if self._workspace_buffer is None:
+            # Parallelism can change the runtime query head count.
             self._workspace_buffer = _get_workspace(
-                q.device, self.num_heads, self.kv_lora_rank
+                q.device, q.shape[-2], self.kv_lora_rank
             )
 
         # vLLM kv_c_and_k_pe_cache is already (num_blocks, block_size, head_size).

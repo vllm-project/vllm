@@ -519,12 +519,17 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
 
     @cached_property
     def feature_extractor(self) -> WhisperFeatureExtractor:
-        return WhisperFeatureExtractor.from_pretrained(self.model_id)
+        return WhisperFeatureExtractor.from_pretrained(
+            self.model_id,
+            revision=self.ctx.model_config.revision,
+        )
 
     @cached_property
     def speech_tokenizer(self) -> TokenizersBackend:
         return TokenizersBackend.from_pretrained(
-            self.model_id, subfolder="speech_tokenizer"
+            self.model_id,
+            subfolder="speech_tokenizer",
+            revision=self.ctx.model_config.tokenizer_revision,
         )
 
     def get_feature_extractor(self) -> WhisperFeatureExtractor:
@@ -690,7 +695,9 @@ class FunAudioChatMultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return {
             "speech_ids": MultiModalFieldConfig.batched("audio"),
-            "speech_attention_mask": MultiModalFieldConfig.batched("audio"),
+            "speech_attention_mask": MultiModalFieldConfig.batched(
+                "audio", keep_on_cpu=True
+            ),
             "input_features": MultiModalFieldConfig.batched("audio"),
             "feature_attention_mask": MultiModalFieldConfig.batched("audio"),
             "feature_exist_mask": MultiModalFieldConfig.batched("audio"),

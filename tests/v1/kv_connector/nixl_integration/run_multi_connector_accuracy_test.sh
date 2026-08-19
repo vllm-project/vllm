@@ -18,6 +18,9 @@
 # Environment variables:
 #   MODEL_NAMES              - model to test (default: Qwen/Qwen3-0.6B)
 #   GPU_MEMORY_UTILIZATION   - GPU memory fraction (default: 0.6)
+#   MAX_MODEL_LEN            - maximum model context length
+#   KV_BUFFER_DEVICE         - NIXL KV buffer device (default: cuda; use xpu for XPU)
+#   NUM_CONCURRENT           - lm-eval request concurrency (default: 100)
 #   ATTENTION_BACKEND        - optional attention backend for vllm serve
 #   VLLM_SERVE_EXTRA_ARGS    - comma-separated extra args for vllm serve
 #   SKIP_CROSS_LAYERS        - set to 1 to skip the cross-layer layout test
@@ -35,12 +38,20 @@ fi
 
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.6}
 BLOCK_SIZE=${BLOCK_SIZE:-128}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-8192}
+KV_BUFFER_DEVICE=${KV_BUFFER_DEVICE:-cuda}
 ATTENTION_BACKEND=${ATTENTION_BACKEND:-}
 VLLM_SERVE_EXTRA_ARGS=${VLLM_SERVE_EXTRA_ARGS:-}
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
+
+if [[ "$KV_BUFFER_DEVICE" == "xpu" ]]; then
+  DEVICE_VISIBILITY_ENV=ZE_AFFINITY_MASK
+else
+  DEVICE_VISIBILITY_ENV=CUDA_VISIBLE_DEVICES
+fi
 
 # ── KV transfer configs ─────────────────────────────────────────────────
 
@@ -51,7 +62,8 @@ KV_CONFIG_NORMAL='{
   "kv_role":"kv_both",
   "kv_connector_extra_config":{
     "connectors":[
-      {"kv_connector":"NixlConnector","kv_role":"kv_both"},
+      {"kv_connector":"NixlConnector","kv_role":"kv_both",
+       "kv_buffer_device":"'$KV_BUFFER_DEVICE'"},
       {"kv_connector":"OffloadingConnector","kv_role":"kv_both",
        "kv_connector_extra_config":{"cpu_bytes_to_use":1000000000}}
     ]
@@ -67,6 +79,7 @@ KV_CONFIG_CROSS_LAYERS='{
   "kv_connector_extra_config":{
     "connectors":[
       {"kv_connector":"NixlConnector","kv_role":"kv_both",
+       "kv_buffer_device":"'$KV_BUFFER_DEVICE'",
        "kv_connector_extra_config":{"enable_cross_layers_blocks":"True"}},
       {"kv_connector":"OffloadingConnector","kv_role":"kv_both",
        "kv_connector_extra_config":{"cpu_bytes_to_use":1000000000}}
@@ -99,7 +112,7 @@ get_num_gpus() {
   elif [[ "$SMI_BIN" == *"rocm"* ]]; then
     $SMI_BIN -l | grep -c GPU
   else
-    echo "1"
+    echo "2"
   fi
 }
 
@@ -124,7 +137,7 @@ run_tests_for_model() {
 
   # ── Start prefill instance ──
   echo "Starting prefill instance on GPU $PREFILL_GPU, port $PREFILL_PORT"
-  BASE_CMD="CUDA_VISIBLE_DEVICES=$PREFILL_GPU \
+  BASE_CMD="$DEVICE_VISIBILITY_ENV=$PREFILL_GPU \
     VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_SIDE_CHANNEL_PORT \
@@ -132,6 +145,7 @@ run_tests_for_model() {
     --port $PREFILL_PORT \
     --enforce-eager \
     --block-size ${BLOCK_SIZE} \
+    --max-model-len ${MAX_MODEL_LEN} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --tensor-parallel-size 1 \
     --kv-transfer-config '$kv_config'"
@@ -149,7 +163,7 @@ run_tests_for_model() {
 
   # ── Start decode instance ──
   echo "Starting decode instance on GPU $DECODE_GPU, port $DECODE_PORT"
-  BASE_CMD="CUDA_VISIBLE_DEVICES=$DECODE_GPU \
+  BASE_CMD="$DEVICE_VISIBILITY_ENV=$DECODE_GPU \
     VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
     VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_SIDE_CHANNEL_PORT \
@@ -157,6 +171,7 @@ run_tests_for_model() {
     --port $DECODE_PORT \
     --enforce-eager \
     --block-size ${BLOCK_SIZE} \
+    --max-model-len ${MAX_MODEL_LEN} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --tensor-parallel-size 1 \
     --kv-transfer-config '$kv_config'"

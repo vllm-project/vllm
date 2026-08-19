@@ -653,8 +653,8 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "image", patches_per_image
             ),
-            patches_per_image=MultiModalFieldConfig.batched("image"),
-            aspect_ratios=MultiModalFieldConfig.batched("image"),
+            patches_per_image=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            aspect_ratios=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         )
 
     def _get_prompt_updates(

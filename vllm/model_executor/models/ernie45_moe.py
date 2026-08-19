@@ -129,7 +129,6 @@ class Ernie4_5_MoeMoE(nn.Module):
 
         self.moe_num_shared_experts = getattr(config, "moe_num_shared_experts", None)
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts: int = config.moe_num_experts
         self.n_shared_experts: int = self.moe_num_shared_experts
@@ -143,10 +142,6 @@ class Ernie4_5_MoeMoE(nn.Module):
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
         self.has_shared_experts = getattr(config, "moe_num_shared_experts", 0) > 0
 
         if self.tp_size > config.moe_num_experts:
@@ -548,7 +543,7 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExpe
             self.lm_head = PPMissingLayer()
 
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors

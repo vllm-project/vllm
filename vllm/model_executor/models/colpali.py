@@ -25,6 +25,7 @@ from transformers import BatchFeature, PaliGemmaProcessor
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.pooler.tokwise import pooler_for_token_embed
+from vllm.model_executor.layers.pooler.tokwise.heads import TokenPoolerHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
@@ -232,7 +233,9 @@ class ColPaliModel(
                         loaded.add(f"custom_text_proj.{param_name}")
 
             # Update pooler projector for the lazy-creation path
-            self.pooler.head.projector = self.custom_text_proj
+            head = self.pooler.head
+            assert isinstance(head, TokenPoolerHead)
+            head.projector = self.custom_text_proj
 
         # Mark pooler projector params as loaded
         if hasattr(self, "pooler") and hasattr(self.pooler, "head"):

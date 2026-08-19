@@ -26,8 +26,7 @@ MODELS = ["openai/clip-vit-base-patch32"]
 def _run_test(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
-    input_texts: list[str],
-    input_images: PromptImageInput,
+    input_cases: list[tuple[list[str], PromptImageInput]],
     model: str,
     *,
     dtype: str,
@@ -39,105 +38,75 @@ def _run_test(
     with vllm_runner(
         model, runner="pooling", dtype=dtype, enforce_eager=True, max_model_len=77
     ) as vllm_model:
-        vllm_outputs = vllm_model.embed(input_texts, images=input_images)
+        vllm_outputs_per_case = [
+            vllm_model.embed(input_texts, images=input_images)
+            for input_texts, input_images in input_cases
+        ]
 
-    with hf_runner(model, dtype=dtype, auto_cls=CLIPModel) as hf_model:
-        all_inputs = hf_model.get_inputs(input_texts, images=input_images)
-
-        all_outputs = []
-        for inputs in all_inputs:
-            inputs = hf_model.wrap_device(inputs)
-
-            if "pixel_values" in inputs:
-                pooled_output = hf_model.model.get_image_features(
-                    pixel_values=inputs.pixel_values,
-                )
-            else:
-                pooled_output = hf_model.model.get_text_features(
-                    input_ids=inputs.input_ids,
-                    attention_mask=inputs.attention_mask,
-                )
-
-            if not isinstance(pooled_output, torch.Tensor):
-                pooled_output = pooled_output.pooler_output
-            pooled_output = pooled_output.squeeze(0)
-            all_outputs.append(pooled_output.tolist())
-
-        hf_outputs = all_outputs
-
-    check_embeddings_close(
-        embeddings_0_lst=hf_outputs,
-        embeddings_1_lst=vllm_outputs,
-        name_0="hf",
-        name_1="vllm",
-    )
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
-def test_models_text(
-    hf_runner,
-    vllm_runner,
-    image_assets,
-    model: str,
-    dtype: str,
-) -> None:
-    input_texts_images = [(text, None) for text in HF_TEXT_PROMPTS]
-    input_texts = [text for text, _ in input_texts_images]
-    input_images = [image for _, image in input_texts_images]
-
-    _run_test(
-        hf_runner,
-        vllm_runner,
-        input_texts,
-        input_images,  # type: ignore
-        model,
-        dtype=dtype,
-    )
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
-def test_models_image(
-    hf_runner,
-    vllm_runner,
-    image_assets,
-    model: str,
-    dtype: str,
-) -> None:
-    input_texts_images = [
-        (text, asset.pil_image) for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)
-    ]
-    input_texts = [text for text, _ in input_texts_images]
-    input_images = [image for _, image in input_texts_images]
-
-    _run_test(
-        hf_runner,
-        vllm_runner,
-        input_texts,
-        input_images,
-        model,
-        dtype=dtype,
-    )
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
-def test_models_text_image_no_crash(
-    vllm_runner,
-    image_assets,
-    model: str,
-    dtype: str,
-) -> None:
-    texts = [HF_TEXT_PROMPTS[0]]
-    images = [image_assets[0].pil_image]
-
-    with vllm_runner(
-        model, runner="pooling", dtype=dtype, enforce_eager=True, max_model_len=77
-    ) as vllm_model:
+        texts = [HF_TEXT_PROMPTS[0]]
+        images = [input_cases[1][1][0]]
         with pytest.raises(ValueError, match="not both"):
             vllm_model.embed(texts, images=images)
 
         # Should still be able to run subsequent requests
         vllm_model.embed(texts)
         vllm_model.embed([""], images=images)
+
+    with hf_runner(model, dtype=dtype, auto_cls=CLIPModel) as hf_model:
+        hf_outputs_per_case = []
+        for input_texts, input_images in input_cases:
+            all_inputs = hf_model.get_inputs(input_texts, images=input_images)
+
+            hf_outputs = []
+            for inputs in all_inputs:
+                inputs = hf_model.wrap_device(inputs)
+
+                if "pixel_values" in inputs:
+                    pooled_output = hf_model.model.get_image_features(
+                        pixel_values=inputs.pixel_values,
+                    )
+                else:
+                    pooled_output = hf_model.model.get_text_features(
+                        input_ids=inputs.input_ids,
+                        attention_mask=inputs.attention_mask,
+                    )
+
+                if not isinstance(pooled_output, torch.Tensor):
+                    pooled_output = pooled_output.pooler_output
+                pooled_output = pooled_output.squeeze(0)
+                hf_outputs.append(pooled_output.tolist())
+
+            hf_outputs_per_case.append(hf_outputs)
+
+    for hf_outputs, vllm_outputs in zip(hf_outputs_per_case, vllm_outputs_per_case):
+        check_embeddings_close(
+            embeddings_0_lst=hf_outputs,
+            embeddings_1_lst=vllm_outputs,
+            name_0="hf",
+            name_1="vllm",
+        )
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["float"])
+def test_models(
+    hf_runner,
+    vllm_runner,
+    image_assets,
+    model: str,
+    dtype: str,
+) -> None:
+    text_images = [None] * len(HF_TEXT_PROMPTS)
+    images = [asset.pil_image for asset in image_assets]
+    input_cases = [
+        (HF_TEXT_PROMPTS, text_images),
+        (HF_IMAGE_PROMPTS, images),
+    ]
+
+    _run_test(
+        hf_runner,
+        vllm_runner,
+        input_cases,  # type: ignore[arg-type]
+        model,
+        dtype=dtype,
+    )

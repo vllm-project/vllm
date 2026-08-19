@@ -817,6 +817,15 @@ class CompressedTensorsConfig(QuantizationConfig):
                     is_fp8_w8a8_supported = config is not None and (
                         config.kernel_config.linear_backend in ("xpu", "torch")
                     )
+                    weight_quant_is_block_strategy = (
+                        weight_quant
+                        and weight_quant.strategy == QuantizationStrategy.BLOCK
+                    )
+                    if weight_quant_is_block_strategy and not is_fp8_w8a8_supported:
+                        # On XPU, block quantized weights always use the
+                        # W8A8 kernel, due to lack of w8a16 support.
+                        is_fp8_w8a8_supported = True
+
                 else:
                     is_fp8_w8a8_supported = self._check_scheme_supported(
                         CompressedTensorsW8A8Fp8.get_min_capability(), error=False

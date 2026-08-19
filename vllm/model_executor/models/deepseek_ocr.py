@@ -49,6 +49,7 @@ from vllm.multimodal.processing import (
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.tokenizers.hf import HfTokenizer
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
@@ -184,6 +185,7 @@ class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
         )
         if ngram_size is None:
             return None
+        assert isinstance(ngram_size, int) and isinstance(window_size, int)
 
         whitelist_token_ids = set(whitelist_token_ids) if whitelist_token_ids else None
         return NoRepeatNGramLogitsProcessor(
@@ -301,6 +303,7 @@ class DeepseekOCRMultiModalProcessor(
 
         else:
             tokenizer = self.info.get_tokenizer()
+            assert isinstance(tokenizer, HfTokenizer)
             processed_outputs = tokenizer(
                 prompt, add_special_tokens=True, return_tensors="pt"
             )
@@ -317,7 +320,9 @@ class DeepseekOCRMultiModalProcessor(
         patches_per_image = torch.where(is_tiled, images_spatial_crop.prod(dim=-1), 0)
         return dict(
             pixel_values=MultiModalFieldConfig.batched("image"),
-            images_spatial_crop=MultiModalFieldConfig.batched("image"),
+            images_spatial_crop=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
             images_crop=MultiModalFieldConfig.flat_from_sizes(
                 "image", patches_per_image
             ),
@@ -342,6 +347,7 @@ class DeepseekOCRMultiModalProcessor(
             if isinstance(images, ImageEmbeddingItems):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
+                assert isinstance(images, ImageProcessorItems)
                 size = images.get_image_size(item_idx)
 
                 num_image_tokens = self.info.get_num_image_tokens(
@@ -459,7 +465,11 @@ class DeepseekOCRForCausalLM(
         images_spatial_crop = kwargs.pop("images_spatial_crop", None)
         images_crop = kwargs.pop("images_crop", None)
 
-        if pixel_values is None or torch.sum(pixel_values).item() == 0:
+        if pixel_values is None:
+            return None
+        assert isinstance(pixel_values, torch.Tensor)
+        assert images_crop is None or isinstance(images_crop, torch.Tensor)
+        if torch.sum(pixel_values).item() == 0:
             return None
 
         # Use actual tensor spatial dim instead of hardcoded
@@ -675,7 +685,8 @@ class DeepseekOCRForCausalLM(
         num_input_tokens = global_input_side**2
 
         if is_tiled:
-            num_patches = image_spatial_crop.prod(dim=-1)
+            assert image_spatial_crop is not None
+            num_patches = int(image_spatial_crop.prod().item())
             num_input_tokens += num_patches * (local_input_side**2)
 
         global_output_token = self.global_image_output_token

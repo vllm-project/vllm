@@ -16,9 +16,9 @@ use serde_json_fmt::JsonFormat as JsonFmt;
 use serial_test::file_serial;
 use vllm_chat::{
     AssistantContentBlock, AssistantMessage, AssistantMessageExt as _, AssistantToolCall,
-    ChatEvent, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice, FinishReason,
-    GenerationPromptMode, LoadModelBackendsOptions, NewChatOutputProcessorOptions, ParserSelection,
-    RendererSelection, load_model_backends,
+    ChatEvent, ChatMessage, ChatRequest, ChatRole, ChatTool, FinishReason, GenerationPromptMode,
+    LoadModelBackendsOptions, NewChatOutputProcessorOptions, ParserSelection, RendererSelection,
+    load_model_backends,
 };
 use vllm_text::{DecodedTextEvent, Finished, Prompt};
 use vllm_tokenizer::Tokenizer;
@@ -185,6 +185,19 @@ impl RoundtripCase {
         }
     }
 
+    /// GLM-5.2 XML-like argument format with `<think>` reasoning tags.
+    fn glm52() -> Self {
+        Self {
+            model_id: "zai-org/GLM-5.2-FP8",
+            assistant_stop_suffix: "",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: true },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
     /// Gemma4 channel reasoning with custom function-call arguments.
     fn gemma4() -> Self {
         Self {
@@ -324,6 +337,7 @@ roundtrip_tests! {
     deepseek_v32 => [tool_call_mix],
     glm45 => [reasoning_and_content, tool_call_mix],
     glm47 => [reasoning_and_content, tool_call_mix],
+    glm52 => [reasoning_and_content, tool_call_mix],
     seed_oss => [reasoning_and_content, tool_call_mix],
     step3p5 => [reasoning_and_content],
     nemotron_v3 => [reasoning_and_content],
@@ -825,15 +839,12 @@ fn roundtrip_request(
     tools: Vec<ChatTool>,
     thinking: Option<bool>,
 ) -> ChatRequest {
+    let tool_context = vllm_chat::ResolvedToolContext::new(&messages, tools, None, true)
+        .expect("tool context should resolve");
     let mut request = ChatRequest {
         request_id: request_id.into(),
         messages,
-        tool_choice: if tools.is_empty() {
-            ChatToolChoice::None
-        } else {
-            ChatToolChoice::Auto
-        },
-        tools,
+        tool_context,
         ..ChatRequest::for_test()
     };
 

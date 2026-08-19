@@ -210,7 +210,7 @@ def _build_mixed_prompt_embeds(
     return full_embeds, is_token_ids.tolist()
 
 
-_PROCESSOR_CHAT_TEMPLATES = dict[tuple[str, bool], str | None]()
+_PROCESSOR_CHAT_TEMPLATES = dict[tuple[str, str | None, str | None, bool], str | None]()
 """
 Used in `_try_get_processor_chat_template` to avoid calling
 `cached_get_processor` again if the processor fails to be loaded.
@@ -222,9 +222,16 @@ This is needed because `lru_cache` does not cache when an exception happens.
 def _try_get_processor_chat_template(
     tokenizer: HfTokenizer,
     *,
+    revision: str | None,
+    code_revision: str | None,
     trust_remote_code: bool,
 ) -> str | None:
-    cache_key = (tokenizer.name_or_path, trust_remote_code)
+    cache_key = (
+        tokenizer.name_or_path,
+        revision,
+        code_revision,
+        trust_remote_code,
+    )
     if cache_key in _PROCESSOR_CHAT_TEMPLATES:
         return _PROCESSOR_CHAT_TEMPLATES[cache_key]
 
@@ -234,6 +241,8 @@ def _try_get_processor_chat_template(
         processor = cached_get_processor(
             tokenizer.name_or_path,
             processor_cls=(PythonBackend, TokenizersBackend, ProcessorMixin),
+            revision=revision,
+            code_revision=code_revision,
             trust_remote_code=trust_remote_code,
         )
         if (
@@ -271,6 +280,8 @@ def resolve_chat_template(
     if tools is None:
         chat_template = _try_get_processor_chat_template(
             tokenizer,
+            revision=model_config.revision,
+            code_revision=model_config.code_revision,
             trust_remote_code=model_config.trust_remote_code,
         )
         if chat_template is not None:

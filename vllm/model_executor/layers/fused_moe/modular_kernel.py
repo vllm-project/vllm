@@ -12,6 +12,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
     MoEActivation,
     apply_moe_activation,
 )
@@ -469,6 +470,12 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
 
 # TODO: add supported activations method (return string)
 class FusedMoEExperts(ABC):
+    # ROCm AITER kernels consume a 0/1 local-expert mask (with a trailing
+    # sentinel slot); every other backend consumes the canonical -1/local-slot
+    # expert_map. RoutedExperts.expert_map reads this flag to pick which to hand
+    # the active experts kernel.
+    consumes_expert_mask: bool = False
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -497,6 +504,9 @@ class FusedMoEExperts(ABC):
 
         self.moe_config = moe_config
         self.quant_config = quant_config
+        self.activation_config = ApplyMoEActivationConfig.from_configs(
+            moe_config, quant_config
+        )
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -885,33 +895,16 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         output: torch.Tensor,
         input: torch.Tensor,
         *,
-        clamp_limit: float | None = None,
-        alpha: float = 1.0,
-        beta: float = 0.0,
         topk_ids: torch.Tensor | None = None,
         expert_map: torch.Tensor | None = None,
-        activation_situ_beta: float | None = None,
-        activation_situ_linear_beta: float | None = None,
     ) -> None:
         apply_moe_activation(
             activation,
             output,
             input,
-            clamp_limit=clamp_limit,
-            alpha=alpha,
-            beta=beta,
+            activation_config=self.activation_config,
             topk_ids=topk_ids,
             expert_map=expert_map,
-            activation_situ_beta=(
-                self.moe_config.activation_situ_beta
-                if activation_situ_beta is None
-                else activation_situ_beta
-            ),
-            activation_situ_linear_beta=(
-                self.moe_config.activation_situ_linear_beta
-                if activation_situ_linear_beta is None
-                else activation_situ_linear_beta
-            ),
         )
 
     @abstractmethod
@@ -1030,8 +1023,15 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         if capture_fn is None:
             self._routing_replay_buffer = None
             return
+        # Allocate for per-rank batches gathered across the DP or EP group.
+        dispatch_group_size = (
+            self.moe_config.ep_size
+            if self.moe_config.use_ep
+            else self.moe_config.dp_size
+        )
+        max_num_replay_tokens = self.moe_config.max_num_tokens * dispatch_group_size
         self._routing_replay_buffer = torch.empty(
-            (self.moe_config.max_num_tokens, self.moe_config.experts_per_token),
+            (max_num_replay_tokens, self.moe_config.experts_per_token),
             dtype=torch.int16,
             device=self.moe_config.device,
         )

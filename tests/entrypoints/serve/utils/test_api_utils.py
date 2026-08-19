@@ -1,21 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from argparse import Namespace
+
 import pytest
 
 from vllm.entrypoints.openai.engine.protocol import StreamOptions
+from vllm.entrypoints.serve.utils import api_utils
 from vllm.entrypoints.serve.utils.api_utils import (
+    _redact_sensitive_args,
     get_max_tokens,
-    sanitize_message,
     should_include_usage,
 )
-
-
-def test_sanitize_message():
-    assert (
-        sanitize_message("<_io.BytesIO object at 0x7a95e299e750>")
-        == "<_io.BytesIO object>"
-    )
 
 
 @pytest.mark.parametrize(
@@ -120,47 +116,34 @@ class TestGetMaxTokens:
             )
 
 
-class TestSanitizeMessageFilePaths:
-    """sanitize_message should also strip file paths and traceback
-    frames, not just memory addresses - see #31683."""
+class TestRedactSensitiveArgs:
+    API_KEY = "sk-test-secret-12345"
 
-    def test_strips_traceback_style_frame(self):
-        msg = (
-            "1 validation error:\n"
-            "  {'type': 'list_type', 'loc': ('body', 'messages')}\n"
-            '\n  File "/usr/local/lib/python3.12/dist-packages/vllm/'
-            'entrypoints/serve/utils/api_utils.py", line 40, '
-            "in create_chat_completion\n"
-            "    POST /v1/chat/completions"
-        )
-        result = sanitize_message(msg)
-        assert "/usr/local/" not in result
-        assert "api_utils.py" not in result
-        assert "list_type" in result
+    def test_redact_replaces_sensitive_values_only(self):
+        args = {"api_key": self.API_KEY, "other": "visible"}
+        redacted = _redact_sensitive_args(args)
+        assert redacted == {"api_key": "***", "other": "visible"}
+        # original dict must not be mutated
+        assert args == {"api_key": self.API_KEY, "other": "visible"}
 
-    def test_strips_arbitrary_absolute_path(self):
-        result = sanitize_message("Error in /home/user/project/vllm/server.py")
-        assert "/home/user" not in result
+    def test_no_sensitive_fields_returns_original(self):
+        args = {"model_tag": "org/model", "other": "visible"}
+        assert _redact_sensitive_args(args) is args
 
-    def test_strips_single_parent_container_path(self):
-        """Regression: /app/server.py and /workspace/server.py (common in
-        container deployments) were missed by the original {2,} quantifier."""
-        assert "/app/" not in sanitize_message("Error in /app/server.py")
-        assert "/workspace/" not in sanitize_message("Error in /workspace/server.py")
-
-    def test_preserves_api_endpoint_paths(self):
-        msg = "POST /v1/chat/completions failed"
-        assert "/v1/chat/completions" in sanitize_message(msg)
-
-    def test_preserves_short_field_references(self):
-        msg = "Invalid value for field 'body.messages'"
-        assert sanitize_message(msg) == msg
-
-    def test_strips_both_address_and_path(self):
-        msg = (
-            "<Request at 0x7f123> failed at "
-            "/usr/local/lib/python3.12/dist-packages/vllm/server.py"
-        )
-        result = sanitize_message(msg)
-        assert "0x" not in result
-        assert "/usr/local/" not in result
+    def test_api_key_not_in_log(self, monkeypatch, caplog):
+        non_default = {
+            "model_tag": "org/model",
+            "default_chat_template_kwargs": {"enable_thinking": False},
+            "api_key": self.API_KEY,
+            "enable_auto_tool_choice": True,
+            "tool_call_parser": "qwen3_coder",
+        }
+        monkeypatch.setattr(api_utils, "get_non_default_args", lambda args: non_default)
+        with caplog.at_level("INFO", logger="vllm.entrypoints.serve.utils.api_utils"):
+            api_utils.log_non_default_args(args=Namespace())
+        message = caplog.text
+        assert self.API_KEY not in message
+        assert "'api_key': '***'" in message
+        # non-sensitive args are still logged
+        assert "org/model" in message
+        assert "qwen3_coder" in message

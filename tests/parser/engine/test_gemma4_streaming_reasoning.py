@@ -170,7 +170,7 @@ def mock_tokenizer():
 
 @pytest.fixture
 def parser(mock_tokenizer):
-    return Gemma4Parser(mock_tokenizer)
+    return Gemma4Parser(mock_tokenizer, chat_template_kwargs={"enable_thinking": True})
 
 
 @pytest.fixture
@@ -289,7 +289,10 @@ class TestGemma4PromptOpenReasoning:
 
     @pytest.fixture
     def open_reasoning_parser(self, open_reasoning_tokenizer):
-        return Gemma4Parser(open_reasoning_tokenizer)
+        return Gemma4Parser(
+            open_reasoning_tokenizer,
+            chat_template_kwargs={"enable_thinking": True},
+        )
 
     @staticmethod
     def _prompt_ids_open_channel() -> list[int]:
@@ -394,7 +397,9 @@ class TestGemma4PreInitReasoningRobustness:
 
     @pytest.fixture
     def pre_init_parser(self, pre_init_tokenizer):
-        return Gemma4Parser(pre_init_tokenizer)
+        return Gemma4Parser(
+            pre_init_tokenizer, chat_template_kwargs={"enable_thinking": True}
+        )
 
     def test_model_emitted_channel_open_after_new_turn(
         self, pre_init_parser, pre_init_tokenizer, request_obj
@@ -489,7 +494,9 @@ class TestGemma4ChannelLessOutputConsistency:
 
     @pytest.fixture
     def plain_parser(self, plain_tokenizer):
-        return Gemma4Parser(plain_tokenizer)
+        return Gemma4Parser(
+            plain_tokenizer, chat_template_kwargs={"enable_thinking": True}
+        )
 
     def test_streaming_channel_less_output_is_content(
         self, plain_parser, plain_tokenizer, request_obj
@@ -521,7 +528,9 @@ class TestGemma4ChannelLessOutputConsistency:
         assert reasoning is None
         assert content == _PLAIN_ANSWER_TEXT
 
-        stream_parser = Gemma4Parser(plain_tokenizer)
+        stream_parser = Gemma4Parser(
+            plain_tokenizer, chat_template_kwargs={"enable_thinking": True}
+        )
         results = _stream_tokens_batched(
             stream_parser,
             plain_tokenizer,

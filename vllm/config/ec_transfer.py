@@ -103,5 +103,15 @@ class ECTransferConfig:
     def is_ec_consumer(self) -> bool:
         return self.ec_connector is not None and self.ec_role in get_args(ECConsumer)
 
+    @property
+    def is_encode_only(self) -> bool:
+        """Whether this instance encodes but does not run the language model.
+
+        It allocates no KV cache either -- `GPUModelRunner.get_kv_cache_spec`
+        returns {} for it -- so it is the one role that can spend accelerator
+        time and memory on frontend work.
+        """
+        return self.is_ec_producer and not self.is_ec_consumer
+
     def get_from_extra_config(self, key, default) -> Any:
         return self.ec_connector_extra_config.get(key, default)

@@ -27,6 +27,18 @@ from vllm.v1.kv_offload.base import CanonicalPageMapping, CopyRun
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+# Version of the canonical byte format; bump on any layout change
+CANONICAL_FORMAT_VERSION = 1
+
+
+def canonical_format_id() -> str:
+    """Identity of the canonical byte format, for namespacing persisted KV.
+    Canonical pages keep the worker's KV layout family, so the id couples the
+    format version with that family; consumers must match it exactly."""
+    from vllm.v1.attention.backends.utils import get_kv_cache_layout
+
+    return f"v{CANONICAL_FORMAT_VERSION}-{get_kv_cache_layout().lower()}"
+
 
 @dataclass(frozen=True)
 class _RankContext:

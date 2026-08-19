@@ -31,11 +31,13 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.model_executor.layers.fused_moe import (
     MoERunner,
     fused_moe_make_expert_params_mapping,
+)
+from vllm.model_executor.layers.fused_moe.utils import (
+    is_model_fused_shared_expert_compatible,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -212,6 +214,11 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
                 self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
         self.extract_moe_parameters(example_moe)
+        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
+            self.model.layers.values(),
+            Glm4MoE,
+            "mtp_block.mlp",
+        )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
@@ -238,10 +245,6 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # FSE weight loading mirrors glm4_moe.py / deepseek_mtp.py.
-        rocm_aiter_moe_shared_expert_enabled = (
-            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        )
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -254,7 +257,7 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         num_experts = self.config.n_routed_experts
-        if rocm_aiter_moe_shared_expert_enabled and self.config.n_shared_experts:
+        if self.is_fused_shared_expert_enabled and self.config.n_shared_experts:
             num_experts += self.config.n_shared_experts
         expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
@@ -279,7 +282,7 @@ class Glm4MoeMTP(nn.Module, Glm4MixtureOfExperts):
                 name = self._rewrite_spec_layer_name(spec_layer, name)
 
             is_fusion_moe_shared_experts_layer = (
-                rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
+                self.is_fused_shared_expert_enabled and ("mlp.shared_experts" in name)
             )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:

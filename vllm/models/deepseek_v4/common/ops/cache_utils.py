@@ -438,7 +438,6 @@ def compute_global_topk_indices_and_lens(
     block_table: torch.Tensor,
     block_size: int,
     is_valid_token: torch.Tensor,
-    output_buffers: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Map local topk indices to global KV cache slots and count valid entries.
 
@@ -448,15 +447,8 @@ def compute_global_topk_indices_and_lens(
     3. Masking padding tokens to length 0
     """
     num_tokens = topk_indices.shape[0]
-    if output_buffers is None:
-        global_topk_indices = torch.empty_like(topk_indices)
-        topk_lens = torch.empty(
-            num_tokens, dtype=torch.int32, device=topk_indices.device
-        )
-    else:
-        global_topk_indices, topk_lens = output_buffers
-        assert global_topk_indices.shape == topk_indices.shape
-        assert topk_lens.shape == (num_tokens,)
+    global_topk_indices = torch.empty_like(topk_indices)
+    topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=topk_indices.device)
     _compute_global_topk_indices_and_lens_kernel[(num_tokens,)](
         global_topk_indices,
         global_topk_indices.stride(0),
@@ -477,15 +469,15 @@ def compute_global_topk_indices_and_lens(
 @triton.jit
 def _compute_global_topk_indices_and_lens_kernel(
     global_topk_indices_ptr,
-    global_topk_indices_stride,
+    global_topk_indices_stride: tl.constexpr,
     topk_lens_ptr,
     topk_indices_ptr,
-    topk_indices_stride,
-    topk,
+    topk_indices_stride: tl.constexpr,
+    topk: tl.constexpr,
     token_to_req_indices_ptr,
     block_table_ptr,
-    block_table_stride,
-    block_size,
+    block_table_stride: tl.constexpr,
+    block_size: tl.constexpr,
     is_valid_token_ptr,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):
@@ -580,7 +572,7 @@ def combine_topk_swa_indices(
     return combined_indices, combined_lens
 
 
-_COMBINE_TOPK_SWA_NUM_WORKERS = 128
+_COMBINE_TOPK_SWA_NUM_WORKERS = 256
 
 
 # Representative pointer alignment variants for Triton pointer specialization.
@@ -839,16 +831,17 @@ def build_flashinfer_mixed_sparse_indices(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build the FlashInfer DSV4 sparse-index matrix for decode-first batches.
 
-    Produces ``sparse_indices`` of shape ``[num_tokens, window_size +
-    padded_topk]`` (the first ``window_size`` columns are SWA slot ids, the rest
-    are compressed/top-k slot ids) and ``sparse_topk_lens`` (active length per
-    token). Decode tokens read precomputed SWA/compressed indices; prefill tokens
-    derive their SWA window from the position and translate local compressed
-    indices to global slots via the block tables.
+    Produces ``sparse_indices`` of shape ``[num_tokens, swa_index_width +
+    padded_topk]`` (the first ``swa_index_width`` columns are SWA slot ids, the
+    rest are compressed/top-k slot ids) and ``sparse_topk_lens`` (active length
+    per token). Decode tokens read precomputed SWA/compressed indices; prefill
+    tokens derive their SWA window from the position and translate local
+    compressed indices to global slots via the block tables.
     """
     assert decode_swa_indices.dtype == torch.int32
     assert decode_swa_indices.dim() == 2
-    assert decode_swa_indices.shape[-1] == window_size
+    swa_index_width = decode_swa_indices.shape[-1]
+    assert swa_index_width >= window_size
     if decode_compressed_topk_lens is not None:
         assert decode_compressed_topk_lens.dtype == torch.int32
     assert prefill_topk_indices.dtype == torch.int32
@@ -897,7 +890,7 @@ def build_flashinfer_mixed_sparse_indices(
     padded_topk = max(topk, decode_compressed_topk)
     padded_topk = (padded_topk + 3) // 4 * 4
     sparse_indices = torch.empty(
-        (num_tokens, window_size + padded_topk),
+        (num_tokens, swa_index_width + padded_topk),
         dtype=torch.int32,
         device=decode_swa_indices.device,
     )
@@ -907,7 +900,7 @@ def build_flashinfer_mixed_sparse_indices(
     if num_tokens == 0:
         return sparse_indices, sparse_topk_lens
 
-    window_block_size = triton.next_power_of_2(max(window_size, 1))
+    window_block_size = triton.next_power_of_2(max(swa_index_width, 1))
     topk_block_size = triton.next_power_of_2(max(padded_topk, 1))
     max_block_size = max(window_block_size, topk_block_size)
     num_warps = 4 if max_block_size >= 256 else 1
@@ -944,6 +937,7 @@ def build_flashinfer_mixed_sparse_indices(
         compressed_span,
         NUM_DECODE_TOKENS=num_decode_tokens,
         WINDOW_SIZE=window_size,
+        SWA_INDEX_WIDTH=swa_index_width,
         COMPRESS_RATIO=compress_ratio,
         TOP_K=topk,
         PADDED_TOP_K=padded_topk,
@@ -1011,6 +1005,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
     compressed_block_span,
     NUM_DECODE_TOKENS,
     WINDOW_SIZE: tl.constexpr,
+    SWA_INDEX_WIDTH: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     TOP_K: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
@@ -1024,9 +1019,9 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
     token_idx = tl.program_id(0)
 
     if token_idx < NUM_DECODE_TOKENS:
-        for i in range(0, WINDOW_SIZE, WINDOW_BLOCK_SIZE):
+        for i in range(0, SWA_INDEX_WIDTH, WINDOW_BLOCK_SIZE):
             offset = i + tl.arange(0, WINDOW_BLOCK_SIZE)
-            mask = offset < WINDOW_SIZE
+            mask = offset < SWA_INDEX_WIDTH
             values = tl.load(
                 decode_swa_indices_ptr + token_idx * decode_swa_stride + offset,
                 mask=mask,
@@ -1072,7 +1067,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
             tl.store(
                 sparse_indices_ptr
                 + token_idx * sparse_indices_stride
-                + WINDOW_SIZE
+                + SWA_INDEX_WIDTH
                 + offset,
                 values,
                 mask=mask,
@@ -1086,7 +1081,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
             else:
                 compressed_len = tl.full((), DECODE_COMPRESSED_TOPK, dtype=tl.int32)
 
-        tl.store(sparse_topk_lens_ptr + token_idx, WINDOW_SIZE + compressed_len)
+        tl.store(sparse_topk_lens_ptr + token_idx, SWA_INDEX_WIDTH + compressed_len)
         return
 
     prefill_idx = token_idx - NUM_DECODE_TOKENS
@@ -1102,9 +1097,9 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
     swa_start_pos = pos - swa_len + 1
     topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
 
-    for i in range(0, WINDOW_SIZE, WINDOW_BLOCK_SIZE):
+    for i in range(0, SWA_INDEX_WIDTH, WINDOW_BLOCK_SIZE):
         offset = i + tl.arange(0, WINDOW_BLOCK_SIZE)
-        mask = offset < WINDOW_SIZE
+        mask = offset < SWA_INDEX_WIDTH
         pos_offset = swa_start_pos + offset
         block_indices = pos_offset // swa_block_size
         block_numbers = tl.load(
@@ -1148,10 +1143,10 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
         tl.store(
             sparse_indices_ptr
             + token_idx * sparse_indices_stride
-            + WINDOW_SIZE
+            + SWA_INDEX_WIDTH
             + offset,
             slot_ids,
             mask=mask,
         )
 
-    tl.store(sparse_topk_lens_ptr + token_idx, WINDOW_SIZE + topk_len)
+    tl.store(sparse_topk_lens_ptr + token_idx, SWA_INDEX_WIDTH + topk_len)

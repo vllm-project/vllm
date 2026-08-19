@@ -5,12 +5,14 @@ from types import SimpleNamespace
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     LoadSpec,
+    MooncakeStoreWorkerMetadata,
     ReqMeta,
     RequestTracker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
     MooncakeStoreScheduler,
 )
+from vllm.v1.core.block_pool import BlockPool
 
 
 def _make_bare_scheduler(
@@ -27,6 +29,12 @@ def _make_bare_scheduler(
     scheduler._unfinished_request_ids = {"req-0"}
     scheduler._unfinished_requests = {}
     scheduler._request_trackers = {}
+    scheduler._gpu_block_pool = BlockPool(
+        num_gpu_blocks=64, enable_caching=True, hash_block_size=hash_block_size
+    )
+    scheduler._num_workers = 1
+    scheduler._next_store_job_id = 0
+    scheduler._pinned_saves = {}
     return scheduler
 
 
@@ -61,6 +69,14 @@ def _make_preemption_scheduler_output():
         ),
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
+    )
+
+
+def _make_worker_output(completed_saves: dict[int, int]) -> SimpleNamespace:
+    return SimpleNamespace(
+        kv_connector_worker_meta=MooncakeStoreWorkerMetadata(
+            completed_saves=completed_saves
+        )
     )
 
 
@@ -133,7 +149,7 @@ def test_cached_request_without_spec_decode_keeps_current_step_save_overlap():
     assert tracker.num_saved_tokens == 48
 
 
-def test_preemption_resets_tracker_before_request_finished():
+def test_preemption_resets_tracker():
     scheduler = _make_bare_scheduler()
     _add_unfinished_request(
         scheduler,
@@ -152,8 +168,6 @@ def test_preemption_resets_tracker_before_request_finished():
     assert tracker.token_ids is None
     assert tracker.has_pending_offload is False
     assert tracker.prefill_end_tokens == 0
-    request = SimpleNamespace(request_id="req-0")
-    assert scheduler.request_finished(request, ([0, 1],)) == (False, None)
 
 
 def test_preemption_clears_stale_load_state():
@@ -215,7 +229,7 @@ def test_pending_load_does_not_co_queue_save():
     # enqueue a save in the same scheduling step. Co-queuing both produces a
     # recv+send pair for the same req_id, and the scheduler's
     # _update_from_kv_xfer_finished then trips `assert req_id in self.requests`
-    # when both completions land for the delay-freed request.
+    # when a completion lands for a request it has already dropped.
     scheduler = _make_bare_scheduler()
     _make_pending_load_unfinished_request(
         scheduler,
@@ -238,9 +252,7 @@ def test_pending_load_does_not_co_queue_save():
     # Load is still issued as planned.
     assert req_meta.load_spec is not None
     assert req_meta.load_spec.can_load is True
-    # And the tracker's saved-tokens watermark stays at 0 so request_finished
-    # later sees `num_saved_tokens <= 0` and frees immediately rather than
-    # waiting for a finished_sending that will never come.
+    # And the save watermark does not advance for a save that was never queued.
     tracker = scheduler._request_trackers["req-0"]
     assert tracker.num_saved_tokens == 0
 
@@ -661,30 +673,34 @@ def test_disabled_lookup_reports_no_hit_without_querying_client():
     assert scheduler.load_specs == {}
 
 
-def test_pending_partial_tail_emits_offload_only_reqmeta():
-    # A sub-block prompt never produces a block-aligned save, so the partial-
-    # tail offload arriving this step is emitted as an offload-only ReqMeta
-    # (can_save=True so it takes the normal enqueue path, token_len_chunk=0 so
-    # the worker skips the normal save). Pending-offload state delays the free
-    # without advancing the normal-save watermark before the put succeeds.
-    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+def _add_pending_partial_tail_request(
+    scheduler: MooncakeStoreScheduler,
+    *,
+    num_tokens: int,
+    block_hashes: list[bytes],
+    block_ids: tuple[list[int], ...],
+) -> SimpleNamespace:
+    """Register a sub-block request and return the step that offloads its tail.
+
+    The CoW block holding the tail is block 7, which the core deliberately keeps
+    out of the request's block table.
+    """
     request = SimpleNamespace(
-        all_token_ids=list(range(12)),
-        block_hashes=[b"h0", b"h1", b"h2"],
+        all_token_ids=list(range(num_tokens)),
+        block_hashes=block_hashes,
         num_output_placeholders=0,
         num_prompt_tokens=12,
     )
-    scheduler._unfinished_requests["req-0"] = (request, ([0],))
+    scheduler._unfinished_requests["req-0"] = (request, block_ids)
     scheduler._request_trackers["req-0"] = RequestTracker(
         req_id="req-0",
-        token_len=12,
-        allocated_block_ids=([0],),
+        token_len=num_tokens,
+        allocated_block_ids=block_ids,
         num_saved_tokens=0,
-        token_ids=list(range(12)),
-        prefill_end_tokens=12,
+        token_ids=list(range(num_tokens)),
+        prefill_end_tokens=num_tokens,
     )
-
-    out = SimpleNamespace(
+    return SimpleNamespace(
         finished_req_ids=set(),
         preempted_req_ids=set(),
         scheduled_new_reqs=[],
@@ -697,6 +713,21 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
         num_scheduled_tokens={},
         scheduled_spec_decode_tokens={},
         partial_tail_offloads={"req-0": [(1, 7, 12)]},
+    )
+
+
+def test_pending_partial_tail_emits_offload_only_reqmeta():
+    # A sub-block prompt never produces a block-aligned save, so the partial-
+    # tail offload arriving this step is emitted as an offload-only ReqMeta
+    # (can_save=True so it takes the normal enqueue path, token_len_chunk=0 so
+    # the worker skips the normal save), without advancing the normal-save
+    # watermark before the put succeeds.
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    out = _add_pending_partial_tail_request(
+        scheduler,
+        num_tokens=12,
+        block_hashes=[b"h0", b"h1", b"h2"],
+        block_ids=([0],),
     )
 
     meta = scheduler.build_connector_meta(out)
@@ -712,42 +743,16 @@ def test_pending_partial_tail_emits_offload_only_reqmeta():
     tracker = scheduler._request_trackers["req-0"]
     assert tracker.num_saved_tokens == 0
     assert tracker.has_pending_offload is True
-    request = SimpleNamespace(request_id="req-0")
-    assert scheduler.request_finished(request, ([0],)) == (True, None)
 
 
 def test_resumed_partial_tail_uses_handoff_boundary():
     scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
-    request = SimpleNamespace(
-        all_token_ids=list(range(20)),
+    # Resumption replays prompt + previously generated tokens.
+    out = _add_pending_partial_tail_request(
+        scheduler,
+        num_tokens=20,
         block_hashes=[b"h0", b"h1", b"h2", b"h3", b"h4"],
-        num_output_placeholders=0,
-        num_prompt_tokens=12,
-    )
-    scheduler._unfinished_requests["req-0"] = (request, ([0, 1],))
-    scheduler._request_trackers["req-0"] = RequestTracker(
-        req_id="req-0",
-        token_len=20,
-        allocated_block_ids=([0, 1],),
-        num_saved_tokens=0,
-        token_ids=list(range(20)),
-        # Resumption replays prompt + previously generated tokens.
-        prefill_end_tokens=20,
-    )
-
-    out = SimpleNamespace(
-        finished_req_ids=set(),
-        preempted_req_ids=set(),
-        scheduled_new_reqs=[],
-        scheduled_cached_reqs=SimpleNamespace(
-            req_ids=[],
-            new_block_ids=[],
-            num_computed_tokens=[],
-            resumed_req_ids=set(),
-        ),
-        num_scheduled_tokens={},
-        scheduled_spec_decode_tokens={},
-        partial_tail_offloads={"req-0": [(1, 7, 12)]},
+        block_ids=([0, 1],),
     )
 
     meta = scheduler.build_connector_meta(out)
@@ -791,3 +796,69 @@ def test_resumed_partial_tail_attached_to_save_keeps_handoff_boundary():
     tracker = scheduler._request_trackers["req-0"]
     assert tracker.num_saved_tokens == 48
     assert tracker.has_pending_offload is True
+
+
+def test_partial_tail_cow_block_is_referenced_for_the_job():
+    # The CoW block a partial-tail offload reads is deliberately kept out of the
+    # request block table, so it is absent from ReqMeta.block_ids. The worker
+    # DMAs out of it just as asynchronously, so it needs its own reference.
+    scheduler = _make_bare_scheduler(hash_block_size=4, enable_partial_hash_hits=True)
+    out = _add_pending_partial_tail_request(
+        scheduler,
+        num_tokens=12,
+        block_hashes=[b"h0", b"h1", b"h2"],
+        block_ids=([0],),
+    )
+    pool = scheduler._gpu_block_pool
+
+    meta = scheduler.build_connector_meta(out)
+
+    store_job_id = meta.requests[0].store_job_id
+    # It leads the list, as in `pop_blocks_for_free`, so that the reversed free
+    # puts it last in eviction priority.
+    assert scheduler._pinned_saves[store_job_id][0] == [7, 0]
+    assert pool.blocks[7].ref_cnt == 1
+
+    scheduler.update_connector_output(_make_worker_output({store_job_id: 1}))
+    assert pool.blocks[7].ref_cnt == 0
+
+
+def test_store_job_blocks_are_released_once_every_rank_reports():
+    # Every rank DMAs the job's blocks on its own, so the reference can only be
+    # dropped once the last of them reports. Until then the engine has to keep
+    # stepping: a completion only reaches the scheduler as worker metadata
+    # attached to a step, and a finishing request no longer defers its own free.
+    scheduler = _make_bare_scheduler()
+    scheduler._num_workers = 2
+    _add_unfinished_request(
+        scheduler,
+        token_ids=list(range(48)),
+        block_hashes=[b"h0", b"h1", b"h2"],
+        prefill_end_tokens=48,
+    )
+    pool = scheduler._gpu_block_pool
+    assert scheduler.has_pending_push_work() is False
+
+    meta = scheduler.build_connector_meta(
+        _make_scheduler_output(scheduled_spec_tokens=None)
+    )
+    store_job_id = meta.requests[0].store_job_id
+    assert pool.blocks[2].ref_cnt == 1
+    assert scheduler.has_pending_push_work() is True
+
+    scheduler.update_connector_output(_make_worker_output({store_job_id: 1}))
+    assert pool.blocks[2].ref_cnt == 1
+    assert scheduler.has_pending_push_work() is True
+
+    scheduler.update_connector_output(_make_worker_output({store_job_id: 1}))
+    assert pool.blocks[2].ref_cnt == 0
+    assert scheduler.has_pending_push_work() is False
+
+
+def test_worker_metadata_aggregates_completions_across_ranks():
+    # The engine merges each rank's metadata before the scheduler sees it, so a
+    # job that every rank finished in one step arrives as a single count.
+    merged = MooncakeStoreWorkerMetadata(completed_saves={1: 1}).aggregate(
+        MooncakeStoreWorkerMetadata(completed_saves={1: 1, 2: 1})
+    )
+    assert merged.completed_saves == {1: 2, 2: 1}

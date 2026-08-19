@@ -2,7 +2,7 @@ group: Samplers
 depends_on: 
   - image-build
 steps:
-- label: Samplers Test
+- label: ":nvidia: (H200) Samplers"
   device: h200_35gb
   key: samplers-test
   timeout_in_minutes: 40
@@ -19,6 +19,7 @@ steps:
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
   mirror:
     amd:
+      label: ":amd: (MI250) Samplers"
       device: mi250_1
       timeout_in_minutes: 40
       depends_on:

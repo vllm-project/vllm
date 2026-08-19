@@ -3,7 +3,18 @@
 
 set -euo pipefail
 
-image_ref="${VLLM_CI_SMOKE_IMAGE:-rocm/vllm-ci:${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}}"
+if [[ "${ROCM_CI_ARTIFACT_ONLY:-0}" == "1" ]]; then
+    base_refreshed=""
+    if command -v buildkite-agent >/dev/null 2>&1; then
+        base_refreshed="$(buildkite-agent meta-data get rocm-base-refresh 2>/dev/null || true)"
+    fi
+    if [[ "${base_refreshed}" != "1" ]]; then
+        echo "ROCM_CI_ARTIFACT_ONLY=1; no full image was built, skipping smoke test"
+        exit 0
+    fi
+fi
+
+image_ref="${VLLM_CI_SMOKE_IMAGE:-${IMAGE_TAG:-rocm/vllm-ci:${BUILDKITE_COMMIT:?BUILDKITE_COMMIT is required}}}"
 
 docker run --rm --network=none --entrypoint /bin/bash "${image_ref}" -ec '
   if [ ! -d /vllm-workspace ]; then echo Missing directory: /vllm-workspace >&2; exit 1; fi

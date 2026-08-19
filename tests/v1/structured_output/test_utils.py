@@ -14,6 +14,12 @@ pytestmark = pytest.mark.cpu_test
 def unsupported_string_schemas():
     return [
         {"type": "string", "format": "non_existing_format"},
+        # pattern/format is compiled but length bounds are silently dropped,
+        # so the combination must be rejected instead of producing quietly
+        # wrong output
+        {"type": "string", "pattern": "^a+$", "maxLength": 2},
+        {"type": "string", "pattern": "^a+$", "minLength": 3},
+        {"type": "string", "format": "email", "maxLength": 10},
     ]
 
 

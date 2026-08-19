@@ -19,6 +19,7 @@
 """PyTorch Idefics2 model."""
 
 from collections.abc import Iterable
+from typing import ClassVar
 
 import torch
 from torch import nn
@@ -38,6 +39,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from .utils import AutoWeightsLoader, WeightsMapper
 from .vision import is_vit_use_data_parallel, run_dp_sharded_vision_model
@@ -95,10 +97,14 @@ class Idefics2VisionEmbeddings(nn.Module):
             size=(batch_size, max_nb_patches_h * max_nb_patches_w), fill_value=0
         )
 
-        for batch_idx, p_attn_mask in enumerate(patch_attention_mask):
-            if tgt_sizes is not None:
-                nb_patches_h = tgt_sizes[batch_idx][0]
-                nb_patches_w = tgt_sizes[batch_idx][1]
+        with gpu_sync_allowed():
+            patch_attention_mask_cpu = patch_attention_mask.cpu()
+            tgt_sizes_cpu = tgt_sizes.cpu() if tgt_sizes is not None else None
+
+        for batch_idx, p_attn_mask in enumerate(patch_attention_mask_cpu):
+            if tgt_sizes_cpu is not None:
+                nb_patches_h = tgt_sizes_cpu[batch_idx][0]
+                nb_patches_w = tgt_sizes_cpu[batch_idx][1]
             else:
                 nb_patches_h = p_attn_mask[:, 0].sum()
                 nb_patches_w = p_attn_mask[0].sum()
@@ -113,8 +119,10 @@ class Idefics2VisionEmbeddings(nn.Module):
             pos_ids = (
                 bucket_coords_h[:, None] * self.num_patches_per_side + bucket_coords_w
             ).flatten()
-            position_ids[batch_idx][p_attn_mask.view(-1).cpu()] = pos_ids
-        position_ids = position_ids.to(self.position_embedding.weight.device)
+            position_ids[batch_idx][p_attn_mask.view(-1)] = pos_ids
+        position_ids = position_ids.to(
+            self.position_embedding.weight.device, non_blocking=True
+        )
         embeddings += self.position_embedding(position_ids)
         return embeddings
 
@@ -352,7 +360,7 @@ class Idefics2Encoder(nn.Module):
 
 
 class Idefics2VisionTransformer(nn.Module):
-    hf_to_vllm_mapper = WeightsMapper(
+    hf_to_vllm_mapper: ClassVar[WeightsMapper] = WeightsMapper(
         orig_to_new_stacked={
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),

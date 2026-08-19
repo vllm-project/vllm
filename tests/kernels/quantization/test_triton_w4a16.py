@@ -306,6 +306,7 @@ def test_triton_w4a16_process_weights_after_loading_repacks_layout():
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 def test_triton_w4a16_process_weights_after_loading_keeps_gptq_qzeros_layout():
+    """AutoGPTQ qzeros are already [K//G, N//8] (output_dim=1): no transpose."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
 
@@ -413,6 +414,7 @@ def test_triton_w4a16_process_weights_after_loading_keeps_gptq_qzeros_layout():
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
 def test_triton_w4a16_symmetric_apply_ignores_qzeros(monkeypatch):
+    """For symmetric (uint4b8) layers, apply_weights must pass qzeros=None."""
     from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
         MPLinearLayerConfig,
     )

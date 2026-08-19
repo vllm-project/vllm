@@ -142,6 +142,7 @@ class CLIPProcessingInfo(BaseProcessingInfo):
 
         pooler_config = self.ctx.model_config.pooler_config
         assert pooler_config is not None
+        assert pooler_config.seq_pooling_type is not None
 
         return get_num_selected_vision_tokens(
             vision_encoder_info.get_num_image_tokens(
@@ -854,6 +855,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         feature_select_strategy: VisionFeatureSelectStrategy | None = None,
     ) -> torch.Tensor:
         if feature_select_strategy is None:
+            assert self.pooler_config.seq_pooling_type is not None
             feature_select_strategy = _get_vision_feature_select_strategy(
                 self.pooler_config.seq_pooling_type
             )
@@ -961,6 +963,7 @@ class CLIPEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             raise RuntimeError("PP is not supported for this model")
 
         # Multimodal inputs
+        assert inputs_embeds is not None
         if not self._is_text_input:
             return inputs_embeds
 

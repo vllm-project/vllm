@@ -149,7 +149,7 @@ pub(super) fn prepare_completion_request(
             min_tokens: request.min_tokens.unwrap_or(0),
         },
         intermediate: request.stream,
-        priority: request.priority.unwrap_or(0),
+        priority: ctx.priority.or(request.priority).unwrap_or(0),
         cache_salt: request.cache_salt,
         add_special_tokens: request.add_special_tokens,
         data_parallel_rank: ctx.data_parallel_rank,
@@ -617,6 +617,27 @@ mod tests {
             prepared.text_request.session_id.as_deref(),
             Some("body-session")
         );
+    }
+
+    #[test]
+    fn prepare_completion_request_header_priority_overrides_body() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "priority": 10,
+        }))
+        .expect("parse request");
+
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Vllm-Priority", "-5".parse().unwrap());
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+            &test_tokenizer(),
+        )
+        .expect("prepare");
+        assert_eq!(prepared.text_request.priority, -5);
     }
 
     #[test]

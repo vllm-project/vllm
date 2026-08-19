@@ -9,7 +9,7 @@ except ImportError as e:
     raise ImportError(
         "The Cohere tool parser requires the `cohere_melody` "
         "package, which is not installed. Install it with:\n"
-        "    pip install cohere_melody"
+        "    pip install 'cohere-melody>=0.11.1'"
     ) from e
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
@@ -130,8 +130,8 @@ class CohereCommand3ToolParser(BaseCohereCommandToolParser):
     ):
         super().__init__(
             tokenizer,
-            streaming_opts=PyFilterOptions().cmd3(),
-            unary_opts=PyFilterOptions().cmd3(),
+            streaming_opts=PyFilterOptions().cmd3().start_in_answer(),
+            unary_opts=PyFilterOptions().cmd3().start_in_answer(),
         )
 
 
@@ -143,6 +143,6 @@ class CohereCommand4ToolParser(BaseCohereCommandToolParser):
     ):
         super().__init__(
             tokenizer,
-            streaming_opts=PyFilterOptions().cmd4(),
-            unary_opts=PyFilterOptions().cmd4(),
+            streaming_opts=PyFilterOptions().cmd4().start_in_answer(),
+            unary_opts=PyFilterOptions().cmd4().start_in_answer(),
         )

@@ -75,6 +75,7 @@ def _build_chat_completion_response(
     reasoning: str | None = None,
     tool_calls: list[dict[str, Any]] | None = None,
     finish_reason: str | None = "stop",
+    stop_reason: int | str | None = None,
     citations: list[Any] | None = None,
     usage: dict[str, Any] | None = None,
     kv_transfer_params: dict[str, Any] | None = None,
@@ -93,7 +94,14 @@ def _build_chat_completion_response(
         object="chat.completion",
         created=0,
         model="m",
-        choices=[{"index": 0, "message": message, "finish_reason": finish_reason}],
+        choices=[
+            {
+                "index": 0,
+                "message": message,
+                "finish_reason": finish_reason,
+                "stop_reason": stop_reason,
+            }
+        ],
         # ``usage`` is a required field on ChatCompletionResponse, but the
         # production code defensively handles ``None`` -> no usage block;
         # we round-trip that behavior by post-setting the attribute below.
@@ -136,6 +144,11 @@ class TestMapFinishReason:
 
     def test_unknown_reason_defaults_to_complete(self):
         assert _map_finish_reason("not_a_real_reason") == "COMPLETE"
+
+    def test_only_string_stop_reasons_are_stop_sequences(self):
+        assert _map_finish_reason("stop", "<END>") == "STOP_SEQUENCE"
+        assert _map_finish_reason("stop", 42) == "COMPLETE"
+        assert _map_finish_reason("stop", None) == "COMPLETE"
 
     def test_finish_reason_map_is_complete(self):
         # Sanity check that the lookup table covers all documented states.
@@ -1487,6 +1500,14 @@ class TestChatCompletionToV2:
         assert v2.message.tool_calls is None
         assert v2.message.tool_plan is None
         assert v2.usage is None
+
+    def test_stop_sequence_finish_reason(self):
+        serving = _serving()
+        resp = _build_chat_completion_response(
+            finish_reason="stop", stop_reason="<END>"
+        )
+        v2 = serving._chat_completion_to_v2(resp, _make_request())
+        assert v2.finish_reason == "STOP_SEQUENCE"
 
     def test_reasoning_model_keeps_thinking_with_tool_calls(self):
         # Reasoning Command models: ``thinking`` block stays in

@@ -8,6 +8,7 @@ import torch
 
 import vllm.model_executor.layers.sparse_attn_indexer as sparse_indexer
 from vllm.config import CUDAGraphMode
+from vllm.models.deepseek_v32.attention import DeepseekV32Attention
 from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 
 INDEXER_LAYER = "model.layers.0.self_attn.indexer.k_cache"
@@ -45,7 +46,15 @@ def make_mla_metadata(*, use_dense_mha: bool = True, num_decode_tokens: int = 0)
 
 @pytest.mark.parametrize(
     "batch_kind",
-    ["short", "threshold_mismatch", "force_mqa", "mla_decode", "capture", "full"],
+    [
+        "short",
+        "threshold_mismatch",
+        "mqa_only_layer",
+        "force_mqa",
+        "mla_decode",
+        "capture",
+        "full",
+    ],
 )
 def test_short_prefill_updates_k_cache_before_scoring_decision(
     monkeypatch: pytest.MonkeyPatch,
@@ -132,6 +141,11 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
     topk_indices = torch.full((7, 2048), 17, dtype=torch.int32)
 
     def run_indexer():
+        if batch_kind == "mqa_only_layer":
+            assert not DeepseekV32Attention.supports_dense_mha_prefill
+            dense_mha_layer = ""
+        else:
+            dense_mha_layer = MLA_LAYER
         return sparse_indexer.sparse_attn_indexer(
             hidden_states,
             INDEXER_LAYER,
@@ -149,7 +163,7 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
             topk_indices,
             False,
             False,
-            MLA_LAYER,
+            dense_mha_layer,
         )
 
     if should_skip:
@@ -163,3 +177,48 @@ def test_short_prefill_updates_k_cache_before_scoring_decision(
     # K cache is always updated before the scoring decision.
     torch.testing.assert_close(observed["k"], k[: slot_mapping.numel()])
     assert observed["slots"] is slot_mapping
+
+
+def test_skipped_k_cache_insert_accepts_no_k(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    indexer_metadata = make_indexer_metadata(
+        num_prefills=0,
+        num_prefill_tokens=0,
+        slot_mapping=torch.empty(0, dtype=torch.long),
+    )
+    monkeypatch.setattr(
+        sparse_indexer,
+        "get_forward_context",
+        lambda: SimpleNamespace(
+            attn_metadata={INDEXER_LAYER: indexer_metadata},
+            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+        ),
+    )
+    monkeypatch.setattr(
+        sparse_indexer.current_platform, "fp8_dtype", lambda: torch.float16
+    )
+
+    topk_indices = torch.full((1, 2048), 17, dtype=torch.int32)
+    result = sparse_indexer.sparse_attn_indexer(
+        torch.empty(1, 1),
+        INDEXER_LAYER,
+        torch.empty(1),
+        torch.empty(1, 1),
+        None,
+        None,
+        torch.empty(1, 1),
+        128,
+        "ue8m0",
+        2048,
+        4,
+        4096,
+        4096,
+        topk_indices,
+        True,
+        False,
+        "",
+    )
+
+    assert result is topk_indices
+    assert torch.all(topk_indices == -1)

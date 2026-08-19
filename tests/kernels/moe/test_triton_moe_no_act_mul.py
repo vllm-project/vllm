@@ -11,7 +11,12 @@ import pytest
 import torch
 
 from tests.kernels.moe.utils import make_dummy_moe_config
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
+    MoEActivation,
+    apply_moe_activation,
+    apply_moe_activation_supported,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
 )
@@ -29,6 +34,49 @@ NO_MUL_ACTIVATIONS = [
     MoEActivation.GELU_NO_MUL,
     MoEActivation.RELU2_NO_MUL,
 ]
+
+
+def test_apply_moe_activation_supported_contract():
+    supported = {
+        activation
+        for activation in MoEActivation
+        if apply_moe_activation_supported(activation)
+    }
+
+    assert supported == set(MoEActivation) - {MoEActivation.RELU2}
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize(
+    "activation",
+    [
+        activation
+        for activation in MoEActivation
+        if apply_moe_activation_supported(activation)
+    ],
+)
+@torch.inference_mode()
+def test_supported_apply_moe_activation_executes(activation: MoEActivation):
+    output_width = 64
+    input_width = output_width * 2 if activation.is_gated else output_width
+    input = torch.randn(2, input_width, device="cuda", dtype=torch.bfloat16)
+    output = torch.empty(2, output_width, device="cuda", dtype=torch.bfloat16)
+    activation_config = ApplyMoEActivationConfig()
+    if activation == MoEActivation.SITU:
+        activation_config = ApplyMoEActivationConfig(activation_situ_beta=1.0)
+    elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+        activation_config = ApplyMoEActivationConfig(clamp_limit=7.0)
+
+    apply_moe_activation(activation, output, input, activation_config=activation_config)
+
+    assert torch.isfinite(output).all()
+
+
+@pytest.mark.parametrize("activation", list(MoEActivation))
+def test_triton_activation_metadata_tracks_shared_apply(activation: MoEActivation):
+    assert TritonExperts._supports_activation(
+        activation
+    ) == apply_moe_activation_supported(activation)
 
 
 def make_test_tensors(

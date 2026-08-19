@@ -6,7 +6,7 @@
 """Data classes for MooncakeStoreConnector."""
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast
 
 import numpy as np
@@ -14,6 +14,7 @@ import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
+    KVConnectorWorkerMetadata,
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -366,6 +367,10 @@ class ReqMeta:
 
     token_ids: list[int] | None = None
     num_prompt_tokens: int | None = None
+    # Identifies this store job for the engine's lifetime. A request id cannot
+    # serve that purpose: it is reused once a preempted request resumes, so it
+    # would release the wrong job's blocks.
+    store_job_id: int | None = None
     # Core-provided per-mamba-group
     # (group_id, cow_block_id, boundary_tokens) for this request's partial tail.
     # Present only on the producer's CoW step; drives the connector's offload
@@ -432,6 +437,23 @@ class ReqMeta:
             token_ids=token_ids,
             num_prompt_tokens=tracker.prefill_end_tokens,
         )
+
+
+@dataclass
+class MooncakeStoreWorkerMetadata(KVConnectorWorkerMetadata):
+    """Maps ``ReqMeta.store_job_id`` to the number of ranks done with that job."""
+
+    completed_saves: dict[int, int] = field(default_factory=dict)
+
+    def aggregate(
+        self, other: "KVConnectorWorkerMetadata"
+    ) -> "MooncakeStoreWorkerMetadata":
+        assert isinstance(other, MooncakeStoreWorkerMetadata)
+        for store_job_id, count in other.completed_saves.items():
+            self.completed_saves[store_job_id] = (
+                self.completed_saves.get(store_job_id, 0) + count
+            )
+        return self
 
 
 class MooncakeStoreConnectorMetadata(KVConnectorMetadata):

@@ -2,13 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import inspect
+from unittest.mock import Mock
 from weakref import WeakKeyDictionary, ref
 
 import pytest
 import torch
 from torch.nn.parameter import UninitializedParameter
 
+import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
+from vllm.config import ModelConfig
+from vllm.model_executor.layers.attention import MMEncoderAttention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload.layerwise import (
@@ -101,6 +106,39 @@ class _NonPersistentBufferLayer(torch.nn.Module):
         self.register_buffer("scale", torch.tensor(0.25), persistent=False)
 
 
+class _ReloadableMMEncoderAttention(MMEncoderAttention):
+    """Minimal stand-in to test reload lifecycle without encoder initialization."""
+
+    def __init__(self):
+        torch.nn.Module.__init__(self)
+        self.weight = torch.nn.Parameter(torch.ones(2, 2))
+        self.weight.weight_loader = default_weight_loader
+        self.post_load_called = False
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        self.post_load_called = True
+
+
+class _ReloadableAttentionLayer(
+    torch.nn.Module,
+    AttentionLayerBase,
+):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.ones(2, 2))
+        self.weight.weight_loader = default_weight_loader
+        self.post_load_called = False
+
+    def get_attn_backend(self):
+        raise NotImplementedError
+
+    def get_kv_cache_spec(self, vllm_config):
+        return None
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        self.post_load_called = True
+
+
 def test_move_metatensors():
     tensor = torch.empty((1, 2, 3))
     meta_tensor = to_meta_tensor(tensor)
@@ -113,6 +151,47 @@ def test_move_metatensors():
     assert tensor.shape == meta_tensor.shape == materialized_tensor.shape
     assert tensor.__class__ == meta_tensor.__class__ == materialized_tensor.__class__
     assert tensor.__dict__ == meta_tensor.__dict__ == materialized_tensor.__dict__
+
+
+@pytest.mark.parametrize(
+    "layer_cls",
+    [_ReloadableMMEncoderAttention, _ReloadableAttentionLayer],
+)
+def test_attention_reload_defers_post_load(default_vllm_config, layer_cls):
+    default_vllm_config.model_config = ModelConfig()
+    layer = layer_cls()
+    model = torch.nn.Sequential(layer)
+    loaded_weight = torch.full_like(layer.weight, 7.0)
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    layer.weight.weight_loader(layer.weight, loaded_weight)
+
+    assert not layer.post_load_called
+
+    finalize_layerwise_reload(model, default_vllm_config.model_config)
+
+    assert layer.post_load_called
+    assert torch.equal(layer.weight, loaded_weight)
+
+
+@pytest.mark.parametrize(
+    "layer_cls",
+    [_ReloadableMMEncoderAttention, _ReloadableAttentionLayer],
+)
+def test_attention_first_load_processes_weights(default_vllm_config, layer_cls):
+    default_vllm_config.model_config = ModelConfig()
+    layer = layer_cls()
+    model = torch.nn.Sequential(layer)
+    loaded_weight = torch.full_like(layer.weight, 7.0)
+
+    initialize_online_processing(layer)
+    layer.weight.weight_loader(layer.weight, loaded_weight)
+
+    finalize_layerwise_reload(model, default_vllm_config.model_config)
+
+    assert layer.post_load_called
+    assert torch.equal(layer.weight, loaded_weight)
 
 
 def test_reload_lifecycle():
@@ -492,6 +571,35 @@ def test_get_numel_loaded_caps_at_param_size():
     args = inspect.signature(loader).bind(param, loaded_weight)
     num_loaded, _ = get_numel_loaded(loader, args)
     assert num_loaded == 10
+
+
+def test_layerwise_loading_warning_only_checks_new_layers(monkeypatch):
+    layers = [torch.nn.Linear(16, 1, bias=False) for _ in range(2)]
+
+    def partial_weight_loader(param, loaded_weight):
+        param.view(-1)[: loaded_weight.numel()].copy_(loaded_weight)
+
+    for layer in layers:
+        layer.weight.requires_grad_(False)
+        layer.weight.weight_loader = partial_weight_loader
+        reload_layerwise.initialize_online_processing(layer)
+
+    monkeypatch.setattr(reload_layerwise, "has_device_tensors", lambda _: True)
+    get_info_size = Mock(return_value=0)
+    warning_once = Mock()
+    monkeypatch.setattr(reload_layerwise, "get_info_size", get_info_size)
+    monkeypatch.setattr(reload_layerwise.logger, "warning_once", warning_once)
+
+    reload_layerwise.LOADING_LAYERS.clear()
+    try:
+        for layer in layers:
+            for _ in range(3):
+                layer.weight.weight_loader(layer.weight, torch.ones(1))
+    finally:
+        reload_layerwise.LOADING_LAYERS.clear()
+
+    assert get_info_size.call_count == 2
+    warning_once.assert_called_once()
 
 
 class _ComposedLoaderLayer(torch.nn.Module):

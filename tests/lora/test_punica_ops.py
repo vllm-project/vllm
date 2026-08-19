@@ -15,6 +15,14 @@ from .utils import PunicaTensors, assert_close, generate_data_for_nslices
 
 DEVICE_TYPE = current_platform.device_type
 
+# On XPU, oneDNN/oneMKL can return wrong results for these reference matmuls
+# after many Triton kernel launches, so the reference stays on CPU there.
+_REF_ON_CPU = current_platform.is_xpu()
+
+
+def _to_ref_device(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor.cpu() if _REF_ON_CPU else tensor
+
 
 @pytest.fixture(autouse=True)
 def reset_device(reset_default_device):
@@ -33,10 +41,10 @@ def dynamo_reset():
     yield
 
 
-def _cpu_bgmv_shrink(
+def _bgmv_shrink(
     inputs, lora_weight, output, seq_len_tensor, lora_indices, scaling=1.0
 ):
-    """Memory-efficient shrink reference: per-LoRA matmul loop on CPU.
+    """Memory-efficient shrink reference: per-LoRA matmul loop.
     output[mask] = scaling * inputs[mask] @ weight.T"""
     exploded = torch.repeat_interleave(lora_indices, seq_len_tensor)
     for lid in exploded.unique():
@@ -48,7 +56,7 @@ def _cpu_bgmv_shrink(
         output[mask] = scaling * (inp @ w.T)
 
 
-def _cpu_bgmv_expand(
+def _bgmv_expand(
     inputs,
     lora_weight,
     output,
@@ -57,7 +65,7 @@ def _cpu_bgmv_expand(
     offset=0,
     add_inputs=False,
 ):
-    """Memory-efficient expand reference: per-LoRA matmul loop on CPU.
+    """Memory-efficient expand reference: per-LoRA matmul loop.
     output[mask, offset:offset+n] (+)= inputs[mask] @ weight.T"""
     exploded = torch.repeat_interleave(lora_indices, seq_len_tensor)
     for lid in exploded.unique():
@@ -88,21 +96,22 @@ def sgmv_shrink_for_nslices(
     num_tokens: int,
     scaling: float,
 ):
-    """CPU reference for sgmv_shrink using per-LoRA matmul loop."""
-    inp_cpu = inputs_tensor.cpu()
-    seq_cpu = seq_len_tensor.cpu()
-    idx_cpu = prompt_lora_mapping.cpu()
-    out_cpu = out_tensor.cpu()
+    """Reference for sgmv_shrink using per-LoRA matmul loop."""
+    inputs = _to_ref_device(inputs_tensor)
+    seq_len = _to_ref_device(seq_len_tensor)
+    mapping = _to_ref_device(prompt_lora_mapping)
+    out = _to_ref_device(out_tensor)
     for index in range(nslices):
-        _cpu_bgmv_shrink(
-            inp_cpu,
-            lora_weights_lst[index].cpu(),
-            out_cpu[index],
-            seq_cpu,
-            idx_cpu,
+        _bgmv_shrink(
+            inputs,
+            _to_ref_device(lora_weights_lst[index]),
+            out[index],
+            seq_len,
+            mapping,
             scaling=scaling,
         )
-    out_tensor.copy_(out_cpu)
+    if _REF_ON_CPU:
+        out_tensor.copy_(out)
 
 
 def sgmv_expand_for_nslices(
@@ -119,21 +128,22 @@ def sgmv_expand_for_nslices(
     num_tokens: int,
     add_inputs: bool,
 ) -> None:
-    """CPU reference for sgmv_expand using per-LoRA matmul loop."""
-    seq_cpu = seq_len_tensor.cpu()
-    idx_cpu = prompt_lora_mapping.cpu()
-    out_cpu = out_tensor.cpu()
+    """Reference for sgmv_expand using per-LoRA matmul loop."""
+    seq_len = _to_ref_device(seq_len_tensor)
+    mapping = _to_ref_device(prompt_lora_mapping)
+    out = _to_ref_device(out_tensor)
     for index in range(nslices):
-        _cpu_bgmv_expand(
-            inputs_tensor[index].cpu(),
-            lora_weights_lst[index].cpu(),
-            out_cpu,
-            seq_cpu,
-            idx_cpu,
+        _bgmv_expand(
+            _to_ref_device(inputs_tensor[index]),
+            _to_ref_device(lora_weights_lst[index]),
+            out,
+            seq_len,
+            mapping,
             offset=hidden_size * index,
             add_inputs=add_inputs,
         )
-    out_tensor.copy_(out_cpu)
+    if _REF_ON_CPU:
+        out_tensor.copy_(out)
 
 
 _dict_lock = Lock()

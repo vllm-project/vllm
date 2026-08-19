@@ -201,7 +201,7 @@ class KimiAudioDummyInputsBuilder(BaseDummyInputsBuilder[KimiAudioProcessingInfo
 # Field config for Kimi-Audio multimodal data
 _KIMIAUDIO_FIELD_CONFIG = {
     "whisper_input_features": MultiModalFieldConfig.batched("audio"),
-    "feature_attention_mask": MultiModalFieldConfig.batched("audio"),
+    "feature_attention_mask": MultiModalFieldConfig.batched("audio", keep_on_cpu=True),
 }
 
 

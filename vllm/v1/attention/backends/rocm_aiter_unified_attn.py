@@ -329,9 +329,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        # _split_kv_cache picks the unbind dim per layout (incl. the K/V-first
-        # encoder-decoder path). unified reads NHD, so never write the shuffle
-        # layout here.
         key_cache, value_cache = self._split_kv_cache(kv_cache)
         rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
             qkv=qkv,

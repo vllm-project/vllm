@@ -20,6 +20,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
+from vllm.v1.worker.gpu.model_states.recoverssm import RecoverSSMState
 from vllm.v1.worker.mamba_utils import (
     MambaSpecDecodeGPUContext,
     preprocess_mamba_align_fused_kernel,
@@ -80,6 +81,9 @@ class MambaHybridModelState(DefaultModelState):
         # kernel reusing the postprocess copy machinery, so the per-step src
         # columns and the running state_idx are kept GPU-resident.
         self._align_mode = self.cache_config.mamba_cache_mode == "align"
+        self.recoverssm = (
+            RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
+        )
         if self._align_mode:
             self._mamba_state_idx_gpu = torch.zeros(
                 self.max_num_reqs, dtype=torch.int32, device=self.device
@@ -267,7 +271,7 @@ class MambaHybridModelState(DefaultModelState):
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
-        return build_attn_metadata(
+        attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
@@ -285,6 +289,13 @@ class MambaHybridModelState(DefaultModelState):
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
         )
+        if self.recoverssm is not None:
+            self.recoverssm.record_step(
+                attn_metadata,
+                attn_groups,
+                for_capture=for_capture,
+            )
+        return attn_metadata
 
     def postprocess_state(
         self,
@@ -295,20 +306,33 @@ class MambaHybridModelState(DefaultModelState):
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
         num_reqs = idx_mapping.shape[0]
+        if num_reqs:
+            if not isinstance(num_sampled, int):
+                # idx_mapping may contain -1 sentinels (filtered rows) under PP; the
+                # kernel skips them rather than scattering with a host-side gather.
+                _scatter_num_accepted_kernel[(num_reqs,)](
+                    idx_mapping,
+                    num_sampled,
+                    self.num_accepted_tokens_gpu,
+                )
+            else:
+                # Fill with single value.
+                _fill_num_accepted_kernel[(num_reqs,)](
+                    idx_mapping,
+                    self.num_accepted_tokens_gpu,
+                    max(num_sampled, 1),
+                )
+
+        if self.recoverssm is not None:
+            self.recoverssm.commit_step(
+                num_sampled,
+                idx_mapping,
+                state_indices=(self._mamba_state_idx_gpu if self._align_mode else None),
+                num_accepted_tokens=self.num_accepted_tokens_gpu,
+            )
+
         if not num_reqs:
             return
-
-        if not isinstance(num_sampled, int):
-            # idx_mapping may contain -1 sentinels (filtered rows) under PP; the
-            # kernel skips them rather than scattering with a host-side gather.
-            _scatter_num_accepted_kernel[(num_reqs,)](
-                idx_mapping, num_sampled, self.num_accepted_tokens_gpu
-            )
-        else:
-            # Fill with single value.
-            _fill_num_accepted_kernel[(num_reqs,)](
-                idx_mapping, self.num_accepted_tokens_gpu, max(num_sampled, 1)
-            )
 
         # Align: save the running state to the block-aligned position when
         # spec-decode acceptance leaves the sequence non-block-aligned (mirrors

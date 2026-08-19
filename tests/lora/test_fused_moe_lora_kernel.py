@@ -22,6 +22,10 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import set_random_seed
 
+# The tensor-parallel cases build their distributed environment inside processes
+# spawned by torch.multiprocessing.spawn, so this process never has one to tear down.
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 @pytest.fixture(autouse=True)
 def reset_device(reset_default_device):
