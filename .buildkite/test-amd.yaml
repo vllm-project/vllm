@@ -13,7 +13,7 @@
 # soft_fail(bool): allow this step to fail without failing the entire pipeline (useful for flaky or experimental tests).
 # command(str): the single command to run for tests. incompatible with commands.
 # commands(list): the list of commands to run for the test. incompatible with command.
-# mirror_hardwares(list): the list of hardware to run the test on as well. currently only supports [amdexperimental]
+# mirror_hardwares(list): selector tags for AMD pipelines that should include the test.
 # dind(bool): when false, run the job directly in the AMD Kubernetes pod.
 #     When true or omitted, use the legacy Docker-in-Docker path.
 # num_gpus(int): override the number of GPUs for the test. defaults to 1 GPU. currently supports 2,4.
@@ -107,6 +107,148 @@ steps:
 
 #########################################################################################################################################
 #                                                                                                                                       #
+#                                                           AMD CPU tests                                                               #
+#                                                                                                                                       #
+#########################################################################################################################################
+
+- label: ":computer: (CPU) Basic Models Other" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_1
+  no_gpu: true
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/test_utils.py
+  - tests/models/test_vision.py
+  commands:
+  - pytest -v -s models/test_utils.py models/test_vision.py
+
+- label: ":computer: (CPU) Multimodal Processor Shard %N" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_1
+  no_gpu: true
+  parallelism: 6
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  - tests/models/registry.py
+  commands:
+  - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+
+- label: ":computer: (CPU) V1 Others" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_1
+  no_gpu: true
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/v1
+  commands:
+  - pytest -v -s -m 'cpu_test' v1/core
+  - pytest -v -s v1/structured_output
+  - pytest -v -s v1/test_serial_utils.py
+  - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
+  - pytest -v -s -m 'cpu_test' v1/metrics
+
+- label: ":computer: (CPU) Async Engine, Inputs, Utils, Worker, Config" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_1
+  no_gpu: true
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  - tests/test_inputs.py
+  - tests/test_outputs.py
+  - tests/test_pooling_params.py
+  - tests/test_ray_env.py
+  - tests/test_sampling_params.py
+  - tests/multimodal
+  - tests/renderers
+  - tests/standalone_tests/lazy_imports.py
+  - tests/tokenizers_
+  - tests/reasoning
+  - tests/tool_parsers
+  - tests/parser
+  - tests/transformers_utils
+  - tests/config
+  commands:
+  - python3 standalone_tests/lazy_imports.py
+  - pytest -v -s test_inputs.py
+  - pytest -v -s test_outputs.py
+  - pytest -v -s test_pooling_params.py
+  - pytest -v -s test_ray_env.py
+  - pytest -v -s test_sampling_params.py
+  - pytest -v -s -m 'cpu_test' multimodal
+  - pytest -v -s renderers
+  - pytest -v -s tokenizers_
+  - pytest -v -s reasoning
+  - pytest -v -s tool_parsers
+  - pytest -v -s parser
+  - pytest -v -s transformers_utils
+  - pytest -v -s config --ignore=config/test_mp_reducer.py
+
+- label: ":computer: (CPU) Rust Frontend Cargo Style + Clippy" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_1
+  no_gpu: true
+  optional: true
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - rust/
+  - rust-toolchain.toml
+  - .buildkite/test_areas/rust_frontend_cargo.yaml
+  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
+  commands:
+  - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
+
+- label: ":computer: (CPU) Rust Frontend Cargo" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_1
+  no_gpu: true
+  optional: true
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - rust/
+  - rust-toolchain.toml
+  - .buildkite/test_areas/rust_frontend_cargo.yaml
+  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
+  commands:
+  - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh test
+
+- label: ":computer: (CPU) Docker Build Metadata" # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_1
+  no_gpu: true
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - .buildkite/scripts/docker-build-metadata-args.sh
+  - .buildkite/scripts/ci-bake-rocm.sh
+  - docker/Dockerfile
+  - docker/Dockerfile.cpu
+  - docker/Dockerfile.rocm
+  - docker/Dockerfile.rocm_base
+  - docker/ci-rocm.hcl
+  - docker/docker-bake.hcl
+  - docker/docker-bake-rocm.hcl
+  - tests/tools/test_docker_build_metadata_args.py
+  commands:
+  - pytest -v -s tools/test_docker_build_metadata_args.py
+
+#########################################################################################################################################
+#                                                                                                                                       #
 #                                                         MI250 (gfx90a) tests                                                          #
 #                                                                                                                                       #
 #########################################################################################################################################
@@ -170,21 +312,6 @@ steps:
   - pip install helion==1.4.0
   - pytest -v -s kernels/helion/
 
-#------------------------------------------------------  mi250 · models / basic  -------------------------------------------------------#
-
-- label: ":amd: (MI250) Basic Models Other" # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/models/test_utils.py
-  - tests/models/test_vision.py
-  commands:
-  - pytest -v -s models/test_utils.py models/test_vision.py
-
 #-----------------------------------------------------  mi250 · models / language  -----------------------------------------------------#
 
 - label: ":amd: (MI250) Language Models (MTEB)" # TBD
@@ -224,20 +351,6 @@ steps:
   commands:
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma"
   - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
-
-- label: ":amd: (MI250) Multimodal Processor Shard %N" # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  parallelism: 6
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/models/multimodal
-  - tests/models/registry.py
-  commands:
-  - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 #------------------------------------------------------------  mi250 · v1  -------------------------------------------------------------#
 
@@ -310,10 +423,15 @@ steps:
   source_file_dependencies:
   - vllm/v1/
   - tests/v1/engine/
+  - tests/config/test_mp_reducer.py
+  - vllm/config/
+  - vllm/engine/arg_utils.py
+  - vllm/transformers_utils/config.py
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s v1/engine/test_preprocess_error_handling.py
   - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+  - pytest -v -s config/test_mp_reducer.py
 
 - label: ":amd: (MI250) Spec Decode Draft Model" # TBD
   timeout_in_minutes: 180
@@ -351,61 +469,7 @@ steps:
   - pytest -v -s v1/e2e/spec_decode/speculators/
   - pytest -v -s v1/e2e/spec_decode/mtp/
 
-- label: ":amd: (MI250) V1 Others" # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/v1
-  commands:
-  - pytest -v -s -m 'cpu_test' v1/core
-  - pytest -v -s v1/structured_output
-  - pytest -v -s v1/test_serial_utils.py
-  - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
-  - pytest -v -s -m 'cpu_test' v1/metrics
-
 #-------------------------------------------------------------  mi250 · misc  ------------------------------------------------------------#
-
-- label: ":amd: (MI250) Async Engine, Inputs, Utils, Worker, Config" # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/test_inputs.py
-  - tests/test_outputs.py
-  - tests/test_pooling_params.py
-  - tests/test_ray_env.py
-  - tests/test_sampling_params.py
-  - tests/multimodal
-  - tests/renderers
-  - tests/standalone_tests/lazy_imports.py
-  - tests/tokenizers_
-  - tests/reasoning
-  - tests/tool_parsers
-  - tests/parser
-  - tests/transformers_utils
-  - tests/config
-  commands:
-  - python3 standalone_tests/lazy_imports.py
-  - pytest -v -s test_inputs.py
-  - pytest -v -s test_outputs.py
-  - pytest -v -s test_pooling_params.py
-  - pytest -v -s test_ray_env.py
-  - pytest -v -s test_sampling_params.py
-  - pytest -v -s -m 'cpu_test' multimodal
-  - pytest -v -s renderers
-  - pytest -v -s tokenizers_
-  - pytest -v -s reasoning
-  - pytest -v -s tool_parsers
-  - pytest -v -s parser
-  - pytest -v -s transformers_utils
-  - pytest -v -s config
 
 - label: ":amd: (MI300) Python-only Installation" # TBD
   timeout_in_minutes: 180
@@ -420,56 +484,6 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - bash standalone_tests/python_only_compile.sh
-
-#------------------------------------------------------------  mi250 · rust  -----------------------------------------------------------#
-
-- label: ":amd: (MI250) Rust Frontend Cargo Style + Clippy" # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  working_dir: "/vllm-workspace"
-  source_file_dependencies:
-  - rust/
-  - rust-toolchain.toml
-  - .buildkite/test_areas/rust_frontend_cargo.yaml
-  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
-  commands:
-  - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
-
-- label: ":amd: (MI250) Rust Frontend Cargo" # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  working_dir: "/vllm-workspace"
-  source_file_dependencies:
-  - rust/
-  - rust-toolchain.toml
-  - .buildkite/test_areas/rust_frontend_cargo.yaml
-  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
-  commands:
-  - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh test
-
-#-----------------------------------------------------------  mi250 · docker  ----------------------------------------------------------#
-
-- label: ":amd: (MI250) Docker Build Metadata" # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - .buildkite/scripts/docker-build-metadata-args.sh
-  - .buildkite/scripts/ci-bake-rocm.sh
-  - docker/Dockerfile
-  - docker/Dockerfile.cpu
-  - docker/Dockerfile.rocm
-  - docker/Dockerfile.rocm_base
-  - docker/ci-rocm.hcl
-  - docker/docker-bake.hcl
-  - docker/docker-bake-rocm.hcl
-  - tests/tools/test_docker_build_metadata_args.py
-  commands:
-  - pytest -v -s tools/test_docker_build_metadata_args.py
 
 #########################################################################################################################################
 #                                                                                                                                       #
@@ -524,6 +538,7 @@ steps:
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
   - pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)'
   - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
+  - pytest -v -s models/test_vision.py -m 'distributed(num_gpus=2)'
 
 #--------------------------------------------------------  mi300 · benchmarks  ---------------------------------------------------------#
 
@@ -724,6 +739,7 @@ steps:
   commands:
   - pytest -v -s detokenizer
   - pytest -v -s -m 'not cpu_test' multimodal
+  - pytest -v -s multimodal/test_cache.py::test_sleep_wake_preserves_mm_cache_consistency
   - pytest -v -s utils_
 
 #--------------------------------------------------------  mi300 · distributed  --------------------------------------------------------#
@@ -814,11 +830,13 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
+  - tests/models/test_vision.py
   commands:
   - pytest -v -s distributed/test_custom_all_reduce.py
   - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
   - TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
+  - pytest -v -s models/test_vision.py -m 'distributed(num_gpus=4)'
 
 - label: ":amd: (MI300) Distributed Torchrun + Examples" # TBD
   timeout_in_minutes: 180
@@ -1923,8 +1941,10 @@ steps:
   - tests/models/test_terratorch.py
   - tests/models/transformers/test_backend.py
   - tests/models/test_registry.py
+  - tests/models/test_vision.py
   commands:
   - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
+  - pytest -v -s models/test_vision.py::test_simple_mrope_vision_model_spatial_merge
 
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
@@ -3929,147 +3949,3 @@ steps:
   commands:
   - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
-
-#########################################################################################################################################
-#                                                                                                                                       #
-#                                              DISABLED CPU-ONLY TEST GROUPS                                                           #
-#                                                                                                                                       #
-#########################################################################################################################################
-#
-# These definitions are retained for reference only. Their commands and source triggers are covered one-for-one by the active
-# MI250 ROCm GPU groups above. Every disabled CPU definition explicitly keeps no_gpu: true.
-#
-# - label: ":computer: (CPU) Basic Models Other" # TBD
-#   timeout_in_minutes: 180
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-#   agent_pool: mi250_1
-#   no_gpu: true
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/
-#   - tests/models/test_utils.py
-#   - tests/models/test_vision.py
-#   commands:
-#   - pytest -v -s models/test_utils.py models/test_vision.py
-#
-# - label: ":computer: (CPU) Multimodal Processor Shard %N" # TBD
-#   timeout_in_minutes: 180
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-#   agent_pool: mi250_1
-#   no_gpu: true
-#   parallelism: 6
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/
-#   - tests/models/multimodal
-#   - tests/models/registry.py
-#   commands:
-#   - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-#
-# - label: ":computer: (CPU) V1 Others" # TBD
-#   timeout_in_minutes: 180
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-#   agent_pool: mi250_1
-#   no_gpu: true
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/
-#   - tests/v1
-#   commands:
-#   - pytest -v -s -m 'cpu_test' v1/core
-#   - pytest -v -s v1/structured_output
-#   - pytest -v -s v1/test_serial_utils.py
-#   - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
-#   - pytest -v -s -m 'cpu_test' v1/metrics
-#
-# - label: ":computer: (CPU) Async Engine, Inputs, Utils, Worker, Config" # TBD
-#   timeout_in_minutes: 180
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-#   agent_pool: mi250_1
-#   optional: true
-#   no_gpu: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - vllm/
-#   - tests/test_inputs.py
-#   - tests/test_outputs.py
-#   - tests/test_pooling_params.py
-#   - tests/test_ray_env.py
-#   - tests/test_sampling_params.py
-#   - tests/multimodal
-#   - tests/renderers
-#   - tests/standalone_tests/lazy_imports.py
-#   - tests/tokenizers_
-#   - tests/reasoning
-#   - tests/tool_parsers
-#   - tests/parser
-#   - tests/transformers_utils
-#   - tests/config
-#   commands:
-#   - python3 standalone_tests/lazy_imports.py
-#   - pytest -v -s test_inputs.py
-#   - pytest -v -s test_outputs.py
-#   - pytest -v -s test_pooling_params.py
-#   - pytest -v -s test_ray_env.py
-#   - pytest -v -s test_sampling_params.py
-#   - pytest -v -s -m 'cpu_test' multimodal
-#   - pytest -v -s renderers
-#   - pytest -v -s tokenizers_
-#   - pytest -v -s reasoning
-#   - pytest -v -s tool_parsers
-#   - pytest -v -s parser
-#   - pytest -v -s transformers_utils
-#   - pytest -v -s config
-#
-# - label: ":computer: (CPU) Rust Frontend Cargo Style + Clippy" # TBD
-#   timeout_in_minutes: 180
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-#   agent_pool: mi250_1
-#   no_gpu: true
-#   working_dir: "/vllm-workspace"
-#   source_file_dependencies:
-#   - rust/
-#   - rust-toolchain.toml
-#   - .buildkite/test_areas/rust_frontend_cargo.yaml
-#   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
-#   commands:
-#   - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
-#
-# - label: ":computer: (CPU) Rust Frontend Cargo" # TBD
-#   timeout_in_minutes: 180
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-#   agent_pool: mi250_1
-#   no_gpu: true
-#   working_dir: "/vllm-workspace"
-#   source_file_dependencies:
-#   - rust/
-#   - rust-toolchain.toml
-#   - .buildkite/test_areas/rust_frontend_cargo.yaml
-#   - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
-#   commands:
-#   - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh test
-#
-# - label: ":computer: (CPU) Docker Build Metadata" # TBD
-#   timeout_in_minutes: 180
-#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-#   agent_pool: mi250_1
-#   no_gpu: true
-#   optional: true
-#   working_dir: "/vllm-workspace/tests"
-#   source_file_dependencies:
-#   - .buildkite/scripts/docker-build-metadata-args.sh
-#   - .buildkite/scripts/ci-bake-rocm.sh
-#   - docker/Dockerfile
-#   - docker/Dockerfile.cpu
-#   - docker/Dockerfile.rocm
-#   - docker/Dockerfile.rocm_base
-#   - docker/ci-rocm.hcl
-#   - docker/docker-bake.hcl
-#   - docker/docker-bake-rocm.hcl
-#   - tests/tools/test_docker_build_metadata_args.py
-#   commands:
-#   - pytest -v -s tools/test_docker_build_metadata_args.py
-#
