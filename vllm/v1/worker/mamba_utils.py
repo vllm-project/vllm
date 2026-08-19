@@ -565,6 +565,93 @@ def precopy_mamba_align_fused_kernel(
     )
 
 
+@triton.jit(do_not_specialize=["num_reqs"])
+def postprocess_mamba_none_normalize_kernel(
+    # Per-request accepted-token counts (this step's true values)
+    num_accepted_tokens_ptr,
+    # Per-group block table base addresses: int64[num_groups], each entry is
+    # the data_ptr of that group's persistent [max_reqs, max_blocks] int32
+    # block table.
+    block_table_ptrs_ptr,
+    block_table_stride_req: tl.int64,  # stride between requests (in elements)
+    # Same flattened state-layout metadata as postprocess_mamba_fused_kernel
+    state_base_addrs_ptr,
+    state_block_strides_ptr,
+    state_elem_sizes_ptr,
+    state_inner_sizes_ptr,
+    state_conv_widths_ptr,
+    state_group_indices_ptr,
+    state_dim_row_count_ptr,
+    state_dim_row_stride_ptr,
+    # Output: normalized accepted-token counts (1 where normalized)
+    num_accepted_tokens_out_ptr,
+    num_reqs,
+    COPY_BLOCK_SIZE: tl.constexpr,
+    CONV_STATE_DIM_FIRST: tl.constexpr,
+):
+    """Normalize mamba states after sampling in "none" cache mode.
+
+    In "none" mode the spec-decode GDN/mamba kernels keep the state after
+    accepting token ``i`` at block-table column ``i`` (conv states: window
+    offset ``i`` inside the block-table column 0 block). The non-spec decode
+    path, however, always reads column 0 with a neutral bias, so after a step
+    that accepted ``num_accepted > 1`` tokens, a following step WITHOUT draft
+    tokens (only reachable with proposers that may return no drafts, e.g.
+    ngram/prompt_lookup) would read a stale state missing the accepted draft
+    tokens' updates, permanently corrupting the running state.
+
+    For every request with ``num_accepted > 1``, migrate the accepted state
+    to the canonical column 0 in place:
+      - temporal state: ``state[bt[num_accepted-1]] -> state[bt[0]]``
+      - conv state:     ``state[bt[0], num_accepted-1:] ->
+                             state[bt[0], :width-(num_accepted-1)]``
+    and write 1 to ``num_accepted_tokens_out`` so downstream consumers see
+    the neutral bias matching the normalized layout.
+
+    Grid: (num_reqs, num_layers * num_state_types)
+    """
+    req_idx = tl.program_id(0)
+    state_idx = tl.program_id(1)
+
+    if req_idx >= num_reqs:
+        return
+
+    num_accepted = tl.load(num_accepted_tokens_ptr + req_idx)
+    if num_accepted <= 1:
+        return
+
+    if state_idx == 0:
+        tl.store(num_accepted_tokens_out_ptr + req_idx, 1)
+
+    # src_col == dst_col == 0 with token_bias = num_accepted - 1 selects the
+    # accepted speculative column (temporal) / window offset (conv) and
+    # migrates it to the canonical position. _copy_mamba_state_block copies
+    # in ascending order, which is overlap-safe for the conv in-place
+    # left-shift because dst < src everywhere; temporal copies are between
+    # distinct blocks.
+    _copy_mamba_state_block(
+        state_idx,
+        req_idx,
+        0,
+        0,
+        num_accepted - 1,
+        block_table_ptrs_ptr,
+        block_table_stride_req,
+        state_base_addrs_ptr,
+        state_block_strides_ptr,
+        state_elem_sizes_ptr,
+        state_inner_sizes_ptr,
+        state_conv_widths_ptr,
+        state_group_indices_ptr,
+        state_dim_row_count_ptr,
+        state_dim_row_stride_ptr,
+        0,
+        COPY_BLOCK_SIZE,
+        CONV_STATE_DIM_FIRST,
+        1,
+    )
+
+
 @triton.jit
 def batch_memcpy_kernel(src_ptrs, dst_ptrs, sizes, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
@@ -991,6 +1078,52 @@ class MambaSpecDecodeGPUContext:
             COPY_BLOCK_SIZE=1024,
             CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
             TEMPORAL_TILES=_TEMPORAL_TILES,
+        )
+
+    def run_fused_none_normalize(
+        self,
+        num_reqs: int,
+        num_accepted_tokens_gpu: torch.Tensor,
+    ) -> None:
+        """Normalize "none"-mode mamba states after sampling.
+
+        Migrates every request's accepted state to block-table column 0 and
+        exposes the matching (reset-to-1) accepted-token counts via
+        ``num_accepted_tokens_out``. See
+        ``postprocess_mamba_none_normalize_kernel`` for why this is needed.
+
+        Args:
+            num_reqs: Number of active requests
+            num_accepted_tokens_gpu: [num_reqs] accepted token counts
+        """
+        if num_reqs == 0 or not self.is_initialized:
+            return
+
+        # Pre-fill output with the true counts; the kernel overwrites entries
+        # to 1 for normalized requests only.
+        self.num_accepted_tokens_out[:num_reqs].copy_(
+            num_accepted_tokens_gpu[:num_reqs]
+        )
+
+        total_states = self.num_layers * self.num_state_types
+        grid = (num_reqs, total_states)
+
+        postprocess_mamba_none_normalize_kernel[grid](
+            num_accepted_tokens_gpu,
+            self.block_table_ptrs,
+            self.block_table_stride_req,
+            self.state_base_addrs,
+            self.state_block_strides,
+            self.state_elem_sizes,
+            self.state_inner_sizes,
+            self.state_conv_widths,
+            self.state_group_indices,
+            self.state_dim_row_count,
+            self.state_dim_row_stride,
+            self.num_accepted_tokens_out,
+            num_reqs,
+            COPY_BLOCK_SIZE=1024,
+            CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
         )
 
     def run_fused_precopy(
@@ -1436,6 +1569,48 @@ def postprocess_mamba_align_gpu(
     # ``num_accepted_tokens_gpu``; the kernel only overwrites entries to 1
     # when src_block_idx == dest_block_idx (copy within the same block), so
     # the original count is preserved for everyone else.
+    num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
+        ctx.num_accepted_tokens_out[:num_reqs], non_blocking=True
+    )
+
+
+def postprocess_mamba_none_normalize_gpu(
+    *,
+    ctx: MambaSpecDecodeGPUContext,
+    num_reqs: int,
+    num_accepted_tokens_gpu: torch.Tensor,
+    num_accepted_tokens_cpu_tensor: torch.Tensor,
+    input_batch: GPUInputBatch,
+    kv_cache_config: KVCacheConfig,
+    forward_context: dict[str, Any],
+    mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
+) -> None:
+    """GPU-side mamba state normalization for spec decode + hybrid + "none"
+    cache mode.
+
+    Lazily binds the fused-kernel context to the persistent block tables and
+    forward-context state pointers on the first call, runs the normalization
+    kernel (migrate accepted states to block-table column 0), and
+    async-copies the normalized per-request accepted-token counts back to
+    the input batch's CPU tensor for the next iteration's preprocess. See
+    ``postprocess_mamba_none_normalize_kernel`` for the bug this fixes.
+    """
+    if not ctx.is_initialized:
+        ctx.initialize_from_forward_context(
+            kv_cache_config,
+            forward_context,
+            mamba_state_copy_funcs,
+            [
+                input_batch.block_table[gid].get_device_tensor(num_reqs)
+                for gid in ctx.mamba_group_ids
+            ],
+        )
+
+    ctx.run_fused_none_normalize(
+        num_reqs=num_reqs,
+        num_accepted_tokens_gpu=num_accepted_tokens_gpu,
+    )
+
     num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
         ctx.num_accepted_tokens_out[:num_reqs], non_blocking=True
     )

@@ -997,6 +997,12 @@ class GPUModelRunner(
         self.kv_connector_output: KVConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: mamba_utils.MambaBuffers | None = None
+        # Lazily-created context for "none"-mode mamba state normalization
+        # (spec decode + hybrid): restores the "canonical state at block
+        # table column 0" invariant after each sampling step.
+        self._mamba_none_normalize_ctx: (
+            mamba_utils.MambaSpecDecodeGPUContext | None
+        ) = None
         self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
         if self.cache_config.mamba_cache_mode == "all" and self.num_spec_tokens > 0:
             self.mamba_prev_last_scheduled_idx = self._make_buffer(
@@ -1657,6 +1663,40 @@ class GPUModelRunner(
                 mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
             )
 
+            assert self.num_accepted_tokens_event is not None
+            self.num_accepted_tokens_event.record()
+        elif self.cache_config.mamba_cache_mode == "none":
+            # "none" mode: the spec-decode GDN/mamba kernels leave the
+            # accepted state at block-table column num_accepted-1 (conv:
+            # window offset num_accepted-1), but the non-spec decode path
+            # always reads column 0 with a neutral bias. Without
+            # normalization, a later step WITHOUT draft tokens (reachable
+            # with proposers that may return no drafts, e.g. ngram) would
+            # read a stale state missing the accepted tokens' updates and
+            # permanently corrupt the running state. Normalize the states
+            # back to column 0 after each sampling step instead.
+            if self._mamba_none_normalize_ctx is None:
+                self._mamba_none_normalize_ctx = (
+                    mamba_utils.MambaSpecDecodeGPUContext.create(
+                        max_num_reqs=self.max_num_reqs,
+                        kv_cache_config=self.kv_cache_config,
+                        num_state_types=len(self.model.get_mamba_state_copy_func()),
+                        device=self.device,
+                        make_buffer=self._make_buffer,
+                    )
+                )
+            mamba_utils.postprocess_mamba_none_normalize_gpu(
+                ctx=self._mamba_none_normalize_ctx,
+                num_reqs=num_reqs,
+                num_accepted_tokens_gpu=self.num_accepted_tokens.gpu,
+                num_accepted_tokens_cpu_tensor=(
+                    self.input_batch.num_accepted_tokens_cpu_tensor
+                ),
+                input_batch=self.input_batch,
+                kv_cache_config=self.kv_cache_config,
+                forward_context=self.compilation_config.static_forward_context,
+                mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
+            )
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.record()
         else:
