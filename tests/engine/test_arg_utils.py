@@ -200,8 +200,12 @@ def test_get_kwargs():
     assert kwargs["optional_bool_or_str"]["nargs"] == "?"
     assert kwargs["optional_bool_or_str"]["const"] is True
     assert "action" not in kwargs["optional_bool_or_str"]
-    # optional literals should have None as a choice
-    assert kwargs["optional_literal"]["choices"] == ["x", "y", "None"]
+    # optional literals should have None as a choice. The sentinel is the object
+    # None, not its spelling: argparse converts with `type` before it checks
+    # `choices`, and optional_type returns None, so the string would be advertised
+    # in --help and then rejected. `str()` in argparse's help rendering is what
+    # keeps "None" visible there.
+    assert kwargs["optional_literal"]["choices"] == ["x", "y", None]
     # tuples should have the correct nargs
     assert kwargs["tuple_n"]["nargs"] == "+"
     assert kwargs["tuple_2"]["nargs"] == 2
