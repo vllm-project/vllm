@@ -45,7 +45,7 @@ class MLAPrefillSelectorConfig(NamedTuple):
         )
 
 
-def _should_use_cpu_native_prefill(vllm_config: "VllmConfig" | None) -> bool:
+def _should_use_cpu_native_prefill(vllm_config: "VllmConfig | None") -> bool:
     from vllm.platforms import CpuArchEnum, current_platform
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
