@@ -119,10 +119,10 @@ ENV PYTHONPATH=${SITE_PACKAGES}/_rocm_sdk_core/share/amd_smi
 # which keeps the set consistent and avoids pip backtracking.
 RUN pip install --pre --index-url "${ROCM_WHEEL_INDEX}" \
     --extra-index-url https://pypi.org/simple \
-    "torch[device-all]==${TORCH_VERSION}" \
+    "torch[device-gfx1250]==${TORCH_VERSION}" \
     "torchvision==${TORCHVISION_VERSION}" \
     "torchaudio==${TORCHAUDIO_VERSION}" \
-    "rocm[libraries,devel,device-all]==${ROCM_SDK_VERSION}" && \
+    "rocm[libraries,devel,device-gfx1250]==${ROCM_SDK_VERSION}" && \
     rocm-sdk init
  
 # Torch runtime deps that may not be published on the ROCm wheel index;
