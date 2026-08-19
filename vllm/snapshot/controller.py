@@ -30,7 +30,7 @@ import regex as re
 from vllm.snapshot.manifest import (
     SnapshotCompatibilityError,
     SnapshotManifest,
-    SocketIdentity,
+    SnapshotRuntimeIdentity,
     validate_artifact_root,
     validate_identity,
     write_manifest_atomic,
@@ -72,7 +72,6 @@ class ProcessInventory:
     process_tree: tuple[int, ...]
     cuda_holders: tuple[int, ...]
     gpu_uuid: str
-    sockets: tuple[SocketIdentity, ...]
 
 
 @dataclass(frozen=True)
@@ -100,7 +99,7 @@ def _format_tcp_endpoint(family: str, raw: str) -> str:
 
 def _validate_tcp_connections(
     records: tuple[_TcpSocketRecord, ...], owned_inodes: set[int]
-) -> tuple[SocketIdentity, ...]:
+) -> None:
     owned = tuple(record for record in records if record.inode in owned_inodes)
     endpoints = {
         (record.family, record.local_raw, record.remote_raw) for record in owned
@@ -119,27 +118,6 @@ def _validate_tcp_connections(
         raise SnapshotCreateError(
             f"snapshot tree has an external established TCP connection: {details}"
         )
-    return tuple(
-        sorted(
-            (
-                SocketIdentity(
-                    family=record.family,
-                    socket_type="SOCK_STREAM",
-                    local_address=_format_tcp_endpoint(record.family, record.local_raw),
-                    remote_address=_format_tcp_endpoint(
-                        record.family, record.remote_raw
-                    ),
-                    state="ESTABLISHED",
-                )
-                for record in owned
-            ),
-            key=lambda identity: (
-                identity.family,
-                identity.local_address,
-                identity.remote_address or "",
-            ),
-        )
-    )
 
 
 def _remove_snapshot_option(argv: tuple[str, ...]) -> tuple[str, ...]:
@@ -182,9 +160,7 @@ def create_snapshot(
     target.mkdir(mode=0o700)
     validate_artifact_root(target, creating=False)
     published = False
-    verified_dead = False
     root_pid: int | None = None
-    inventory: ProcessInventory | None = None
     try:
         child_argv = _remove_snapshot_option(engine_argv or _current_engine_argv(args))
         include_model_state = bool(getattr(args, "include_model_state", False))
@@ -199,15 +175,12 @@ def create_snapshot(
         inventory = toolset.inventory(root_pid)
         toolset.dump(target, inventory)
         toolset.verify_dead(inventory)
-        verified_dead = True
         manifest = toolset.make_manifest(args, child_argv, inventory, oracle, target)
-        if not manifest.complete:
-            raise SnapshotCreateError("snapshot manifest is incomplete")
         toolset.publish(target, manifest)
         published = True
     except BaseException:
-        if root_pid is not None and not verified_dead:
-            toolset.abort_create(root_pid, inventory)
+        if root_pid is not None:
+            toolset.abort_create(root_pid)
         raise
     finally:
         if not published and target.exists():
@@ -223,9 +196,7 @@ def restore_snapshot(
     from vllm.snapshot.manifest import read_manifest
 
     manifest = read_manifest(artifact)
-    if not manifest.complete:
-        raise SnapshotCompatibilityError("snapshot manifest is incomplete")
-    current = toolset.current_identity(manifest)
+    current = toolset.current_identity(manifest.gpu_uuid)
     validate_identity(manifest, current)
 
     root_pid: int | None = None
@@ -391,17 +362,18 @@ class LocalSnapshotTools:
             stack.extend(children.get(pid, []))
         return tuple(found)
 
-    def _cuda_pids(self) -> tuple[int, ...]:
+    def _cuda_process_rows(self) -> tuple[str, ...]:
         output = self._run(
             [
                 self.nvidia_smi,
-                "--query-compute-apps=pid",
+                "--query-compute-apps=pid,gpu_uuid",
                 "--format=csv,noheader,nounits",
             ]
         ).stdout
-        return tuple(
-            sorted({int(line.strip()) for line in output.splitlines() if line.strip()})
-        )
+        return tuple(line for line in output.splitlines() if line.strip())
+
+    def _cuda_pids(self, rows: tuple[str, ...]) -> tuple[int, ...]:
+        return tuple(sorted({int(line.split(",", 1)[0].strip()) for line in rows}))
 
     def _descriptor_targets(self, pid: int) -> tuple[str, ...]:
         descriptor_dir = Path("/proc") / str(pid) / "fd"
@@ -419,20 +391,19 @@ class LocalSnapshotTools:
                 continue
         return tuple(targets)
 
-    def _socket_inodes(self, process_tree: tuple[int, ...]) -> set[int]:
-        inodes: set[int] = set()
+    def _descriptor_inventory(
+        self, process_tree: tuple[int, ...]
+    ) -> tuple[tuple[int, ...], set[int]]:
+        io_uring_pids: list[int] = []
+        socket_inodes: set[int] = set()
         for pid in process_tree:
-            for target in self._descriptor_targets(pid):
+            targets = self._descriptor_targets(pid)
+            if "anon_inode:[io_uring]" in targets:
+                io_uring_pids.append(pid)
+            for target in targets:
                 if target.startswith("socket:[") and target.endswith("]"):
-                    inodes.add(int(target[len("socket:[") : -1]))
-        return inodes
-
-    def _io_uring_pids(self, process_tree: tuple[int, ...]) -> tuple[int, ...]:
-        return tuple(
-            pid
-            for pid in process_tree
-            if "anon_inode:[io_uring]" in self._descriptor_targets(pid)
-        )
+                    socket_inodes.add(int(target[len("socket:[") : -1]))
+        return tuple(io_uring_pids), socket_inodes
 
     def _tcp_records(self) -> tuple[_TcpSocketRecord, ...]:
         records: list[_TcpSocketRecord] = []
@@ -456,10 +427,13 @@ class LocalSnapshotTools:
 
     def inventory(self, root_pid: int) -> ProcessInventory:
         process_tree = self._tree_pids(root_pid)
-        cuda_holders = tuple(pid for pid in self._cuda_pids() if pid in process_tree)
+        cuda_rows = self._cuda_process_rows()
+        cuda_holders = tuple(
+            pid for pid in self._cuda_pids(cuda_rows) if pid in process_tree
+        )
         if not cuda_holders:
             raise SnapshotCreateError("snapshot tree has no CUDA-holding process")
-        io_uring_pids = self._io_uring_pids(process_tree)
+        io_uring_pids, socket_inodes = self._descriptor_inventory(process_tree)
         if io_uring_pids:
             raise SnapshotCreateError(
                 "snapshot tree owns io_uring state that CRIU cannot dump; set "
@@ -467,30 +441,20 @@ class LocalSnapshotTools:
                 "vLLM process, or use =2 to disable it host-wide "
                 f"(pids: {', '.join(map(str, io_uring_pids))})"
             )
-        sockets = _validate_tcp_connections(
-            self._tcp_records(), self._socket_inodes(process_tree)
-        )
-        gpu_uuid = self._gpu_uuid_for_pids(cuda_holders)
+        _validate_tcp_connections(self._tcp_records(), socket_inodes)
+        gpu_uuid = self._gpu_uuid_for_pids(cuda_holders, cuda_rows)
         return ProcessInventory(
             root_pid=root_pid,
             process_tree=process_tree,
             cuda_holders=cuda_holders,
             gpu_uuid=gpu_uuid,
-            sockets=sockets,
         )
 
-    def _gpu_uuid_for_pids(self, pids: tuple[int, ...]) -> str:
-        output = self._run(
-            [
-                self.nvidia_smi,
-                "--query-compute-apps=pid,gpu_uuid",
-                "--format=csv,noheader,nounits",
-            ]
-        ).stdout
+    def _gpu_uuid_for_pids(self, pids: tuple[int, ...], rows: tuple[str, ...]) -> str:
         wanted = set(pids)
         matches: set[str] = set()
         try:
-            for line in output.splitlines():
+            for line in rows:
                 pid, gpu_uuid = (item.strip() for item in line.split(",", 1))
                 if int(pid) in wanted:
                     matches.add(gpu_uuid)
@@ -836,13 +800,9 @@ class LocalSnapshotTools:
         oracle: Oracle,
         workdir: Path,
     ) -> SnapshotManifest:
-        gpu_name, gpu_uuid, driver_version = self._gpu_identity(inventory.gpu_uuid)
-        torch_version, cuda_runtime = self._torch_identity()
-        host_id_path = Path("/etc/machine-id")
-        host_id = host_id_path.read_text().strip()
+        identity = self.current_identity(inventory.gpu_uuid)
         revision = str(getattr(args, "revision", None) or "")
         tokenizer_revision = str(getattr(args, "tokenizer_revision", None) or revision)
-        source_revision = self._source_revision()
         source_model = str(getattr(args, "model_tag", None) or args.model)
         from vllm.config.model import get_served_model_name
 
@@ -856,30 +816,16 @@ class LocalSnapshotTools:
                 if getattr(args, "include_model_state", False)
                 else "post-engine-init-reloadable-state-released"
             ),
-            complete=True,
             created_at=datetime.now(timezone.utc).isoformat(),
             artifact_bytes=self._artifact_bytes(workdir),
-            source_revision=source_revision,
-            binary_revision=self._binary_revision(),
-            python_version=platform.python_version(),
-            torch_version=torch_version,
-            cuda_runtime=cuda_runtime,
-            driver_version=driver_version,
-            criu_version=self._version([self.criu, "--version"]),
-            cuda_checkpoint_sha256=self._sha256(Path(self.cuda_checkpoint)),
-            kernel_release=platform.release(),
-            host_id=host_id,
-            gpu_name=gpu_name,
-            gpu_uuid=gpu_uuid,
+            **identity.model_dump(),
             model=source_model,
             served_model_name=str(served_model_name),
             model_revision=revision,
             tokenizer_revision=tokenizer_revision,
             engine_argv=engine_argv,
-            environment=self._environment_identity(),
             process_tree=inventory.process_tree,
             cuda_holders=inventory.cuda_holders,
-            socket_inventory=inventory.sockets,
             oracle_token_ids=oracle.token_ids,
             oracle_text=oracle.text,
             oracle_sampled_token_logprob=oracle.sampled_token_logprob,
@@ -893,27 +839,25 @@ class LocalSnapshotTools:
         finally:
             os.close(parent_fd)
 
-    def current_identity(self, manifest: SnapshotManifest) -> SnapshotManifest:
-        gpu_name, gpu_uuid, driver_version = self._gpu_identity(manifest.gpu_uuid)
+    def current_identity(self, gpu_uuid: str) -> SnapshotRuntimeIdentity:
+        gpu_name, gpu_uuid, driver_version = self._gpu_identity(gpu_uuid)
         torch_version, cuda_runtime = self._torch_identity()
         host_id = Path("/etc/machine-id").read_text().strip()
         source_revision = self._source_revision()
-        return manifest.model_copy(
-            update={
-                "source_revision": source_revision,
-                "binary_revision": self._binary_revision(),
-                "python_version": platform.python_version(),
-                "torch_version": torch_version,
-                "cuda_runtime": cuda_runtime,
-                "driver_version": driver_version,
-                "criu_version": self._version([self.criu, "--version"]),
-                "cuda_checkpoint_sha256": self._sha256(Path(self.cuda_checkpoint)),
-                "kernel_release": platform.release(),
-                "host_id": host_id,
-                "gpu_name": gpu_name,
-                "gpu_uuid": gpu_uuid,
-                "environment": self._environment_identity(),
-            }
+        return SnapshotRuntimeIdentity(
+            source_revision=source_revision,
+            binary_revision=self._binary_revision(),
+            python_version=platform.python_version(),
+            torch_version=torch_version,
+            cuda_runtime=cuda_runtime,
+            driver_version=driver_version,
+            criu_version=self._version([self.criu, "--version"]),
+            cuda_checkpoint_sha256=self._sha256(Path(self.cuda_checkpoint)),
+            kernel_release=platform.release(),
+            host_id=host_id,
+            gpu_name=gpu_name,
+            gpu_uuid=gpu_uuid,
+            environment=self._environment_identity(),
         )
 
     def _read_restored_pid(self, pidfile: Path) -> int:
@@ -1114,8 +1058,6 @@ class LocalSnapshotTools:
         raise primary
 
     def restore(self, artifact: Path, manifest: SnapshotManifest) -> int:
-        if not manifest.process_tree:
-            raise SnapshotRestoreError("captured process tree is empty")
         # This is necessarily a best-effort TOCTOU check. CRIU restore and the
         # rollback below remain authoritative if a PID is claimed after it.
         for pid in manifest.process_tree:
@@ -1151,9 +1093,6 @@ class LocalSnapshotTools:
                     str(pidfile),
                 ],
             )
-        except BaseException as error:
-            self._abort_failed_restore(artifact, staged_remaps, error)
-        try:
             restored_pid = self._read_restored_pid(pidfile)
             if restored_pid != expected_root_pid:
                 raise SnapshotRestoreError(
@@ -1296,7 +1235,7 @@ class LocalSnapshotTools:
             raise SnapshotRestoreError("no pinned restore transaction to complete")
         _close_pidfds(handles)
 
-    def abort_create(self, root_pid: int, _inventory: ProcessInventory | None) -> None:
+    def abort_create(self, root_pid: int) -> None:
         process = self._children.get(root_pid)
         if process is None:
             return
