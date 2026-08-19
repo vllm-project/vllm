@@ -20,6 +20,7 @@ from pathlib import Path
 ENDPOINT = os.getenv("CI_INFRA_OTEL_ENDPOINT", "https://ci.vllm.ai/api/otel/v1/traces")
 AUDIENCE = os.getenv("CI_INFRA_OTEL_AUDIENCE", "https://ci.vllm.ai/api/otel")
 MAX_BATCH_SIZE = 2_000
+TEST_SPOOL_BATCH_SIZE = 100
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,8 @@ class Span:
 
 
 def _varint(value: int) -> bytes:
+    if value < 0:
+        value += 1 << 64
     encoded = bytearray()
     while value > 0x7F:
         encoded.append((value & 0x7F) | 0x80)
@@ -163,11 +166,12 @@ def record_spans(spans: Iterable[Span]) -> bool:
         return False
 
 
-def load_spans() -> list[Span]:
+def _read_spool() -> tuple[list[Span], list[Path]]:
     spool_dir = _spool_dir()
     if spool_dir is None or not spool_dir.is_dir():
-        return []
+        return [], []
     spans: list[Span] = []
+    loaded_files: list[Path] = []
     for spool_file in sorted(spool_dir.glob("spans-*.jsonl")):
         try:
             spans.extend(
@@ -175,11 +179,16 @@ def load_spans() -> list[Span]:
                 for record in spool_file.read_text(encoding="utf-8").splitlines()
                 if record
             )
+            loaded_files.append(spool_file)
         except Exception as error:
             print(
                 f"CI timing spool ignored {spool_file.name}: {error}", file=sys.stderr
             )
-    return spans
+    return spans, loaded_files
+
+
+def load_spans() -> list[Span]:
+    return _read_spool()[0]
 
 
 def _remaining_seconds(deadline: float) -> float:
@@ -244,8 +253,31 @@ def export_spans(spans: list[Span], timeout_seconds: float = 3.0) -> bool:
         return False
 
 
+def flush_spans(timeout_seconds: float = 3.0) -> bool:
+    spans, spool_files = _read_spool()
+    if not spool_files:
+        return True
+    if not spans or not export_spans(spans, timeout_seconds):
+        return False
+    for spool_file in spool_files:
+        try:
+            spool_file.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as error:
+            print(f"CI timing spool cleanup skipped: {error}", file=sys.stderr)
+    return True
+
+
 _test_runs: dict[str, tuple[int, str]] = {}
 _test_spans: list[Span] = []
+
+
+def _spool_test_spans() -> None:
+    if not _test_spans:
+        return
+    record_spans(_test_spans)
+    _test_spans.clear()
 
 
 def _test_span(nodeid: str, start_ns: int, outcome: str) -> Span:
@@ -295,6 +327,8 @@ def pytest_runtest_logfinish(nodeid: str, location: tuple[str, int | None, str])
         run = _test_runs.pop(nodeid, None)
         if run:
             _test_spans.append(_test_span(nodeid, *run))
+            if len(_test_spans) >= TEST_SPOOL_BATCH_SIZE:
+                _spool_test_spans()
     except Exception:
         pass
 
@@ -304,8 +338,7 @@ def pytest_sessionfinish(session, exitstatus: int):
         for nodeid, run in list(_test_runs.items()):
             _test_spans.append(_test_span(nodeid, *run))
         _test_runs.clear()
-        record_spans(_test_spans)
-        _test_spans.clear()
+        _spool_test_spans()
     except Exception:
         pass
 
@@ -336,14 +369,23 @@ def _record_command(arguments: list[str]) -> None:
 
 def main(arguments: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if arguments is None else arguments
-    if arguments == ["new-context"]:
-        trace_id, span_id, parent_span_id = new_context()
-        print(trace_id, span_id, parent_span_id or "-", time.time_ns())
-    elif arguments == ["flush"]:
-        export_spans(load_spans())
-    elif len(arguments) == 8 and arguments[0] == "record-command":
-        _record_command(arguments[1:])
-    return 0
+    try:
+        if arguments == ["new-context"]:
+            trace_id, span_id, parent_span_id = new_context()
+            print(trace_id, span_id, parent_span_id or "-", time.time_ns())
+            return 0
+        if arguments == ["flush"]:
+            return 0 if flush_spans() else 1
+        if len(arguments) == 8 and arguments[0] == "record-command":
+            _record_command(arguments[1:])
+            return 0
+        print(
+            "usage: ci_otel.py {new-context|flush|record-command ...}", file=sys.stderr
+        )
+        return 2
+    except Exception as error:
+        print(f"CI timing helper failed: {error}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
