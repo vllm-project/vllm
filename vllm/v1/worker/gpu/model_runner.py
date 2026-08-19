@@ -1962,13 +1962,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def setup_eplb_from_mapping(
         self,
         expanded_physical_to_logical: torch.Tensor,
-        old_num_physical_experts: int,
     ) -> None:
         self.eplb.setup_from_mapping(
             self.model,
             self.model_config,
             expanded_physical_to_logical,
-            old_num_physical_experts,
         )
 
     ########### EPLB methods end ###########
