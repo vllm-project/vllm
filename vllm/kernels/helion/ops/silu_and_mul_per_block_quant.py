@@ -37,6 +37,7 @@ from vllm.kernels.helion.register import register_kernel
 
 logger = init_logger(__name__)
 
+
 def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover all input
     # property combination. Currently, dtypes are fixed. We need optimization to
@@ -78,7 +79,10 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
                 "num_tokens": num_tokens,
             }
         )
-        inputs[config_key] = (result, input, scale, group_size, scale_ub, False)
+        if current_platform.is_rocm():
+            inputs[config_key] = (input, group_size)
+        else:
+            inputs[config_key] = (result, input, scale, group_size, scale_ub, False)
 
     return inputs
 
@@ -105,8 +109,13 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     if len(config_keys) == 1:
         return config_keys[0]
 
-    result, _, _, group_size, *_ = args
-    num_tokens, intermediate_size = result.shape
+    if current_platform.is_rocm():
+        input, group_size, *_ = args
+        num_tokens, two_intermediate_size = input.shape
+        intermediate_size = two_intermediate_size // 2
+    else:
+        result, _, _, group_size, *_ = args
+        num_tokens, intermediate_size = result.shape
 
     cache_key = (num_tokens, group_size, intermediate_size)
     cached = _pick_cache.get(cache_key)
@@ -114,14 +123,17 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
         return cached
 
     if all(set(key) == {"config_id"} for key in config_keys):
-        if num_tokens <= 1:
-            config_id = 0
-        elif num_tokens <= 8:
-            config_id = 1
-        elif num_tokens <= 16 or num_tokens > 32:
-            config_id = 2
+        if current_platform.is_rocm():
+            config_id = 1 if intermediate_size <= 2304 else 0
         else:
-            config_id = 3
+            if num_tokens <= 1:
+                config_id = 0
+            elif num_tokens <= 8:
+                config_id = 1
+            elif num_tokens <= 16 or num_tokens > 32:
+                config_id = 2
+            else:
+                config_id = 3
         result = next(
             (key for key in config_keys if key["config_id"] == config_id), None
         )
@@ -168,6 +180,25 @@ def fake_impl(
     is_scale_transposed: bool = False,
 ) -> None:
     return
+
+
+def fake_impl_rocm(
+    x: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    intermediate_size = x.shape[1] // 2
+    return (
+        torch.empty(
+            (x.shape[0], intermediate_size),
+            device=x.device,
+            dtype=current_platform.fp8_dtype(),
+        ),
+        torch.empty(
+            (x.shape[0], intermediate_size // group_size),
+            device=x.device,
+            dtype=torch.float32,
+        ),
+    )
 
 
 def baseline(
@@ -217,11 +248,11 @@ autotune_baseline = (
 
 
 @register_kernel(
-    mutates_args=["out", "scales"],
+    mutates_args=None if current_platform.is_rocm() else ["out", "scales"],
     config_picker=pick_config,
     rocm_kernel_func=silu_and_mul_per_block_quant_rocm,
     input_generator=generate_inputs,
-    fake_impl=fake_impl,
+    fake_impl=fake_impl_rocm if current_platform.is_rocm() else fake_impl,
     helion_settings=helion.Settings(
         autotune_baseline_fn=autotune_baseline,
         ignore_warnings=[helion.exc.TensorOperationInWrapper],

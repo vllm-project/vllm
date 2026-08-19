@@ -85,17 +85,20 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
                 "num_tokens": num_tokens,
             }
         )
-        inputs[config_key] = (
-            result,
-            input,
-            weight,
-            scale,
-            epsilon,
-            scale_ub,
-            residual,
-            group_size,
-            False,
-        )
+        if current_platform.is_rocm():
+            inputs[config_key] = (input, weight, epsilon, group_size)
+        else:
+            inputs[config_key] = (
+                result,
+                input,
+                weight,
+                scale,
+                epsilon,
+                scale_ub,
+                residual,
+                group_size,
+                False,
+            )
 
     return inputs
 
@@ -122,7 +125,10 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     if len(config_keys) == 1:
         return config_keys[0]
 
-    _, input, _, _, _, _, _, group_size, *_ = args
+    if current_platform.is_rocm():
+        input, _, _, group_size, *_ = args
+    else:
+        _, input, _, _, _, _, _, group_size, *_ = args
     num_tokens, hidden_size = input.shape
 
     cache_key = (num_tokens, group_size, hidden_size)
@@ -131,18 +137,32 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
         return cached
 
     if all(set(key) == {"config_id"} for key in config_keys):
-        if group_size != 128:
-            config_id = 5
-        elif num_tokens <= 1:
-            config_id = 0
-        elif num_tokens <= 8:
-            config_id = 1 if hidden_size <= 4096 else 2
-        elif num_tokens <= 16:
-            config_id = 2
-        elif num_tokens <= 32:
-            config_id = 3
+        if current_platform.is_rocm():
+            if hidden_size <= 2048:
+                config_id = 0
+            elif hidden_size <= 3072:
+                config_id = 3
+            elif hidden_size <= 4096:
+                config_id = 4
+            elif num_tokens > 256:
+                config_id = 5
+            elif num_tokens == 1:
+                config_id = 2
+            else:
+                config_id = 1
         else:
-            config_id = 4
+            if group_size != 128:
+                config_id = 5
+            elif num_tokens <= 1:
+                config_id = 0
+            elif num_tokens <= 8:
+                config_id = 1 if hidden_size <= 4096 else 2
+            elif num_tokens <= 16:
+                config_id = 2
+            elif num_tokens <= 32:
+                config_id = 3
+            else:
+                config_id = 4
         result = next(
             (key for key in config_keys if key["config_id"] == config_id), None
         )
@@ -190,6 +210,22 @@ def fake_impl(
     is_scale_transposed: bool,  # dummy
 ) -> None:
     return
+
+
+def fake_impl_rocm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return (
+        torch.empty_like(x, dtype=current_platform.fp8_dtype()),
+        torch.empty(
+            (x.shape[0], x.shape[1] // group_size),
+            device=x.device,
+            dtype=torch.float32,
+        ),
+    )
 
 
 def baseline(
@@ -241,18 +277,18 @@ def baseline(
 
 
 autotune_baseline = (
-    rms_norm_per_block_quant_baseline_rocm
-    if current_platform.is_rocm()
-    else baseline
+    rms_norm_per_block_quant_baseline_rocm if current_platform.is_rocm() else baseline
 )
 
 
 @register_kernel(
-    mutates_args=["result", "scale", "residual"],
+    mutates_args=None
+    if current_platform.is_rocm()
+    else ["result", "scale", "residual"],
     config_picker=pick_config,
     rocm_kernel_func=rms_norm_per_block_quant_rocm,
     input_generator=generate_inputs,
-    fake_impl=fake_impl,
+    fake_impl=fake_impl_rocm if current_platform.is_rocm() else fake_impl,
     helion_settings=helion.Settings(
         autotune_baseline_fn=autotune_baseline,
         ignore_warnings=[helion.exc.TensorOperationInWrapper],

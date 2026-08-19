@@ -50,14 +50,17 @@ def _generate_fake_input(
             dtype=scale_dtype,
         )
         scale_ub = torch.mean(input).to(scale_dtype)
-        args = (
-            result,
-            input,
-            scale,
-            group_size,
-            scale_ub,
-            False,
-        )
+        if current_platform.is_rocm():
+            args = (input, group_size)
+        else:
+            args = (
+                result,
+                input,
+                scale,
+                group_size,
+                scale_ub,
+                False,
+            )
         return args
 
 
@@ -106,6 +109,23 @@ class TestSiluAndMulPerBlockQuantConfigPicker:
         config_key = CaseKey.default()
 
         assert pick_config((), [config_key]) is config_key
+
+    @pytest.mark.skipif(
+        not current_platform.is_rocm(), reason="ROCm-specific config portfolio"
+    )
+    @pytest.mark.parametrize(
+        "intermediate_size,expected_config_id",
+        [(256, 1), (2304, 1), (3072, 0), (25600, 0)],
+    )
+    def test_rocm_config_id_picker(
+        self, intermediate_size: int, expected_config_id: int
+    ) -> None:
+        config_keys = [CaseKey({"config_id": i}) for i in range(2)]
+        args = _generate_fake_input(128, intermediate_size, 128)
+
+        assert pick_config(args, config_keys) == CaseKey(
+            {"config_id": expected_config_id}
+        )
 
     def test_config_picker_fallback_to_largest(self):
         config_keys = [
@@ -167,6 +187,28 @@ class TestSiluAndMulPerBlockQuantCorrectness:
         scale = 1 / hidden_size
         x = torch.randn(num_tokens, 2 * hidden_size, dtype=dtype, device="cuda") * scale
 
+        if current_platform.is_rocm():
+            if (
+                group_size != 128
+                or is_scale_transposed
+                or dtype not in (torch.bfloat16, torch.float16)
+                or quant_dtype != current_platform.fp8_dtype()
+                or has_scale_ub
+            ):
+                pytest.skip("ROCm functional op matches AITER's serving contract")
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            ref_out, ref_scales = rocm_aiter_ops.get_act_mul_fused_fp8_group_quant_op()(
+                x, group_size
+            )
+            ops_out, ops_scales = silu_and_mul_per_block_quant(x, group_size)
+            torch.testing.assert_close(ref_scales, ops_scales, rtol=0.02, atol=1e-4)
+            assert (
+                ref_out.view(torch.uint8).to(torch.int16)
+                - ops_out.view(torch.uint8).to(torch.int16)
+            ).abs().max() <= 1
+            return
+
         if has_scale_ub:
             act = torch.nn.functional.silu(x[:, :hidden_size]) * x[:, hidden_size:]
             act_abs = act.abs().float()
@@ -215,7 +257,15 @@ class TestSiluAndMulPerBlockQuantIntegration:
         kernel_wrapper = registered_kernels["silu_and_mul_per_block_quant"]
         assert kernel_wrapper.op_name == "silu_and_mul_per_block_quant"
         assert kernel_wrapper._config_picker is not None
-        assert kernel_wrapper._mutates_args == ["out", "scales"]
+        expected_mutations = (
+            None
+            if current_platform.is_rocm()
+            else [
+                "out",
+                "scales",
+            ]
+        )
+        assert kernel_wrapper._mutates_args == expected_mutations
 
     def test_fake_impl_functionality(self):
         skip_if_platform_unsupported("silu_and_mul_per_block_quant")
@@ -226,4 +276,9 @@ class TestSiluAndMulPerBlockQuantIntegration:
         fake_impl = kernel_wrapper._fake_impl
 
         args = _generate_fake_input(16, 4096, 128)
-        assert fake_impl(*args) is None
+        result = fake_impl(*args)
+        if current_platform.is_rocm():
+            assert result[0].shape == (16, 4096)
+            assert result[1].shape == (16, 32)
+        else:
+            assert result is None

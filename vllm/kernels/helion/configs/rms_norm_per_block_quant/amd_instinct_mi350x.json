@@ -1,68 +1,21 @@
 [
   {
     "key": {
-      "hidden_size": 4096,
-      "group_size": 128,
-      "num_tokens": 1
+      "config_id": 0
     },
     "config": {
       "block_sizes": [
-        2
+        1
       ],
-      "load_cache_modifiers": [
-        ".cg",
-        ".cg",
-        "",
-        ""
-      ],
-      "num_warps": 8,
+      "num_warps": 4,
       "num_stages": 1,
-      "reduction_loops": [
-        null
-      ],
-      "range_unroll_factors": [
-        0
-      ],
-      "range_multi_buffers": [
-        null
-      ],
-      "range_flattens": [
-        null
-      ],
-      "load_eviction_policies": [
-        "",
-        "",
-        "",
-        ""
-      ],
-      "store_cache_modifiers": [
-        ".wt",
-        ".cs",
-        ""
-      ],
-      "indexing": [
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer"
-      ],
-      "atomic_indexing": [],
-      "waves_per_eu": 0,
-      "matrix_instr_nonkdim": 0,
-      "pid_type": "flat",
-      "xcd_remap": false,
-      "range_warp_specializes": [],
-      "range_num_stages": []
+      "waves_per_eu": 2,
+      "xcd_remap": false
     }
   },
   {
     "key": {
-      "hidden_size": 4096,
-      "group_size": 128,
-      "num_tokens": 128
+      "config_id": 1
     },
     "config": {
       "block_sizes": [
@@ -70,51 +23,86 @@
       ],
       "load_cache_modifiers": [
         ".cg",
-        ".cg",
+        "",
         "",
         ""
       ],
       "num_warps": 8,
       "num_stages": 1,
-      "reduction_loops": [
-        null
+      "waves_per_eu": 0
+    }
+  },
+  {
+    "key": {
+      "config_id": 2
+    },
+    "config": {
+      "block_sizes": [
+        1
       ],
-      "range_unroll_factors": [
-        0
+      "num_warps": 8,
+      "num_stages": 1,
+      "waves_per_eu": 0
+    }
+  },
+  {
+    "key": {
+      "config_id": 3
+    },
+    "config": {
+      "block_sizes": [
+        1
       ],
-      "range_multi_buffers": [
-        null
-      ],
-      "range_flattens": [
-        null
-      ],
-      "load_eviction_policies": [
-        "",
+      "load_cache_modifiers": [
+        ".cg",
         "",
         "",
         ""
       ],
-      "store_cache_modifiers": [
-        ".wt",
-        ".cs",
+      "num_warps": 4,
+      "num_stages": 1,
+      "waves_per_eu": 2,
+      "xcd_remap": true
+    }
+  },
+  {
+    "key": {
+      "config_id": 4
+    },
+    "config": {
+      "block_sizes": [
+        1
+      ],
+      "load_cache_modifiers": [
+        ".cg",
+        "",
+        "",
         ""
       ],
-      "indexing": [
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer",
-        "pointer"
+      "num_warps": 4,
+      "num_stages": 1,
+      "waves_per_eu": 4,
+      "xcd_remap": false
+    }
+  },
+  {
+    "key": {
+      "config_id": 5
+    },
+    "config": {
+      "block_sizes": [
+        1
       ],
-      "atomic_indexing": [],
+      "load_cache_modifiers": [
+        ".cg",
+        "",
+        "",
+        ""
+      ],
+      "num_warps": 8,
+      "num_stages": 1,
       "waves_per_eu": 0,
-      "matrix_instr_nonkdim": 0,
-      "pid_type": "flat",
-      "xcd_remap": false,
-      "range_warp_specializes": [],
-      "range_num_stages": []
+      "xcd_remap": true
     }
   }
 ]

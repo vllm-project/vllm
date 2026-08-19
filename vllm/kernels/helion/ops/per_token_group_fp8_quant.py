@@ -31,6 +31,7 @@ from vllm.kernels.helion.register import register_kernel
 
 logger = init_logger(__name__)
 
+
 def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
     # TODO(xiaohongchen1991): it is difficult for kernel author to cover all
     # input property combination. Currently, dtypes are fixed. We need
@@ -66,18 +67,21 @@ def generate_inputs() -> dict[CaseKey, tuple[Any, ...]]:
                 "num_tokens": num_tokens,
             }
         )
-        inputs[config_key] = (
-            input,
-            output_q,
-            output_s,
-            group_size,
-            eps,
-            fp8_min,
-            fp8_max,
-            use_ue8m0,
-            column_major,
-            False,
-        )
+        if current_platform.is_rocm():
+            inputs[config_key] = (input, group_size, False)
+        else:
+            inputs[config_key] = (
+                input,
+                output_q,
+                output_s,
+                group_size,
+                eps,
+                fp8_min,
+                fp8_max,
+                use_ue8m0,
+                column_major,
+                False,
+            )
 
     return inputs
 
@@ -104,7 +108,10 @@ def pick_config(args: tuple[Any, ...], config_keys: list[CaseKey]) -> CaseKey | 
     if len(config_keys) == 1:
         return config_keys[0]
 
-    input, _, _, group_size, *_ = args
+    if current_platform.is_rocm():
+        input, group_size, *_ = args
+    else:
+        input, _, _, group_size, *_ = args
     num_tokens, hidden_size = input.shape
 
     cache_key = (num_tokens, group_size, hidden_size)
@@ -166,6 +173,22 @@ def fake_impl(
     return
 
 
+def fake_impl_rocm(
+    x: torch.Tensor,
+    group_size: int,
+    transpose_scale: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert not transpose_scale
+    return (
+        torch.empty_like(x, dtype=current_platform.fp8_dtype()),
+        torch.empty(
+            (x.shape[0], x.shape[1] // group_size),
+            device=x.device,
+            dtype=torch.float32,
+        ),
+    )
+
+
 def baseline(
     input: torch.Tensor,  # [num_tokens, hidden_size]
     output_q: torch.Tensor,  # [num_tokens, hidden_size]
@@ -192,18 +215,16 @@ def baseline(
 
 
 autotune_baseline = (
-    per_token_group_fp8_quant_baseline_rocm
-    if current_platform.is_rocm()
-    else baseline
+    per_token_group_fp8_quant_baseline_rocm if current_platform.is_rocm() else baseline
 )
 
 
 @register_kernel(
-    mutates_args=["output_q", "output_s"],
+    mutates_args=None if current_platform.is_rocm() else ["output_q", "output_s"],
     config_picker=pick_config,
     rocm_kernel_func=per_token_group_fp8_quant_rocm,
     input_generator=generate_inputs,
-    fake_impl=fake_impl,
+    fake_impl=fake_impl_rocm if current_platform.is_rocm() else fake_impl,
     helion_settings=helion.Settings(
         autotune_baseline_fn=autotune_baseline,
     ),

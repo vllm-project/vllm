@@ -24,6 +24,7 @@ from vllm.kernels.helion.ops.per_token_group_fp8_quant import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_helion
 
 if not has_helion():
@@ -50,17 +51,20 @@ def _generate_fake_input(
         column_major = False
         fp8_min, fp8_max = get_fp8_min_max()
         eps = 1e-10
-        args = (
-            input,
-            output_q,
-            output_s,
-            group_size,
-            eps,
-            fp8_min,
-            fp8_max,
-            use_ue8m0,
-            column_major,
-        )
+        if current_platform.is_rocm():
+            args = (input, group_size, False)
+        else:
+            args = (
+                input,
+                output_q,
+                output_s,
+                group_size,
+                eps,
+                fp8_min,
+                fp8_max,
+                use_ue8m0,
+                column_major,
+            )
         return args
 
 
@@ -163,6 +167,20 @@ class TestPerTokenGroupFp8QuantCorrectness:
             torch.randn((num_tokens, hidden_size), device="cuda", dtype=torch.bfloat16)
             * 8
         )
+        if current_platform.is_rocm():
+            if column_major or tma_aligned or scale_ue8m0 or group_size != 128:
+                pytest.skip("ROCm functional op matches AITER's serving contract")
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            ref_q, ref_s = rocm_aiter_ops.group_fp8_quant(input, group_size)
+            ops_q, ops_s = per_token_group_fp8_quant(input, group_size, False)
+            torch.testing.assert_close(ref_s, ops_s, rtol=0.02, atol=1e-4)
+            assert (
+                ref_q.view(torch.uint8).to(torch.int16)
+                - ops_q.view(torch.uint8).to(torch.int16)
+            ).abs().max() <= 1
+            return
+
         ref_q = torch.empty(input.shape, device=input.device, dtype=FP8_DTYPE)
         ops_q = ref_q.clone()
 
@@ -234,7 +252,15 @@ class TestPerTokenGroupFp8QuantIntegration:
         kernel_wrapper = registered_kernels["per_token_group_fp8_quant"]
         assert kernel_wrapper.op_name == "per_token_group_fp8_quant"
         assert kernel_wrapper._config_picker is not None
-        assert kernel_wrapper._mutates_args == ["output_q", "output_s"]
+        expected_mutations = (
+            None
+            if current_platform.is_rocm()
+            else [
+                "output_q",
+                "output_s",
+            ]
+        )
+        assert kernel_wrapper._mutates_args == expected_mutations
 
     def test_fake_impl_functionality(self):
         skip_if_platform_unsupported("per_token_group_fp8_quant")
@@ -245,4 +271,9 @@ class TestPerTokenGroupFp8QuantIntegration:
         fake_impl = kernel_wrapper._fake_impl
 
         args = _generate_fake_input(16, 4096, 128)
-        assert fake_impl(*args) is None
+        result = fake_impl(*args)
+        if current_platform.is_rocm():
+            assert result[0].shape == (16, 4096)
+            assert result[1].shape == (16, 32)
+        else:
+            assert result is None

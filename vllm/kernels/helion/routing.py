@@ -10,13 +10,11 @@ from typing import Any
 import torch
 
 import vllm.envs as envs
+from vllm.platforms import current_platform
 
-# Fusion-only Helion ops and the native op each one replaces. Keys are Helion
-# kernel names (torch.ops.vllm_helion.<key>); values are the native op emitted
-# by vLLM's post-grad fusion passes (torch.ops._C.<value>). The correspondence
-# is declared explicitly rather than assuming the two always share a name. The
-# remaining registered Helion kernels have eager call sites or an incompatible
-# schema and need a different routing path.
+# Helion ops and the platform fallback op each one replaces. CUDA fallbacks are
+# mutation-based vLLM ops; ROCm fallbacks are functional AITER ops. The
+# correspondence is explicit because names and namespaces differ.
 _HELION_TO_NATIVE_OP: dict[str, str] = {
     "rms_norm_per_block_quant": "rms_norm_per_block_quant",
     "silu_and_mul_per_block_quant": "silu_and_mul_per_block_quant",
@@ -24,6 +22,15 @@ _HELION_TO_NATIVE_OP: dict[str, str] = {
     # that survives fusion is retargeted here; its eager call sites are routed
     # separately in input_quant_fp8.QuantFP8.forward_cuda.
     "per_token_group_fp8_quant": "per_token_group_fp8_quant",
+}
+
+# ROCm Helion kernels use the same functional schemas as the corresponding
+# AITER ops. Routing these functional ops avoids adapting AITER's returned
+# tensors through mutation-based output buffers and copies.
+_HELION_TO_ROCM_AITER_OP: dict[str, str] = {
+    "rms_norm_per_block_quant": "rocm_aiter_rmsnorm_fp8_group_quant",
+    "silu_and_mul_per_block_quant": "rocm_aiter_act_mul_and_fp8_group_quant",
+    "per_token_group_fp8_quant": "rocm_aiter_group_fp8_quant",
 }
 
 
@@ -46,7 +53,12 @@ def _make_routed_impl(
         values = list(args)
         for name in names[len(args) :]:
             values.append(kwargs[name] if name in kwargs else defaults[name])
-        if torch.cuda.is_current_stream_capturing():
+        can_use_helion = not (
+            current_platform.is_rocm()
+            and "transpose_scale" in names
+            and values[names.index("transpose_scale")]
+        )
+        if torch.cuda.is_current_stream_capturing() and can_use_helion:
             return helion_op(*values)
         return native_op(*values)
 
@@ -66,8 +78,15 @@ def build_compiled_helion_op_map() -> dict[
     import_all_kernels()
     routed: dict[torch._ops.OpOverload, torch._ops.OpOverload] = {}
 
-    for helion_name, native_name in _HELION_TO_NATIVE_OP.items():
-        native_packet = getattr(torch.ops._C, native_name, None)
+    if current_platform.is_rocm():
+        fallback_namespace = torch.ops.vllm
+        helion_to_fallback = _HELION_TO_ROCM_AITER_OP
+    else:
+        fallback_namespace = torch.ops._C
+        helion_to_fallback = _HELION_TO_NATIVE_OP
+
+    for helion_name, fallback_name in helion_to_fallback.items():
+        native_packet = getattr(fallback_namespace, fallback_name, None)
         helion_packet = getattr(torch.ops.vllm_helion, helion_name, None)
         if native_packet is None or helion_packet is None:
             continue
@@ -83,7 +102,20 @@ def build_compiled_helion_op_map() -> dict[
                 _make_routed_impl(native_op, helion_op),
                 "CUDA",
             )
-            vllm_helion_lib._register_fake(routed_name, lambda *args, **kwargs: None)
+            if helion_op._schema.returns:
+
+                def routed_fake(
+                    *args: object,
+                    _helion_op: torch._ops.OpOverload = helion_op,
+                    **kwargs: object,
+                ) -> Any:
+                    return _helion_op(*args, **kwargs)
+
+                vllm_helion_lib._register_fake(routed_name, routed_fake)
+            else:
+                vllm_helion_lib._register_fake(
+                    routed_name, lambda *args, **kwargs: None
+                )
 
         routed[native_op] = getattr(torch.ops.vllm_helion, routed_name).default
 

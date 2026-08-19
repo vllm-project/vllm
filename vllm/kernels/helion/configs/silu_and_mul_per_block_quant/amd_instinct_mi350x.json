@@ -1,9 +1,7 @@
 [
   {
     "key": {
-      "intermediate_size": 12288,
-      "group_size": 128,
-      "num_tokens": 128
+      "config_id": 0
     },
     "config": {
       "block_sizes": [
@@ -50,6 +48,34 @@
       "atomic_indexing": [],
       "range_warp_specializes": [],
       "range_num_stages": []
+    }
+  },
+  {
+    "key": {
+      "config_id": 1
+    },
+    "config": {
+      "block_sizes": [
+        8
+      ],
+      "loop_orders": [
+        [
+          0,
+          2,
+          1
+        ]
+      ],
+      "store_cache_modifiers": [
+        ".wt",
+        ".wt"
+      ],
+      "num_warps": 4,
+      "num_stages": 1,
+      "indexing": "pointer",
+      "pid_type": "flat",
+      "xcd_remap": false,
+      "waves_per_eu": 0,
+      "matrix_instr_nonkdim": 0
     }
   }
 ]

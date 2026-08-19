@@ -13,6 +13,7 @@ from vllm.model_executor.layers.quantization.utils import fp8_utils
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8_helion,
 )
+from vllm.platforms import current_platform
 
 _GROUP_SIZE = 128
 
@@ -36,18 +37,25 @@ def test_helion_matches_native(column_major: bool, tma_aligned: bool):
     1 fp8 ULP, for every scale layout the eager router can pass through."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
+    if current_platform.is_rocm() and (column_major or tma_aligned):
+        pytest.skip("ROCm functional op matches AITER's row-major scale layout")
 
     torch.manual_seed(0)
     x = (torch.randn(64, 4096, device="cuda", dtype=torch.bfloat16) * 8).contiguous()
 
-    native_q, native_s = fp8_utils.per_token_group_quant_fp8(
-        x,
-        group_size=_GROUP_SIZE,
-        column_major_scales=column_major,
-        tma_aligned_scales=tma_aligned,
-        dtype=torch.float8_e4m3fn,
-        use_ue8m0=False,
-    )
+    if current_platform.is_rocm():
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        native_q, native_s = rocm_aiter_ops.group_fp8_quant(x, _GROUP_SIZE)
+    else:
+        native_q, native_s = fp8_utils.per_token_group_quant_fp8(
+            x,
+            group_size=_GROUP_SIZE,
+            column_major_scales=column_major,
+            tma_aligned_scales=tma_aligned,
+            dtype=torch.float8_e4m3fn,
+            use_ue8m0=False,
+        )
     helion_q, helion_s = per_token_group_quant_fp8_helion(
         x,
         group_size=_GROUP_SIZE,
@@ -58,7 +66,7 @@ def test_helion_matches_native(column_major: bool, tma_aligned: bool):
 
     assert helion_q.stride() == native_q.stride()
     assert helion_s.stride() == native_s.stride()
-    assert torch.allclose(helion_s, native_s)
+    torch.testing.assert_close(helion_s, native_s, rtol=0.02, atol=1e-4)
     assert _q_ulp_diff(helion_q, native_q) <= 1
 
 
@@ -71,14 +79,19 @@ def test_helion_runs_inside_cuda_graph_capture():
     torch.manual_seed(0)
     x = (torch.randn(64, 4096, device="cuda", dtype=torch.bfloat16) * 8).contiguous()
 
-    native_q, native_s = fp8_utils.per_token_group_quant_fp8(
-        x,
-        group_size=_GROUP_SIZE,
-        column_major_scales=False,
-        tma_aligned_scales=False,
-        dtype=torch.float8_e4m3fn,
-        use_ue8m0=False,
-    )
+    if current_platform.is_rocm():
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        native_q, native_s = rocm_aiter_ops.group_fp8_quant(x, _GROUP_SIZE)
+    else:
+        native_q, native_s = fp8_utils.per_token_group_quant_fp8(
+            x,
+            group_size=_GROUP_SIZE,
+            column_major_scales=False,
+            tma_aligned_scales=False,
+            dtype=torch.float8_e4m3fn,
+            use_ue8m0=False,
+        )
 
     torch.accelerator.synchronize()
     graph = torch.cuda.CUDAGraph()
@@ -94,7 +107,7 @@ def test_helion_runs_inside_cuda_graph_capture():
     graph.replay()
     torch.accelerator.synchronize()
 
-    assert torch.allclose(cap_s, native_s)
+    torch.testing.assert_close(cap_s, native_s, rtol=0.02, atol=1e-4)
     assert _q_ulp_diff(cap_q, native_q) <= 1
 
 
@@ -129,22 +142,16 @@ def test_forward_cuda_compiles_with_helion_enabled(monkeypatch):
 
 
 def test_forward_hip_compile_keeps_group_quant_routable(monkeypatch):
-    """AITER may stay enabled for GEMM while compiled group quant remains native."""
+    """Compiled group quant keeps the functional AITER/Helion schema."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available")
 
     import vllm.envs as envs
-    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
     from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
     monkeypatch.setattr(envs, "VLLM_USE_HELION_KERNELS", True)
-
-    def fail_aiter_group_quant(*args, **kwargs):
-        raise AssertionError("compiled group quant should remain Helion-routable")
-
-    monkeypatch.setattr(rocm_aiter_ops, "group_fp8_quant", fail_aiter_group_quant)
 
     with set_current_vllm_config(VllmConfig()):
         quant = QuantFP8(

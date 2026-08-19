@@ -683,6 +683,14 @@ def per_token_group_quant_fp8_helion(
     if use_ue8m0 is None:
         use_ue8m0 = is_deep_gemm_e8m0_used()
     dtype = current_platform.fp8_dtype() if dtype is None else dtype
+
+    if current_platform.is_rocm():
+        assert dtype == current_platform.fp8_dtype()
+        assert not column_major_scales
+        assert not tma_aligned_scales
+        assert not use_ue8m0
+        return torch.ops.vllm_helion.per_token_group_fp8_quant(x, group_size, False)
+
     fp8_min, fp8_max = get_fp8_min_max()
 
     x_q = torch.empty(x.shape, device=x.device, dtype=dtype)

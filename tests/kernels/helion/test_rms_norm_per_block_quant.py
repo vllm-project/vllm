@@ -22,9 +22,6 @@ from vllm.kernels.helion.ops.rms_norm_per_block_quant import (
     pick_config,
     rms_norm_per_block_quant,
 )
-from vllm.kernels.helion.ops.rocm.rms_norm_per_block_quant import (
-    rms_norm_per_block_quant_reference_rocm,
-)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_helion
 from vllm.utils.torch_utils import set_random_seed
@@ -59,17 +56,20 @@ def _generate_fake_input(
             device=input.device,
         )
         epsilon = 1e-6
-        args = (
-            result,
-            input,
-            weight,
-            scale,
-            epsilon,
-            scale_ub,
-            residual,
-            group_size,
-            False,
-        )
+        if current_platform.is_rocm():
+            args = (input, weight, epsilon, group_size)
+        else:
+            args = (
+                result,
+                input,
+                weight,
+                scale,
+                epsilon,
+                scale_ub,
+                residual,
+                group_size,
+                False,
+            )
         return args
 
 
@@ -127,6 +127,9 @@ class TestRmsNormPerBlockQuantConfigPicker:
 
         assert pick_config((), [config_key]) is config_key
 
+    @pytest.mark.skipif(
+        current_platform.is_rocm(), reason="CUDA-specific compact config portfolio"
+    )
     @pytest.mark.parametrize(
         "num_tokens, hidden_size, group_size, expected_config_id",
         [
@@ -158,6 +161,33 @@ class TestRmsNormPerBlockQuantConfigPicker:
     ) -> None:
         config_keys = [CaseKey({"config_id": config_id}) for config_id in range(6)]
         args = _generate_fake_input(num_tokens, hidden_size, group_size)
+
+        assert pick_config(args, config_keys) == CaseKey(
+            {"config_id": expected_config_id}
+        )
+
+    @pytest.mark.skipif(
+        not current_platform.is_rocm(), reason="ROCm-specific config portfolio"
+    )
+    @pytest.mark.parametrize(
+        "num_tokens,hidden_size,expected_config_id",
+        [
+            (1, 2048, 0),
+            (16, 2048, 0),
+            (1, 3072, 3),
+            (128, 3072, 3),
+            (1, 4096, 4),
+            (128, 4096, 4),
+            (1, 5120, 2),
+            (256, 7168, 1),
+            (512, 7168, 5),
+        ],
+    )
+    def test_rocm_config_id_picker(
+        self, num_tokens: int, hidden_size: int, expected_config_id: int
+    ) -> None:
+        config_keys = [CaseKey({"config_id": i}) for i in range(6)]
+        args = _generate_fake_input(num_tokens, hidden_size, 128)
 
         assert pick_config(args, config_keys) == CaseKey(
             {"config_id": expected_config_id}
@@ -230,36 +260,12 @@ class TestRmsNormPerBlockQuantCorrectness:
             num_tokens, hidden_size, dtype=torch.bfloat16, device="cuda"
         )
         weight = torch.randn(hidden_size, dtype=input.dtype, device=input.device)
-        groups_per_row = hidden_size // group_size
-        ref_out = torch.empty_like(input, dtype=FP8_DTYPE)
-        ops_out = torch.empty_like(ref_out)
-        ref_scales = torch.empty(
-            num_tokens, groups_per_row, dtype=torch.float32, device=input.device
-        )
-        ops_scales = torch.full_like(ref_scales, torch.nan)
+        from vllm._aiter_ops import rocm_aiter_ops
 
-        rms_norm_per_block_quant_reference_rocm(
-            ref_out,
-            input,
-            weight,
-            ref_scales,
-            EPS,
-            None,
-            None,
-            group_size,
-            False,
+        ref_out, ref_scales = rocm_aiter_ops.get_rmsnorm_group_fused_quant_op()(
+            input, weight, EPS, group_size
         )
-        rms_norm_per_block_quant(
-            ops_out,
-            input,
-            weight,
-            ops_scales,
-            EPS,
-            None,
-            None,
-            group_size,
-            False,
-        )
+        ops_out, ops_scales = rms_norm_per_block_quant(input, weight, EPS, group_size)
 
         torch.testing.assert_close(ref_scales, ops_scales)
         assert (
@@ -307,6 +313,17 @@ class TestRmsNormPerBlockQuantCorrectness:
             # skip
             return
 
+        if current_platform.is_rocm() and (
+            add_residual
+            or has_scale_ub
+            or dtype == torch.float
+            or quant_dtype != FP8_DTYPE
+            or is_scale_transposed
+            or group_size != 128
+            or tma_alignment != 0
+        ):
+            pytest.skip("ROCm functional op matches AITER's serving contract")
+
         scale = 1 / (hidden_size)
         input = torch.randn(num_tokens, hidden_size, dtype=dtype, device="cuda") * scale
         weight = torch.normal(
@@ -348,11 +365,23 @@ class TestRmsNormPerBlockQuantCorrectness:
 
         ops_scales = ref_scales.clone()
 
-        reference = (
-            rms_norm_per_block_quant_reference_rocm
-            if current_platform.is_rocm()
-            else baseline
-        )
+        if current_platform.is_rocm():
+            from vllm._aiter_ops import rocm_aiter_ops
+
+            ref_out, ref_scales = rocm_aiter_ops.get_rmsnorm_group_fused_quant_op()(
+                input, weight, EPS, group_size
+            )
+            ops_out, ops_scales = rms_norm_per_block_quant(
+                input, weight, EPS, group_size
+            )
+            torch.testing.assert_close(ref_scales, ops_scales, rtol=0.02, atol=1e-4)
+            assert (
+                ref_out.view(torch.uint8).to(torch.int16)
+                - ops_out.view(torch.uint8).to(torch.int16)
+            ).abs().max() <= 1
+            return
+
+        reference = baseline
         reference(
             ref_out,
             input,
@@ -491,7 +520,16 @@ class TestRmsNormPerBlockQuantIntegration:
         kernel_wrapper = registered_kernels["rms_norm_per_block_quant"]
         assert kernel_wrapper.op_name == "rms_norm_per_block_quant"
         assert kernel_wrapper._config_picker is not None
-        assert kernel_wrapper._mutates_args == ["result", "scale", "residual"]
+        expected_mutations = (
+            None
+            if current_platform.is_rocm()
+            else [
+                "result",
+                "scale",
+                "residual",
+            ]
+        )
+        assert kernel_wrapper._mutates_args == expected_mutations
 
     def test_fake_impl_functionality(self):
         skip_if_platform_unsupported("rms_norm_per_block_quant")
@@ -502,4 +540,9 @@ class TestRmsNormPerBlockQuantIntegration:
         fake_impl = kernel_wrapper._fake_impl
 
         args = _generate_fake_input(16, 4096, 128)
-        assert fake_impl(*args) is None
+        result = fake_impl(*args)
+        if current_platform.is_rocm():
+            assert result[0].shape == (16, 4096)
+            assert result[1].shape == (16, 32)
+        else:
+            assert result is None
