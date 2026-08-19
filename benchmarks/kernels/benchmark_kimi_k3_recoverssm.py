@@ -110,6 +110,7 @@ class Inputs:
         verify_config: KernelConfig = DEFAULT_VERIFY_CONFIG,
         recover_config: KernelConfig = DEFAULT_RECOVER_CONFIG,
         boundary_token: int | None = None,
+        use_pdl: bool = False,
     ) -> None:
         h = local_num_heads(tp_size)
         d = KIMI_K3_HEAD_DIM
@@ -123,6 +124,7 @@ class Inputs:
         self.verify_config = verify_config
         self.recover_config = recover_config
         self.boundary_token = boundary_token
+        self.use_pdl = use_pdl
         self.mixed_qkv_source = torch.randn(
             tokens, 3 * h * d, device=device, dtype=dtype
         )
@@ -222,6 +224,7 @@ class Inputs:
             mamba_block_size=self.t if self.boundary_token is not None else None,
             value_block_size=self.recover_config.value_slice,
             num_warps=self.recover_config.num_warps,
+            use_pdl=self.use_pdl,
         )
 
 
@@ -249,10 +252,11 @@ def _compile_warmup_worker(
     verify_config: KernelConfig,
     recover_config: KernelConfig,
     boundary_token: int | None,
+    use_pdl: bool,
     mode: str,
 ) -> None:
     inputs = Inputs(
-        batch, spec_query_len, tp_size, verify_config, recover_config, boundary_token
+        batch, spec_query_len, tp_size, verify_config, recover_config, boundary_token, use_pdl
     )
     inputs.warm_projection_output()
     if mode == "verify":
@@ -270,6 +274,7 @@ def compile_warmup(
     verify_configs: tuple[KernelConfig, ...],
     recover_configs: tuple[KernelConfig, ...],
     boundary_token: int | None,
+    use_pdl: bool,
     workers: int,
 ) -> None:
     if workers <= 0:
@@ -294,6 +299,7 @@ def compile_warmup(
                 verify_config,
                 recover_config,
                 boundary_token,
+                use_pdl,
                 mode,
             )
             for batch, verify_config, recover_config, mode in jobs
@@ -356,6 +362,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recover-value-slices", default="16")
     parser.add_argument("--recover-num-warps", default="1")
     parser.add_argument("--boundary-token", nargs="?", const=0, default=None, type=int)
+    parser.add_argument("--pdl", action="store_true")
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--iters", type=int, default=100)
     parser.add_argument("--compile-workers", type=int, default=4)
@@ -394,7 +401,7 @@ def main() -> None:
         f"RecoverSSM benchmark: heads={local_num_heads(args.tp_size)}, "
         f"head_dim={KIMI_K3_HEAD_DIM}, T={spec_query_len}, batches={batch_sizes}, "
         f"accepted={accepted_tokens}, verify={verify_configs}, "
-        f"recover={recover_configs}, boundary_token={args.boundary_token}, "
+        f"recover={recover_configs}, boundary_token={args.boundary_token}, pdl={args.pdl}, "
         f"device={torch.cuda.get_device_name()}"
     )
     compile_warmup(
@@ -405,6 +412,7 @@ def main() -> None:
         verify_configs,
         recover_configs,
         args.boundary_token,
+        args.pdl,
         min(args.compile_workers, len(batch_sizes) * (len(verify_configs) + len(recover_configs))),
     )
     for batch in batch_sizes:
@@ -435,6 +443,7 @@ def main() -> None:
                 args.tp_size,
                 recover_config=recover_config,
                 boundary_token=args.boundary_token,
+                use_pdl=args.pdl,
             )
             for accepted in accepted_tokens:
                 commit_graph = capture_graph(

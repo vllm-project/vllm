@@ -336,7 +336,10 @@ def _compact_conv_state_kernel(
     BLOCK_D: tl.constexpr,
     BLOCK_HISTORY: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
+    LAUNCH_PDL: tl.constexpr,
 ):
+    if LAUNCH_PDL:
+        tl.extra.cuda.gdc_launch_dependents()
     pid_d = tl.program_id(0)
     pid_b = tl.program_id(1)
     pid_l = tl.program_id(2)
@@ -907,6 +910,7 @@ class KDARecoverSSMCommitContext:
         mamba_block_size: int | None = None,
         value_block_size: int = 16,
         num_warps: int = 1,
+        use_pdl: bool = False,
     ) -> None:
         """Fold accepted KDA and convolution inputs into every layer."""
         batch = state_indices.shape[0]
@@ -1004,6 +1008,7 @@ class KDARecoverSSMCommitContext:
             BLOCK_D=256,
             BLOCK_HISTORY=block_history,
             ALIGN_MODE=block_table is not None,
+            LAUNCH_PDL=use_pdl,
             num_warps=4,
         )
 
@@ -1059,6 +1064,7 @@ class KDARecoverSSMCommitContext:
             ALIGN_MODE=block_table is not None,
             num_warps=num_warps,
             num_stages=2,
+            launch_pdl=use_pdl,
         )
 
 
