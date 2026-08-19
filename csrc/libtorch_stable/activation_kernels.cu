@@ -478,19 +478,7 @@ __global__ void swigluoai_and_mul_kernel(
 //   gate_out = beta * tanh(gate / beta) * sigmoid(gate)
 //   up_out   = (linear_beta > 0) ? linear_beta * tanh(up / linear_beta) : up
 //   out      = gate_out * up_out
-// sm_75+ hardware tanh.approx.f32 (single MUFU). tanhf/__tanhf compile to an
-// out-of-line range-reduction CALL with a stack frame and ABI spills; the PTX
-// intrinsic has no slow path. Error is negligible under the FP8 quant that
-// follows.
-__device__ __forceinline__ float situ_tanh(float x) {
-#if defined(__CUDA_ARCH__) && !defined(USE_ROCM)
-  float r;
-  asm("tanh.approx.f32 %0, %1;" : "=f"(r) : "f"(x));
-  return r;
-#else
-  return tanhf(x);
-#endif
-}
+__device__ __forceinline__ float situ_tanh(float x) { return tanhf(x); }
 
 // Kimi-K3 SITU params; baked into the fused LDG kernel to fold at compile time.
 static constexpr float SITU_BETA = 4.0f;
