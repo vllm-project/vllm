@@ -341,6 +341,7 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
+        use_v32_mtp = hf_config.model_type in ("deepseek_v32", "glm_moe_dsa")
         if hf_config.model_type == "dots3_note":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             mtp_layer_types = getattr(hf_config, "mtp_layer_types", None)
@@ -365,7 +366,12 @@ class SpeculativeConfig:
         if hf_config.model_type == "deepseek_mtp":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
-                {"n_predict": n_predict, "architectures": ["DeepSeekMTPModel"]}
+                {
+                    "n_predict": n_predict,
+                    "architectures": [
+                        "DeepseekV32MTPModel" if use_v32_mtp else "DeepSeekMTPModel"
+                    ],
+                }
             )
         if hf_config.model_type == "deepseek_v4":
             hf_config.model_type = "deepseek_mtp"
@@ -759,10 +765,6 @@ class SpeculativeConfig:
             if self.method == "mtp":
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
-                if self.target_model_config.hf_text_config.model_type == "deepseek_v32":
-                    # FIXME(luccafong): cudagraph with v32 MTP is not supported,
-                    # remove this when the issue is fixed.
-                    self.enforce_eager = True
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
                 # Align the quantization of draft model for cases such as
@@ -953,6 +955,10 @@ class SpeculativeConfig:
                     "dspark" in self.draft_model_config.model.lower()
                     or "Qwen3DSparkModel" in self.draft_model_config.architectures
                     or "Gemma4DSparkModel" in self.draft_model_config.architectures
+                    or (
+                        "DSparkDraftModel" in self.draft_model_config.architectures
+                        and self.draft_model_config.hf_config.model_type == "qwen3"
+                    )
                 ):
                     self.method = "dspark"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
@@ -1010,7 +1016,16 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config = eagle_config
                         self.update_arch_()
 
-                if self.method == "dspark" and (
+                if (
+                    self.method == "dspark"
+                    and "DSparkDraftModel" in self.draft_model_config.architectures
+                    and self.draft_model_config.hf_config.model_type == "qwen3"
+                ):
+                    self.draft_model_config.hf_config.architectures = [
+                        "Qwen3DSparkModel"
+                    ]
+                    self.update_arch_()
+                elif self.method == "dspark" and (
                     "Qwen3DSparkModel" not in self.draft_model_config.architectures
                     and "Gemma4DSparkModel" not in self.draft_model_config.architectures
                     and "K3DSparkModel" not in self.draft_model_config.architectures
@@ -1045,16 +1060,6 @@ class SpeculativeConfig:
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
-
-                if (
-                    self.method == "dspark"
-                    and "K3DSparkModel" in self.draft_model_config.architectures
-                    and self.target_parallel_config.decode_context_parallel_size > 1
-                ):
-                    raise ValueError(
-                        "MLA DSpark does not currently support decode context "
-                        "parallelism; set decode_context_parallel_size=1."
-                    )
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
