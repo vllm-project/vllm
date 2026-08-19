@@ -224,21 +224,10 @@ impl pb::control_server::Control for ControlServiceImpl {
         request: Request<pb::LoadLoraRequest>,
     ) -> Result<Response<pb::LoadLoraResponse>, Status> {
         ensure_lora_enabled(&self.state)?;
-        let adapter = request
-            .into_inner()
-            .adapter
-            .ok_or_else(|| Status::invalid_argument("adapter is required"))?;
-        let lora_int_id = u64::try_from(adapter.lora_id)
-            .map_err(|_| Status::invalid_argument("lora_id must be positive"))?;
+        let request = request.into_inner();
         let adapter = self
             .state
-            .load_lora(
-                adapter.lora_name,
-                adapter.source_path,
-                Some(lora_int_id),
-                false,
-                false,
-            )
+            .load_lora(request.lora_name, request.source_path, false, false)
             .await
             .map_err(|error| match error {
                 LoadLoraError::InvalidRequest(error) => Status::invalid_argument(error.to_string()),

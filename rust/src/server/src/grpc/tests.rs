@@ -1608,7 +1608,7 @@ async fn control_lora_lifecycle_selects_adapter_for_generation() {
                         rmp_serde::from_slice(&frames[1]).expect("decode generation request");
                     let lora = request.lora_request.expect("generation LoRA request");
                     assert_eq!(lora.lora_name, "adapter");
-                    assert_eq!(lora.lora_int_id, 42);
+                    assert_eq!(lora.lora_int_id, 1);
                     send_outputs(
                         push,
                         engine_outputs_for_request(
@@ -1632,43 +1632,27 @@ async fn control_lora_lifecycle_selects_adapter_for_generation() {
     .await;
     let mut control_client = ControlClient::new(channel.clone());
     let mut inference_client = InferenceClient::new(channel);
-    let adapter = pb::LoraAdapter {
-        lora_id: 42,
-        lora_name: "adapter".to_string(),
-        source_path: "adapter".to_string(),
-    };
-
     let loaded = control_client
         .load_lora(pb::LoadLoraRequest {
-            adapter: Some(adapter.clone()),
+            lora_name: "adapter".to_string(),
+            source_path: "adapter".to_string(),
         })
         .await
         .expect("load LoRA")
         .into_inner();
     assert_eq!(
         loaded.adapter.as_ref().map(|adapter| adapter.lora_id),
-        Some(42)
+        Some(1)
     );
 
     let duplicate = control_client
         .load_lora(pb::LoadLoraRequest {
-            adapter: Some(adapter),
+            lora_name: "adapter".to_string(),
+            source_path: "adapter".to_string(),
         })
         .await
         .expect_err("duplicate LoRA name should be rejected");
     assert_eq!(duplicate.code(), tonic::Code::AlreadyExists);
-
-    let conflict = control_client
-        .load_lora(pb::LoadLoraRequest {
-            adapter: Some(pb::LoraAdapter {
-                lora_id: 42,
-                lora_name: "conflicting-adapter".to_string(),
-                source_path: "conflicting-adapter".to_string(),
-            }),
-        })
-        .await
-        .expect_err("reused LoRA ID should conflict");
-    assert_eq!(conflict.code(), tonic::Code::AlreadyExists);
 
     let listed = control_client
         .list_loras(pb::ListLorasRequest {})
@@ -1702,7 +1686,7 @@ async fn control_lora_lifecycle_selects_adapter_for_generation() {
         .into_inner();
     assert_eq!(
         unloaded.adapter.as_ref().map(|adapter| adapter.lora_id),
-        Some(42)
+        Some(1)
     );
     assert!(
         control_client

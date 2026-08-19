@@ -91,7 +91,6 @@ impl LoraManager {
         base_model_names: &[String],
         lora_name: String,
         lora_path: String,
-        requested_lora_int_id: Option<u64>,
         load_inplace: bool,
         is_3d_lora_weight: bool,
     ) -> Result<LoraRequest, LoadLoraError> {
@@ -106,7 +105,6 @@ impl LoraManager {
         }
 
         let lora_int_id = existing_lora_int_id
-            .or(requested_lora_int_id)
             .unwrap_or_else(|| self.id_counter.fetch_add(1, Ordering::Relaxed) + 1);
         let lora_request = LoraRequest::new(
             lora_name.clone(),
@@ -116,14 +114,6 @@ impl LoraManager {
             is_3d_lora_weight,
         )
         .map_err(LoadLoraError::InvalidRequest)?;
-        if let Some(existing) = requests
-            .values()
-            .find(|request| request.lora_int_id == lora_int_id && request.lora_name != lora_name)
-        {
-            return Err(LoadLoraError::AlreadyLoaded {
-                lora_name: existing.lora_name.clone(),
-            });
-        }
         drop(requests);
 
         let loaded = engine_core_client
@@ -133,7 +123,6 @@ impl LoraManager {
         if !loaded {
             return Err(LoadLoraError::NotLoaded { lora_name });
         }
-        self.id_counter.fetch_max(lora_int_id, Ordering::Relaxed);
         self.requests.write().await.insert(lora_name, lora_request.clone());
         Ok(lora_request)
     }

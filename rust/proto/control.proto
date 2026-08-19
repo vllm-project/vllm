@@ -98,7 +98,10 @@ message LoraAdapter {
   string source_path = 3;
 }
 
-message LoadLoraRequest { LoraAdapter adapter = 1; }
+message LoadLoraRequest {
+  string lora_name = 1;
+  string source_path = 2;
+}
 message LoadLoraResponse { LoraAdapter adapter = 1; }
 message UnloadLoraRequest { string lora_name = 1; }
 message UnloadLoraResponse { LoraAdapter adapter = 1; }
