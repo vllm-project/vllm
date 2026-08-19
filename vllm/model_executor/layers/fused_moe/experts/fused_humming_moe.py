@@ -114,11 +114,12 @@ def _fixup_moe_tuning_config(tuning_config: list, max_k_block: int = 128) -> Non
         logger.info_once(f"Overriding humming GEMM config. Previous config\n: {config}")
         if block_k > max_k_block:
             config["block_shape"] = [block_m, block_n, max_k_block]
-            warp_shape = config.get("warp_shape")
+
+        warp_shape = config.get("warp_shape")
+        if warp_shape and warp_shape[1] < 32 and block_n % 32 == 0:
             config["warp_shape"] = [warp_shape[0], 32, warp_shape[2]]
-            logger.info_once(
-                f"Overridden humming GEMM config. Current config\n: {config}"
-            )
+
+        logger.info_once(f"Overridden humming GEMM config. Current config\n: {config}")
 
 
 class HummingExpertsBase(mk.FusedMoEExpertsModular):
@@ -642,12 +643,12 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
     def fused_situ_quant_enabled(self, activation: MoEActivation) -> bool:
         """Whether the SITU activation + w2 quant can be fused into one kernel.
 
-        Fused for per-token FP8 (group_size 0) and k-major block-FP8 group-128,
-        both e4m3 with float32 scales. A float32 as_dtype rules out MXMMA (which
-        uses e8m0 m-major scales), so a group-128 scale is guaranteed k-major --
-        the only group layout situ_and_mul_quant emits. Everything else (m-major
-        MXFP8, other group sizes, 16-bit passthrough, non-SITU) falls back to the
-        separate situ_and_mul + quantize_input path.
+        Fused only for k-major block-FP8 group-128 e4m3 with float32 scales --
+        the sole layout situ_and_mul_quant supports. A float32 as_dtype rules out
+        MXMMA (which uses e8m0 m-major scales), so a group-128 scale is
+        guaranteed k-major. Everything else (m-major MXFP8, other group sizes,
+        16-bit passthrough, non-SITU) falls back to the separate
+        situ_and_mul + quantize_input path.
         """
         if activation != MoEActivation.SITU:
             return False
@@ -657,10 +658,10 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         reason: str | None = None
         if not (w2cfg.a_dtype.num_bits == 8 and str(w2cfg.a_dtype) == "float8e4m3"):
             reason = f"w2 a_dtype is {w2cfg.a_dtype} (need float8e4m3)"
-        elif w2cfg.input_scale_group_size not in (0, 128):
+        elif w2cfg.input_scale_group_size != 128:
             reason = (
                 f"w2 input_scale_group_size is {w2cfg.input_scale_group_size} "
-                "(need 0 or 128)"
+                "(need 128)"
             )
         elif not (w2cfg.as_dtype is not None and str(w2cfg.as_dtype) == "float32"):
             reason = f"w2 as_dtype is {w2cfg.as_dtype} (need float32, k-major)"
@@ -678,13 +679,14 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         gate_up_output: torch.Tensor,
         quanted_down_input: torch.Tensor,
         valid_rows: torch.Tensor | None,
+        topk: int = 1,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the fused SITU activation + FP8 quant for the w2 input.
 
         Returns ``(quanted_down_input, input_scale)`` in the same layout the
         unfused ``apply_activation`` + ``quantize_input("w2")`` pair produces: an
-        fp8 [M, d] tensor plus either a per-token float32 [M, 1] scale
-        (group_size 0) or a k-major block-FP8 float32 [M, d // 128] group scale.
+        fp8 [M, d] tensor plus a k-major block-FP8 float32 [M, d // 128] group
+        scale. Only reached when ``fused_situ_quant_enabled`` (group_size 128).
         """
         from vllm.model_executor.layers.fused_moe.activation import (
             situ_and_mul_quant,
@@ -694,11 +696,10 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         assert cfg.activation_situ_beta is not None, (
             "SITU requires activation_situ_beta from FusedMoEConfig"
         )
-        group_size = self.humming_configs["w2"].input_scale_group_size or 0
+        group_size = self.humming_configs["w2"].input_scale_group_size
         m, d = quanted_down_input.size(0), quanted_down_input.size(1)
-        num_cols = 1 if group_size == 0 else d // group_size
         input_scale = torch.empty(
-            (m, num_cols),
+            (m, d // group_size),
             dtype=torch.float32,
             device=quanted_down_input.device,
         )
@@ -710,6 +711,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             linear_beta=cfg.activation_situ_linear_beta,
             group_size=group_size,
             valid_rows=valid_rows,
+            topk=topk,
         )
         return quanted_down_input, input_scale
 
@@ -835,18 +837,16 @@ class HummingIndexedExperts(HummingExpertsBase):
             **moe_kwargs1,
         )
 
-        valid_rows = None
+        # psum[-1:] is the DeepEP valid *token* count as a zero-cost int32 view.
+        # situ (rows = tokens*topk) multiplies by topk on-device; mul_sum bounds
+        # on tokens, so both read this pointer directly -- no host cast/multiply.
         valid_tokens = None
+        topk = topk_ids.size(1)
         if (
             expert_tokens_meta is not None
             and expert_tokens_meta.psum_recv_per_rank is not None
         ):
-            psum = expert_tokens_meta.psum_recv_per_rank
-            topk = topk_ids.size(1)
-            # situ operates on [num_tokens * topk] rows; mul_sum's outer dim is
-            # tokens (it reduces topk internally), so it bounds on psum[-1] alone.
-            valid_rows = psum[-1:].to(torch.int64) * topk
-            valid_tokens = psum[-1:]
+            valid_tokens = expert_tokens_meta.psum_recv_per_rank[-1:]
 
         if self.fused_situ_quant_enabled(activation):
             # Fused SITU + FP8 quant (per-token or block-FP8 group-128) straight
@@ -854,9 +854,16 @@ class HummingIndexedExperts(HummingExpertsBase):
             inputs, input_scale = self.fused_situ_quant(
                 gate_up_output=buffers["gate_up_output"],
                 quanted_down_input=buffers["quanted_down_input"],
-                valid_rows=valid_rows,
+                valid_rows=valid_tokens,
+                topk=topk,
             )
         else:
+            # Fallback situ_and_mul takes int64 row counts (tokens*topk).
+            valid_rows = (
+                valid_tokens.to(torch.int64) * topk
+                if valid_tokens is not None
+                else None
+            )
             self.apply_activation(
                 activation=activation,
                 input=buffers["gate_up_output"],
