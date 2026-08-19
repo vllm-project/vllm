@@ -201,7 +201,7 @@ async def run_server_worker(
         sock.close()
 
 
-if __name__ == "__main__":
+def main():
     import uvloop
 
     from vllm.entrypoints.openai.cli_args import (
@@ -223,3 +223,7 @@ if __name__ == "__main__":
     validate_parsed_serve_args(args)
 
     uvloop.run(run_server(args))
+
+
+if __name__ == "__main__":
+    main()
