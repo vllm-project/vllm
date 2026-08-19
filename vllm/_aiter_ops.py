@@ -1621,6 +1621,8 @@ class rocm_aiter_ops:
         VLLM_ROCM_USE_AITER_RMSNORM: Controls RMSNorm operations.
         VLLM_ROCM_USE_AITER_MOE: Controls MoE (Mixture of Experts) ops.
         VLLM_ROCM_USE_AITER_MLA: Controls MLA (Multi-head Latent Attention) ops.
+        VLLM_ROCM_USE_AITER_MLA_QK_NORM_ROPE: Controls the deepseek_v32 fused QK
+            norm + RoPE + KV cache write path (replaces the shared Triton pair).
         VLLM_ROCM_USE_AITER_MHA: Controls MHA ops including flash_attn_varlen.
         VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: Controls Triton unified attention.
         VLLM_ROCM_USE_AITER_FP8BMM: Controls FP8 batched matrix multiply.
@@ -1684,6 +1686,7 @@ class rocm_aiter_ops:
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
+    _MLA_QK_NORM_ROPE = envs.VLLM_ROCM_USE_AITER_MLA_QK_NORM_ROPE
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
     _SHUFFLE_KV_CACHE_ENABLED = envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
     _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
@@ -1717,6 +1720,7 @@ class rocm_aiter_ops:
         cls._LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
         cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
         cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
+        cls._MLA_QK_NORM_ROPE = envs.VLLM_ROCM_USE_AITER_MLA_QK_NORM_ROPE
         cls._MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
         cls._SHUFFLE_KV_CACHE_ENABLED = envs.VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT
         cls._TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
@@ -1894,6 +1898,11 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_mla_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._MLA_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def is_mla_qk_norm_rope_enabled(cls) -> bool:
+        return cls.is_mla_enabled() and cls._MLA_QK_NORM_ROPE
 
     @classmethod
     @if_aiter_supported

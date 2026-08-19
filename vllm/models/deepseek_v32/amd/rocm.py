@@ -21,40 +21,55 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla_sparse import (
 # base declaration -- narrowing it to [16, 32] made select_common_block_size silently
 # downgrade a requested 64 to 32 via its largest-divisor fallback.
 class DeepseekV32MLASparseBackend(ROCMAiterMLASparseBackend):
+    """Sparse MLA backend with the extra block sizes the aiter kernels accept."""
+
     @staticmethod
     def get_supported_kernel_block_sizes() -> list:
+        """Base sizes plus the 16 and 32 the aiter kernels also handle."""
         return list(
             set(ROCMAiterMLASparseBackend.get_supported_kernel_block_sizes() + [16, 32])
         )
 
 
 class DeepseekV32ROCmIndexerBackend(DeepseekV32IndexerBackend):
+    """Indexer backend with the extra block sizes the aiter kernels accept."""
+
     @staticmethod
     def get_supported_kernel_block_sizes() -> list:
+        """Base sizes plus the 16 and 32 the aiter kernels also handle."""
         return list(
             set(DeepseekV32IndexerBackend.get_supported_kernel_block_sizes() + [16, 32])
         )
 
 
 class DeepseekV32ROCmIndexerCache(DeepseekV32IndexerCache):
+    """Indexer K cache that reports aiter's shuffled layout above block size 1."""
+
     def get_attn_backend(self):
+        """Indexer backend for this cache."""
         return DeepseekV32ROCmIndexerBackend
 
     @property
     def uses_shuffled_layout(self) -> bool:
+        """Whether the indexer K cache uses aiter's shuffled layout."""
         # aiter's gather/insert pair shuffles the cache above block size 1:
         # [n_blocks, blk/16, head_dim/16, 16, 16] instead of [n_blocks, blk, head_dim].
         return self.kv_cache.ndim == 3 and self.kv_cache.shape[1] != 1
 
 
 class DeepseekV32ROCmIndexer(DeepseekV32Indexer):
+    """Indexer wired to the ROCm K cache."""
+
     indexer_cache_cls = DeepseekV32ROCmIndexerCache
 
 
 class DeepseekV32MLAAttention(DeepseekV32Attention):
+    """DeepSeek-V3.2 / GLM-5.2 sparse MLA attention on ROCm."""
+
     indexer_cls = DeepseekV32ROCmIndexer
 
     def __init__(self, vllm_config, config, prefix, topk_indices_buffer=None):
+        """Wire the ROCm sparse backend, indexer op and fusion toggles."""
         super().__init__(
             vllm_config,
             config,
@@ -78,9 +93,11 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             )
         self._fp8_kv = is_quantized_kv_cache(self.kv_cache_dtype)
         self._fp8_kv_needs_view = self._fp8_kv and self.kv_cache_dtype != "fp8_ds_mla"
+        self._use_aiter_qk_norm_rope = rocm_aiter_ops.is_mla_qk_norm_rope_enabled()
 
     @property
     def _active_indexer(self) -> DeepseekV32Indexer | None:
+        """The indexer when it should run this forward, else None."""
         # skip_topk is flipped at runtime by the MTP proposer (see mtp.py
         # set_skip_topk), so this cannot be cached into a flag.
         return None if self.skip_topk else self.indexer
@@ -103,6 +120,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        """A-projections and indexer K weights, then fused attention and o_proj."""
         qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
         q_c, kv_c, k_pe = qkv_lora.split(
             [self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
@@ -183,7 +201,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         index_q = active_indexer.wq_b(q_c)[0]  # [T, q_lora] -> [T, n_head*head_dim]
         return index_q.view(-1, active_indexer.n_head, active_indexer.head_dim)
 
-    def _rope_and_pack_q(
+    def _rope_and_pack_queries(
         self,
         positions: torch.Tensor,
         q_pe: torch.Tensor,
@@ -241,27 +259,29 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         if self.indexer_op is not None:
             self.indexer_op.forward_hip(q_c, index_q_fp8, None, index_weights_out)
 
-    def _build_q_for_attn(
+    def _select_q_for_forward_mqa(
         self,
         ql_nope: torch.Tensor,
         mqa_q: torch.Tensor,
         num_actual: int,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Slice Q to num_actual and pick the packed fp8 or bf16 tuple form."""
         if self._fp8_kv:
             # fp8 KV: mqa_q is the full [ql_nope; q_pe] packed as fp8.
             return mqa_q[:num_actual]
 
         return (ql_nope[:num_actual], mqa_q[:num_actual])
 
-    def _compute_uv_out(
+    def _absorb_w_uv_into_output(
         self,
         attn_out: torch.Tensor,
         output: torch.Tensor,
         num_actual: int,
     ) -> None:
+        """Absorb W_UV into attn_out, writing [T, N*v_head_dim] into output."""
         x = attn_out.view(
             num_actual, self.num_local_heads, self.kv_lora_rank
-        ).transpose(0, 1)  # (N, tokens, L)
+        ).transpose(0, 1)  # [T, N, kv_lora] -> [N, T, kv_lora]
         out_view = output[:num_actual].view(
             num_actual, self.num_local_heads, self.v_head_dim
         )
@@ -282,6 +302,72 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         else:
             torch.bmm(x, self.W_UV, out=out_view.transpose(0, 1))
 
+    def _prepare_attn_inputs_for_common_triton(
+        self,
+        positions: torch.Tensor,
+        q_c: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        index_k: torch.Tensor | None,
+        index_weights: torch.Tensor | None,
+        mla_slot: torch.Tensor | None,
+        attn_metadata,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Shared-Triton path: norm/RoPE/cache writes, then the MQA/indexer queries."""
+        q_c = self._norm_rope_and_cache(
+            positions, q_c, kv_c, k_pe, index_k, mla_slot, attn_metadata
+        )
+        ql_nope, q_pe = self._compute_w_uk_absorbed_ql_nope_and_q_pe(q_c)
+        index_q = self._project_index_q(q_c)
+        index_q_fp8, index_weights_out, mqa_q = self._rope_and_pack_queries(
+            positions, q_pe, ql_nope, index_q, index_weights
+        )
+        return q_c, ql_nope, mqa_q, index_q_fp8, index_weights_out
+
+    def _prepare_attn_inputs_for_aiter(
+        self,
+        positions: torch.Tensor,
+        q_c: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        index_k: torch.Tensor | None,
+        index_weights: torch.Tensor | None,
+        mla_slot: torch.Tensor | None,
+        attn_metadata,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """AITER path: dual RMSNorm, indexer QK RoPE/quant, fused QK RoPE + cache."""
+        raise NotImplementedError(
+            "VLLM_ROCM_USE_AITER_MLA_QK_NORM_ROPE is set but the aiter QK "
+            "norm/RoPE path is not implemented yet"
+        )
+
+    def _prepare_attn_inputs(
+        self,
+        positions: torch.Tensor,
+        q_c: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        index_k: torch.Tensor | None,
+        index_weights: torch.Tensor | None,
+        mla_slot: torch.Tensor | None,
+        attn_metadata,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Route query/cache preparation to the selected fusion path."""
+        if self._use_aiter_qk_norm_rope:
+            return self._prepare_attn_inputs_for_aiter(
+                positions,
+                q_c,
+                kv_c,
+                k_pe,
+                index_k,
+                index_weights,
+                mla_slot,
+                attn_metadata,
+            )
+        return self._prepare_attn_inputs_for_common_triton(
+            positions, q_c, kv_c, k_pe, index_k, index_weights, mla_slot, attn_metadata
+        )
+
     @eager_break_during_capture
     def _fused_attention(
         self,
@@ -293,17 +379,11 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         index_weights: torch.Tensor | None,
         output: torch.Tensor,
     ) -> None:
+        """Eager region: caches, queries, sparse indexer, MQA attention, W_UV."""
         attn_metadata, mla_slot = self.get_layer_forward_context()
 
-        q_c = self._norm_rope_and_cache(
-            positions, q_c, kv_c, k_pe, index_k, mla_slot, attn_metadata
-        )
-
-        ql_nope, q_pe = self._compute_w_uk_absorbed_ql_nope_and_q_pe(q_c)
-        index_q = self._project_index_q(q_c)
-
-        index_q_fp8, index_weights_out, mqa_q = self._rope_and_pack_q(
-            positions, q_pe, ql_nope, index_q, index_weights
+        q_c, ql_nope, mqa_q, index_q_fp8, index_weights_out = self._prepare_attn_inputs(
+            positions, q_c, kv_c, k_pe, index_k, index_weights, mla_slot, attn_metadata
         )
 
         if self._active_indexer is not None:
@@ -318,9 +398,9 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
         if self._fp8_kv_needs_view:
             kv_cache = kv_cache.view(torch.float8_e4m3fn)
 
-        q_for_attn = self._build_q_for_attn(ql_nope, mqa_q, num_actual)
+        q_for_attn = self._select_q_for_forward_mqa(ql_nope, mqa_q, num_actual)
         attn_out, _ = self.impl.forward_mqa(  # type: ignore[attr-defined]
             q_for_attn, kv_cache, attn_metadata, self
         )
 
-        self._compute_uv_out(attn_out, output, num_actual)
+        self._absorb_w_uv_into_output(attn_out, output, num_actual)

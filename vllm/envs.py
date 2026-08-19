@@ -146,6 +146,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
+    VLLM_ROCM_USE_AITER_MLA_QK_NORM_ROPE: bool = False
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
@@ -1319,6 +1320,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_FP4BMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FP4BMM", "True").lower() in ("true", "1")
+    ),
+    # Use aiter kernels for MLA QK norm + RoPE + KV cache write in the ROCm
+    # deepseek_v32 path (DeepSeek-V3.2 / GLM-5.2), replacing the shared Triton
+    # fused_norm_rope / fused_q pair.
+    "VLLM_ROCM_USE_AITER_MLA_QK_NORM_ROPE": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_MLA_QK_NORM_ROPE", "False").lower()
+        in ("true", "1")
     ),
     # Use AITER triton unified attention for V1 attention
     "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": lambda: (
