@@ -1034,10 +1034,17 @@ class TestTieringOffloadingManager:
         self.manager.on_request_finished(ctx)
         assert ctx.req_id not in self.manager._req_state
 
+    @pytest.mark.parametrize("new_ids", [(), (3, 4)], ids=["fully_warm", "mixed"])
     def test_prepare_store_cascades_existing_blocks_to_request_level_tiers(
-        self, manager_setup
+        self, manager_setup, new_ids
     ):
-        """prepare_store cascades hit blocks to request-level tiers only."""
+        """prepare_store cascades hit blocks to request-level tiers only.
+
+        The fully-warm case is the producer shape from issue #52808: nothing is
+        new, so primary returns an empty keys_to_store and no GPU->primary
+        transfer runs. A request-level tier must still be handed the blocks,
+        otherwise a peer waiting on them has nothing to fetch.
+        """
         # Store some blocks to primary first
         existing_blocks = to_keys(range(3))
         self._start_request()
@@ -1064,7 +1071,7 @@ class TestTieringOffloadingManager:
         )
 
         # Call prepare_store with existing + new blocks
-        new_blocks = to_keys(range(3, 5))
+        new_blocks = to_keys(new_ids)
         all_blocks = existing_blocks + new_blocks
         result = self.manager.prepare_store(all_blocks, ctx)
         assert result is not None
@@ -1077,44 +1084,6 @@ class TestTieringOffloadingManager:
         assert set(job_metadata.keys) == set(existing_blocks)
 
         # tier2 (block-level) does not get existing blocks here.
-        self.secondary_tier2.submit_store.assert_not_called()
-
-    def test_fully_warm_request_still_cascades_to_request_level_tiers(
-        self, manager_setup
-    ):
-        """A request whose blocks are ALL already in primary still cascades.
-
-        This is the warm-producer shape from issue #52808: nothing is new, so
-        primary returns an empty keys_to_store and no GPU->primary transfer
-        runs. A request-level tier must still be handed the blocks, otherwise a
-        peer waiting on them has nothing to fetch.
-        """
-        existing_blocks = to_keys(range(3))
-        self._start_request()
-        assert self.manager.prepare_store(existing_blocks, _CTX) is not None
-        self.manager.complete_store(existing_blocks, _CTX, success=True)
-        self._simulate_on_schedule_end()
-
-        self.secondary_tier1.on_new_request = lambda req_context: (
-            RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
-        )
-        ctx = ReqContext(req_id="req_fully_warm")
-        self.manager.on_new_request(ctx)
-
-        self.secondary_tier1.submit_store = MagicMock(
-            wraps=self.secondary_tier1.submit_store
-        )
-        self.secondary_tier2.submit_store = MagicMock(
-            wraps=self.secondary_tier2.submit_store
-        )
-
-        result = self.manager.prepare_store(existing_blocks, ctx)
-        assert result is not None
-        assert result.keys_to_store == []
-
-        self.secondary_tier1.submit_store.assert_called_once()
-        job_metadata = self.secondary_tier1.submit_store.call_args.args[0]
-        assert set(job_metadata.keys) == set(existing_blocks)
         self.secondary_tier2.submit_store.assert_not_called()
 
     def test_reset_cache_clears_orchestrator_state(self, manager_setup):
