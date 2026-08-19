@@ -29,8 +29,21 @@ _MAX_FENCE_SPINS = 100_000_000
 
 @triton.jit
 def _trap_if_nonzero(value):
-    if value != 0:
-        tl.device_assert(False, "PCP direct-KV fence timed out")
+    # Unconditional PTX trap. tl.device_assert is a no-op unless TRITON_DEBUG=1.
+    tl.inline_asm_elementwise(
+        """
+        {
+            .reg .pred %p0;
+            setp.ne.s32 %p0, $1, 0;
+            @%p0 trap;
+        }
+        """,
+        "=r, r",
+        [value.to(tl.int32)],
+        dtype=tl.int32,
+        is_pure=False,
+        pack=1,
+    )
 
 
 @triton.jit
@@ -161,7 +174,7 @@ def get_layer_peer_ptrs(layer_name: str) -> torch.Tensor | None:
 
 
 def get_layer_mcast_ptr(layer_name: str) -> int:
-    if not _STATE.enabled:
+    if not _STATE.enabled or not bool(envs.VLLM_PCP_DIRECT_KV_MULTIMEM):
         return 0
     return int(_STATE.layer_mcast_ptrs.get(layer_name, 0))
 
@@ -175,13 +188,14 @@ def should_allocate_pcp_direct_kv(vllm_config) -> bool:
     if not pcp_direct_kv_requested():
         return False
     if not current_platform.is_cuda() or not symm_mem_available:
-        logger.warning(
-            "VLLM_USE_PCP_DIRECT_KV=1 ignored: CUDA symmetric memory is unavailable"
+        raise RuntimeError(
+            "VLLM_USE_PCP_DIRECT_KV=1 requires CUDA torch.distributed._symmetric_memory"
         )
-        return False
     parallel_config = vllm_config.parallel_config
     if parallel_config.prefill_context_parallel_size <= 1:
-        return False
+        raise RuntimeError(
+            "VLLM_USE_PCP_DIRECT_KV=1 requires prefill_context_parallel_size > 1"
+        )
     if parallel_config.tensor_parallel_size != 1:
         raise RuntimeError("VLLM_USE_PCP_DIRECT_KV requires tensor_parallel_size=1")
     if parallel_config.decode_context_parallel_size != 1:
@@ -193,17 +207,10 @@ def should_allocate_pcp_direct_kv(vllm_config) -> bool:
     return True
 
 
-def try_allocate_pcp_direct_backing(
+def allocate_pcp_direct_backing(
     nbytes: int, device: torch.device, group: ProcessGroup
-) -> SymmMemPeerAllocation | None:
-    try:
-        allocation = allocate_symm_mem_peer((nbytes,), torch.int8, device, group)
-    except Exception as error:
-        logger.warning(
-            "PCP direct-KV symmetric allocation failed (%s); using ordinary allocation",
-            error,
-        )
-        return None
+) -> SymmMemPeerAllocation:
+    allocation = allocate_symm_mem_peer((nbytes,), torch.int8, device, group)
     _STATE.allocations.append(allocation)
     return allocation
 
@@ -214,22 +221,32 @@ def bind_pcp_direct_layer_views(
     device: torch.device,
 ) -> None:
     if not _STATE.allocations:
-        _STATE.enabled = False
-        return
+        raise RuntimeError(
+            "VLLM_USE_PCP_DIRECT_KV=1 requires every KV buffer to be allocated "
+            "with PyTorch symmetric memory"
+        )
     layer_peer_ptrs: dict[str, torch.Tensor] = {}
     layer_mcast_ptrs: dict[str, int] = {}
+    missing: list[str] = []
     for layer_name, cache in kv_caches.items():
         tensor = _as_cache_tensor(cache)
         if tensor is None:
             continue
         allocation = _allocation_for_tensor(tensor)
         if allocation is None:
+            missing.append(layer_name)
             continue
         layer_peer_ptrs[layer_name] = allocation.peer_ptrs_for_view(tensor)
         layer_mcast_ptrs[layer_name] = allocation.multicast_ptr_for_view(tensor)
+    if missing:
+        raise RuntimeError(
+            "VLLM_USE_PCP_DIRECT_KV=1: cache layers not on symmetric-memory "
+            f"backing: {', '.join(missing)}"
+        )
     if not layer_peer_ptrs:
-        _STATE.enabled = False
-        return
+        raise RuntimeError(
+            "VLLM_USE_PCP_DIRECT_KV=1: no bindable KV cache tensors"
+        )
     _STATE.layer_peer_ptrs = layer_peer_ptrs
     _STATE.layer_mcast_ptrs = layer_mcast_ptrs
     _STATE.world_size = group.size()

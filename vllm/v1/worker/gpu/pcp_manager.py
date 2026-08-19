@@ -70,7 +70,7 @@ class PCPManager:
         self.dcp_world_size = dcp_world_size
         self.dcp_rank = dcp_rank
         self.cp_interleave = cp_interleave
-        self.direct_kv_enabled = direct_kv_enabled
+        self._direct_kv_requested = direct_kv_enabled
 
         self._global_batch: InputBatch | None = None
         self._req_states = req_states
@@ -79,6 +79,14 @@ class PCPManager:
         self._padded_gather_idx: torch.Tensor | None = None
         self._gathered_kv_write_mask: torch.Tensor | None = None
         self._pad_slot_id = torch.tensor(PAD_SLOT_ID, dtype=torch.int64, device=device)
+
+    @property
+    def direct_kv_enabled(self) -> bool:
+        from vllm.model_executor.layers.attention.pcp_direct_kv import (
+            pcp_direct_kv_active,
+        )
+
+        return self._direct_kv_requested and pcp_direct_kv_active()
 
         max_num_local_reqs = 2 * max_num_reqs if max_num_reqs is not None else None
         self._input_buffers = (

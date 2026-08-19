@@ -202,6 +202,7 @@ if TYPE_CHECKING:
     VLLM_USE_DIRECT_DCP_Q_GATHER: bool | None = None
     VLLM_USE_DIRECT_DCP_KV_GATHER: bool | None = None
     VLLM_USE_PCP_DIRECT_KV: bool = False
+    VLLM_PCP_DIRECT_KV_MULTIMEM: bool = True
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
         "full",
@@ -2156,6 +2157,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # way when using the mp backend.
     "VLLM_USE_SPINLOOP_EXT": lambda: bool(int(os.getenv("VLLM_USE_SPINLOOP_EXT", "0"))),
     "VLLM_USE_PCP_DIRECT_KV": lambda: bool(int(os.getenv("VLLM_USE_PCP_DIRECT_KV", "0"))),
+    "VLLM_PCP_DIRECT_KV_MULTIMEM": lambda: bool(
+        int(os.getenv("VLLM_PCP_DIRECT_KV_MULTIMEM", "0"))
+    ),
     # Comma-separated GPU_BDF=NIC_BDF pairs for RDMA NIC selection.
     # Must be set together with VLLM_NIC_SELECTION_VARS.
     "VLLM_GPU_NIC_PCIE_MAPPING": lambda: os.getenv("VLLM_GPU_NIC_PCIE_MAPPING", ""),
