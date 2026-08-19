@@ -17,11 +17,11 @@
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/tensor.h>
 #include "libtorch_stable/torch_utils.h"
-#include "cutlass_extensions/torch_utils.hpp"
+#include "libtorch_stable/cutlass_extensions/torch_utils.hpp"
 #include "libtorch_stable/cutlass_extensions/common.hpp"
 
 #include "get_group_starts.cuh"
-#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
+#include "libtorch_stable/cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 #include "w4a8_utils.cuh"
 
 namespace vllm::cutlass_w4a8_moe {

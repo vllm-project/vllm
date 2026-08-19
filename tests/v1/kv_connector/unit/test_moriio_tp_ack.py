@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOTransferAck,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
+    MoRIIOConnector,
     MoRIIOConnectorWorker,
     get_moriio_expected_ack_count,
     get_moriio_remote_tp_rank,
@@ -253,6 +254,7 @@ def test_worker_get_finished_counts_structured_release_fan_in():
     worker.transfer_id_to_request_id = {"tx-fanin": "req-fanin"}
     worker._consumer_notification_counts = {}
     worker._completed_consumer_notifications = set()
+    worker._pending_unmapped_acks = []
 
     assert worker.get_finished() == (set(), set())
     assert worker._consumer_notification_counts == {"tx-fanin": 1}
@@ -291,10 +293,12 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.world_size = 8
     worker.moriio_wrapper = FakeWrapper()
-    worker._recving_transfers = {"req": [DoneStatus()]}
+    worker._recving_transfers = {"req": {"layer0": DoneStatus()}}
     worker._recving_transfers_callback_addr = {
         "req": ("127.0.0.1", "7000", "tx-release")
     }
+    # Transfer-timeout reaping state consulted by _pop_done_transfers.
+    worker._recving_transfers_start = {}
 
     assert worker._pop_done_transfers() == {"tx-release"}
     assert worker.moriio_wrapper.sent == [
@@ -308,3 +312,15 @@ def test_read_completion_sends_structured_release_with_consumer_tp_size():
     ]
     assert worker._recving_transfers == {}
     assert worker._recving_transfers_callback_addr == {}
+
+
+def test_requested_cudagraph_mode_is_never_overridden():
+    # The configured cudagraph mode is always honored: the barrier fires when
+    # the operator sets cudagraph_mode=PIECEWISE, and READ mode with full
+    # graphs only warns instead of silently forcing PIECEWISE.
+    assert (
+        MoRIIOConnector.requires_piecewise_for_cudagraph({"read_mode": True}) is False
+    )
+    assert (
+        MoRIIOConnector.requires_piecewise_for_cudagraph({"read_mode": False}) is False
+    )
