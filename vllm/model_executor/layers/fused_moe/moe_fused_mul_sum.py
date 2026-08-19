@@ -95,7 +95,6 @@ def moe_fused_mul_sum_persistent_kernel(
     outputs_ptr,
     top_ids_ptr,
     expert_map_ptr,
-    num_valid_tokens_ptr,
     num_tokens,
     stride_m,
     has_topk_ids: tl.constexpr,
@@ -106,13 +105,9 @@ def moe_fused_mul_sum_persistent_kernel(
     BLOCK_K: tl.constexpr,
     NUM_K_TILES: tl.constexpr,
 ):
-    # Persistent variant: the launch grid is a fixed function of the SM count
-    # (see moe_fused_mul_sum), not of num_tokens, so it stays static under CUDA
-    # graph capture. The grid-stride loop covers every row; padding rows are
-    # dropped per-tile by the has_expert_map row_present check below.
-    row_bound = num_tokens
-
-    num_m_tiles = tl.cdiv(row_bound, BLOCK_M)
+    # Fixed SM-count grid (CUDA-graph safe); grid-stride over all rows, padding
+    # dropped per-tile by the has_expert_map check.
+    num_m_tiles = tl.cdiv(num_tokens, BLOCK_M)
     total_tiles = num_m_tiles * NUM_K_TILES
 
     pid = tl.program_id(0)
@@ -124,7 +119,7 @@ def moe_fused_mul_sum_persistent_kernel(
 
         offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
         offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
-        m_mask = offs_m < row_bound
+        m_mask = offs_m < num_tokens
         k_mask = offs_k < size
 
         keep_m = m_mask
@@ -272,10 +267,9 @@ def moe_fused_mul_sum(
             indicates an invalid token/expert pair that will be skipped. When
             provided, rows with all top ids < 0 (worst-case padding) are skipped
             and their output rows left untouched.
-        num_valid_tokens: Optional device scalar (1-element tensor). When
-            provided, a persistent kernel with a fixed, CUDA-graph-safe grid is
-            launched. The grid-stride loop covers all num_tokens rows; padding
-            rows are dropped per-tile by the expert_map check.
+        num_valid_tokens: When provided, selects the persistent kernel with a
+            fixed, CUDA-graph-safe grid. The value is unused; all num_tokens
+            rows are processed.
 
     Returns:
         The fused weighted sum of expert outputs.
@@ -316,9 +310,9 @@ def moe_fused_mul_sum(
             # 8 fp32/thread (+ the per-n a_vec load), pushing ~79 regs/thread ->
             # 3 blocks/SM (past the 64-reg cliff). Halving BLOCK_K to 256 halves
             # both to 4 fp32/thread -> ~63 regs -> 4 blocks/SM, and doubles the
-            # k-tile count so the fixed grid is better filled when num_recv (the
-            # real row count) is small. num_stages barely affects this masked,
-            # no-MMA reduce, so just cap it to keep buffers off the reg file.
+            # k-tile count so the fixed grid is better filled. num_stages barely
+            # affects this masked, no-MMA reduce, so cap it to keep buffers off
+            # the reg file.
             persistent_block_k = min(BLOCK_K, 256)
             num_k_tiles = triton.cdiv(size, persistent_block_k)
             num_sms = torch.cuda.get_device_properties(
@@ -335,7 +329,6 @@ def moe_fused_mul_sum(
                 outputs,
                 topk_ids,
                 expert_map,
-                num_valid_tokens,
                 num_tokens,
                 top_k * size,
                 topk_ids is not None,
