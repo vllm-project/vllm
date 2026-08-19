@@ -6,4 +6,3 @@ Qwen1.5-MoE-W4A16-CT.yaml
 DeepSeek-V2-Lite-Instruct-FP8.yaml
 Qwen3-30B-A3B-MXFP4A16.yaml
 gemma-4-E4B-it-qat-mobile-ct.yaml
-Laguna-XS-2.1-INT4.yaml
