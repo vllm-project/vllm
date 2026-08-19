@@ -739,13 +739,31 @@ class TestBuildAnthropicUsage:
 
 
 class TestInlineSystemMessageInMessagesArray:
-    """Verify that ``role: system`` messages embedded inside the ``messages``
-    array are preserved in their original position.
+    """Inline ``role: system`` turns inside ``messages``.
 
-    Unlike the previous approach that merged all system messages into a single
-    leading system message (breaking prefix caching), this preserves the
-    conversation structure so KV-cache hits remain intact.
+    Mid-conversation system turns stay in place so prefix caching is not
+    broken. A trailing system suffix (Claude Code ``[user, system]``) is
+    folded into the leading system block so generation cannot end on system.
     """
+
+    def test_claude_code_trailing_system_is_hoisted(self):
+        """Claude Code >= 2.1.207 sends the agent registry after the user turn."""
+        request = _make_request(
+            [
+                {"role": "user", "content": "Do the task"},
+                {
+                    "role": "system",
+                    "content": "Available agent types for the Agent tool.",
+                },
+            ]
+        )
+        result = _convert(request)
+
+        assert [m["role"] for m in result.messages] == ["system", "user"]
+        assert result.messages[0]["content"] == (
+            "Available agent types for the Agent tool."
+        )
+        assert result.messages[1]["content"] == "Do the task"
 
     def test_inline_system_merged_with_top_level_system(self):
         """Full integration: inline system + top-level system + user message."""
@@ -792,12 +810,13 @@ class TestInlineSystemMessageInMessagesArray:
 
         result = _convert(request)
 
-        # First message: top-level system prompt (billing header stripped).
+        # First message: top-level system plus trailing inline system
+        # (billing header stripped).
         assert result.messages[0]["role"] == "system"
         assert (
             result.messages[0]["content"]
             == "You are Claude Code, Anthropic's official CLI for Claude."
-            "...."
+            "........."
         )
 
         # Second message: user message, content preserved at original position.
@@ -812,11 +831,7 @@ class TestInlineSystemMessageInMessagesArray:
             "type": "text",
             "text": "help?",
         }
-
-        # Third message: inline system stays in original position
-        # (after user, not merged into leading system).
-        assert result.messages[2]["role"] == "system"
-        assert result.messages[2]["content"] == "....."
+        assert len(result.messages) == 2
 
     def test_inline_system_string_only(self):
         """Only an inline system string, no top-level system."""
@@ -828,11 +843,10 @@ class TestInlineSystemMessageInMessagesArray:
         )
         result = _convert(request)
 
-        # Inline system stays in its original position.
-        assert result.messages[0]["role"] == "user"
-        assert result.messages[0]["content"] == "Hello"
-        assert result.messages[1]["role"] == "system"
-        assert result.messages[1]["content"] == "Be concise."
+        assert result.messages[0]["role"] == "system"
+        assert result.messages[0]["content"] == "Be concise."
+        assert result.messages[1]["role"] == "user"
+        assert result.messages[1]["content"] == "Hello"
 
     def test_inline_system_list_content(self):
         """Inline system with list content blocks."""
@@ -850,12 +864,10 @@ class TestInlineSystemMessageInMessagesArray:
         )
         result = _convert(request)
 
-        # Inline system stays in its original position;
-        # text blocks are concatenated (same as top-level system).
-        assert result.messages[0]["role"] == "user"
-        assert result.messages[0]["content"] == "Hi"
-        assert result.messages[1]["role"] == "system"
-        assert result.messages[1]["content"] == "Part one. Part two."
+        assert result.messages[0]["role"] == "system"
+        assert result.messages[0]["content"] == "Part one. Part two."
+        assert result.messages[1]["role"] == "user"
+        assert result.messages[1]["content"] == "Hi"
 
     def test_multiple_inline_system_messages(self):
         """Multiple inline system messages each stay in their position."""
@@ -868,13 +880,15 @@ class TestInlineSystemMessageInMessagesArray:
         )
         result = _convert(request)
 
-        # Each system message stays in its original position.
-        assert result.messages[0]["role"] == "system"
-        assert result.messages[0]["content"] == "First system."
-        assert result.messages[1]["role"] == "user"
-        assert result.messages[1]["content"] == "Hello"
-        assert result.messages[2]["role"] == "system"
-        assert result.messages[2]["content"] == "Second system."
+        # Trailing system is hoisted; the earlier inline system stays put.
+        assert [m["role"] for m in result.messages] == [
+            "system",
+            "system",
+            "user",
+        ]
+        assert result.messages[0]["content"] == "Second system."
+        assert result.messages[1]["content"] == "First system."
+        assert result.messages[2]["content"] == "Hello"
 
     def test_inline_system_with_top_level_string(self):
         """Top-level system is a string, inline system is also present."""
@@ -887,13 +901,9 @@ class TestInlineSystemMessageInMessagesArray:
         )
         result = _convert(request)
 
-        # Top-level system goes first; inline system stays in position.
-        assert result.messages[0]["role"] == "system"
-        assert result.messages[0]["content"] == "Top-level prompt."
-        assert result.messages[1]["role"] == "user"
+        assert [m["role"] for m in result.messages] == ["system", "user"]
+        assert result.messages[0]["content"] == "Top-level prompt.Inline hint."
         assert result.messages[1]["content"] == "Hello"
-        assert result.messages[2]["role"] == "system"
-        assert result.messages[2]["content"] == "Inline hint."
 
     def test_inline_system_billing_header_stripped(self):
         """Inline system that is only a billing header is omitted."""
@@ -934,12 +944,58 @@ class TestInlineSystemMessageInMessagesArray:
         )
         result = _convert(request)
 
-        # Billing header stripped, real content preserved in position.
-        assert len(result.messages) == 2
-        assert result.messages[0]["role"] == "user"
-        assert result.messages[0]["content"] == "Hello"
-        assert result.messages[1]["role"] == "system"
-        assert result.messages[1]["content"] == "Real system content."
+        # Billing header stripped; remaining text is a trailing system turn.
+        assert [m["role"] for m in result.messages] == ["system", "user"]
+        assert result.messages[0]["content"] == "Real system content."
+        assert result.messages[1]["content"] == "Hello"
+
+    def test_mid_conversation_system_stays_in_place(self):
+        """A system turn that is not a trailing suffix stays put for cache."""
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "system", "content": "Be concise."},
+                {"role": "assistant", "content": "Hi"},
+            ]
+        )
+        result = _convert(request)
+
+        assert [m["role"] for m in result.messages] == [
+            "user",
+            "system",
+            "assistant",
+        ]
+        assert result.messages[1]["content"] == "Be concise."
+
+    def test_merge_flag_folds_mid_conversation_system(self):
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "system", "content": "Be concise."},
+                {"role": "assistant", "content": "Hi"},
+            ]
+        )
+        result = _convert(request, merge_inline_system=True)
+
+        assert [m["role"] for m in result.messages] == [
+            "system",
+            "user",
+            "assistant",
+        ]
+        assert result.messages[0]["content"] == "Be concise."
+
+    def test_duplicate_trailing_system_is_not_repeated(self):
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "system", "content": "Same hint."},
+            ],
+            system="Same hint.",
+        )
+        result = _convert(request)
+
+        assert [m["role"] for m in result.messages] == ["system", "user"]
+        assert result.messages[0]["content"] == "Same hint."
 
 
 # ======================================================================
