@@ -4,6 +4,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use indexmap::IndexMap;
+use thiserror::Error;
 use tokio::sync::{Mutex, RwLock};
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::{LoraRequest, LoraRequestError};
@@ -26,30 +27,44 @@ pub(crate) struct LoraManager {
     update_lock: Mutex<()>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub(crate) enum LoadLoraError {
-    InvalidRequest(LoraRequestError),
+    #[error(transparent)]
+    InvalidRequest(#[from] LoraRequestError),
+    #[error("LoRA adapter `{lora_name}` is already loaded")]
     AlreadyLoaded { lora_name: String },
+    #[error("LoRA adapter `{lora_name}` conflicts with a served base model")]
     BaseModelName { lora_name: String },
-    Engine(vllm_engine_core_client::Error),
+    #[error("failed to load LoRA adapter `{lora_name}`")]
+    Engine {
+        lora_name: String,
+        #[source]
+        source: vllm_engine_core_client::Error,
+    },
+    #[error("one or more engine ranks rejected LoRA adapter `{lora_name}`")]
     NotLoaded { lora_name: String },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub(crate) enum UnloadLoraError {
-    NotFound {
-        lora_name: String,
-    },
+    #[error("LoRA adapter `{lora_name}` is not loaded")]
+    NotFound { lora_name: String },
+    #[error(
+        "requested lora_int_id {actual} does not match loaded adapter `{lora_name}` with id {expected}"
+    )]
     IntIdMismatch {
         lora_name: String,
         expected: u64,
         actual: u64,
     },
-    Engine(vllm_engine_core_client::Error),
-    NotRemoved {
+    #[error("failed to unload LoRA adapter `{lora_name}`")]
+    Engine {
         lora_name: String,
-        lora_int_id: u64,
+        #[source]
+        source: vllm_engine_core_client::Error,
     },
+    #[error("engine rejected removal of LoRA adapter `{lora_name}` with id {lora_int_id}")]
+    NotRemoved { lora_name: String, lora_int_id: u64 },
 }
 
 impl LoraManager {
@@ -116,10 +131,12 @@ impl LoraManager {
         .map_err(LoadLoraError::InvalidRequest)?;
         drop(requests);
 
-        let loaded = engine_core_client
-            .add_lora(&lora_request)
-            .await
-            .map_err(LoadLoraError::Engine)?;
+        let loaded = engine_core_client.add_lora(&lora_request).await.map_err(|source| {
+            LoadLoraError::Engine {
+                lora_name: lora_name.clone(),
+                source,
+            }
+        })?;
         if !loaded {
             return Err(LoadLoraError::NotLoaded { lora_name });
         }
@@ -152,10 +169,14 @@ impl LoraManager {
             });
         }
 
-        let removed = engine_core_client
-            .remove_lora(lora_request.lora_int_id)
-            .await
-            .map_err(UnloadLoraError::Engine)?;
+        let removed =
+            engine_core_client
+                .remove_lora(lora_request.lora_int_id)
+                .await
+                .map_err(|source| UnloadLoraError::Engine {
+                    lora_name: lora_request.lora_name.clone(),
+                    source,
+                })?;
         if !removed {
             return Err(UnloadLoraError::NotRemoved {
                 lora_name: lora_request.lora_name,

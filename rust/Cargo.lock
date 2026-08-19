@@ -5743,6 +5743,7 @@ dependencies = [
  "socket2",
  "subtle",
  "tempfile",
+ "thiserror 2.0.18",
  "thiserror-ext",
  "tls-listener",
  "tokio",
