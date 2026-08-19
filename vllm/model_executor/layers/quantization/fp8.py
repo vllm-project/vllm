@@ -462,9 +462,6 @@ class Fp8LinearMethod(LinearMethodBase):
         )
 
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
-        if self.use_marlin and use_sub_block_shard:
-            # Marlin repack and apply read this as the packed input dimension.
-            layer.input_size_per_partition = padded_input_size
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.use_marlin:
