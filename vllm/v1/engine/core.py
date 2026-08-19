@@ -2234,9 +2234,10 @@ class DPEngineCoreProc(EngineCoreProc):
         raise SystemExit
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
-        # Optimization - only perform finish-sync all-reduce every 32 steps.
+        # Sync at step 1 so an idle-engine pause needs one dummy batch, not
+        # 32; the cadence must stay a pure function of the lockstep counter.
         self.step_counter += 1
-        if self.step_counter % 32 != 0:
+        if self.step_counter != 1 and self.step_counter % 32 != 0:
             return True
 
         has_unfinished, pause_consensus = ParallelConfig.sync_dp_state(

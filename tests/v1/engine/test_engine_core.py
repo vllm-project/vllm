@@ -16,6 +16,7 @@ from vllm.config import (
     ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
+    ParallelConfig,
     SchedulerConfig,
     VllmConfig,
 )
@@ -23,7 +24,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core import EngineCore
+from vllm.v1.engine.core import DPEngineCoreProc, EngineCore
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -608,3 +609,41 @@ def test_encoder_instance_zero_kv_cache(
         assert not engine_core.scheduler.ec_connector.is_producer, (
             "Consumer instance EC connector should be consumer"
         )
+
+
+def _cadenced_dp_engine_core(monkeypatch, results: list[tuple[bool, bool]]):
+    """A bare DPEngineCoreProc whose all-reduce is scripted by `results`;
+    returns the core and the step numbers at which the all-reduce ran."""
+    core = object.__new__(DPEngineCoreProc)
+    core.dp_group = object()
+    core.step_counter = 0
+    core.pending_pause = False
+    core.ignore_start_dp_wave = False
+    synced: list[int] = []
+
+    def scripted_sync(dp_group, has_unfinished, pending_pause):
+        synced.append(core.step_counter)
+        return results.pop(0)
+
+    monkeypatch.setattr(ParallelConfig, "sync_dp_state", staticmethod(scripted_sync))
+    return core, synced
+
+
+def test_dp_sync_cadence_normal_wave(monkeypatch):
+    """First all-reduce of a wave after one step, then every 32."""
+    core, synced = _cadenced_dp_engine_core(monkeypatch, [(True, False)] * 3)
+    for _ in range(70):
+        assert DPEngineCoreProc._has_global_unfinished_reqs(core, True)
+    assert synced == [1, 32, 64]
+
+
+def test_dp_sync_cadence_idle_pause_consensus_on_first_step(monkeypatch):
+    """A pause of an idle engine arms every rank before its kick-started
+    first step, so the step-1 sync reaches consensus after one dummy batch
+    instead of 32."""
+    core, synced = _cadenced_dp_engine_core(monkeypatch, [(False, True)])
+    core.pending_pause = True
+    assert DPEngineCoreProc._has_global_unfinished_reqs(core, False) is False
+    assert synced == [1]
+    assert core.ignore_start_dp_wave
+    assert not core.pending_pause
