@@ -10,6 +10,7 @@ PR:  https://github.com/vllm-project/vllm/pull/45586
 """
 
 import contextlib
+import io
 import json
 import os
 import subprocess
@@ -21,7 +22,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
+import pybase64 as base64
 import requests
+
+from tests.utils import RemoteOpenAIServer
 
 # ---------------------------------------------------------------------------
 # Model / server defaults
@@ -412,3 +417,85 @@ def sleep_metrics(url):
             for s in family.samples:
                 vals[s.labels.get("sleep_state", "")] = s.value
     return vals.get("awake"), vals.get("weights_offloaded"), vals.get("discard_all")
+
+
+# ---------------------------------------------------------------------------
+# Routed experts (consistency section)
+# ---------------------------------------------------------------------------
+
+
+# tiny-mixtral config: 8 local experts, top-2 routing, 2 hidden layers.
+# The published config has sliding_window=4096, which produces
+# SlidingWindowSpec kv-cache groups; the routed-experts slot buffer
+# requires a FullAttentionSpec group, so we override sliding_window=null.
+MOE_MODEL_NAME = "TitanML/tiny-mixtral"
+MOE_NUM_LOCAL_EXPERTS = 8
+MOE_NUM_EXPERTS_PER_TOK = 2
+MOE_NUM_HIDDEN_LAYERS = 2
+
+
+def routed_experts_server(
+    runner_type: str = "v1",
+    *,
+    enforce_eager: bool = True,
+    moe_backend: str | None = None,
+) -> RemoteOpenAIServer:
+    """Start a server returning routed experts for the tiny-MoE model.
+
+    This does not reuse the ``server`` harness above: that harness pins
+    ``--enforce-eager``, sleep mode and the dense default model, while
+    the consistency tests need to sweep eager vs. CUDA graphs, the V1
+    vs. V2 ("mrv2") model runners, and modular vs. monolithic
+    (``--moe-backend flashinfer_trtllm``) MoE kernels.
+
+    Args:
+        runner_type: The model runner: ``"v1"`` for the legacy runner or
+            ``"mrv2"`` for Model Runner V2
+            (``VLLM_USE_V2_MODEL_RUNNER=1``).
+        enforce_eager: When True, run eagerly (``--enforce-eager``);
+            otherwise the default ``-O2`` (dynamo + CUDA graphs) applies.
+        moe_backend: Override the MoE kernel backend, e.g.
+            ``"flashinfer_trtllm"`` selects the TRTLLM monolithic kernel.
+    """
+    env_dict = {"VLLM_USE_V2_MODEL_RUNNER": "0" if runner_type == "v1" else "1"}
+    args = [
+        # Pin bf16 instead of trusting the checkpoint's torch_dtype: the
+        # flashinfer_trtllm kernel only supports bf16, and this keeps the
+        # scenario matrix independent of per-model config variance.
+        "--dtype",
+        "bfloat16",
+        "--max-model-len",
+        "256",
+        "--max-num-seqs",
+        "32",
+        "--enable-return-routed-experts",
+        "--hf-overrides",
+        '{"sliding_window": null}',
+    ]
+    if enforce_eager:
+        args += ["--enforce-eager"]
+    if moe_backend is not None:
+        args += ["--moe-backend", moe_backend]
+    return RemoteOpenAIServer(MOE_MODEL_NAME, args, env_dict=env_dict)
+
+
+def decode_routed_experts(encoded: str | None) -> np.ndarray:
+    """Decode the base64-encoded ``.npy`` routed-experts payload."""
+    assert encoded is not None
+    return np.load(io.BytesIO(base64.b64decode(encoded)))
+
+
+def assert_valid_routed_experts(
+    routed_experts: np.ndarray,
+    *,
+    num_layers: int = MOE_NUM_HIDDEN_LAYERS,
+    num_experts_per_tok: int = MOE_NUM_EXPERTS_PER_TOK,
+    num_experts: int = MOE_NUM_LOCAL_EXPERTS,
+) -> None:
+    """Assert shape ``(n, num_layers, top_k)`` and valid expert IDs."""
+    assert routed_experts.ndim == 3
+    _, layers, topk = routed_experts.shape
+    assert layers == num_layers
+    assert topk == num_experts_per_tok
+    assert (routed_experts >= 0).all()
+    assert (routed_experts < num_experts).all()
