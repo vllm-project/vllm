@@ -830,8 +830,12 @@ class RoutedExperts(PluggableLayer):
                     loaded_weight=loaded_weight,
                     expert_data=expert_data,
                     tp_rank=self.moe_config.tp_rank,
-                    is_block_scale=quant_method
-                    == FusedMoeWeightScaleSupported.BLOCK.value,
+                    is_block_scale=(
+                        quant_method == FusedMoeWeightScaleSupported.BLOCK.value
+                        and getattr(self, "weight_block_size", None) is not None
+                        and self.moe_config.intermediate_size_per_partition
+                        != self.moe_config.intermediate_size_per_partition_unpadded
+                    ),
                 )
             elif quant_method == FusedMoeWeightScaleSupported.TENSOR.value:
                 self._load_per_tensor_weight_scale(
