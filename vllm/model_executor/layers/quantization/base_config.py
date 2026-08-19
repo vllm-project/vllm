@@ -106,7 +106,7 @@ class QuantizationConfig(ABC):
         super().__init__()
         # mapping is updated by models as they initialize
         self.packed_modules_mapping: dict[str, list[str]] = dict()
-        self.online_quant_config: OnlineQuantizationConfig | None = None
+        self.online_quantization_config: OnlineQuantizationConfig | None = None
 
     @abstractmethod
     def get_name(self) -> QuantizationMethods:
@@ -202,7 +202,7 @@ class QuantizationConfig(ABC):
             OnlineQuantizationConfig,
         )
 
-        self.online_quant_config = OnlineQuantizationConfig(online_args)
+        self.online_quantization_config = OnlineQuantizationConfig(online_args)
 
     def get_effective_quant_method(
         self, layer: torch.nn.Module, prefix: str
@@ -218,16 +218,20 @@ class QuantizationConfig(ABC):
         )
 
         base_quant_method = self.get_quant_method(layer, prefix)
-        if self.online_quant_config is None:
+        if self.online_quantization_config is None:
             return base_quant_method
         if not isinstance(layer, (LinearBase, RoutedExperts)):
             return base_quant_method
 
-        self.online_quant_config.packed_modules_mapping = self.packed_modules_mapping
+        self.online_quantization_config.packed_modules_mapping = (
+            self.packed_modules_mapping
+        )
         checkpoint_is_quantized = base_quant_method is not None and not isinstance(
             base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
         )
-        online_target = self.online_quant_config.get_quantization_target(layer, prefix)
+        online_target = self.online_quantization_config.get_quantization_target(
+            layer, prefix
+        )
         if checkpoint_is_quantized:
             if online_target is not None:
                 raise ValueError(
@@ -238,7 +242,7 @@ class QuantizationConfig(ABC):
             return base_quant_method
         if online_target is None:
             return base_quant_method
-        return self.online_quant_config.get_quant_method(layer, prefix)
+        return self.online_quantization_config.get_quant_method(layer, prefix)
 
     @staticmethod
     def get_cache_scale_mapper() -> "WeightsMapper":

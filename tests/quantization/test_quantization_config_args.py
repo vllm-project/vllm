@@ -106,12 +106,9 @@ def test_resolve_merges_explicit_over_shorthand():
     assert args.moe == QuantSpec(weight=kFp8StaticTensorSym)
 
 
-def test_resolve_rejects_quantization_config_with_non_shorthand_quant():
-    # If --quantization names something other than an online shorthand,
-    # quantization_config is not allowed via this path (checkpoint quant
-    # paths read it directly off ModelConfig instead).
-    with pytest.raises(ValueError, match="quantization_config is only supported"):
-        resolve_quantization_config("gptq", {"linear": "fp8_per_block"})
+def test_resolve_quantization_config_with_checkpoint_quantization():
+    args = resolve_quantization_config("gptq", {"linear": "fp8_per_block"})
+    assert args == QuantizationConfigArgs(linear="fp8_per_block")
 
 
 # ---- QUANT_KEY_NAMES coverage --------------------------------------------

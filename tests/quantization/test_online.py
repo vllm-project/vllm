@@ -253,9 +253,9 @@ def test_online_ignored_moe_skips_method_construction(
     quant_config.set_online_quantization(
         QuantizationConfigArgs(linear="mxfp4", ignore=[prefix])
     )
-    assert quant_config.online_quant_config is not None
+    assert quant_config.online_quantization_config is not None
     monkeypatch.setattr(
-        quant_config.online_quant_config,
+        quant_config.online_quantization_config,
         "get_quant_method",
         lambda *args: pytest.fail("online method should not be constructed"),
     )
@@ -296,15 +296,15 @@ def test_activation_only_override_keeps_checkpoint_config(monkeypatch) -> None:
     )
 
     assert result is checkpoint_config
-    assert result.online_quant_config is None
+    assert result.online_quantization_config is None
 
 
 def test_online_overlay_loads_sidecar_checkpoint_config(monkeypatch, tmp_path) -> None:
     """An online overlay must not bypass checkpoint sidecar config loading."""
-    checkpoint_config = SimpleNamespace(online_quant_config=None)
+    checkpoint_config = SimpleNamespace(online_quantization_config=None)
 
     def set_online_quantization(args) -> None:
-        checkpoint_config.online_quant_config = args
+        checkpoint_config.online_quantization_config = args
 
     checkpoint_config.set_online_quantization = set_online_quantization
     loaded_configs: list[dict] = []
@@ -347,7 +347,7 @@ def test_online_overlay_loads_sidecar_checkpoint_config(monkeypatch, tmp_path) -
 
     assert result is checkpoint_config
     assert loaded_configs == [{}]
-    assert result.online_quant_config is model_config.quantization_config
+    assert result.online_quantization_config is model_config.quantization_config
 
 
 def test_log_online_quantization_for_composable_config(monkeypatch) -> None:
@@ -358,7 +358,7 @@ def test_log_online_quantization_for_composable_config(monkeypatch) -> None:
         "model.layers.1.self_attn.o_proj": ("linear", "mxfp8", None),
     }
     vllm_config = SimpleNamespace(
-        quant_config=SimpleNamespace(online_quant_config=online_config)
+        quant_config=SimpleNamespace(online_quantization_config=online_config)
     )
     log_args = []
     monkeypatch.setattr(
