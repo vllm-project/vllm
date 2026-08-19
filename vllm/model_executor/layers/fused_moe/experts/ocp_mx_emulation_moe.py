@@ -35,6 +35,52 @@ from vllm.utils.import_utils import has_quark
 logger = init_logger(__name__)
 
 
+def activation_quant_dtype(
+    ocp_mx_scheme: OCP_MX_Scheme | str,
+) -> torch.dtype | str | None:
+    """Activation dtype `moe_kernel_quantize_input` should fake-quantize to.
+
+    Args:
+        ocp_mx_scheme: The OCP MX scheme the emulated experts run. Accepts the
+            enum member or its string value.
+
+    Returns:
+        A `quant_dtype` `moe_kernel_quantize_input` dispatches on, or None for
+        weight-only schemes, which leave activations untouched.
+
+    Raises:
+        NotImplementedError: If the scheme has no emulated activation dtype.
+    """
+    if ocp_mx_scheme in {
+        OCP_MX_Scheme.w_mxfp4,
+        OCP_MX_Scheme.w_mxfp6_e3m2,
+        OCP_MX_Scheme.w_mxfp6_e2m3,
+    }:
+        return None
+    elif ocp_mx_scheme == OCP_MX_Scheme.w_mxfp4_a_mxfp4:
+        return "mxfp4"
+    elif ocp_mx_scheme in {
+        OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
+        OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2,
+    }:
+        return "mxfp6_e3m2"
+    elif ocp_mx_scheme in {
+        OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
+        OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3,
+    }:
+        return "mxfp6_e2m3"
+    elif ocp_mx_scheme in {
+        OCP_MX_Scheme.w_mxfp4_a_fp8,
+        OCP_MX_Scheme.w_mxfp6_e3m2_a_fp8,
+        OCP_MX_Scheme.w_mxfp6_e2m3_a_fp8,
+    }:
+        return current_platform.fp8_dtype()
+    raise NotImplementedError(
+        f"No emulated activation dtype for OCP MX scheme {ocp_mx_scheme}."
+        " Please open an issue."
+    )
+
+
 class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
     """
     Extension of TritonExperts to support emulated OCP MX MoE experts.
@@ -72,29 +118,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
 
         self.quantization_emulation = True
 
-        if self.ocp_mx_scheme in {
-            OCP_MX_Scheme.w_mxfp4,
-            OCP_MX_Scheme.w_mxfp6_e3m2,
-            OCP_MX_Scheme.w_mxfp6_e2m3,
-        }:
-            # Weight-only schemes leave activations unquantized.
-            self._quant_dtype = None
-        elif self.ocp_mx_scheme in {
-            OCP_MX_Scheme.w_mxfp4_a_mxfp4,
-        }:
-            self._quant_dtype = "mxfp4"
-        elif self.ocp_mx_scheme in [
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
-            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
-            OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2,
-            OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3,
-        ]:
-            self._quant_dtype = "mxfp6"
-        elif self.ocp_mx_scheme in [
-            OCP_MX_Scheme.w_mxfp4_a_fp8,
-            OCP_MX_Scheme.w_mxfp6_e3m2_a_fp8,
-        ]:
-            self._quant_dtype = current_platform.fp8_dtype()
+        self._quant_dtype = activation_quant_dtype(self.ocp_mx_scheme)
 
     @staticmethod
     def is_supported_config(
