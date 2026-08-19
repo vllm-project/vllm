@@ -58,6 +58,7 @@ def _topk_mask_shape(
     tile_m = 128 if max_query_len <= 128 else 256
     padded_q_len = triton.cdiv(max_query_len, tile_m) * tile_m
     num_words = triton.cdiv(max_key_len, 32) + int(reserve_key_starts_word)
+    num_words = triton.cdiv(num_words, 4) * 4
     return batch_size, padded_q_len, num_words
 
 
@@ -432,12 +433,12 @@ def _build_topk_mask(
     max_seq_len: int,
     out: torch.Tensor,
 ) -> torch.Tensor:
-    """Build a bit-packed top-k mask into ``out[:B, :max_Q, :num_words]``."""
+    """Build a bit-packed top-k mask while preserving padded row storage."""
     batch_size = len(q_lens)
     num_words = (max_seq_len + 31) // 32
     total_rows = batch_size * max_q_len
     if total_rows == 0:
-        return out[:batch_size, :max_q_len, :num_words]
+        return out[:batch_size, :max_q_len]
 
     total_q = sum(q_lens)
     mask_row_stride = out.stride(-2)
@@ -457,7 +458,7 @@ def _build_topk_mask(
             BLOCK_TOPK=triton.next_power_of_2(num_topk),
             BLOCK_WORDS=block_words,
         )
-        return out[:1, :max_q_len, :num_words]
+        return out[:1, :max_q_len]
 
     topk_packed = torch.cat(topk_indices_per_req, dim=0)
     num_topk = topk_packed.shape[1]
@@ -478,7 +479,7 @@ def _build_topk_mask(
         BLOCK_TOPK=triton.next_power_of_2(num_topk),
         BLOCK_WORDS=block_words,
     )
-    return out[:batch_size, :max_q_len, :num_words]
+    return out[:batch_size, :max_q_len]
 
 
 class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
