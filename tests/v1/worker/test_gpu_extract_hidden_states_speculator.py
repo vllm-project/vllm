@@ -19,6 +19,18 @@ class _RecordingModel(torch.nn.Module):
         self.hidden_states = hidden_states.clone()
 
 
+def test_init_requires_greedy_draft_sampling():
+    vllm_config = cast(
+        Any,
+        SimpleNamespace(
+            speculative_config=SimpleNamespace(draft_sample_method="probabilistic")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="only supports draft_sample_method='greedy'"):
+        ExtractHiddenStatesSpeculator(vllm_config, torch.device("cpu"))
+
+
 def test_init_speculator_dispatches_extract_hidden_states(monkeypatch):
     vllm_config = cast(
         Any,

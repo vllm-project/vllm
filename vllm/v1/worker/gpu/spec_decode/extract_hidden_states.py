@@ -18,6 +18,11 @@ class ExtractHiddenStatesSpeculator(DraftModelSpeculator):
     """Cache target hidden states while returning always-accepted draft tokens."""
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        assert vllm_config.speculative_config is not None
+        if vllm_config.speculative_config.draft_sample_method != "greedy":
+            raise ValueError(
+                "extract_hidden_states only supports draft_sample_method='greedy'"
+            )
         super().__init__(vllm_config, device)
 
         if self.num_speculative_steps != 1:
