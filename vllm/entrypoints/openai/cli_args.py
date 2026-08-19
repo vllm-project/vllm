@@ -412,7 +412,9 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
 
 def validate_parsed_serve_args(args: argparse.Namespace):
     """Quick checks for model serve args that raise prior to loading."""
-    if hasattr(args, "subparser") and args.subparser != "serve":
+    # `vllm launch <component>` builds its parser with make_arg_parser too (see
+    # LaunchSubcommandBase.add_cli_args), so its args are serve args as well.
+    if hasattr(args, "subparser") and args.subparser not in ("serve", "launch"):
         return
 
     # Ensure that the chat template is valid; raises if it likely isn't
