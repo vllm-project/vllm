@@ -47,41 +47,6 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 
 
-# Per-tensor fp8 layouts this attention reads as float8_e4m3fn. Which cache
-# dtypes are reachable at all is the sparse MLA backend's call
-# (``supported_kv_cache_dtypes``); this only says how to address the ones that
-# get here, so an e5m2 or nvfp4 cache raises instead of being read as e4m3.
-_E4M3_KV_LAYOUTS = ("fp8", "fp8_e4m3")
-
-
-def select_query_and_cache_form(
-    kv_cache_dtype: str, backend_supports_quant_query: bool
-) -> tuple[bool, bool]:
-    """``(pack the MQA query as fp8, view the paged cache as fp8)``.
-
-    An fp8 query only pairs with a per-tensor fp8 cache. Everything else takes
-    the bf16 ``(ql_nope, q_pe)`` query tuple that the fp8_ds_mla layout already
-    uses -- including an unquantized cache, so no dtype is forced on the user.
-    The fused kernels already emit both forms.
-    """
-    if not is_quantized_kv_cache(kv_cache_dtype):
-        return False, False
-    if kv_cache_dtype == "fp8_ds_mla":
-        # Block-scaled fp8 NoPE + bf16 RoPE, addressed as raw bytes and
-        # dequantized inside FlashMLA.
-        return False, False
-    assert kv_cache_dtype in _E4M3_KV_LAYOUTS, (
-        f"deepseek_v32 cannot address a {kv_cache_dtype} KV cache. "
-        f"Supported: unquantized, {', '.join(_E4M3_KV_LAYOUTS)}, fp8_ds_mla."
-    )
-    assert backend_supports_quant_query, (
-        "deepseek_v32 on a bf16-query sparse MLA backend (FlashMLA sparse) "
-        "requires the fp8_ds_mla KV cache layout. "
-        "Launch with --kv-cache-dtype fp8_ds_mla."
-    )
-    return True, True
-
-
 class DeepseekV32Indexer(nn.Module):
     indexer_cache_cls = DeepseekV32IndexerCache
 
@@ -318,9 +283,12 @@ class DeepseekV32Attention(MLAAttention):
         )
 
         if self.require_fp8_kv_cache:
-            self._fp8_query, self._fp8_kv_needs_view = select_query_and_cache_form(
-                self.kv_cache_dtype, self.impl.supports_quant_query_input
+            fp8_attention = (
+                is_quantized_kv_cache(self.kv_cache_dtype)
+                and self.kv_cache_dtype != "fp8_ds_mla"
             )
+            self._fp8_query = fp8_attention and self.impl.supports_quant_query_input
+            self._fp8_kv_needs_view = fp8_attention
 
         self._index_rope_interleave = getattr(config, "indexer_rope_interleave", False)
 
@@ -586,7 +554,7 @@ class DeepseekV32Attention(MLAAttention):
             return
 
         if self._fp8_kv_needs_view:
-            kv_cache = kv_cache.view(torch.float8_e4m3fn)
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
         if self._fp8_query:
             # FlashInfer sparse: single packed fp8 query.
             mqa_q_arg: torch.Tensor | tuple[torch.Tensor, torch.Tensor] = mqa_q[
