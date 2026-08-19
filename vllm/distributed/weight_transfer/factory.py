@@ -167,7 +167,7 @@ class WeightTransferTrainerFactory:
         init_info: "TrainerInitInfo",
         *,
         client: "VLLMWeightSyncClient",
-        source: "WeightSource",
+        source: "WeightSource | None" = None,
     ) -> TrainerWeightTransferEngine:
         """Build and rendezvous a ready-to-send trainer engine.
 
@@ -184,7 +184,9 @@ class WeightTransferTrainerFactory:
                 selects the engine; it also carries the wire params (e.g.
                 `packed`).
             client: Inference-side control-plane client.
-            source: `WeightSource` of `(name, tensor)` pairs to send each round.
+            source: `WeightSource` of `(name, tensor)` pairs to send each round,
+                for full-resync backends (NCCL, IPC). Sparse backend
+                omits it and passes its per-round payload to `send_weights`.
 
         Raises:
             ValueError: If `init_info.backend` is not registered.
@@ -233,10 +235,21 @@ WeightTransferEngineFactory.register_engine(
 )
 
 
-# Trainer-side engines. Backends register here as they migrate to the stateful
-# trainer engine; NCCL / sparse NCCL keep their static trainer path until then.
+# Trainer-side engines, parallel to the worker registry above.
+WeightTransferTrainerFactory.register_engine(
+    "nccl",
+    "vllm.distributed.weight_transfer.nccl_engine",
+    "NCCLTrainerWeightTransferEngine",
+)
+
 WeightTransferTrainerFactory.register_engine(
     "ipc",
     "vllm.distributed.weight_transfer.ipc_engine",
     "IPCTrainerWeightTransferEngine",
+)
+
+WeightTransferTrainerFactory.register_engine(
+    "sparse_nccl",
+    "vllm.distributed.weight_transfer.sparse_nccl_engine",
+    "SparseNCCLTrainerWeightTransferEngine",
 )

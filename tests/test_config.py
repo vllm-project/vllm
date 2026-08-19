@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pydantic
 import pytest
+from huggingface_hub import ResolvedRevision
 from pydantic import ValidationError
 
 import vllm.config.vllm as vllm_config_module
@@ -28,15 +29,59 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
+from vllm.config.mamba import MambaBackendEnum
 from vllm.config.utils import get_field
-from vllm.config.vllm import (
-    OPTIMIZATION_LEVEL_TO_CONFIG,
-    OptimizationLevel,
-)
+from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionCGSupport
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_kda_recoverssm_derivation_is_revalidated():
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            use_replayssm=True,
+            use_kda_recoverssm=False,
+            mamba_cache_mode="none",
+        ),
+        num_speculative_tokens=3,
+        model_config=SimpleNamespace(
+            supports_replayssm=True,
+            architecture="KimiLinearForCausalLM",
+        ),
+        mamba_config=SimpleNamespace(
+            backend=MambaBackendEnum.TRITON,
+            enable_stochastic_rounding=False,
+        ),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        kv_transfer_config=None,
+        use_v2_model_runner=True,
+    )
+
+    VllmConfig.validate_mamba_cached_kernel(config)
+    assert config.cache_config.use_replayssm
+    assert config.cache_config.use_kda_recoverssm
+
+    config.cache_config.mamba_cache_mode = "align"
+    VllmConfig.validate_mamba_cached_kernel(config)
+    config.use_v2_model_runner = False
+    with pytest.raises(ValueError, match="VLLM_USE_V2_MODEL_RUNNER=1"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+    config.use_v2_model_runner = True
+    config.cache_config.mamba_cache_mode = "all"
+    with pytest.raises(ValueError, match="only none and align"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+    config.cache_config.mamba_cache_mode = "none"
+
+    config.model_config.architecture = "NemotronHForCausalLM"
+    with pytest.raises(ValueError, match="only supported for Kimi-K3 KDA"):
+        VllmConfig.validate_mamba_cached_kernel(config)
+
+    config.model_config.architecture = "KimiLinearForCausalLM"
+    config.parallel_config.pipeline_parallel_size = 2
+    with pytest.raises(ValueError, match="pipeline_parallel_size=1"):
+        VllmConfig.validate_mamba_cached_kernel(config)
 
 
 def test_compile_config_repr_succeeds():
@@ -66,6 +111,156 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
         monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", env_value)
 
     assert envs.VLLM_USE_V2_MODEL_RUNNER is expected
+
+
+def test_rocm_keeps_compiled_deepseek_defaults(monkeypatch):
+    """ROCm keeps DeepSeek V3.2 and V4 on their compiled MRV1 paths."""
+    from vllm.config.vllm import (
+        default_breakable_cudagraph_architectures,
+        default_v2_model_runner_architectures,
+    )
+    from vllm.platforms import current_platform
+
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    # The lookup is lru_cached against a fixed platform.
+    default_v2_model_runner_architectures.cache_clear()
+    default_breakable_cudagraph_architectures.cache_clear()
+    try:
+        v2_architectures = default_v2_model_runner_architectures()
+        breakable_architectures = default_breakable_cudagraph_architectures()
+
+        assert "DeepseekV32ForCausalLM" not in v2_architectures
+        assert "DeepseekV4ForCausalLM" not in v2_architectures
+        assert "DeepseekV32ForCausalLM" not in breakable_architectures
+        assert "DeepseekV32MTPModel" not in breakable_architectures
+    finally:
+        default_v2_model_runner_architectures.cache_clear()
+        default_breakable_cudagraph_architectures.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("model", "architecture"),
+    [
+        ("nvidia/GLM-5.2-NVFP4", "GlmMoeDsaForCausalLM"),
+        ("zai-org/GLM-5.2-FP8", "GlmMoeDsaForCausalLM"),
+        ("nvidia/DeepSeek-V3.2-NVFP4", "DeepseekV32ForCausalLM"),
+    ],
+)
+@pytest.mark.parametrize("with_mtp", [False, True], ids=["no-mtp", "mtp"])
+def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
+    monkeypatch, model, architecture, with_mtp
+):
+    from vllm.compilation.breakable_cudagraph import (
+        is_breakable_cudagraph_enabled,
+    )
+    from vllm.config.vllm import (
+        default_breakable_cudagraph_architectures,
+        default_v2_model_runner_architectures,
+    )
+    from vllm.platforms import current_platform
+
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+    monkeypatch.setattr(vllm_config_module, "HAS_TRITON", True)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    default_v2_model_runner_architectures.cache_clear()
+    default_breakable_cudagraph_architectures.cache_clear()
+
+    model_config = SimpleNamespace(
+        model=model,
+        architectures=[architecture],
+        runner_type="generate",
+        is_moe=True,
+        is_hybrid=False,
+        is_attention_free=False,
+        is_diffusion=False,
+    )
+    config = SimpleNamespace(
+        model_config=model_config,
+        speculative_config=SimpleNamespace(method="mtp") if with_mtp else None,
+        parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
+        compilation_config=CompilationConfig(
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+        ),
+    )
+    config._dflash_needs_multi_kv_group = lambda: False
+    config._is_default_v2_model_runner_model = lambda: (
+        VllmConfig._is_default_v2_model_runner_model(config)
+    )
+    config._get_v2_model_runner_unsupported_features = lambda: []
+    config._uses_breakable_cudagraph_by_default = lambda: (
+        VllmConfig._uses_breakable_cudagraph_by_default(config)
+    )
+
+    try:
+        assert VllmConfig.use_v2_model_runner.fget(config)
+        assert VllmConfig._maybe_enable_breakable_cudagraph(config)
+        assert is_breakable_cudagraph_enabled()
+        assert config.compilation_config.mode == CompilationMode.NONE
+        assert config.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
+    finally:
+        os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        default_v2_model_runner_architectures.cache_clear()
+        default_breakable_cudagraph_architectures.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("architecture", "is_rocm", "expected"),
+    [
+        ("DeepseekV32ForCausalLM", False, True),
+        ("DeepseekV32ForCausalLM", True, False),
+        ("DeepseekV32MTPModel", False, True),
+        ("DeepseekV32MTPModel", True, False),
+        ("GlmMoeDsaForCausalLM", False, True),
+        ("GlmMoeDsaForCausalLM", True, True),
+    ],
+)
+def test_dsa_breakable_cudagraph_platform_default(
+    monkeypatch, architecture, is_rocm, expected
+):
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
+    from vllm.platforms import current_platform
+
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: is_rocm)
+    default_breakable_cudagraph_architectures.cache_clear()
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architectures=[architecture]),
+        compilation_config=CompilationConfig(),
+    )
+    config._uses_breakable_cudagraph_by_default = lambda: (
+        VllmConfig._uses_breakable_cudagraph_by_default(config)
+    )
+
+    try:
+        assert VllmConfig._maybe_enable_breakable_cudagraph(config) is expected
+        if expected:
+            assert config.compilation_config.mode == CompilationMode.NONE
+    finally:
+        os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        default_breakable_cudagraph_architectures.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("model_type", "expected_architecture"),
+    [
+        ("deepseek_v32", "DeepseekV32MTPModel"),
+        ("glm_moe_dsa", "DeepseekV32MTPModel"),
+        ("deepseek_v3", "DeepSeekMTPModel"),
+    ],
+)
+def test_dsa_models_select_matching_mtp(model_type, expected_architecture):
+    from transformers import PretrainedConfig
+
+    hf_config = PretrainedConfig(
+        architectures=["DeepseekV32ForCausalLM"],
+        num_nextn_predict_layers=1,
+    )
+    hf_config.model_type = model_type
+
+    SpeculativeConfig.hf_config_override(hf_config)
+
+    assert hf_config.architectures == [expected_architecture]
 
 
 @pytest.mark.parametrize(
@@ -183,6 +378,16 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ),
         (
             SimpleNamespace(
+                model="deepseek-ai/DeepSeek-V4-Flash",
+                architectures=["DeepseekV4ForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=True,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
                 model="Qwen/Qwen1.5-MoE-A2.7B",
                 architectures=["Qwen2MoeForCausalLM"],
                 runner_type="generate",
@@ -275,20 +480,53 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ),
         (
             SimpleNamespace(
-                model="Qwen/Qwen3-Embedding-0.6B",
-                architectures=["Qwen3ForCausalLM"],
+                model="sentence-transformers/all-MiniLM-L6-v2",
+                architectures=["BertModel"],
                 runner_type="pooling",
+                is_multimodal_model=False,
                 is_moe=False,
                 is_quantized=False,
             ),
-            False,
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-Embedding-0.6B",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="pooling",
+                is_multimodal_model=False,
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="TomoroAI/tomoro-colqwen3-embed-4b",
+                architectures=["ColQwen3"],
+                runner_type="pooling",
+                is_multimodal_model=True,
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
         ),
     ],
 )
-def test_is_default_v2_model_runner_model(model_config, expected):
+def test_is_default_v2_model_runner_model(model_config, expected, monkeypatch):
+    from vllm.config.vllm import default_v2_model_runner_architectures
+    from vllm.platforms import current_platform
+
+    # The expectations below are the platform-independent defaults; ROCm's
+    # DeepSeek V4 carve-out is covered by test_rocm_defaults_deepseek_v4_to_mrv1.
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    default_v2_model_runner_architectures.cache_clear()
     config = SimpleNamespace(model_config=model_config)
 
-    assert VllmConfig._is_default_v2_model_runner_model(config) is expected
+    try:
+        assert VllmConfig._is_default_v2_model_runner_model(config) is expected
+    finally:
+        default_v2_model_runner_architectures.cache_clear()
 
 
 @pytest.mark.skip_global_cleanup
@@ -382,6 +620,21 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
     assert cfg.scheduler_config.async_scheduling is True
 
 
+def test_data_parallel_rpc_port_has_fixed_default():
+    assert ParallelConfig().data_parallel_rpc_port == 29550
+
+
+@pytest.mark.parametrize("port", [1, 29550, 65535])
+def test_data_parallel_rpc_port_accepts_valid_ports(port: int):
+    assert ParallelConfig(data_parallel_rpc_port=port).data_parallel_rpc_port == port
+
+
+@pytest.mark.parametrize("port", [-1, 0, 65536])
+def test_data_parallel_rpc_port_rejects_invalid_ports(port: int):
+    with pytest.raises(ValidationError):
+        ParallelConfig(data_parallel_rpc_port=port)
+
+
 def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
     parallel_config = ParallelConfig(
         tensor_parallel_size=8,
@@ -428,6 +681,30 @@ def test_draft_model_enables_async_scheduling_by_default():
     )
 
     assert cfg.scheduler_config.async_scheduling is True
+
+
+@pytest.mark.parametrize(
+    ("method", "parallel_drafting", "expected_slots"),
+    [
+        pytest.param("eagle3", False, 0, id="eagle3"),
+        pytest.param("eagle3", True, 7, id="p-eagle"),
+        pytest.param("dflash", True, 8, id="dflash"),
+        pytest.param("dspark", True, 7, id="dspark"),
+        pytest.param("mtp", False, 0, id="mtp"),
+        pytest.param("ngram", False, 0, id="ngram"),
+        pytest.param("draft_model", False, 1, id="draft-model"),
+        pytest.param("draft_model", True, 8, id="pard"),
+    ],
+)
+def test_max_num_new_slots_for_drafting(method, parallel_drafting, expected_slots):
+    speculative_config = SpeculativeConfig(
+        model="ngram",
+        num_speculative_tokens=8,
+    )
+    speculative_config.method = method
+    speculative_config.parallel_drafting = parallel_drafting
+
+    assert speculative_config.max_num_new_slots_for_drafting == expected_slots
 
 
 @dataclass
@@ -1771,3 +2048,23 @@ def test_load_config_rejects_invalid_safetensors_load_strategy():
 def test_load_config_rejects_non_string_load_format(bad_load_format):
     with pytest.raises(pydantic.ValidationError):
         LoadConfig(load_format=bad_load_format)
+
+
+# A real Qwen3-0.6B model revision that is used in the tests below.
+REVISION = "c1899de289a04d12100db370d81485cdf75e47ca"
+
+
+@patch("vllm.config.model.resolve_revision", return_value=ResolvedRevision(REVISION))
+def test_revision_not_resolved_when_weights_differ_from_model(mock_resolve):
+    model_weights = "unsloth/Qwen3-0.6B-GGUF:Q8_0"
+    config = ModelConfig("Qwen/Qwen3-0.6B", model_weights=model_weights)
+    assert config.revision is None
+
+
+@patch("vllm.config.model.resolve_revision", return_value=ResolvedRevision(REVISION))
+def test_revision_resolved_when_weights_match_model(mock_resolve):
+    model = "Qwen/Qwen3-0.6B"
+    config = ModelConfig(model)
+    assert isinstance(config.revision, ResolvedRevision)
+    assert config.revision.resolved == REVISION
+    mock_resolve.assert_any_call(model, None, config.hf_token)

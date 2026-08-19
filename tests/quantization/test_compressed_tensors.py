@@ -22,6 +22,7 @@ from vllm.model_executor.kernels.linear import (
     Fp8BlockScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsConfig,
     CompressedTensorsLinearMethod,
@@ -35,12 +36,21 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsWNA8O8Int,
     CompressedTensorsWNA16,
 )
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import (  # noqa: E501
+    CompressedTensorsW8A8Fp8MoEMethod,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+    ScaleDesc,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
+from vllm.scalar_type import scalar_types
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 
 # AITER only supports per-channel-per-channel INT8 gemm
@@ -343,6 +353,34 @@ def test_compressed_tensors_fp8(vllm_runner):
 
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
+
+
+def test_compressed_tensors_w8a8_fp8_moe_forwards_swiglu_params():
+    quant_method = object.__new__(CompressedTensorsW8A8Fp8MoEMethod)
+    quant_method.input_quant = QuantizationArgs(
+        num_bits=8,
+        type=QuantizationType.FLOAT,
+        strategy=QuantizationStrategy.TOKEN,
+        dynamic=True,
+        symmetric=True,
+    )
+    quant_method.weight_block_size = None
+    quant_method.fp8_backend = Fp8MoeBackend.TRITON
+
+    layer = Mock()
+    layer.w13_weight_scale = torch.ones(2, 4, 1)
+    layer.w2_weight_scale = torch.ones(2, 8, 1)
+    layer.w13_input_scale = None
+    layer.w2_input_scale = None
+    layer.swiglu_alpha = 1.702
+    layer.swiglu_beta = None
+    layer.swiglu_limit = 7.0
+
+    quant_config = quant_method.get_fused_moe_quant_config(layer)
+
+    assert quant_config.gemm1_alpha == 1.702
+    assert quant_config.gemm1_beta is None
+    assert quant_config.gemm1_clamp_limit == 7.0
 
 
 @pytest.mark.skipif(
@@ -937,6 +975,44 @@ def test_wna16_moe_w2_scale_sharding(actorder, group_size, part, full, expected)
         actorder, group_size, part, full
     )
     assert result == expected
+
+
+@pytest.mark.parametrize("num_bits", range(2, 9))
+def test_humming_supports_compressed_tensors_wna16_quant_key(num_bits):
+    from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+        HummingExpertsBase,
+    )
+    from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa: E501
+        WNA16_SUPPORTED_TYPES_MAP,
+    )
+
+    weight_key = QuantKey(
+        dtype=WNA16_SUPPORTED_TYPES_MAP[num_bits],
+        scale=ScaleDesc(
+            dtype=torch.float16,
+            static=True,
+            group_shape=GroupShape(row=1, col=128),
+        ),
+        symmetric=True,
+    )
+
+    assert HummingExpertsBase._supports_quant_scheme(weight_key, None)
+
+
+def test_quant_key_str_supports_scalar_type_dtypes():
+    quant_key = QuantKey(
+        dtype=scalar_types.uint2b2,
+        scale=ScaleDesc(
+            dtype=torch.float16,
+            static=True,
+            group_shape=GroupShape(row=1, col=128),
+        ),
+        symmetric=True,
+    )
+
+    assert str(quant_key) == (
+        "QuantKey(uint2b2,scale(f16,static,GroupShape(row=1, col=128)),symmetric)"
+    )
 
 
 @pytest.mark.skipif(
