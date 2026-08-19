@@ -174,6 +174,15 @@ class KVConnectorBase_V1(ABC):
     """
 
     @property
+    def supports_divergent_local_hybrid_hits(self) -> bool:
+        """Whether external hits can complete divergent local hybrid hits.
+
+        A capable connector restores lagging recurrent state when the local
+        full-attention group reaches a deeper boundary. Defaults to False.
+        """
+        return False
+
+    @property
     def prefer_cross_layer_blocks(self) -> bool:
         """
         Indicates whether this connector prefers KV blocks that hold KV data for all

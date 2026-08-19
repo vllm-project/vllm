@@ -17,7 +17,6 @@ import queue
 import socket
 import threading
 import time
-from collections import defaultdict
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
@@ -46,6 +45,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  
     ChunkedTokenDatabase,
     KeyMetadata,
     MooncakeStoreConnectorMetadata,
+    MooncakeStoreWorkerMetadata,
     PoolKey,
     ReqMeta,
 )
@@ -80,6 +80,7 @@ logger = init_logger(__name__)
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
+DEFAULT_TENANT_ID = "default"
 
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
 _T = TypeVar("_T")
@@ -87,6 +88,22 @@ _T = TypeVar("_T")
 
 def _rotate_list(values: list[_T], offset: int) -> list[_T]:
     return values[offset:] + values[:offset]
+
+
+def _replicate_config_supports_group_ids(
+    replicate_config_cls: type[Any],
+    replicate_config: Any,
+) -> bool:
+    if hasattr(replicate_config_cls, "group_ids"):
+        return True
+    return hasattr(replicate_config, "group_ids")
+
+
+def _make_mooncake_group_id(metadata: KeyMetadata, chunk_hash: str) -> str:
+    # Mooncake group ids describe the lifecycle unit. For vLLM, that unit is
+    # a prefix chunk, so shard dimensions stay only in the object key.
+    prefix = f"{metadata.cache_prefix}@" if metadata.cache_prefix else ""
+    return f"vllm-mooncake-store:{prefix}{metadata.model_name}@{chunk_hash}"
 
 
 # Mirrors FileStorageConfig::local_buffer_size in Mooncake C++.
@@ -118,6 +135,7 @@ class MooncakeStoreConfig:
     global_segment_size: int = DEFAULT_GLOBAL_SEGMENT_SIZE
     local_buffer_size: int = DEFAULT_LOCAL_BUFFER_SIZE
     enable_offload: bool = False
+    tenant_id: str = DEFAULT_TENANT_ID
 
     def __post_init__(self) -> None:
         if self.mode not in ("embedded", "standalone-store"):
@@ -146,6 +164,7 @@ class MooncakeStoreConfig:
                 config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)
             ),
             enable_offload=bool(config.get("enable_offload", False)),
+            tenant_id=_normalize_tenant_id(config.get("tenant_id", DEFAULT_TENANT_ID)),
         )
 
     @staticmethod
@@ -156,6 +175,17 @@ class MooncakeStoreConfig:
                 "The environment variable 'MOONCAKE_CONFIG_PATH' is not set."
             )
         return MooncakeStoreConfig.from_file(config_path)
+
+
+def _normalize_tenant_id(value: Any) -> str:
+    if value is None:
+        return DEFAULT_TENANT_ID
+    if not isinstance(value, str):
+        raise TypeError(
+            f"tenant_id must be a string or null, got {type(value).__name__}: {value!r}"
+        )
+    tenant_id = value.strip()
+    return tenant_id if tenant_id else DEFAULT_TENANT_ID
 
 
 def _parse_size(value: Any) -> int:
@@ -459,6 +489,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         ready_event: threading.Event,
         enable_kv_event: bool = False,
         replicate_config: Any = None,
+        enable_group_semantics: bool = False,
+        supports_group_ids: bool = False,
         record_operation: Callable[..., None] | None = None,
     ):
         super().__init__(
@@ -474,11 +506,22 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.group_put_steps = group_put_steps
         self.coord = coord
         self.kv_role = kv_role
-        self.stored_requests: defaultdict[str, int] = defaultdict(int)
+        # req_id -> ids of its store jobs that are still queued or running.
+        # Keying by store_job_id, which never repeats for the engine's lifetime,
+        # rather than counting jobs per request id makes the ledger immune to id
+        # reuse across preemption: a job left over from a retired generation is
+        # missing from the set its resumed generation builds, so it can no longer
+        # retire that generation, rewind its resume offset, or mark it skipped.
+        self.stored_requests: dict[str, set[int]] = {}
+        # store_job_id -> times this rank finished with it, drained every step
+        # so the scheduler can release the blocks it referenced for those jobs.
+        self._completed_saves: dict[int, int] = {}
         self.enable_kv_event = enable_kv_event
         # Caller always passes a non-None ReplicateConfig — see
         # MooncakeStoreWorker.__init__ where store_replicate_config is built.
         self.replicate_config = replicate_config
+        self.enable_group_semantics = enable_group_semantics
+        self.supports_group_ids = supports_group_ids
 
         # Pause store requests when CPU/disk offloading is under pressure.
         self._store_pressure_active = False
@@ -488,14 +531,20 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # batch resumes here, so pressure-skipped or failed ranges are retried.
         self._saved_offset: dict[str, int] = {}
 
-    def add_stored_request(self, req_id: str):
+    def add_request(self, request: ReqMeta) -> None:
+        # Register before enqueueing so a job is never picked up unledgered.
+        assert request.store_job_id is not None
         with self.done_task_lock:
-            self.stored_requests[req_id] += 1
+            self.stored_requests.setdefault(request.req_id, set()).add(
+                request.store_job_id
+            )
+        super().add_request(request)
 
-    def dec_stored_request(self, req_id: str):
+    def is_live_store_job(self, req_meta: ReqMeta) -> bool:
         with self.done_task_lock:
-            if req_id in self.stored_requests:
-                self.stored_requests[req_id] -= 1
+            return req_meta.store_job_id in self.stored_requests.get(
+                req_meta.req_id, ()
+            )
 
     def delete_finished_stored_request(self, req_id: str):
         with self.done_task_lock:
@@ -504,21 +553,51 @@ class KVCacheStoreSendingThread(KVTransferThread):
             self._skip_store_requests.discard(req_id)
             self._saved_offset.pop(req_id, None)
 
-    def _record_saved(self, req_id: str, token_len: int) -> None:
-        # Guard on liveness so a concurrent finish/preempt pop isn't recreated.
+    def finish_store_job(self, req_meta: ReqMeta) -> None:
+        """Retire a job from the ledger and report its blocks as no longer read.
+
+        Every path out of a job must reach this, skips and failures included: a
+        job that never reports leaves its blocks referenced for the rest of the
+        run. The discard is a no-op for a job whose generation already retired.
+        """
+        store_job_id = req_meta.store_job_id
+        assert store_job_id is not None, (
+            "a queued store job always carries a store_job_id"
+        )
         with self.done_task_lock:
-            if req_id in self.stored_requests:
-                self._saved_offset[req_id] = token_len
+            live = self.stored_requests.get(req_meta.req_id)
+            if live is not None:
+                live.discard(store_job_id)
+            self._completed_saves[store_job_id] = (
+                self._completed_saves.get(store_job_id, 0) + 1
+            )
+
+    def take_completed_saves(self) -> dict[int, int]:
+        with self.done_task_lock:
+            completed = self._completed_saves
+            self._completed_saves = {}
+        return completed
+
+    def _record_saved(self, req_meta: ReqMeta, token_len: int) -> None:
+        # Guard on job liveness so neither a concurrent finish/preempt pop nor a
+        # stale job's offset is written back over the live generation's.
+        with self.done_task_lock:
+            if req_meta.store_job_id in self.stored_requests.get(req_meta.req_id, ()):
+                self._saved_offset[req_meta.req_id] = token_len
 
     def _should_skip_request(self, req_id: str) -> bool:
         with self.done_task_lock:
             return self._store_pressure_active and req_id in self._skip_store_requests
 
-    def _mark_request_skipped_for_pressure(self, req_id: str) -> bool:
+    def _mark_request_skipped_for_pressure(self, req_meta: ReqMeta) -> bool:
+        req_id = req_meta.req_id
         with self.done_task_lock:
             already_skipped = req_id in self._skip_store_requests
             self._store_pressure_active = True
-            self._skip_store_requests.add(req_id)
+            # The pressure itself is global, but only a live job may sentence its
+            # own request to being skipped.
+            if req_meta.store_job_id in self.stored_requests.get(req_id, ()):
+                self._skip_store_requests.add(req_id)
         return already_skipped
 
     def _clear_store_pressure(self) -> bool:
@@ -567,6 +646,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
         keys: list[str] = []
         addrs: list[list[int]] = []
         sizes: list[list[int]] = []
+        group_ids: list[str] | None = (
+            [] if self.enable_group_semantics and self.supports_group_ids else None
+        )
         saved = self._saved_offset.get(req_meta.req_id, 0)
         for g_idx, db in enumerate(self.token_databases):
             group_blocks = req_meta.block_ids[g_idx]
@@ -603,9 +685,17 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
                     continue
                 addr, size = db.prepare_value_for_block(block_id)
-                keys.append(db.key_for(key_hash))
+                key = db.key_for(key_hash)
+                keys.append(key)
                 addrs.append(addr)
                 sizes.append(size)
+                if group_ids is not None:
+                    group_ids.append(
+                        _make_mooncake_group_id(
+                            db.metadata,
+                            key.rsplit("@", 1)[-1],
+                        )
+                    )
 
         if not keys:
             return True
@@ -633,9 +723,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
         keys = [keys[i] for i in missing]
         addrs = [addrs[i] for i in missing]
         sizes = [sizes[i] for i in missing]
+        if group_ids is not None:
+            group_ids = [group_ids[i] for i in missing]
         if req_meta.current_event is not None:
             # Fence the CoW block copy enqueued earlier this step.
             req_meta.current_event.synchronize()
+        if group_ids is not None:
+            assert len(group_ids) == len(keys)
+            self.replicate_config.group_ids = group_ids
         batch_bytes = _sum_batch_bytes(sizes)
         put_start = time.perf_counter()
         try:
@@ -677,7 +772,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 failed_codes,
             )
             if MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes:
-                self._mark_request_skipped_for_pressure(req_meta.req_id)
+                self._mark_request_skipped_for_pressure(req_meta)
             return False
 
         if self._clear_store_pressure():
@@ -688,22 +783,20 @@ class KVCacheStoreSendingThread(KVTransferThread):
         return True
 
     def _handle_request(self, req_meta: ReqMeta):
-        # Cache hits are always a multiple of ``lcm_block_size`` tokens, which
-        # is also ``store_mask``'s precondition.
-        lcm_block_size = self.coord.lcm_block_size
-        token_len = req_meta.token_len_chunk // lcm_block_size * lcm_block_size
-        block_ids_per_group = req_meta.block_ids
-        req_id = req_meta.req_id
-        current_event = req_meta.current_event
-
-        if req_id not in self.stored_requests:
-            self.request_queue.task_done()
-            return
-
-        # Decrement the in-flight counter and signal task_done() in `finally`
-        # so the scheduler can release the GPU blocks it pinned for this
-        # request (via `delay_free_blocks`) even when the store path raises.
+        # The single `finally` is the only way out, so the scheduler releases
+        # this job's GPU block references however the job ends.
         try:
+            # Cache hits are always a multiple of ``lcm_block_size`` tokens,
+            # which is also ``store_mask``'s precondition.
+            lcm_block_size = self.coord.lcm_block_size
+            token_len = req_meta.token_len_chunk // lcm_block_size * lcm_block_size
+            block_ids_per_group = req_meta.block_ids
+            req_id = req_meta.req_id
+            current_event = req_meta.current_event
+
+            if not self.is_live_store_job(req_meta):
+                return
+
             if self._should_skip_request(req_id):
                 logger.debug(
                     "Skipping Mooncake store for request %s while CPU/disk "
@@ -758,7 +851,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     group_indices.append(g_idx)
 
             if not keys:
-                self._record_saved(req_id, token_len)
+                self._record_saved(req_meta, token_len)
                 return
 
             # Check which blocks already exist (dedup)
@@ -784,7 +877,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             ]
 
             if not missing_indices:
-                self._record_saved(req_id, token_len)
+                self._record_saved(req_meta, token_len)
                 return
 
             if len(missing_indices) != len(keys):
@@ -796,6 +889,18 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         kv_event_block_hashes[i] for i in missing_indices
                     ]
                 group_indices = [group_indices[i] for i in missing_indices]
+
+            group_ids = (
+                [
+                    _make_mooncake_group_id(
+                        self.token_databases[g_idx].metadata,
+                        key.rsplit("@", 1)[-1],
+                    )
+                    for key, g_idx in zip(keys, group_indices, strict=True)
+                ]
+                if self.enable_group_semantics and self.supports_group_ids
+                else None
+            )
 
             logger.debug(
                 "Storing KV cache for %d blocks (groups=%s) for request %s",
@@ -855,6 +960,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if current_event is not None:
                 current_event.synchronize()
 
+            if group_ids is not None:
+                assert len(group_ids) == len(keys)
+                self.replicate_config.group_ids = group_ids
+
             batch_bytes = _sum_batch_bytes(sizes)
             put_start = time.perf_counter()
             try:
@@ -888,7 +997,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     )
                     if (
                         MOONCAKE_NO_AVAILABLE_HANDLE in failed_codes
-                        and not self._mark_request_skipped_for_pressure(req_id)
+                        and not self._mark_request_skipped_for_pressure(req_meta)
                     ):
                         logger.warning(
                             "Detected Mooncake CPU/disk offloading pressure "
@@ -898,7 +1007,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             req_id,
                         )
                 else:
-                    self._record_saved(req_id, token_len)
+                    self._record_saved(req_meta, token_len)
                     if self._clear_store_pressure():
                         logger.info(
                             "Mooncake CPU/disk offloading pressure cleared "
@@ -918,7 +1027,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if self.enable_kv_event and stored_events:
                 self.update_kv_event(stored_events)
         finally:
-            self.dec_stored_request(req_id)
+            self.finish_store_job(req_meta)
             self.request_queue.task_done()
 
 
@@ -1193,6 +1302,9 @@ class MooncakeStoreWorker:
         self.store = MooncakeDistributedStore()
         local_ip = get_ip()
         local_hostname = rdma_utils.get_requester_local_hostname(local_ip)
+        setup_kwargs: dict[str, str] = {}
+        if store_config.tenant_id != DEFAULT_TENANT_ID:
+            setup_kwargs["tenant_id"] = store_config.tenant_id
         ret = self.store.setup(
             local_hostname,
             store_config.metadata_server,
@@ -1201,6 +1313,7 @@ class MooncakeStoreWorker:
             store_config.protocol,
             store_config.device_name,
             store_config.master_server_address,
+            **setup_kwargs,
         )
         if ret != 0:
             msg = "Initialize MooncakeDistributedStore failed."
@@ -1210,17 +1323,31 @@ class MooncakeStoreWorker:
         preferred_segment = rdma_utils.get_configured_preferred_segment(extra_config)
         self.preferred_segment = preferred_segment
         self.store_replicate_config = ReplicateConfig()
+        self.enable_group_semantics = (
+            str(extra_config.get("enable_group_semantics", "False")).strip().lower()
+            == "true"
+        )
+        self._supports_group_ids = _replicate_config_supports_group_ids(
+            ReplicateConfig, self.store_replicate_config
+        )
+        if self.enable_group_semantics and not self._supports_group_ids:
+            logger.warning(
+                "Mooncake group semantics is enabled, but the installed "
+                "Mooncake package does not support ReplicateConfig.group_ids. "
+                "Falling back to the existing batch_put_from_multi_buffers path."
+            )
         if preferred_segment is not None:
             self.store_replicate_config.preferred_segment = preferred_segment
 
         logger.info(
             "Mooncake mode=%s (global_segment_size=%d, local_buffer_size=%d, "
-            "preferred_segment=%s, enable_offload=%s)",
+            "preferred_segment=%s, enable_offload=%s, tenant_id=%s)",
             store_config.mode,
             store_config.global_segment_size,
             store_config.local_buffer_size,
             preferred_segment or "<none>",
             store_config.enable_offload,
+            store_config.tenant_id,
         )
         if store_config.mode == "embedded":
             if store_config.enable_offload and preferred_segment is None:
@@ -1306,7 +1433,7 @@ class MooncakeStoreWorker:
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
             use_eagle=use_eagle,
-            retention_interval=envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL,
+            retention_interval=kv_cache_config.prefix_cache_retention_interval,
         )
         # One ChunkedTokenDatabase per group; addresses populated in
         # register_kv_caches once the kv-cache layout is known. Each group's
@@ -1503,6 +1630,8 @@ class MooncakeStoreWorker:
                 ready_event_sending,
                 self.enable_kv_events,
                 self.store_replicate_config,
+                enable_group_semantics=self.enable_group_semantics,
+                supports_group_ids=self._supports_group_ids,
                 record_operation=self._record_kv_connector_operation,
             )
             self.kv_send_thread.start()
@@ -1584,16 +1713,15 @@ class MooncakeStoreWorker:
                     continue
                 request.current_event = current_event
                 assert self.kv_send_thread is not None
-                self.kv_send_thread.add_stored_request(request.req_id)
                 self.kv_send_thread.add_request(request)
 
-        # Check completion of previously queued transfers
-        done_sending = (
-            self._get_and_clear_finished_sending(finished_req_ids, meta)
-            if self.kv_role in ["kv_producer", "kv_both"]
-            else set()
-        )
+        if self.kv_role in ["kv_producer", "kv_both"]:
+            self._close_ended_store_requests(finished_req_ids, meta)
 
+        # Blocks read by a store job are released by the scheduler when the job
+        # reports back (see build_connector_worker_meta), so no request ever waits
+        # on a `finished_sending` signal to get its blocks back.
+        done_sending: set[str] = set()
         done_recving: set[str] = set()
         if self.load_async:
             for recv_thread in self.kv_recv_threads:
@@ -1641,35 +1769,37 @@ class MooncakeStoreWorker:
             self.kv_connector_stats = MooncakeStoreConnectorStats()
             return kv_connector_stats
 
-    def _get_and_clear_finished_sending(
+    def _close_ended_store_requests(
         self,
         finished_req_ids: set[str],
         meta: MooncakeStoreConnectorMetadata,
-    ) -> set[str]:
+    ) -> None:
+        """Retire the ledger entries of requests that finished or were preempted.
+
+        An entry may only go once its jobs have drained, because they still read
+        the resume offset it owns; a request that comes back after preemption
+        then saves from the start rather than from where the last attempt got to.
+        """
         assert self.kv_send_thread is not None
-        finished_sending: set[str] = set()
 
         for req_id in meta.preempted_req_ids:
             self.kv_send_thread.delete_finished_stored_request(req_id)
 
-        for req_id in self.kv_send_thread.stored_requests.copy():
-            if (
-                self.kv_send_thread.stored_requests[req_id] == 0
-                and req_id in self.finished_store_req
-            ):
-                self.finished_store_req.remove(req_id)
-                finished_sending.add(req_id)
-                self.kv_send_thread.delete_finished_stored_request(req_id)
-
-        for req_id in finished_req_ids:
-            req_remain_jobs = self.kv_send_thread.stored_requests.get(req_id)
-            if req_remain_jobs == 0:
-                finished_sending.add(req_id)
-                self.kv_send_thread.delete_finished_stored_request(req_id)
-            elif req_remain_jobs is not None:
+        for req_id in finished_req_ids | self.finished_store_req:
+            if self.kv_send_thread.stored_requests.get(req_id):
+                # Queued jobs still need the resume offset; retire on a later step.
                 self.finished_store_req.add(req_id)
+            else:
+                self.finished_store_req.discard(req_id)
+                self.kv_send_thread.delete_finished_stored_request(req_id)
 
-        return finished_sending
+    def build_connector_worker_meta(self) -> MooncakeStoreWorkerMetadata | None:
+        if self.kv_send_thread is None:
+            return None
+        completed_saves = self.kv_send_thread.take_completed_saves()
+        if not completed_saves:
+            return None
+        return MooncakeStoreWorkerMetadata(completed_saves=completed_saves)
 
     def lookup(self, num_tokens: int, block_hashes: Sequence[BlockHash]) -> int:
         """Check how many prefix tokens exist in the store.

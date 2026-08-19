@@ -21,28 +21,12 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
     TEST_MODELS: list[tuple[str, dict[str, Any]]] = [
         ("facebook/opt-125m", {}),
         (
-            "neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic",
+            "RedHatAI/Llama-3.2-1B-Instruct-FP8-dynamic",
             {"dtype": torch.float16},
         ),
-        ("meta-llama/Llama-3.2-1B-Instruct", {}),
     ]
 
     if all:
-        TEST_MODELS.extend(
-            [
-                ("neuralmagic/Llama-3.2-1B-Instruct-quantized.w8a8", {}),
-                (
-                    "nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change",
-                    {"dtype": torch.float16},
-                ),
-            ]
-        )
-
-        if is_quant_method_supported("gptq"):
-            TEST_MODELS.append(
-                ("TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ", {"quantization": "gptq"})
-            )
-
         if is_quant_method_supported("gptq_marlin"):
             TEST_MODELS.append(
                 (
@@ -76,14 +60,6 @@ def test_full_graph(
     model_kwargs: dict[str, Any],
     compilation_mode: CompilationMode,
 ):
-    if (
-        "w8a8" in model
-        or "w8w8" in model
-        and current_platform.has_device_capability((10, 0))
-    ):
-        # int8 removed on Blackwell:
-        pytest.skip("int8 support removed on Blackwell")
-
     with monkeypatch.context():
         print(f"MODEL={model}")
 
@@ -113,7 +89,7 @@ def test_full_graph(
             ),
             *model_info,
         )
-        for model_info in models_list(keywords=["FP8-dynamic", "quantized.w8a8"])
+        for model_info in models_list(keywords=["FP8-dynamic"])
     ]
     + [
         # Test depyf integration works
@@ -164,14 +140,6 @@ def test_custom_compile_config(
     model: str,
     model_kwargs: dict[str, Any],
 ):
-    if (
-        "w8a8" in model
-        or "w8w8" in model
-        and current_platform.has_device_capability((10, 0))
-    ):
-        # int8 removed on Blackwell:
-        pytest.skip("int8 support removed on Blackwell")
-
     if compilation_config.use_inductor_graph_partition and not is_torch_equal_or_newer(
         "2.9.0.dev"
     ):

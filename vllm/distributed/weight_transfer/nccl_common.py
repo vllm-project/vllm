@@ -9,7 +9,7 @@ sparse engine does not have to subclass the dense one.
 """
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import torch
 
@@ -18,15 +18,35 @@ if TYPE_CHECKING:
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
 from vllm.distributed.weight_transfer.base import WeightTransferInitInfo
+from vllm.distributed.weight_transfer.packed_tensor import (
+    DEFAULT_PACKED_BUFFER_SIZE_BYTES,
+    DEFAULT_PACKED_NUM_BUFFERS,
+)
 
 
 @dataclass
 class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
-    """Initialization info for NCCL-based weight transfer backends."""
+    """Worker-side initialization info for NCCL-based weight transfer backends."""
 
     master_address: str
     master_port: int
     rank_offset: int
+    world_size: int
+    packed: bool = False
+    packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
+    packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
+
+
+class NCCLRendezvous(Protocol):
+    """The three fields `trainer_init` needs to open the trainer endpoint.
+
+    Structural so each backend can keep its own trainer init info next to its
+    engine (dense `NCCLTrainerInitInfo`, `SparseNCCLTrainerInitInfo`) without
+    this shared module importing either.
+    """
+
+    master_address: str
+    master_port: int
     world_size: int
 
 
@@ -83,7 +103,7 @@ def worker_init_process_group(
 
 
 def trainer_init(
-    init_info: NCCLWeightTransferInitInfo | dict,
+    init_info: NCCLRendezvous | dict,
 ) -> "PyNcclCommunicator":
     """
     Initialize NCCL process group for trainer-side weight transfer.
@@ -92,7 +112,8 @@ def trainer_init(
     CUDA device (torch.accelerator.current_device_index()).
 
     Args:
-        init_info: Either an NCCLWeightTransferInitInfo object or a dict with keys:
+        init_info: Any object carrying the `NCCLRendezvous` fields (a trainer or
+            worker NCCL init info), or a dict with keys:
             - master_address: str
             - master_port: int
             - world_size: int

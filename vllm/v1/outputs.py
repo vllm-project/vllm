@@ -15,6 +15,7 @@ from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
+    from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorWorkerMetadata
     from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorWorkerMetadata,
@@ -24,6 +25,7 @@ else:
     KVConnectorStats = object
     KVConnectorWorkerMetadata = object
     KVConnectorKVEvents = object
+    ECConnectorWorkerMetadata = object
 
 
 class LogprobsLists(NamedTuple):
@@ -49,6 +51,45 @@ class LogprobsLists(NamedTuple):
             self.sampled_token_ranks[req_idx:end_idx],
             None,
         )
+
+
+class SamplingMaskLists(NamedTuple):
+    # [num_kept_tokens]
+    token_ids: np.ndarray
+    # [num_generated_tokens + 1]
+    offsets: np.ndarray
+    # [num_reqs + 1]
+    cu_num_generated_tokens: list[int] | None = None
+
+    def slice_request(self, req_idx: int, num_positions: int) -> "SamplingMaskLists":
+        if self.cu_num_generated_tokens is None:
+            start_idx = req_idx
+        else:
+            start_idx = self.cu_num_generated_tokens[req_idx]
+        end_idx = start_idx + num_positions
+        flat_start = self.offsets[start_idx]
+        flat_end = self.offsets[end_idx]
+        return SamplingMaskLists(
+            self.token_ids[flat_start:flat_end],
+            self.offsets[start_idx : end_idx + 1] - flat_start,
+            None,
+        )
+
+    def to_nested_list(self) -> list[list[int]]:
+        """Convert CSR representation to ``list[list[int]]``."""
+        return [
+            self.token_ids[int(self.offsets[i]) : int(self.offsets[i + 1])].tolist()
+            for i in range(len(self.offsets) - 1)
+        ]
+
+    @staticmethod
+    def merge(chunks: Sequence["SamplingMaskLists"]) -> "SamplingMaskLists":
+        token_ids = np.concatenate([chunk.token_ids for chunk in chunks])
+        counts = np.concatenate([np.diff(chunk.offsets) for chunk in chunks])
+        offsets = np.empty(len(counts) + 1, dtype=np.int64)
+        offsets[0] = 0
+        np.cumsum(counts, dtype=np.int64, out=offsets[1:])
+        return SamplingMaskLists(token_ids, offsets)
 
 
 class LogprobsTensors(NamedTuple):
@@ -262,6 +303,14 @@ class ECConnectorOutput:
     # [mm_hash]
     finished_sending: set[str] | None = None
     finished_recving: set[str] | None = None
+    ec_connector_worker_meta: ECConnectorWorkerMetadata | None = None
+
+    def is_empty(self):
+        return (
+            not self.finished_sending
+            and not self.finished_recving
+            and not self.ec_connector_worker_meta
+        )
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
@@ -316,6 +365,9 @@ class ModelRunnerOutput:
     # ``None`` when ``enable_return_routed_experts`` is off.
     routed_experts: RoutedExpertsLists | None = None
 
+    # ``None`` when ``return_sampling_mask`` is off.
+    sampling_masks: SamplingMaskLists | None = None
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,
@@ -327,6 +379,32 @@ class ModelRunnerOutput:
             return EMPTY_MODEL_RUNNER_OUTPUT
         output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
+        return output
+
+    @staticmethod
+    def with_ec_conn_output_only(
+        ec_connector_output: ECConnectorOutput | None,
+    ) -> "ModelRunnerOutput":
+        """Return an otherwise-empty output carrying `ec_connector_output`."""
+        return ModelRunnerOutput.with_ec_conn_output(
+            EMPTY_MODEL_RUNNER_OUTPUT, ec_connector_output
+        )
+
+    @staticmethod
+    def with_ec_conn_output(
+        output: "ModelRunnerOutput",
+        ec_connector_output: ECConnectorOutput | None,
+    ) -> "ModelRunnerOutput":
+        """Return `output` carrying `ec_connector_output`.
+
+        The shared empty output is copied rather than written to, so callers
+        must use the return value.
+        """
+        if ec_connector_output is None or ec_connector_output.is_empty():
+            return output
+        if output is EMPTY_MODEL_RUNNER_OUTPUT:
+            output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.ec_connector_output = ec_connector_output
         return output
 
 
@@ -367,8 +445,10 @@ def make_empty_encoder_model_runner_output(
     # Give every request its own contiguous index
     req_id_to_index: dict[str, int] = {rid: idx for idx, rid in enumerate(req_ids)}
 
-    # No tokens generated yet ⇒ one empty list per request
-    sampled_token_ids: list[list[int]] = [[0] for _ in req_ids]
+    # An encoder instance never samples, so it emits no tokens at all. The
+    # scheduler finishes these requests once their prompt is fully encoded
+    # (see `Scheduler.update_from_output`).
+    sampled_token_ids: list[list[int]] = [[] for _ in req_ids]
 
     # Pooler outputs are not available yet ⇒ use None placeholders
     pooler_output: list[torch.Tensor | None] = [None for _ in req_ids]

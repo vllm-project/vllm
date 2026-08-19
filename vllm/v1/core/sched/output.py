@@ -68,6 +68,14 @@ class NewRequestData:
             prefill_token_ids=prefill_token_ids,
         )
 
+    @property
+    def prompt_len(self) -> int:
+        if self.prompt_token_ids is not None:
+            return len(self.prompt_token_ids)
+        if self.prompt_embeds is not None:
+            return self.prompt_embeds.shape[0]
+        return 0
+
     def __repr__(self) -> str:
         prompt_embeds_shape = (
             self.prompt_embeds.shape if self.prompt_embeds is not None else None

@@ -42,6 +42,7 @@ logger = init_logger(__name__)
 RequestT = TypeVar("RequestT", bound=AnyRequest)
 _T = TypeVar("_T")
 SESSION_ID_HEADER = "X-Session-ID"
+PRIORITY_HEADER = "X-Vllm-Priority"
 
 
 def build_per_request_timing_metrics(
@@ -238,6 +239,20 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
             if isinstance(session_id, str) and session_id:
                 return session_id
         return None
+
+    @staticmethod
+    def _get_priority(
+        request: ChatCompletionRequest | CompletionRequest | ResponsesRequest,
+        raw_request: Request | None,
+    ) -> int:
+        if raw_request is not None:
+            priority = raw_request.headers.get(PRIORITY_HEADER)
+            if priority is not None:
+                try:
+                    return int(priority)
+                except ValueError:
+                    pass
+        return request.priority
 
     async def _with_kv_transfer_rejection_cleanup(
         self,
