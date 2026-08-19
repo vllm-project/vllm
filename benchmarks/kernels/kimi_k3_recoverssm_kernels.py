@@ -336,10 +336,7 @@ def _compact_conv_state_kernel(
     BLOCK_D: tl.constexpr,
     BLOCK_HISTORY: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
-    LAUNCH_PDL: tl.constexpr,
 ):
-    if LAUNCH_PDL:
-        tl.extra.cuda.gdc_launch_dependents()
     pid_d = tl.program_id(0)
     pid_b = tl.program_id(1)
     pid_l = tl.program_id(2)
@@ -440,7 +437,10 @@ def _commit_kda_state_kernel(
     NUM_HEADS: tl.constexpr,
     USE_LOWER_BOUND: tl.constexpr,
     ALIGN_MODE: tl.constexpr,
+    LAUNCH_PDL: tl.constexpr,
 ):
+    if LAUNCH_PDL:
+        tl.extra.cuda.gdc_launch_dependents()
     pid_v = tl.program_id(0)
     pid_b = tl.program_id(1)
     pid_lh = tl.program_id(2)
@@ -990,28 +990,6 @@ class KDARecoverSSMCommitContext:
             SPEC_QUERY_LEN=self.spec_query_len,
             num_warps=1,
         )
-        _compact_conv_state_kernel[(triton.cdiv(conv_dim, 256), batch, num_layers)](
-            conv_ref,
-            self.conv_state_base_addrs,
-            self.conv_state_block_strides,
-            self.conv_state_dim_strides,
-            self.conv_state_token_strides,
-            state_indices,
-            self.commit_lens,
-            self.final_state_indices,
-            self.boundary_state_indices,
-            self.boundary_recovery_lens,
-            NULL_BLOCK_ID,
-            conv_dim,
-            self.conv_history_len,
-            state_indices.stride(0),
-            BLOCK_D=256,
-            BLOCK_HISTORY=block_history,
-            ALIGN_MODE=block_table is not None,
-            LAUNCH_PDL=use_pdl,
-            num_warps=4,
-        )
-
         state_ref = self.checkpoints[0]
         _, num_heads, value_dim, key_dim = state_ref.shape
         block_k = triton.next_power_of_2(key_dim)
@@ -1062,8 +1040,29 @@ class KDARecoverSSMCommitContext:
             NUM_HEADS=num_heads,
             USE_LOWER_BOUND=self.lower_bound is not None,
             ALIGN_MODE=block_table is not None,
+            LAUNCH_PDL=use_pdl,
             num_warps=num_warps,
             num_stages=2,
+        )
+        _compact_conv_state_kernel[(triton.cdiv(conv_dim, 256), batch, num_layers)](
+            conv_ref,
+            self.conv_state_base_addrs,
+            self.conv_state_block_strides,
+            self.conv_state_dim_strides,
+            self.conv_state_token_strides,
+            state_indices,
+            self.commit_lens,
+            self.final_state_indices,
+            self.boundary_state_indices,
+            self.boundary_recovery_lens,
+            NULL_BLOCK_ID,
+            conv_dim,
+            self.conv_history_len,
+            state_indices.stride(0),
+            BLOCK_D=256,
+            BLOCK_HISTORY=block_history,
+            ALIGN_MODE=block_table is not None,
+            num_warps=4,
             launch_pdl=use_pdl,
         )
 
