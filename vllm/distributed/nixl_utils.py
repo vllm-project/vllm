@@ -17,6 +17,26 @@ nixl_agent_config: Any
 nixlXferTelemetry: Any
 
 
+def _cpu_supports_avx() -> bool:
+    """True unless this x86 CPU lacks the 'avx' flag (conservative)."""
+    try:
+        import platform
+
+        machine = platform.machine().lower()
+    except Exception:
+        return True
+
+    if machine not in ("x86_64", "amd64", "i386", "i686"):
+        return True
+
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            data = f.read().lower()
+        return "avx" in data
+    except Exception:
+        return True
+
+
 def _maybe_set_ucx_rcache_limit() -> None:
     if "UCX_RCACHE_MAX_UNRELEASED" in os.environ:
         return
@@ -53,6 +73,15 @@ def _load_nixl_attr(name: str) -> Any:
         "nixl_agent_config": "nixl_agent_config",
         "nixlXferTelemetry": "nixlXferTelemetry",
     }[name]
+
+    # Avoid NIXL/UCX import on x86 CPUs without AVX (UCX aborts at init).
+    if not _cpu_supports_avx():
+        logger.warning_once(
+            "Detected x86 CPU without AVX; skipping NIXL import to avoid "
+            "a native UCX crash."
+        )
+        globals()[name] = None
+        return None
 
     _maybe_set_ucx_rcache_limit()
     try:
