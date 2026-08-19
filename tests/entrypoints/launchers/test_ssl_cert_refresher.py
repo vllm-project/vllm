@@ -7,7 +7,7 @@ from ssl import SSLContext
 
 import pytest
 
-from vllm.entrypoints.serve.utils.ssl import SSLCertRefresher
+from vllm.entrypoints.launchers.utils.ssl import SSLCertRefresher
 
 
 class MockSSLContext(SSLContext):

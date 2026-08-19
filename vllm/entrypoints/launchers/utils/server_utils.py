@@ -12,7 +12,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 from vllm.utils.gc_utils import freeze_gc_heap
 
-logger = init_logger("vllm.entrypoints.openai.server_utils")
+logger = init_logger(__name__)
 
 
 def load_log_config(log_config_file: str | None) -> dict | None:

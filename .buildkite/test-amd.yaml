@@ -990,10 +990,12 @@ steps:
   - vllm/entrypoints
   - tests/entrypoints/unit_tests
   - tests/entrypoints/weight_transfer
+  - tests/entrypoints/launchers
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s entrypoints/unit_tests
   - pytest -v -s entrypoints/weight_transfer
+  - pytest -v -s entrypoints/launchers
 
 - label: Entrypoints Integration (LLM) # TBD
   timeout_in_minutes: 180
@@ -2320,9 +2322,9 @@ steps:
   - tests/benchmarks/test_serve_cli.py
   - tests/entrypoints/openai/chat_completion/test_chat_completion.py
   - tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
-  - tests/entrypoints/openai/completion/test_shutdown.py
+  - tests/entrypoints/launchers/test_shutdown.py
   - tests/entrypoints/openai/test_return_token_ids.py
-  - tests/entrypoints/openai/test_uds.py
+  - tests/entrypoints/serve/instrumentator/test_uds.py
   - tests/v1/sample/test_logprobs_e2e.py
   - vllm/platforms/rocm.py
   commands:
@@ -2331,9 +2333,9 @@ steps:
   - pytest -v -s benchmarks/test_serve_cli.py -k "not insecure and not (test_bench_serve and not test_bench_serve_chat)"
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_invalid_json_schema and not test_invalid_regex and not test_kv_transfer_prompt_token_ids_round_trip and not test_kv_transfer_prompt_token_ids_streaming"
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
-  - pytest -v -s entrypoints/openai/completion/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
+  - pytest -v -s entrypoints/launchers/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
   - pytest -v -s entrypoints/openai/test_return_token_ids.py -k "not test_comparison"
-  - pytest -v -s entrypoints/openai/test_uds.py
+  - pytest -v -s entrypoints/serve/instrumentator/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
 
 - label: Rust Frontend Serve Admin Coverage # TBD
