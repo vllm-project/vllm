@@ -23,7 +23,13 @@ paths call kernels that only exist for SM90+.
 | Weights | MXFP4 MoE, served through the MARLIN backend (Ada has no hardware block-scaled MMA) |
 | KV cache | `fp8_ds_mla`, 584 B/token |
 
-Smaller counts work as long as the weights fit and TP ≤ 4.
+Smaller counts work as long as the weights fit.
+
+**Tensor-parallel size must be ≤ 4.** The FlashInfer sparse-MLA prefill dispatch
+instantiates `num_heads` in `{16, 32, 64, 128}`; DeepSeek-V4-Flash has 64 attention
+heads, so TP8 asks for 8 heads per rank and the dispatch refuses. Use TP4 × PP2 on
+eight GPUs — which also avoids replicating the single-KV-head MLA cache on every
+rank. This is upstream FlashInfer behaviour, not specific to this port.
 
 ---
 
@@ -85,6 +91,27 @@ Under Docker, add `--security-opt seccomp=unconfined` — otherwise OpenBLAS
 fails with `pthread_create: Operation not permitted` on hosts whose
 libseccomp does not know `clone3`.
 
+Startup is healthy when the log contains all three:
+
+```
+Using 'MARLIN' Mxfp4 MoE backend.
+Using FP8 indexer cache for Lightning Indexer.
+Using fp8_ds_mla data type to store kv cache.
+```
+
+### Flags that do not work here
+
+| Flag | Why |
+|---|---|
+| `--tensor-parallel-size 8` | Sparse-MLA prefill has no `num_heads=8` instantiation — see [Hardware](#hardware). Fails on the first real prefill, not at startup. |
+| `--enable-return-routed-experts` | Needs a full-attention KV cache group; DSv4's are all compressed → `ValueError` during engine init. Also incompatible with `PP > 1`, and costs a fixed 512 MiB per GPU. |
+| `--gpu-memory-utilization 0.97` with PP | The NCCL buffers for the PP channel live outside vLLM's budget; 0.95 is the working value. |
+
+### The M-aware GEMM default
+
+Upstream hardcodes `BLOCK_SIZE_M=64` for the block-scaled Triton GEMM, so every
+decode step (`M ≤ 32`) launches a single M-block and under-fills the 128 SMs.
+Single-variable A/B, same container and launch script:
 
 | | TPOT P50 | throughput |
 |---|---|---|
