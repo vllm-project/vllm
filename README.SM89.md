@@ -74,15 +74,24 @@ uv pip install ./vllm-0.27.2.whl --torch-backend=cu130
 
 ### FlashInfer
 
-The sparse-MLA kernels for Ada come from a community build. It is a binary
-release; the source branch was never published upstream.
+The sparse-MLA kernels for Ada come from a community build published as a binary
+only — no source branch was ever pushed. A copy is vendored in this repository so
+the configuration stays rebuildable; see [`assets/`](assets/) for provenance,
+checksum and license.
 
 ```bash
-gh release download --repo yhfgyyf/vllm-deepseek-v4-sm89 \
-  --pattern 'flashinfer_python-0.6.14*sm89*.whl' --dir /tmp/fi
-uv pip install /tmp/fi/flashinfer_python-0.6.14*.whl
+uv pip install ./assets/flashinfer_python-0.6.14-py3-none-any.whl
 export FLASHINFER_DISABLE_VERSION_CHECK=1
 ```
+
+Verify before installing:
+
+```
+sha256  d124369346a3d48eac67e31c42f7a3c813bcc0abc10e2e36db413b7b3dfd97df
+```
+
+Once installed it reports version `0.6.14+sm89`, which is what
+`has_flashinfer_sparse_mla_sm89()` probes for.
 
 Then overlay this branch's changed files onto the installed package, or install
 from source.
@@ -183,7 +192,8 @@ Chinese and Japanese prompts all answer correctly.
 
 - **TP ≤ 4.** See above.
 - **FlashInfer `0.6.14+sm89` is a binary-only dependency.** No source branch was
-  published; if that release disappears, this configuration cannot be rebuilt.
+  ever published, so it cannot be rebuilt from source. A copy is vendored under
+  [`assets/`](assets/) to keep this configuration reproducible.
 - **`has_cutedsl()` still only checks whether the package is installed, not the
   architecture.** On Ada, CuTe-DSL kernels produce wrong output without raising.
   The short-circuit here works around it; the upstream probe is the real defect.
