@@ -5,6 +5,7 @@ import bisect
 import mimetypes
 from collections import defaultdict
 from collections.abc import Generator, Sequence
+from dataclasses import replace
 from itertools import groupby
 from typing import TYPE_CHECKING, Any
 
@@ -210,6 +211,36 @@ def _batch_mm_items(
         )
         for key, elems in elems.items()
     }
+
+
+def strip_covered_mm_data(
+    mm_features: list[MultiModalFeatureSpec],
+    num_computed_tokens: int,
+    uses_mrope: bool = False,
+) -> list[MultiModalFeatureSpec]:
+    """Drop the tensor data of mm items whose placeholder span is fully inside
+    a prefix-cache-covered region: no encoder run can be scheduled for them,
+    so the workers never consume the payload fields. M-RoPE models are the
+    exception: the worker computes positions for the whole prompt from the
+    CPU-side metadata fields (e.g. grid dims), so those are kept. The
+    scheduler-side ``Request`` keeps the full features."""
+    if not mm_features or num_computed_tokens == 0:
+        return mm_features
+
+    def maybe_strip(f: MultiModalFeatureSpec) -> MultiModalFeatureSpec:
+        if f.data is None or (
+            f.mm_position.offset + f.mm_position.length > num_computed_tokens
+        ):
+            return f
+
+        data = None
+        if uses_mrope:
+            data = MultiModalKwargsItem(
+                {k: elem for k, elem in f.data.items() if elem.field.keep_on_cpu}
+            )
+        return replace(f, data=data)
+
+    return [maybe_strip(f) for f in mm_features]
 
 
 def group_and_batch_mm_items(
