@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from vllm.v1.attention.backends.utils import get_kv_cache_layout, set_kv_cache_layout
+from vllm.config import CacheConfig
 from vllm.v1.core.kv_cache_utils import (
     _get_kv_cache_bytes_per_block,
     _pool_bytes_per_block,
@@ -23,18 +23,13 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
+    KVCacheLayout,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.utils import allocate_kv_cache
 
 MEMORY = 8 * 1024 * 1024
-
-
-@pytest.fixture(autouse=True)
-def reset_layout():
-    yield
-    set_kv_cache_layout(None)
 
 
 def _mla(head_size: int) -> MLAAttentionSpec:
@@ -64,10 +59,11 @@ def _mixed_page_groups(n_mla=3, n_idx=3, n_swa=5):
     return [_uniform_group(g1), _uniform_group(g2)], g1, g2
 
 
-def _mock_vllm_config():
+def _mock_vllm_config(layout: str | None):
     config = MagicMock()
+    config.cache_config = CacheConfig()
     config.cache_config.num_gpu_blocks_override = None
-    config.cache_config.kv_cache_layout = None
+    config.cache_config.kv_cache_layout = layout
     return config
 
 
@@ -86,8 +82,8 @@ def _expected_bytes_per_block(groups) -> int:
     return max(sum(pages[n] for n in g.layer_names) for g in groups)
 
 
-def _bind(config):
-    return allocate_kv_cache(config, torch.device("cpu"), get_kv_cache_layout(), None)
+def _bind(config, layout: str):
+    return allocate_kv_cache(config, torch.device("cpu"), KVCacheLayout[layout], None)
 
 
 class TestDensePacking:
@@ -97,8 +93,9 @@ class TestDensePacking:
             groups
         )
 
-        set_kv_cache_layout("BLHNC")
-        config = get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
+        config = get_kv_cache_config_from_groups(
+            _mock_vllm_config("BLHNC"), groups, MEMORY
+        )
         # Groups overlay: both start at offset 0.
         assert [tensor.offset for tensor in config.kv_cache_tensors].count(0) == 2
         assert [tensor.layers for tensor in config.kv_cache_tensors] == [
@@ -110,8 +107,9 @@ class TestDensePacking:
     def test_layers_within_a_group_are_dense(self):
         groups, _, _ = _mixed_page_groups()
         pages = _pages(groups)
-        set_kv_cache_layout("BLHNC")
-        config = get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
+        config = get_kv_cache_config_from_groups(
+            _mock_vllm_config("BLHNC"), groups, MEMORY
+        )
         offsets = {
             name: tensor.offset + i * tensor.layer_stride
             for tensor in config.kv_cache_tensors
@@ -127,8 +125,9 @@ class TestDensePacking:
     def test_allocation_is_layout_invariant(self, layout):
         specs = {f"l.{i}": _full() for i in range(4)}
         groups = [KVCacheGroupSpec(list(specs), _full())]
-        set_kv_cache_layout(layout)
-        config = get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
+        config = get_kv_cache_config_from_groups(
+            _mock_vllm_config(layout), groups, MEMORY
+        )
         (tensor,) = config.kv_cache_tensors
         page = _full().page_size_bytes
         assert tensor.layers == list(specs)
@@ -146,8 +145,9 @@ class TestDensePacking:
     def test_single_group_mixed_pages_follows_layout(self, layout):
         specs = {"mla.0": _mla(512), "mla.1": _mla(512), "idx.0": _mla(128)}
         groups = [_uniform_group(specs)]
-        set_kv_cache_layout(layout)
-        config = get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
+        config = get_kv_cache_config_from_groups(
+            _mock_vllm_config(layout), groups, MEMORY
+        )
         block_stride = _expected_bytes_per_block(groups)
         mla_tensor, idx_tensor = config.kv_cache_tensors
         assert mla_tensor.layers == ["mla.0", "mla.1"]
@@ -168,12 +168,13 @@ class TestDensePacking:
         groups, g1, g2 = _mixed_page_groups()
         # Overlay models resolve to a block-outer layout at backend selection (the
         # model's backend declares it); mirror that here.
-        set_kv_cache_layout("BLNHC")
-        config = get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
+        config = get_kv_cache_config_from_groups(
+            _mock_vllm_config("BLNHC"), groups, MEMORY
+        )
         assert config.num_blocks == MEMORY // _expected_bytes_per_block(groups)
         assert _pool_bytes_per_block(groups) == _expected_bytes_per_block(groups)
 
-        views = _bind(config)
+        views = _bind(config, "BLNHC")
         assert set(views) == set(g1) | set(g2)
         assert views["swa.0"].data_ptr() == views["mla.0"].data_ptr()
 
@@ -196,34 +197,36 @@ class TestDensePacking:
         for i, name in enumerate(list(g1)[1:], start=1):
             assert (views[name][0].to(torch.int32) == i + 1).all()
 
-    @pytest.mark.parametrize("layout", [None, "LBNHC"])
-    def test_layer_compact_layout_rejected_for_overlaid_groups(self, layout):
+    def test_layer_compact_layout_rejected_for_overlaid_groups(self):
         # The layout has a single writer (backend-selection resolution); a layer-
         # compact layout reaching an overlay model's allocation is an error, not a
         # silent flip.
         groups, _, _ = _mixed_page_groups()
-        if layout is not None:
-            set_kv_cache_layout(layout)
         with pytest.raises(
             ValueError, match="cannot express this model's mixed page sizes"
         ):
-            get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
+            get_kv_cache_config_from_groups(_mock_vllm_config("LBNHC"), groups, MEMORY)
+
+    def test_unresolved_layout_rejected(self):
+        groups, _, _ = _mixed_page_groups()
+        with pytest.raises(ValueError, match="has not been resolved"):
+            get_kv_cache_config_from_groups(_mock_vllm_config(None), groups, MEMORY)
 
     def test_head_outer_layout_rejected_for_mixed_pages(self):
         groups, _, _ = _mixed_page_groups()
-        set_kv_cache_layout("LHBNC")
         with pytest.raises(
             ValueError, match="cannot express this model's mixed page sizes"
         ):
-            get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
+            get_kv_cache_config_from_groups(_mock_vllm_config("LHBNC"), groups, MEMORY)
 
     @pytest.mark.parametrize("layout", ["LBNHC", "BLHNC"])
     def test_bound_views_round_trip(self, layout):
         specs = {"mla.0": _mla(512), "mla.1": _mla(512), "idx.0": _mla(128)}
         groups = [_uniform_group(specs)]
-        set_kv_cache_layout(layout)
-        config = get_kv_cache_config_from_groups(_mock_vllm_config(), groups, MEMORY)
-        views = _bind(config)
+        config = get_kv_cache_config_from_groups(
+            _mock_vllm_config(layout), groups, MEMORY
+        )
+        views = _bind(config, layout)
         for i, name in enumerate(specs):
             views[name].fill_(i + 1)
         for i, name in enumerate(specs):

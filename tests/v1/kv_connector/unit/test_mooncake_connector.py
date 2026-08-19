@@ -33,7 +33,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     MooncakeBootstrapServer,
 )
 from vllm.utils.network_utils import get_open_port
-from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -43,12 +42,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import RequestStatus
 
 from .utils import create_request, create_scheduler, create_vllm_config
-
-
-@pytest.fixture(autouse=True)
-def reset_kv_cache_layout():
-    yield
-    set_kv_cache_layout(None)
 
 
 def _make_test_kv_cache_config() -> KVCacheConfig:
@@ -1120,7 +1113,6 @@ def test_register_kv_caches(layout: KVCacheLayout, separate_kv_head_groups: bool
         kv_connector="MooncakeConnector", kv_role="kv_consumer"
     )
 
-    set_kv_cache_layout(layout.name)
     with (
         set_current_vllm_config(vllm_config),
         patch_worker_dependencies(),

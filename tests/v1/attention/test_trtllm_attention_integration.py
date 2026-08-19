@@ -18,10 +18,7 @@ from tests.v1.attention.utils import (
 from vllm.config import set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import nvfp4_kv_cache_full_dim, set_random_seed
-from vllm.v1.attention.backends.utils import (
-    PerLayerParameters,
-    set_kv_cache_layout,
-)
+from vllm.v1.attention.backends.utils import PerLayerParameters
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout, KVQuantMode
 
 if not current_platform.is_device_capability_family(100):
@@ -311,122 +308,113 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
         )
 
     # 3. Run through FlashInfer with TRTLLM enabled
-    set_kv_cache_layout("LBHNC")
+    vllm_config.cache_config.kv_cache_layout = "LBHNC"
 
-    try:
-        is_nvfp4 = kv_cache_dtype == "nvfp4"
-        kv_quant_mode = KVQuantMode.NVFP4 if is_nvfp4 else KVQuantMode.NONE
-        spec_dtype = torch.uint8 if is_nvfp4 else dtype
-        kv_cache_spec = FullAttentionSpec(
-            block_size=BLOCK_SIZE,
-            num_kv_heads=num_kv_heads,
-            head_size=head_size,
-            dtype=spec_dtype,
-            kv_quant_mode=kv_quant_mode,
+    is_nvfp4 = kv_cache_dtype == "nvfp4"
+    kv_quant_mode = KVQuantMode.NVFP4 if is_nvfp4 else KVQuantMode.NONE
+    spec_dtype = torch.uint8 if is_nvfp4 else dtype
+    kv_cache_spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=spec_dtype,
+        kv_quant_mode=kv_quant_mode,
+    )
+    layer_names = ["test_layer_0"]
+
+    with (
+        set_current_vllm_config(vllm_config),
+        unittest.mock.patch(
+            "vllm.utils.flashinfer.supports_trtllm_attention",
+            return_value=True,
+        ),
+        unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+            _mock_get_per_layer_parameters,
+        ),
+    ):
+        builder = FlashInferMetadataBuilder(
+            kv_cache_spec, layer_names, vllm_config, device
         )
-        layer_names = ["test_layer_0"]
+        attn_metadata = builder.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+        )
 
-        with (
-            set_current_vllm_config(vllm_config),
-            unittest.mock.patch(
-                "vllm.utils.flashinfer.supports_trtllm_attention",
-                return_value=True,
-            ),
-            unittest.mock.patch(
-                "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
-                _mock_get_per_layer_parameters,
-            ),
-        ):
-            builder = FlashInferMetadataBuilder(
-                kv_cache_spec, layer_names, vllm_config, device
+        # Verify the correct TRTLLM metadata types were produced.
+        has_prefills = any(ql > 1 for ql in batch_spec.query_lens)
+        has_decodes = any(ql == 1 for ql in batch_spec.query_lens)
+
+        if has_prefills:
+            assert isinstance(attn_metadata.prefill, TRTLLMPrefill), (
+                f"Expected TRTLLMPrefill, got {type(attn_metadata.prefill)}"
             )
-            attn_metadata = builder.build(
-                common_prefix_len=0,
-                common_attn_metadata=common_attn_metadata,
+        if has_decodes:
+            assert isinstance(attn_metadata.decode, FlashInferTrtllmAPIDecode), (
+                f"Expected FlashInferTrtllmAPIDecode, got {type(attn_metadata.decode)}"
             )
+            assert attn_metadata.decode.kernel == FlashInferDecodeKernel.TRTLLM_GEN
 
-            # Verify the correct TRTLLM metadata types were produced.
-            has_prefills = any(ql > 1 for ql in batch_spec.query_lens)
-            has_decodes = any(ql == 1 for ql in batch_spec.query_lens)
+        impl = FlashInferImpl(
+            num_heads=num_q_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype=kv_cache_dtype,
+        )
 
-            if has_prefills:
-                assert isinstance(attn_metadata.prefill, TRTLLMPrefill), (
-                    f"Expected TRTLLMPrefill, got {type(attn_metadata.prefill)}"
-                )
-            if has_decodes:
-                assert isinstance(attn_metadata.decode, FlashInferTrtllmAPIDecode), (
-                    "Expected FlashInferTrtllmAPIDecode, got "
-                    f"{type(attn_metadata.decode)}"
-                )
-                assert attn_metadata.decode.kernel == FlashInferDecodeKernel.TRTLLM_GEN
-
-            impl = FlashInferImpl(
-                num_heads=num_q_heads,
-                head_size=head_size,
-                scale=scale,
-                num_kv_heads=num_kv_heads,
-                alibi_slopes=None,
-                sliding_window=None,
-                kv_cache_dtype=kv_cache_dtype,
-            )
-
-            mock_layer = MockAttentionLayer(device)
-            if is_nvfp4:
-                # For nvfp4, k_scale/v_scale are the global quantization
-                # scales (amax/448) used by reshape_and_cache_flash.
-                kv_scale_t = torch.tensor(
-                    kv_scale_val, dtype=torch.float32, device=device
-                )
-                mock_layer._k_scale = kv_scale_t
-                mock_layer._v_scale = kv_scale_t
-                mock_layer._k_scale_float = kv_scale_val
-                mock_layer._v_scale_float = kv_scale_val
-            output = torch.empty_like(query_vllm)
-
-            impl.do_kv_cache_update(
-                mock_layer,
-                key_vllm,
-                value_vllm,
-                kv_cache,
-                attn_metadata.slot_mapping,
-            )
-
-            # nvfp4 trtllm kernel requires FP8 queries. In the real
-            # pipeline the attention layer handles this; here we
-            # quantize manually.
-            if is_nvfp4:
-                finfo = torch.finfo(torch.float8_e4m3fn)
-                q_amax = query_vllm.abs().amax().clamp(min=1e-12)
-                q_s = (finfo.max / q_amax * 0.1).item()
-                query_vllm = (
-                    (query_vllm * q_s)
-                    .clamp(finfo.min, finfo.max)
-                    .to(torch.float8_e4m3fn)
-                )
-                mock_layer._q_scale = torch.tensor(
-                    1.0 / q_s, dtype=torch.float32, device=device
-                )
-                mock_layer._q_scale_float = 1.0 / q_s
-
-            output = impl.forward(
-                mock_layer,
-                query_vllm,
-                key_vllm,
-                value_vllm,
-                kv_cache,
-                attn_metadata,
-                output=output,
-            )
-
-        # 4. Compare against SDPA reference
+        mock_layer = MockAttentionLayer(device)
         if is_nvfp4:
-            atol, rtol = 1.0, 1.0  # nvfp4 has higher quantization error
-        else:
-            atol, rtol = 1e-2, 1e-2
-        torch.testing.assert_close(output, sdpa_output, atol=atol, rtol=rtol)
+            # For nvfp4, k_scale/v_scale are the global quantization
+            # scales (amax/448) used by reshape_and_cache_flash.
+            kv_scale_t = torch.tensor(kv_scale_val, dtype=torch.float32, device=device)
+            mock_layer._k_scale = kv_scale_t
+            mock_layer._v_scale = kv_scale_t
+            mock_layer._k_scale_float = kv_scale_val
+            mock_layer._v_scale_float = kv_scale_val
+        output = torch.empty_like(query_vllm)
 
-    finally:
-        set_kv_cache_layout(None)
+        impl.do_kv_cache_update(
+            mock_layer,
+            key_vllm,
+            value_vllm,
+            kv_cache,
+            attn_metadata.slot_mapping,
+        )
+
+        # nvfp4 trtllm kernel requires FP8 queries. In the real
+        # pipeline the attention layer handles this; here we
+        # quantize manually.
+        if is_nvfp4:
+            finfo = torch.finfo(torch.float8_e4m3fn)
+            q_amax = query_vllm.abs().amax().clamp(min=1e-12)
+            q_s = (finfo.max / q_amax * 0.1).item()
+            query_vllm = (
+                (query_vllm * q_s).clamp(finfo.min, finfo.max).to(torch.float8_e4m3fn)
+            )
+            mock_layer._q_scale = torch.tensor(
+                1.0 / q_s, dtype=torch.float32, device=device
+            )
+            mock_layer._q_scale_float = 1.0 / q_s
+
+        output = impl.forward(
+            mock_layer,
+            query_vllm,
+            key_vllm,
+            value_vllm,
+            kv_cache,
+            attn_metadata,
+            output=output,
+        )
+
+    # 4. Compare against SDPA reference
+    if is_nvfp4:
+        atol, rtol = 1.0, 1.0  # nvfp4 has higher quantization error
+    else:
+        atol, rtol = 1e-2, 1e-2
+    torch.testing.assert_close(output, sdpa_output, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize(

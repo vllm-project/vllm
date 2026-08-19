@@ -69,7 +69,6 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     get_flashinfer_layout_string,
-    get_kv_cache_layout,
     get_num_attention_heads_from_layers,
     get_per_layer_parameters,
     infer_global_hyperparameters,
@@ -280,6 +279,7 @@ def trtllm_prefill_attn_kvfp8_dequant(
 class BatchDCPPrefillWrapper:
     def __init__(
         self,
+        kv_layout: str,
         workspace_buffer: torch.Tensor | None = None,
         dcp_a2a: bool = False,
     ):
@@ -287,9 +287,7 @@ class BatchDCPPrefillWrapper:
             self._dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
         else:
             self._dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
-        self._context = BatchPrefillWithPagedKVCacheWrapper(
-            workspace_buffer, get_flashinfer_layout_string()
-        )
+        self._context = BatchPrefillWithPagedKVCacheWrapper(workspace_buffer, kv_layout)
         self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(workspace_buffer)
 
     def plan(
@@ -890,6 +888,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.paged_kv_indices = self._make_buffer(max_num_pages)
         self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
 
+    @property
+    def kv_cache_layout(self) -> KVCacheLayout:
+        return self.cache_config.get_resolved_kv_cache_layout()
+
     # Keep SM90 prefill/decode Q dtype selection in one place.
     def get_q_data_type(self, is_prefill: bool) -> torch.dtype:
         # The user sets --attention-config.disable_flashinfer_q_quantization
@@ -1100,7 +1102,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     self._noncausal_prefill_wrapper = (
                         BatchAttentionWithAttentionSinkWrapper(
                             self._get_workspace_buffer(),
-                            get_flashinfer_layout_string(),
+                            get_flashinfer_layout_string(self.kv_cache_layout),
                             backend="auto",
                             q_data_type=self.q_data_type_prefill,
                             kv_data_type=self.kv_cache_dtype,
@@ -1113,7 +1115,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     self._noncausal_prefill_wrapper = (
                         BatchPrefillWithPagedKVCacheWrapper(
                             self._get_workspace_buffer(),
-                            get_flashinfer_layout_string(),
+                            get_flashinfer_layout_string(self.kv_cache_layout),
                             backend="auto",
                         )
                     )
@@ -1122,6 +1124,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if self._prefill_wrapper is None:
             if self.use_dcp:
                 self._prefill_wrapper = BatchDCPPrefillWrapper(
+                    kv_layout=get_flashinfer_layout_string(self.kv_cache_layout),
                     workspace_buffer=self._get_workspace_buffer(),
                     dcp_a2a=self.dcp_a2a,
                 )
@@ -1130,7 +1133,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     assert not self.is_kvcache_nvfp4
                     self._prefill_wrapper = BatchAttentionWithAttentionSinkWrapper(
                         self._get_workspace_buffer(),
-                        get_flashinfer_layout_string(),
+                        get_flashinfer_layout_string(self.kv_cache_layout),
                         backend="auto",
                         q_data_type=self.q_data_type_prefill,
                         kv_data_type=self.kv_cache_dtype,
@@ -1144,7 +1147,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     backend = "trtllm-gen" if self.is_kvcache_nvfp4 else "auto"
                     self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
                         self._get_workspace_buffer(),
-                        get_flashinfer_layout_string(),
+                        get_flashinfer_layout_string(self.kv_cache_layout),
                         backend=backend,
                     )
         assert self._prefill_wrapper is not None
@@ -1170,7 +1173,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             backend = "trtllm-gen" if self.is_kvcache_nvfp4 else "auto"
             decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                 self._get_workspace_buffer(),
-                get_flashinfer_layout_string(),
+                get_flashinfer_layout_string(self.kv_cache_layout),
                 use_cuda_graph=use_cudagraph,
                 paged_kv_indptr_buffer=paged_kv_indptr,
                 paged_kv_indices_buffer=paged_kv_indices,
@@ -1193,7 +1196,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _get_cascade_wrapper(self):
         if self._cascade_wrapper is None:
             self._cascade_wrapper = MultiLevelCascadeAttentionWrapper(
-                2, self._get_workspace_buffer(), get_flashinfer_layout_string()
+                2,
+                self._get_workspace_buffer(),
+                get_flashinfer_layout_string(self.kv_cache_layout),
             )
         return self._cascade_wrapper
 
@@ -1758,6 +1763,8 @@ class FlashInferImpl(AttentionImpl):
             num_heads, num_kv_heads, is_prefill=False
         )
         vllm_config = get_current_vllm_config_or_none()
+        # The layout is resolved after model construction, so read it lazily.
+        self.cache_config = vllm_config.cache_config if vllm_config else None
         # Query pre-quantization needs a single dtype for the whole query tensor.
         # SM90 XQA needs BF16/FP16-Q for decode and FP8 for prefill,
         # so only enable this for SM100 trtllm-gen where both use FP8-Q.
@@ -1792,6 +1799,11 @@ class FlashInferImpl(AttentionImpl):
             self.dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
         else:
             self.dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
+
+    @property
+    def kv_cache_layout(self) -> KVCacheLayout:
+        assert self.cache_config is not None
+        return self.cache_config.get_resolved_kv_cache_layout()
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         # XQA does not support FP8/NVFP4 output, so require trtllm-gen
@@ -1962,7 +1974,7 @@ class FlashInferImpl(AttentionImpl):
         if attn_metadata.use_cascade:
             # Cascade attention (rare case).
             assert attn_metadata.cascade_wrapper is not None
-            stride_order = get_kv_cache_layout().layer_view_order
+            stride_order = self.kv_cache_layout.layer_view_order
             if self.is_kvcache_nvfp4:
                 kv_cache_views = tuple(
                     cache.permute(*stride_order)
@@ -1982,7 +1994,7 @@ class FlashInferImpl(AttentionImpl):
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_prefill_tokens = attn_metadata.num_prefill_tokens
 
-        stride_order = get_kv_cache_layout().layer_view_order
+        stride_order = self.kv_cache_layout.layer_view_order
         kv_cache_permute = kv_cache.permute(*stride_order)  # HND and contiguous
         # Fix degenerate strides on any size-1 dimension (e.g. num_kv_heads=1
         # with TP=8).  PyTorch permits non-canonical strides on size-1 dims;
@@ -2138,7 +2150,7 @@ class FlashInferImpl(AttentionImpl):
                 seq_lens_prefill = attn_metadata.prefill.seq_lens
 
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
-                assert get_flashinfer_layout_string() == "HND"
+                assert get_flashinfer_layout_string(self.kv_cache_layout) == "HND"
                 assert is_strictly_contiguous(prefill_query)
                 assert is_strictly_contiguous(workspace_buffer)
                 assert is_strictly_contiguous(block_tables_prefill)
@@ -2323,7 +2335,7 @@ class FlashInferImpl(AttentionImpl):
                 # trtllm-gen needs HND layout on SM100. XQA is selected
                 # separately on SM90 and does not use this SM100 layout gate.
                 if decode_with_trtllm_gen:
-                    assert get_flashinfer_layout_string() == "HND"
+                    assert get_flashinfer_layout_string(self.kv_cache_layout) == "HND"
                 else:
                     assert decode_with_xqa
                 assert is_strictly_contiguous(decode_query)
@@ -2369,7 +2381,7 @@ class FlashInferImpl(AttentionImpl):
                         window_left=self.window_left,
                         out=output[:num_decode_tokens],
                         sinks=self.sinks,
-                        kv_layout=get_flashinfer_layout_string(),
+                        kv_layout=get_flashinfer_layout_string(self.kv_cache_layout),
                         q_len_per_req=q_len_per_req,
                         mask=attn_metadata.decode.mask,
                         q_cu_seq_lens=attn_metadata.decode.q_cu_seq_lens,
@@ -2442,7 +2454,7 @@ class FlashInferImpl(AttentionImpl):
                     sinks=self.sinks,
                     o_sf_scale=self.o_sf_scale,
                     out=out,
-                    kv_layout=get_flashinfer_layout_string(),
+                    kv_layout=get_flashinfer_layout_string(self.kv_cache_layout),
                     backend=attn_metadata.decode.kernel.value,
                     q_len_per_req=q_len_per_req,
                     kv_cache_sf=(

@@ -37,19 +37,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
 )
-from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheLayout,
 )
-
-
-@pytest.fixture(autouse=True)
-def reset_kv_cache_layout():
-    yield
-    set_kv_cache_layout(None)
 
 
 class _RecordingBlockHashes:
@@ -2773,7 +2766,6 @@ def test_register_kv_caches_shared_storage(layout: KVCacheLayout):
     )
     caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
 
-    set_kv_cache_layout(layout.name)
     _register_with_mocked_threads(
         worker,
         {"layer0": caches[0], "__cross_layer__": caches[1]},
@@ -2822,7 +2814,6 @@ def test_register_kv_caches_separate_head_groups():
     )
     caches = dense_kv_cache_views(raw, spec, num_blocks, num_layers, layout)
 
-    set_kv_cache_layout(layout.name)
     _register_with_mocked_threads(worker, dict(zip(layer_names, caches)))
 
     head_block_bytes = caches[0].stride(0) * caches[0].element_size()

@@ -39,13 +39,12 @@ from vllm.config import (
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
-    get_kv_cache_layout,
     get_supported_kv_cache_layouts,
-    publish_kv_cache_layout_to_current_process,
     resolve_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheLayout,
     KVCacheTensor,
     compute_layer_kv_cache_shape_bytes,
     compute_layout_strides,
@@ -350,6 +349,7 @@ def _create_kv_cache(
     backend_class,
     device: torch.device,
     dtype: torch.dtype,
+    layout: KVCacheLayout,
 ) -> list:
     """Create KV cache tensors for all layers using the standard allocator."""
     if config.kv_cache_dtype.startswith("fp8"):
@@ -364,7 +364,6 @@ def _create_kv_cache(
     )
     # Apply the backend's page customization, as the worker does for the real spec.
     spec = backend_class.customize_spec(spec)
-    layout = get_kv_cache_layout()
     total_bytes = (
         prod(compute_layer_kv_cache_shape_bytes(spec, max_num_blocks))
         * config.num_layers
@@ -505,9 +504,8 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             # Set KV cache layout if the backend requires a specific one
             # (e.g., FlashInfer requires LBHNC on SM100/Blackwell for TRTLLM attention)
             supported = get_supported_kv_cache_layouts([backend_class])
-            layout = resolve_kv_cache_layout([[m.name for m in supported]])
-            publish_kv_cache_layout_to_current_process(
-                layout.name, vllm_config.cache_config
+            layout = resolve_kv_cache_layout(
+                vllm_config.cache_config, [[m.name for m in supported]]
             )
 
             common_metadata = _build_common_attn_metadata(
@@ -545,7 +543,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
             )
 
             cache_list = _create_kv_cache(
-                config, max_num_blocks, backend_class, device, dtype
+                config, max_num_blocks, backend_class, device, dtype, layout
             )
 
             timing_stats, mem_stats = _run_single_benchmark(

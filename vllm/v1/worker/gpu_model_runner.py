@@ -152,7 +152,6 @@ from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     create_fast_prefill_custom_backend,
     get_dcp_local_seq_lens,
-    get_kv_cache_layout,
     reorder_batch_to_split_decodes_and_prefills,
 )
 from vllm.v1.core.sched.output import NewRequestData
@@ -7460,7 +7459,10 @@ class GPUModelRunner(
         """
 
         kv_caches = allocate_kv_cache(
-            kv_cache_config, self.device, get_kv_cache_layout(), kernel_block_sizes
+            kv_cache_config,
+            self.device,
+            self.cache_config.get_resolved_kv_cache_layout(),
+            kernel_block_sizes,
         )
 
         # Set up cross-layer KV cache sharing

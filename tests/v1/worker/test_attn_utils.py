@@ -12,7 +12,6 @@ import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
-from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -211,11 +210,7 @@ def test_copy_kv_cache_blocks_shared_storage(layout: KVCacheLayout):
     expected = [[cache[i].clone() for i in range(num_blocks)] for cache in caches]
     copies = [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)]
 
-    set_kv_cache_layout(layout.name)
-    try:
-        copy_kv_cache_blocks_inplace(caches, num_blocks, copies)
-    finally:
-        set_kv_cache_layout(None)
+    copy_kv_cache_blocks_inplace(caches, num_blocks, copies)
 
     for layer_idx, cache in enumerate(caches):
         torch.testing.assert_close(cache[2], expected[layer_idx][0])
@@ -272,15 +267,11 @@ def test_copy_kv_cache_blocks_separate_head_groups():
                 )
 
     expected = [[cache[i].clone() for i in range(num_blocks)] for cache in caches]
-    set_kv_cache_layout(layout.name)
-    try:
-        copy_kv_cache_blocks_inplace(
-            caches,
-            num_blocks,
-            [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)],
-        )
-    finally:
-        set_kv_cache_layout(None)
+    copy_kv_cache_blocks_inplace(
+        caches,
+        num_blocks,
+        [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)],
+    )
 
     for layer_idx, cache in enumerate(caches):
         torch.testing.assert_close(cache[2], expected[layer_idx][0])
@@ -322,15 +313,11 @@ def test_copy_kv_cache_blocks_with_virtual_block_splitting(
             cache[block_idx].fill_(100 * layer_idx + block_idx)
     expected = [[cache[i].clone() for i in range(cache.shape[0])] for cache in caches]
 
-    set_kv_cache_layout(layout.name)
-    try:
-        copy_kv_cache_blocks_inplace(
-            caches,
-            num_blocks,
-            [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)],
-        )
-    finally:
-        set_kv_cache_layout(None)
+    copy_kv_cache_blocks_inplace(
+        caches,
+        num_blocks,
+        [KVCacheBlockCopy(src_block_id=0, dst_block_id=2)],
+    )
 
     dst_start = 2 * physical_per_logical
     for layer_idx, cache in enumerate(caches):

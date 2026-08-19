@@ -7,6 +7,8 @@ import torch
 
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import _custom_ops as ops
+from vllm.config import CacheConfig
+from vllm.config.cache import _layout_from_name
 from vllm.models.minimax_m3.common.ops.index_topk import (
     minimax_m3_index_decode,
     minimax_m3_index_score,
@@ -19,10 +21,7 @@ from vllm.models.minimax_m3.common.ops.sparse_attn import (
 )
 from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseTritonImpl
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import (
-    get_kv_cache_layout,
-    set_kv_cache_layout,
-)
+from vllm.v1.attention.backends.utils import record_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheLayout,
@@ -38,21 +37,17 @@ if not (current_platform.is_cuda() or current_platform.is_rocm()):
 
 
 @pytest.fixture
-def kv_layout(request):
-    """Set the global KV cache layout for one test and restore it after."""
-    set_kv_cache_layout(request.param)
-    try:
-        yield request.param
-    finally:
-        set_kv_cache_layout(None)
+def kv_layout(request) -> KVCacheLayout:
+    """Resolve the requested layout name (legacy NHD/HND aliases included)."""
+    return _layout_from_name(request.param)
 
 
-def _layer_stride_order(ndim: int) -> tuple[int, ...]:
-    """Per-layer physical stride order for the active layout; the 3-dim
+def _layer_stride_order(layout: KVCacheLayout, ndim: int) -> tuple[int, ...]:
+    """Per-layer physical stride order for the given layout; the 3-dim
     indexer side cache (H=1) is contiguous, so identity."""
     if ndim == 3:
         return (0, 1, 2)
-    stride_order = get_kv_cache_layout().layer_view_order
+    stride_order = layout.layer_view_order
     assert len(stride_order) == ndim
     return stride_order
 
@@ -75,13 +70,13 @@ def _main_kv_logical_shape(num_pages: int) -> tuple[int, ...]:
 
 
 def _allocate_main_kv_via_contract(
-    num_pages: int, device: torch.device | str = "cuda"
+    num_pages: int, layout: KVCacheLayout, device: torch.device | str = "cuda"
 ) -> torch.Tensor:
     """Build the main KV cache exactly as the production allocator does for the
-    currently active layout: allocate the physical (permuted) tensor, then
-    expose the inverse-permuted logical [B, H, N, C] view the backend sees."""
+    given layout: allocate the physical (permuted) tensor, then expose the
+    inverse-permuted logical [B, H, N, C] view the backend sees."""
     logical_shape = _main_kv_logical_shape(num_pages)
-    stride_order = _layer_stride_order(len(logical_shape))
+    stride_order = _layer_stride_order(layout, len(logical_shape))
     physical_shape = tuple(logical_shape[i] for i in stride_order)
     inv_order = [stride_order.index(i) for i in range(len(stride_order))]
     raw = torch.randn(physical_shape, device=device, dtype=DTYPE)
@@ -833,7 +828,7 @@ def _reference_sparse_attn(
     ],
 )
 def test_prefill_sparse_attention_correctness(
-    kv_layout: str,
+    kv_layout: KVCacheLayout,
     q_lens: tuple[int, ...],
     kv_lens: tuple[int, ...],
 ):
@@ -867,7 +862,7 @@ def test_prefill_sparse_attention_correctness(
     # Allocate the main KV cache through the backend layout contract so the
     # physical storage matches the active layout (contiguous NHD or strided
     # HND), while the kernels and reference see the logical-NHD view.
-    kv_cache = _allocate_main_kv_via_contract(num_pages)
+    kv_cache = _allocate_main_kv_via_contract(num_pages, kv_layout)
 
     # Build sparse block indices with the same contract as the real M3 indexer:
     # one forced local block, then score-selected older causal blocks.
@@ -933,20 +928,15 @@ def test_main_cache_layout_contract():
     assert KVCacheLayout.LBHNC.layer_view_order == (0, 1, 2, 3)
     assert KVCacheLayout.LBNHC.layer_view_order == (0, 2, 1, 3)
 
-    try:
-        set_kv_cache_layout("HND")
-        assert get_kv_cache_layout() is KVCacheLayout.LBHNC
-        set_kv_cache_layout("NHD")
-        assert get_kv_cache_layout() is KVCacheLayout.LBNHC
-    finally:
-        set_kv_cache_layout(None)
+    cache_config = CacheConfig()
+    record_kv_cache_layout(cache_config, "HND")
+    assert cache_config.get_resolved_kv_cache_layout() is KVCacheLayout.LBHNC
+    cache_config = CacheConfig()
+    record_kv_cache_layout(cache_config, "NHD")
+    assert cache_config.get_resolved_kv_cache_layout() is KVCacheLayout.LBNHC
 
-    for layout in ("NHD", "HND"):
-        try:
-            set_kv_cache_layout(layout)
-            order = get_kv_cache_layout().layer_view_order
-        finally:
-            set_kv_cache_layout(None)
+    for layout in (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC):
+        order = layout.layer_view_order
         # Valid permutation: no duplicates, covers every axis.
         assert set(order) == set(range(len(order)))
 
@@ -992,7 +982,7 @@ def test_indexer_cache_squeezes_to_contiguous_3d():
     )
     shape_bytes = compute_layer_kv_cache_shape_bytes(ispec, nb)
     assert shape_bytes == (nb, 1, BLOCK_SIZE, HEAD_DIM * DTYPE.itemsize)
-    assert _layer_stride_order(3) == (0, 1, 2)
+    assert _layer_stride_order(KVCacheLayout.LBNHC, 3) == (0, 1, 2)
 
     for layout in (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC):
         iraw = torch.zeros(nb * ispec.page_size_bytes, dtype=torch.int8)
@@ -1008,11 +998,7 @@ def test_hnd_allocation_is_packed_head_major():
     physical allocation."""
     nb, bs, h, d = 4, BLOCK_SIZE, NUM_KV_HEADS, HEAD_DIM
     logical = _main_kv_logical_shape(nb)
-    try:
-        set_kv_cache_layout("HND")
-        stride_order = get_kv_cache_layout().layer_view_order
-    finally:
-        set_kv_cache_layout(None)
+    stride_order = KVCacheLayout.LBHNC.layer_view_order
 
     physical_shape = tuple(logical[i] for i in stride_order)
     assert physical_shape == (nb, h, bs, 2 * d)
@@ -1043,12 +1029,8 @@ def test_main_cache_is_block_first_and_unpadded():
     assert spec.page_size_padded is None
 
     logical = _main_kv_logical_shape(4)
-    for layout in ("NHD", "HND"):
-        try:
-            set_kv_cache_layout(layout)
-            order = get_kv_cache_layout().layer_view_order
-        finally:
-            set_kv_cache_layout(None)
+    for layout in (KVCacheLayout.LBNHC, KVCacheLayout.LBHNC):
+        order = layout.layer_view_order
         inv_order = [order.index(i) for i in range(len(order))]
         # Physical first dim is num_blocks (block-first); required by the
         # padded-strided branch's block-first assumption if it were ever taken.
@@ -1261,7 +1243,7 @@ def test_aiter_decode_sparse_block_table_supports_spec_decode():
 @pytest.mark.parametrize("decode_query_len", [1, 4])
 @pytest.mark.parametrize("num_padded_reqs", [0, 2])
 def test_decode_sparse_attention_correctness(
-    kv_layout: str,
+    kv_layout: KVCacheLayout,
     seq_lens_list: tuple[int, ...],
     decode_query_len: int,
     num_padded_reqs: int,
@@ -1273,7 +1255,7 @@ def test_decode_sparse_attention_correctness(
     q, block_table, seq_lens, topk_idx, num_pages = _build_decode_inputs(
         seq_lens_list, decode_query_len, num_padded_reqs
     )
-    kv_cache = _allocate_main_kv_via_contract(num_pages)
+    kv_cache = _allocate_main_kv_via_contract(num_pages, kv_layout)
 
     actual = torch.empty_like(q)
     minimax_m3_sparse_attn_decode(
@@ -1357,12 +1339,7 @@ def test_main_cache_byte_identical_through_production_allocator():
     nb = 4
     spec = _main_spec()
     raw = torch.zeros(nb * spec.page_size_bytes, dtype=torch.int8)
-    try:
-        set_kv_cache_layout("HND")
-        layout = get_kv_cache_layout()
-    finally:
-        set_kv_cache_layout(None)
-    view = dense_kv_cache_views(raw, spec, nb, 1, layout, BLOCK_SIZE)[0]
+    view = dense_kv_cache_views(raw, spec, nb, 1, KVCacheLayout.LBHNC, BLOCK_SIZE)[0]
 
     oracle = raw.view(DTYPE).view((nb, NUM_KV_HEADS, BLOCK_SIZE, 2 * HEAD_DIM))
     assert tuple(view.shape) == tuple(oracle.shape)
@@ -1383,11 +1360,7 @@ def test_padded_main_cache_is_flagged():
         )
         assert inv_order[0] == 0, "main GQA cache must remain block-first"
 
-    try:
-        set_kv_cache_layout("HND")
-        stride_order = get_kv_cache_layout().layer_view_order
-    finally:
-        set_kv_cache_layout(None)
+    stride_order = KVCacheLayout.LBHNC.layer_view_order
 
     good = FullAttentionSpec(
         block_size=BLOCK_SIZE,
@@ -1411,13 +1384,13 @@ def test_padded_main_cache_is_flagged():
 
 
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
-def test_reshape_and_cache_flash_write_persists(kv_layout: str):
+def test_reshape_and_cache_flash_write_persists(kv_layout: KVCacheLayout):
     """AC-5 write path: the `reshape_and_cache_flash` write site now consumes
     packed-content K/V split views. Writing through those views must persist
     into the bound storage under both layouts."""
     torch.manual_seed(0)
     num_pages = 4
-    kv_cache = _allocate_main_kv_via_contract(num_pages)
+    kv_cache = _allocate_main_kv_via_contract(num_pages, kv_layout)
     with torch.no_grad():
         kv_cache.zero_()
 

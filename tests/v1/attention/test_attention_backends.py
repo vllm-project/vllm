@@ -30,12 +30,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends import utils as attn_utils
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.attention.backends.utils import (
-    get_kv_cache_layout,
-    set_kv_cache_layout,
-)
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
 
 BACKENDS_TO_TEST = [
@@ -344,17 +339,19 @@ def run_attention_backend(
     )
     head_size = vllm_config.model_config.get_head_size()
     scale = 1.0 / (head_size**0.5)
-    impl = impl_cls(
-        num_heads=num_heads,
-        head_size=head_size,
-        scale=scale,
-        num_kv_heads=num_kv_heads,
-        alibi_slopes=None,
-        sliding_window=sliding_window,
-        attn_type=attn_type,
-        kv_cache_dtype=kv_cache_dtype,
-        **({"sinks": sinks} if sinks is not None else {}),
-    )
+    # Impls capture the current vllm config at construction, as in model loading.
+    with set_current_vllm_config(vllm_config):
+        impl = impl_cls(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=None,
+            sliding_window=sliding_window,
+            attn_type=attn_type,
+            kv_cache_dtype=kv_cache_dtype,
+            **({"sinks": sinks} if sinks is not None else {}),
+        )
 
     # Create mock layer and output buffer
     mock_layer = MockAttentionLayer(device)
@@ -391,6 +388,7 @@ def _test_backend_correctness(
     tensor_parallel_size: int = 1,
     kv_cache_dtype: str = "auto",
     use_sinks: bool = False,
+    layout: KVCacheLayout | None = None,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -568,9 +566,8 @@ def _test_backend_correctness(
     common_attn_metadata.causal = causal
 
     # 3. Simulate Paged KV Cache and a realistic slot_mapping
-    # Mirror selector-time resolution locally (test override, then any
-    # backend-required layout, then the default chain) without publishing
-    # process-global state that would leak between tests.
+    # Mirror selector-time resolution locally (caller-requested layout, then
+    # any backend-required layout, then the default chain).
     declared = [
         supported
         for backend in backend_to_test
@@ -581,11 +578,10 @@ def _test_backend_correctness(
         )
         is not None
     ]
-    layout = get_kv_cache_layout()
-    if declared and attn_utils._KV_CACHE_LAYOUT_OVERRIDE is None:
+    if layout is None:
         # Mirror the resolver: the shared cache uses the declared sets' preferred
         # layout; backends that don't support it get a per-backend copy below.
-        layout = min(declared, key=len)[0]
+        layout = min(declared, key=len)[0] if declared else KVCacheLayout.LBNHC
     kv_cache = create_and_prepopulate_kv_cache(
         k_contexts=k_contexts,
         v_contexts=v_contexts,
@@ -623,29 +619,26 @@ def _test_backend_correctness(
             backend_layout = backend_supported[0]
             kv_cache_for_backend = _clone_kv_cache_in_layout(kv_cache, backend_layout)
 
-        # FlashInfer reads the layout at plan time; override to match
+        # FlashInfer reads the layout at plan time; set it to match
         # the physical order of the test cache.
-        set_kv_cache_layout(backend_layout.name)
+        vllm_config.cache_config.kv_cache_layout = backend_layout.name
 
-        try:
-            backend_output = run_attention_backend(
-                backend_name,
-                kv_cache_spec,
-                ["placeholder"],
-                vllm_config,
-                device,
-                common_attn_metadata,
-                query_vllm,
-                key_vllm,
-                value_vllm,
-                kv_cache_for_backend,
-                sliding_window=sliding_window,
-                attn_type=attn_type,
-                kv_cache_dtype=kv_cache_dtype,
-                sinks=sinks,
-            )
-        finally:
-            set_kv_cache_layout(None)
+        backend_output = run_attention_backend(
+            backend_name,
+            kv_cache_spec,
+            ["placeholder"],
+            vllm_config,
+            device,
+            common_attn_metadata,
+            query_vllm,
+            key_vllm,
+            value_vllm,
+            kv_cache_for_backend,
+            sliding_window=sliding_window,
+            attn_type=attn_type,
+            kv_cache_dtype=kv_cache_dtype,
+            sinks=sinks,
+        )
 
         # Check shape and dtype consistency
         assert backend_output.shape == sdpa_output.shape, (
@@ -696,17 +689,14 @@ def test_flashinfer_cross_layer_layout(
     ):
         return (q_idx + context_len) >= kv_idx
 
-    set_kv_cache_layout(layout)
-    try:
-        _test_backend_correctness(
-            batch_spec=BATCH_SPECS[batch_spec_name],
-            model="meta-llama/Meta-Llama-3-8B",
-            backend_to_test=[AttentionBackendEnum.FLASHINFER],
-            mask_mod=causal_mask_mod,
-            kv_cache_dtype=kv_cache_dtype,
-        )
-    finally:
-        set_kv_cache_layout(None)
+    _test_backend_correctness(
+        batch_spec=BATCH_SPECS[batch_spec_name],
+        model="meta-llama/Meta-Llama-3-8B",
+        backend_to_test=[AttentionBackendEnum.FLASHINFER],
+        mask_mod=causal_mask_mod,
+        kv_cache_dtype=kv_cache_dtype,
+        layout=KVCacheLayout[layout],
+    )
 
 
 @pytest.mark.parametrize(

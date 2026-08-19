@@ -21,7 +21,6 @@ if not current_platform.is_cuda_alike():
     pytest.skip("Requires CUDA or ROCm", allow_module_level=True)
 
 from tests.v1.attention.utils import dense_kv_cache_views
-from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheLayout
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
@@ -219,13 +218,9 @@ def test_register_shared_kv_cache_storage(monkeypatch, layout: KVCacheLayout):
     worker._backend = MagicMock()
     monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.PIN_MEMORY", False)
 
-    set_kv_cache_layout(layout.name)
-    try:
-        worker.register_kv_caches(
-            {f"layer.{layer_idx}": cache for layer_idx, cache in enumerate(caches)}
-        )
-    finally:
-        set_kv_cache_layout(None)
+    worker.register_kv_caches(
+        {f"layer.{layer_idx}": cache for layer_idx, cache in enumerate(caches)}
+    )
 
     assert worker.gpu_kv_caches is not None
     if layout.is_layer_compact and not layout.is_block_compact:
@@ -271,13 +266,9 @@ def test_register_separate_kv_head_groups(monkeypatch):
     worker._backend = MagicMock()
     monkeypatch.setattr("vllm.v1.simple_kv_offload.worker.PIN_MEMORY", False)
 
-    set_kv_cache_layout(layout.name)
-    try:
-        worker.register_kv_caches(
-            {f"layer.{layer_idx}": cache for layer_idx, cache in enumerate(caches)}
-        )
-    finally:
-        set_kv_cache_layout(None)
+    worker.register_kv_caches(
+        {f"layer.{layer_idx}": cache for layer_idx, cache in enumerate(caches)}
+    )
 
     assert worker.gpu_kv_caches is not None
     assert len(worker.gpu_kv_caches) == num_layers * spec.num_heads

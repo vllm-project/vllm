@@ -10,10 +10,31 @@ from vllm.utils.torch_utils import (
     current_stream,
     get_kv_cache_torch_dtype,
     is_lossless_cast,
+    is_non_overlapping_and_dense,
     is_quantized_kv_cache,
     set_torch_threads_for_runtime,
     startup_omp_num_threads,
 )
+
+
+@pytest.mark.parametrize(
+    ("tensor", "expected"),
+    [
+        (torch.zeros(4, 3, 2), True),
+        # Permuted views of a contiguous tensor stay dense.
+        (torch.zeros(4, 3, 2).permute(1, 0, 2), True),
+        (torch.zeros(4, 3, 2).permute(2, 1, 0), True),
+        # Slicing an inner dim leaves gaps.
+        (torch.zeros(4, 6)[:, :3], False),
+        # Selecting from an outer dim of a permuted view leaves a gap per row.
+        (torch.zeros(4, 3, 2).permute(1, 0, 2)[0], False),
+        # Size-1 dims are dense regardless of their (degenerate) stride.
+        (torch.zeros(5).as_strided((1, 5), (1, 1)), True),
+        (torch.zeros(1), True),
+    ],
+)
+def test_is_non_overlapping_and_dense(tensor: torch.Tensor, expected: bool):
+    assert is_non_overlapping_and_dense(tensor) == expected
 
 
 def test_nvfp4_4over6_cache_dtype() -> None:

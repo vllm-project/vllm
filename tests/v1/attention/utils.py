@@ -220,6 +220,9 @@ def create_vllm_config(
     #   (these may be set during initialization normally)
     cache_config.num_gpu_blocks = num_gpu_blocks
     cache_config.num_cpu_blocks = 0
+    # Builders read the resolved layout from the config; tests that exercise a
+    # different layout overwrite this field.
+    cache_config.kv_cache_layout = "LBNHC"
 
     parallel_config = ParallelConfig(
         tensor_parallel_size=tensor_parallel_size,

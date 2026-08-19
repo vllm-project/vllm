@@ -870,6 +870,7 @@ def test_metrics_empty_stats():
 def test_get_kv_cache_configs_multiple_workers():
     model_config = ModelConfig(max_model_len=16)
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
     vllm_config.cache_config.prefix_cache_retention_interval = None
 
     ref_kv_cache_spec = new_kv_cache_spec()
@@ -1197,6 +1198,7 @@ def test_get_kv_cache_configs_multiple_workers():
 def test_get_kv_cache_configs_pp_sharding(asymmetric_memory):
     model_config = ModelConfig(max_model_len=512)
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
     vllm_config.cache_config.prefix_cache_retention_interval = None
 
     ref_kv_cache_spec = new_kv_cache_spec()
@@ -1673,6 +1675,7 @@ def test_get_kv_cache_config_one_worker():
     # pass max_model_len to pass check_enough_kv_cache_memory
     model_config = ModelConfig(max_model_len=16)
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
     vllm_config.cache_config.prefix_cache_retention_interval = None
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
@@ -2309,27 +2312,21 @@ def test_multi_run_layer_compact_strides_place_hoisted_heads():
     groups sit between the layers and the blocks, so a run's block stride is one head
     group's slice, not the whole page (regression test for setStorage out-of-bounds
     on ROCm hybrid models)."""
-    import vllm.v1.attention.backends.utils as attn_backend_utils
-    from vllm.v1.kv_cache_interface import KVCacheLayout
-
     full = new_kv_cache_spec()
     swa = new_sliding_window_spec(sliding_window=full.block_size * 2)
     page = full.page_size_bytes
     assert swa.page_size_bytes == page
 
-    prev = attn_backend_utils._RESOLVED_KV_CACHE_LAYOUT
-    attn_backend_utils._RESOLVED_KV_CACHE_LAYOUT = KVCacheLayout.LHBNC
-    try:
-        config = kv_cache_utils.get_kv_cache_config_from_groups(
-            VllmConfig(model_config=ModelConfig(max_model_len=16)),
-            [
-                KVCacheGroupSpec(["full.0", "full.1"], full),
-                KVCacheGroupSpec(["swa.0", "swa.1"], swa),
-            ],
-            available_memory=4 * page * 8,
-        )
-    finally:
-        attn_backend_utils._RESOLVED_KV_CACHE_LAYOUT = prev
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
+    vllm_config.cache_config.kv_cache_layout = "LHBNC"
+    config = kv_cache_utils.get_kv_cache_config_from_groups(
+        vllm_config,
+        [
+            KVCacheGroupSpec(["full.0", "full.1"], full),
+            KVCacheGroupSpec(["swa.0", "swa.1"], swa),
+        ],
+        available_memory=4 * page * 8,
+    )
 
     num_blocks = config.num_blocks
     head_group = full.block_size * full.state_content_size_bytes
@@ -2670,6 +2667,7 @@ def test_auto_fit_max_model_len():
     # Simulate the user passing -1 by setting original_max_model_len
     model_config.original_max_model_len = -1
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2  # 16KB per block per layer
     kv_cache_specs = {
@@ -2688,6 +2686,7 @@ def test_auto_fit_max_model_len():
     model_config = ModelConfig(max_model_len=1024)
     model_config.original_max_model_len = -1
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
 
     # With limited memory, max_model_len should be reduced
     # Need memory for at least max_model_len tokens
@@ -2708,6 +2707,7 @@ def test_auto_fit_max_model_len_with_hybrid():
     # Simulate the user passing -1 by setting original_max_model_len
     model_config.original_max_model_len = -1
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2  # 16KB per block per layer
     gamma = 2
@@ -2728,6 +2728,7 @@ def test_auto_fit_max_model_len_not_triggered():
     model_config = ModelConfig(max_model_len=16)
     # original_max_model_len should be None by default, not -1
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
 
     mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2
     kv_cache_specs = {
@@ -2750,6 +2751,7 @@ def test_auto_fit_max_model_len_respects_num_gpu_blocks_override():
     model_config = ModelConfig(max_model_len=16384)
     model_config.original_max_model_len = -1  # request auto-fit
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
     # Cap the cache to 32 blocks regardless of available memory.
     vllm_config.cache_config.num_gpu_blocks_override = 32
 
@@ -2775,6 +2777,7 @@ def test_check_enough_kv_cache_memory_respects_num_gpu_blocks_override():
     """
     model_config = ModelConfig(max_model_len=16384)
     vllm_config = VllmConfig(model_config=model_config)
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
     # 32 blocks is far too small for max_model_len=16384 (would need 1024).
     vllm_config.cache_config.num_gpu_blocks_override = 32
 

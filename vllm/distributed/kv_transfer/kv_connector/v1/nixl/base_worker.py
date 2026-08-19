@@ -70,7 +70,6 @@ from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.network_utils import make_zmq_path
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheLayout,
@@ -519,7 +518,9 @@ class NixlBaseConnectorWorker:
         self.attn_backends = get_current_attn_backends(vllm_config)
         self.backend_name = self.attn_backends[0].get_name()
 
-        self.kv_cache_layout = get_kv_cache_layout().name
+        self.kv_cache_layout = (
+            vllm_config.cache_config.get_resolved_kv_cache_layout().name
+        )
         self.host_buffer_kv_cache_layout = self.kv_cache_layout
         logger.info(
             "Detected attention backend(s) %s",

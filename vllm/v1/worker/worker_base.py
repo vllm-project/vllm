@@ -18,7 +18,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
 from vllm.v1.attention.backends.utils import (
     get_supported_kv_cache_layouts,
-    publish_kv_cache_layout_to_current_process,
+    record_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
@@ -111,9 +111,7 @@ class WorkerBase:
 
     def set_kv_cache_layout(self, kv_cache_layout: str) -> None:
         """Adopt the KV cache layout resolved by the engine core."""
-        publish_kv_cache_layout_to_current_process(
-            kv_cache_layout, self.vllm_config.cache_config
-        )
+        record_kv_cache_layout(self.vllm_config.cache_config, kv_cache_layout)
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.

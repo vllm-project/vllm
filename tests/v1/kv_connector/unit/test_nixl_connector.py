@@ -55,7 +55,6 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.platforms.interface import Platform
 from vllm.sampling_params import SamplingParams
-from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.kv_cache_interface import (
@@ -95,15 +94,6 @@ def clear_kv_transfer():
     yield
     if has_kv_transfer_group():
         ensure_kv_transfer_shutdown()
-    # Reset any KV cache layout override set during tests so it doesn't
-    # leak into tests in other modules.
-    set_kv_cache_layout(None)
-
-
-@pytest.fixture(autouse=True)
-def reset_kv_cache_layout():
-    yield
-    set_kv_cache_layout(None)
 
 
 def get_default_xfer_telemetry(
@@ -356,11 +346,11 @@ def test_abort_immediately_remote_prefill_enqueues_empty_recv():
 def test_kv_transfer_handshake(dist_init):
     """Unit test for basic NixlConnector interface functionality."""
 
-    set_kv_cache_layout("BLHNC")
     # Test setup, we creates a scheduler that contains a NixlConnector
     # of role SCHEDULER, and expect it to be serving NixlAgentMetadata from
     # all workers of the instance.
     vllm_config = create_vllm_config()
+    vllm_config.cache_config.kv_cache_layout = "BLHNC"
     # in case the test runs on non-GPU machine
     vllm_config.kv_transfer_config.kv_buffer_device = "cpu"
     scheduler = create_scheduler(vllm_config)
@@ -1846,7 +1836,7 @@ def test_register_kv_caches(
     """
 
     vllm_config = create_vllm_config(attention_backend=attn_backend)
-    set_kv_cache_layout(layout)
+    vllm_config.cache_config.kv_cache_layout = layout
 
     # Import the appropriate backend based on the parameter
     if attn_backend == "FLASH_ATTN":

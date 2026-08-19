@@ -6,7 +6,6 @@ from dataclasses import dataclass, field, fields, make_dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
-    Literal,
     Protocol,
 )
 
@@ -14,7 +13,8 @@ import numpy as np
 import torch
 from typing_extensions import runtime_checkable
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
+from vllm.config.cache import _layout_from_name
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
 from vllm.v1.kv_cache_interface import KVCacheLayout, KVCacheSpec, MambaSpec
@@ -38,8 +38,6 @@ from vllm.v1.attention.backend import (
 )
 
 logger = init_logger(__name__)
-KVCacheLayoutType = Literal["LBNHC", "LBHNC", "LHBNC", "BLHNC", "BLNHC", "BHLNC"]
-_KV_CACHE_LAYOUT_OVERRIDE: KVCacheLayoutType | None = None
 
 PAD_SLOT_ID = -1
 NULL_BLOCK_ID = 0
@@ -145,10 +143,6 @@ def fill_mm_prefix_query_ranges(
     return num_actual_tokens
 
 
-_LAYOUT_COMPAT_ALIASES = {
-    "NHD": "LBNHC",
-    "HND": "LBHNC",
-}
 _FLASHINFER_LAYOUT_NAMES = {
     "LBNHC": "NHD",
     "LBHNC": "HND",
@@ -158,25 +152,14 @@ _FLASHINFER_LAYOUT_NAMES = {
 }
 
 
-def get_flashinfer_layout_string() -> str:
+def get_flashinfer_layout_string(layout: KVCacheLayout) -> str:
     """Return the layout name in FlashInfer's convention (NHD/HND)."""
-    name = get_kv_cache_layout().name
-    assert name in _FLASHINFER_LAYOUT_NAMES, (
-        f"KV cache layout {name} has no FlashInfer equivalent; FlashInfer "
+    assert layout.name in _FLASHINFER_LAYOUT_NAMES, (
+        f"KV cache layout {layout.name} has no FlashInfer equivalent; FlashInfer "
         "rejects it in supported_kv_cache_layouts"
     )
-    return _FLASHINFER_LAYOUT_NAMES[name]
+    return _FLASHINFER_LAYOUT_NAMES[layout.name]
 
-
-def set_kv_cache_layout(cache_layout: KVCacheLayoutType | None):
-    """Install a test-only layout override (highest priority)."""
-    global _KV_CACHE_LAYOUT_OVERRIDE, _RESOLVED_KV_CACHE_LAYOUT
-    layout = _layout_from_name(cache_layout) if cache_layout is not None else None
-    _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
-    _RESOLVED_KV_CACHE_LAYOUT = layout
-
-
-_RESOLVED_KV_CACHE_LAYOUT: KVCacheLayout | None = None
 
 # Preference order when no backend declares a supported set; LBNHC (NHD)
 # first to match main's default.
@@ -192,17 +175,6 @@ _DEFAULT_LAYOUT_PREFERENCE = (
 
 def _layout_names(layouts: Iterable[KVCacheLayout]) -> list[str]:
     return [layout.name for layout in layouts]
-
-
-def _layout_from_name(layout_name: str) -> KVCacheLayout:
-    layout_name = _LAYOUT_COMPAT_ALIASES.get(layout_name, layout_name)
-    try:
-        return KVCacheLayout[layout_name]
-    except KeyError:
-        raise ValueError(
-            f"Unknown KV cache layout {layout_name!r}. "
-            f"Valid layouts: {[m.name for m in KVCacheLayout]}"
-        ) from None
 
 
 def get_supported_kv_cache_layouts(
@@ -243,21 +215,20 @@ def get_supported_kv_cache_layouts(
     return candidates
 
 
-def publish_kv_cache_layout_to_current_process(
-    layout_name: str, cache_config=None
-) -> None:
-    """Adopt a layout resolved elsewhere (the engine core) in this process.
-
-    The layout is published on ``cache_config.kv_cache_layout`` and in a
-    process-local mirror for callers without a config handle.
-    """
-    global _RESOLVED_KV_CACHE_LAYOUT
-    _RESOLVED_KV_CACHE_LAYOUT = _layout_from_name(layout_name)
-    if cache_config is not None:
-        cache_config.kv_cache_layout = _RESOLVED_KV_CACHE_LAYOUT.name
+def record_kv_cache_layout(cache_config: CacheConfig, layout_name: str) -> None:
+    """Adopt a layout resolved elsewhere (the engine core) in this process."""
+    layout = _layout_from_name(layout_name)
+    existing = cache_config.kv_cache_layout
+    if existing is not None and existing != layout.name:
+        raise ValueError(
+            f"KV cache layout is already resolved to {existing}; "
+            f"cannot change it to {layout.name}."
+        )
+    cache_config.kv_cache_layout = layout.name
 
 
 def resolve_kv_cache_layout(
+    cache_config: CacheConfig,
     supported_layouts: list[list[str]],
     kv_cache_specs: Iterable[KVCacheSpec] | None = None,
 ) -> KVCacheLayout:
@@ -270,12 +241,13 @@ def resolve_kv_cache_layout(
     ``VLLM_KV_CACHE_LAYOUT`` must be one of the candidates or resolution fails,
     with the legacy ``NHD``/``HND`` names as aliases for ``LBNHC``/``LBHNC``; the
     connector's preference is used when compatible and dropped with a warning
-    otherwise. The caller publishes the result: locally via
-    ``publish_kv_cache_layout_to_current_process``, to workers through the
-    ``set_kv_cache_layout`` RPC and ``KVCacheConfig.kv_cache_layout``.
+    otherwise. A layout already present on ``cache_config`` wins outright, and
+    the result is recorded there (see ``CacheConfig.kv_cache_layout``); it
+    reaches workers through the ``set_kv_cache_layout`` RPC and
+    ``KVCacheConfig.kv_cache_layout``.
     """
-    if _KV_CACHE_LAYOUT_OVERRIDE is not None:
-        return _layout_from_name(_KV_CACHE_LAYOUT_OVERRIDE)
+    if cache_config.kv_cache_layout is not None:
+        return cache_config.get_resolved_kv_cache_layout()
 
     assert supported_layouts and all(supported_layouts), (
         "No worker reported supported KV cache layouts."
@@ -321,25 +293,8 @@ def resolve_kv_cache_layout(
         layout = candidates[0]
 
     logger.info_once("Using %s KV cache layout.", layout.name)
+    cache_config.kv_cache_layout = layout.name
     return layout
-
-
-def get_kv_cache_layout() -> KVCacheLayout:
-    """Return the physical KV cache layout resolved for this model.
-
-    Read-only: the engine core resolves the layout once and every process adopts
-    it (``publish_kv_cache_layout_to_current_process``) before the cache is
-    allocated. Processes where resolution never runs (unit tests, standalone
-    tools) get the LBNHC default with a warning; use ``set_kv_cache_layout`` to
-    pick one explicitly.
-    """
-    if _RESOLVED_KV_CACHE_LAYOUT is not None:
-        return _RESOLVED_KV_CACHE_LAYOUT
-    logger.warning_once(
-        "get_kv_cache_layout() called before layout resolution; "
-        "using the LBNHC default."
-    )
-    return KVCacheLayout.LBNHC
 
 
 @dataclass

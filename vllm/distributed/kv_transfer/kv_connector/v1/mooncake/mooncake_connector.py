@@ -49,8 +49,9 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
+from vllm.utils.torch_utils import is_non_overlapping_and_dense
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, get_kv_cache_layout
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -1000,12 +1001,10 @@ class MooncakeConnectorWorker:
         self._sync_block_size_with_kernel()
 
         self.attn_backends = get_current_attn_backends(vllm_config)
-        self.kv_cache_layout = get_kv_cache_layout().name
         logger.debug(
             "Detected attention backends %s",
             [backend.get_name() for backend in self.attn_backends],
         )
-        logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
         self._layer_specs: dict[str, KVCacheSpec] = {}
@@ -1632,7 +1631,6 @@ class MooncakeConnectorWorker:
 
         logger.info("Registering KV_Caches. use_mla: %s", self.use_mla)
 
-        layout = get_kv_cache_layout()
         kv_data_ptrs: list[int] = []
         kv_data_lens: list[int] = []
         region_base_addresses: list[int] = []
@@ -1655,8 +1653,14 @@ class MooncakeConnectorWorker:
             # One raw page tensor per layer; for Mamba that page holds all the
             # recurrent states, unpacked only when binding the cache for execution.
             self._log_debug_cache_registration(layer_name, cache)
-            if not layout.is_block_compact:
+            block_is_contiguous = is_non_overlapping_and_dense(cache[0])
+            if not block_is_contiguous:
+                # Non-block-compact layouts scatter a block across per-head
+                # regions; each region's blocks are contiguous.
                 region_caches = [cache[:, head] for head in range(cache.shape[1])]
+                assert all(
+                    is_non_overlapping_and_dense(region[0]) for region in region_caches
+                )
             else:
                 region_caches = [cache]
 
@@ -1667,7 +1671,7 @@ class MooncakeConnectorWorker:
 
                 kv_block_len = (
                     layer_spec.page_size_bytes
-                    if isinstance(layer_spec, AttentionSpec) and layout.is_block_compact
+                    if isinstance(layer_spec, AttentionSpec) and block_is_contiguous
                     else block_len
                 )
                 self.block_len_per_layer.append(block_len)

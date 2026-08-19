@@ -19,9 +19,6 @@ from vllm.utils.hashing import xxhash, xxhash_cbor
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.attention.backends.utils import (
-    get_kv_cache_layout,
-)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
@@ -1285,16 +1282,16 @@ def _get_kv_cache_bytes_per_block(
 
 
 def validate_kv_cache_layout(
+    layout: KVCacheLayout,
     kv_cache_groups: list[KVCacheGroupSpec],
-) -> KVCacheLayout:
+) -> None:
     """Validate that the resolved layout can express this model's packing.
 
-    Read-only: the layout was chosen once in the engine core from the backends'
-    supported sets; a backend whose model packs pages side by side (e.g. the
-    DeepSeek-V4 indexer) declares block-outermost layouts there, so an inexpressible
+    The layout was chosen once in the engine core from the backends' supported
+    sets; a backend whose model packs pages side by side (e.g. the DeepSeek-V4
+    indexer) declares block-outermost layouts there, so an inexpressible
     layout reaching this point is an error.
     """
-    layout = get_kv_cache_layout()
     page_sizes = {
         _get_per_layer_spec(group, layer_name).page_size_bytes
         for group in kv_cache_groups
@@ -1302,7 +1299,7 @@ def validate_kv_cache_layout(
     }
     if len(page_sizes) == 1:
         # A rectangular layer dim exists; every layout can express it.
-        return layout
+        return
 
     # Mixed page sizes pack pages side by side within a block, which needs each page
     # to be one contiguous chunk inside its block (a block-compact layout) and, with
@@ -1316,7 +1313,6 @@ def validate_kv_cache_layout(
             "declare block-outermost supported layouts (e.g. BLHNC), or "
             "set VLLM_KV_CACHE_LAYOUT=BLHNC."
         )
-    return layout
 
 
 def get_kv_cache_config_from_groups(
@@ -1347,7 +1343,8 @@ def get_kv_cache_config_from_groups(
             ),
         )
 
-    layout = validate_kv_cache_layout(kv_cache_groups)
+    layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+    validate_kv_cache_layout(layout, kv_cache_groups)
     bytes_per_block = _get_kv_cache_bytes_per_block(kv_cache_groups)
     interleaved_block_stride = bytes_per_block if layout.is_block_outermost else None
 

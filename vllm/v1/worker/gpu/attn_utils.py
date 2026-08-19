@@ -14,7 +14,6 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -191,7 +190,10 @@ def init_kv_cache(
     vllm_config: VllmConfig,
 ) -> dict[str, Any]:
     kv_caches = allocate_kv_cache(
-        kv_cache_config, device, get_kv_cache_layout(), kernel_block_sizes
+        kv_cache_config,
+        device,
+        vllm_config.cache_config.get_resolved_kv_cache_layout(),
+        kernel_block_sizes,
     )
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]

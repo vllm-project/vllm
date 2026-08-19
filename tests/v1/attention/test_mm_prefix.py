@@ -22,8 +22,8 @@ import torch
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import (
     fill_mm_prefix_query_ranges,
-    get_kv_cache_layout,
 )
+from vllm.v1.kv_cache_interface import KVCacheLayout
 
 
 def _fa4_available() -> bool:
@@ -588,7 +588,7 @@ def test_mm_prefix_kv_cache_path(head_size: int):
         device=DEVICE,
         num_blocks=2048,
         common_attn_metadata=common,
-        layout=get_kv_cache_layout(),
+        layout=KVCacheLayout.LBNHC,
         randomize_blocks=True,
     )
 

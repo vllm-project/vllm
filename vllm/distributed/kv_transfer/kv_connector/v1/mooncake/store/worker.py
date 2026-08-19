@@ -58,7 +58,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.protocol import
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_socket
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, get_kv_cache_layout
+from vllm.utils.torch_utils import is_non_overlapping_and_dense
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     maybe_convert_block_hash,
@@ -1546,7 +1547,6 @@ class MooncakeStoreWorker:
         assert self.cache_config.num_gpu_blocks is not None
         self.num_blocks = self.cache_config.num_gpu_blocks
 
-        layout = get_kv_cache_layout()
         seen_storage_ptrs: set[int] = set()
         seen_region_ptrs: set[int] = set()
         addrs: list[int] = []
@@ -1568,27 +1568,25 @@ class MooncakeStoreWorker:
                         ret,
                     )
 
-            if not layout.is_block_compact:
+            if not is_non_overlapping_and_dense(cache[0]):
+                # A block is scattered across per-head regions; each region's
+                # blocks are contiguous.
                 for head_idx in range(cache.shape[1]):
                     head_cache = cache[:, head_idx]
+                    assert is_non_overlapping_and_dense(head_cache[0])
                     region_addr = head_cache.data_ptr()
                     if region_addr in seen_region_ptrs:
                         continue
                     seen_region_ptrs.add(region_addr)
                     addrs.append(region_addr)
                     block_lens.append(head_cache.stride(0) * head_cache.element_size())
-            elif not layout.is_layer_compact:
-                if base_addr in seen_region_ptrs:
-                    continue
-                seen_region_ptrs.add(base_addr)
-                addrs.append(base_addr)
-                block_lens.append(region_len // self.num_blocks)
             elif cache.stride(0) * cache.element_size() * self.num_blocks == region_len:
-                # Packed layout (and single-layer tensors): the block stride spans
-                # the whole per-block window, which may hold other layers' pages at
-                # higher offsets. Register the storage once as one whole-window
-                # region; per-layer regions would copy overlapping windows and run
-                # past the storage for offset layers.
+                # The block stride spans the whole per-block window
+                # (block-outermost and packed layouts, and single-layer
+                # tensors), which may hold other layers' pages at higher
+                # offsets. Register the storage once as one whole-window
+                # region; per-layer regions would copy overlapping windows and
+                # run past the storage for offset layers.
                 if base_addr in seen_region_ptrs:
                     continue
                 seen_region_ptrs.add(base_addr)
