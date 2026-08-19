@@ -42,9 +42,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   5: Add remote_blocks_expiry_time to kv_transfer_params + handshake
 #      clock-sync timestamp
 #   6: Validate EAGLE/MTP speculative configuration compatibility
-#   7: Add packed KV cache region metadata, including strides, block counts,
+#   7: Include NIXL transfer mode (push vs pull) in the compatibility hash
+#   8: Add packed KV cache region metadata, including strides, block counts,
 #      group IDs, block sizes, and names
-#   8: Include NIXL transfer mode (push vs pull) in the compatibility hash
 #
 NIXL_CONNECTOR_VERSION: int = 8
 
