@@ -1286,7 +1286,7 @@ re_quote_pytest_markers() {
   echo "${output% }"
 }
 
-# shellcheck disable=SC2317  # Called indirectly by the EXIT trap.
+# shellcheck disable=SC2317,SC2329  # Called indirectly by the EXIT trap.
 handle_amd_runner_exit() {
   local exit_code=${1:-$?}
   if [[ "${exit_code}" -ne 0 ]]; then
@@ -1307,7 +1307,7 @@ if is_native_runtime; then
   echo "--- Native in-pod ROCm CI (AMD_CI_RUNTIME=${AMD_CI_RUNTIME:-unset}, NATIVE_CI=${NATIVE_CI:-unset})"
   artifact_work_dir=""
 
-  # shellcheck disable=SC2317  # Called indirectly by the EXIT trap.
+  # shellcheck disable=SC2317,SC2329  # Called indirectly by the EXIT trap.
   cleanup_native_workspace() {
     local exit_code=$?
     if [[ -n "${artifact_work_dir}" ]]; then
@@ -1377,7 +1377,7 @@ image_name="${VLLM_CI_FALLBACK_IMAGE:-rocm/vllm-ci:${BUILDKITE_COMMIT:-local}}"
 artifact_work_dir=""
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
 
-# shellcheck disable=SC2317  # Called indirectly by the EXIT trap.
+# shellcheck disable=SC2317,SC2329  # Called indirectly by the EXIT trap.
 remove_docker_container() {
   local exit_code=$?
   if docker container inspect "${container_name}" >/dev/null 2>&1; then
@@ -1531,6 +1531,7 @@ if is_multi_node "$commands"; then
   #   BASH_REMATCH[2] = comma-separated node0 commands
   #   BASH_REMATCH[3] = comma-separated node1 commands
   if [[ "$commands" =~ ^(.*)\[(.*)"] && ["(.*)\]$ ]]; then
+    # shellcheck disable=SC2001  # verified equivalent behavior; switch to param expansion in a follow-up cleanup PR
     prefix=$(echo "${BASH_REMATCH[1]}" | sed 's/;//g')
     echo "PREFIX: ${prefix}"
 
@@ -1546,7 +1547,9 @@ if is_multi_node "$commands"; then
     fi
 
     for i in "${!node0[@]}"; do
+      # shellcheck disable=SC2001  # verified equivalent behavior; switch to param expansion in a follow-up cleanup PR
       command_node_0=$(echo "${node0[i]}" | sed 's/\"//g')
+      # shellcheck disable=SC2001  # verified equivalent behavior; switch to param expansion in a follow-up cleanup PR
       command_node_1=$(echo "${node1[i]}" | sed 's/\"//g')
 
       step_cmd="./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
@@ -1590,6 +1593,7 @@ else
     echo "ROCm debug agent not enabled, coredumps are disabled in the test container."
   fi
 
+  # shellcheck disable=SC2086  # word splitting is intentional: both hold multiple docker flags
   docker run \
     "${docker_run_terminal_args[@]}" \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \

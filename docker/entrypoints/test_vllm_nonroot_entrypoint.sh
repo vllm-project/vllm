@@ -43,6 +43,7 @@ run_wrapper() {
         _env="$_env $1"; shift
     done
     shift
+    # shellcheck disable=SC2086  # word splitting is intentional: $_env holds multiple NAME=value assignments
     env -i PATH="$WORKDIR/bin:/usr/bin:/bin" $_env "$WRAPPER" "$@" > "$_out"
 }
 

@@ -86,10 +86,10 @@ launch_baseline() {
       --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION} \
       --dtype float16 \
       --enforce-eager"
-  echo ${BASELINE_BASE_CMD}      
+  echo "${BASELINE_BASE_CMD}"
   bash -c "${BASELINE_BASE_CMD}" &
   sleep 10
-  wait_for_server ${BASELINE_HOST} ${BASELINE_PORT}
+  wait_for_server "${BASELINE_HOST}" "${BASELINE_PORT}"
 }
 
 launch_pd() {
@@ -150,7 +150,7 @@ launch_pd_proxy(){
   --prefiller-host ${PREFILL_HOST} --prefiller-port ${PREFILL_PORT} \
   --decoder-host ${DECODE_HOST} --decoder-port ${DECODE_PORT} \
   --host=${PROXY_HOST} --port ${PROXY_PORT}"
-  echo ${PROXY_BASE_CMD} 
+  echo "${PROXY_BASE_CMD}"
   bash -c "${PROXY_BASE_CMD}" &
   sleep 2
 }
@@ -158,7 +158,7 @@ launch_pd_proxy(){
 run_tests(){
   local service_url=$1
   local mode=$2
-  python3 ${EXP_ROOT}/test_disagg_accuracy.py --service_url=${service_url} --model_name=${MODEL_NAME} --mode=${mode} --file_name=${OUTPUT_FILE}
+  python3 "${EXP_ROOT}/test_disagg_accuracy.py" --service_url="${service_url}" --model_name="${MODEL_NAME}" --mode="${mode}" --file_name="${OUTPUT_FILE}"
 }
 
 
@@ -175,7 +175,7 @@ launch_pd_proxy
 run_tests "http://${PROXY_HOST}:${PROXY_PORT}" "disagg"
 echo "-----P/D success----"
 
-rm ${OUTPUT_FILE}
+rm "${OUTPUT_FILE}"
 cleanup
 
 exit 0

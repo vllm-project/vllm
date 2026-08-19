@@ -39,7 +39,7 @@ repos:
   rev: 745eface02aef23e168a8afb6b5737818efbea95 # v0.11.0.1
   hooks:
   - id: shellcheck
-    args: ["-s", "bash", "--format=gcc", "--severity=warning"]
+    args: ["-s", "bash", "--format=gcc"]
 - repo: https://github.com/astral-sh/uv-pre-commit
   rev: 0.11.1
   hooks:
