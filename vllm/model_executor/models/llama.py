@@ -35,7 +35,7 @@ from transformers import LlamaConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
@@ -76,6 +76,10 @@ from .utils import (
     maybe_prefix,
 )
 
+# ACT2FN names whose fused activation-and-mul op uses the concatenated
+# [gate | up] layout of gate_up_proj; SwigluOAIAndMul expects interleaved.
+_SUPPORTED_HIDDEN_ACTS = frozenset({"gelu", "gelu_pytorch_tanh", "silu", "swish"})
+
 
 class LlamaMLP(nn.Module):
     def __init__(
@@ -107,11 +111,12 @@ class LlamaMLP(nn.Module):
             disable_tp=disable_tp,
             prefix=f"{prefix}.down_proj",
         )
-        if hidden_act != "silu":
+        if hidden_act not in _SUPPORTED_HIDDEN_ACTS:
             raise ValueError(
-                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
+                f"Unsupported activation: {hidden_act}. Supported activations "
+                f"are: {sorted(_SUPPORTED_HIDDEN_ACTS)}."
             )
-        self.act_fn = SiluAndMul()
+        self.act_fn = get_act_and_mul_fn(hidden_act)
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
