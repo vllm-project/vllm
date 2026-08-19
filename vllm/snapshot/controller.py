@@ -3,7 +3,6 @@
 
 import argparse
 import ast
-import dataclasses
 import hashlib
 import importlib.metadata
 import importlib.util
@@ -938,21 +937,22 @@ class LocalSnapshotTools:
         torch_version, cuda_runtime = self._torch_identity()
         host_id = Path("/etc/machine-id").read_text().strip()
         source_revision = self._source_revision()
-        return dataclasses.replace(
-            manifest,
-            source_revision=source_revision,
-            binary_revision=self._binary_revision(),
-            python_version=platform.python_version(),
-            torch_version=torch_version,
-            cuda_runtime=cuda_runtime,
-            driver_version=driver_version,
-            criu_version=self._version([self.criu, "--version"]),
-            cuda_checkpoint_sha256=self._sha256(Path(self.cuda_checkpoint)),
-            kernel_release=platform.release(),
-            host_id=host_id,
-            gpu_name=gpu_name,
-            gpu_uuid=gpu_uuid,
-            environment=self._environment_identity(),
+        return manifest.model_copy(
+            update={
+                "source_revision": source_revision,
+                "binary_revision": self._binary_revision(),
+                "python_version": platform.python_version(),
+                "torch_version": torch_version,
+                "cuda_runtime": cuda_runtime,
+                "driver_version": driver_version,
+                "criu_version": self._version([self.criu, "--version"]),
+                "cuda_checkpoint_sha256": self._sha256(Path(self.cuda_checkpoint)),
+                "kernel_release": platform.release(),
+                "host_id": host_id,
+                "gpu_name": gpu_name,
+                "gpu_uuid": gpu_uuid,
+                "environment": self._environment_identity(),
+            }
         )
 
     def _read_restored_pid(self, pidfile: Path) -> int:

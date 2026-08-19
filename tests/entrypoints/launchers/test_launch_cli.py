@@ -3,7 +3,6 @@
 """Unit tests for the `vllm launch` CLI subcommand."""
 
 import argparse
-import dataclasses
 import io
 import json
 import os
@@ -418,7 +417,9 @@ def _manifest(**changes: object) -> SnapshotManifest:
         oracle_text=" Paris",
         oracle_sampled_token_logprob=-0.125,
     )
-    return dataclasses.replace(manifest, **changes)  # type: ignore[arg-type]
+    return SnapshotManifest.model_validate(
+        {**manifest.model_dump(mode="python"), **changes}, strict=True
+    )
 
 
 def _fake_snapshot_tools(*, fail_dump: bool = False) -> Any:
@@ -640,15 +641,89 @@ def test_snapshot_create_outcomes_and_child_paths(
     assert not failed.exists()
 
 
-def test_snapshot_restore_rejects_identity_and_manages_pinned_lifecycle(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("invalid_update", "diagnostic"),
+    [
+        pytest.param({"unexpected": True}, "fields", id="extra-field"),
+        pytest.param({"created_at": 1}, "created_at", id="strict-string"),
+        pytest.param({"schema_version": True}, "schema_version", id="schema-bool"),
+        pytest.param({"schema_version": 2}, "schema_version", id="schema-value"),
+        pytest.param({"complete": 1}, "complete", id="complete-int"),
+        pytest.param({"complete": False}, "complete", id="complete-false"),
+        pytest.param({"boundary": "unknown"}, "boundary", id="boundary"),
+        pytest.param({"process_tree": []}, "process_tree", id="empty-process-tree"),
+        pytest.param({"process_tree": [0]}, "process_tree", id="nonpositive-pid"),
+        pytest.param(
+            {"process_tree": [100, 100]},
+            "process_tree",
+            id="duplicate-process-pid",
+        ),
+        pytest.param({"cuda_holders": []}, "cuda_holders", id="empty-cuda-holders"),
+        pytest.param(
+            {"cuda_holders": [-1]}, "cuda_holders", id="nonpositive-cuda-holder"
+        ),
+        pytest.param(
+            {"cuda_holders": [999]},
+            "cuda_holders",
+            id="cuda-holder-outside-tree",
+        ),
+        pytest.param(
+            {"cuda_holders": [101, 101]},
+            "cuda_holders",
+            id="duplicate-cuda-holder",
+        ),
+        pytest.param({"oracle_token_ids": []}, "oracle", id="empty-oracle-token"),
+        pytest.param(
+            {"oracle_token_ids": [1, 2]}, "oracle", id="multiple-oracle-tokens"
+        ),
+        pytest.param({"oracle_token_ids": [-1]}, "oracle", id="negative-oracle-token"),
+        pytest.param(
+            {"oracle_sampled_token_logprob": 0}, "oracle", id="integer-logprob"
+        ),
+        pytest.param(
+            {"oracle_sampled_token_logprob": True}, "oracle", id="boolean-logprob"
+        ),
+        pytest.param(
+            {"oracle_sampled_token_logprob": float("nan")},
+            "oracle",
+            id="nan-logprob",
+        ),
+        pytest.param(
+            {"oracle_sampled_token_logprob": float("inf")},
+            "oracle",
+            id="infinite-logprob",
+        ),
+        pytest.param(
+            {
+                "socket_inventory": [
+                    {
+                        "family": "AF_INET",
+                        "socket_type": "SOCK_STREAM",
+                        "local_address": "127.0.0.1:8000",
+                        "remote_address": None,
+                        "state": "LISTEN",
+                        "unexpected": True,
+                    }
+                ]
+            },
+            "socket_inventory",
+            id="socket-extra-field",
+        ),
+    ],
+)
+def test_snapshot_manifest_validation_and_restore_lifecycle(
+    tmp_path: Path,
+    invalid_update: dict[str, object],
+    diagnostic: str,
+):
     artifact = tmp_path / "snapshot"
     artifact.mkdir(mode=0o700)
     write_manifest_atomic(artifact, _manifest())
     args = argparse.Namespace(snapshot_dir=str(artifact), host="127.0.0.1", port=9000)
 
     identity_mismatch = _fake_snapshot_tools()
-    identity_mismatch.current_identity.side_effect = lambda manifest: (
-        dataclasses.replace(manifest, model_revision="different")
+    identity_mismatch.current_identity.side_effect = lambda _current: _manifest(
+        model_revision="different"
     )
     with pytest.raises(SnapshotCompatibilityError, match="model_revision"):
         restore_snapshot(args, tools=identity_mismatch)
@@ -666,10 +741,10 @@ def test_snapshot_restore_rejects_identity_and_manages_pinned_lifecycle(tmp_path
     oracle_mismatch.cleanup.assert_called_once()
     oracle_mismatch.complete_restore.assert_not_called()
 
-    invalid = dataclasses.asdict(_manifest())
-    invalid["process_tree"] = [0]
+    invalid = _manifest().model_dump(mode="json")
+    invalid.update(invalid_update)
     (artifact / "manifest.json").write_text(json.dumps(invalid))
-    with pytest.raises(SnapshotCompatibilityError, match="process_tree"):
+    with pytest.raises(SnapshotCompatibilityError, match=diagnostic):
         restore_snapshot(args, tools=_fake_snapshot_tools())
 
 
