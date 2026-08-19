@@ -222,7 +222,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # `+PTX` in TORCH_CUDA_ARCH_LIST is not preserved here. If a kernel really
   # needs PTX, add `+PTX` to that kernel's component-specific arch list below.
   #
-  clear_cuda_arches(CUDA_ARCH_FLAGS)
+  clear_cuda_gencode_flags(CUDA_ARCH_FLAGS)
+  warn_if_ptx_arch_requested("${CUDA_ARCH_FLAGS}")
   extract_unique_cuda_archs_ascending(CUDA_ARCHS "${CUDA_ARCH_FLAGS}")
   message(STATUS "CUDA target architectures: ${CUDA_ARCHS}")
   # Filter the target architectures by the supported supported archs
@@ -1179,14 +1180,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
 
   # HIP counterpart of the FUSED_KDA_DECODE block above: same `fused_kda_decode`
-  # op, same VLLM_ENABLE_FUSED_KDA_DECODE guard in torch_bindings.cpp. Only
-  # measured on gfx950, so it is only built when gfx950 is in the arch list.
-  # A multi-arch build that includes gfx950 still emits this source for every
-  # arch in that list. The runtime gate in kda_decode.py keeps the kernel off
-  # non-gfx950 devices.
+  # op, same VLLM_ENABLE_FUSED_KDA_DECODE guard in torch_bindings.cpp. Built for
+  # the CDNA archs the kernel supports (gfx942 / gfx950), so it is only emitted
+  # when one of those is in the arch list. A multi-arch build that includes them
+  # still emits this source for every arch in that list. The runtime gate in
+  # kda_decode.py keeps the kernel off unsupported devices.
   if(VLLM_GPU_LANG STREQUAL "HIP")
     set(FUSED_KDA_DECODE_HIP_ARCHS ${VLLM_GPU_ARCHES})
-    list(FILTER FUSED_KDA_DECODE_HIP_ARCHS INCLUDE REGEX "gfx950")
+    list(FILTER FUSED_KDA_DECODE_HIP_ARCHS INCLUDE REGEX "gfx942|gfx950")
     if(FUSED_KDA_DECODE_HIP_ARCHS)
       set(FUSED_KDA_DECODE_HIP_SRC
         "csrc/libtorch_stable/kimi_k3/fused_kda_decode_kernel_rocm.cu")
