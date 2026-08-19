@@ -509,6 +509,7 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         B12xMxfp8LinearKernel,
         EmulationMxfp8LinearKernel,
         HummingMxfp8LinearKernel,
+        FlashInferTrtllmMxfp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
         # Native CDNA4 (gfx950) MX linear; is_supported() gates to gfx95x and
@@ -842,14 +843,7 @@ def init_mxfp8_linear_kernel() -> Mxfp8LinearKernel:
     config = Mxfp8LinearLayerConfig()
 
     platform = current_platform._enum
-    possible = [
-        kernel
-        for kernel in _POSSIBLE_MXFP8_KERNELS.get(platform, [])
-        if kernel is not FlashInferTrtllmMxfp8LinearKernel
-    ]
-
-    if _get_linear_backend() == "flashinfer_trtllm":
-        possible.append(FlashInferTrtllmMxfp8LinearKernel)
+    possible = list(_POSSIBLE_MXFP8_KERNELS.get(platform, []))
 
     # Apply --linear-backend filtering when set.
     possible = _resolve_backend_kernels(possible, "MXFP8")

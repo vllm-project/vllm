@@ -34,10 +34,9 @@ following `quantization.quant_algo` values:
     `vllm serve --help=KernelConfig`.
 
 !!! note
-    For MXFP8 checkpoints on SM100, SM103, and SM107 GPUs, BF16 models can
-    select FlashInfer's TRTLLM dense GEMM explicitly with
-    `--linear-backend flashinfer_trtllm`. Automatic MXFP8 kernel selection is
-    unchanged.
+    For MXFP8 models with BF16 activations on SM100-family GPUs, use
+    `--linear-backend flashinfer_trtllm` to select FlashInfer's TensorRT-LLM
+    GEMM backend.
 
 ## Quantizing HuggingFace Models with PTQ
 

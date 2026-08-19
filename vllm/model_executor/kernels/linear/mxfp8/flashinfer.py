@@ -186,17 +186,11 @@ class FlashInferTrtllmMxfp8LinearKernel(Mxfp8LinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if not current_platform.is_cuda():
-            return False, "requires CUDA"
-        if compute_capability is None:
-            supported_capability = any(
-                current_platform.is_device_capability(capability)
-                for capability in (100, 103, 107)
-            )
-        else:
-            supported_capability = compute_capability in (100, 103, 107)
-        if not supported_capability:
-            return False, "requires sm_100/sm_103/sm_107 (Blackwell)"
+        if not (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+        ):
+            return False, "requires SM100-family GPU"
         if not has_flashinfer():
             return False, "requires FlashInfer"
         return True, None
@@ -252,11 +246,9 @@ class FlashInferTrtllmMxfp8LinearKernel(Mxfp8LinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if x.dtype != torch.bfloat16:
-            raise ValueError(
-                "FlashInfer TRTLLM MXFP8 requires bfloat16 output, "
-                f"got input dtype {x.dtype}."
-            )
+        assert x.dtype == torch.bfloat16, (
+            f"FlashInfer TRTLLM MXFP8 requires bfloat16 activations, got {x.dtype}."
+        )
 
         weight = layer.weight  # shuffled [padded N, K]
         weight_scale = layer.weight_scale

@@ -15,11 +15,11 @@ from vllm.utils.flashinfer import has_flashinfer
 
 if not (
     current_platform.is_cuda()
-    and any(current_platform.is_device_capability(cc) for cc in (100, 103, 107))
+    and current_platform.is_device_capability_family(100)
     and has_flashinfer()
 ):
     pytest.skip(
-        reason="FlashInfer TRTLLM MXFP8 requires SM100, SM103, or SM107",
+        reason="FlashInfer TRTLLM MXFP8 requires an SM100-family GPU",
         allow_module_level=True,
     )
 
