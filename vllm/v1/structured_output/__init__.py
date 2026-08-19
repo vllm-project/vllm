@@ -277,7 +277,7 @@ class StructuredOutputManager:
         return len(spec_tokens) + 1
 
     def validate_tokens(self, request: "Request", spec_tokens: list[int]) -> list[int]:
-        """Return the longest grammar-valid prefix of `spec_tokens`."""
+        """Return the longest unconstrained or grammar-valid prefix of `spec_tokens`."""
         if not request.use_structured_output:
             return spec_tokens
 
@@ -419,6 +419,8 @@ class StructuredOutputManager:
             new_token_ids,
             committed_len=len(request.all_token_ids) - len(new_token_ids),
         )
+        # Early return only when the constraint hasn't started.
+        # Otherwise, latch structured_req.reasoning_ended.
         if constraint_start > len(new_token_ids):
             return True
         structured_req.reasoning_ended = True
