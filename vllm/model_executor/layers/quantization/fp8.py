@@ -246,13 +246,9 @@ class _Fp8SubBlockWeightParameter(ModelWeightParameter):
         self,
         *,
         logical_input_size: int,
-        logical_output_sizes: list[int],
-        padded_output_sizes: list[int],
         **kwargs,
     ):
         self.logical_input_size = logical_input_size
-        self.logical_output_sizes = logical_output_sizes
-        self.padded_output_sizes = padded_output_sizes
         super().__init__(**kwargs)
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
@@ -265,26 +261,6 @@ class _Fp8SubBlockWeightParameter(ModelWeightParameter):
             )
         )
 
-    def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
-        logical_size = self.logical_output_sizes[0]
-        dst = self.data.narrow(self.output_dim, 0, logical_size)
-        dst.copy_(
-            loaded_weight.narrow(
-                self.output_dim, self.tp_rank * logical_size, logical_size
-            )
-        )
-
-    def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
-        shard_id = self._shard_id_as_int(kwargs["shard_id"])
-        logical_size = self.logical_output_sizes[shard_id]
-        dst_offset = sum(self.padded_output_sizes[:shard_id])
-        dst = self.data.narrow(self.output_dim, dst_offset, logical_size)
-        dst.copy_(
-            loaded_weight.narrow(
-                self.output_dim, self.tp_rank * logical_size, logical_size
-            )
-        )
-
 
 class _Fp8SubBlockScaleParameter(BlockQuantScaleParameter):
     """Block scale shared by TP shards that split one checkpoint block."""
@@ -293,42 +269,19 @@ class _Fp8SubBlockScaleParameter(BlockQuantScaleParameter):
         self,
         *,
         logical_input_size: int,
-        logical_output_sizes: list[int],
-        padded_output_sizes: list[int],
-        block_n: int,
         block_k: int,
         **kwargs,
     ):
         self.logical_input_size = logical_input_size
-        self.logical_output_sizes = logical_output_sizes
-        self.padded_output_sizes = padded_output_sizes
-        self.block_n = block_n
         self.block_k = block_k
         super().__init__(**kwargs)
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
         src_offset = self.tp_rank * self.logical_input_size // self.block_k
         self.data.copy_(
-            loaded_weight.narrow(self.input_dim, src_offset, self.data.shape[1])
-        )
-
-    def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
-        logical_size = self.logical_output_sizes[0]
-        src_offset = self.tp_rank * logical_size // self.block_n
-        self.data.copy_(
-            loaded_weight.narrow(self.output_dim, src_offset, self.data.shape[0])
-        )
-
-    def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
-        shard_id = self._shard_id_as_int(kwargs["shard_id"])
-        logical_size = self.logical_output_sizes[shard_id]
-        dst_offset = sum(
-            size // self.block_n for size in self.padded_output_sizes[:shard_id]
-        )
-        dst_size = self.padded_output_sizes[shard_id] // self.block_n
-        src_offset = self.tp_rank * logical_size // self.block_n
-        self.data.narrow(self.output_dim, dst_offset, dst_size).copy_(
-            loaded_weight.narrow(self.output_dim, src_offset, dst_size)
+            loaded_weight.narrow(
+                self.input_dim, src_offset, self.data.shape[self.input_dim]
+            )
         )
 
 
@@ -398,58 +351,42 @@ class Fp8LinearMethod(LinearMethodBase):
         **extra_weight_attrs,
     ):
         logical_input_size = input_size_per_partition
-        logical_output_sizes = output_partition_sizes
         padded_input_size = logical_input_size
-        padded_output_sizes = logical_output_sizes
         weight_loader = extra_weight_attrs.get("weight_loader")
-        layer.logical_widths = logical_output_sizes
+        layer.logical_widths = output_partition_sizes
         layer.input_size_per_partition = logical_input_size
-        layer.output_size_per_partition = sum(logical_output_sizes)
+        layer.output_size_per_partition = sum(output_partition_sizes)
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
-        layer.fp8_sub_block_input_size = logical_input_size
-        layer.fp8_sub_block_output_sizes = logical_output_sizes
 
         if self.block_quant:
             assert self.weight_block_size is not None
             layer.weight_block_size = self.weight_block_size
             block_n, block_k = self.weight_block_size
-            tp_size = getattr(layer, "tp_size", get_tensor_model_parallel_world_size())
+            tp_size = layer.tp_size
             is_row_parallel = tp_size > 1 and input_size == logical_input_size * tp_size
-            is_column_parallel = (
-                tp_size > 1 and output_size == sum(logical_output_sizes) * tp_size
-            )
             if (
                 is_row_parallel
                 and logical_input_size < block_k
                 and block_k % logical_input_size == 0
             ):
                 padded_input_size = block_k
-            if is_column_parallel:
-                padded_output_sizes = [
-                    block_n if size < block_n and block_n % size == 0 else size
-                    for size in logical_output_sizes
-                ]
             validate_fp8_block_shape(
                 layer,
                 input_size,
                 output_size,
                 padded_input_size,
-                padded_output_sizes,
+                output_partition_sizes,
                 self.weight_block_size,
             )
 
-        use_sub_block_shard = (
-            padded_input_size != logical_input_size
-            or padded_output_sizes != logical_output_sizes
-        )
-        layer.fp8_sub_block_input_size_padded = padded_input_size
-        layer.fp8_sub_block_output_sizes_padded = padded_output_sizes
+        use_sub_block_shard = padded_input_size != logical_input_size
+        layer.fp8_sub_block_input_padding = padded_input_size - logical_input_size
 
         if use_sub_block_shard:
             weight = _Fp8SubBlockWeightParameter(
                 data=torch.zeros(
-                    sum(padded_output_sizes),
+                    sum(output_partition_sizes),
                     padded_input_size,
                     dtype=torch.float8_e4m3fn,
                 ),
@@ -457,12 +394,10 @@ class Fp8LinearMethod(LinearMethodBase):
                 output_dim=0,
                 weight_loader=weight_loader,
                 logical_input_size=logical_input_size,
-                logical_output_sizes=logical_output_sizes,
-                padded_output_sizes=padded_output_sizes,
             )
         else:
             weight = create_fp8_weight_parameter(
-                sum(padded_output_sizes), padded_input_size, weight_loader
+                sum(output_partition_sizes), padded_input_size, weight_loader
             )
         layer.register_parameter("weight", weight)
 
@@ -486,7 +421,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 )
                 scale = _Fp8SubBlockScaleParameter(
                     data=torch.empty(
-                        (sum(padded_output_sizes) + block_n - 1) // block_n,
+                        (sum(output_partition_sizes) + block_n - 1) // block_n,
                         (padded_input_size + block_k - 1) // block_k,
                         dtype=scale_dtype,
                     ),
@@ -494,9 +429,6 @@ class Fp8LinearMethod(LinearMethodBase):
                     output_dim=0,
                     weight_loader=weight_loader,
                     logical_input_size=logical_input_size,
-                    logical_output_sizes=logical_output_sizes,
-                    padded_output_sizes=padded_output_sizes,
-                    block_n=block_n,
                     block_k=block_k,
                 )
                 if scale_dtype == torch.float32:
@@ -505,7 +437,7 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 scale = create_fp8_scale_parameter(
                     BlockQuantScaleParameter,
-                    padded_output_sizes,
+                    output_partition_sizes,
                     padded_input_size,
                     self.weight_block_size,
                     weight_loader,
@@ -531,9 +463,8 @@ class Fp8LinearMethod(LinearMethodBase):
 
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
         if self.use_marlin and use_sub_block_shard:
-            # Marlin repack and apply read these as the packed dimensions.
+            # Marlin repack and apply read this as the packed input dimension.
             layer.input_size_per_partition = padded_input_size
-            layer.output_size_per_partition = sum(padded_output_sizes)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.use_marlin:
@@ -589,56 +520,16 @@ class Fp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        logical_input_size = getattr(layer, "fp8_sub_block_input_size", x.shape[-1])
-        padded_input_size = getattr(
-            layer, "fp8_sub_block_input_size_padded", logical_input_size
-        )
-        logical_output_sizes = getattr(
-            layer, "fp8_sub_block_output_sizes", layer.logical_widths
-        )
-        padded_output_sizes = getattr(
-            layer, "fp8_sub_block_output_sizes_padded", logical_output_sizes
-        )
-        if padded_input_size != logical_input_size:
-            x = torch.nn.functional.pad(x, (0, padded_input_size - logical_input_size))
-        if bias is not None and padded_output_sizes != logical_output_sizes:
-            bias = torch.cat(
-                [
-                    torch.nn.functional.pad(part, (0, padded - logical))
-                    for part, logical, padded in zip(
-                        torch.split(bias, logical_output_sizes),
-                        logical_output_sizes,
-                        padded_output_sizes,
-                    )
-                ]
-            )
-
-        def unpad_output(output: torch.Tensor) -> torch.Tensor:
-            if padded_output_sizes == logical_output_sizes:
-                return output
-            return torch.cat(
-                [
-                    part[..., :logical]
-                    for part, logical in zip(
-                        torch.split(output, padded_output_sizes, dim=-1),
-                        logical_output_sizes,
-                    )
-                ],
-                dim=-1,
-            )
+        input_padding = layer.fp8_sub_block_input_padding
+        if input_padding:
+            x = torch.nn.functional.pad(x, (0, input_padding))
 
         # if batch invariant mode is enabled, prefer direct FP8 path
         # we will use BF16 dequant when direct FP8 is not supported.
         if envs.VLLM_BATCH_INVARIANT:
             if self.block_quant:
                 assert self.weight_block_size is not None
-                return unpad_output(
-                    self.fp8_linear.apply_weights(
-                        layer,
-                        x,
-                        bias,
-                    )
-                )
+                return self.fp8_linear.apply_weights(layer, x, bias)
             else:
                 if isinstance(self.fp8_linear, CutlassFP8ScaledMMLinearKernel):
                     return self.fp8_linear.apply_weights(layer, x, bias)
@@ -666,7 +557,7 @@ class Fp8LinearMethod(LinearMethodBase):
                         weight_bf16 = weight_fp8 * weight_scale
                 return torch.nn.functional.linear(x, weight_bf16.t(), bias)
 
-        return unpad_output(self.fp8_linear.apply_weights(layer, x, bias))
+        return self.fp8_linear.apply_weights(layer, x, bias)
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
@@ -726,10 +617,18 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         )
         if self.block_quant:
             assert self.weight_block_size is not None
-            alignment = math.lcm(*self.weight_block_size)
-            intermediate_size_per_partition = round_up(
-                intermediate_size_per_partition, alignment
-            )
+            if all(
+                intermediate_size_per_partition % block_size == 0
+                or (
+                    intermediate_size_per_partition < block_size
+                    and block_size % intermediate_size_per_partition == 0
+                )
+                for block_size in self.weight_block_size
+            ):
+                alignment = math.lcm(*self.weight_block_size)
+                intermediate_size_per_partition = round_up(
+                    intermediate_size_per_partition, alignment
+                )
         return hidden_size, intermediate_size_per_partition
 
     def create_weights(
@@ -775,8 +674,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 )
 
         # WEIGHTS
+        weight_factory = (
+            torch.zeros
+            if intermediate_size_per_partition
+            != self.moe.intermediate_size_per_partition_unpadded
+            else torch.empty
+        )
         w13_weight = torch.nn.Parameter(
-            torch.zeros(
+            weight_factory(
                 num_experts,
                 self.moe.w13_num_shards * intermediate_size_per_partition,
                 hidden_size,
@@ -788,7 +693,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         w2_weight = torch.nn.Parameter(
-            torch.zeros(
+            weight_factory(
                 num_experts,
                 hidden_size,
                 intermediate_size_per_partition,
