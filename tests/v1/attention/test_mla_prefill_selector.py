@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from vllm.config import AttentionConfig, ModelConfig, VllmConfig
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
@@ -18,6 +18,7 @@ from vllm.v1.attention.backends.mla.prefill.selector import (
     _get_mla_prefill_backend_priorities,
     get_mla_prefill_backend,
 )
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +58,34 @@ def _make_vllm_config(
 
 class TestGetMLAPrefillBackend:
     """Tests for get_mla_prefill_backend (public API)."""
+
+    def test_cpu_reference_backend_uses_sdpa_prefill(self):
+        vllm_config = _make_vllm_config()
+        vllm_config.attention_config.backend = AttentionBackendEnum.CPU_MLA
+
+        with (
+            patch("vllm.platforms.current_platform") as mock_platform,
+            patch.object(torch.cpu, "_is_amx_tile_supported", return_value=True),
+        ):
+            mock_platform.is_cpu.return_value = True
+            mock_platform.get_cpu_architecture.return_value = CpuArchEnum.X86
+
+            backend = get_mla_prefill_backend(vllm_config)
+            assert backend is MLAPrefillBackendEnum.CPU.get_class()
+
+    def test_cpu_amx_backend_uses_native_prefill(self):
+        vllm_config = _make_vllm_config()
+        vllm_config.attention_config.backend = AttentionBackendEnum.AMX_MLA
+
+        with (
+            patch("vllm.platforms.current_platform") as mock_platform,
+            patch.object(torch.cpu, "_is_amx_tile_supported", return_value=True),
+        ):
+            mock_platform.is_cpu.return_value = True
+            mock_platform.get_cpu_architecture.return_value = CpuArchEnum.X86
+
+            backend = get_mla_prefill_backend(vllm_config)
+            assert backend is MLAPrefillBackendEnum.CPU_NATIVE.get_class()
 
     def test_no_device_capability_returns_flash_attn(self):
         vllm_config = _make_vllm_config()
