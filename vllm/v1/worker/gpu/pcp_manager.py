@@ -16,6 +16,7 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
     combine_sampled_and_draft_tokens,
+    expand_idx_mapping,
     prepare_pos_seq_lens,
 )
 from vllm.v1.worker.gpu.states import RequestState
@@ -55,7 +56,6 @@ class PCPManager:
         dcp_world_size: int = 1,
         dcp_rank: int = 0,
         cp_interleave: int = 1,
-        prefill_only_mtp: bool = False,
     ) -> None:
         self.pcp_world_size = pcp_world_size
         self.pcp_rank = pcp_rank
@@ -63,7 +63,6 @@ class PCPManager:
         self.dcp_world_size = dcp_world_size
         self.dcp_rank = dcp_rank
         self.cp_interleave = cp_interleave
-        self.prefill_only_mtp = prefill_only_mtp
 
         self._global_batch: InputBatch | None = None
         self._local_batch: InputBatch | None = None
@@ -151,7 +150,7 @@ class PCPManager:
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None and speculative_config.method != "mtp":
             raise NotImplementedError(
-                "MRV2 PCP only supports prefill-only MTP speculative decoding."
+                "MRV2 PCP only supports MTP speculative decoding."
             )
         is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
         if (
@@ -326,16 +325,6 @@ class PCPManager:
         assert self._input_buffers is not None
         req_states = self._req_states
         input_buffers = self._input_buffers
-        if input_batch.num_draft_tokens > 0:
-            raise NotImplementedError("MRV2 PCP does not support spec decode yet.")
-        if (
-            self.prefill_only_mtp
-            and input_batch.num_reqs > 0
-            and (not input_batch.has_prefill or not input_batch.is_prefilling_np.all())
-        ):
-            raise NotImplementedError(
-                "MRV2 PCP with MTP only supports pure prefill batches."
-            )
 
         global_batch = input_batch
         self._global_batch = global_batch
@@ -470,17 +459,53 @@ class PCPManager:
                 is_padding, 0
             )
 
-        total_num_logits = num_local_reqs if num_local_tokens > 0 else 0
-        if total_num_logits > 0:
+        global_num_draft_tokens_per_req = global_batch.num_draft_tokens_per_req
+        if global_num_draft_tokens_per_req is None:
+            local_num_draft_tokens_per_req = None
+        else:
+            local_num_draft_tokens_per_req = global_num_draft_tokens_per_req[
+                local_to_global_batch_req_idx_np
+            ]
+            if num_local_tokens == 0:
+                local_num_draft_tokens_per_req.fill(0)
+
+        local_num_draft_tokens = (
+            int(local_num_draft_tokens_per_req.sum())
+            if local_num_draft_tokens_per_req is not None
+            else 0
+        )
+        total_num_logits = (
+            num_local_reqs + local_num_draft_tokens if num_local_tokens > 0 else 0
+        )
+        if total_num_logits == num_local_reqs:
             cu_num_logits_np = np.arange(num_local_reqs + 1, dtype=np.int32)
             cu_num_logits = torch.arange(
                 num_local_reqs + 1, device=self.device, dtype=torch.int32
+            )
+            expanded_idx_mapping = local_to_global_req_idx
+            expanded_local_pos = torch.zeros(
+                num_local_reqs, dtype=torch.int32, device=self.device
+            )
+        elif total_num_logits > 0:
+            assert local_num_draft_tokens_per_req is not None
+            local_num_logits_per_req = local_num_draft_tokens_per_req + 1
+            cu_num_logits_np = np.empty(num_local_reqs + 1, dtype=np.int32)
+            cu_num_logits_np[0] = 0
+            np.cumsum(local_num_logits_per_req, out=cu_num_logits_np[1:])
+            cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
+            expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
+                local_to_global_req_idx,
+                total_num_logits,
+                cu_num_logits,
+                int(local_num_logits_per_req.max()),
             )
         else:
             cu_num_logits_np = np.zeros(num_local_reqs + 1, dtype=np.int32)
             cu_num_logits = torch.zeros(
                 num_local_reqs + 1, device=self.device, dtype=torch.int32
             )
+            expanded_idx_mapping = local_to_global_req_idx[:0]
+            expanded_local_pos = torch.empty(0, dtype=torch.int32, device=self.device)
         logits_indices = combine_sampled_and_draft_tokens(
             input_buffers.input_ids,
             local_to_global_req_idx,
@@ -525,15 +550,13 @@ class PCPManager:
             num_reqs_after_padding=num_local_reqs,
             idx_mapping=local_to_global_req_idx,
             idx_mapping_np=local_to_global_req_idx_np,
-            expanded_idx_mapping=local_to_global_req_idx,
-            expanded_local_pos=torch.zeros(
-                num_local_reqs, dtype=torch.int32, device=self.device
-            ),
+            expanded_idx_mapping=expanded_idx_mapping,
+            expanded_local_pos=expanded_local_pos,
             num_scheduled_tokens=local_num_scheduled_tokens,
             num_tokens=num_local_tokens,
             num_tokens_after_padding=num_local_tokens_padded,
-            num_draft_tokens=0,
-            num_draft_tokens_per_req=None,
+            num_draft_tokens=local_num_draft_tokens,
+            num_draft_tokens_per_req=local_num_draft_tokens_per_req,
             query_start_loc=local_query_start_loc,
             query_start_loc_np=local_query_start_loc_np[: num_local_reqs + 1],
             seq_lens=seq_lens,
@@ -715,5 +738,4 @@ def maybe_build_pcp_manager(
         dcp_world_size=dcp_size,
         dcp_rank=dcp_rank,
         cp_interleave=parallel_config.cp_kv_cache_interleave_size,
-        prefill_only_mtp=vllm_config.speculative_config is not None,
     )
