@@ -44,6 +44,7 @@ from vllm.utils.gc_utils import (
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
+from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -283,6 +284,15 @@ class EngineCore:
 
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
+            # Resolve the KV cache layout before memory profiling: workers that
+            # capture full cudagraphs initialize a minimal KV cache during it.
+            layout = resolve_kv_cache_layout(
+                vllm_config.cache_config,
+                self.model_executor.get_supported_kv_cache_layouts(),
+                [s for specs in kv_cache_specs for s in specs.values()],
+            )
+            self.model_executor.set_kv_cache_layout(layout.name)
+
             if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
                 # NOTE(yongji): should already be set
                 # during _eep_scale_up_before_kv_init
@@ -307,6 +317,8 @@ class EngineCore:
         kv_cache_configs = get_kv_cache_configs(
             vllm_config, kv_cache_specs, available_gpu_memory
         )
+        for kv_cache_config in kv_cache_configs:
+            kv_cache_config.kv_cache_layout = vllm_config.cache_config.kv_cache_layout
 
         # If auto-fit reduced max_model_len, sync the new value to workers.
         # This is needed because workers were spawned before memory profiling

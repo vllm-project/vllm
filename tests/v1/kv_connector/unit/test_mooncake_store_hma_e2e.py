@@ -160,8 +160,13 @@ def test_e2e_swa_plus_full_save_then_lookup_hits():
     cfg = KVCacheConfig(
         num_blocks=4,
         kv_cache_tensors=[
-            KVCacheTensor(size=8192, shared_by=["L0"]),
-            KVCacheTensor(size=8192, shared_by=["L1"]),
+            # The two groups overlay the same allocation.
+            KVCacheTensor(
+                size=8192, layers=["L0"], layer_stride=8192, block_stride=2048
+            ),
+            KVCacheTensor(
+                size=8192, layers=["L1"], layer_stride=8192, block_stride=2048
+            ),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(["L0"], full),
