@@ -386,10 +386,12 @@ class NanoNemotronVLMultiModalProcessor(
 
         return dict(
             pixel_values_flat=pixel_values_flat,
-            image_num_patches=MultiModalFieldConfig.batched("image"),
+            image_num_patches=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
             image_embeds=MultiModalFieldConfig.batched("image"),
-            num_tokens_per_image=MultiModalFieldConfig.batched("image"),
-            imgs_sizes=MultiModalFieldConfig.batched("image"),
+            num_tokens_per_image=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
+            imgs_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         )
 
     def _get_video_fields_config(self, hf_inputs: BatchFeature):
@@ -399,9 +401,9 @@ class NanoNemotronVLMultiModalProcessor(
             pixel_values_flat_video=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_num_patches
             ),
-            video_num_patches=MultiModalFieldConfig.batched("video"),
-            frames_indices=MultiModalFieldConfig.batched("video"),
-            frame_duration_ms=MultiModalFieldConfig.batched("video"),
+            video_num_patches=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            frames_indices=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+            frame_duration_ms=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
         )
 
     def _get_audio_fields_config(self, hf_inputs: BatchFeature):
