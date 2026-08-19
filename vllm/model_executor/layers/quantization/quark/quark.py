@@ -576,79 +576,91 @@ class QuarkConfig(QuantizationConfig):
 
         return True
 
-    def is_mxfp4_quant(self, prefix: str, layer: torch.nn.Module) -> bool:
-        """
-        For Quark, determine if it's OCP MXFP4 by checking config directly.
-        This allows hidden_size rounding to happen before moe_config creation.
-        """
-        layer_quant_config = self._find_matched_config(prefix, layer)
-        weight_config = layer_quant_config.get("weight")
-        input_config = layer_quant_config.get("input_tensors")
-
-        return (
-            self._is_w_ocp_mx_a_x(weight_config, input_config)
-            and weight_config is not None
-            and weight_config.get("dtype") == "fp4"
-            and getattr(torch, "float4_e2m1fn_x2", None) is not None
-        )
-
-    def _find_matched_config(
-        self, layer_name: str, module: torch.nn.Module
-    ) -> dict[str, Any]:
+    def get_layer_quant_config_from_name(
+        self, layer_name: str
+    ) -> dict[str, Any] | None:
         proj_name = layer_name.split(".")[-1]
         if proj_name in self.packed_modules_mapping:
             shard_proj_names = self.packed_modules_mapping[proj_name]
-
-            # Convert fused_name --> [shard_names]
-            shard_names = [
-                layer_name.replace(proj_name, shard_proj_name)
-                for shard_proj_name in shard_proj_names
-            ]
-
             shard_configs = []
-            for shard_name in shard_names:
-                if shard_name == layer_name:
-                    config = cast(
-                        dict[str, Any], self.quant_config.get("global_quant_config")
-                    )
+            for shard_proj_name in shard_proj_names:
+                shard_name = layer_name.replace(proj_name, shard_proj_name)
+                if shard_name != layer_name:
+                    config = self.get_layer_quant_config_from_name(shard_name)
                 else:
-                    config = self._find_matched_config(shard_name, module)
+                    config = None
                 shard_configs.append(config)
 
-            if not all(
-                deep_compare(q_config, shard_configs[0]) for q_config in shard_configs
+            matched_configs = [config for config in shard_configs if config is not None]
+            if matched_configs and not all(
+                deep_compare(config, matched_configs[0]) for config in matched_configs
             ):
                 raise ValueError(
                     f"Found a different quantization configuration for "
                     f"{shard_proj_names} in {layer_name}. vLLM "
                     "requires all to use the same scheme."
                 )
-            return shard_configs[0]
+            if matched_configs:
+                return matched_configs[0]
+            return None
         else:
             layer_quant_config = cast(
-                dict[str, Any], self.quant_config.get("layer_quant_config")
+                dict[str, Any], self.quant_config.get("layer_quant_config") or {}
             )
-
-            def _matches_pattern(layer_name, pattern):
-                if "*" not in pattern:
-                    return layer_name in pattern
-                return fnmatch.fnmatch(layer_name, pattern)
-
             for name_pattern, config in layer_quant_config.items():
-                if _matches_pattern(layer_name, name_pattern):
+                if "*" not in name_pattern:
+                    matches = layer_name in name_pattern
+                else:
+                    matches = fnmatch.fnmatch(layer_name, name_pattern)
+                if matches:
                     return config
+            return None
 
-            layer_type = cast(str, type(module))
-            layer_type_quant_config = cast(
-                dict[str, Any], self.quant_config.get("layer_type_quant_config")
-            )
-            if layer_type in layer_type_quant_config:
-                return layer_type_quant_config[layer_type]
+    def _find_matched_config(
+        self, layer_name: str, module: torch.nn.Module
+    ) -> dict[str, Any]:
+        # Priority order:
+        # 1. layer_quant_config,
+        # 2. layer_type_quant_config,
+        # 3. global_quant_config.
 
-            global_quant_config = cast(
-                dict[str, Any], self.quant_config.get("global_quant_config")
-            )
-            return global_quant_config
+        layer_type = cast(str, type(module))
+        layer_type_quant_config = cast(
+            dict[str, Any], self.quant_config.get("layer_type_quant_config")
+        )
+        global_quant_config = cast(
+            dict[str, Any], self.quant_config.get("global_quant_config")
+        )
+        fallback_config = layer_type_quant_config.get(layer_type, global_quant_config)
+
+        proj_name = layer_name.split(".")[-1]
+        if proj_name in self.packed_modules_mapping:
+            shard_proj_names = self.packed_modules_mapping[proj_name]
+            shard_configs = []
+            for shard_proj_name in shard_proj_names:
+                shard_name = layer_name.replace(proj_name, shard_proj_name)
+                if shard_name == layer_name:
+                    config = fallback_config
+                else:
+                    config = self.get_layer_quant_config_from_name(shard_name)
+                    if config is None:
+                        config = fallback_config
+                shard_configs.append(config)
+
+            if not all(
+                deep_compare(config, shard_configs[0]) for config in shard_configs
+            ):
+                raise ValueError(
+                    f"Found a different quantization configuration for "
+                    f"{shard_proj_names} in {layer_name}. vLLM requires all "
+                    "to use the same scheme."
+                )
+            return shard_configs[0]
+        else:
+            layer_quant_config = self.get_layer_quant_config_from_name(layer_name)
+            if layer_quant_config is not None:
+                return layer_quant_config
+            return fallback_config
 
     def _get_scheme_from_config(
         self, config: dict[str, Any], dynamic_mxfp4_quant: bool = False

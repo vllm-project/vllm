@@ -54,6 +54,11 @@ def test_registry_imports(model_arch):
     ):
         pytest.skip("DSparkDraftModel is only supported on CUDA and ROCm")
 
+    if model_arch in ("Dots3NoteForCausalLM", "Dots3NoteMTPModel") and not (
+        current_platform.is_cuda()
+    ):
+        pytest.skip("Dots3 NOTE is only supported on CUDA")
+
     # Ensure all model classes can be imported successfully
     model_cls = ModelRegistry._try_load_model_cls(model_arch)
     assert model_cls is not None
@@ -138,8 +143,10 @@ def test_registry_is_pp(model_arch, is_pp, init_cuda):
 @pytest.mark.parametrize(
     "model_arch,supported",
     [
-        # ReplaySSM is opt-in per model; only Nemotron-H sets the flag today.
+        # ReplaySSM is opt-in per model.
         ("NemotronHForCausalLM", True),
+        ("KimiLinearForCausalLM", not current_platform.is_rocm()),
+        ("KimiK3ForConditionalGeneration", not current_platform.is_rocm()),
         ("Mamba2ForCausalLM", False),
         ("Zamba2ForCausalLM", False),
     ],
