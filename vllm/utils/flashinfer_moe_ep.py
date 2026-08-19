@@ -120,7 +120,7 @@ def make_fi_moe_ep_bootstrap() -> BootstrapConfig:
         # vLLM already bound this worker's (possibly remapped) device;
         # without this the runtime would rebind to cuda:LOCAL_RANK|rank and
         # launch weight transforms against another device's pointers.
-        device=torch.cuda.current_device(),
+        device=torch.accelerator.current_device_index(),
     )
 
 

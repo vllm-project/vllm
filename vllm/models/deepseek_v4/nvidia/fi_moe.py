@@ -20,6 +20,8 @@ from vllm.utils.flashinfer_moe_ep import (
 )
 
 if TYPE_CHECKING:
+    from flashinfer.moe_ep import MoEEpMegaLayer
+
     from vllm.config import VllmConfig
 
 _MOE_SKIP_PADDING: bool | None = None
@@ -136,8 +138,8 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
         super().__init__(vllm_config, **kwargs)
         self._vllm_config = vllm_config
         self._activation_clamp = activation_clamp
-        self._mega_layer = None
-        self._fast_ctx = None
+        self._mega_layer: MoEEpMegaLayer | None = None
+        self._fast_ctx: tuple[Any, Any, Any, int, bool] | None = None
         self._epilogue_alphas: tuple[torch.Tensor, torch.Tensor] | None = None
         self._nvfp4_prequant = ckpt_uses_nvfp4_experts(vllm_config)
         if self._nvfp4_prequant:
@@ -312,7 +314,10 @@ class DeepseekV4MegaMoEExpertsFI(DeepseekV4MegaMoEExperts):
         topk_ids: torch.Tensor,
         *,
         activation_clamp: float | None,
+        fast_math: bool = True,
     ) -> torch.Tensor:
+        # fast_math is a native deep_gemm knob; the FI kernels have no
+        # equivalent toggle, so it is accepted for signature parity only.
         if hidden_states.shape[0] > self.max_num_tokens:
             raise ValueError(
                 f"DeepSeek V4 MegaMoE got {hidden_states.shape[0]} tokens, "

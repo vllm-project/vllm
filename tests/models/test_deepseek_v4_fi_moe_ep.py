@@ -181,7 +181,7 @@ def test_bootstrap_pins_the_device_vllm_bound(fake_flashinfer, monkeypatch):
         "get_ep_group",
         lambda: SimpleNamespace(world_size=4, rank_in_group=2, device_group=pg),
     )
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: 3)
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 3)
 
     bootstrap = make_fi_moe_ep_bootstrap()
 
