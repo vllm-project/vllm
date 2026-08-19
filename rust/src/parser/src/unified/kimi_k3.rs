@@ -53,7 +53,9 @@ use self::structural_tag::KIMI_K3_STRUCTURAL_TAG_BUILDER;
 use super::{Result, UnifiedParser, UnifiedParserOutput, token_id};
 use crate::tool::{StructuralTagBuilder, Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
-use crate::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
+use crate::utils::{
+    MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker_mul,
+};
 
 const OPEN: &str = "<|open|>";
 const SEP: &str = "<|sep|>";
@@ -84,6 +86,7 @@ const REASONING_MARKERS: &[&str] = &[THINK_CLOSE, END_OF_MSG];
 const RESPONSE_MARKERS: &[&str] = &[RESPONSE_CLOSE, TOOLS_OPEN, MESSAGE_CLOSE, END_OF_MSG];
 const EPILOGUE_MARKERS: &[&str] = &[TOOLS_OPEN, MESSAGE_CLOSE, END_OF_MSG];
 const TOOLS_MARKERS: &[&str] = &[CALL_OPEN, TOOLS_CLOSE, MESSAGE_CLOSE, END_OF_MSG];
+const CALL_BODY_MARKERS: &[&str] = &[CALL_CLOSE, TOOLS_CLOSE, MESSAGE_CLOSE, END_OF_MSG];
 
 /// Channel tags are a couple of text tokens; longer `<|open|>…<|sep|>` spans in
 /// the prompt tail (attribute-bearing message opens, message bodies) never name
@@ -446,17 +449,23 @@ fn call_open_event(input: &mut KimiK3Input<'_>) -> ModalResult<KimiK3Event> {
     })
 }
 
-/// Parse the buffered call body through `<|close|>call<|sep|>` into a
-/// completed call.
+/// Parse the buffered call body through its close marker or an outer boundary.
 fn call_body_event(
     input: &mut KimiK3Input<'_>,
     scan: &mut MarkerScanState,
 ) -> ModalResult<KimiK3Event> {
-    let (body,) = seq!(
-        take_until_marker(CALL_CLOSE, scan),
-        _: literal(CALL_CLOSE),
-    )
-    .parse_next(input)?;
+    let (body, marker_index) = take_until_marker_mul(CALL_BODY_MARKERS, scan).parse_next(input)?;
+    let marker = CALL_BODY_MARKERS[marker_index];
+    literal(marker).parse_next(input)?;
+
+    if marker == TOOLS_CLOSE {
+        return Ok(KimiK3Event::ToolsClose);
+    }
+    if marker == MESSAGE_CLOSE || marker == END_OF_MSG {
+        return Ok(KimiK3Event::MessageEnd);
+    }
+
+    debug_assert_eq!(marker, CALL_CLOSE);
     let arguments = parse_call_arguments(body)?;
 
     Ok(KimiK3Event::CallComplete { arguments })
@@ -574,8 +583,8 @@ mod tests {
     use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::{
-        END_OF_MSG, KimiK3UnifiedParser, OPEN, RESPONSE_CLOSE, RESPONSE_OPEN, SEP, THINK_CLOSE,
-        THINK_OPEN, TOOLS_CLOSE, TOOLS_OPEN,
+        CALL_CLOSE, END_OF_MSG, KimiK3UnifiedParser, MESSAGE_CLOSE, OPEN, RESPONSE_CLOSE,
+        RESPONSE_OPEN, SEP, THINK_CLOSE, THINK_OPEN, TOOLS_CLOSE, TOOLS_OPEN,
     };
     use crate::tool::ToolCallDelta;
     use crate::unified::{
@@ -1040,6 +1049,50 @@ mod tests {
 
         assert_eq!(output.normal_text(), "answer");
         assert_eq!(output.calls().len(), 1);
+    }
+
+    #[test]
+    fn kimi_k3_outer_boundary_aborts_incomplete_call() {
+        let complete_call = call(
+            "tool=\"complete\" index=\"1\"",
+            &arg("value", "string", "kept"),
+        );
+
+        for boundary in [TOOLS_CLOSE, MESSAGE_CLOSE, END_OF_MSG] {
+            let message_close = if boundary == TOOLS_CLOSE {
+                MESSAGE_CLOSE
+            } else {
+                ""
+            };
+            let text = format!(
+                "{TOOLS_OPEN}{complete_call}\
+                 {OPEN}call tool=\"incomplete\" index=\"2\"{SEP}\
+                 {OPEN}argument key=\"value\" type=\"string\"{SEP}discarded\
+                 {boundary}{CALL_CLOSE}{message_close}{RESPONSE_OPEN}fabricated"
+            );
+
+            for size in [text.chars().count(), 1, 3, 7] {
+                let chunks = char_chunks(&text, size);
+                let chunk_refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+                let output = collect_stream(&mut test_parser(), &chunk_refs);
+                let calls = output.calls();
+
+                assert_eq!(calls.len(), 1, "boundary {boundary}, chunk size {size}");
+                assert_eq!(
+                    calls[0].name.as_deref(),
+                    Some("complete"),
+                    "boundary {boundary}, chunk size {size}"
+                );
+                assert_eq!(
+                    calls[0].arguments, r#"{"value":"kept"}"#,
+                    "boundary {boundary}, chunk size {size}"
+                );
+                assert!(
+                    output.normal_text().is_empty(),
+                    "boundary {boundary}, chunk size {size}"
+                );
+            }
+        }
     }
 
     #[test]
