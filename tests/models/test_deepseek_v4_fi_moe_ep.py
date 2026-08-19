@@ -66,20 +66,24 @@ class _FakeMegaConfig:
 def fake_flashinfer(monkeypatch):
     """Install a minimal fake flashinfer.moe_ep for the lazy imports."""
     moe_ep = ModuleType("flashinfer.moe_ep")
-    moe_ep.BootstrapConfig = _FakeBootstrapConfig
-    moe_ep.DeepGemmMegaMoeConfig = _FakeDeepGemmMegaMoeConfig
-    moe_ep.Nvfp4CutedslMegaMoeConfig = _FakeNvfp4CutedslMegaMoeConfig
-    moe_ep.MegaConfig = _FakeMegaConfig
-
     core = ModuleType("flashinfer.moe_ep.core")
     runtime = ModuleType("flashinfer.moe_ep.core.runtime")
-    runtime.TORCH_DIST = "torch_dist"
-    runtime.NVSHMEM = "nvshmem"
-
     flashinfer = ModuleType("flashinfer")
-    flashinfer.moe_ep = moe_ep
-    moe_ep.core = core
-    core.runtime = runtime
+    fake_attrs: dict[ModuleType, dict[str, Any]] = {
+        moe_ep: {
+            "BootstrapConfig": _FakeBootstrapConfig,
+            "DeepGemmMegaMoeConfig": _FakeDeepGemmMegaMoeConfig,
+            "Nvfp4CutedslMegaMoeConfig": _FakeNvfp4CutedslMegaMoeConfig,
+            "MegaConfig": _FakeMegaConfig,
+            "core": core,
+        },
+        runtime: {"TORCH_DIST": "torch_dist", "NVSHMEM": "nvshmem"},
+        flashinfer: {"moe_ep": moe_ep},
+        core: {"runtime": runtime},
+    }
+    for mod, attrs in fake_attrs.items():
+        for attr, value in attrs.items():
+            setattr(mod, attr, value)
 
     for name, mod in {
         "flashinfer": flashinfer,
