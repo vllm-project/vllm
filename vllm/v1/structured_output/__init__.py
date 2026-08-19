@@ -370,10 +370,13 @@ class StructuredOutputManager:
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
                 constraint_start = self._get_constraint_start(request, req_tokens)
                 state_advancements = 0
+                seen_padding = False
                 for i, token in enumerate(req_tokens):
-                    apply_bitmask = i >= constraint_start
+                    apply_bitmask = not seen_padding and i >= constraint_start
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
-                    if token != -1 and apply_bitmask and not grammar.is_terminated():
+                    if token == -1:
+                        seen_padding = True
+                    elif apply_bitmask and not grammar.is_terminated():
                         accepted = grammar.accept_tokens(req_id, [token])
                         # grammar_bitmask should only see validated drafts tokens
                         assert accepted, (token, req_id, scheduled_spec_decode_tokens)
@@ -382,7 +385,9 @@ class StructuredOutputManager:
                 # Diffusion LLMs don't sample a bonus token after the
                 # scheduled positions, so skip its bitmask in that case.
                 if not (self.vllm_config.model_config.is_diffusion and req_tokens):
-                    bonus_apply = constraint_start <= len(req_tokens)
+                    bonus_apply = not seen_padding and constraint_start <= len(
+                        req_tokens
+                    )
                     self._fill_bitmasks(((grammar, cumulative_index, bonus_apply),))
                     cumulative_index += 1
                 if state_advancements > 0:
