@@ -299,12 +299,41 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.register_cross_layers_kv_caches(kv_cache)
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
-        # No-op: loads are issued in get_finished() for compute overlap.
-        pass
+        # Phase 1: build per-layer tasks before model forward so that
+        # wait_for_layer_load() / save_kv_layer() (called during the
+        # forward pass) have tasks to consume.
+        if self._layerwise_enabled:
+            assert self.connector_worker is not None
+            metadata = self._get_connector_metadata()
+            assert isinstance(metadata, MooncakeStoreConnectorMetadata)
+            self.connector_worker.start_load_kv(metadata)
+
+    @property
+    def _layerwise_enabled(self) -> bool:
+        """Check if layerwise mode is enabled."""
+        extra_config = self._kv_transfer_config.kv_connector_extra_config
+        return str(extra_config.get("use_layerwise", "False")).lower() == "true"
+
+    @classmethod
+    def requires_piecewise_for_cudagraph(cls, extra_config: dict) -> bool:
+        """Layerwise mode requires PIECEWISE cudagraph mode.
+
+        Because wait_for_layer_load() and save_kv_layer() contain blocking
+        Python synchronization that cannot be captured in CUDA graphs.
+        """
+        return str(extra_config.get("use_layerwise", "False")).lower() == "true"
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        # No layerwise support - no-op
-        return
+        """Wait for a layer's KV cache to finish loading.
+
+        Called by the ``@maybe_transfer_kv_layer`` decorator before each
+        layer's attention computation in layerwise mode.
+        """
+        if not self._layerwise_enabled:
+            return
+
+        assert self.connector_worker is not None
+        self.connector_worker.wait_for_layer_load(layer_name)
 
     def save_kv_layer(
         self,
@@ -313,8 +342,16 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         attn_metadata: AttentionMetadata,
         **kwargs: Any,
     ) -> None:
-        # No layerwise support - no-op
-        return
+        """Save a layer's KV cache to the store.
+
+        Called by the ``@maybe_transfer_kv_layer`` decorator after each layer's
+        attention computation in layerwise mode.
+        """
+        if not self._layerwise_enabled:
+            return
+
+        assert self.connector_worker is not None
+        self.connector_worker.save_kv_layer(layer_name, kv_layer, attn_metadata)
 
     def wait_for_save(self):
         # No-op: stores are issued in get_finished() for compute overlap.

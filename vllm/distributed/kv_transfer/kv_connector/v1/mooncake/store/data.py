@@ -185,6 +185,7 @@ class ChunkedTokenDatabase:
         self.kv_caches_base_addr: list[int] = []
         self.block_len: list[int] = []
         self._key_prefix = PoolKey.build_prefix(metadata)
+        self.num_layers: int = 0  # total layers, used to slice block_len per layer
 
     def key_for(self, chunk_hash: BlockHash) -> str:
         return PoolKey.build_key_string(self._key_prefix, chunk_hash.hex())
@@ -298,6 +299,148 @@ class ChunkedTokenDatabase:
             end_idx = min(start_idx + self.block_size, token_len)
             h = block_hashes[end_idx // self.hash_block_size - 1]
             yield start_idx, end_idx, h
+
+    # ======================================================================
+    # Layerwise Support
+    # ======================================================================
+
+    def key_for_layer(self, chunk_hash: BlockHash, layer_id: int) -> str:
+        """Return the store key for a chunk hash at a given layer.
+
+        Args:
+            chunk_hash: Hash of the chunk.
+            layer_id: Layer index.
+
+        Returns:
+            Key string with the ``@layer:N`` suffix.
+        """
+        base_key = self.key_for(chunk_hash)
+        return f"{base_key}@layer:{layer_id}"
+
+    def key_for_block(self, chunk_hash: BlockHash) -> str:
+        """Return the block-level key (no layer suffix).
+
+        In Session API mode all layers of a block share one key, addressed by a
+        byte offset. Alias of ``key_for()`` kept for clarity.
+        """
+        return self.key_for(chunk_hash)
+
+    def prepare_values_for_layer(
+        self,
+        chunks: Sequence[tuple[int, int]],
+        block_ids: list[int],
+        layer_id: int,
+    ) -> tuple[list[list[int]], list[list[int]], list[int]]:
+        """Compute memory addresses for a specific layer.
+
+        Slice ``kv_caches_base_addr`` / ``block_len`` by ``num_layers`` to
+        extract the target layer's segments (following vllm-ascend's
+        ``LayerBatchBuilder._build_transfer_arrays``).
+
+        Args:
+            chunks: [(start, end), ...] token ranges.
+            block_ids: Corresponding block-id list.
+            layer_id: Layer index (used for the address offset).
+
+        Returns:
+            (addr_lists, size_lists, chunk_block_ids)
+        """
+        if not chunks:
+            return [], [], []
+
+        if self.num_layers > 0 and self.block_len:
+            caches_per_layer = len(self.block_len) // max(1, self.num_layers)
+            if (caches_per_layer > 0
+                    and caches_per_layer * self.num_layers == len(self.block_len)
+                    and (layer_id + 1) * caches_per_layer <= len(self.block_len)):
+                base = np.asarray(self.kv_caches_base_addr, dtype=np.int64)
+                length = len(self.block_len)
+                blen = np.asarray(
+                    [self.block_len[i % length] for i in range(base.shape[0])],
+                    dtype=np.int64,
+                )
+                layer_start = layer_id * caches_per_layer
+                layer_end = layer_start + caches_per_layer
+                layer_base = base[layer_start:layer_end]
+                layer_blen = blen[layer_start:layer_end]
+
+                n = len(chunks)
+                starts = np.fromiter((c[0] for c in chunks), dtype=np.int64, count=n)
+                spans = np.fromiter((c[1] for c in chunks), dtype=np.int64, count=n) - starts
+                assert not (spans % self.block_size).any()
+                bids = np.fromiter(
+                    (block_ids[i] for i in (starts // self.block_size).tolist()),
+                    dtype=np.int64,
+                    count=n,
+                )
+                addrs = layer_base[None, :] + bids[:, None] * layer_blen[None, :]
+                sizes = layer_blen[None, :] * (spans // self.block_size)[:, None]
+                return addrs.tolist(), sizes.tolist(), bids.tolist()
+
+        return self.prepare_values(chunks, block_ids)
+
+    def prepare_values_for_layer_offset(
+        self,
+        chunks: Sequence[tuple[int, int]],
+        block_ids: list[int],
+        layer_id: int,
+    ) -> tuple[list[list[int]], list[list[int]], list[list[int]], list[int]]:
+        """Compute per-layer addresses, sizes, object-byte offsets, and block IDs.
+
+        Returns (addr_lists, size_lists, offset_lists, block_ids_out) where
+        offset_lists contains the destination byte offset for each (key,
+        segment) pair within the Mooncake session object.  The offset is::
+
+            layer_id * page_size_bytes + segment_relative_offset
+
+        where page_size_bytes = sum(block_len_per_layer).  The per-layer
+        addresses and sizes are identical to ``prepare_values_for_layer``.
+
+        Args:
+            chunks: [(start, end), ...] token ranges.
+            block_ids: corresponding block-id list.
+            layer_id: layer index (for address slicing and base-offset).
+
+        Returns:
+            (addr_lists, size_lists, offset_lists, block_ids_out)
+            — one sub-list per chunk.
+        """
+        addrs, sizes, block_ids_out = self.prepare_values_for_layer(
+            chunks, block_ids, layer_id
+        )
+        if not addrs:
+            return [], [], [], []
+
+        offset_lists: list[list[int]] = []
+        if self.num_layers > 0 and self.block_len:
+            caches_per_layer = len(self.block_len) // max(1, self.num_layers)
+            if not (caches_per_layer > 0
+                    and caches_per_layer * self.num_layers == len(self.block_len)
+                    and (layer_id + 1) * caches_per_layer <= len(self.block_len)):
+                caches_per_layer = len(self.block_len)
+        else:
+            caches_per_layer = len(self.block_len)
+
+        page_size_bytes = sum(self.block_len[:caches_per_layer]) if caches_per_layer > 0 else 0
+        layer_base_offset = layer_id * page_size_bytes
+
+        # Per-segment relative offsets (cumulative within one layer)
+        segment_offsets: list[int] = []
+        cumulative = 0
+        for blen in self.block_len[:caches_per_layer]:
+            segment_offsets.append(cumulative)
+            cumulative += blen
+
+        for chunk_sizes in sizes:
+            chunk_offsets: list[int] = []
+            for i in range(len(chunk_sizes)):
+                seg_idx = i % max(1, caches_per_layer)
+                chunk_offsets.append(
+                    layer_base_offset + segment_offsets[seg_idx]
+                )
+            offset_lists.append(chunk_offsets)
+
+        return addrs, sizes, offset_lists, block_ids_out
 
 
 @dataclass
@@ -454,6 +597,31 @@ class MooncakeStoreWorkerMetadata(KVConnectorWorkerMetadata):
                 self.completed_saves.get(store_job_id, 0) + count
             )
         return self
+
+
+# ============================================================================
+# Layerwise KV Cache Data Structures (Phase 1)
+# ============================================================================
+
+@dataclass
+class LayerTransferTask:
+    """Per-layer transfer task for one request on one layer."""
+    req_id: str
+    group_id: int
+    layer_idx_in_group: int  # layer index within its group
+    physical_layer_id: int  # global layer index
+    key_list: list[str]
+    addr_list: list[list[int]]
+    size_list: list[list[int]]
+    block_ids: list[int]
+    is_save: bool = True
+    # Per-segment destination/src byte offsets within the Mooncake session object.
+    # Only used when use_key_major_ranges is True (Session API mode).
+    # Shape: [num_chunks][num_segments_per_chunk], parallel to addr_list / size_list.
+    dst_offset_list: list[list[int]] = field(default_factory=list)
+    # True → Mooncake session API path (batch_put/get_*_ranges);
+    # False → legacy per-layer-key path (batch_put/get_from_multi_buffers).
+    use_key_major_ranges: bool = False
 
 
 class MooncakeStoreConnectorMetadata(KVConnectorMetadata):
