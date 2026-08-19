@@ -2,7 +2,7 @@ group: Quantization
 depends_on:
   - image-build-xpu
 steps:
-- label: ":intel: (B50) Quantization"
+- label: ":intel: (BMG) Quantization"
   key: quantization
   timeout_in_minutes: 30
   env:

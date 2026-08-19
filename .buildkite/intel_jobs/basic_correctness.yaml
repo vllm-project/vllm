@@ -2,7 +2,7 @@ group: Basic Correctness
 depends_on:
   - image-build-xpu
 steps:
-- label: ":intel: (B50) Sleep Mode"
+- label: ":intel: (BMG) Sleep Mode"
   timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:

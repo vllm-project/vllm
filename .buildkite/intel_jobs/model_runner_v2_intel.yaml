@@ -2,7 +2,7 @@ group: Model Runner V2 Intel
 depends_on:
   - image-build-xpu
 steps:
-- label: ":intel: (B70) Model Runner V2 Core Tests"
+- label: ":intel: (BMG) Model Runner V2 Core Tests"
   timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:
@@ -33,7 +33,7 @@ steps:
       pytest -v -s entrypoints/llm/test_struct_output_generate.py -k "xgrammar and not speculative_config6 and not speculative_config7 and not speculative_config8 and not speculative_config0" &&
       pytest -v -s v1/e2e/general/test_min_tokens.py'
 
-- label: ":intel: (B70) Model Runner V2 Examples"
+- label: ":intel: (BMG) Model Runner V2 Examples"
   timeout_in_minutes: 45
   device: intel_gpu
   agent_tags:
@@ -63,7 +63,7 @@ steps:
       python3 generate/multimodal/vision_language_offline.py --seed 0 &&
       python3 features/automatic_prefix_caching/prefix_caching_offline.py'
 
-- label: ":intel: (B50) Model Runner V2 Distributed"
+- label: ":intel: (BMG) Model Runner V2 Distributed"
   timeout_in_minutes: 50
   device: intel_gpu
   agent_tags:
@@ -89,7 +89,7 @@ steps:
       cd tests &&
       TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -m "distributed\(num_gpus=2\)" -k "not ray and not True"'
 
-- label: ":intel: (B70) Model Runner V2 Spec Decode"
+- label: ":intel: (BMG) Model Runner V2 Spec Decode"
   timeout_in_minutes: 50
   device: intel_gpu
   agent_tags:
