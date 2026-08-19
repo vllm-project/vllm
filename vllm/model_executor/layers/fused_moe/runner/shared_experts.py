@@ -61,7 +61,11 @@ class SharedExperts(torch.nn.Module):
         # debug purposes.
         # TODO: Remove this after more extensive testings with TP/DP
         # and other execution modes
-        if envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM:
+        disable_shared_experts_stream = envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM or (
+            current_platform.is_rocm()
+            and not envs.VLLM_ROCM_ENABLE_SHARED_EXPERTS_STREAM
+        )
+        if disable_shared_experts_stream:
             logger.debug_once("Disabling MoE shared_experts cuda stream")
             self._stream = None
         else:
@@ -97,12 +101,6 @@ class SharedExperts(torch.nn.Module):
             and parallel_config.all2all_backend not in _EPLB_OVERLAP_SAFE_BACKENDS
         ) or parallel_config.use_fi_nvl_two_sided_kernels
 
-    @property
-    def _should_enable_stream_overlap_heuristic(self) -> bool:
-        if not current_platform.is_rocm():
-            return True
-        return envs.VLLM_ROCM_ENABLE_SHARED_EXPERTS_STREAM
-
     def _determine_shared_experts_order(
         self,
         hidden_states: torch.Tensor,
@@ -118,7 +116,6 @@ class SharedExperts(torch.nn.Module):
             and self._stream is not None
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
-            and self._should_enable_stream_overlap_heuristic
         )
 
         if should_run_shared_in_aux_stream:
