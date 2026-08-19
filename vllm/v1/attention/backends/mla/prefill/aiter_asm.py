@@ -245,7 +245,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         is_causal: bool,
         device: torch.device,
         max_qlen: int,
-        max_kvlen: int | None,
+        max_kvlen: int | None = None,
     ) -> dict:
         """Build persistent-scheduling metadata buffers for this chunk.
 
@@ -353,7 +353,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             is_causal=True,
             device=device,
             max_qlen=max_query_len,
-            max_kvlen=None,
         )
         ps["qo_indptr"] = qo_indptr
         ps["kv_indptr"] = qo_indptr
