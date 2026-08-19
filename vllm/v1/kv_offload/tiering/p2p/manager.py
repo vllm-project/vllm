@@ -22,6 +22,7 @@ from vllm.v1.core.kv_cache_utils import get_none_hash_seed
 from vllm.v1.kv_offload.base import (
     LookupResult,
     OffloadKey,
+    OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
@@ -361,11 +362,18 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         prefiller side, sessions are created when the consumer's inbound
         connection arrives in _accept_new_peers — submit_store no longer
         pre-creates anything.
+
+        Producer-leg requests (``remote_decoder`` present) ask for
+        REQUEST_LEVEL: the peer needs every block of the request, not just
+        the ones this request computed.
         """
         _annotate_req_context(req_context)
         source = req_context.get_state(P2PSourceInfo)
         if source is not None:
             self._get_or_create_session(source.peer_id)
+        dest = req_context.get_state(P2PDestInfo)
+        if dest is not None and dest.kv_request_id:
+            return RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
         return RequestOffloadingContext()
 
     @override

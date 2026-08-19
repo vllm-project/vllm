@@ -17,7 +17,12 @@ import pytest
 
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import DEFAULT_NONE_HASH_SEED, init_none_hash
-from vllm.v1.kv_offload.base import LookupResult, ReqContext, ScheduleEndContext
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadPolicy,
+    ReqContext,
+    ScheduleEndContext,
+)
 from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
@@ -238,6 +243,46 @@ class TestLookup:
         mgr = _make_manager()
         ctx = _req_context(kv_params=_remote_decoder_kv_params())
         assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+
+
+# ---------------------------------------------------------------------------
+# Tests for on_new_request offload policy
+# ---------------------------------------------------------------------------
+
+
+class TestOnNewRequestPolicy:
+    """The producer leg must offload every block the peer will fetch.
+
+    A producer serving a remote decoder has to supply the whole request, so it
+    asks for REQUEST_LEVEL: that is what makes the TieringManager cascade
+    blocks that are already resident in the primary tier. Under BLOCK_LEVEL a
+    warm producer cascades nothing and the peer's fetch demand parks until the
+    load timeout (see issue #52808).
+    """
+
+    def test_remote_decoder_request_is_request_level(self):
+        mgr = _make_manager()
+        ctx = _req_context(kv_params=_remote_decoder_kv_params())
+        assert mgr.on_new_request(ctx).policy is OffloadPolicy.REQUEST_LEVEL
+
+    def test_plain_request_stays_block_level(self):
+        mgr = _make_manager()
+        ctx = _req_context(kv_params=None)
+        assert mgr.on_new_request(ctx).policy is OffloadPolicy.BLOCK_LEVEL
+
+    def test_consumer_leg_stays_block_level(self, monkeypatch):
+        """The consumer fetches from the peer; it has nothing to supply."""
+        mgr = _make_manager()
+        monkeypatch.setattr(mgr, "_get_or_create_session", lambda peer_id: None)
+        ctx = _req_context(kv_params=_remote_prefiller_kv_params())
+        assert mgr.on_new_request(ctx).policy is OffloadPolicy.BLOCK_LEVEL
+
+    def test_malformed_remote_decoder_stays_block_level(self):
+        """No kv_request_id means submit_store will fail the request anyway,
+        so there is nothing to gain from widening the store set."""
+        mgr = _make_manager()
+        ctx = _req_context(kv_params={"remote_decoder": {}})
+        assert mgr.on_new_request(ctx).policy is OffloadPolicy.BLOCK_LEVEL
 
 
 # ---------------------------------------------------------------------------

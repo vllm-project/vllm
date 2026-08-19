@@ -1079,6 +1079,44 @@ class TestTieringOffloadingManager:
         # tier2 (block-level) does not get existing blocks here.
         self.secondary_tier2.submit_store.assert_not_called()
 
+    def test_fully_warm_request_still_cascades_to_request_level_tiers(
+        self, manager_setup
+    ):
+        """A request whose blocks are ALL already in primary still cascades.
+
+        This is the warm-producer shape from issue #52808: nothing is new, so
+        primary returns an empty keys_to_store and no GPU->primary transfer
+        runs. A request-level tier must still be handed the blocks, otherwise a
+        peer waiting on them has nothing to fetch.
+        """
+        existing_blocks = to_keys(range(3))
+        self._start_request()
+        assert self.manager.prepare_store(existing_blocks, _CTX) is not None
+        self.manager.complete_store(existing_blocks, _CTX, success=True)
+        self._simulate_on_schedule_end()
+
+        self.secondary_tier1.on_new_request = lambda req_context: (
+            RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
+        )
+        ctx = ReqContext(req_id="req_fully_warm")
+        self.manager.on_new_request(ctx)
+
+        self.secondary_tier1.submit_store = MagicMock(
+            wraps=self.secondary_tier1.submit_store
+        )
+        self.secondary_tier2.submit_store = MagicMock(
+            wraps=self.secondary_tier2.submit_store
+        )
+
+        result = self.manager.prepare_store(existing_blocks, ctx)
+        assert result is not None
+        assert result.keys_to_store == []
+
+        self.secondary_tier1.submit_store.assert_called_once()
+        job_metadata = self.secondary_tier1.submit_store.call_args.args[0]
+        assert set(job_metadata.keys) == set(existing_blocks)
+        self.secondary_tier2.submit_store.assert_not_called()
+
     def test_reset_cache_clears_orchestrator_state(self, manager_setup):
         """reset_cache wipes every kind of orchestrator state and resets
         primary tier; pending submissions are dropped without being sent
