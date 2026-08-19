@@ -149,6 +149,7 @@ steps:
   timeout_in_minutes: 25
   device: h100
   num_devices: 1
+  trace_mode: kernel-set
   source_file_dependencies:
   - cmake/external_projects/flashmla.cmake
   - vllm/v1/attention/ops/flashmla.py
