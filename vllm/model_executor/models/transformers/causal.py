@@ -19,9 +19,6 @@
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding as VllmVocabParallelEmbedding,
-)
 from vllm.model_executor.models.interfaces_base import VllmModelForTextGeneration
 from vllm.model_executor.models.transformers.layers import (
     get_logits_processor_cls,
@@ -57,10 +54,7 @@ class CausalMixin(VllmModelForTextGeneration):
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             if tie_word_embeddings:
-                vpe_classes = (
-                    get_vocab_parallel_embedding_cls(),
-                    VllmVocabParallelEmbedding,
-                )
+                vpe_classes = get_vocab_parallel_embedding_cls()
                 for module in self.model.get_input_embeddings().modules():
                     if isinstance(module, vpe_classes):
                         self.lm_head = self.lm_head.tie_weights(module)
