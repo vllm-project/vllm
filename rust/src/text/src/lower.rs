@@ -59,6 +59,7 @@ pub fn lower_text_request(
         cache_salt: request.cache_salt.clone(),
         priority: request.priority,
         data_parallel_rank: request.data_parallel_rank,
+        session_id: request.session_id.clone(),
         reasoning_parser_kwargs: request.reasoning_parser_kwargs.clone(),
         lora_request: request.lora_request.clone(),
         arrival_time: request.arrival_time,
@@ -187,6 +188,7 @@ pub fn lower_sampling_params(
         logprob_token_ids,
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
+        routed_experts_prompt_start: 0,
     };
     validate_resolved_sampling_params(&params)?;
     validate_vocab_range(&params, &sampling_limits)?;
@@ -644,6 +646,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -693,6 +696,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -858,6 +862,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -925,6 +930,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -985,6 +991,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);
@@ -1234,6 +1241,7 @@ mod tests {
                 logprob_token_ids: None,
                 skip_reading_prefix_cache: None,
                 extra_args: None,
+                routed_experts_prompt_start: 0,
             }
         "#]]
         .assert_debug_eq(&params);

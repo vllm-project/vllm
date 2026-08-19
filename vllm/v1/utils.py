@@ -339,6 +339,7 @@ class RustFrontendProcessManager:
         output_address: str,
         engine_start_index: int,
         engine_count: int,
+        data_parallel_size: int,
         stats_update_address: str | None = None,
     ):
         import os
@@ -360,6 +361,8 @@ class RustFrontendProcessManager:
             str(engine_start_index),
             "--engine-count",
             str(engine_count),
+            "--data-parallel-size",
+            str(data_parallel_size),
         ]
         if stats_update_address is not None:
             cmd.extend(["--coordinator-address", stats_update_address])
@@ -500,7 +503,7 @@ def run_api_server_worker_proc(
 ) -> None:
     """Entrypoint for individual API server worker processes."""
 
-    from vllm.entrypoints.openai.api_server import run_server_worker
+    from vllm.entrypoints.launchers.api_server.entry import run_server_worker
 
     client_config = client_config or {}
     server_index = client_config.get("client_index", 0)
