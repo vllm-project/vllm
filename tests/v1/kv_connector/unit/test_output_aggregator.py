@@ -88,8 +88,7 @@ def test_aggregate_workers_output():
 def test_aggregate_workers_output_with_expected_finished_count():
     # We create the aggregator expecting to collect from 4 workers
     aggregator = KVOutputAggregator(expected_finished_count=4)
-    assert aggregator._expected_finished_sending_count == 4
-    assert aggregator._expected_finished_recving_count == 4
+    assert aggregator._expected_finished_count == 4
     # Some request with default expected finished requests
     output1 = DummyModelRunnerOutput(finished_sending={"req1"})
     aggregated = aggregator.aggregate([output1])

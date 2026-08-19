@@ -604,48 +604,13 @@ class TestNixlHandshake:
         assert worker.pcp_rank == pcp_rank
         payload = MagicMock(spec=NixlHandshakePayload)
         worker.xfer_handshake_metadata = payload
-        worker.get_finished = MagicMock(return_value=({"sent"}, {"received"}))
+        worker.get_finished = MagicMock(return_value=({"sent"}, set()))
 
         expected_payload = payload if pcp_rank == 0 else None
         assert connector.get_handshake_metadata() is expected_payload
         done_sending, done_recving = connector.get_finished(set())
         assert done_sending == ({"sent"} if pcp_rank == 0 else set())
-        assert done_recving == {"received"}
-
-    def test_pcp_producer_uses_distinct_send_recv_counts(self):
-        """Canonical sends and bidirectional receives have different fan-in."""
-        vllm_config = create_vllm_config(kv_role="kv_producer")
-        parallel_config = vllm_config.parallel_config
-        parallel_config.prefill_context_parallel_size = 2
-        parallel_config.world_size = 2
-        connector = NixlConnector(
-            vllm_config,
-            KVConnectorRole.SCHEDULER,
-            make_kv_cache_config(block_size=16),
-        )
-        aggregator = KVOutputAggregator.from_connector(connector, world_size=2)
-
-        aggregated = aggregator.aggregate(
-            [
-                SimpleNamespace(
-                    kv_connector_output=KVConnectorOutput(
-                        finished_sending={"send"},
-                        finished_recving={"recv"},
-                    )
-                )
-            ]
-        )
-        assert aggregated.kv_connector_output.finished_sending == {"send"}
-        assert aggregated.kv_connector_output.finished_recving is None
-
-        aggregated = aggregator.aggregate(
-            [
-                SimpleNamespace(
-                    kv_connector_output=KVConnectorOutput(finished_recving={"recv"})
-                )
-            ]
-        )
-        assert aggregated.kv_connector_output.finished_recving == {"recv"}
+        assert done_recving == set()
 
     @patch(
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",

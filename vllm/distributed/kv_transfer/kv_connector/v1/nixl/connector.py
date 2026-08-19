@@ -179,19 +179,15 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     # Scheduler Side Methods
     ############################################################
 
-    def get_finished_count(self) -> tuple[int, int] | None:
+    def get_finished_count(self) -> int | None:
         parallel_config = self._vllm_config.parallel_config
         if (
             self.kv_transfer_config.kv_role == "kv_producer"
             and parallel_config.prefill_context_parallel_size > 1
         ):
-            expected_finished_sending_count = (
+            return (
                 parallel_config.tensor_parallel_size
                 * parallel_config.pipeline_parallel_size
-            )
-            return (
-                expected_finished_sending_count,
-                parallel_config.world_size,
             )
         return None
 

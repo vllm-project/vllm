@@ -362,7 +362,7 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         for c, cm in zip(self._connectors, kv_connector_metadata.metadata):
             c.handle_preemptions(cm)
 
-    def get_finished_count(self) -> tuple[int, int] | None:
+    def get_finished_count(self) -> int | None:
         # TODO(https://github.com/vllm-project/vllm/issues/33400)
         # Currently no connectors return non-None
         return None
