@@ -13,7 +13,7 @@ _STRUCTURED_OUTPUT_STOP_TOKENS = (
 )
 
 
-class InklingParserReasoningAdapter(_InklingParserReasoningAdapter):
+class InklingParserReasoningAdapter(_InklingParserReasoningAdapter):  # type: ignore[valid-type, misc]
     def structured_output_stop_token_ids(self) -> set[int]:
         return {
             token_id
