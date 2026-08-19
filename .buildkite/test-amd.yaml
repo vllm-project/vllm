@@ -4903,7 +4903,7 @@ steps:
   optional: true
   commands:
   - unset VLLM_USE_V2_MODEL_RUNNER
-  - uv pip install --system torchao==0.17.0
+  - uv pip install --system torchao==0.18.0
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - if [ "$$BUILDKITE_PARALLEL_JOB" = "0" ]; then pytest -v -s rocm/test_moe_weight_replay.py; fi
