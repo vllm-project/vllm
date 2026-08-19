@@ -19,10 +19,15 @@ from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if current_platform.is_rocm():
+    from aiter.ops.triton.gemm.batched.batched_gemm_bf16 import (
+        batched_gemm_bf16 as _aiter_batched_gemm_bf16,
+    )
+
     from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950
 else:
     _ON_GFX942 = False
     _ON_GFX950 = False
+    _aiter_batched_gemm_bf16 = None
 
 
 @triton.jit
@@ -1075,11 +1080,20 @@ def rocm_inv_rope_einsum(
     o_ref = _fused_inverse_rope_gptj(
         o, positions, rotary_emb.cos_sin_cache, rope_head_dim
     )
-    o_ref = o_ref.view(o.shape[0], n_local_groups, -1)
+    num_tokens = o_ref.shape[0]
+    o_ref = o_ref.view(num_tokens, n_local_groups, -1)
 
     wo_a_weight = _get_cached_wo_a_bf16(
         wo_a, n_local_groups, o_lora_rank, o_ref.shape[-1]
     )
+
+    if _aiter_batched_gemm_bf16 is not None and num_tokens <= 32:
+        # aiter Triton batched GEMM: tuned for small T (decode regime).
+        # Accepts non-contiguous inputs via strides; no .contiguous() needed.
+        return _aiter_batched_gemm_bf16(
+            o_ref.transpose(0, 1),
+            wo_a_weight,
+        ).transpose(0, 1)
 
     return torch.einsum("tgd,grd->tgr", o_ref, wo_a_weight)
 
