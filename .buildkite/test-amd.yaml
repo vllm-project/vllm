@@ -3666,6 +3666,9 @@ steps:
   - tests/kernels/
   - vllm/platforms/rocm.py
   commands:
+  # kernels/turboquant is skipped until FlyDSL ships an API its kernel builds
+  # against: 0.2.x rejects the wrapped `vector.insert` operand and 0.3.x no
+  # longer exports `buffer_ops`. The directory arrived with #47896.
   - >-
     pytest -v -s kernels/
     --ignore=kernels/attention
@@ -3675,6 +3678,7 @@ steps:
     --ignore=kernels/mamba
     --ignore=kernels/moe
     --ignore=kernels/quantization
+    --ignore=kernels/turboquant
     --ignore=kernels/test_concat_mla_q.py
     --ignore=kernels/test_fused_qk_norm_rope_gate.py
     --ignore=kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
