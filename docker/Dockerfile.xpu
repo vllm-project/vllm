@@ -1,16 +1,13 @@
 ######################### RUST BUILD IMAGE #########################
 # Build the Rust frontend (`vllm-rs`) in a dedicated stage so the main image
-# doesn't need the rust toolchain or protoc. Runs in parallel with vllm-base.
+# doesn't need the rust toolchain. Runs in parallel with vllm-base.
 FROM ubuntu:22.04 AS rust-build
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl git build-essential unzip python3 python3-pip \
+        ca-certificates curl git build-essential python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
-
-COPY tools/install_protoc.sh /tmp/install_protoc.sh
-RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 
 WORKDIR /workspace
 

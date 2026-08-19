@@ -243,20 +243,17 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 #################### RUST BUILD IMAGE ####################
 # Build the Rust frontend (`vllm-rs`) in a dedicated stage so the main wheel
-# build stage doesn't need the rust toolchain, protoc, or the rust source.
+# build stage doesn't need the rust toolchain or the rust source.
 # This stage reuses the Python environment from base and runs in parallel with
 # csrc-build/extensions-build.
 FROM base AS rust-build
 ARG USE_SCCACHE
 ARG SCCACHE_ENDPOINT
 
-# Install native tools needed only for Rust/protoc builds.
-RUN dnf install -y --setopt=install_weak_deps=False make unzip \
+# Install native tools needed only for Rust builds.
+RUN dnf install -y --setopt=install_weak_deps=False make \
     && dnf clean all \
     && rm -rf /var/cache/dnf
-
-COPY tools/install_protoc.sh /tmp/install_protoc.sh
-RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 
 WORKDIR /workspace
 
