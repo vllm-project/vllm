@@ -15,7 +15,10 @@ from vllm.model_executor.layers.linear import (
     ReplicatedLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.models.qwen3_dspark import DSparkMarkovHead
+from vllm.model_executor.models.qwen3_dspark import (
+    DSparkConfidenceHead,
+    DSparkMarkovHead,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -184,6 +187,23 @@ class K3DSparkModel(nn.Module):
             self.config.markov_rank,
             prefix=maybe_prefix(prefix, "markov_head"),
         )
+        # Acceptance-confidence head for adaptive verification (confidence-scheduled
+        # draft budget). Config-driven so a checkpoint without one (fixed spec
+        # decode) simply leaves it None; input width mirrors the generic DSpark
+        # head: hidden_size, plus markov_rank when the head consumes the Markov
+        # embedding. Built here; weights load via load_weights below.
+        self.confidence_head: DSparkConfidenceHead | None = None
+        if getattr(self.config, "enable_confidence_head", False):
+            with_markov = getattr(self.config, "confidence_head_with_markov", False)
+            input_dim = self.config.hidden_size + (
+                self.config.markov_rank if with_markov else 0
+            )
+            self.confidence_head = DSparkConfidenceHead(
+                input_dim,
+                prefix=maybe_prefix(prefix, "confidence_head"),
+                bias=True,
+                with_markov=with_markov,
+            )
         self._max_num_context_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
         )
@@ -399,7 +419,10 @@ class K3DSparkForCausalLM(nn.Module):
     has_own_embed_tokens = False
     has_own_lm_head = False
     draft_id_to_target_id = None
-    checkpoint_skip_substrs = ("confidence_head", "embed_tokens", "lm_head")
+    # embed_tokens / lm_head are aliased from the target, never loaded here.
+    # confidence_head is skipped only when the draft did not build one (fixed
+    # spec decode); load_weights adds it dynamically in that case.
+    checkpoint_skip_substrs = ("embed_tokens", "lm_head")
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"": "model."},
@@ -476,13 +499,22 @@ class K3DSparkForCausalLM(nn.Module):
     def markov_bias(self, markov_embed: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.bias(markov_embed, self.logits_processor)
 
+    def compute_confidence(
+        self, head_hidden: torch.Tensor, markov_embed: torch.Tensor
+    ) -> torch.Tensor:
+        """Per-position acceptance probability for each drafted token."""
+        assert self.model.confidence_head is not None
+        return torch.sigmoid(self.model.confidence_head(head_hidden, markov_embed))
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # confidence_head is training-only. The frozen target embedding and LM
-        # head are shared after this draft-specific checkpoint is loaded.
-        loader = AutoWeightsLoader(
-            self,
-            skip_substrs=list(self.checkpoint_skip_substrs),
-        )
+        # The frozen target embedding and LM head are shared after this
+        # draft-specific checkpoint is loaded. The confidence head IS loaded when
+        # the draft built one (adaptive verification); when it did not (fixed spec
+        # decode) skip any confidence_head weights the checkpoint carries.
+        skip_substrs = list(self.checkpoint_skip_substrs)
+        if self.model.confidence_head is None:
+            skip_substrs.append("confidence_head")
+        loader = AutoWeightsLoader(self, skip_substrs=skip_substrs)
         # read: 1. all weights. 2. context kv weights
         weights = _duplicate_context_kv_weights(weights, len(self.model.layers))
         loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
