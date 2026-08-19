@@ -41,11 +41,6 @@ class ControlArgs:
     include_model_state: bool
 
 
-def validate_oracle(oracle: Oracle) -> None:
-    if not oracle.token_ids:
-        raise SnapshotCanaryError("snapshot canary produced no token")
-
-
 def _fsync_directory(path: Path) -> None:
     directory_fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
@@ -163,7 +158,6 @@ def oracle_from_request_output(request_output: Any) -> Oracle:
         raise SnapshotCanaryError(
             "snapshot canary did not return sampled token logprob"
         ) from error
-    validate_oracle(oracle)
     return oracle
 
 
@@ -313,7 +307,6 @@ async def run_snapshot_child(
     """Initialize and validate an engine before creating its HTTP listener."""
     async with engine_context as engine:
         oracle = await run_canary(engine)
-        validate_oracle(oracle)
         if release_reloadable_state is not None:
             try:
                 await release_reloadable_state(engine)
@@ -321,7 +314,6 @@ async def run_snapshot_child(
                     raise RuntimeError("compact snapshot restore callback is missing")
                 await restore_reloadable_state(engine)
                 rehearsal_oracle = await run_canary(engine)
-                validate_oracle(rehearsal_oracle)
                 if not oracles_match(oracle, rehearsal_oracle):
                     raise SnapshotCanaryError(
                         "compact snapshot rehearsal changed canary output; retry "

@@ -733,6 +733,7 @@ FROM ${FINAL_BASE_IMAGE} AS vllm-runtime-base
 
 ARG INSTALL_RUBIN_PRERELEASE
 ARG TARGETPLATFORM
+ARG max_jobs=2
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
 ARG NCCL_VERSION
@@ -844,7 +845,7 @@ RUN if [ "${INSTALL_RUBIN_PRERELEASE}" = "true" ]; then \
 # redistributing NVIDIA's proprietary cuda-checkpoint binary.
 COPY docker/install_snapshot_runtime.sh /usr/local/bin/install_snapshot_runtime.sh
 RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ]; then \
-        /usr/local/bin/install_snapshot_runtime.sh; \
+        MAX_JOBS="${max_jobs}" /usr/local/bin/install_snapshot_runtime.sh; \
     else \
         echo "Initialized snapshots are not installed for ${TARGETPLATFORM}"; \
     fi
