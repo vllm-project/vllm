@@ -32,7 +32,6 @@ from vllm.snapshot.controller import (
     ProcessInventory,
     SnapshotCreateError,
     SnapshotRestoreError,
-    SnapshotTools,
     _TcpSocketRecord,
     create_snapshot,
     restore_snapshot,
@@ -423,7 +422,7 @@ def _manifest(**changes: object) -> SnapshotManifest:
 
 
 def _fake_snapshot_tools(*, fail_dump: bool = False) -> Any:
-    tools = create_autospec(SnapshotTools, instance=True)
+    tools = create_autospec(LocalSnapshotTools, instance=True)
     tools.launch_child.return_value = 100
     tools.wait_ready.return_value = _oracle()
     tools.inventory.return_value = ProcessInventory(

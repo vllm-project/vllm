@@ -18,11 +18,12 @@ import subprocess
 import sys
 import time
 import urllib.request
+from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import NoReturn, Protocol
+from typing import NoReturn
 
 import regex as re
 
@@ -45,9 +46,24 @@ class SnapshotRestoreError(RuntimeError):
     """Snapshot restore failed."""
 
 
+_COMMON_CRIU_OPTIONS = (
+    "--shell-job",
+    "--ext-unix-sk",
+    "--tcp-established",
+    "--link-remap",
+    "--file-locks",
+)
+
+
 def _error_detail(error: BaseException) -> str:
     message = str(error)
     return f"{type(error).__name__}: {message}" if message else type(error).__name__
+
+
+def _close_pidfds(handles: Iterable[tuple[int, int]]) -> None:
+    for _pid, pidfd in handles:
+        with suppress(OSError):
+            os.close(pidfd)
 
 
 @dataclass(frozen=True)
@@ -126,57 +142,6 @@ def _validate_tcp_connections(
     )
 
 
-class SnapshotTools(Protocol):
-    def preflight(self, action: str, artifact: Path) -> None: ...
-
-    def launch_child(
-        self,
-        workdir: Path,
-        engine_argv: tuple[str, ...],
-        *,
-        include_model_state: bool,
-    ) -> int: ...
-
-    def wait_ready(self, workdir: Path, root_pid: int) -> Oracle: ...
-
-    def inventory(self, root_pid: int) -> ProcessInventory: ...
-
-    def dump(self, workdir: Path, inventory: ProcessInventory) -> None: ...
-
-    def verify_dead(self, inventory: ProcessInventory) -> None: ...
-
-    def make_manifest(
-        self,
-        args: argparse.Namespace,
-        engine_argv: tuple[str, ...],
-        inventory: ProcessInventory,
-        oracle: Oracle,
-        workdir: Path,
-    ) -> SnapshotManifest: ...
-
-    def publish(self, workdir: Path, manifest: SnapshotManifest) -> None: ...
-
-    def abort_create(
-        self, root_pid: int, inventory: ProcessInventory | None
-    ) -> None: ...
-
-    def current_identity(self, manifest: SnapshotManifest) -> SnapshotManifest: ...
-
-    def restore(self, artifact: Path, manifest: SnapshotManifest) -> int: ...
-
-    def release(self, artifact: Path, host: str | None, port: int) -> None: ...
-
-    def wait_listener(self, root_pid: int, host: str | None, port: int) -> None: ...
-
-    def request_oracle(
-        self, host: str | None, port: int, manifest: SnapshotManifest
-    ) -> Oracle: ...
-
-    def cleanup(self, root_pid: int) -> None: ...
-
-    def complete_restore(self, root_pid: int) -> None: ...
-
-
 def _remove_snapshot_option(argv: tuple[str, ...]) -> tuple[str, ...]:
     remaining: list[str] = []
     iterator = iter(argv)
@@ -204,7 +169,7 @@ def create_snapshot(
     args: argparse.Namespace,
     *,
     engine_argv: tuple[str, ...] | None = None,
-    tools: SnapshotTools | None = None,
+    tools: "LocalSnapshotTools | None" = None,
 ) -> None:
     target = Path(args.snapshot_dir).absolute()
     toolset = tools or LocalSnapshotTools()
@@ -250,7 +215,7 @@ def create_snapshot(
 
 
 def restore_snapshot(
-    args: argparse.Namespace, *, tools: SnapshotTools | None = None
+    args: argparse.Namespace, *, tools: "LocalSnapshotTools | None" = None
 ) -> None:
     artifact = Path(args.snapshot_dir).absolute()
     toolset = tools or LocalSnapshotTools()
@@ -723,11 +688,7 @@ class LocalSnapshotTools:
                     str(images),
                     "--log-file",
                     "dump.log",
-                    "--shell-job",
-                    "--ext-unix-sk",
-                    "--tcp-established",
-                    "--link-remap",
-                    "--file-locks",
+                    *_COMMON_CRIU_OPTIONS,
                 ],
             )
             self._capture_link_remaps(
@@ -1096,9 +1057,7 @@ class LocalSnapshotTools:
                     "restored process exited during verification"
                 )
         except BaseException as error:
-            for _pid, pidfd in handles:
-                with suppress(OSError):
-                    os.close(pidfd)
+            _close_pidfds(handles)
             if isinstance(error, SnapshotRestoreError):
                 raise
             if not isinstance(error, Exception):
@@ -1186,11 +1145,7 @@ class LocalSnapshotTools:
                     str(artifact / "images"),
                     "--log-file",
                     "restore.log",
-                    "--shell-job",
-                    "--ext-unix-sk",
-                    "--tcp-established",
-                    "--link-remap",
-                    "--file-locks",
+                    *_COMMON_CRIU_OPTIONS,
                     "--restore-detached",
                     "--pidfile",
                     str(pidfile),
@@ -1333,17 +1288,13 @@ class LocalSnapshotTools:
                 with suppress(KeyError, OSError):
                     poller.unregister(pidfd)
         self._restored_processes.pop(root_pid)
-        for _pid, pidfd in handles:
-            with suppress(OSError):
-                os.close(pidfd)
+        _close_pidfds(handles)
 
     def complete_restore(self, root_pid: int) -> None:
         handles = self._restored_processes.pop(root_pid, None)
         if handles is None:
             raise SnapshotRestoreError("no pinned restore transaction to complete")
-        for _pid, pidfd in handles:
-            with suppress(OSError):
-                os.close(pidfd)
+        _close_pidfds(handles)
 
     def abort_create(self, root_pid: int, _inventory: ProcessInventory | None) -> None:
         process = self._children.get(root_pid)
