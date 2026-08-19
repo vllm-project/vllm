@@ -631,6 +631,8 @@ def rocm_fp8_paged_mqa_logits(
     block_tables: torch.Tensor,
     schedule_metadata: torch.Tensor,
     max_model_len: int,
+    *,
+    skip_k_cache_insert: bool = False,
 ) -> torch.Tensor:
     """Compute FP8 MQA logits using paged KV-cache.
 
@@ -655,11 +657,13 @@ def rocm_fp8_paged_mqa_logits(
     """
     from vllm._aiter_ops import rocm_aiter_ops
 
-    # gfx942/gfx950: AITER's paged MQA-logits decode kernel scores the sparse
-    # indexer incorrectly and collapses long-context retrieval, so route the
-    # decode/MTP path through the Triton kernel instead.
-    if _ON_GFX950 or _ON_GFX942:
-        if kv_cache_fp8.shape[1] % 64 == 0:
+    batch_size, next_n = q_fp8.shape[:2]
+    block_size = kv_cache_fp8.shape[1]
+
+    # Block-flat indexer cache (DSv4 compressor write); AITER's
+    # deepgemm_fp8_paged_mqa_logits reads shuffled (Preshuffle=True).
+    if (_ON_GFX950 or _ON_GFX942) and skip_k_cache_insert and block_size > 1:
+        if block_size % 64 == 0:
             return rocm_fp8_paged_mqa_logits_triton(
                 q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
             )
@@ -670,8 +674,6 @@ def rocm_fp8_paged_mqa_logits(
 
     aiter_paged_mqa_logits_module = None
     # if rocm_aiter_ops.is_enabled():
-    batch_size, next_n = q_fp8.shape[:2]
-    block_size = kv_cache_fp8.shape[1]
 
     if rocm_aiter_ops.is_enabled() or rocm_aiter_ops.is_rdna_aiter_enabled():
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
@@ -1041,6 +1043,7 @@ def rocm_aiter_sparse_attn_indexer(
             decode_metadata.block_table,
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
+            skip_k_cache_insert=skip_k_cache_insert,
         )
 
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
