@@ -7444,7 +7444,9 @@ class GPUModelRunner(
             yield from attn_groups
 
     def initialize_kv_cache_tensors(
-        self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int],
     ) -> dict[str, torch.Tensor]:
         """
         Initialize the memory buffer for KV cache.

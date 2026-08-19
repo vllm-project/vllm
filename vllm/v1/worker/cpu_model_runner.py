@@ -157,7 +157,15 @@ class CPUModelRunner(GPUModelRunner):
         self,
         kv_cache_config: KVCacheConfig,
         is_profiling: bool = False,
+        extensible: bool = False,
     ) -> None:
+        if extensible:
+            # The extensible KV cache is backed by device virtual memory
+            # management, which has no CPU equivalent. Unreachable in practice:
+            # `use_extensible_kv_cache` rules out non-CUDA/ROCm platforms.
+            raise NotImplementedError(
+                "The extensible KV cache is not supported on CPU."
+            )
         super().initialize_kv_cache(kv_cache_config, is_profiling)
 
         if self.speculative_config:

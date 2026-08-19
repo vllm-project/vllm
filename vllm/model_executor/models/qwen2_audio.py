@@ -426,11 +426,14 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
         audio_attention_mask_ = padding_mask.view(batch_size, 1, 1, max_seq_len).expand(
             batch_size, 1, max_seq_len, max_seq_len
         )
-        audio_attention_mask = audio_attention_mask_.to(
-            dtype=self.audio_tower.conv1.weight.dtype,
-            device=self.audio_tower.conv1.weight.device,
+        weight = self.audio_tower.conv1.weight
+        audio_attention_mask_ = audio_attention_mask_.to(weight.device)
+        # Build the float mask with masked_fill_ rather than boolean-mask
+        # assignment, which can force a GPU<->CPU sync.
+        audio_attention_mask = torch.zeros_like(
+            audio_attention_mask_, dtype=weight.dtype
         )
-        audio_attention_mask[audio_attention_mask_] = float("-inf")
+        audio_attention_mask.masked_fill_(audio_attention_mask_, float("-inf"))
 
         audio_outputs = self.audio_tower(
             input_features, attention_mask=audio_attention_mask

@@ -223,6 +223,11 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
         FlashInferCuteDslNvFp4LinearKernel,
     )
 
+    # The trtllm-gen MLA decode sweep faults on the V2 runner's dummy decode
+    # batch (zeroed block tables); MRV1's autotune never reached this op, so
+    # keep its heuristic fallback until the sweep is made safe.
+    skip_ops = {"trtllm_batch_decode_mla"}
+
     for module in runner.get_model().modules():
         for holder_name in ("quant_method", "scheme"):
             kernel = getattr(getattr(module, holder_name, None), "kernel", None)
@@ -230,8 +235,8 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
             # fallback is already the heuristic; all mm_fp4 backends share
             # the "fp4_gemm" op name, so skip only when cute-dsl is selected.
             if isinstance(kernel, FlashInferCuteDslNvFp4LinearKernel):
-                return {"fp4_gemm"}
-    return None
+                skip_ops.add("fp4_gemm")
+    return skip_ops
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:

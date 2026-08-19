@@ -1579,9 +1579,10 @@ def wait_for_gpu_memory_to_clear(
     if current_platform.is_rocm() and threshold_ratio is not None:
         # ROCm can keep a small runtime/driver footprint resident even after
         # all model allocations are gone. On MI300 this has been observed
-        # around 2.5 GiB, which is above a strict 1% idle threshold but nowhere
-        # near the amount of free memory needed by the next vLLM runner.
-        min_threshold_b = 4 * 1024**3
+        # around 2.5 GiB (up to ~4.2 GiB with the V2 model runner), which is
+        # above a strict 1% idle threshold but nowhere near the amount of free
+        # memory needed by the next vLLM runner.
+        min_threshold_b = 6 * 1024**3
         if threshold_bytes is None:
             threshold_bytes = {}
         for device, ratio in threshold_ratio.items():

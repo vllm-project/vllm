@@ -53,6 +53,20 @@ def test_prefix_caching_from_cli():
     assert vllm_config.cache_config.prefix_cache_retention_interval == 64
 
 
+def test_extensible_kv_cache_from_cli():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # Unset stays None so CacheConfig can tell "default" from "explicitly
+    # requested"; only an explicit request is mandatory.
+    args = parser.parse_args([])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.enable_extensible_kv_cache is None
+
+    args = parser.parse_args(["--enable-extensible-kv-cache"])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.enable_extensible_kv_cache is True
+
+
 @pytest.mark.skipif(_xxhash is None, reason="xxhash not installed")
 def test_prefix_caching_xxhash_from_cli():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())

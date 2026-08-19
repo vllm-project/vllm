@@ -16,7 +16,6 @@ def test_reset_prefix_cache_e2e(monkeypatch):
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     engine_args = EngineArgs(
         model="Qwen/Qwen3-0.6B",
-        gpu_memory_utilization=0.2,
         async_scheduling=True,
         max_num_batched_tokens=32,
         max_model_len=2048,

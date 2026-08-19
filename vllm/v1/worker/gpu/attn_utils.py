@@ -10,6 +10,10 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.utils.extensible_tensor import (
+    ExtensibleKVCacheBuffers,
+    ExtensibleKVCacheBuilder,
+)
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
@@ -188,13 +192,31 @@ def init_kv_cache(
     device: torch.device,
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
-) -> dict[str, Any]:
-    kv_caches = allocate_kv_cache(
-        kv_cache_config,
-        device,
-        vllm_config.cache_config.get_resolved_kv_cache_layout(),
-        kernel_block_sizes,
-    )
+    extensible: bool = False,
+) -> tuple[dict[str, Any], ExtensibleKVCacheBuffers | None]:
+    layout = vllm_config.cache_config.get_resolved_kv_cache_layout()
+    if not extensible:
+        kv_caches = allocate_kv_cache(
+            kv_cache_config, device, layout, kernel_block_sizes
+        )
+        extensible_buffers = None
+    else:
+        # KV connectors export this memory for cross-process access
+        # (CUDA IPC intra-node, GPU-direct RDMA across nodes).
+        shareable = vllm_config.kv_transfer_config is not None
+        builder = ExtensibleKVCacheBuilder(
+            kv_cache_config.num_blocks, device, shareable
+        )
+        kv_caches = allocate_kv_cache(
+            kv_cache_config,
+            device,
+            layout,
+            kernel_block_sizes,
+            reserve=builder.reserve,
+        )
+        extensible_buffers = builder.finish()
+
+    # Map any KV-sharing layers to their target layer's KV cache.
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
@@ -206,7 +228,41 @@ def init_kv_cache(
         else 1
     )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches, num_attn_module)
-    return kv_caches
+    return kv_caches, extensible_buffers
+
+
+def narrow_kv_caches_to_num_blocks(
+    kv_caches: dict[str, torch.Tensor],
+    attn_groups: Sequence[AttentionGroup],
+    kernel_block_sizes: list[int],
+    num_blocks: int,
+) -> dict[str, torch.Tensor]:
+    """Return views of the KV caches narrowed to the first `num_blocks` blocks.
+
+    With the extensible KV cache, the layer views span the full reserved
+    capacity while only a block prefix is physically committed. KV connectors
+    must only see (and register) backed memory, so hand them views whose
+    (logical) block dimension is trimmed to the committed count. Since
+    committed blocks form a prefix of each physical layout segment, the
+    narrowed views cover exactly the committed bytes.
+    """
+    narrowed = dict(kv_caches)
+    for group in attn_groups:
+        if group.kv_cache_group_id >= len(kernel_block_sizes):
+            continue
+        spec = group.kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            spec = next(iter(spec.kv_cache_specs.values()))
+        if isinstance(spec, AttentionSpec):
+            # Mirror the virtual block split of allocate_kv_cache.
+            ratio = spec.block_size // kernel_block_sizes[group.kv_cache_group_id]
+        else:
+            ratio = 1
+        for layer_name in group.layer_names:
+            kv_cache = kv_caches.get(layer_name)
+            if kv_cache is not None:
+                narrowed[layer_name] = kv_cache.narrow(0, 0, num_blocks * ratio)
+    return narrowed
 
 
 def build_slot_mappings_by_layer(

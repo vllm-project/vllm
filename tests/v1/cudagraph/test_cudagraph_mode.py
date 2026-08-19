@@ -56,7 +56,6 @@ def test_backend_and_cudagraph_mode_combo(backend_name, cudagraph_mode, supporte
             model="Qwen/Qwen2-1.5B-Instruct",
             max_num_seqs=256,
             trust_remote_code=True,
-            gpu_memory_utilization=0.45,
             max_model_len=1024,
             attention_config=attention_config,
             compilation_config=CompilationConfig(
@@ -102,7 +101,6 @@ def test_cudagraph_compilation_combo(
             model="Qwen/Qwen2-1.5B-Instruct",
             max_num_seqs=256,
             trust_remote_code=True,
-            gpu_memory_utilization=0.45,
             max_model_len=1024,
             attention_config=attention_config,
             compilation_config=CompilationConfig(

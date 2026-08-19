@@ -16,8 +16,6 @@ def transcription_server_with_force_include_usage():
         "4",
         "--enforce-eager",
         "--enable-force-include-usage",
-        "--gpu-memory-utilization",
-        "0.2",
     ]
 
     with RemoteOpenAIServer("openai/whisper-large-v3-turbo", args) as remote_server:

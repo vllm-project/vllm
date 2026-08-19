@@ -23,7 +23,6 @@ def llm(vllm_runner):
         pooler_config=PoolerConfig(task="token_embed"),
         max_num_batched_tokens=32768,
         tensor_parallel_size=1,
-        gpu_memory_utilization=0.75,
         enforce_eager=True,
         seed=0,
         enable_chunked_prefill=None,

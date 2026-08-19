@@ -196,6 +196,12 @@ def get_prompt_logprobs_token_ids(
     return token_ids
 
 
+# Chunk width for materializing full-vocab prompt logits; warmup exercises
+# one chunk of exactly this shape so the allocation is retained before the
+# post-warmup KV measurement.
+PROMPT_LOGPROBS_CHUNK_SIZE = 1024
+
+
 def compute_prompt_logprobs_with_chunking(
     prompt_token_ids: torch.Tensor,
     prompt_hidden_states: torch.Tensor,
@@ -205,7 +211,7 @@ def compute_prompt_logprobs_with_chunking(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # Since materializing the full prompt logits can take too much memory,
     # we compute it in chunks.
-    CHUNK_SIZE = 1024
+    CHUNK_SIZE = PROMPT_LOGPROBS_CHUNK_SIZE
     token_ids = []
     scores = []
     ranks = []

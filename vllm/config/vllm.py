@@ -93,6 +93,11 @@ def default_v2_model_runner_architectures() -> frozenset[str]:
     return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
 
 
+MRV1_UNSUPPORTED_PIECEWISE_CUDAGRAPH_ARCHITECTURES = frozenset(
+    {"DeepseekV4ForCausalLM"}
+)
+
+
 class OptimizationLevel(IntEnum):
     """Optimization level enum."""
 
@@ -673,26 +678,7 @@ class VllmConfig:
 
     def _is_default_v2_model_runner_model(self) -> bool:
         model_config = self.model_config
-        if model_config is None:
-            return False
-
-        if model_config.runner_type != "generate":
-            return False
-
-        architectures = getattr(model_config, "architectures", [])
-        default_architectures = default_v2_model_runner_architectures()
-        is_default_v2_architecture = any(
-            arch in default_architectures for arch in architectures
-        )
-
-        if getattr(model_config, "is_hybrid", False) and (
-            not is_default_v2_architecture
-        ):
-            return False
-
-        if getattr(model_config, "is_attention_free", False):
-            return False
-        return is_default_v2_architecture or not model_config.is_moe
+        return model_config is not None and model_config.runner_type == "generate"
 
     @property
     def needs_dp_coordinator(self) -> bool:
@@ -1589,6 +1575,9 @@ class VllmConfig:
                 "Remove VLLM_USE_V2_MODEL_RUNNER=0."
             )
 
+        if self.cache_config.enable_extensible_kv_cache:
+            self._validate_extensible_kv_cache()
+
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
         self._set_compile_ranges()
@@ -2454,6 +2443,83 @@ class VllmConfig:
             unsupported.append("KV sharing fast prefill")
 
         return unsupported
+
+    def _validate_extensible_kv_cache(self) -> None:
+        """Check for configurations the extensible KV cache cannot support.
+
+        Config-level only, so they fail before workers are spawned; driver
+        support is resolved later, worker-side (each worker probes its own
+        driver before memory profiling) and by `use_extensible_kv_cache`.
+        """
+        from vllm.platforms import current_platform
+
+        if self.model_config is not None and self.model_config.runner_type == "draft":
+            # Draft configs are derived from the target's via replace() and
+            # share its cache_config; re-validation must not disable the
+            # extensible KV cache under the live target engine.
+            return
+
+        # Connectors that RDMA-register the KV cache must be able to register
+        # VMM-backed (cuMemCreate/cuMemMap) memory. NIXL's UCX path can;
+        # Mooncake's raw ibv_reg_mr path fails with EFAULT on VMM pages.
+        # Connectors that only touch the cache with kernels or host copies
+        # are also fine. Anything not known-compatible falls back.
+        vmm_compatible_connectors = {
+            "NixlConnector",
+            "OffloadingConnector",
+            "SharedStorageConnector",
+            # Requires WITH_NVIDIA_PEERMEM=0 (DMA-BUF registration); the
+            # connector worker enforces this before engine init.
+            "MooncakeConnector",
+        }
+
+        def connector_names(kv_transfer_config) -> list[str]:
+            if kv_transfer_config.kv_connector != "MultiConnector":
+                return [kv_transfer_config.kv_connector or ""]
+            return [
+                c.get("kv_connector", "")
+                for c in kv_transfer_config.kv_connector_extra_config.get(
+                    "connectors", []
+                )
+            ]
+
+        reason = None
+        if not current_platform.is_cuda_alike():
+            reason = f"{current_platform.device_type} is not a CUDA or ROCm platform"
+        elif not self.use_v2_model_runner:
+            reason = "it requires the V2 model runner"
+        elif self.kv_transfer_config is not None and (
+            incompatible := [
+                name
+                for name in connector_names(self.kv_transfer_config)
+                if name not in vmm_compatible_connectors
+            ]
+        ):
+            reason = (
+                f"KV connector(s) {incompatible} are not known to support "
+                "registering VMM-backed memory"
+            )
+        elif (
+            self.kv_transfer_config is not None
+            and self.model_config is not None
+            and self.model_config.enable_sleep_mode
+        ):
+            # Waking remaps physical pages, invalidating the connector's
+            # memory registration.
+            reason = "sleep mode is not supported alongside KV connectors"
+        if reason is None:
+            return
+
+        if self.cache_config.user_specified_enable_extensible_kv_cache:
+            raise ValueError(
+                f"enable_extensible_kv_cache=True cannot be honored: {reason}."
+            )
+        logger.info_once(
+            "Not using the extensible KV cache: %s. KV cache sizing will use "
+            "profiling estimates instead of measured usage.",
+            reason,
+        )
+        self.cache_config.disable_extensible_kv_cache()
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""

@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -225,6 +226,22 @@ def record_kv_cache_layout(cache_config: CacheConfig, layout_name: str) -> None:
             f"cannot change it to {layout.name}."
         )
     cache_config.kv_cache_layout = layout.name
+
+
+def narrow_layouts_to_block_outermost(
+    supported_layouts: list[list[str]],
+) -> list[list[str]] | None:
+    """Drop layer-compact layout candidates from every rank's supported list.
+
+    The extensible KV cache commits equal-size per-segment block prefixes,
+    which layer-compact regions of different page sizes cannot provide.
+    Returns None when any rank would be left without a candidate.
+    """
+    narrowed = [
+        [name for name in names if not _layout_from_name(name).is_layer_compact]
+        for names in supported_layouts
+    ]
+    return narrowed if all(narrowed) else None
 
 
 def resolve_kv_cache_layout(
@@ -462,7 +479,11 @@ def make_local_attention_virtual_batches(
     block_size: int = 0,
 ) -> tuple[CommonAttentionMetadata, Callable[[torch.Tensor], torch.Tensor]]:
     query_start_loc_np = common_attn_metadata.query_start_loc_cpu.numpy()
-    seq_lens_np = common_attn_metadata.seq_lens_cpu.numpy()
+    # Chunked-local attention builds its virtual batches on the host and needs
+    # exact seq lens; the V2 runner supplies them on the GPU only, so this is
+    # an acknowledged sync (the values are settled once the batch is built).
+    with gpu_sync_allowed():
+        seq_lens_np = common_attn_metadata.seq_lens_cpu.numpy()
     block_table = common_attn_metadata.block_table_tensor
     device = common_attn_metadata.query_start_loc.device
 

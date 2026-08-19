@@ -473,6 +473,9 @@ class ModelArchConfigConvertorBase:
 
 
 class CohereAsrModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_hidden_size(self) -> int:
+        return self.hf_text_config.transf_decoder["config_dict"]["hidden_size"]
+
     def get_total_num_attention_heads(self) -> int:
         return self.hf_text_config.transf_decoder["config_dict"]["num_attention_heads"]
 

@@ -88,7 +88,6 @@ if __name__ == "__main__":
             "model": f"{__name__}.DummyDraftProposer",
             "num_speculative_tokens": NUM_SPEC_TOKENS,
         },
-        gpu_memory_utilization=0.4,
         enforce_eager=True,
     )
 

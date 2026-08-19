@@ -164,7 +164,6 @@ def test_models(
         max_model_len=8192,
         enforce_eager=enforce_eager,
         enable_prompt_embeds=enable_prompt_embeds,
-        gpu_memory_utilization=0.7,
         async_scheduling=async_scheduling,
         distributed_executor_backend=model_executor,
         attention_config={"backend": backend},
@@ -254,8 +253,9 @@ def test_models_distributed(
             tensor_parallel_size=2,
             distributed_executor_backend=distributed_executor_backend,
             enable_prompt_embeds=enable_prompt_embeds,
-            gpu_memory_utilization=0.7,
             attention_config=attention_config,
+            # The HF reference model loads below while this engine is alive.
+            gpu_memory_utilization=0.7,
         ) as vllm_model:
             if enable_prompt_embeds:
                 with hf_runner(model, dtype=dtype) as hf_model:

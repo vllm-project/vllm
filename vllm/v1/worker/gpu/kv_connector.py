@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import torch
@@ -21,9 +22,11 @@ from vllm.v1.outputs import (
     KVConnectorOutput,
     ModelRunnerOutput,
 )
+from vllm.v1.worker.gpu.attn_utils import narrow_kv_caches_to_num_blocks
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.utils import AttentionGroup
 
 
 class KVConnector:
@@ -119,3 +122,27 @@ def get_kv_connector(
         return NO_OP_KV_CONNECTOR
 
     return ActiveKVConnector(vllm_config, kv_caches_dict)
+
+
+def get_deferred_kv_connector(
+    vllm_config: VllmConfig,
+    kv_caches_dict: dict[str, torch.Tensor],
+    attn_groups: Sequence[Sequence["AttentionGroup"]],
+    kernel_block_sizes: list[int],
+    num_blocks: int,
+) -> KVConnector:
+    """Create the KV connector once the extensible KV cache is fully committed.
+
+    Connectors must not register the cache before its final size is physically
+    committed: the layer views span the full reserved capacity, of which only
+    a block prefix is backed. Registration therefore runs against views
+    narrowed to `num_blocks`, so connectors only see (and register with e.g.
+    RDMA) memory that exists.
+    """
+    kv_caches = narrow_kv_caches_to_num_blocks(
+        kv_caches_dict,
+        [group for groups in attn_groups for group in groups],
+        kernel_block_sizes,
+        num_blocks,
+    )
+    return get_kv_connector(vllm_config, kv_caches)

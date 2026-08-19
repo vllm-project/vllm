@@ -38,7 +38,6 @@ def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
         vllm_runner(
             "Qwen/Qwen2.5-VL-3B-Instruct",
             max_model_len=2048,
-            gpu_memory_utilization=0.8,
             compilation_config={
                 "mode": CompilationMode.VLLM_COMPILE,
                 "compile_mm_encoder": True,
@@ -63,7 +62,6 @@ def test_qwen2_5_vl_no_vit_compilation(vllm_runner, monkeypatch):
         vllm_runner(
             "Qwen/Qwen2.5-VL-3B-Instruct",
             max_model_len=2048,
-            gpu_memory_utilization=0.8,
             compilation_config={
                 "mode": CompilationMode.VLLM_COMPILE,
                 "compile_mm_encoder": False,
@@ -99,7 +97,6 @@ def test_mllama4_vit_compilation(vllm_runner, monkeypatch):
         vllm_runner(
             "meta-llama/Llama-4-Scout-17B-16E-Instruct",
             max_model_len=512,
-            gpu_memory_utilization=0.8,
             tensor_parallel_size=8,
             compilation_config={
                 "mode": CompilationMode.VLLM_COMPILE,

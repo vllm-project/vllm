@@ -35,7 +35,6 @@ def get_model_args(
         "dtype": "auto",
         "add_bos_token": True,
         "tensor_parallel_size": tp_size,
-        "gpu_memory_utilization": 0.7,
         "speculative_config": speculative_config,
         "enable_expert_parallel": True,
         "eplb_config": eplb_config,

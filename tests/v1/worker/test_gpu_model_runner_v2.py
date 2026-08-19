@@ -65,6 +65,7 @@ def test_initialize_kv_cache_does_not_dcp_shard_mamba_block_table(
         max_model_len=max_model_len,
         is_encoder_decoder=False,
         vllm_config=vllm_config,
+        extensible_kv_buffers=None,
     )
 
     class _CapturedWidths(Exception):

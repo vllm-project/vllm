@@ -54,12 +54,10 @@ from vllm.model_executor.offloader import (
 )
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.encoder_budget import (
-    MultiModalBudget,
-    get_dummy_encoder_profile_inputs,
-)
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
+from vllm.utils.extensible_tensor import ExtensibleKVCacheBuffers
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -112,6 +110,7 @@ from vllm.v1.worker.gpu.input_batch import (
 from vllm.v1.worker.gpu.kv_connector import (
     NO_OP_KV_CONNECTOR,
     KVConnector,
+    get_deferred_kv_connector,
     get_kv_connector,
 )
 from vllm.v1.worker.gpu.lora_utils import (
@@ -227,8 +226,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
 
         # Multimodal
-        self.mm_registry = MULTIMODAL_REGISTRY
-        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
+        self.supports_mm_inputs = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
             self.model_config
         )
         self.uses_inputs_embeds = (
@@ -318,6 +316,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
+        self.extensible_kv_buffers: ExtensibleKVCacheBuffers | None = None
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
@@ -497,7 +496,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return {}
         return get_kv_cache_spec(self.vllm_config)
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(
+        self, kv_cache_config: KVCacheConfig, extensible: bool = False
+    ) -> None:
+        if self.extensible_kv_buffers is not None:
+            self.extensible_kv_buffers.free()
+        self.extensible_kv_buffers = None
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
 
@@ -608,15 +612,50 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         self.kv_caches: list[torch.Tensor] = []
-        kv_caches_dict = init_kv_cache(
+        kv_caches_dict, self.extensible_kv_buffers = init_kv_cache(
             self.kv_caches,
             self.compilation_config.static_forward_context,
             self.kv_cache_config,
             self.device,
             self.kernel_block_sizes,
             self.vllm_config,
+            extensible=extensible,
         )
+        self._kv_caches_dict = kv_caches_dict
+        # With the extensible flow, KV transfer init is deferred until the
+        # final KV cache size is committed, so this yields a no-op connector
+        # that init_deferred_kv_connector later replaces.
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+
+    def init_deferred_kv_connector(self) -> None:
+        """Create and register the KV connector after `extend_kv_cache`."""
+        assert self.extensible_kv_buffers is not None
+        self.kv_connector = get_deferred_kv_connector(
+            self.vllm_config,
+            self._kv_caches_dict,
+            self.attn_groups,
+            self.kernel_block_sizes,
+            self.kv_cache_config.num_blocks,
+        )
+
+    def ensure_kv_cache_blocks(self, num_blocks: int) -> None:
+        """Commit at least `num_blocks` KV blocks (no-op without extensible
+        KV). Called from warmup before writing to real block IDs."""
+        if self.extensible_kv_buffers is not None:
+            self.extensible_kv_buffers.ensure_blocks(num_blocks)
+
+    def extend_kv_cache(self, num_blocks: int, defragment: bool = False) -> None:
+        """Grow the KV cache to `num_blocks` blocks after warmup."""
+        if self.extensible_kv_buffers is None:
+            raise RuntimeError("extend_kv_cache requires an extensible KV cache.")
+        self.extensible_kv_buffers.extend(num_blocks, defragment=defragment)
+        self.kv_cache_config.num_blocks = num_blocks
+
+    @property
+    def kv_cache_committed_bytes(self) -> int:
+        """Physically committed KV cache bytes (0 without extensible KV)."""
+        buffers = self.extensible_kv_buffers
+        return buffers.physical_bytes if buffers is not None else 0
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -774,55 +813,70 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs, num_reqs, self.input_buffers
         )
 
-        # NOTE(woosuk): During the initial memory profiling, the sampler may skip
-        # top_k, top_p, and logprobs, using less GPU memory than what is possible
-        # during actual execution.
+        # Give every dummy request worst-case sampling parameters so the run
+        # exercises the expensive paths (top-k/top-p, penalties, logprobs) and
+        # memory profiling sees their transient allocations; a default-greedy
+        # dummy batch would skip them and undersize the estimate.
         assert self.sampler is not None
-        self.sampler(logits, dummy_input_batch)
+        warmup_params = SamplingParams.for_sampler_warmup()
+        for req_idx in range(num_reqs):
+            self.sampler.add_request(req_idx, 1, warmup_params)
+        self.sampler.apply_staged_writes()
+        try:
+            self.sampler(logits, dummy_input_batch)
+        finally:
+            default_params = SamplingParams()
+            for req_idx in range(num_reqs):
+                self.sampler.add_request(req_idx, 1, default_params)
+            self.sampler.apply_staged_writes()
 
     @torch.inference_mode()
     def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
         assert self.pooling_runner is not None
         self.pooling_runner.dummy_pooler_run(hidden_states)
 
-    @torch.inference_mode()
+    def halve_encoder_budget(self) -> bool:
+        """Halve the per-step encoder token budget; False when not reducible."""
+        if not (self.supports_mm_inputs and self.is_first_pp_rank):
+            return False
+        return self.model_state.halve_encoder_budget()
+
+    def warmup_multimodal_encoder(self) -> None:
+        """Re-run the worst-case encoder pass so its memory stays resident
+        for post-warmup measurement (and to JIT-warm the vision tower). If it
+        does not fit alongside the memory warmup already retains, the per-step
+        encoder token budget is halved until it does; the engine hands the
+        reduced budget to the scheduler."""
+        if not (self.supports_mm_inputs and self.is_first_pp_rank):
+            return
+        if self.extensible_kv_buffers is None and not self.is_encoder_only:
+            # Without measured sizing there is nothing to keep resident.
+            return
+        try:
+            self.model_state.profile_encoder_cache(fit_budget=True)
+        finally:
+            self.reset_encoder_cache()
+
     def profile_run(self) -> None:
         if self.supports_mm_inputs and self.is_first_pp_rank:
-            mm_config = self.model_config.multimodal_config
-            if mm_config is not None and not mm_config.skip_mm_profiling:
-                mm_budget = MultiModalBudget(
-                    self.vllm_config,
-                    self.mm_registry,
-                    enable_cache=False,
-                )
-                dummy_mm_inputs = get_dummy_encoder_profile_inputs(
-                    self.mm_registry,
-                    mm_budget,
-                )
-                self.model_state.encoder_runner.profile_encoder_cache(
-                    dummy_mm_inputs, mm_budget
-                )
+            self.model_state.profile_encoder_cache()
 
-        if self.is_encoder_only:
-            torch.accelerator.synchronize()
-            self.reset_encoder_cache()
-            gc.collect()
-            return
+        if not self.is_encoder_only:
+            hidden_states, sample_hidden_states = self._dummy_run(
+                self.max_num_tokens, skip_attn=True, is_profile=True
+            )
 
-        hidden_states, sample_hidden_states = self._dummy_run(
-            self.max_num_tokens, skip_attn=True, is_profile=True
-        )
+            # Only run sampler/pooler on last PP rank (non-last ranks return None).
+            if self.is_last_pp_rank:
+                assert sample_hidden_states is not None
+                if self.pooling_runner is None:
+                    self._dummy_sampler_run(sample_hidden_states)
+                else:
+                    self._dummy_pooler_run(hidden_states)
 
-        # Only run sampler/pooler on last PP rank (non-last ranks return None).
-        if self.is_last_pp_rank:
-            assert sample_hidden_states is not None
-            if self.pooling_runner is None:
-                self._dummy_sampler_run(sample_hidden_states)
-            else:
-                self._dummy_pooler_run(hidden_states)
+            del hidden_states, sample_hidden_states
 
         torch.accelerator.synchronize()
-        del hidden_states, sample_hidden_states
         self.reset_encoder_cache()
         gc.collect()
 
@@ -1927,6 +1981,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             del self.kv_cache_config
         if hasattr(self, "model_state") and self.model_state.supports_mm_inputs:
             self.model_state.encoder_runner.clear()
+        if self.extensible_kv_buffers is not None:
+            self.extensible_kv_buffers.free()
+            self.extensible_kv_buffers = None
         free_before_shutdown(self.vllm_config)
         if hasattr(self, "model_state"):
             del self.model_state

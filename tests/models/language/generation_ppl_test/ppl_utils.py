@@ -34,7 +34,6 @@ def wikitext_ppl_test(
 
     with vllm_runner(
         model_info.name,
-        gpu_memory_utilization=0.7,
         max_model_len=max_length,
         max_num_seqs=1,
         **vllm_extra_kwargs,

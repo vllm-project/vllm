@@ -44,15 +44,18 @@ from vllm.utils.gc_utils import (
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
-from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+from vllm.v1.attention.backends.utils import (
+    narrow_layouts_to_block_outermost,
+    resolve_kv_cache_layout,
+)
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
-    generate_scheduler_kv_cache_config,
-    get_kv_cache_configs,
+    configure_kv_cache,
     get_request_block_hasher,
     init_none_hash,
+    post_warmup_available_memory,
     resolve_kv_cache_block_sizes,
-    update_kv_cache_capacity,
+    use_extensible_kv_cache,
 )
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -286,10 +289,46 @@ class EngineCore:
         if has_kv_cache:
             # Resolve the KV cache layout before memory profiling: workers that
             # capture full cudagraphs initialize a minimal KV cache during it.
+            supported_layouts: list[list[str]] = (
+                self.model_executor.get_supported_kv_cache_layouts()
+            )
+            all_specs = [s for specs in kv_cache_specs for s in specs.values()]
+            kv_transfer_config = vllm_config.kv_transfer_config
+            needs_single_segment = kv_transfer_config is not None and (
+                kv_transfer_config.kv_connector == "MooncakeConnector"
+                or (
+                    kv_transfer_config.kv_connector == "MultiConnector"
+                    and any(
+                        c.get("kv_connector") == "MooncakeConnector"
+                        for c in kv_transfer_config.kv_connector_extra_config.get(
+                            "connectors", []
+                        )
+                    )
+                )
+            )
+            if vllm_config.cache_config.enable_extensible_kv_cache and (
+                len({spec.page_size_bytes for spec in all_specs}) > 1
+                or needs_single_segment
+            ):
+                # The extensible KV cache commits equal-size per-segment block
+                # prefixes, which layer-compact regions of different page
+                # sizes cannot provide; prefer block-outermost layouts.
+                # Mooncake also requires them regardless of page sizes: it
+                # registers the KV cache as one contiguous span, which under a
+                # layer-compact layout would cross per-segment mapping
+                # boundaries and each segment's uncommitted tail.
+                if narrowed := narrow_layouts_to_block_outermost(supported_layouts):
+                    supported_layouts = narrowed
+                else:
+                    logger.info_once(
+                        "Not using the extensible KV cache: no block-outermost "
+                        "KV cache layout is supported for this model. KV cache "
+                        "sizing will use profiling estimates instead of "
+                        "measured usage."
+                    )
+                    vllm_config.cache_config.disable_extensible_kv_cache()
             layout = resolve_kv_cache_layout(
-                vllm_config.cache_config,
-                self.model_executor.get_supported_kv_cache_layouts(),
-                [s for specs in kv_cache_specs for s in specs.values()],
+                vllm_config.cache_config, supported_layouts, all_specs
             )
             self.model_executor.set_kv_cache_layout(layout.name)
 
@@ -311,36 +350,60 @@ class EngineCore:
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
 
-        # Track max_model_len before KV cache config to detect auto-fit changes
-        max_model_len_before = vllm_config.model_config.max_model_len
-
-        kv_cache_configs = get_kv_cache_configs(
-            vllm_config, kv_cache_specs, available_gpu_memory
+        extensible = has_kv_cache and use_extensible_kv_cache(
+            vllm_config, self.collective_rpc
         )
-        for kv_cache_config in kv_cache_configs:
-            kv_cache_config.kv_cache_layout = vllm_config.cache_config.kv_cache_layout
+        kv_cache_configs, scheduler_kv_cache_config = configure_kv_cache(
+            vllm_config, kv_cache_specs, available_gpu_memory, self.collective_rpc
+        )
 
-        # If auto-fit reduced max_model_len, sync the new value to workers.
-        # This is needed because workers were spawned before memory profiling
-        # and have the original (larger) max_model_len cached.
-        max_model_len_after = vllm_config.model_config.max_model_len
-        if max_model_len_after != max_model_len_before:
-            self.collective_rpc("update_max_model_len", args=(max_model_len_after,))
-
-        scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
-        vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
-        kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
-        if kv_cache_groups:
-            vllm_config.cache_config.block_size = min(
-                g.kv_cache_spec.block_size for g in kv_cache_groups
-            )
-            update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
-
-        vllm_config.validate_block_size()
-
-        self.model_executor.initialize_from_config(kv_cache_configs)
+        # Initialize KV cache and warm up execution. With extensible KV cache,
+        # this reserves the upper-bound address range, commits only the block
+        # prefix warmup needs, and runs warmup / CUDA graph capture before the
+        # post-warmup KV size is committed.
+        self.model_executor.initialize_from_config(
+            kv_cache_configs, extensible=extensible
+        )
+        compilation_times = []
         if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-            self.model_executor.compile_or_warm_up_model()
+            compilation_times = self.model_executor.compile_or_warm_up_model()
+
+        # A worker may have reduced its per-step encoder token budget so the
+        # worst-case encoder batch fits in memory; the scheduler (constructed
+        # after this) must not batch more encoder tokens than every worker
+        # proved to fit.
+        fitted_budgets = [
+            times.encoder_budget_tokens
+            for times in compilation_times
+            if times.encoder_budget_tokens is not None
+        ]
+        if fitted_budgets:
+            scheduler_config = vllm_config.scheduler_config
+            budget = min(fitted_budgets)
+            logger.warning(
+                "Limiting the per-step encoder budget to %d tokens "
+                "(from %d) to fit the worst-case encoder batch in memory.",
+                budget,
+                scheduler_config.max_num_encoder_input_tokens,
+            )
+            scheduler_config.max_num_encoder_input_tokens = budget
+            scheduler_config.encoder_cache_size = min(
+                scheduler_config.encoder_cache_size, budget
+            )
+        if extensible:
+            # Re-size from the memory warmup and CUDA graph capture actually
+            # consumed, then commit. One CompilationTimes per worker.
+            final_memory = post_warmup_available_memory(
+                vllm_config,
+                available_gpu_memory,
+                [times.warmup_memory for times in compilation_times],
+                [times.transient_peak_headroom for times in compilation_times],
+            )
+            if final_memory is not None:
+                kv_cache_configs, scheduler_kv_cache_config = configure_kv_cache(
+                    vllm_config, kv_cache_specs, final_memory, self.collective_rpc
+                )
+            self.model_executor.extend_kv_cache(kv_cache_configs)
 
         elapsed = time.time() - start
         compile_time = vllm_config.compilation_config.compilation_time

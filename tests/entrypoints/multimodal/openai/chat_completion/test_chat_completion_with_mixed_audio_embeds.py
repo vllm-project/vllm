@@ -38,8 +38,6 @@ def qwen2audio_server_args() -> list[str]:
         "4",
         "--enforce-eager",
         "--trust-remote-code",
-        "--gpu-memory-utilization",
-        "0.85",
         "--limit-mm-per-prompt",
         json.dumps({"audio": 1}),
         "--enable-prompt-embeds",

@@ -91,7 +91,6 @@ def test_sharded_state_loader(
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
     weights_patterns = ("*.safetensors",)
-    gpu_memory_utilization = 0.8
     input_dir = llama_3p2_1b_files
     ctx = mp.get_context("spawn")
 
@@ -107,7 +106,6 @@ def test_sharded_state_loader(
             args=(input_dir, output_dir, weights_patterns),
             kwargs=dict(
                 tensor_parallel_size=tp_size,
-                gpu_memory_utilization=gpu_memory_utilization,
                 enforce_eager=True,
                 **platform_args,
             ),
@@ -122,7 +120,6 @@ def test_sharded_state_loader(
             args=(input_dir, queue),
             kwargs=dict(
                 enable_lora=enable_lora,
-                gpu_memory_utilization=gpu_memory_utilization,
                 tensor_parallel_size=tp_size,
                 **platform_args,
             ),
@@ -145,7 +142,6 @@ def test_sharded_state_loader(
             args=(output_dir, queue),
             kwargs=dict(
                 enable_lora=enable_lora,
-                gpu_memory_utilization=gpu_memory_utilization,
                 tensor_parallel_size=tp_size,
                 load_format="sharded_state",
                 **platform_args,

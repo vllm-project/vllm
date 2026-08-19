@@ -26,8 +26,6 @@ def server():
         "--max-model-len",
         "2048",
         "--enforce-eager",
-        "--gpu-memory-utilization",
-        "0.4",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server

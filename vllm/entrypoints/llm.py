@@ -111,7 +111,9 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             reserve for the model weights, activations, and KV cache. Higher
             values will increase the KV cache size and thus improve the model's
             throughput. However, if the value is too high, it may cause out-of-
-            memory (OOM) errors.
+            memory (OOM) errors. Defaults to
+            `CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION`; passing it explicitly
+            is required to share a GPU with another process.
         kv_cache_memory_bytes: Size of KV Cache per GPU in bytes. By default,
             this is set to None and vllm can automatically infer the kv cache
             size based on gpu_memory_utilization. However, users may want to
@@ -120,6 +122,11 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             compared with using gpu_memory_utilization. Note that
             kv_cache_memory_bytes (when not-None) ignores
             gpu_memory_utilization
+        enable_extensible_kv_cache: Use CUDA virtual memory to reserve the KV
+            cache address range before CUDA graph capture and commit the final
+            cache size after capture. Supported by V1 CUDA workers for all
+            attention backends (block-major and K/V-split KV cache layouts)
+            and for Mamba / linear-attention models.
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data
@@ -195,7 +202,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         tokenizer_revision: str | None = None,
         chat_template: Path | str | None = None,
         seed: int = 0,
-        gpu_memory_utilization: float = 0.92,
+        gpu_memory_utilization: float | None = None,
         cpu_offload_gb: float = 0,
         offload_group_size: int = 0,
         offload_num_in_group: int = 1,
@@ -215,6 +222,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         profiler_config: dict[str, Any] | ProfilerConfig | None = None,
         attention_config: dict[str, Any] | AttentionConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
+        enable_extensible_kv_cache: bool | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
         quantization_config: dict[str, Any] | QuantizationConfigArgs | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
@@ -313,6 +321,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
             kv_cache_memory_bytes=kv_cache_memory_bytes,
+            enable_extensible_kv_cache=enable_extensible_kv_cache,
             cpu_offload_gb=cpu_offload_gb,
             offload_group_size=offload_group_size,
             offload_num_in_group=offload_num_in_group,
