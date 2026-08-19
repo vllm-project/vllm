@@ -27,10 +27,15 @@ def reset_aiter_mla_support_cache(monkeypatch: pytest.MonkeyPatch) -> None:
     import vllm._aiter_ops as aiter_ops
 
     monkeypatch.setattr(aiter_ops, "_AITER_MLA_SUPPORTS_FP8", None)
+    # if_aiter_supported wraps the functools.cache, so reach through to it.
+    aiter_ops.rocm_aiter_ops.mla_decode_supports_non_causal.__wrapped__.cache_clear()
 
 
 def _install_fake_aiter_modules(
-    monkeypatch: pytest.MonkeyPatch, *, supports_fp8: bool
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    supports_fp8: bool,
+    supports_causal: bool = False,
 ) -> None:
     aiter_mod: Any = types.ModuleType("aiter")
     mla_mod: Any = types.ModuleType("aiter.mla")
@@ -64,6 +69,14 @@ def _install_fake_aiter_modules(
             return None
 
         mla_decode_fwd = mla_decode_fwd_without_fp8
+
+    if supports_causal:
+        inner = mla_decode_fwd
+
+        def mla_decode_fwd_with_causal(*args, causal=True, **kwargs):
+            return inner(*args, **kwargs)
+
+        mla_decode_fwd = mla_decode_fwd_with_causal
 
     mla_mod.mla_decode_fwd = mla_decode_fwd
     aiter_mod.mla = mla_mod
@@ -135,3 +148,62 @@ def test_aiter_mla_fp8_support_result_is_cached(monkeypatch):
         assert _check_aiter_mla_fp8_support() is True
         assert _check_aiter_mla_fp8_support() is True
         assert signature_mock.call_count == 1
+
+
+@pytest.mark.parametrize("supports_causal", [True, False])
+def test_non_causal_probe_follows_the_installed_signature(monkeypatch, supports_causal):
+    """Builds without a ``causal`` argument are causal-only; asking one for a
+    non-causal block would return a causally masked result and say nothing."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    _install_fake_aiter_modules(
+        monkeypatch, supports_fp8=True, supports_causal=supports_causal
+    )
+    assert bool(rocm_aiter_ops.mla_decode_supports_non_causal()) is supports_causal
+
+
+def _install_callable_fake(monkeypatch) -> list:
+    """The shared fake above exists to be inspected, not called. The impl tests
+    need one that runs, so they bring their own."""
+    seen: list = []
+
+    def mla_decode_fwd(*args, causal=None, **kwargs):
+        seen.append(
+            {"causal": causal, **kwargs} if causal is not None else dict(kwargs)
+        )
+
+    mla_mod: Any = types.ModuleType("aiter.mla")
+    mla_mod.mla_decode_fwd = mla_decode_fwd
+    aiter_mod: Any = types.ModuleType("aiter")
+    aiter_mod.mla = mla_mod
+    monkeypatch.setitem(sys.modules, "aiter", aiter_mod)
+    monkeypatch.setitem(sys.modules, "aiter.mla", mla_mod)
+    return seen
+
+
+def _call_impl(causal: bool) -> None:
+    import torch
+
+    import vllm._aiter_ops as aiter_ops
+
+    aiter_ops._rocm_aiter_mla_decode_fwd_impl(
+        torch.zeros(2, 1, 8),
+        torch.zeros(2, 1, 1, 8),
+        torch.zeros(2, 1, 8),
+        torch.zeros(3, dtype=torch.int32),
+        1,
+        causal=causal,
+    )
+
+
+def test_a_causal_block_never_passes_the_argument(monkeypatch):
+    """Causal is the default, so builds without the argument keep working."""
+    seen = _install_callable_fake(monkeypatch)
+    _call_impl(causal=True)
+    assert "causal" not in seen[0]
+
+
+def test_a_non_causal_block_reaches_a_capable_build(monkeypatch):
+    seen = _install_callable_fake(monkeypatch)
+    _call_impl(causal=False)
+    assert seen[0]["causal"] is False

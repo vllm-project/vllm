@@ -191,6 +191,12 @@ class AiterMLABackend(MLACommonBackend):
     def get_name() -> str:
         return "ROCM_AITER_MLA"
 
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        # A non-causal block is served by handing the mask to the asm decode,
+        # so the only thing to check is whether the installed aiter takes one.
+        return bool(rocm_aiter_ops.mla_decode_supports_non_causal())
+
     @staticmethod
     def get_impl_cls() -> type["AiterMLAImpl"]:
         return AiterMLAImpl
@@ -257,6 +263,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     #  https://github.com/vllm-project/vllm/issues/22945
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
+    # Served by passing the mask to the kernel; _build_decode turns away the
+    # shapes AITER has no non-causal kernel for.
+    supports_non_causal_multi_token_decode: ClassVar[bool] = True
 
     @staticmethod
     def _uniform_padded_mtp_qo_len(
@@ -628,6 +637,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         query_start_loc_device: torch.Tensor,
         num_decode_tokens: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
+        causal: bool = True,
     ) -> AiterMLADecodeMetadata:
         device = self.device
         num_reqs = seq_lens_device.size(0)
@@ -744,19 +754,38 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 self.num_heads, max_qo_len, self._kv_cache_dtype_str
             )
             and not AiterMLAHelper.use_gluon_verify(
-                self.num_heads, max_qo_len, self._kv_cache_dtype_str
+                self.num_heads, max_qo_len, self._kv_cache_dtype_str, causal
             )
             # A padded rank has no bf16 persistent kernel past qlen 4 where the
             # gfx950 fold is absent; the non-persistent entry covers it. fp8
             # keeps the schedule -- its fold rejects non-persistent outright.
+            # A non-causal block keeps it too: what the fold drops past qlen 4
+            # is the block's causal staircase, which a non-causal block does
+            # not have, and the schedule is the only thing carrying its mask.
             and (
-                self.num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
+                not causal
+                or self.num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS
                 or max_qo_len <= AiterMLAHelper._ASM_PADDED_MAX_PS_QLEN
                 or is_quantized_kv_cache(self._kv_cache_dtype_str)
             )
             and max_qo_len >= 1
             and max_qo_len <= self._mtp_decode_qlen
         )
+        if (
+            not causal
+            and max_qo_len == 2
+            and is_quantized_kv_cache(self._kv_cache_dtype_str)
+        ):
+            # AITER's fp8 dispatch folds (gqa 16, qlen 3 or 4) onto the
+            # qseqlen-4 kernel but never lists 2, so the lookup would land on a
+            # causal-only entry -- and a missing kernel aborts the process
+            # rather than raising. The bf16 fold has no such hole. Drop this
+            # once the pinned AITER folds that length.
+            raise ValueError(
+                "AITER has no non-causal fp8 MLA kernel for a 2-token query "
+                "block. Pin the draft to TRITON_MLA for this speculative config."
+            )
+
         if use_persistent_metadata:
             from aiter import get_mla_metadata_v1
 
@@ -769,7 +798,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
                 paged_kv_last_page_len,
                 self._num_attention_heads,
                 1,
-                True,
+                causal,
                 self._mla_work_meta_data,
                 self._mla_work_info_set,
                 self._mla_work_indptr,
@@ -976,7 +1005,9 @@ class AiterMLAHelper:
         return m % num_heads == 0 and gluon_supported
 
     @staticmethod
-    def use_gluon_verify(num_heads: int, max_qo_len: int, kv_cache_dtype: str) -> bool:
+    def use_gluon_verify(
+        num_heads: int, max_qo_len: int, kv_cache_dtype: str, causal: bool = True
+    ) -> bool:
         """Whether a small-head multi-token verify is flattened onto Gluon.
 
         bf16 has no gqa<16, qseqlen>1 asm kernel, so the verify is flattened
@@ -985,6 +1016,11 @@ class AiterMLAHelper:
         asserts against. A predicate rather than inline in forward_mqa so the
         builder sees the same answer the impl acts on.
         """
+        if not causal:
+            # Gluon masks the block causally with no way to turn it off, so a
+            # non-causal block takes the padded asm decode whatever the head
+            # count -- padding is what gives it a kernel there.
+            return False
         if num_heads >= AiterMLAHelper._AITER_MIN_MLA_HEADS or max_qo_len <= 1:
             return False
         if is_quantized_kv_cache(kv_cache_dtype):
@@ -1280,7 +1316,10 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         # builder -- which has to know whether the asm decode will run -- sees
         # the same answer as this branch.
         if AiterMLAHelper.use_gluon_verify(
-            self.num_heads, int(decode.max_qo_len), self.kv_cache_dtype
+            self.num_heads,
+            int(decode.max_qo_len),
+            self.kv_cache_dtype,
+            attn_metadata.causal,
         ):
             qlen = int(decode.max_qo_len)
             if type(q) is tuple:
@@ -1400,6 +1439,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             decode.paged_kv_indptr,
             decode.paged_kv_indices,
             decode.paged_kv_last_page_len,
+            causal=attn_metadata.causal,
             **mla_kwargs,
         )
 

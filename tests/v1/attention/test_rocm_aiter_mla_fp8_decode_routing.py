@@ -152,3 +152,22 @@ def test_pad_unpad_round_trip_preserves_head_order(num_heads):
 
     assert unpadded.shape == q.shape
     torch.testing.assert_close(unpadded, q)
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8", "auto"])
+@pytest.mark.parametrize("num_heads", [8, 12, 16, 32])
+def test_a_non_causal_block_never_routes_to_gluon(
+    gluon_available, num_heads, kv_cache_dtype
+):
+    """Gluon masks the block causally with no way to turn it off, so a
+    non-causal block has to reach the padded asm decode -- at any head count
+    and either cache dtype. The fixture pins the arch gate, so a gfx942 host
+    cannot pass this for the wrong reason."""
+    assert not AiterMLAHelper.use_gluon_verify(
+        num_heads, 8, kv_cache_dtype, causal=False
+    )
+
+
+def test_a_causal_small_head_bf16_block_still_uses_gluon(gluon_available):
+    """The routing this backend already had must not move."""
+    assert AiterMLAHelper.use_gluon_verify(12, 8, "auto", causal=True)
