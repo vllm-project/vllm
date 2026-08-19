@@ -320,6 +320,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GraniteMoeSharedForCausalLM": _HfExamplesInfo(
         "ibm-research/moe-7b-1b-active-shared-experts"
     ),
+    "GraniteMoeSWAForCausalLM": _HfExamplesInfo(
+        "ibm-granite/granite-swash-3b-a600m", min_transformers_version="5.15.1"
+    ),
+    "GraniteSWAForCausalLM": _HfExamplesInfo(
+        "ibm-granite/granite-swash-2b", min_transformers_version="5.15.1"
+    ),
     "HrmTextForCausalLM": _HfExamplesInfo(
         "sapientinc/HRM-Text-1B",
         min_transformers_version="5.9.0",

@@ -199,11 +199,13 @@ get_buildkite_target_repo_url() {
 
 git_fetch_with_timeout() {
     local timeout_secs="${ROCM_CACHE_GIT_FETCH_TIMEOUT:-60}"
+    local -a fetch_command=(git fetch --no-auto-maintenance)
 
+    # Detached maintenance can race a later shallow fetch on .git/shallow.
     if command -v timeout >/dev/null 2>&1; then
-        timeout "${timeout_secs}s" git fetch "$@"
+        timeout "${timeout_secs}s" "${fetch_command[@]}" "$@"
     else
-        git fetch "$@"
+        "${fetch_command[@]}" "$@"
     fi
 }
 

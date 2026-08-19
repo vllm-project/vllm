@@ -344,13 +344,36 @@ def test_resolve_cudagraph_mode_adjusts_spec_decode_sizes_only_for_v1(
         ),
         (
             SimpleNamespace(
-                model="Qwen/Qwen3-Embedding-0.6B",
-                architectures=["Qwen3ForCausalLM"],
+                model="sentence-transformers/all-MiniLM-L6-v2",
+                architectures=["BertModel"],
                 runner_type="pooling",
+                is_multimodal_model=False,
                 is_moe=False,
                 is_quantized=False,
             ),
-            False,
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen3-Embedding-0.6B",
+                architectures=["Qwen3ForCausalLM"],
+                runner_type="pooling",
+                is_multimodal_model=False,
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="TomoroAI/tomoro-colqwen3-embed-4b",
+                architectures=["ColQwen3"],
+                runner_type="pooling",
+                is_multimodal_model=True,
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
         ),
     ],
 )
