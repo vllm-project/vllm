@@ -451,6 +451,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 if raw_request is None
                 else await self._get_trace_headers(raw_request.headers)
             )
+            session_id = self._get_session_id(request, raw_request)
 
             chat_template_kwargs = self._effective_chat_template_kwargs(request)
             response_parser = self._make_response_parser(
@@ -486,6 +487,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                         response_parser=response_parser,
                     )
 
+            reasoning_parser_kwargs = None
             if (
                 context.response_parser is not None
                 and context.response_parser.reasoning_parser is not None
@@ -514,11 +516,10 @@ class OpenAIServingResponses(GenerateBaseServing):
                 sampling_params=sampling_params,
                 context=context,
                 lora_request=lora_request,
-                priority=request.priority,
+                priority=self._get_priority(request, raw_request),
                 trace_headers=trace_headers,
-                reasoning_parser_kwargs=reasoning_parser_kwargs
-                if self.parser and self.parser.reasoning_parser_cls is not None
-                else None,
+                session_id=session_id,
+                reasoning_parser_kwargs=reasoning_parser_kwargs,
             )
             generators.append(generator)
 
@@ -610,7 +611,13 @@ class OpenAIServingResponses(GenerateBaseServing):
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
     ):
-        tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
+        tool_dicts = construct_tool_dicts(
+            request.tools,
+            request.tool_choice,
+            exclude_tools_when_tool_choice_none=(
+                self.online_renderer.exclude_tools_when_tool_choice_none
+            ),
+        )
         # Construct the input messages.
         messages = construct_input_messages(
             request_instructions=request.instructions,
@@ -663,6 +670,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         lora_request: LoRARequest | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
+        session_id: str | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ):
         max_model_len = self.model_config.max_model_len
@@ -687,6 +695,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
+                session_id=session_id,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
             )
 
@@ -743,11 +752,14 @@ class OpenAIServingResponses(GenerateBaseServing):
         request: ResponsesRequest,
         prev_response: ResponsesResponse | None,
     ):
-        if request.tool_choice not in ("auto", "none"):
-            raise NotImplementedError(
-                "Only 'auto' or 'none' tool_choice is supported "
-                "in response API with Harmony"
-            )
+        if self.parser is not None:
+            # HarmonyParser doesn't need chat_template_kwargs
+            # TODO: Unify adjust_request() call with non-harmony branch
+            self.parser(
+                self.renderer.get_tokenizer(),
+                request.tools,
+                model_config=self.model_config,
+            ).adjust_request(request=request)
 
         arrival_time = time.time()
         messages = self._construct_input_messages_with_harmony(request, prev_response)
@@ -860,6 +872,8 @@ class OpenAIServingResponses(GenerateBaseServing):
             if final_output.finish_reason == "length":
                 status = "incomplete"
 
+            # TODO: Build final response items from the accumulated streaming
+            # parser results instead of reparsing the complete output.
             output = self._make_response_output_items(
                 request,
                 final_output,
@@ -888,13 +902,10 @@ class OpenAIServingResponses(GenerateBaseServing):
             num_reasoning_tokens == 0
             and isinstance(context, (SimpleContext, ParsableContext))
             and context.response_parser is not None
-            and context.response_parser.reasoning_parser is not None
         ):
             accumulated = getattr(context, "_accumulated_token_ids", []) or []
-            num_reasoning_tokens = (
-                context.response_parser.reasoning_parser.count_reasoning_tokens(
-                    accumulated
-                )
+            num_reasoning_tokens = context.response_parser.count_reasoning_tokens(
+                accumulated
             )
 
         usage = ResponseUsage(

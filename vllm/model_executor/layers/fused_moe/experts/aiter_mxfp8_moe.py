@@ -6,16 +6,22 @@
 ``convert_to_fp8_moe_kernel_format``.
 """
 
+import math
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
     Mxfp8TritonExpertsBase,
 )
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
+
+_AITER_SWIGLU_ALPHA = 1.702
+_AITER_SWIGLU_BETA = 1.0
 
 
 def is_aiter_mxfp8_moe_available() -> bool:
@@ -56,6 +62,8 @@ def is_aiter_mxfp8_moe_available() -> bool:
 class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
     """MXFP8 MoE through AITER's FlyDSL two-stage grouped GEMM (gfx950)."""
 
+    consumes_expert_mask = True
+
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
         return self.quant_config.quant_dtype
@@ -93,6 +101,27 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
             return False, (
                 "kernel requires the aiter flydsl package, which is not installed"
             )
+        if (
+            is_supported
+            and moe_config.activation != MoEActivation.SWIGLUOAI_UNINTERLEAVE
+        ):
+            return False, (
+                "kernel hardcodes SwiGLU-OAI activation and requires "
+                f"activation={MoEActivation.SWIGLUOAI_UNINTERLEAVE.value}; "
+                f"got activation={moe_config.activation.value}"
+            )
+        if is_supported and (
+            moe_config.swiglu_alpha is None
+            or not math.isclose(float(moe_config.swiglu_alpha), _AITER_SWIGLU_ALPHA)
+            or moe_config.swiglu_beta is None
+            or not math.isclose(float(moe_config.swiglu_beta), _AITER_SWIGLU_BETA)
+        ):
+            return False, (
+                "kernel hardcodes SwiGLU-OAI with "
+                f"alpha={_AITER_SWIGLU_ALPHA} and beta={_AITER_SWIGLU_BETA}; "
+                f"got swiglu_alpha={moe_config.swiglu_alpha} and "
+                f"swiglu_beta={moe_config.swiglu_beta}"
+            )
         return is_supported, reason
 
     def apply(
@@ -118,29 +147,12 @@ class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
 
         from vllm._aiter_ops import rocm_aiter_ops
 
-        # Re-tag the preshuffled weights: replace_parameter drops the
-        # is_shuffled flag, without which aiter picks a broken CK kernel.
-        w1.is_shuffled = True
-        w2.is_shuffled = True
-
         limit = self.quant_config.gemm1_clamp_limit
         swiglu_limit = 0.0 if limit is None else float(limit)
 
-        # Under EP, aiter expects ``expert_mask``: a 0/1 *local-expert* mask over
-        # global ids with a trailing fake-expert sentinel slot (shape
-        # ``[global_num_experts + 1]``), from which it derives the global->local
-        # compaction. What ``RoutedExperts.expert_map`` hands us depends on the
-        # aiter master switch (``rocm_aiter_fmoe_enabled``).
-        # Branching on the (static) master flag — not the tensor contents —
-        # keeps this HIP-graph/torch.compile safe (no data-dependent sync).
-        # ``None`` under pure TP.
-        if expert_map is None:
-            expert_mask = None
-        elif self.moe_config.rocm_aiter_fmoe_enabled:
-            expert_mask = expert_map
-        else:
-            local_mask = (expert_map >= 0).to(torch.int32)
-            expert_mask = torch.cat([local_mask, local_mask.new_zeros(1)])
+        # RoutedExperts.expert_map hands AITER experts the precomputed 0/1
+        # expert_mask (with trailing sentinel) instead of the vLLM expert_map.
+        expert_mask = expert_map
 
         # Route through the graph-safe ``rocm_aiter_fused_moe`` custom op so the
         # call is captured under HIP graphs / torch.compile (a direct
