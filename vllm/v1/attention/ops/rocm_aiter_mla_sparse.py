@@ -3,6 +3,7 @@
 import functools
 import importlib
 import math
+from collections.abc import Callable
 from importlib.util import find_spec
 
 import torch
@@ -10,6 +11,7 @@ import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.config import CUDAGraphMode
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -23,6 +25,115 @@ if current_platform.is_rocm():
 else:
     _ON_GFX942 = False
     _ON_GFX950 = False
+
+
+@functools.cache
+def _get_aiter_topk_ops() -> tuple[Callable[..., None], Callable[..., None]] | None:
+    try:
+        from aiter.ops.topk import (
+            top_k_per_row_decode,
+            top_k_per_row_prefill,
+        )
+    except ImportError:
+        return None
+    return top_k_per_row_prefill, top_k_per_row_decode
+
+
+@triton.jit
+def _localize_aiter_prefill_topk_kernel(
+    indices_ptr,
+    row_starts_ptr,
+    indices_stride,
+    num_topk,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row_idx = tl.program_id(0)
+    offsets = tl.program_id(1) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < num_topk
+    indices = tl.load(indices_ptr + row_idx * indices_stride + offsets, mask=mask)
+    row_start = tl.load(row_starts_ptr + row_idx)
+    localized = tl.where(indices < 0, indices, indices - row_start)
+    tl.store(
+        indices_ptr + row_idx * indices_stride + offsets,
+        localized,
+        mask=mask,
+    )
+
+
+def _localize_aiter_prefill_topk(
+    indices: torch.Tensor,
+    row_starts: torch.Tensor,
+) -> None:
+    num_rows, num_topk = indices.shape
+    block_size = 256
+    _localize_aiter_prefill_topk_kernel[(num_rows, triton.cdiv(num_topk, block_size))](
+        indices,
+        row_starts,
+        indices.stride(0),
+        num_topk,
+        BLOCK_SIZE=block_size,
+    )
+
+
+def _aiter_top_k_per_row_prefill(
+    logits: torch.Tensor,
+    row_starts: torch.Tensor,
+    row_ends: torch.Tensor,
+    indices: torch.Tensor,
+    topk_tokens: int,
+) -> bool:
+    topk_ops = _get_aiter_topk_ops()
+    if topk_ops is None:
+        return False
+    top_k_per_row_prefill, _ = topk_ops
+    top_k_per_row_prefill(
+        logits,
+        row_starts,
+        row_ends,
+        indices,
+        None,
+        logits.shape[0],
+        logits.stride(0),
+        logits.stride(1),
+        k=topk_tokens,
+    )
+    _localize_aiter_prefill_topk(indices, row_starts)
+    return True
+
+
+def _aiter_top_k_per_row_decode(
+    logits: torch.Tensor,
+    seq_lens: torch.Tensor,
+    indices: torch.Tensor,
+    topk_tokens: int,
+) -> bool:
+    topk_ops = _get_aiter_topk_ops()
+    if topk_ops is None:
+        return False
+    _, top_k_per_row_decode = topk_ops
+    top_k_per_row_decode(
+        logits,
+        1,
+        seq_lens.reshape(-1),
+        indices,
+        logits.shape[0],
+        logits.stride(0),
+        logits.stride(1),
+        k=topk_tokens,
+    )
+    return True
+
+
+def _use_aiter_c4a_decode_topk_auto(
+    num_rows: int,
+    max_valid_seq_len: int,
+    on_gfx950: bool = _ON_GFX950,
+) -> bool:
+    # AITER v0.1.19 decode is one-block only. The native split kernel remains
+    # faster for long, low-row shapes on gfx950.
+    if not on_gfx950:
+        return False
+    return num_rows >= 192 or max_valid_seq_len <= max(65_536, 1_280 * num_rows)
 
 
 @triton.jit
@@ -692,6 +803,7 @@ def rocm_aiter_sparse_attn_indexer_fake(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool = False,
+    compress_ratio: int = 1,
 ) -> torch.Tensor:
     return topk_indices_buffer
 
@@ -712,9 +824,11 @@ def rocm_aiter_sparse_attn_indexer(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
     skip_k_cache_insert: bool = False,
+    compress_ratio: int = 1,
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
-    attn_metadata = get_forward_context().attn_metadata
+    forward_context = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
     from vllm.utils.torch_utils import _resolve_layer_name
 
@@ -773,6 +887,7 @@ def rocm_aiter_sparse_attn_indexer(
             total_seq_lens,
             topk_indices_buffer,
             skip_k_cache_insert,
+            compress_ratio,
         )
     layer_attn_metadata = attn_metadata[k_cache_prefix]
     assert isinstance(layer_attn_metadata, DeepseekV32IndexerMetadata)
@@ -833,16 +948,28 @@ def rocm_aiter_sparse_attn_indexer(
 
             num_rows = logits.shape[0]
 
-            torch.ops._C.top_k_per_row_prefill(
-                logits,
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
+            used_aiter_topk = (
+                compress_ratio > 1
+                and _ON_GFX950
+                and _aiter_top_k_per_row_prefill(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_indices,
+                    topk_tokens,
+                )
             )
+            if not used_aiter_topk:
+                torch.ops._C.top_k_per_row_prefill(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
 
     if has_decode:
         decode_metadata = layer_attn_metadata.decode
@@ -882,16 +1009,31 @@ def rocm_aiter_sparse_attn_indexer(
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
         num_rows = logits.shape[0]
 
-        torch.ops._C.top_k_per_row_decode(
+        # FULL graphs are not keyed by context length, so use a replay-safe
+        # upper bound when choosing the captured kernel.
+        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            max_compressed_seq_len = max_model_len
+        else:
+            max_compressed_seq_len = layer_attn_metadata.max_seq_len // compress_ratio
+        use_aiter_topk = compress_ratio > 1 and _use_aiter_c4a_decode_topk_auto(
+            num_rows, max_compressed_seq_len
+        )
+        if not use_aiter_topk or not _aiter_top_k_per_row_decode(
             logits,
-            next_n,
             decode_metadata.seq_lens,
             topk_indices,
-            num_rows,
-            logits.stride(0),
-            logits.stride(1),
             topk_tokens,
-        )
+        ):
+            torch.ops._C.top_k_per_row_decode(
+                logits,
+                next_n,
+                decode_metadata.seq_lens,
+                topk_indices,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack

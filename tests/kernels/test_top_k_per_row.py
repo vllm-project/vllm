@@ -374,6 +374,79 @@ def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
     )
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
+@torch.inference_mode()
+def test_aiter_c4a_prefill_topk_returns_sequence_local_indices() -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _aiter_top_k_per_row_prefill,
+    )
+
+    row_starts = torch.tensor([1, 6, 20], dtype=torch.int32, device="cuda")
+    row_ends = torch.tensor([3, 18, 23], dtype=torch.int32, device="cuda")
+    logits = torch.arange(96, dtype=torch.float32, device="cuda").reshape(3, 32)
+    top_k = 4
+    indices = torch.empty((3, top_k), dtype=torch.int32, device="cuda")
+
+    if not _aiter_top_k_per_row_prefill(logits, row_starts, row_ends, indices, top_k):
+        pytest.skip("AITER top-k is unavailable")
+
+    for row_idx, (row_start, row_end) in enumerate(
+        zip(row_starts.tolist(), row_ends.tolist())
+    ):
+        num_valid = min(top_k, row_end - row_start)
+        expected = logits[row_idx, row_start:row_end].topk(num_valid).indices
+        actual = indices[row_idx, :num_valid]
+        assert set(actual.tolist()) == set(expected.tolist())
+        assert torch.all(indices[row_idx, num_valid:] == -1)
+
+
+@pytest.mark.parametrize("num_speculative_tokens", [2, 3, 4])
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
+@torch.inference_mode()
+def test_aiter_c4a_decode_topk_uses_exact_mtp_lengths(
+    num_speculative_tokens: int,
+) -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _aiter_top_k_per_row_decode,
+    )
+
+    query_tokens = num_speculative_tokens + 1
+    offsets = torch.arange(query_tokens, dtype=torch.int32, device="cuda")
+    final_uncompressed_lens = torch.tensor([43, 59], dtype=torch.int32, device="cuda")
+    seq_lens = (final_uncompressed_lens[:, None] - query_tokens + offsets + 1) // 4
+    seq_lens[0, 0] = 0
+
+    num_rows = seq_lens.numel()
+    logits = torch.arange(num_rows * 16, dtype=torch.float32, device="cuda").reshape(
+        num_rows, 16
+    )
+    top_k = 4
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+
+    if not _aiter_top_k_per_row_decode(logits, seq_lens, indices, top_k):
+        pytest.skip("AITER top-k is unavailable")
+
+    for row_idx, row_end in enumerate(seq_lens.reshape(-1).tolist()):
+        num_valid = min(top_k, row_end)
+        expected = logits[row_idx, :row_end].topk(num_valid).indices
+        actual = indices[row_idx, :num_valid]
+        assert set(actual.tolist()) == set(expected.tolist())
+        assert torch.all(indices[row_idx, num_valid:] == -1)
+
+
+def test_aiter_c4a_decode_topk_auto_policy() -> None:
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        _use_aiter_c4a_decode_topk_auto,
+    )
+
+    assert _use_aiter_c4a_decode_topk_auto(3, 2_500, on_gfx950=True)
+    assert not _use_aiter_c4a_decode_topk_auto(96, 125_000, on_gfx950=True)
+    assert _use_aiter_c4a_decode_topk_auto(128, 125_000, on_gfx950=True)
+    assert not _use_aiter_c4a_decode_topk_auto(160, 250_000, on_gfx950=True)
+    assert _use_aiter_c4a_decode_topk_auto(192, 250_000, on_gfx950=True)
+    assert not _use_aiter_c4a_decode_topk_auto(320, 2_500, on_gfx950=False)
+
+
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
 @pytest.mark.parametrize(
     "seq_len_range,test_id",
