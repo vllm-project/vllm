@@ -1429,11 +1429,7 @@ def try_get_optimal_moe_config(
     block_shape: list[int] | None = None,
     default_config_func: Callable[..., dict[str, int]] | None = None,
 ) -> dict[str, int]:
-    """Resolve a kernel config: override, then tuned file, then a default.
-
-    default_config_func overrides the fallback for callers whose M is not a
-    whole-GEMM row count.
-    """
+    """Resolve a kernel config: override, then tuned file, then default_config_func."""
     from vllm.model_executor.layers.fused_moe import get_config
 
     override_config = get_config()

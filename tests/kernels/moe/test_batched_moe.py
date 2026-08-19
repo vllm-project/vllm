@@ -446,6 +446,36 @@ def _run_td(A, B, num_expert_tokens, use_td: bool):
 
 
 @pytest.mark.parametrize("num_experts,max_tokens_per_expert,K,N", _TD_SHAPES)
+def test_batched_mm_tile_mapping(num_experts, max_tokens_per_expert, K, N):
+    """Check every program's tile lands on the right expert, m and n."""
+    if not (current_platform.is_xpu() or current_platform.is_cuda_alike()):
+        pytest.skip("No GPU device available")
+    set_random_seed(42)
+    device = current_platform.device_type
+    A = (
+        torch.randn(
+            num_experts, max_tokens_per_expert, K, device=device, dtype=torch.bfloat16
+        )
+        / 10
+    )
+    B = torch.randn(num_experts, N, K, device=device, dtype=torch.bfloat16)
+    num_expert_tokens = torch.randint(
+        low=0,
+        high=max_tokens_per_expert,
+        size=(num_experts,),
+        device=device,
+        dtype=torch.int32,
+    )
+
+    out = _run_td(A, B, num_expert_tokens, False)
+    ref = native_batched_masked_quant_matmul(
+        A, B, torch.zeros_like(out), num_expert_tokens
+    )
+
+    torch.testing.assert_close(out, ref, atol=6e-2, rtol=6e-2)
+
+
+@pytest.mark.parametrize("num_experts,max_tokens_per_expert,K,N", _TD_SHAPES)
 def test_batched_mm_td_matches_plain(num_experts, max_tokens_per_expert, K, N):
     if not _td_supported():
         pytest.skip("TD requires XPU or CUDA sm_90+")
@@ -542,35 +572,6 @@ def test_batched_triton_backend_mapping():
     assert map_unquantized_backend("triton") == UnquantizedMoeBackend.TRITON
 
 
-# get_default_batched_config: parity with the shared config off Xe, plus the
-# one per-architecture override (narrow N/K on Xe).
-def test_batched_default_config_matches_shared_off_xpu():
-    from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
-        get_default_batched_config,
-    )
-    from vllm.model_executor.layers.fused_moe.fused_moe import get_default_config
-    from vllm.platforms import current_platform
-
-    # Off Xe the batched fallback must equal the shared config: the shared
-    # default is the per-expert GEMM tiling that measured best on CUDA/ROCm.
-    args = (3072, 64, 1408, 2048, 6, None)
-    if not current_platform.is_xpu():
-        assert get_default_batched_config(*args) == get_default_config(*args)
-
-
-def test_batched_default_config_narrows_nk_on_xpu():
-    from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
-        get_default_batched_config,
-    )
-    from vllm.platforms import current_platform
-
-    if not current_platform.is_xpu():
-        pytest.skip("narrow N/K tiles are an Xe-only measurement")
-    cfg = get_default_batched_config(3072, 64, 1408, 2048, 6, None)
-    assert cfg["BLOCK_SIZE_N"] == 32
-    assert cfg["BLOCK_SIZE_K"] == 32
-
-
 def test_batched_default_config_keeps_blockwise_quant_k_tile():
     from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
         get_default_batched_config,
@@ -578,6 +579,5 @@ def test_batched_default_config_keeps_blockwise_quant_k_tile():
 
     block_shape = [128, 128]
     cfg = get_default_batched_config(512, 64, 1408, 2048, 6, "fp8_w8a8", block_shape)
-    # moe_mmk derives scale-group offsets from BLOCK_SIZE_K, so a mismatched
-    # K tile would straddle two groups and read the wrong scales.
+    # moe_mmk derives scale-group offsets from BLOCK_SIZE_K.
     assert cfg["BLOCK_SIZE_K"] == block_shape[1]

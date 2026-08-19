@@ -342,14 +342,15 @@ def batched_triton_kernel(
     BLOCK_K: tl.constexpr,
     USE_TD: tl.constexpr = False,
 ):
+    # axis 0 is M_blocks * N_blocks
+    pid_mn = tl.program_id(axis=0)
     expert_id = tl.program_id(axis=1)
+
     e_num_tokens = tl.load(expert_num_tokens + expert_id)
     if e_num_tokens == 0:
         # Early exit
         return
 
-    # axis 0 is M_blocks * N_blocks
-    pid_mn = tl.program_id(axis=0)
     num_pid_n = tl.cdiv(N, BLOCK_N)
     pid_m = pid_mn // num_pid_n
     pid_n = pid_mn % num_pid_n
@@ -433,22 +434,14 @@ def get_default_batched_config(
     dtype: str | None,
     block_shape: list[int] | None = None,
 ) -> dict[str, int]:
-    """Tile sizes for the E per-expert GEMMs of the expert-batched layout.
-
-    Mirrors get_default_config, then applies the one per-architecture tile
-    choice that measured a win: narrower N/K on Xe. Every other platform keeps
-    the shared config, so this is a no-op fallback there.
-    """
+    """Tile sizes for the per-expert GEMMs of the expert-batched layout."""
     config = get_default_config(max_num_tokens, E, N, K, top_k, dtype, block_shape)
 
-    # A config without num_warps came from a path that pins its own tiles
-    # (batch-invariant mode, wna16); leave those alone.
+    # Configs without num_warps come from paths that pin their own tiles.
     if "num_warps" not in config:
         return config
 
-    # Narrower N/K tiles measured 1.24x on Xe; that is a per-architecture tile
-    # choice, so other platforms keep the shared config's N/K. Quantized paths
-    # tie N/K to the scale-group shape, so only override the unquantized case.
+    # Narrower N/K is faster on XPU; quantized N/K must match the scale groups.
     if block_shape is None and current_platform.is_xpu():
         config["BLOCK_SIZE_N"] = 32
         config["BLOCK_SIZE_K"] = 32
@@ -482,7 +475,7 @@ def invoke_moe_batched_triton_kernel(
     BLOCK_N = config["BLOCK_SIZE_N"]
     BLOCK_K = config["BLOCK_SIZE_K"]
 
-    # Tile index is the fastest-varying axis so consecutive work-groups share an
+    # Tile index is the fastest-varying axis so consecutive programs share an
     # expert's weight tile.
     grid = (
         triton.cdiv(max_num_tokens, BLOCK_M) * triton.cdiv(B.size(1), BLOCK_N),
