@@ -708,6 +708,10 @@ class AiterFlashAttentionMetadataBuilder(
         skip split_decodes_prefills_and_extends() and avoid all .cpu() /
         .item() calls that would otherwise break CUDA graph capture.
         """
+        num_reqs = common_attn_metadata.num_reqs
+        num_tokens = common_attn_metadata.num_actual_tokens
+        max_query_len = common_attn_metadata.max_query_len
+        
         # Uniform-decode assumption does not hold for the
         # drafter's first forward after a target step: it inherits the target's
         # per-request query lengths, so rows can be longer than gluon's limit or
