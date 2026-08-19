@@ -1652,4 +1652,3 @@ class TestClientErrorResponses:
 
         assert response.status_code == HTTPStatus.BAD_REQUEST
         assert response.json()["error"]["type"] == "BadRequestError"
-
