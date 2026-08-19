@@ -84,12 +84,31 @@ vllm serve /models/DeepSeek-V4-Flash \
   --enable-prefix-caching --max-model-len 131072 \
   --gpu-memory-utilization 0.95 --max-num-seqs 16 \
   --trust-remote-code \
-  --enable-auto-tool-choice --tool-call-parser deepseek_v4
+  --enable-auto-tool-choice --tool-call-parser deepseek_v4 \
+  --reasoning-parser deepseek_v4
 ```
 
 Under Docker, add `--security-opt seccomp=unconfined` — otherwise OpenBLAS
 fails with `pthread_create: Operation not permitted` on hosts whose
 libseccomp does not know `clone3`.
+
+### Reasoning output
+
+DeepSeek-V4-Flash reasons by default. With `--reasoning-parser deepseek_v4` the
+chain of thought is split out into **`message.reasoning`** (not
+`reasoning_content`), counted separately under
+`usage.completion_tokens_details.reasoning_tokens`:
+
+```json
+{"message": {"content": "17 times 23 is 391.",
+             "reasoning": "Thinking. 1. **Analyze the Request:** ..."}}
+```
+
+Pass `chat_template_kwargs: {"thinking": false}` (or `{"reasoning_effort": "none"}`)
+to turn it off. Note that this does not save tokens — the model writes the same
+working into `content` instead. Measured on one prompt: 82 completion tokens with
+reasoning on (14-character answer), 114 with `thinking=false`, 196 with
+`reasoning_effort=none`.
 
 Startup is healthy when the log contains all three:
 
@@ -106,6 +125,7 @@ Using fp8_ds_mla data type to store kv cache.
 | `--tensor-parallel-size 8` | Sparse-MLA prefill has no `num_heads=8` instantiation — see [Hardware](#hardware). Fails on the first real prefill, not at startup. |
 | `--enable-return-routed-experts` | Needs a full-attention KV cache group; DSv4's are all compressed → `ValueError` during engine init. Also incompatible with `PP > 1`, and costs a fixed 512 MiB per GPU. |
 | `--gpu-memory-utilization 0.97` with PP | The NCCL buffers for the PP channel live outside vLLM's budget; 0.95 is the working value. |
+| `--reasoning-parser deepseek_r1` | It splits on a literal `</think>` in the text, which the DSv4 tokenizer has already consumed. With the end token absent the base parser puts the whole output in `reasoning` and leaves **`content` null**. Use `deepseek_v4`. |
 
 ### The M-aware GEMM default
 
