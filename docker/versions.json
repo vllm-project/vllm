@@ -13,6 +13,21 @@
     "NCCL_VERSION": {
       "default": "2.30.7"
     },
+    "CRIU_VERSION": {
+      "default": "4.2.1"
+    },
+    "CRIU_SOURCE_SHA256": {
+      "default": "feffdf4638125ebb12d2434754f80a1d7bbba85a3e6bee98c216f88fb99a5d96"
+    },
+    "DYNAMO_CHECKPOINT_HELPER_COMMIT": {
+      "default": "fdf25efad60f696a73393caf341c527a93d84190"
+    },
+    "DYNAMO_CHECKPOINT_HELPER_SHA256": {
+      "default": "7b8ea21baecb1da729202c32e0fecbbbafb789d65e5c1c0649ea253ad09b8f82"
+    },
+    "DYNAMO_LICENSE_SHA256": {
+      "default": "aeeca3d74a13b91d17ab9211c407b8d94a77bf8d9e5750c467818d3066b8adcf"
+    },
     "BUILD_BASE_IMAGE": {
       "default": "pytorch/manylinux2_28-builder:cuda13.0-78e737ad29420ffc4800e677c51e2a852caf8359"
     },
