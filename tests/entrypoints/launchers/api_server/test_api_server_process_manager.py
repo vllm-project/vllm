@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 import zmq
 
-from tests.entrypoints.unit_tests._api_server_spawn_workers import (
+from tests.entrypoints.launchers.api_server._api_server_spawn_workers import (
     exit_before_report_worker,
 )
 from vllm.utils.network_utils import make_zmq_socket, split_zmq_path
