@@ -70,7 +70,7 @@ steps:
   # https://github.com/pytorch/pytorch/issues/193951 is resolved.
   commands:
     - |
-      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 90m "
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 1800m "
       pytest -x -v -s tests/models/language/generation -m cpu_model
       pytest -x -v -s tests/models/language/pooling -m cpu_model
       pytest -x -v -s tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py"
@@ -140,7 +140,7 @@ steps:
   # https://github.com/pytorch/pytorch/issues/193951 is resolved.
   commands:
     - |
-      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 120m "
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 1800m "
       pytest -x -v -s tests/models/multimodal/generation --ignore=tests/models/multimodal/generation/test_pixtral.py --ignore=tests/models/multimodal/generation/test_qwen2_5_vl.py -m cpu_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
   parallelism: 4
 
