@@ -5288,13 +5288,9 @@ class GPUModelRunner(
     ) -> None:
         """Reload weights in place; see `reload_weights` in
         `vllm.model_executor.model_loader.reload.inplace` for details."""
-        # Speculative drafts are a separate module. Level 2 sleep discards
-        # their parameters with the target's; wake_up only restores draft
-        # buffers. Reload the configured draft checkpoint first (disk path
-        # only) so the target remains authoritative for any shared storage.
-        # Call unbound: Model Runner V2 delegates this method with a V2
-        # `self` and does not inherit the helper.
         if weights_iterator is None:
+            # Reload draft weights (dropped by L2 sleep) before the target so it
+            # stays authoritative for shared storage. Unbound: MRV2 passes a V2 self.
             GPUModelRunner._reload_draft_weights_from_disk(self)
         reload_weights(
             self.vllm_config,
