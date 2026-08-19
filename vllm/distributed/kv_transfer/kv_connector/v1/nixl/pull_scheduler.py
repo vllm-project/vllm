@@ -272,7 +272,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             remote_block_ids=block_ids,
             remote_engine_id=self.engine_id,
             remote_request_id=request.request_id,
-            remote_host=self.side_channel_host,
+            remote_host=self.side_channel_advertize_host,
             remote_port=self.side_channel_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             remote_num_tokens=remote_num_tokens,
