@@ -828,7 +828,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
         histogram_inter_token_latency = self._histogram_cls(
             name="vllm:inter_token_latency_seconds",
-            documentation="Histogram of inter-token latency in seconds.",
+            documentation=(
+                "Histogram of inter-token latency in seconds. One observation "
+                "per engine step; with speculative decoding a step can emit "
+                "multiple tokens, so for a per-token measure see "
+                "vllm:request_time_per_output_token_seconds."
+            ),
             buckets=[
                 0.01,
                 0.025,
