@@ -128,24 +128,23 @@ class DFlash2Speculator(DFlashSpeculator):
             dtype=torch.float32,
             device=device,
         )
-        # draft_sample_method decides whether verification needs a proposal
-        # distribution at all, and the base class says so by allocating
-        # draft_logits or leaving it None. Greedy drafting takes the walk's
-        # argmax path and needs no q.
-        if self.draft_logits is not None:
-            self.draft_logits = torch.full(
-                (
-                    self.max_num_reqs,
-                    self.num_speculative_steps,
-                    self.vocab_size,
-                ),
-                -float("inf"),
-                dtype=torch.float32,
-                device=device,
-            )
         self._cached_candidate_ids = torch.zeros(
             self._selector_scores.shape, dtype=torch.int64, device=device
         )
+        if self.draft_logits is not None:
+            # Restated rather than trusted: a construction path that skips the
+            # base allocation would otherwise hand the walk uninitialized memory
+            # where it needs every unwritten column to be impossible.
+            self.draft_logits.fill_(-float("inf"))
+
+    def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
+        # fp32, not the head dtype. Rounding real selector scores to bf16 moves
+        # the argmax of a candidate row 0.81% of the time and reverses the order
+        # of 0.68% of candidate pairs, so the walk and the rejection that checks
+        # it would no longer read the same distribution. The fill is -inf because
+        # the cache kernel writes only the K candidates, and every column it
+        # never touches has to read as impossible.
+        return torch.float32, -float("inf")
 
     def _sample_path(
         self,

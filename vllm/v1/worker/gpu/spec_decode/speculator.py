@@ -132,11 +132,15 @@ class DraftModelSpeculator(BaseSpeculator):
         self.draft_logits: torch.Tensor | None = None
         if self.speculative_config.draft_sample_method == "probabilistic":
             # Pre-temperature logits, cached from the previous decode step.
-            self.draft_logits = torch.zeros(
-                self.max_num_reqs,
-                self.num_speculative_steps,
-                self.vocab_size,
-                dtype=vllm_config.model_config.head_dtype,
+            dtype, fill = self.draft_logits_spec(vllm_config)
+            self.draft_logits = torch.full(
+                (
+                    self.max_num_reqs,
+                    self.num_speculative_steps,
+                    self.vocab_size,
+                ),
+                fill,
+                dtype=dtype,
                 device=device,
             )
 
@@ -292,6 +296,16 @@ class DraftModelSpeculator(BaseSpeculator):
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
         )
         return attn_metadata
+
+    def draft_logits_spec(self, vllm_config: VllmConfig) -> tuple[torch.dtype, float]:
+        """Dtype and initial value for the cached proposal distribution.
+
+        A speculator that writes every column each step wants the head's dtype
+        and can start from zero. One that writes a subset -- DFlash2 caches only
+        its K candidates -- overrides this, since the columns it never touches
+        have to read as impossible.
+        """
+        return vllm_config.model_config.head_dtype, 0.0
 
     def _validate_local_argmax_reduction(self) -> None:
         if not self.use_local_argmax_reduction:
