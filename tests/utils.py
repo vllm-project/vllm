@@ -63,6 +63,7 @@ from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import (
     set_random_seed,  # noqa: F401 - re-exported for use in test files
 )
+from vllm.v1.engine.utils import get_engine_process_shutdown_timeout
 
 logger = init_logger(__name__)
 
@@ -237,6 +238,9 @@ class RemoteVLLMServer:
             model_loader = get_model_loader(load_config)
             model_loader.download_model(model_config)
 
+    def _get_process_termination_timeout(self) -> float:
+        return 15.0
+
     def __init__(
         self,
         model: str,
@@ -287,6 +291,7 @@ class RemoteVLLMServer:
         self.show_hidden_metrics = (
             getattr(args, "show_hidden_metrics_for_version", None) is not None
         )
+        self._request_shutdown_timeout = float(args.shutdown_timeout)
 
         with _temporarily_sanitized_pythonpath_env():
             self._pre_download_model(model, args)
@@ -416,7 +421,7 @@ class RemoteVLLMServer:
             print(f"[RemoteOpenAIServer] Sent SIGTERM to process {pid}")
 
         try:
-            self.proc.wait(timeout=15)
+            self.proc.wait(timeout=self._get_process_termination_timeout())
             print(f"[RemoteOpenAIServer] Server {pid} terminated gracefully")
         except subprocess.TimeoutExpired:
             # Phase 2: SIGKILL the entire process group
@@ -758,6 +763,14 @@ class RemoteVLLMServer:
 class RemoteOpenAIServer(RemoteVLLMServer):
     """Launches ``vllm serve`` for testing OpenAI-compatible endpoints."""
 
+    def _get_process_termination_timeout(self) -> float:
+        engine_timeout = get_engine_process_shutdown_timeout(
+            self._request_shutdown_timeout,
+            self._request_shutdown_timeout,
+        )
+        assert engine_timeout is not None
+        return engine_timeout + super()._get_process_termination_timeout()
+
     def _create_cli_subcommand(self):
         return ServeSubcommand()
 
@@ -889,7 +902,7 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
             self.proc.terminate()
             print(f"[RemoteOpenAIServerCustom] Sent SIGTERM to process {pid}")
 
-        self.proc.join(15)
+        self.proc.join(self._get_process_termination_timeout())
         if self.proc.is_alive():
             print(
                 f"[RemoteOpenAIServerCustom] Server {pid} did not respond "
