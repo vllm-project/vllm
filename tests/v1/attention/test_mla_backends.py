@@ -1726,7 +1726,7 @@ def _run_backend_correctness(
 
             # Check numerical similarity
             rtol = 1e-2
-            atol = 5e-1
+            atol = 1.5e-1
 
             max_diff = torch.max(torch.abs(backend_output - expected_output)).item()
             max_rel_diff = torch.max(
