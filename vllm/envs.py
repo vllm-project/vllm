@@ -1994,11 +1994,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: bool(
         int(os.getenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0"))
     ),
-    # Opt-in to multi-stream shared_experts overlap on ROCm. Off by default
+    # Opt-in to multi-stream shared experts overlap on ROCm. Off by default
     # because it is unsafe for models that mutate their MoE input in place
-    # (e.g. Qwen3.5 MoE), whose routed experts overwrite hidden_states while the
-    # shared expert reads the aliased buffer on the aux stream. No effect on
-    # non-ROCm platforms, where the path is enabled by default.
+    # (e.g. Qwen3.5 MoE).
     "VLLM_ROCM_ENABLE_SHARED_EXPERTS_STREAM": lambda: bool(
         int(os.getenv("VLLM_ROCM_ENABLE_SHARED_EXPERTS_STREAM", "0"))
     ),
