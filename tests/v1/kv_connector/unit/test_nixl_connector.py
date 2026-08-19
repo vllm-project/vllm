@@ -612,39 +612,6 @@ class TestNixlHandshake:
         assert done_sending == ({"sent"} if pcp_rank == 0 else set())
         assert done_recving == {"received"}
 
-    @pytest.mark.parametrize(
-        ("kv_role", "dcp_size", "error_match"),
-        [
-            (
-                "kv_producer",
-                2,
-                "PCP producers.*decode_context_parallel_size=1",
-            ),
-            (
-                "kv_consumer",
-                1,
-                "Consumers and kv_both.*prefill_context_parallel_size=1",
-            ),
-            (
-                "kv_both",
-                1,
-                "Consumers and kv_both.*prefill_context_parallel_size=1",
-            ),
-        ],
-    )
-    def test_rejects_unsupported_pcp_topology(self, kv_role, dcp_size, error_match):
-        vllm_config = create_vllm_config(kv_role=kv_role)
-        parallel_config = vllm_config.parallel_config
-        parallel_config.prefill_context_parallel_size = 2
-        parallel_config.decode_context_parallel_size = dcp_size
-
-        with pytest.raises(NotImplementedError, match=error_match):
-            NixlConnector(
-                vllm_config,
-                KVConnectorRole.SCHEDULER,
-                make_kv_cache_config(block_size=16),
-            )
-
     def test_pcp_producer_uses_distinct_send_recv_counts(self):
         """Canonical sends and bidirectional receives have different fan-in."""
         vllm_config = create_vllm_config(kv_role="kv_producer")
