@@ -34,8 +34,8 @@ following `quantization.quant_algo` values:
     `vllm serve --help=KernelConfig`.
 
 !!! note
-    For MXFP8 models with BF16 activations on SM100-family GPUs, use
-    `--linear-backend flashinfer_trtllm` to select FlashInfer's TensorRT-LLM
+    For models quantized to MXFP8 with BF16 activations on SM100-family GPUs,
+    use `--linear-backend flashinfer_trtllm` to select FlashInfer's TensorRT-LLM
     GEMM backend.
 
 ## Quantizing HuggingFace Models with PTQ
