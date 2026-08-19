@@ -178,15 +178,6 @@ def _replace_parameter_with_empty(
     return getattr(layer, name)
 
 
-def _set_quant_config_scale(
-    quant_config: FusedMoEQuantConfig,
-    descriptor_name: str,
-    scale: torch.Tensor,
-) -> None:
-    descriptor = getattr(quant_config, descriptor_name)
-    descriptor.scale = scale
-
-
 def _normalize_expert_scale(scale: torch.Tensor) -> torch.Tensor:
     if scale.ndim == 2:
         if scale.shape[1] not in (1, 2):
@@ -298,18 +289,6 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         params_dtype: torch.dtype,
     ) -> Any:
         quant_mode = self._quant_mode
-        if self._prepared_experts is not None:
-            plan = self._prepared_experts.plan
-            requested_dtype = str(params_dtype).removeprefix("torch.")
-            if (
-                quant_mode in plan.quant_modes
-                and requested_dtype == plan.io_dtype
-                and _b12x_activation_name(activation) == plan.activation
-            ):
-                return self._prepared_experts
-            raise RuntimeError("b12x MoE prepared weights do not match this invocation")
-        if self._source_parameters_released:
-            raise RuntimeError("b12x MoE source parameters were already released")
         if _is_current_stream_capturing():
             raise RuntimeError(
                 "b12x MoE weights must be prepared before CUDA graph capture"
@@ -352,7 +331,7 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             intermediate_size=intermediate_size,
             w13_layout=self._w13_layout,
         )
-        self._prepared_experts = fused_moe.prepare_weights(
+        return fused_moe.prepare_weights(
             plan=weight_plan,
             w1_fp4=w1,
             w1_blockscale=self.w1_scale,
@@ -364,7 +343,18 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             a2_gscale=a2_gscale,
             params_dtype=params_dtype,
         )
-        return self._prepared_experts
+
+    def _refresh_quant_config(self, layer: torch.nn.Module) -> None:
+        self.quant_config._w1.scale = layer.w13_weight_scale
+        self.quant_config._w2.scale = layer.w2_weight_scale
+        if self._source_format != "modelopt_nvfp4":
+            return
+
+        self.quant_config._w1.alpha_or_gscale = layer.w13_weight_scale_2
+        self.quant_config._w2.alpha_or_gscale = layer.w2_weight_scale_2
+        if self._quant_mode in ("nvfp4", "w4a8_nvfp4"):
+            self.quant_config._a1.alpha_or_gscale = 1.0 / layer.w13_input_scale
+            self.quant_config._a2.alpha_or_gscale = 1.0 / layer.w2_input_scale
 
     def _release_source_parameters(self, layer: torch.nn.Module) -> None:
         if self._source_parameters_released:
@@ -372,9 +362,9 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         w1_scale = _replace_parameter_with_empty(layer, "w13_weight_scale")
         w2_scale = _replace_parameter_with_empty(layer, "w2_weight_scale")
         if w1_scale is not None:
-            _set_quant_config_scale(self.quant_config, "_w1", w1_scale)
+            self.quant_config._w1.scale = w1_scale
         if w2_scale is not None:
-            _set_quant_config_scale(self.quant_config, "_w2", w2_scale)
+            self.quant_config._w2.scale = w2_scale
         _replace_parameter_with_empty(layer, "w13_weight")
         _replace_parameter_with_empty(layer, "w2_weight")
         self._source_parameters_released = True
@@ -382,6 +372,8 @@ class B12xExperts(mk.FusedMoEExpertsModular):
     def _reuse_prepared_storage(self, layer: torch.nn.Module, prepared: Any) -> Any:
         previous = getattr(layer, "_b12x_prepared_experts", None)
         prepared = reuse_packed_weight_storage(previous, prepared)
+        if prepared is not previous:
+            self._plans.clear()
         self._prepared_experts = prepared
         layer._b12x_prepared_experts = prepared
         return prepared
@@ -392,6 +384,8 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             raise ValueError(
                 "b12x MoE supports apply_router_weight_on_input only with W4A16"
             )
+        self._source_parameters_released = False
+        self._refresh_quant_config(layer)
         prepared = self._prepare_experts(
             w1=layer.w13_weight,
             w2=layer.w2_weight,
@@ -523,7 +517,10 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         return TopKWeightAndReduceNoOP()
 
     def _prepared(self) -> Any:
-        assert self._prepared_experts is not None
+        if self._prepared_experts is None:
+            raise RuntimeError(
+                "b12x MoE weights must be prepared by process_weights_after_loading"
+            )
         return self._prepared_experts
 
     def moe_problem_size(
@@ -637,12 +634,7 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         topk = int(self.moe_config.experts_per_token)
         apply_router_weight_on_input = bool(layer.apply_router_weight_on_input)
         limit, alpha, beta = self._swiglu_params(activation)
-        prepared = self._prepare_experts(
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
-            activation=activation,
-            params_dtype=dtype,
-        )
+        prepared = self._prepared()
         device = prepared.w1_fp4.device
         launch_tokens: dict[tuple[Any, ...], int] = {}
         for tokens in sorted({int(count) for count in token_counts if int(count) > 0}):
@@ -744,19 +736,15 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool | None,
     ) -> None:
-        del global_num_experts, a1q_scale, a2_scale, workspace13, expert_tokens_meta
+        del w1, w2, global_num_experts
+        del a1q_scale, a2_scale, workspace13, expert_tokens_meta
         if expert_map is not None:
             raise ValueError("b12x TP MoE does not support expert maps")
         if bool(apply_router_weight_on_input) != self._apply_router_weight_on_input:
             raise ValueError(
                 "apply_router_weight_on_input does not match the prepared b12x MoE plan"
             )
-        prepared = self._prepare_experts(
-            w1=w1,
-            w2=w2,
-            activation=activation,
-            params_dtype=hidden_states.dtype,
-        )
+        prepared = self._prepared()
         topk_ids = _normalize_topk_ids(topk_ids)
         topk_weights = _normalize_topk_weights(topk_weights)
         plan = self._plan(

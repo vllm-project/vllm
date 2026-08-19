@@ -184,14 +184,23 @@ def _make_b12x_moe_kernel(
         activation=activation,
     )
     experts = B12xExperts(moe_config, quant_config)
-    experts.process_weights_after_loading(
-        SimpleNamespace(
-            activation=activation,
-            apply_router_weight_on_input=False,
-            w13_weight=w1,
-            w2_weight=w2,
-        )
+    layer = SimpleNamespace(
+        activation=activation,
+        apply_router_weight_on_input=False,
+        w13_weight=w1,
+        w2_weight=w2,
+        w13_weight_scale=quant_config.w1_scale,
+        w2_weight_scale=quant_config.w2_scale,
     )
+    if quant_config.weight_quant_dtype == "nvfp4":
+        layer.w13_weight_scale_2 = quant_config.g1_alphas
+        layer.w2_weight_scale_2 = quant_config.g2_alphas
+        if quant_config.quant_dtype is not None:
+            assert quant_config.a1_gscale is not None
+            assert quant_config.a2_gscale is not None
+            layer.w13_input_scale = 1.0 / quant_config.a1_gscale
+            layer.w2_input_scale = 1.0 / quant_config.a2_gscale
+    experts.process_weights_after_loading(layer)
     return mk.FusedMoEKernel(
         maybe_make_prepare_finalize(
             moe=moe_config,
@@ -479,7 +488,13 @@ def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
     )
     moe_config = SimpleNamespace(w13_num_shards=2, moe_backend="b12x")
     method = ct_mxfp4.CompressedTensorsW4A4Mxfp4MoEMethod(moe_config)
-    monkeypatch.setattr(method, "get_fused_moe_quant_config", lambda layer: None)
+    processed_layers: list[torch.nn.Module] = []
+    fake_experts = SimpleNamespace(
+        process_weights_after_loading=processed_layers.append
+    )
+    kernel = SimpleNamespace(fused_experts=fake_experts)
+    monkeypatch.setattr(method, "get_fused_moe_quant_config", lambda _: object())
+    monkeypatch.setattr(ct_mxfp4, "make_mxfp4_moe_kernel", lambda **_: kernel)
     layer = torch.nn.Module()
     layer._expert_routing_tables = lambda: ()
     method.create_weights(
@@ -496,6 +511,7 @@ def test_compressed_tensors_mxfp4_preserves_checkpoint_packing(
 
     assert layer.w13_weight.data.data_ptr() == w13_packed_data.data_ptr()
     assert layer.w2_weight.data.data_ptr() == w2_packed_data.data_ptr()
+    assert processed_layers == [layer]
 
 
 def test_b12x_mxfp4_falls_back_to_a16(
@@ -722,17 +738,16 @@ def test_b12x_moe_warmup_runs_each_planner_regime_once(
         intermediate_size=64,
         w1_fp4=torch.empty(0),
     )
-    experts._prepared_experts = prepared
     layer = SimpleNamespace(
         activation=MoEActivation.SILU,
         apply_router_weight_on_input=False,
-        w13_weight=torch.empty(0),
-        w2_weight=torch.empty(0),
     )
     planned_tokens = []
     launched_tokens = []
 
-    monkeypatch.setattr(experts, "_prepare_experts", lambda **kwargs: prepared)
+    with pytest.raises(RuntimeError, match="process_weights_after_loading"):
+        experts.warmup_launches(layer, token_counts=(1,))
+    experts._prepared_experts = prepared
 
     def fake_execution_plan(**kwargs):
         tokens = kwargs["tokens"]
@@ -765,6 +780,61 @@ def test_b12x_moe_warmup_runs_each_planner_regime_once(
     assert warmed == 3
     assert planned_tokens == [1, 3, 8]
     assert launched_tokens == planned_tokens
+
+
+def test_b12x_moe_reload_reprepares_current_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = SimpleNamespace(
+        discards_source_parameters=False,
+        quant_modes=("w4a16",),
+        io_dtype="bfloat16",
+        activation="silu",
+    )
+    prepared_inputs: list[
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    ] = []
+
+    def prepare_weights(**kwargs):
+        prepared_inputs.append(
+            (
+                kwargs["w1_fp4"],
+                kwargs["w2_fp4"],
+                kwargs["w1_blockscale"],
+                kwargs["w2_blockscale"],
+            )
+        )
+        return SimpleNamespace(plan=plan)
+
+    extension = SimpleNamespace(
+        plan_weights=lambda **_: plan, prepare_weights=prepare_weights
+    )
+    monkeypatch.setattr(b12x, "_require_b12x_fused_moe", lambda: extension)
+    experts = B12xExperts(
+        make_dummy_moe_config(num_experts=2, hidden_dim=4, intermediate_size=8),
+        _quant_config("mxfp4", None),
+    )
+    layer = SimpleNamespace(
+        activation=MoEActivation.SILU,
+        apply_router_weight_on_input=False,
+        w13_weight=torch.full((2, 8, 2), 1, dtype=torch.uint8),
+        w2_weight=torch.full((2, 4, 4), 1, dtype=torch.uint8),
+        w13_weight_scale=torch.full((2, 8, 1), 1, dtype=torch.uint8),
+        w2_weight_scale=torch.full((2, 4, 1), 1, dtype=torch.uint8),
+    )
+
+    experts.process_weights_after_loading(layer)
+    layer.w13_weight = torch.full_like(layer.w13_weight, 2)
+    layer.w2_weight = torch.full_like(layer.w2_weight, 2)
+    layer.w13_weight_scale = torch.full_like(layer.w13_weight_scale, 3)
+    layer.w2_weight_scale = torch.full_like(layer.w2_weight_scale, 3)
+    experts.process_weights_after_loading(layer)
+
+    assert len(prepared_inputs) == 2
+    assert prepared_inputs[-1][0] is layer.w13_weight
+    assert prepared_inputs[-1][1] is layer.w2_weight
+    assert prepared_inputs[-1][2] is layer.w13_weight_scale
+    assert prepared_inputs[-1][3] is layer.w2_weight_scale
 
 
 def test_b12x_source_release_preserves_prepared_storage_owner() -> None:
@@ -846,6 +916,8 @@ def test_b12x_moe_workspace_uses_prepared_router_weight_contract(
         apply_router_weight_on_input=True,
         w13_weight=torch.empty(0),
         w2_weight=torch.empty(0),
+        w13_weight_scale=torch.empty(0),
+        w2_weight_scale=torch.empty(0),
     )
     monkeypatch.setattr(experts, "_prepare_experts", lambda **kwargs: prepared)
     planned = []
