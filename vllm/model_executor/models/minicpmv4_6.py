@@ -75,11 +75,11 @@ from .vision import is_vit_use_data_parallel
 def _minicpmv4_6_field_config(hf_inputs: Mapping[str, torch.Tensor]):
     fields = dict(
         pixel_values=MultiModalFieldConfig.batched("image"),
-        tgt_sizes=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+        tgt_sizes=MultiModalFieldConfig.batched("image"),
         image_embeds=MultiModalFieldConfig.batched("image"),
         video_pixel_values=MultiModalFieldConfig.batched("video"),
         video_image_sizes=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
-        video_tgt_sizes=MultiModalFieldConfig.batched("video", keep_on_cpu=True),
+        video_tgt_sizes=MultiModalFieldConfig.batched("video"),
         video_embeds=MultiModalFieldConfig.batched("video"),
     )
     if "use_vit_merger" in hf_inputs:
