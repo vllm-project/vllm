@@ -529,7 +529,6 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
-        "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/mamba_cpu.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files
@@ -546,7 +545,6 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
         "csrc/cpu/mamba_cpu.cpp"
-        "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files
         "csrc/cpu/activation.cpp"
@@ -559,9 +557,9 @@ if (ENABLE_X86_ISA)
     message(STATUS "CPU extension (AVX512F) source files: ${VLLM_EXT_SRC_AVX512}")
     message(STATUS "CPU extension (AVX2) source files: ${VLLM_EXT_SRC_AVX2}")
 
-    set(_C_LIBS numa dnnl_ext)
-    set(_C_AVX512_LIBS numa dnnl_ext)
-    set(_C_AVX2_LIBS numa dnnl_ext)
+    set(_C_LIBS numa)
+    set(_C_AVX512_LIBS numa)
+    set(_C_AVX2_LIBS numa)
 
     # AMX + AVX512F + AVX512BF16 + AVX512VNNI
     define_extension_target(
