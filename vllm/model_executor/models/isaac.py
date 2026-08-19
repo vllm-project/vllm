@@ -440,7 +440,7 @@ class IsaacMultiModalProcessor(BaseMultiModalProcessor):
             "pixel_values": MultiModalFieldConfig.flat_from_sizes(
                 "image", image_grid_sizes
             ),
-            "image_grid_thw": MultiModalFieldConfig.batched("image"),
+            "image_grid_thw": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         }
 
     def _get_prompt_updates(
