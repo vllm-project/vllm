@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""SM100 BF16 GEMM with a fused tensor-parallel reduce-scatter."""
+"""SM100 BF16 GEMM with fused tensor-parallel reduce-scatter/all-reduce."""
 
 # Based on CUTLASS's Blackwell distributed GEMM-RS example at dcf215a.
 # See https://github.com/NVIDIA/cutlass/issues/3117 for memory semantics.
@@ -66,15 +66,38 @@ def multimem_ld_reduce_16B(x: cute.Tensor, *, loc=None, ip=None) -> cute.Tensor:
     return cute.recast_tensor(y, x.element_type)
 
 
+@dsl_user_op
+def multimem_st_16B(dst: cute.Tensor, value: cute.Tensor, *, loc=None, ip=None) -> None:
+    assert dst.element_type == BFloat16
+    assert value.element_type == BFloat16
+    ptr = dst.iterator.toint(loc=loc, ip=ip).ir_value(loc=loc, ip=ip)
+    regs = cute.recast_tensor(value, Int32, loc=loc, ip=ip)
+    llvm.inline_asm(
+        None,
+        [ptr] + [regs[i].ir_value(loc=loc, ip=ip) for i in range(4)],
+        "multimem.st.weak.global.v4.f32 [$0], {$1, $2, $3, $4};",
+        "l,r,r,r,r",
+        has_side_effects=True,
+        loc=loc,
+        ip=ip,
+    )
+
+
 class Sm100GemmRsBF16:
     def __init__(
-        self, rank: int, num_ranks: int, BN: int = 128, cta_group: int = 1
+        self,
+        rank: int,
+        num_ranks: int,
+        BN: int = 128,
+        cta_group: int = 1,
+        all_reduce: bool = False,
     ) -> None:
         self.rank = rank
         self.num_ranks = num_ranks
         BM, BK = 128, 64
         self.cta_tile = (BM, BN, BK)
         self.cta_group = cta_group
+        self.all_reduce = all_reduce
 
         smem_bytes = get_smem_capacity_in_bytes()
         self.stage_size = (BM + (BN // cta_group)) * BK * 2
@@ -190,6 +213,9 @@ class Sm100GemmRsBF16:
 
         M, K = A_tma.tma_tensor.shape
         N, _ = B_tma.tma_tensor.shape
+        local_M = (
+            partial_uc.shape[0] // num_ranks if self.all_reduce else output.shape[0]
+        )
         grid_m = cute.ceil_div(M, BM)
         # Keep 2-CTA clusters within a single N tile.
         grid_m = cute.ceil_div(grid_m, cta_group) * cta_group
@@ -322,8 +348,6 @@ class Sm100GemmRsBF16:
             # Keep epilogue in warps 0-3 and communication in warps 4-7.
             # Swapping the warpgroups can hang due to warp scheduling.
             tid_ = tid % 128
-            local_M = output.shape[0]
-
             # Offset in the [M, N] GEMM result.
             rank_start = self.rank * local_M
             rank_end = min(rank_start + local_M, M)
@@ -332,13 +356,13 @@ class Sm100GemmRsBF16:
                 cute.nvgpu.CopyUniversalOp(), BFloat16, num_bits_per_copy=128
             )
 
-            # Each thread issues one BF16x8 multimem reduction per vector.
             vec_width = 8
             vec_cols = BN // vec_width
             max_tile_rows = BM // num_ranks
             vecs_per_tile = max_tile_rows * vec_cols
             partial_vecs = cute.zipped_divide(partial_mc, (1, vec_width))
-            output_vecs = cute.zipped_divide(output, (1, vec_width))
+            if cutlass.const_expr(not self.all_reduce):
+                output_vecs = cute.zipped_divide(output, (1, vec_width))
 
             for tile_id in range(raw_bid, total_tiles, num_bids):
                 rs_bid_m = tile_id % grid_m
@@ -383,11 +407,10 @@ class Sm100GemmRsBF16:
                             )
                     cute.arch.barrier(barrier_id=BAR_COMM, number_of_threads=128)
 
-                    # Issue multimem.ld_reduce before storing any result.
+                    # Issue every multimem reduction before storing any result.
                     reduced_vecs = []
                     for vec_iter in cutlass.range_constexpr(vecs_per_tile // 128):
                         vec_idx = tid_ + vec_iter * 128
-
                         local_row = local_row_start + vec_idx // vec_cols
                         global_row = rank_start + local_row
                         col = bid_n * vec_cols + vec_idx % vec_cols
@@ -400,20 +423,24 @@ class Sm100GemmRsBF16:
                             reduced_vec.store(tmp.load())
                         reduced_vecs.append(reduced_vec)
 
-                    # Store the result to local L2.
                     for vec_iter in cutlass.range_constexpr(vecs_per_tile // 128):
                         vec_idx = tid_ + vec_iter * 128
-
                         local_row = local_row_start + vec_idx // vec_cols
                         global_row = rank_start + local_row
                         col = bid_n * vec_cols + vec_idx % vec_cols
 
                         if local_row < local_row_end and global_row < M:
-                            cute.copy(
-                                st_atom,
-                                reduced_vecs[vec_iter],
-                                output_vecs[None, (local_row, col)],
-                            )
+                            if cutlass.const_expr(self.all_reduce):
+                                multimem_st_16B(
+                                    partial_vecs[None, (global_row, col)],
+                                    reduced_vecs[vec_iter],
+                                )
+                            else:
+                                cute.copy(
+                                    st_atom,
+                                    reduced_vecs[vec_iter],
+                                    output_vecs[None, (local_row, col)],
+                                )
                     cute.arch.barrier(barrier_id=BAR_COMM, number_of_threads=128)
 
                     # Release each GEMM tile consumed by this RS tile. The last
@@ -481,19 +508,18 @@ class Sm100GemmRsBF16:
                             num_ranks,
                         )
 
-            # Exit barrier. GPU scope is sufficient because the kernel writes
-            # local global memory and only needs to flush it to local L2.
             cute.arch.barrier(barrier_id=BAR_COMM, number_of_threads=128)
             if tid_ == 0:
                 exit_flag = total_tiles + raw_bid
+                scope = "sys" if self.all_reduce else "gpu"
                 utils.distributed.multimem_red_add1(
-                    flags_mc_ptr + exit_flag, order="release", scope="gpu"
+                    flags_mc_ptr + exit_flag, order="release", scope=scope
                 )
                 utils.distributed.spin_lock_atom_cas_acquire_wait(
                     flags_uc_ptr + exit_flag,
                     expected_val=num_ranks,
                     reset_val=0,
-                    scope="gpu",
+                    scope=scope,
                 )
 
         else:
@@ -564,8 +590,8 @@ class Sm100GemmRsBF16:
                 if tid_ == 0 and bid_m * BM < M:
                     gemm_start = bid_m * BM
                     gemm_end = min(gemm_start + BM, M)
-                    first_owner = gemm_start // output.shape[0]
-                    last_owner = (gemm_end - 1) // output.shape[0]
+                    first_owner = gemm_start // local_M
+                    last_owner = (gemm_end - 1) // local_M
 
                     # signal to all consuming ranks (can be more than 1)
                     for rank in cutlass.range_constexpr(num_ranks):
@@ -595,7 +621,13 @@ class Sm100GemmRsBF16:
 
     @cache
     @staticmethod
-    def compile(rank: int, num_ranks: int, BN: int, cta_group: int):
+    def compile(
+        rank: int,
+        num_ranks: int,
+        BN: int,
+        cta_group: int,
+        all_reduce: bool = False,
+    ):
         M = cute.sym_int()
         padded_M = cute.sym_int()
         N = cute.sym_int()
@@ -616,18 +648,22 @@ class Sm100GemmRsBF16:
             assumed_align=32,
         )
         partial_mc_ptr = nullptr(BFloat16, cute.AddressSpace.gmem, assumed_align=32)
-        output = make_fake_tensor(
-            BFloat16,
-            (local_M, N),
-            (cute.sym_int64(divisibility=16), 1),
-            assumed_align=32,
+        output = (
+            None
+            if all_reduce
+            else make_fake_tensor(
+                BFloat16,
+                (local_M, N),
+                (cute.sym_int64(divisibility=16), 1),
+                assumed_align=32,
+            )
         )
         flags = make_fake_tensor(Int32, (num_flags,), (1,), assumed_align=16)
         flags_mc_ptr = nullptr(Int32, cute.AddressSpace.gmem, assumed_align=16)
         peer_flag_ptr = nullptr(Int64, cute.AddressSpace.gmem, assumed_align=8)
 
         stream = make_fake_stream(use_tvm_ffi_env_stream=True)
-        kernel = Sm100GemmRsBF16(rank, num_ranks, BN, cta_group)
+        kernel = Sm100GemmRsBF16(rank, num_ranks, BN, cta_group, all_reduce=all_reduce)
         return cute.compile(
             kernel,
             A,
@@ -645,12 +681,12 @@ class Sm100GemmRsBF16:
 
 
 class GemmRS:
-    """Own the max-sized symmetric workspace for Kimi-K3 GEMM-RS launches.
+    """Own the symmetric workspace for Kimi-K3 GEMM-RS/AR launches.
 
     All TP ranks must belong to one NVLink domain for multimem instructions.
     """
 
-    def __init__(self, *, max_M: int, N: int) -> None:
+    def __init__(self, *, max_M: int, N: int, all_reduce: bool = False) -> None:
         tp_group = get_tp_group()
         group = tp_group.device_group
         rank = tp_group.rank_in_group
@@ -667,6 +703,7 @@ class GemmRS:
         self.max_M = max_M
         self.N = N
         self.device = device
+        self.all_reduce = all_reduce
 
         self.partial = symm_mem.empty((max_M, N), dtype=torch.bfloat16, device=device)
         self.partial_handle = symm_mem.rendezvous(self.partial, group)
@@ -752,12 +789,15 @@ class GemmRS:
         num_ctas = num_ctas // cta_group * cta_group
         assert self.flags.numel() >= num_tiles + num_ctas
 
-        output = torch.empty((local_M, N), dtype=torch.bfloat16, device=self.device)
+        output = None
+        if not self.all_reduce:
+            output = torch.empty((local_M, N), dtype=torch.bfloat16, device=self.device)
         compiled = Sm100GemmRsBF16.compile(
             self.rank,
             self.world_size,
             BN,
             cta_group,
+            self.all_reduce,
         )
         compiled(
             x,
@@ -770,6 +810,9 @@ class GemmRS:
             self.peer_flag_ptr,
             num_ctas,
         )
+        if self.all_reduce:
+            return self.partial[:M]
+        assert output is not None
         return output
 
 
