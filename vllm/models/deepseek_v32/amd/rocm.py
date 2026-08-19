@@ -209,7 +209,9 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             quantize_mqa=self._fp8_kv,
         )
 
-    def _compute_ql_nope(self, q_c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _compute_w_uk_absorbed_ql_nope_and_q_pe(
+        self, q_c: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Project q_c per-head, split nope/rope, absorb W_UK into nope."""
         q = self.q_b_proj(q_c)[0].view(-1, self.num_local_heads, self.qk_head_dim)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
@@ -297,7 +299,7 @@ class DeepseekV32MLAAttention(DeepseekV32Attention):
             positions, q_c, kv_c, k_pe, index_k, mla_slot, attn_metadata
         )
 
-        ql_nope, q_pe = self._compute_ql_nope(q_c)
+        ql_nope, q_pe = self._compute_w_uk_absorbed_ql_nope_and_q_pe(q_c)
         index_q = self._project_index_q(q_c)
 
         index_q_fp8, index_weights_out, mqa_q = self._rope_and_pack_q(
