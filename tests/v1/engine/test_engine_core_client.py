@@ -335,6 +335,8 @@ def test_apply_ready_response_syncs_block_size():
             max_num_seqs=256,
             max_num_batched_tokens=8192,
             instance_id="test-instance",
+            supports_lora=False,
+            max_loras=0,
         )
     )
     client._apply_ready_response(payload)
@@ -1066,6 +1068,7 @@ def test_kv_cache_events(
         model=model_name,
         enforce_eager=True,
         enable_prefix_caching=True,
+        prefix_cache_retention_interval=None,
         block_size=block_size,
     )
     engine_args.kv_events_config = publisher_config

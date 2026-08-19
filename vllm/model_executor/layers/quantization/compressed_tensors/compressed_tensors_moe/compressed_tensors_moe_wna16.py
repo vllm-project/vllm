@@ -82,7 +82,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             else:
                 scale = kInt4StaticGroupScale
         elif self.num_bits == 8:
-            assert self.group_size == -1
             scale = kInt8StaticGroupScale
         else:
             raise ValueError(
@@ -122,8 +121,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             assert weight_quant.strategy == "group"
             # grouped actorder isn't supported by this kernel
             assert weight_quant.actorder != "group"
-
-            assert self.symmetric, "Only symmetric quantization is supported for MoE"
 
             # Non-Marlin WNA16 always uses bf16/fp16 inputs
             self.input_dtype = torch.bfloat16
@@ -316,6 +313,27 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 )
             num_groups_w2 = w2_scales_size // self.group_size
             num_groups_w13 = hidden_size // self.group_size
+
+        if not self.symmetric:
+            # For asymmetric int4 quantization, packed_factor (=8) int4 ZPs are
+            # stored per int32. Each TP shard must contain a whole number of
+            # int32 elements so the packed ZP can be sliced without straddling
+            # an int32 boundary.
+            w13_n = 2 * intermediate_size_per_partition  # gate+up output channels
+            if w13_n % self.packed_factor != 0:
+                raise ValueError(
+                    f"CompressedTensors WNA16 MoE: gate+up output channels per "
+                    f"TP rank (2 * intermediate_size_per_partition = {w13_n}) "
+                    f"must be divisible by packed_factor ({self.packed_factor}). "
+                    f"Use a TP size where 2 * intermediate_size is divisible by "
+                    f"{self.packed_factor}."
+                )
+            if hidden_size % self.packed_factor != 0:
+                raise ValueError(
+                    f"CompressedTensors WNA16 MoE: hidden_size ({hidden_size}) "
+                    f"must be divisible by packed_factor ({self.packed_factor}) "
+                    f"for correct ZP unpacking."
+                )
 
         layer.num_groups_w13 = num_groups_w13
         layer.num_groups_w2 = num_groups_w2
@@ -513,8 +531,11 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w13_weight_scale", w13_scales)
         replace_parameter(layer, "w2_weight_scale", w2_scales)
 
-        # CPU fused_experts_cpu requires zero points even for symmetric quant
-        if not self.symmetric or self.wna16_backend == WNA16MoEBackend.CPU:
+        # CPU fused_experts_cpu requires zero points even for symmetric quant.
+        # EMULATION bakes ZP into the dequantized bf16 weights — ZP is None.
+        if (
+            not self.symmetric or self.wna16_backend == WNA16MoEBackend.CPU
+        ) and self.wna16_backend != WNA16MoEBackend.EMULATION:
             assert w13_qzeros is not None and w2_qzeros is not None
             replace_parameter(layer, "w13_weight_zero_point", w13_qzeros)
             replace_parameter(layer, "w2_weight_zero_point", w2_qzeros)
