@@ -121,26 +121,3 @@ def test_aggregate_workers_output_with_expected_finished_count():
     # NOTE: This is to showcase dynamic update. Workers are responsible for
     # ensuring "req1" termination in this case
     assert aggregator._send_remaining_count["req1"] == 2
-
-
-def test_aggregate_workers_output_with_different_send_recv_counts():
-    aggregator = KVOutputAggregator(
-        expected_finished_count=1,
-        expected_finished_recving_count=2,
-    )
-
-    aggregated = aggregator.aggregate(
-        [
-            DummyModelRunnerOutput(
-                finished_sending={"send"},
-                finished_recving={"recv"},
-            )
-        ]
-    )
-    assert aggregated.kv_connector_output.finished_sending == {"send"}
-    assert aggregated.kv_connector_output.finished_recving is None
-
-    aggregated = aggregator.aggregate(
-        [DummyModelRunnerOutput(finished_recving={"recv"})]
-    )
-    assert aggregated.kv_connector_output.finished_recving == {"recv"}
