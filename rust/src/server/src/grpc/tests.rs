@@ -12,6 +12,7 @@ use std::time::Duration;
 use futures::StreamExt as _;
 use hyper_util::rt::TokioIo;
 use openssl::ssl::{SslConnector, SslFiletype, SslMethod};
+use rmpv::Value;
 use serial_test::serial;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
@@ -30,14 +31,15 @@ use vllm_engine_core_client::mock_engine::{
     DEFAULT_MOCK_BLOCK_SIZE, DEFAULT_MOCK_MAX_MODEL_LEN, DEFAULT_MOCK_NUM_GPU_BLOCKS,
     default_ready_response,
 };
-use vllm_engine_core_client::protocol::handshake::KvEventsConfig;
+use vllm_engine_core_client::protocol::decode_value;
+use vllm_engine_core_client::protocol::handshake::{EngineCoreReadyResponse, KvEventsConfig};
 use vllm_engine_core_client::protocol::output::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
+    UtilityCallOutput,
 };
 use vllm_engine_core_client::protocol::request::EngineCoreRequest;
-use vllm_engine_core_client::test_utils::{
-    IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
-};
+use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
+use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task_with_ready};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId, TransportMode};
 use vllm_llm::Llm;
 use vllm_text::tokenizer::DynTokenizer;
@@ -291,13 +293,10 @@ async fn setup_grpc_service_with_backend<F>(
 where
     F: FnOnce(&EngineCoreRequest) + Send + 'static,
 {
-    let ipc = IpcNamespace::new().expect("create ipc namespace");
-    let handshake_address = ipc.handshake_endpoint();
-    let engine_id = engine_id.into();
-
-    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
-        handshake_address.clone(),
-        engine_id.clone(),
+    setup_grpc_service_with_engine_script(
+        engine_id,
+        default_ready_response(),
+        backend,
         move |dealer, push| {
             boxed_test_future(async move {
                 let add = recv_engine_message(dealer).await;
@@ -311,6 +310,33 @@ where
                 .await;
             })
         },
+    )
+    .await
+}
+
+async fn setup_grpc_service_with_engine_script<F>(
+    engine_id: impl Into<EngineId>,
+    ready: EngineCoreReadyResponse,
+    backend: Arc<dyn ChatTextBackend>,
+    script: F,
+) -> (
+    InferenceServer<InferenceServiceImpl>,
+    ControlServer<ControlServiceImpl>,
+    tokio::sync::watch::Receiver<bool>,
+    MockEngineTask,
+)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = engine_id.into();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        engine_id.clone(),
+        ready,
+        script,
     ));
 
     let client = EngineCoreClient::connect(
@@ -1509,6 +1535,11 @@ async fn control_reports_server_and_model_info() {
     assert_eq!(parallelism.data_parallel_size, 1);
     assert_eq!(parallelism.data_parallel_rank, 0);
     assert_eq!(parallelism.decode_context_parallel_size, 1);
+    let rl = server.rl_capabilities.expect("RL capabilities");
+    assert!(!rl.weight_transfer_enabled);
+    assert!(rl.weight_transfer_backend.is_empty());
+    assert!(!rl.sleep_mode_enabled);
+    assert!(!rl.draft_weight_updates_enabled);
 
     let model = client
         .get_model_info(pb::GetModelInfoRequest {})
@@ -1528,6 +1559,65 @@ async fn control_reports_server_and_model_info() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn control_forwards_weight_update_without_pause_guard() {
+    let mut ready = default_ready_response();
+    ready.weight_transfer_backend = Some("nccl".to_string());
+    let (inference_service, control_service, engine_health, engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-rl".to_vec(),
+            ready,
+            Arc::new(FakeTextBackend),
+            |dealer, push| {
+                boxed_test_future(async move {
+                    let frames = recv_engine_message(dealer).await;
+                    assert_eq!(frames[0].as_ref(), &[0x03]);
+                    let payload = decode_value(&frames[1]).expect("decode utility payload");
+                    let fields = payload.as_array().expect("utility payload array");
+                    let call_id = fields[1].as_u64().expect("utility call id");
+                    assert_eq!(fields[2].as_str(), Some("collective_rpc"));
+                    let args = fields[3].as_array().expect("collective_rpc arguments");
+                    assert_eq!(args[0].as_str(), Some("update_weights"));
+                    send_outputs(
+                        push,
+                        UtilityCallOutput {
+                            output: UtilityOutput {
+                                call_id: call_id.into(),
+                                failure_message: None,
+                                result: Some(UtilityResultEnvelope::without_type_info(
+                                    Value::Array(vec![Value::Nil]),
+                                )),
+                            },
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                })
+            },
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut client = ControlClient::new(channel);
+
+    client
+        .update_weights(pb::UpdateWeightsRequest {
+            update_info_json: br#"{"names":["model.weight"]}"#.to_vec(),
+        })
+        .await
+        .expect("forward weight update without a pause probe");
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn control_aggregates_multi_engine_capacity() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
@@ -1535,12 +1625,15 @@ async fn control_aggregates_multi_engine_capacity() {
     let mut ready_0 = default_ready_response();
     ready_0.max_model_len = 8_192;
     ready_0.num_gpu_blocks = 10;
-    ready_0.data_parallel_size = 2;
+    ready_0.effective_data_parallel_size = 2;
+    ready_0.weight_transfer_backend = Some("nccl".to_string());
+    ready_0.enable_sleep_mode = true;
+    ready_0.supports_draft_weight_updates = true;
 
     let mut ready_1 = default_ready_response();
     ready_1.max_model_len = 4_096;
     ready_1.num_gpu_blocks = 20;
-    ready_1.data_parallel_size = 2;
+    ready_1.effective_data_parallel_size = 2;
     ready_1.data_parallel_rank = 1;
 
     let engine_tasks = [ready_0, ready_1].map(|ready| {
@@ -1574,7 +1667,7 @@ async fn control_aggregates_multi_engine_capacity() {
         Llm::new(client),
         Arc::new(FakeTextBackend) as Arc<dyn ChatTextBackend>,
     );
-    let state = AppState::new(vec!["test-model".to_string()], chat).with_data_parallel_size(4);
+    let state = AppState::new(vec!["test-model".to_string()], chat);
     let service = ControlServiceImpl::new(Arc::new(state));
 
     let server = pb::control_server::Control::get_server_info(
@@ -1586,7 +1679,12 @@ async fn control_aggregates_multi_engine_capacity() {
     .into_inner();
     assert_eq!(server.max_model_len, 4_096);
     assert_eq!(server.total_kv_blocks, 30);
-    assert_eq!(server.parallelism.unwrap().data_parallel_size, 4);
+    let rl = server.rl_capabilities.expect("RL capabilities");
+    assert!(!rl.weight_transfer_enabled);
+    assert!(rl.weight_transfer_backend.is_empty());
+    assert!(!rl.sleep_mode_enabled);
+    assert!(!rl.draft_weight_updates_enabled);
+    assert_eq!(server.parallelism.unwrap().data_parallel_size, 2);
 
     drop(engine_tasks);
 }

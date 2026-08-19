@@ -2,7 +2,7 @@ group: Models - Multimodal
 depends_on: 
   - image-build
 steps:
-- label: "Multi-Modal Models (Standard) 1: qwen2"
+- label: ":nvidia: (H200) Multimodal Models (Standard) 1: qwen2"
   key: multi-modal-models-standard-1-qwen2
   timeout_in_minutes: 68
   device: h200_18gb
@@ -15,13 +15,14 @@ steps:
     - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
   mirror:
     amd:
+      label: ":amd: (MI300) Multimodal Models (Standard) 1: qwen2"
       dind: false
       device: mi300_1
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
 
-- label: "Multi-Modal Models (Standard) 2: qwen3 + gemma"
+- label: ":nvidia: (H200) Multimodal Models (Standard) 2: qwen3 + gemma"
   key: multi-modal-models-standard-2-qwen3-gemma
   timeout_in_minutes: 75
   device: h200_18gb
@@ -35,13 +36,14 @@ steps:
     - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
   mirror:
     amd:
+      label: ":amd: (MI300) Multimodal Models (Standard) 2: qwen3 + gemma"
       dind: false
       device: mi300_1
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
 
-- label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl"
+- label: ":nvidia: (H200) Multimodal Models (Standard) 3: llava + qwen2_vl"
   device: h200_35gb
   key: multi-modal-models-standard-3-llava-qwen2-vl
   timeout_in_minutes: 40
@@ -54,12 +56,13 @@ steps:
     - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
   mirror:
     amd:
+      label: ":amd: (MI250) Multimodal Models (Standard) 3: llava + qwen2_vl"
       device: mi250_1
       timeout_in_minutes: 55
       depends_on:
       - image-build-amd
 
-- label: "Multi-Modal Models (Standard) 4: other + whisper"
+- label: ":nvidia: (H200) Multimodal Models (Standard) 4: other + whisper"
   device: h200_35gb
   key: multi-modal-models-standard-4-other-whisper
   timeout_in_minutes: 75
@@ -74,13 +77,14 @@ steps:
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
   mirror:
     amd:
+      label: ":amd: (MI300) Multimodal Models (Standard) 4: other + whisper"
       dind: false
       device: mi300_1
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd
 
-- label: Multi-Modal Processor (CPU) %N
+- label: ":computer: (CPU) Multimodal Processor Shard %N"
   key: multi-modal-processor-cpu
   depends_on:
   - image-build-cpu
@@ -95,7 +99,7 @@ steps:
     - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 4
 
-- label: Multi-Modal Processor # 44min
+- label: ":nvidia: (H200) Multimodal Processor"
   key: multi-modal-processor
   timeout_in_minutes: 98
   device: h200_18gb
@@ -106,8 +110,16 @@ steps:
   - tests/models/registry.py
   commands:
     - pytest -v -s models/multimodal/processing/test_tensor_schema.py
+  mirror:
+    amd:
+      label: ":amd: (MI355) Multimodal Processor"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 115
+      depends_on:
+      - image-build-amd
 
-- label: Multi-Modal Accuracy Eval (Small Models) # 50min
+- label: ":nvidia: (H200) Multimodal Accuracy Eval (Small Models)"
   device: h200_35gb
   key: multi-modal-accuracy-eval-small-models
   timeout_in_minutes: 30
@@ -120,6 +132,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
   mirror:
     amd:
+      label: ":amd: (MI300) Multimodal Accuracy Eval (Small Models)"
       dind: false
       device: mi300_1
       timeout_in_minutes: 35
@@ -132,7 +145,7 @@ steps:
       - vllm/platforms/rocm.py
       - vllm/model_executor/model_loader/
 
-- label: Multi-Modal Models (Extended Generation 1)
+- label: ":nvidia: (H200) Multimodal Models (Extended Generation 1)"
   device: h200_35gb
   key: multi-modal-models-extended-generation-1
   optional: true
@@ -146,13 +159,14 @@ steps:
     - pytest -v -s models/multimodal/test_mapping.py
   mirror:
     amd:
+      label: ":amd: (MI300) Multimodal Models (Extended Generation 1)"
       dind: false
       device: mi300_1
       timeout_in_minutes: 90
       depends_on:
       - image-build-amd
 
-- label: Multi-Modal Models (PPL)
+- label: ":nvidia: (H200) Multimodal Models (PPL)"
   device: h200_35gb
   key: multi-modal-models-extended-ppl
   optional: true
@@ -163,24 +177,34 @@ steps:
     - pytest -v -s models/multimodal/generation_ppl_test/
   mirror:
     amd:
+      label: ":amd: (MI300) Multimodal Models (PPL)"
       dind: false
       device: mi300_1
       timeout_in_minutes: 90
       depends_on:
       - image-build-amd
 
-- label: Multi-Modal Models (Extended Generation 2)
+- label: ":nvidia: (H200) Multimodal Models (Extended Generation 2) Shard %N"
   device: h200_35gb
   key: multi-modal-models-extended-generation-2
+  parallelism: 4
   optional: true
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal/generation
   commands:
-    - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
+    - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  mirror:
+    amd:
+      label: ":amd: (MI355) Multimodal Models (Extended Generation 2) Shard %N"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 100
+      depends_on:
+      - image-build-amd
 
-- label: Multi-Modal Models (Extended Generation 3)
+- label: ":nvidia: (H200) Multimodal Models (Extended Generation 3)"
   device: h200_35gb
   key: multi-modal-models-extended-generation-3
   optional: true
@@ -190,8 +214,16 @@ steps:
   - tests/models/multimodal/generation
   commands:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+  mirror:
+    amd:
+      label: ":amd: (MI355) Multimodal Models (Extended Generation 3)"
+      dind: false
+      device: mi355_1
+      timeout_in_minutes: 90
+      depends_on:
+      - image-build-amd
 
-- label: Multi-Modal Models (Extended Pooling)
+- label: ":nvidia: (H200) Multimodal Models (Extended Pooling)"
   key: multi-modal-models-extended-pooling
   optional: true
   device: h200_18gb
@@ -203,6 +235,7 @@ steps:
     - pytest -v -s models/multimodal/pooling -m 'not core_model'
   mirror:
     amd:
+      label: ":amd: (MI300) Multimodal Models (Extended Pooling)"
       dind: false
       device: mi300_1
       timeout_in_minutes: 60
