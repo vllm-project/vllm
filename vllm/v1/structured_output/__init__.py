@@ -3,6 +3,7 @@
 import multiprocessing
 from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from itertools import islice
 from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
@@ -219,12 +220,16 @@ class StructuredOutputManager:
     def _get_constraint_start(
         self,
         request: "Request",
-        committed_tokens: Sequence[int],
         spec_tokens: Sequence[int],
+        committed_len: int | None = None,
     ) -> int:
         """Return the first constrained index within `spec_tokens`.
         Returns `len(spec_tokens) + 1` if no token should be constrained after
         accepting all `spec_tokens`.
+
+        `committed_len` is the length of prefix in `request.all_token_ids` that are
+        committed before `spec_tokens`. When omitted, all tokens are assumed to be
+        committed.
         """
         if self.enable_in_reasoning:
             return 0
@@ -250,9 +255,19 @@ class StructuredOutputManager:
         if structured_req.reasoning_ended:
             return 0
 
-        simulated = list(committed_tokens)
+        if not spec_tokens:
+            return 1
+
+        # TODO: Build a read-only Sequence view over (committed, delta)
+        # instead of copying the entire committed prefix into `simulated`.
+        # TODO: Try search from right to left or binary search
+        all_token_ids = request.all_token_ids
+        if committed_len is None:
+            simulated = list(all_token_ids)
+        else:
+            simulated = list(islice(all_token_ids, committed_len))
         delta: list[int] = []
-        for i, token in enumerate(spec_tokens):
+        for i, token in enumerate[int](spec_tokens):
             if token == -1:
                 break
             simulated.append(token)
@@ -266,9 +281,7 @@ class StructuredOutputManager:
         if not request.use_structured_output:
             return spec_tokens
 
-        constraint_start = self._get_constraint_start(
-            request, request.all_token_ids, spec_tokens
-        )
+        constraint_start = self._get_constraint_start(request, spec_tokens)
         if constraint_start >= len(spec_tokens):
             return spec_tokens
 
@@ -329,9 +342,7 @@ class StructuredOutputManager:
                 if TYPE_CHECKING:
                     assert isinstance(grammar, StructuredOutputGrammar)
 
-                apply_bitmask = (
-                    self._get_constraint_start(request, request.all_token_ids, ()) == 0
-                )
+                apply_bitmask = self._get_constraint_start(request, ()) == 0
                 batch.append((grammar, cumulative_index, apply_bitmask))
                 if len(batch) == self.fill_bitmask_parallel_batch_size:
                     promises.append(self._async_submit_fill_bitmask(batch))
@@ -357,9 +368,7 @@ class StructuredOutputManager:
                     assert isinstance(grammar, StructuredOutputGrammar)
 
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
-                constraint_start = self._get_constraint_start(
-                    request, request.all_token_ids, req_tokens
-                )
+                constraint_start = self._get_constraint_start(request, req_tokens)
                 state_advancements = 0
                 for i, token in enumerate(req_tokens):
                     apply_bitmask = i >= constraint_start
@@ -400,10 +409,10 @@ class StructuredOutputManager:
         if TYPE_CHECKING:
             assert isinstance(grammar, StructuredOutputGrammar)
 
-        all_token_ids = request.all_token_ids
-        history_len = len(all_token_ids) - len(new_token_ids)
         constraint_start = self._get_constraint_start(
-            request, all_token_ids[:history_len], new_token_ids
+            request,
+            new_token_ids,
+            committed_len=len(request.all_token_ids) - len(new_token_ids),
         )
         if constraint_start > len(new_token_ids):
             return True
