@@ -217,8 +217,10 @@ class TestMissingInvokeEnd:
         parser = DeepSeekV4Parser(mock_tokenizer)
         chunks = [
             DSML_TOOL_START,
-            f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n"
-            f"{_param('location', 'true', 'NYC')}\n",
+            (
+                f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n"
+                f"{_param('location', 'true', 'NYC')}\n"
+            ),
             DSML_TOOL_END,
             "Done.",
         ]
@@ -1005,3 +1007,62 @@ class TestDelegatingParserLargeDelta:
         assert eos_text not in output.reasoning
         assert output.content == ""
         assert output.tool_calls == []
+
+
+class TestLongStringParameterStreaming:
+    """Regression tests for Issue #52846: Ensure long string tool arguments
+    stream incrementally before the closing tag arrives."""
+
+    def test_long_string_parameter_incremental_streaming(self, mock_tokenizer):
+        tool = {
+            "type": "function",
+            "function": {
+                "name": "emit_text",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                },
+            },
+        }
+        parser = DeepSeekV4Parser(mock_tokenizer, tools=[tool])
+        request = _test_request(tools=[tool])
+
+        header = (
+            "<｜DSML｜tool_calls>\n"
+            '<｜DSML｜invoke name="emit_text">\n'
+            '<｜DSML｜parameter name="text" string="true">'
+        )
+        body = "A" * 4096
+        tail = "</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
+        chunks = [header] + [body[i : i + 32] for i in range(0, len(body), 32)] + [tail]
+
+        previous = ""
+        argument_deltas = []
+        for index, delta_text in enumerate(chunks):
+            current = previous + delta_text
+            delta = parser.extract_tool_calls_streaming(
+                previous_text=previous,
+                current_text=current,
+                delta_text=delta_text,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[1],
+                request=request,
+            )
+            previous = current
+            if delta:
+                for tool_call in delta.tool_calls:
+                    if tool_call.function and tool_call.function.arguments is not None:
+                        argument_deltas.append((index, tool_call.function.arguments))
+
+        # Must emit multiple non-empty argument deltas before the tail/closing chunk
+        pre_close_deltas = [
+            val for idx, val in argument_deltas if idx < len(chunks) - 1 and val
+        ]
+        assert len(pre_close_deltas) > 10, (
+            f"Expected streaming deltas, got {len(pre_close_deltas)}."
+        )
+
+        reconstructed = "".join(val for _, val in argument_deltas)
+        assert json.loads(reconstructed) == {"text": body}

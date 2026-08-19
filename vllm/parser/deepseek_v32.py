@@ -101,7 +101,6 @@ def deepseek_v32_config() -> ParserEngineConfig:
             ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
         },
         arg_converter=_dsml_arg_converter,
-        arg_structural_chars=frozenset(">"),
         strip_content_whitespace_with_tools=False,
         tool_args_json=False,
     )
