@@ -12,14 +12,101 @@ from vllm.distributed.device_communicators.all_reduce_utils import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
+from dataclasses import dataclass
+from typing import Any
+
 try:
     import torch.distributed._symmetric_memory as torch_symm_mem
 
     symm_mem_available = True
 except ImportError:
+    torch_symm_mem = None  # type: ignore[assignment]
     symm_mem_available = False
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class SymmMemPeerAllocation:
+    """Rendezvoused symmetric buffer plus per-rank peer pointers."""
+
+    storage: torch.Tensor
+    handle: Any
+    peer_ptrs: torch.Tensor
+    world_size: int
+    rank: int
+    multicast_ptr: int
+    buffer_size: int
+    _peer_views: list[torch.Tensor]
+
+    def peer_ptrs_for_view(self, local_view: torch.Tensor) -> torch.Tensor:
+        offset_bytes = local_view.data_ptr() - self.storage.data_ptr()
+        if offset_bytes < 0 or offset_bytes >= self.buffer_size:
+            raise ValueError(
+                "Symmetric-memory view offset "
+                f"{offset_bytes} is outside buffer size {self.buffer_size}"
+            )
+        view_ptrs = self.peer_ptrs + offset_bytes
+        if bool((view_ptrs == 0).any().item()):
+            raise RuntimeError("Symmetric-memory view produced a null peer pointer")
+        return view_ptrs
+
+    def multicast_ptr_for_view(self, local_view: torch.Tensor) -> int:
+        if self.multicast_ptr == 0:
+            return 0
+        return self.multicast_ptr + (local_view.data_ptr() - self.storage.data_ptr())
+
+    def close(self) -> None:
+        self.peer_ptrs = torch.empty(0, dtype=torch.int64, device=self.storage.device)
+        self.handle = None
+        self.storage = torch.empty(0, dtype=self.storage.dtype, device="cpu")
+
+
+def allocate_symm_mem_peer(
+    shape: tuple[int, ...] | int,
+    dtype: torch.dtype,
+    device: torch.device,
+    group: ProcessGroup,
+) -> SymmMemPeerAllocation:
+    if not symm_mem_available or torch_symm_mem is None:
+        raise RuntimeError("torch.distributed._symmetric_memory is unavailable")
+    storage = torch_symm_mem.empty(shape, dtype=dtype, device=device)
+    storage.zero_()
+    torch.accelerator.synchronize()
+    handle = torch_symm_mem.rendezvous(storage, group.group_name)
+    if handle is None:
+        raise RuntimeError("symmetric-memory rendezvous returned None")
+    handle.barrier()
+    view_shape = (shape,) if isinstance(shape, int) else tuple(shape)
+    peer_views = [
+        handle.get_buffer(peer, list(view_shape), dtype, 0)
+        for peer in range(group.size())
+    ]
+    peer_ptrs = torch.tensor(
+        [int(view.data_ptr()) for view in peer_views],
+        dtype=torch.int64,
+        device=storage.device,
+    )
+    if bool((peer_ptrs == 0).any().item()):
+        raise RuntimeError("symmetric-memory rendezvous produced a null peer pointer")
+    if int(peer_ptrs[group.rank()].item()) != int(storage.data_ptr()):
+        raise RuntimeError("Local symmetric-memory pointer does not match storage")
+    multicast_ptr = 0
+    try:
+        multicast_ptr = int(handle.multicast_ptr or 0)
+    except Exception:
+        multicast_ptr = 0
+    buffer_size = int(getattr(handle, "buffer_size", storage.nbytes))
+    return SymmMemPeerAllocation(
+        storage=storage,
+        handle=handle,
+        peer_ptrs=peer_ptrs,
+        world_size=group.size(),
+        rank=group.rank(),
+        multicast_ptr=multicast_ptr,
+        buffer_size=buffer_size,
+        _peer_views=peer_views,
+    )
 
 
 class SymmMemCommunicator:

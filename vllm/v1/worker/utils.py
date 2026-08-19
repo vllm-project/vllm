@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
 from typing import Any
@@ -380,6 +380,7 @@ def allocate_kv_cache(
     device: torch.device,
     layout: KVCacheLayout,
     kernel_block_sizes: list[int] | None = None,
+    buffer_allocator: Callable[[int, torch.device], torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Allocate the KV cache and view it as ``[B, H, N, C]`` per layer.
 
@@ -392,7 +393,12 @@ def allocate_kv_cache(
 
     sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
     assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
-    buf = torch.zeros(sizes.pop(), dtype=torch.int8, device=device)
+    size = sizes.pop()
+    buf = (
+        torch.zeros(size, dtype=torch.int8, device=device)
+        if buffer_allocator is None
+        else buffer_allocator(size, device)
+    )
 
     kv_caches: dict[str, torch.Tensor] = {}
     for tensor in kv_cache_config.kv_cache_tensors:

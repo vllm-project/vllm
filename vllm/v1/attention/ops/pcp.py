@@ -52,7 +52,9 @@ def maybe_gather_mla_latent_cache_inputs(
     num_decode_tokens: int | None,
     use_pcp: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    if not use_pcp or num_decode_tokens is None:
+    from vllm.model_executor.layers.attention.pcp_direct_kv import pcp_direct_kv_active
+
+    if pcp_direct_kv_active() or not use_pcp or num_decode_tokens is None:
         return kv_c_normed, k_pe, slot_mapping
     assert slot_mapping is not None
     num_tokens = kv_c_normed.shape[0]
@@ -72,7 +74,9 @@ def maybe_gather_indexer_k(
     num_decode_tokens: int,
     use_pcp: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if not use_pcp:
+    from vllm.model_executor.layers.attention.pcp_direct_kv import pcp_direct_kv_active
+
+    if pcp_direct_kv_active() or not use_pcp:
         return k, slot_mapping
     (cache_k,), cache_slot_mapping = _gather_prefill_cache_inputs(
         (k,), slot_mapping, num_decode_tokens

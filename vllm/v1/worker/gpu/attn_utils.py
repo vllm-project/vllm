@@ -189,11 +189,34 @@ def init_kv_cache(
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
 ) -> dict[str, Any]:
+    buffer_allocator = None
+    try:
+        from vllm.distributed.parallel_state import get_pcp_group
+        from vllm.model_executor.layers.attention.pcp_direct_kv import (
+            pcp_direct_kv_requested,
+            try_allocate_pcp_direct_backing,
+        )
+
+        if pcp_direct_kv_requested():
+            pcp_group = get_pcp_group()
+            if pcp_group.world_size > 1:
+
+                def buffer_allocator(nbytes: int, device: torch.device) -> torch.Tensor:
+                    allocation = try_allocate_pcp_direct_backing(
+                        nbytes, device, pcp_group.device_group
+                    )
+                    if allocation is not None:
+                        return allocation.storage
+                    return torch.zeros(nbytes, dtype=torch.int8, device=device)
+
+    except Exception:
+        buffer_allocator = None
     kv_caches = allocate_kv_cache(
         kv_cache_config,
         device,
         vllm_config.cache_config.get_resolved_kv_cache_layout(),
         kernel_block_sizes,
+        buffer_allocator,
     )
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
@@ -206,6 +229,18 @@ def init_kv_cache(
         else 1
     )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches, num_attn_module)
+    try:
+        from vllm.distributed.parallel_state import get_pcp_group
+        from vllm.model_executor.layers.attention.pcp_direct_kv import (
+            bind_pcp_direct_layer_views,
+            should_allocate_pcp_direct_kv,
+        )
+
+        if should_allocate_pcp_direct_kv(vllm_config):
+            pcp_group = get_pcp_group()
+            bind_pcp_direct_layer_views(kv_caches, pcp_group.device_group, device)
+    except RuntimeError:
+        raise
     return kv_caches
 
 
