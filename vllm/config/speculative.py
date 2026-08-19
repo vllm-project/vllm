@@ -728,23 +728,70 @@ class SpeculativeConfig:
         hf_config: PretrainedConfig,
     ) -> int | None:
         """Return the checkpoint's default proposal count for block drafters."""
+        block_tokens = SpeculativeConfig._block_drafter_tokens(method, hf_config)
+        return block_tokens[0] if block_tokens is not None else None
+
+    @staticmethod
+    def _block_drafter_tokens(
+        method: SpeculativeMethod,
+        hf_config: PretrainedConfig,
+    ) -> tuple[int, str] | None:
         if method not in ("dflash", "dspark"):
             return None
         dflash_config = getattr(hf_config, "dflash_config", None)
-        if isinstance(dflash_config, Mapping):
-            block_size = dflash_config.get("block_size")
-        else:
-            block_size = getattr(dflash_config, "block_size", None)
-        if block_size is None:
-            block_size = getattr(hf_config, "block_size", None)
+        nested_block_size = (
+            dflash_config.get("block_size")
+            if isinstance(dflash_config, Mapping)
+            else getattr(dflash_config, "block_size", None)
+        )
+        candidates = (
+            (
+                (nested_block_size, "dflash_config.block_size"),
+                (getattr(hf_config, "block_size", None), "block_size"),
+            )
+            if method == "dflash"
+            else (
+                (
+                    getattr(hf_config, "dspark_block_size", None),
+                    "dspark_block_size",
+                ),
+                (getattr(hf_config, "block_size", None), "block_size"),
+                (nested_block_size, "dflash_config.block_size"),
+            )
+        )
+        block_size, source = next(
+            ((value, name) for value, name in candidates if value is not None),
+            (None, "block_size"),
+        )
         if not isinstance(block_size, int) or isinstance(block_size, bool):
             return None
         if method == "dflash":
             tokens = block_size - 1
+            reason = f"{source}={block_size} with a bonus anchor"
         else:
             sample_from_anchor = getattr(hf_config, "sample_from_anchor", True)
             tokens = block_size if sample_from_anchor else block_size - 1
-        return tokens if tokens > 0 else None
+            reason = (
+                f"{source}={block_size} with sample_from_anchor={sample_from_anchor}"
+            )
+        return (tokens, reason) if tokens > 0 else None
+
+    @staticmethod
+    def _validate_block_drafter_tokens(
+        method: SpeculativeMethod,
+        hf_config: PretrainedConfig,
+        num_speculative_tokens: int,
+    ) -> None:
+        block_tokens = SpeculativeConfig._block_drafter_tokens(method, hf_config)
+        if block_tokens is None:
+            return
+        max_tokens, reason = block_tokens
+        if num_speculative_tokens > max_tokens:
+            raise ValueError(
+                f"num_speculative_tokens={num_speculative_tokens} exceeds the "
+                f"{method} checkpoint proposal limit of {max_tokens} "
+                f"derived from {reason}."
+            )
 
     @staticmethod
     def _apply_composed_hf_override(
@@ -1061,20 +1108,32 @@ class SpeculativeConfig:
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
 
-                if self.num_speculative_tokens is not None and hasattr(
-                    self.draft_model_config.hf_config, "num_lookahead_tokens"
-                ):
-                    self.draft_model_config.hf_config.num_lookahead_tokens = (
-                        self.num_speculative_tokens
-                    )
-
                 n_predict = getattr(
                     self.draft_model_config.hf_config, "n_predict", None
                 )
+                default_source = None
                 if n_predict is not None:
+                    if (
+                        not isinstance(n_predict, int)
+                        or isinstance(n_predict, bool)
+                        or n_predict <= 0
+                    ):
+                        raise ValueError(
+                            "The draft checkpoint n_predict must be a positive "
+                            f"integer, got {n_predict!r}."
+                        )
                     if self.num_speculative_tokens is None:
-                        # Default to max value defined in draft model config.
                         self.num_speculative_tokens = n_predict
+                        default_source = f"draft checkpoint n_predict={n_predict}"
+                    elif (
+                        self.method in ("dflash", "dspark")
+                        and self.num_speculative_tokens > n_predict
+                    ):
+                        raise ValueError(
+                            f"num_speculative_tokens={self.num_speculative_tokens} "
+                            f"exceeds the {self.method} checkpoint n_predict="
+                            f"{n_predict}."
+                        )
                     elif (
                         self.num_speculative_tokens > n_predict
                         and self.num_speculative_tokens % n_predict != 0
@@ -1085,22 +1144,35 @@ class SpeculativeConfig:
                             f" must be divisible by {n_predict=}"
                         )
 
-                if self.num_speculative_tokens is None:
-                    block_tokens = self._tokens_from_draft_block_size(
-                        self.method, self.draft_model_config.hf_config
-                    )
-                    if block_tokens is not None:
-                        self.num_speculative_tokens = block_tokens
-                        logger.info(
-                            "Defaulted num_speculative_tokens to %d from the "
-                            "draft checkpoint block_size.",
-                            block_tokens,
-                        )
+                block_tokens = self._block_drafter_tokens(
+                    self.method, self.draft_model_config.hf_config
+                )
+                if self.num_speculative_tokens is None and block_tokens is not None:
+                    self.num_speculative_tokens, reason = block_tokens
+                    default_source = f"draft checkpoint {reason}"
 
                 if self.num_speculative_tokens is None:
                     raise ValueError(
                         "A speculative model was provided, but "
                         "`num_speculative_tokens` was not provided"
+                    )
+
+                self._validate_block_drafter_tokens(
+                    self.method,
+                    self.draft_model_config.hf_config,
+                    self.num_speculative_tokens,
+                )
+
+                if default_source is not None:
+                    logger.info(
+                        "Defaulted num_speculative_tokens=%d from %s.",
+                        self.num_speculative_tokens,
+                        default_source,
+                    )
+
+                if hasattr(self.draft_model_config.hf_config, "num_lookahead_tokens"):
+                    self.draft_model_config.hf_config.num_lookahead_tokens = (
+                        self.num_speculative_tokens
                     )
 
                 if (

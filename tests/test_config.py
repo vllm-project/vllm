@@ -2293,6 +2293,12 @@ def test_explicit_method_selects_deepseek_v4_loader(
         pytest.param("dspark", {"block_size": 7}, 7, id="dspark-full-block"),
         pytest.param(
             "dspark",
+            {"dspark_block_size": 5, "block_size": 7},
+            5,
+            id="dspark-specific-block-size-takes-precedence",
+        ),
+        pytest.param(
+            "dspark",
             {"block_size": 7, "sample_from_anchor": False},
             6,
             id="dspark-bonus-anchor",
@@ -2309,6 +2315,34 @@ def test_block_drafters_default_tokens_from_block_size(method, config_kwargs, ex
     assert (
         SpeculativeConfig._tokens_from_draft_block_size(method, hf_config) == expected
     )
+
+
+@pytest.mark.parametrize(
+    ("method", "config_kwargs", "tokens"),
+    [
+        pytest.param("dflash", {"block_size": 16}, 16, id="dflash"),
+        pytest.param("dspark", {"block_size": 7}, 8, id="dspark-anchor"),
+        pytest.param(
+            "dspark",
+            {"block_size": 7, "sample_from_anchor": False},
+            7,
+            id="dspark-bonus-anchor",
+        ),
+    ],
+)
+def test_block_drafters_reject_tokens_beyond_checkpoint_limit(
+    method, config_kwargs, tokens
+):
+    hf_config = PretrainedConfig(**config_kwargs)
+
+    with pytest.raises(ValueError, match="checkpoint proposal limit"):
+        SpeculativeConfig._validate_block_drafter_tokens(method, hf_config, tokens)
+
+
+def test_block_drafters_allow_smaller_explicit_token_count():
+    hf_config = PretrainedConfig(block_size=16)
+
+    SpeculativeConfig._validate_block_drafter_tokens("dflash", hf_config, 7)
 
 
 def test_draft_sample_method_probabilistic_is_accepted():

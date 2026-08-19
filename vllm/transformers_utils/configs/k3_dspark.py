@@ -15,6 +15,7 @@ class K3DSparkConfig(DeepseekV2Config):
         mla_use_nope: bool = False,
         mla_use_output_gate: bool = False,
         mla_use_qk_norm: bool = False,
+        block_size: int = 7,
         rope_theta: float = 50000.0,
         **kwargs,
     ) -> None:
@@ -23,6 +24,8 @@ class K3DSparkConfig(DeepseekV2Config):
         kwargs.setdefault("n_routed_experts", 0)
         kwargs.setdefault("n_shared_experts", 0)
         kwargs.setdefault("num_experts_per_tok", 0)
+        # The released K3 DSpark checkpoint is trained at depth 7 but omits it.
+        kwargs.setdefault("block_size", block_size)
 
         rope_parameters = kwargs.get("rope_parameters")
         if rope_parameters is None:
