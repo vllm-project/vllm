@@ -324,10 +324,14 @@ class HCXVisionMultiModalProcessor(BaseMultiModalProcessor[HCXVisionProcessingIn
     ) -> Mapping[str, MultiModalFieldConfig]:
         fields = dict(
             pixel_values_images=MultiModalFieldConfig.batched("image"),
-            image_sizes_images=MultiModalFieldConfig.batched("image"),
-            vision_query_lengths_images=MultiModalFieldConfig.batched("image"),
+            image_sizes_images=MultiModalFieldConfig.batched("image", keep_on_cpu=True),
+            vision_query_lengths_images=MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            ),
             pixel_values_videos=MultiModalFieldConfig.batched("video"),
-            vision_query_lengths_videos=MultiModalFieldConfig.batched("video"),
+            vision_query_lengths_videos=MultiModalFieldConfig.batched(
+                "video", keep_on_cpu=True
+            ),
         )
 
         return fields
