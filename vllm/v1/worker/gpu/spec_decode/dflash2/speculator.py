@@ -7,8 +7,8 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.triton_utils import tl, tldevice, triton
-from vllm.v1.worker.gpu.sample.gumbel import tl_rand32, tl_rand64
+from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
 
@@ -51,21 +51,18 @@ def _selector_walk_kernel(
             other=0,
         )
 
-        if not SAMPLE_PROBABILISTIC or temperature == 0.0:
-            best = tl.max(scores, axis=0)
-            index = tl.min(tl.where(scores == best, offsets, BLOCK_K), axis=0)
-        else:
-            position = tl.load(sample_pos_ptr + flat) - 1
-            gumbel_seed = tl.randint(seed, position)
-            if USE_FP64:
-                uniform = tl_rand64(gumbel_seed, candidates, includes_zero=False)
-                noise = -tl.log(-tl.log(uniform))
-            else:
-                uniform = tl_rand32(gumbel_seed, candidates, includes_zero=False)
-                noise = -tl.log(-tldevice.log1p(-uniform))
-            sampled_scores = tl.where(mask, scores / temperature + noise, -float("inf"))
-            best = tl.max(sampled_scores, axis=0)
-            index = tl.min(tl.where(sampled_scores == best, offsets, BLOCK_K), axis=0)
+        # The candidate token ids key the noise, so a token drawn at this slot
+        # gets the same noise the target's own sampling would give it.
+        position = tl.load(sample_pos_ptr + flat) - 1
+        _, index = gumbel_noised_argmax(
+            scores,
+            candidates,
+            mask & valid,
+            seed,
+            position,
+            temperature if SAMPLE_PROBABILISTIC else 0.0,
+            USE_FP64=USE_FP64,
+        )
 
         tl.store(
             realized_scores_ptr + candidate_base + offsets,
