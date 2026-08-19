@@ -12,6 +12,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_deq
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import nvfp4_split_data_scale, set_random_seed
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 COPYING_DIRECTION = [("cuda", "cpu"), ("cuda", "cuda"), ("cpu", "cuda")]
 DTYPES = [torch.bfloat16, torch.float]
 NUM_TOKENS = [42]  # Arbitrary values for testing
