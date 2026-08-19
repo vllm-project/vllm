@@ -2339,10 +2339,6 @@ class TestFP8Layer(torch.nn.Module):
         force_kernel: type[_KernelT] | None = None,
     ):
         super().__init__()
-        self.input_size_per_partition = weight_shape[1]
-        self.output_size_per_partition = weight_shape[0]
-        self.logical_widths = [self.output_size_per_partition]
-        self.orig_dtype = input_dtype
         act_scale_desc = activation_quant_key.scale
         weight_scale_desc = weight_quant_key.scale
         is_block_wise = act_scale_desc.group_shape.is_per_group()
@@ -2350,12 +2346,11 @@ class TestFP8Layer(torch.nn.Module):
             block_size = weight_scale_desc.group_shape.col
             weight_scale_shape = weight_shape[0] // block_size
             self.weight_scale_inv = torch.rand(
-                (weight_scale_shape, weight_scale_shape),
-                dtype=torch.float32,
-                device=device,
+                (weight_scale_shape, weight_scale_shape), dtype=torch.float32
             )
-            self.weight = torch.rand(weight_shape, device=device).to(dtype=FP8_DTYPE)
+            self.weight = torch.rand(weight_shape).to(dtype=FP8_DTYPE)
             self.input_scale = None
+            self.weight_scale = None
             self.weight_block_size = [block_size, block_size]
             if transpose_weights:
                 self.weight = self.weight.t()
