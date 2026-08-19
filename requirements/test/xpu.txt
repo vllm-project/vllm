@@ -230,7 +230,7 @@ httpx2==2.10.0
     # via
     #   mcp
     #   openai
-huggingface-hub==1.27.0
+huggingface-hub==1.28.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
