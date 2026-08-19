@@ -28,7 +28,7 @@ DEVICE_BACKENDS: dict[str, DeviceConfig] = {
         and current_platform.has_device_capability(80),
         # FlashInfer backend temporarily disabled due to invariant CTA sizes.
         # See FlashInfer issue #2424
-        backends=["FLASH_ATTN", "TRITON_ATTN", "FLEX_ATTENTION"],
+        backends=["FLASH_ATTN", "TRITON_ATTN", "FLEX_ATTENTION", "GDN_ATTN"],
     ),
     "xpu": DeviceConfig(
         available=current_platform.is_xpu() and HAS_TRITON,
@@ -51,6 +51,29 @@ if os.getenv("VLLM_TEST_MODEL"):
         DEVICE_BACKENDS["xpu"] = DeviceConfig(
             available=DEVICE_BACKENDS["xpu"].available,
             backends=[],
+        )
+    # GDN_ATTN is for Qwen3.5 models (model_type="qwen3_5") and
+    # Qwen3-Next/Qwen3.6 hybrid models (dual_chunk_attention_config present)
+    elif (
+        getattr(config, "model_type", "") == "qwen3_5"
+        or (
+            hasattr(config, "dual_chunk_attention_config")
+            and config.dual_chunk_attention_config is not None
+        )
+    ):
+        DEVICE_BACKENDS["cuda"] = DeviceConfig(
+            available=DEVICE_BACKENDS["cuda"].available,
+            backends=["GDN_ATTN"],
+        )
+    else:
+        # Remove GDN_ATTN for models that don't have GDN architecture
+        DEVICE_BACKENDS["cuda"] = DeviceConfig(
+            available=DEVICE_BACKENDS["cuda"].available,
+            backends=[
+                b
+                for b in DEVICE_BACKENDS["cuda"].backends
+                if b != "GDN_ATTN"
+            ],
         )
 
 # Only include backends for devices that are actually available.
@@ -133,3 +156,18 @@ def _extract_step_logprobs(request_output):
 
 def is_device_capability_below_90() -> bool:
     return not current_platform.has_device_capability(90)
+
+
+def get_attention_config(backend: str) -> dict:
+    """Return attention_config dict for the given backend.
+
+    GDN_ATTN is a Mamba-specific backend that is auto-selected by model
+    architecture (Qwen3.5/Qwen3.6 GDN layers). It cannot be set via
+    attention_config["backend"] since it is not a standard AttentionBackendEnum
+    value. For GDN_ATTN, return an empty dict so the engine uses its default
+    attention backend for transformer layers while GDN layers use GDN_ATTN
+    automatically.
+    """
+    if backend == "GDN_ATTN":
+        return {}
+    return {"backend": backend}
