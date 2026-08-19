@@ -795,8 +795,6 @@ def rocm_fp8_mqa_logits(
 
     if aiter_mqa_logits_module is not None:
         fp8_mqa_logits = aiter_mqa_logits_module.fp8_mqa_logits
-        # The following top-k only reads each row's [cu_seqlen_ks,
-        # cu_seqlen_ke) range, so padding logits do not need initialization.
         return fp8_mqa_logits(
             q,
             k_fp8,
