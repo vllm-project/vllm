@@ -2816,17 +2816,44 @@ class Scheduler(SchedulerInterface):
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            req = self.requests[req_id]
+            req = self.requests.get(req_id)
+            if req is None:
+                logger.warning(
+                    "Ignoring stale KV transfer completion: request_id=%s, "
+                    "direction=recv; request no longer exists",
+                    req_id,
+                )
+                continue
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)
+            elif RequestStatus.is_finished(req.status):
+                self._free_blocks(req)
             else:
-                assert RequestStatus.is_finished(req.status)
-                self._free_blocks(self.requests[req_id])
+                logger.warning(
+                    "Ignoring unexpected KV transfer completion: request_id=%s, "
+                    "direction=recv, request_status=%s",
+                    req_id,
+                    req.status.name,
+                )
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            self._free_blocks(self.requests[req_id])
+            req = self.requests.get(req_id)
+            if req is None:
+                logger.warning(
+                    "Ignoring stale KV transfer completion: request_id=%s, "
+                    "direction=send; request no longer exists",
+                    req_id,
+                )
+                continue
+            if RequestStatus.is_finished(req.status):
+                self._free_blocks(req)
+            else:
+                logger.warning(
+                    "Ignoring unexpected KV transfer completion: request_id=%s, "
+                    "direction=send, request_status=%s",
+                    req_id,
+                    req.status.name,
+                )
 
     def _update_requests_with_invalid_blocks(
         self,

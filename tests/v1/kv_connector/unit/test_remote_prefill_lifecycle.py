@@ -28,6 +28,57 @@ def _num_waiting_requests(scheduler) -> int:
     return len(scheduler.waiting) + len(scheduler.skipped_waiting)
 
 
+@pytest.mark.parametrize("completion", ["finished_recving", "finished_sending"])
+def test_stale_kv_completion_for_unknown_request_is_ignored(completion, caplog):
+    """A late connector callback must not crash the scheduler."""
+    scheduler = create_scheduler(create_vllm_config())
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output(
+        reqs=[], **{completion: {"stale-request"}}
+    )
+
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert "stale-request" not in scheduler.requests
+    assert "Ignoring stale KV transfer completion" in caplog.text
+
+
+@pytest.mark.parametrize("completion", ["finished_recving", "finished_sending"])
+def test_duplicate_kv_completion_for_running_request_is_ignored(completion, caplog):
+    """A completion from an older transfer attempt must not affect a live request."""
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    request = create_request(
+        request_id=1,
+        block_size=vllm_config.cache_config.block_size,
+        num_tokens=40,
+        do_remote_prefill=True,
+    )
+    scheduler.add_request(request)
+
+    # Start the async load, then complete it and promote the request to RUNNING.
+    scheduler_output = scheduler.schedule()
+    scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
+    scheduler_output = scheduler.schedule()
+    model_runner_output = create_model_runner_output(
+        reqs=[], finished_recving={request.request_id}
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+    scheduler_output = scheduler.schedule()
+    assert request.status == RequestStatus.RUNNING
+
+    # A duplicate or out-of-order completion from the old load/save attempt
+    # must not free the live request or terminate the scheduler.
+    model_runner_output = create_model_runner_output(
+        reqs=[request], **{completion: {request.request_id}}
+    )
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert scheduler.requests[request.request_id] is request
+    assert request.status == RequestStatus.RUNNING
+    assert "Ignoring unexpected KV transfer completion" in caplog.text
+
+
 def test_basic_lifecycle():
     """Test lifecycle of a remote prefill."""
 
