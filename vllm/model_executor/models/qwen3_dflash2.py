@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vllm.compilation.backends import set_model_tag
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -294,14 +295,19 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
         self.input_embedding_scale = float(
             draft_config.get("input_embedding_scale", 1.0)
         )
-        self.candidate_selector = CandidateSelector(
-            hidden_size=self.config.hidden_size,
-            vocab_size=self.config.vocab_size,
-            rank=int(draft_config["selector_rank"]),
-            top_k=int(draft_config["selector_top_k"]),
-            params_dtype=vllm_config.model_config.dtype,
-            prefix=maybe_prefix(prefix, "candidate_selector"),
-        )
+        # The selector carries its own @support_torch_compile, but it is built
+        # while the active model tag is still the draft's, so without a tag of its
+        # own the two share a compile-cache namespace and the selector loads the
+        # draft's graph -- a different input signature, within the same startup.
+        with set_model_tag("dflash2_candidate_selector"):
+            self.candidate_selector = CandidateSelector(
+                hidden_size=self.config.hidden_size,
+                vocab_size=self.config.vocab_size,
+                rank=int(draft_config["selector_rank"]),
+                top_k=int(draft_config["selector_top_k"]),
+                params_dtype=vllm_config.model_config.dtype,
+                prefix=maybe_prefix(prefix, "candidate_selector"),
+            )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return super().embed_input_ids(input_ids) * self.input_embedding_scale
