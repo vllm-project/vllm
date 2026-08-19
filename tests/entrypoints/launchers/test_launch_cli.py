@@ -756,6 +756,116 @@ def _local_restore_artifact(tmp_path: Path, name: str = "snapshot") -> Path:
     return artifact
 
 
+def _mark_snapshot_pids_free(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    probed_pids: list[int] = []
+
+    def missing(pid: int, _signal: int) -> None:
+        probed_pids.append(pid)
+        raise ProcessLookupError
+
+    monkeypatch.setattr(snapshot_controller.os, "kill", missing)
+    return probed_pids
+
+
+def test_snapshot_restore_rejects_occupied_pid_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    blocker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        artifact = _local_restore_artifact(tmp_path)
+        (artifact / "release.json").write_bytes(b"release sentinel")
+        (artifact / "restored.pid").write_bytes(b"pid sentinel")
+        with (artifact / "child.log").open("ab") as child_log:
+            child_log.write(b" runtime tail")
+        saved_remaps = artifact / "link-remaps"
+        saved_remaps.mkdir()
+        (saved_remaps / "link_remap.270").write_bytes(b"semaphore state")
+        write_manifest_atomic(
+            artifact,
+            _manifest(
+                process_tree=(blocker.pid,),
+                cuda_holders=(blocker.pid,),
+            ),
+        )
+
+        tools = LocalSnapshotTools()
+        tools.shm_dir = tmp_path / "shm"
+        tools.shm_dir.mkdir()
+        monkeypatch.setattr(tools, "preflight", lambda *_args: None)
+        monkeypatch.setattr(tools, "current_identity", lambda manifest: manifest)
+        criu_calls: list[str] = []
+
+        def unexpected_criu(action: str, *_args: object) -> None:
+            criu_calls.append(action)
+            raise RuntimeError("CRIU called before PID collision rejection")
+
+        monkeypatch.setattr(tools, "_criu", unexpected_criu)
+
+        def file_state() -> dict[str, bytes]:
+            return {
+                str(path.relative_to(tmp_path)): path.read_bytes()
+                for path in tmp_path.rglob("*")
+                if path.is_file()
+            }
+
+        before = file_state()
+        args = argparse.Namespace(
+            snapshot_dir=str(artifact), host="127.0.0.1", port=9000
+        )
+        with pytest.raises(SnapshotRestoreError) as exc_info:
+            restore_snapshot(args, tools=tools)
+
+        assert str(blocker.pid) in str(exc_info.value)
+        assert criu_calls == []
+        assert blocker.poll() is None
+        assert file_state() == before
+        assert not (tools.shm_dir / "link_remap.270").exists()
+    finally:
+        if blocker.poll() is None:
+            blocker.terminate()
+            try:
+                blocker.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                blocker.kill()
+                blocker.wait(timeout=5)
+
+
+@pytest.mark.parametrize(
+    ("probe_error", "diagnostic"),
+    [
+        pytest.param(
+            PermissionError(), "already occupied: 100", id="permission-denied"
+        ),
+        pytest.param(
+            OSError("probe failed"),
+            "availability probe failed: 100",
+            id="unexpected-error",
+        ),
+    ],
+)
+def test_snapshot_restore_pid_probe_is_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe_error: OSError,
+    diagnostic: str,
+):
+    artifact = _local_restore_artifact(tmp_path)
+    tools = LocalSnapshotTools()
+    criu_calls: list[str] = []
+
+    def fail_probe(_pid: int, _signal: int) -> None:
+        raise probe_error
+
+    monkeypatch.setattr(snapshot_controller.os, "kill", fail_probe)
+    monkeypatch.setattr(
+        tools, "_criu", lambda action, *_args: criu_calls.append(action)
+    )
+
+    with pytest.raises(SnapshotRestoreError, match=diagnostic):
+        tools.restore(artifact, _manifest())
+    assert criu_calls == []
+
+
 def _fake_restored_tree(
     tools: LocalSnapshotTools,
     monkeypatch: pytest.MonkeyPatch,
@@ -804,6 +914,7 @@ def _restored_tools(
     list[tuple[int, signal.Signals]],
     dict[int, tuple[int, int]],
 ]:
+    _mark_snapshot_pids_free(monkeypatch)
     artifact = _local_restore_artifact(tmp_path)
     tools = LocalSnapshotTools()
     monkeypatch.setattr(tools, "_read_restored_pid", lambda _path: 100)
@@ -823,6 +934,7 @@ def _close_pipes(pipes: dict[int, tuple[int, int]]) -> None:
 def test_snapshot_criu_uses_file_locks_and_cuda_holder_gpu(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    probed_pids = _mark_snapshot_pids_free(monkeypatch)
     artifact = tmp_path / "snapshot"
     artifact.mkdir(mode=0o700)
     (artifact / "child.log").write_bytes(b"startup log")
@@ -844,6 +956,7 @@ def test_snapshot_criu_uses_file_locks_and_cuda_holder_gpu(
     with pytest.raises(RuntimeError, match="stop after command capture"):
         tools.restore(artifact, _manifest())
 
+    assert probed_pids == [100, 101]
     assert [action for action, _arguments in calls] == ["dump", "restore"]
     assert all("--file-locks" in arguments for _action, arguments in calls)
     monkeypatch.setattr(
@@ -873,6 +986,7 @@ def test_snapshot_restore_never_signals_an_unpinned_pid(
     criu_error: bool,
     message: str,
 ):
+    _mark_snapshot_pids_free(monkeypatch)
     artifact = _local_restore_artifact(tmp_path)
     tools = LocalSnapshotTools()
     signaled: list[int] = []
@@ -925,6 +1039,7 @@ def test_snapshot_restore_pins_and_cleans_the_exact_process_tree(
 def test_snapshot_private_path_and_link_remap_security(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
+    _mark_snapshot_pids_free(monkeypatch)
     real = tmp_path / "real"
     real.mkdir(mode=0o700)
     linked = tmp_path / "linked"

@@ -1157,6 +1157,20 @@ class LocalSnapshotTools:
     def restore(self, artifact: Path, manifest: SnapshotManifest) -> int:
         if not manifest.process_tree:
             raise SnapshotRestoreError("captured process tree is empty")
+        # This is necessarily a best-effort TOCTOU check. CRIU restore and the
+        # rollback below remain authoritative if a PID is claimed after it.
+        for pid in manifest.process_tree:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                pass
+            except Exception as error:
+                raise SnapshotRestoreError(
+                    f"captured PID availability probe failed: {pid}"
+                ) from error
+            raise SnapshotRestoreError(f"captured PID is already occupied: {pid}")
         expected_root_pid = manifest.process_tree[0]
         (artifact / "release.json").unlink(missing_ok=True)
         pidfile = artifact / "restored.pid"
