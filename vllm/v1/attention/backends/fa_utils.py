@@ -9,6 +9,11 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
+# FA4 serves (head_dim, head_dim_v) == (256, 256) on Blackwell with a dedicated
+# 2-CTA kernel (flash_attn/cute/sm100_hd256_2cta_fmha_forward.py) that reads
+# paged KV through TMA only, with exactly one page per 128-token tile.
+FA4_HD256_PAGE_SIZE = 128
+
 # Track whether upstream flash-attn is available on ROCm.
 # Set during module initialization and never modified afterwards.
 # This module-level flag avoids repeated import attempts and ensures
@@ -72,7 +77,9 @@ def get_flash_attn_version(
     head_size: int | None = None,
     head_size_v: int | None = None,
     has_sinks: bool = False,
-    requires_local_attention: bool = False,
+    requires_softcap: bool = False,
+    kv_cache_block_size: int | None = None,
+    supports_fa4_hd256: bool = False,
 ) -> int | None:
     if current_platform.is_xpu():
         return 2
@@ -169,17 +176,26 @@ def get_flash_attn_version(
             )
             fa_version = 2
 
-        if (
-            fa_version == 4
-            and device_capability.major >= 10
-            and head_size == 256
-            and requires_local_attention
-        ):
-            logger.warning_once(
-                "FA4 on Blackwell does not support local attention with "
-                "head_size=256, defaulting to FA version 2."
-            )
-            fa_version = 2
+        # FA4 routes head_size=256 on Blackwell to a dedicated kernel whose
+        # feature set is much narrower than the generic FA4 forward. Anything
+        # it cannot express has to resolve to FA2 *here*, at selection time,
+        # or it becomes an AssertionError at kernel-launch time.
+        if fa_version == 4 and uses_fa4_hd256_kernel(head_size, head_size_v):
+            if not supports_fa4_hd256:
+                # Opt-in: the kernel also needs a call shape only
+                # FlashAttentionBackend builds (see FA4_HD256_PAGE_SIZE).
+                fa_version = 2
+            elif (
+                reason := _fa4_hd256_fallback_reason(
+                    has_sinks, requires_softcap, kv_cache_block_size, vllm_config
+                )
+            ) is not None:
+                logger.warning_once(
+                    "FA4's Blackwell head_size=256 kernel does not support %s, "
+                    "defaulting to FA version 2.",
+                    reason,
+                )
+                fa_version = 2
 
         # FA4 on SM100 (Blackwell) has TMEM capacity limits that restrict
         # supported head dimensions to ≤128, with exceptions for 256 and 192/128 (MLA
@@ -212,6 +228,64 @@ def get_flash_attn_version(
         return None
 
 
+def uses_fa4_hd256_kernel(
+    head_size: int | None, head_size_v: int | None = None
+) -> bool:
+    """Whether FA4 would dispatch this layer to its dedicated hd256 kernel.
+
+    Mirrors ``use_dedicated_hd256_kernel`` in flash_attn/cute/interface.py:
+    ``arch // 10 in [10, 11] and head_dim == head_dim_v == 256``. head_size=256
+    with a different V head dim keeps using the generic FA4 forward.
+    """
+    if head_size != 256:
+        return False
+    if head_size_v is not None and head_size_v != 256:
+        return False
+    capability = current_platform.get_device_capability()
+    return capability is not None and capability.major in (10, 11)
+
+
+def _fa4_hd256_fallback_reason(
+    has_sinks: bool,
+    requires_softcap: bool,
+    kv_cache_block_size: int | None,
+    vllm_config: Any,
+) -> str | None:
+    """Feature of this layer that FA4's hd256 kernel cannot express, or None.
+
+    Only features are listed here. The kernel's remaining requirements are
+    call-shape ones that ``FlashAttentionImpl.forward`` satisfies directly, so
+    they are not fallback reasons; see ``FA4_HD256_PAGE_SIZE``.
+    """
+    model_config = vllm_config.model_config if vllm_config is not None else None
+    if has_sinks:
+        return "attention sinks"
+    if requires_softcap or (
+        # Model-level signal (Gemma-2), so the KV cache block size advertised
+        # for the model agrees with the version each of its layers selects.
+        model_config is not None
+        and getattr(model_config.hf_text_config, "attn_logit_softcapping", None)
+    ):
+        return "logits soft capping"
+    if kv_cache_block_size is not None and kv_cache_block_size % FA4_HD256_PAGE_SIZE:
+        # A larger multiple is fine: the KV cache group is then split into
+        # FA4_HD256_PAGE_SIZE-token kernel pages (select_common_block_size).
+        return f"a KV cache block size of {kv_cache_block_size}"
+    if model_config is not None:
+        if model_config.is_mm_prefix_lm:
+            return "mm_prefix bidirectional attention"
+        if model_config.rswa_window is not None:
+            return "R-SWA"
+    if (
+        vllm_config is not None
+        and vllm_config.parallel_config.decode_context_parallel_size > 1
+    ):
+        # The DCP context call reuses the unsliced block table with a
+        # max_dcp_context_kv_len that is not page aligned.
+        return "decode context parallelism"
+    return None
+
+
 def is_fa_version_supported(fa_version: int) -> bool:
     try:
         from vllm.vllm_flash_attn.flash_attn_interface import (
@@ -230,6 +304,9 @@ def flash_attn_supports_kv_cache_dtype(
     head_size: int | None = None,
     head_size_v: int | None = None,
     has_sinks: bool = False,
+    requires_softcap: bool = False,
+    kv_cache_block_size: int | None = None,
+    supports_fa4_hd256: bool = False,
 ) -> bool:
     if kv_cache_dtype == "fp8_e5m2":
         return False
@@ -240,6 +317,9 @@ def flash_attn_supports_kv_cache_dtype(
         head_size=head_size,
         head_size_v=head_size_v,
         has_sinks=has_sinks,
+        requires_softcap=requires_softcap,
+        kv_cache_block_size=kv_cache_block_size,
+        supports_fa4_hd256=supports_fa4_hd256,
     )
     return (fa_version == 3 and current_platform.is_device_capability_family(90)) or (
         fa_version == 4 and current_platform.is_device_capability_family(100)
