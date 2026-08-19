@@ -108,11 +108,9 @@ def moe_fused_mul_sum_persistent_kernel(
 ):
     # Persistent variant: the launch grid is a fixed function of the SM count
     # (see moe_fused_mul_sum), not of num_tokens, so it stays static under CUDA
-    # graph capture. The real row count is read from device (no host sync) and
-    # bounds the grid-stride loop, so worst-case padding rows past num_recv are
-    # never iterated instead of being launched as empty CTAs that early-return.
-    row_bound = tl.load(num_valid_tokens_ptr).to(tl.int32)
-    row_bound = tl.minimum(row_bound, num_tokens)
+    # graph capture. The grid-stride loop covers every row; padding rows are
+    # dropped per-tile by the has_expert_map row_present check below.
+    row_bound = num_tokens
 
     num_m_tiles = tl.cdiv(row_bound, BLOCK_M)
     total_tiles = num_m_tiles * NUM_K_TILES
@@ -274,12 +272,10 @@ def moe_fused_mul_sum(
             indicates an invalid token/expert pair that will be skipped. When
             provided, rows with all top ids < 0 (worst-case padding) are skipped
             and their output rows left untouched.
-        num_valid_tokens: Optional device scalar (1-element tensor) holding the
-            number of real token rows (e.g. num_recv for a decode dispatch).
-            When provided, a persistent kernel with a fixed, CUDA-graph-safe grid
-            is launched and only rows [0, num_valid_tokens) are processed; the
-            padding tail is never iterated. Pass the token count, not
-            token*top_k.
+        num_valid_tokens: Optional device scalar (1-element tensor). When
+            provided, a persistent kernel with a fixed, CUDA-graph-safe grid is
+            launched. The grid-stride loop covers all num_tokens rows; padding
+            rows are dropped per-tile by the expert_map check.
 
     Returns:
         The fused weighted sum of expert outputs.
