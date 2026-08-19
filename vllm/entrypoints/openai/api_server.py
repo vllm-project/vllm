@@ -48,7 +48,7 @@ from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tool_parsers import ToolParserManager
-from vllm.tracing import instrument
+from vllm.tracing import init_tracer, instrument
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import is_valid_ipv6_address
@@ -373,6 +373,10 @@ async def init_render_app_state(
             for name in served_model_names
         ],
     )
+
+    tracing_endpoint = vllm_config.observability_config.otlp_traces_endpoint
+    if tracing_endpoint is not None:
+        init_tracer("vllm.renderer", tracing_endpoint)
 
     if args.enable_log_requests:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
