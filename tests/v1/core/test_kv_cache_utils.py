@@ -781,6 +781,13 @@ def test_build_full_block_hash_chain_same_inputs_twice_are_identical(monkeypatch
     NONE_HASH per call (absent PYTHONHASHSEED), silently diverging the same
     request's chain across two calls in the same process. The guard must
     make repeated calls, e.g. across a batch of requests, deterministic.
+
+    Uses ``xxhash`` rather than ``sha256``: since NONE_HASH is now
+    deterministic by default for cryptographic hash functions (see
+    ``resolve_none_hash_seed``), ``sha256`` would pass here even without the
+    guard, and this test would stop proving anything. ``xxhash`` keeps the
+    per-process random seed absent ``PYTHONHASHSEED``, so this only passes if
+    the guard is actually preventing a reseed between the two calls.
     """
     with monkeypatch.context() as m:
         m.delenv("PYTHONHASHSEED", raising=False)
@@ -788,10 +795,10 @@ def test_build_full_block_hash_chain_same_inputs_twice_are_identical(monkeypatch
 
         token_ids = list(range(9))
         first = kv_cache_utils.build_full_block_hash_chain(
-            token_ids, block_size=3, hash_algo="sha256"
+            token_ids, block_size=3, hash_algo="xxhash"
         )
         second = kv_cache_utils.build_full_block_hash_chain(
-            token_ids, block_size=3, hash_algo="sha256"
+            token_ids, block_size=3, hash_algo="xxhash"
         )
         assert first == second
 

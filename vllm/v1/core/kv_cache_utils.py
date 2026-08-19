@@ -683,16 +683,20 @@ def build_full_block_hash_chain(
     semantics without reimplementing them. See ``_ensure_none_hash`` for the
     NONE_HASH seeding behavior this relies on.
 
-    Seeding and stability: NONE_HASH is process-wide and first-writer-wins.
-    Without ``PYTHONHASHSEED`` set, it is random per process, so two separate
-    processes diverge even given identical inputs and the same
-    ``hash_algo``. With ``PYTHONHASHSEED`` set, NONE_HASH is derived from the
-    seed *and* whichever hash function first initialized it in this process
-    -- so for reproducible cross-process analysis (e.g. diffing JSON reports
-    across CI runs), set ``PYTHONHASHSEED`` and run in a fresh process with a
-    single, consistent ``hash_algo``. Hash *values* are never guaranteed
-    stable across vLLM versions or hash-algorithm changes. The one
-    unconditional contract is narrower: within a single process, the
+    Seeding and stability: NONE_HASH is process-wide and first-writer-wins
+    (see ``resolve_none_hash_seed``). Without ``PYTHONHASHSEED`` set,
+    cryptographic hash algorithms (``sha256``, ``sha256_cbor``) derive
+    NONE_HASH from a fixed default seed, so independent processes agree by
+    default; non-cryptographic algorithms (``xxhash``, ``xxhash_cbor``) keep
+    a random per-process seed, since a predictable seed would let an
+    attacker precompute colliding blocks offline. With ``PYTHONHASHSEED``
+    set, NONE_HASH is derived from the seed *and* whichever hash function
+    first initialized it in this process -- so for reproducible
+    cross-process analysis with a non-cryptographic algorithm (e.g. diffing
+    JSON reports across CI runs), set ``PYTHONHASHSEED`` and run in a fresh
+    process with a single, consistent ``hash_algo``. Hash *values* are never
+    guaranteed stable across vLLM versions or hash-algorithm changes. The
+    one unconditional contract is narrower: within a single process, the
     returned chain matches what the engine's own request-hashing path
     computes for the same tokens, block size, and hash algorithm.
 
