@@ -900,6 +900,24 @@ def test_find_mm_placeholders(
     assert result == expected
 
 
+def test_find_mm_placeholders_insertion_overlap():
+    prompt = [1, 32000, 32000, 32000]
+    mm_prompt_updates = {
+        "pattern": [
+            [PromptInsertion("pattern", [32000], [32000, 32000]).resolve(0)]
+        ]
+    }
+
+    result = find_mm_placeholders(prompt, mm_prompt_updates, tokenizer=None)
+
+    assert "pattern" in result
+    infos = result["pattern"]
+    assert len(infos) == 1
+    info = infos[0]
+    assert info.start_idx == 2
+    assert info.tokens == [32000, 32000]
+
+
 @pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
 @pytest.mark.parametrize(
     ("num_images", "limit", "is_valid"),

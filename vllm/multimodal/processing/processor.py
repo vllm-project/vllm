@@ -1047,11 +1047,24 @@ def _iter_placeholders(
             if content_len_full == 0 or end_idx_full > prompt_len:
                 continue
 
-            # Check the first token before comparing the full slice
+                # Check the first token before comparing the full slice
             if (
                 first_token == content_tokens_full[0]
                 and prompt[start_idx:end_idx_full] == content_tokens_full
             ):
+                if update.mode == UpdateMode.INSERT and not isinstance(
+                    update.target, PromptIndex
+                ):
+                    try:
+                        target_tokens = _seq2tokens(tokenizer, update.target)
+                    except Exception:
+                        target_tokens = None
+
+                    if target_tokens:
+                        tlen = len(target_tokens)
+                        if start_idx < tlen or prompt[start_idx - tlen : start_idx] != target_tokens:  # noqa: E203
+                            continue
+
                 content = update.content
                 content_is_embed = content.is_embed
                 if content_is_embed is not None:
