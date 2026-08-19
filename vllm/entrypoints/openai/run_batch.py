@@ -35,7 +35,7 @@ from vllm.config import config
 from vllm.connections import global_http_connection
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.api_server import init_app_state
+from vllm.entrypoints.launchers.api_server.entry import init_app_state
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -1006,7 +1006,7 @@ async def run_batch(
 
 
 async def main(args: Namespace):
-    from vllm.entrypoints.openai.api_server import build_async_engine_client
+    from vllm.entrypoints.launchers.api_server.entry import build_async_engine_client
     from vllm.usage.usage_lib import UsageContext
 
     validate_run_batch_args(args)
