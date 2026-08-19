@@ -11,12 +11,13 @@ import msgspec
 import numpy as np
 import torch
 
+from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import PrefillStats, SchedulerStats
-from vllm.v1.outputs import LogprobsLists, LogprobsTensors
+from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplingMaskLists
 from vllm.v1.serial_utils import UtilityResult
 
 # Type for pause_generation mode parameter.
@@ -35,8 +36,6 @@ FT_STATUS_CALL_ID = -2
 
 
 class EEPNotificationType(enum.Enum):
-    NEW_CORE_ENGINES_INIT_READY = "NEW_CORE_ENGINES_INIT_READY"
-    NEW_CORE_ENGINES_WEIGHTS_INIT_READY = "NEW_CORE_ENGINES_WEIGHTS_INIT_READY"
     RECONFIGURE_FINISHED = "RECONFIGURE_FINISHED"
     SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
 
@@ -89,9 +88,15 @@ class EngineCoreReadyResponse:
     max_num_seqs: int
     max_num_batched_tokens: int
     instance_id: str
+    supports_lora: bool
+    max_loras: int
     # KV cache capacity (None for encoder-only/attention-free models).
     kv_cache_size_tokens: int | None = None
     kv_cache_max_concurrency: float | None = None
+    kv_events_config: KVEventsConfig | None = None
+    weight_transfer_backend: str | None = None
+    enable_sleep_mode: bool = False
+    supports_draft_weight_updates: bool = False
 
 
 class EngineCoreRequest(
@@ -144,6 +149,8 @@ class EngineCoreRequest(
     # request_finished hook. Used to free P-side prefill blocks when a
     # KV-transfer request is rejected on the D node before engine admission.
     abort_immediately: bool = False
+
+    session_id: str | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
@@ -209,6 +216,13 @@ class EngineCoreOutput(
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
+    # Multi-modal hashes missing from the P1 receiver cache (P0/P1 drift; see
+    # `MultiModalCacheMissError`). Non-empty => retryable: the frontend drops these
+    # from its sender cache and the request is resent with the data. Appended last
+    # so `array_like` positional serialization stays backward compatible.
+    mm_cache_miss_hashes: list[str] | None = None
+
+    new_sampling_mask: SamplingMaskLists | None = None
 
     @property
     def finished(self) -> bool:

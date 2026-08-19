@@ -8,9 +8,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from tests.v1.kv_connector.unit.offloading_connector.utils import MockOffloadingSpec
 from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+    SchedulerOffloadConfig,
+    is_store_reachable_swa_chunk,
 )
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (
@@ -42,6 +47,9 @@ def _make_vllm_config(
     config.cache_config.cache_dtype = torch.float16
     config.model_config.model = "test-model"
     config.model_config.use_mla = False
+    # _full_attention_spec's heads at tp=1: the parallelism-agnostic gate
+    # requires the head shard to cover the model's KV heads exactly
+    config.model_config.get_total_num_kv_heads.return_value = 4
     world_size = (
         tensor_parallel_size * pipeline_parallel_size * prefill_context_parallel_size
     )
@@ -179,6 +187,25 @@ def _make_hybrid_kv_cache_config() -> KVCacheConfig:
     )
 
 
+def _make_mamba_hybrid_kv_cache_config() -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full_layer"], _full_attention_spec()),
+            KVCacheGroupSpec(
+                ["mamba_layer"],
+                MambaSpec(
+                    block_size=16,
+                    shapes=((1, 1),),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                ),
+            ),
+        ],
+    )
+
+
 def _parallelism_agnostic(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
     config = _make_vllm_config()
     kv_cache_config = KVCacheConfig(
@@ -267,13 +294,49 @@ def test_prefill_context_parallelism_does_not_scale_group_blocks():
     assert offloading_config.cache.blocks_per_chunk == 4
 
 
-def test_preserves_data_parallel_index():
+def test_dcp_scales_attention_but_not_mamba_group_blocks():
+    config = _make_vllm_config(tensor_parallel_size=2, decode_context_parallel_size=2)
+    config.speculative_config = None
+
+    offloading_config = build_offloading_config(
+        config, _make_mamba_hybrid_kv_cache_config()
+    )
+
+    assert tuple(group.tokens_per_block for group in offloading_config.groups) == (
+        32,
+        16,
+    )
+    scheduler_config = SchedulerOffloadConfig.from_spec(
+        MockOffloadingSpec(offloading_config),
+        config,
+        _make_mamba_hybrid_kv_cache_config(),
+    )
+    mamba_group = scheduler_config.kv_group_configs[1]
+    assert mamba_group.alignment_chunk_count == 2
+    assert [
+        chunk_idx
+        for chunk_idx in range(4)
+        if is_store_reachable_swa_chunk(
+            chunk_idx,
+            4,
+            mamba_group.alignment_chunk_count,
+            mamba_group.sliding_window_size_in_chunks,
+            mamba_group.is_eagle_group,
+        )
+    ] == [1, 3]
+
+
+def test_preserves_data_parallel_config():
     config = _make_vllm_config()
     config.parallel_config.data_parallel_index = 2
+    config.parallel_config.data_parallel_size = 4
+    config.parallel_config.data_parallel_rank_local = 1
 
     offloading_config = build_offloading_config(config, _make_kv_cache_config())
 
     assert offloading_config.parallel.data_parallel_index == 2
+    assert offloading_config.parallel.data_parallel_size == 4
+    assert offloading_config.parallel.data_parallel_rank_local == 1
 
 
 def test_resolves_heterogeneous_hybrid_block_sizes():
@@ -545,6 +608,89 @@ def test_parallelism_agnostic_for_single_full_attention_group():
 )
 def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
     assert not _parallelism_agnostic(kv_cache_groups)
+
+
+def test_canonical_layout_widens_parallelism_agnostic_to_mla():
+    """The canonical layout dedups the TP-replicated MLA latent into one
+    portable copy, so the gate admits MLA — but only when canonical_layout
+    is requested."""
+    mla_groups = [KVCacheGroupSpec(["l0"], _mla_spec(head_size=576))]
+    assert not _parallelism_agnostic(mla_groups)
+
+    config = _make_vllm_config(extra_config={"canonical_layout": True})
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=mla_groups,
+    )
+    offloading_config = build_offloading_config(config, kv_cache_config)
+    assert offloading_config.parallel.is_parallelism_agnostic
+    assert offloading_config.canonical_layout
+
+    # hybrid groupings stay out: their non-full-attention layers can only
+    # derive opaque (exact-topology) mappings
+    hybrid_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["l0"], _full_attention_spec()),
+            KVCacheGroupSpec(["l1"], _full_attention_spec()),
+        ],
+    )
+    assert not build_offloading_config(
+        config, hybrid_config
+    ).parallel.is_parallelism_agnostic
+
+
+def test_canonical_layout_certifies_v2_model_runner():
+    """Canonical bytes are certified per layer against live tensor strides at
+    registration, so the static gate must not depend on the model-runner
+    version — the v2 runner is the case the canonical layout exists for."""
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["l0"], _full_attention_spec())],
+    )
+
+    config = _make_vllm_config()
+    config.use_v2_model_runner = True
+    assert not build_offloading_config(
+        config, kv_cache_config
+    ).parallel.is_parallelism_agnostic
+
+    config = _make_vllm_config(extra_config={"canonical_layout": True})
+    config.use_v2_model_runner = True
+    assert build_offloading_config(
+        config, kv_cache_config
+    ).parallel.is_parallelism_agnostic
+
+
+def test_prefer_cross_layer_blocks_yields_to_canonical_layout():
+    """The connector must not request cross-layer blocks under
+    canonical_layout: cross-layer slabs have no per-layer refs to certify."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+        OffloadingConnector,
+    )
+
+    kv_cache_config = _make_kv_cache_config()
+    connector_module = "vllm.distributed.kv_transfer.kv_connector.v1"
+
+    def make_connector(extra_config: dict[str, Any] | None) -> OffloadingConnector:
+        with (
+            patch(f"{connector_module}.offloading_connector.OffloadingSpecFactory"),
+            patch(
+                f"{connector_module}.offloading_connector.OffloadingConnectorScheduler"
+            ),
+        ):
+            return OffloadingConnector(
+                _make_vllm_config(extra_config=extra_config),
+                KVConnectorRole.SCHEDULER,
+                kv_cache_config,
+            )
+
+    assert make_connector(None).prefer_cross_layer_blocks
+    assert not make_connector({"canonical_layout": True}).prefer_cross_layer_blocks
 
 
 def test_parallelism_agnostic_disabled_on_v2_model_runner():

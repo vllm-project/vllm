@@ -6,7 +6,7 @@
 import json
 import time
 from http import HTTPStatus
-from typing import Any, ClassVar, Literal, TypeAlias
+from typing import Annotated, Any, ClassVar, Literal, TypeAlias
 
 import regex as re
 from pydantic import (
@@ -17,15 +17,20 @@ from pydantic import (
     model_validator,
 )
 
+import vllm.envs as envs
 from vllm.config.utils import replace
 from vllm.entrypoints.chat_utils import make_tool_call_id
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import VLLMServerError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
+
+StopParam: TypeAlias = (
+    str | Annotated[list[str], Field(max_length=envs.VLLM_MAX_STOP_STRINGS)] | None
+)
 
 
 class OpenAIBaseModel(BaseModel):
@@ -112,11 +117,16 @@ class PromptTokenUsageInfo(OpenAIBaseModel):
     request has no multimodal input."""
 
 
+class CompletionTokenUsageInfo(OpenAIBaseModel):
+    reasoning_tokens: int = 0
+
+
 class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: int | None = 0
     prompt_tokens_details: PromptTokenUsageInfo | None = None
+    completion_tokens_details: CompletionTokenUsageInfo | None = None
 
 
 class PerRequestTimingMetrics(OpenAIBaseModel):
@@ -256,7 +266,7 @@ def validate_structural_tag_payload(payload: Any, *, parameter: str) -> None:
                 structured_outputs=StructuredOutputsParams(structural_tag=payload)
             )
         )
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, VLLMValidationError) as exc:
         raise VLLMValidationError(
             f"Invalid {parameter} structural_tag specification.",
             parameter=parameter,
@@ -296,6 +306,7 @@ class FunctionDefinition(OpenAIBaseModel):
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         data = handler(self)
+        data = {k: v for k, v in data.items() if k in type(self).model_fields}
         if self.strict is None:
             data.pop("strict", None)
         if self.defer_loading is None:
@@ -404,7 +415,7 @@ class DeltaMessage(OpenAIBaseModel):
         return data
 
 
-class GenerationError(Exception):
+class GenerationError(VLLMServerError):
     """raised when finish_reason indicates internal server error (500)"""
 
     def __init__(self, message: str = "Internal server error"):
