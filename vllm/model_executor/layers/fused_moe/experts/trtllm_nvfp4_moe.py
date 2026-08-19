@@ -44,6 +44,40 @@ class TrtLlmNvFp4ExpertsBase:
     NvFp4 TRTLLM-Gen MoE kernels. Supports modular and monolithic interface.
     """
 
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        # FlashInfer's native FP4 implementation appends always-on shared
+        # assignments inside its DeepSeek-V3 router. It does not yet support
+        # the pre-routed modular path, expert parallelism, or a configurable
+        # shared-expert weight.
+        if moe_config.num_fused_shared_experts:
+            if not cls.is_monolithic():
+                return False, (
+                    "native fused shared experts require the monolithic backend"
+                )
+            if moe_config.routing_method != RoutingMethodType.DeepSeekV3:
+                return False, "native fused shared experts require DeepSeekV3 routing"
+            if moe_config.moe_parallel_config.use_ep:
+                return False, "native fused shared experts do not support EP"
+            if moe_config.fused_shared_expert_weight != 1.0:
+                return False, (
+                    "native fused shared experts require shared expert weight 1.0"
+                )
+
+        return mk.FusedMoEExperts.is_supported_config(
+            cls,
+            moe_config,
+            weight_key,
+            activation_key,
+            activation_format,
+        )
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -466,8 +500,14 @@ class TrtLlmNvFp4ExpertsMonolithic(
     Monolithic version of the kernel (router + experts).
     """
 
-    def supports_routing_replay_capture(self) -> bool:
+    @staticmethod
+    def supports_native_fused_shared_experts() -> bool:
         return True
+
+    def supports_routing_replay_capture(self) -> bool:
+        # FlashInfer replay buffers have routed-top-k stride, while the native
+        # shared path emits top-k + shared slots.
+        return self.moe_config.num_fused_shared_experts == 0
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -543,6 +583,26 @@ class TrtLlmNvFp4ExpertsMonolithic(
 
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
+        num_fused_shared_experts = self.moe_config.num_fused_shared_experts
+        logger.info_once(
+            "FlashInfer TRTLLM NVFP4 monolithic MoE is running with "
+            "num_fused_shared_experts=%d.",
+            num_fused_shared_experts,
+        )
+        if num_fused_shared_experts:
+            # Weight tensors have E + S rows, but FlashInfer's routing metadata
+            # describes only the E routed experts. The S shared rows are passed
+            # separately and appended by the native DeepSeek-V3 router.
+            assert self.ep_rank == 0
+            assert self.local_num_experts == (
+                global_num_experts + num_fused_shared_experts
+            )
+            local_expert_offset = 0
+            local_num_experts = global_num_experts
+        else:
+            local_expert_offset = self.ep_rank * self.local_num_experts
+            local_num_experts = self.local_num_experts
+
         routing_replay_out = self._maybe_make_routing_replay_buffer(
             num_tokens=hidden_states.shape[0],
             device=hidden_states.device,
@@ -571,11 +631,12 @@ class TrtLlmNvFp4ExpertsMonolithic(
             output2_scale_scalar=self.quant_config.g2_alphas,
             num_experts=global_num_experts,
             top_k=self.topk,
+            num_fused_shared_experts=num_fused_shared_experts,
             n_group=(num_expert_group or 0),
             topk_group=(topk_group or 0),
             intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
-            local_num_experts=self.local_num_experts,
+            local_expert_offset=local_expert_offset,
+            local_num_experts=local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
             do_finalize=True,

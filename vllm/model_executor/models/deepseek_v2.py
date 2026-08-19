@@ -93,6 +93,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
@@ -131,6 +132,65 @@ def _get_moe_router_dtype(
     if router_dtype == "float32":
         return torch.float32
     return None
+
+
+def _can_fuse_nvfp4_shared_experts(
+    quant_config: QuantizationConfig | None,
+    parallel_config: ParallelConfig,
+    prefix: str,
+) -> bool:
+    """Whether this layer can use FlashInfer's native NVFP4 shared path."""
+    if (
+        not envs.VLLM_FLASHINFER_NVFP4_FUSED_SHARED_EXPERTS
+        or quant_config is None
+        or quant_config.get_name() != "modelopt_fp4"
+        or getattr(quant_config, "quant_method", None) != "NVFP4"
+        or not getattr(quant_config, "is_checkpoint_nvfp4_serialized", False)
+        or parallel_config.enable_expert_parallel
+        or parallel_config.enable_eplb
+        or not current_platform.is_cuda()
+        or not current_platform.is_device_capability_family(100)
+        or not has_flashinfer_trtllm_fused_moe()
+    ):
+        return False
+
+    # Native fusion requires every appended shared weight to use the same
+    # serialized NVFP4 representation as the routed expert tensor.
+    is_layer_excluded = getattr(quant_config, "is_layer_excluded", None)
+    if is_layer_excluded is None:
+        return False
+    return not any(
+        is_layer_excluded(layer_prefix)
+        for layer_prefix in (
+            f"{prefix}.experts",
+            f"{prefix}.shared_experts.gate_up_proj",
+            f"{prefix}.shared_experts.down_proj",
+        )
+    )
+
+
+def _shared_expert_tensor_chunks(
+    name: str,
+    loaded_weight: torch.Tensor,
+    num_shared_experts: int,
+) -> tuple[torch.Tensor, ...]:
+    """Expand a widened shared projection into expert-style checkpoint chunks."""
+    if loaded_weight.ndim == 0:
+        # ModelOpt NVFP4 stores input_scale and weight_scale_2 as scalars.
+        # A widened shared projection has one scale, so every synthesized
+        # shared-expert slot receives the same value.
+        return (loaded_weight,) * num_shared_experts
+
+    # gate/up are column-parallel and widened along dim 0; down is
+    # row-parallel and widened along dim 1. The same layout applies to the
+    # packed FP4 weights and their blockwise weight_scale tensors.
+    split_dim = 1 if "down_proj.weight" in name and loaded_weight.ndim > 1 else 0
+    total = loaded_weight.shape[split_dim]
+    assert total % num_shared_experts == 0, (
+        f"Shared expert tensor {name!r} dim {total} not divisible by "
+        f"num_shared_experts {num_shared_experts}"
+    )
+    return loaded_weight.split(total // num_shared_experts, dim=split_dim)
 
 
 class DeepseekAttention(nn.Module):
@@ -1274,13 +1334,25 @@ class DeepseekV2DecoderLayer(nn.Module):
         )
 
         if is_moe_layer:
+            fuse_nvfp4_shared_experts = (
+                config.n_shared_experts is not None
+                and _can_fuse_nvfp4_shared_experts(
+                    quant_config,
+                    parallel_config,
+                    f"{prefix}.mlp",
+                )
+            )
             self.mlp = DeepseekV2MoE(
                 config=config,
                 parallel_config=parallel_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
-                # aiter applies routed_scaling_factor internally
-                apply_routed_scale_to_output=not rocm_aiter_ops.is_fused_moe_enabled(),
+                # AITER and native FlashInfer fusion apply routed scaling
+                # internally, leaving the always-on shared contribution unscaled.
+                apply_routed_scale_to_output=not (
+                    rocm_aiter_ops.is_fused_moe_enabled() or fuse_nvfp4_shared_experts
+                ),
+                fuse_shared_experts=(True if fuse_nvfp4_shared_experts else None),
             )
         else:
             self.mlp = DeepseekV2MLP(
@@ -1646,44 +1718,23 @@ class DeepseekV2Model(nn.Module):
             else:
                 is_expert_weight = False
 
-                # Special handling: when AITER fusion_shared_experts is enabled,
-                # checkpoints may provide a single widened shared_experts tensor
-                # without explicit expert indices
-                # (e.g. ...mlp.shared_experts.gate_proj.weight).
-                # For models with multiple shared experts, split that tensor
-                # evenly into per-shared-expert slices and load them into
-                # appended expert slots mlp.experts.{n_routed_experts + j}.*
-                # accordingly.
-                num_chunks = 1
+                # Shared-expert checkpoints use one projection namespace instead
+                # of explicit expert indices. Matrix weights and block scales may
+                # be widened for multiple shared experts, while per-tensor NVFP4
+                # input/global scales are scalars shared by every appended slot.
+                weight_chunks = (loaded_weight,)
                 if is_fusion_moe_shared_experts_layer:
-                    num_chunks = getattr(self.config, "n_shared_experts", 1) or 1
-                    # Determine split axis based on op type
-                    # gate/up: ColumnParallel → split along dim 0
-                    # down: RowParallel → split along dim 1
-                    split_dim = (
-                        1
-                        if ("down_proj.weight" in name and loaded_weight.ndim > 1)
-                        else 0
+                    num_shared_experts = (
+                        getattr(self.config, "n_shared_experts", 1) or 1
                     )
-                    total = loaded_weight.shape[split_dim]
-                    assert total % num_chunks == 0, (
-                        f"Shared expert weight dim {total} "
-                        f"not divisible by num_chunks {num_chunks}"
+                    weight_chunks = _shared_expert_tensor_chunks(
+                        name, loaded_weight, num_shared_experts
                     )
-                    chunk_size = total // num_chunks
 
-                for j in range(num_chunks):
+                for j, weight_to_load in enumerate(weight_chunks):
                     chunk_name = name
-                    weight_to_load = loaded_weight
 
                     if is_fusion_moe_shared_experts_layer:
-                        chunk_slice = slice(j * chunk_size, (j + 1) * chunk_size)
-                        if loaded_weight.ndim == 1:
-                            weight_to_load = loaded_weight[chunk_slice]
-                        elif split_dim == 0:
-                            weight_to_load = loaded_weight[chunk_slice, :]
-                        else:
-                            weight_to_load = loaded_weight[:, chunk_slice]
                         # Synthesize an expert-style name so expert mapping
                         # can route it
                         chunk_name = name.replace(

@@ -161,7 +161,10 @@ class RoutedExperts(PluggableLayer):
             ),
             "params_dtype": params_dtype,
             "weight_loader": self.weight_loader,
-            "global_num_experts": moe_config.num_experts,
+            # Quant methods that allocate globally indexed metadata (for
+            # example ModelOpt NVFP4 input scales) must include appended
+            # shared-expert slots as well as routed experts.
+            "global_num_experts": self.kernel_global_num_experts,
         }
 
         # need full intermediate size pre-sharding for WNA16 act order

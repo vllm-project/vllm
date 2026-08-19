@@ -203,6 +203,7 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
+    VLLM_FLASHINFER_NVFP4_FUSED_SHARED_EXPERTS: bool = True
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS: list[str] | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
@@ -1574,6 +1575,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_INT4", "0"))
+    ),
+    # Fuse compatible NVFP4 shared experts into FlashInfer's TRTLLM MoE call.
+    # Disabling this keeps the same routed-expert backend and is intended for
+    # correctness and performance A/B validation against the separate MLP path.
+    "VLLM_FLASHINFER_NVFP4_FUSED_SHARED_EXPERTS": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_NVFP4_FUSED_SHARED_EXPERTS", "1"))
     ),
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
