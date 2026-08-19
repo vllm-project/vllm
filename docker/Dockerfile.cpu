@@ -119,7 +119,8 @@ ENV TARGETARCH=${TARGETARCH}
 ######################### x86_64 BASE IMAGE #########################
 FROM base-common AS base-amd64
 
-ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/opt/venv/lib/libiomp5.so"
+# ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/opt/venv/lib/libiomp5.so"
+ENV LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libtcmalloc_minimal.so.4"
 
 ######################### arm64 BASE IMAGE #########################
 FROM base-common AS base-arm64

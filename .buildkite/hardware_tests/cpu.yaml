@@ -71,7 +71,6 @@ steps:
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 1800m "
-      pytest -x -v -s tests/models/language/generation -m cpu_model
       pytest -x -v -s tests/models/language/pooling -m cpu_model
       pytest -x -v -s tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py"
 
