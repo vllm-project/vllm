@@ -375,17 +375,25 @@ def test_top_k_per_row_decode_large_vocab_size(clean_logits: bool) -> None:
 
 
 @pytest.mark.parametrize(
-    "batch_size,num_speculative_tokens",
+    "batch_size,num_speculative_tokens,min_seq_len,max_seq_len",
     [
-        pytest.param(1, 2, id="eight-splits"),
-        pytest.param(7, 4, id="four-splits"),
-        pytest.param(13, 4, id="baseline-fallback"),
+        pytest.param(1, 2, 125_000, 250_000, id="eight-splits"),
+        pytest.param(7, 4, 125_000, 250_000, id="four-splits"),
+        pytest.param(16, 4, 2_500, 2_501, id="dynamic-short-rows"),
+        pytest.param(13, 4, 25_000, 25_001, id="dynamic-three-splits"),
+        pytest.param(16, 4, 65_535, 65_536, id="dynamic-boundary-mixed"),
+        pytest.param(16, 4, 125_000, 125_001, id="dynamic-two-splits"),
+        pytest.param(64, 3, 125_000, 125_001, id="dynamic-two-splits-max-rows"),
+        pytest.param(64, 4, 125_000, 125_001, id="baseline-fallback"),
     ],
 )
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
 @torch.inference_mode()
 def test_top_k_per_row_decode_gfx950_long_c4a(
-    batch_size: int, num_speculative_tokens: int
+    batch_size: int,
+    num_speculative_tokens: int,
+    min_seq_len: int,
+    max_seq_len: int,
 ) -> None:
     properties = torch.cuda.get_device_properties(0)
     if not properties.gcnArchName.startswith("gfx950"):
@@ -396,7 +404,9 @@ def test_top_k_per_row_decode_gfx950_long_c4a(
     stride = 262_144
     top_k = 1024
     offsets = torch.arange(num_rows, dtype=torch.int32, device="cuda")
-    seq_lens = 125_000 + offsets * 125_000 // max(num_rows - 1, 1)
+    seq_lens = min_seq_len + offsets * (max_seq_len - min_seq_len) // max(
+        num_rows - 1, 1
+    )
     seq_lens = seq_lens.reshape(batch_size, query_tokens)
     logits = torch.randn(num_rows, stride, dtype=torch.float32, device="cuda")
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
@@ -420,6 +430,52 @@ def test_top_k_per_row_decode_gfx950_long_c4a(
         seq_lens.reshape(-1),
         top_k,
         "gfx950 long C4A top-k",
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="This test requires ROCm")
+@torch.inference_mode()
+def test_top_k_per_row_decode_gfx950_long_c4a_1d_seq_lens() -> None:
+    properties = torch.cuda.get_device_properties(0)
+    if not properties.gcnArchName.startswith("gfx950"):
+        pytest.skip("This test exercises the gfx950 launch configuration")
+
+    batch_size = 20
+    query_tokens = 4
+    num_rows = batch_size * query_tokens
+    stride = 262_144
+    top_k = 1024
+    seq_lens = torch.linspace(
+        125_003,
+        250_000,
+        batch_size,
+        dtype=torch.int32,
+        device="cuda",
+    )
+    row_offsets = torch.arange(query_tokens, dtype=torch.int32, device="cuda")
+    row_ends = (seq_lens[:, None] - query_tokens + row_offsets + 1).reshape(-1)
+    logits = torch.randn(num_rows, stride, dtype=torch.float32, device="cuda")
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+
+    torch.ops._C.top_k_per_row_decode(
+        logits,
+        query_tokens,
+        seq_lens,
+        indices,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        top_k,
+    )
+
+    row_starts = torch.zeros(num_rows, dtype=torch.int32, device="cuda")
+    validate_topk_against_reference(
+        logits,
+        indices,
+        row_starts,
+        row_ends,
+        top_k,
+        "gfx950 long C4A top-k with 1-D sequence lengths",
     )
 
 
@@ -489,10 +545,12 @@ def test_aiter_c4a_decode_topk_auto_policy() -> None:
     )
 
     assert _use_aiter_c4a_decode_topk_auto(3, 2_500, on_gfx950=True)
-    assert not _use_aiter_c4a_decode_topk_auto(96, 125_000, on_gfx950=True)
-    assert _use_aiter_c4a_decode_topk_auto(128, 125_000, on_gfx950=True)
-    assert not _use_aiter_c4a_decode_topk_auto(160, 250_000, on_gfx950=True)
-    assert _use_aiter_c4a_decode_topk_auto(192, 250_000, on_gfx950=True)
+    assert _use_aiter_c4a_decode_topk_auto(1, 65_536, on_gfx950=True)
+    assert not _use_aiter_c4a_decode_topk_auto(1, 65_537, on_gfx950=True)
+    assert not _use_aiter_c4a_decode_topk_auto(256, 125_000, on_gfx950=True)
+    assert _use_aiter_c4a_decode_topk_auto(257, 125_000, on_gfx950=True)
+    assert not _use_aiter_c4a_decode_topk_auto(256, 250_000, on_gfx950=True)
+    assert _use_aiter_c4a_decode_topk_auto(320, 250_000, on_gfx950=True)
     assert not _use_aiter_c4a_decode_topk_auto(320, 2_500, on_gfx950=False)
 
 

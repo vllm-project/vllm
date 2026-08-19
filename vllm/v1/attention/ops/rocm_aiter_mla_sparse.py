@@ -130,10 +130,10 @@ def _use_aiter_c4a_decode_topk_auto(
     on_gfx950: bool = _ON_GFX950,
 ) -> bool:
     # AITER v0.1.19 decode is one-block only. The native split kernel remains
-    # faster for long, low-row shapes on gfx950.
+    # faster for long rows while its gfx950 specialization applies.
     if not on_gfx950:
         return False
-    return num_rows >= 192 or max_valid_seq_len <= max(65_536, 1_280 * num_rows)
+    return num_rows > 256 or max_valid_seq_len <= 65_536
 
 
 @triton.jit
