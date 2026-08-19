@@ -170,7 +170,6 @@ class DeepseekV32Attention(MLAAttention):
     indexer: "DeepseekV32Indexer | None"
     indexer_cls: "type[DeepseekV32Indexer]" = DeepseekV32Indexer
 
-    require_fp8_kv_cache: bool = True
     supports_dense_mha_prefill = False
 
     def __init__(
@@ -283,21 +282,9 @@ class DeepseekV32Attention(MLAAttention):
             self.layer_name if enable_short_prefill_scoring_skip else ""
         )
 
-        if self.require_fp8_kv_cache:
-            assert is_quantized_kv_cache(self.kv_cache_dtype), (
-                "deepseek_v32 (nvidia) requires an fp8 KV cache served by a sparse "
-                "MLA backend. Launch with --kv-cache-dtype fp8 (FlashInfer sparse) "
-                "or --kv-cache-dtype fp8_ds_mla (FlashMLA sparse)."
-            )
-            self._fp8_query = self.impl.supports_quant_query_input
-            if not self._fp8_query:
-                assert self.kv_cache_dtype == "fp8_ds_mla", (
-                    "deepseek_v32 (nvidia) on a bf16-query sparse MLA backend "
-                    "(FlashMLA sparse) requires the fp8_ds_mla KV cache layout. "
-                    "Launch with --kv-cache-dtype fp8_ds_mla."
-                )
-
-            self._fp8_kv_needs_view = self.kv_cache_dtype != "fp8_ds_mla"
+        fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
+        self._fp8_query = fp8_attention and self.impl.supports_quant_query_input
+        self._fp8_kv_needs_view = fp8_attention and self.kv_cache_dtype != "fp8_ds_mla"
 
         self._index_rope_interleave = getattr(config, "indexer_rope_interleave", False)
 
