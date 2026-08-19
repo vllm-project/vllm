@@ -472,6 +472,12 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64" AND VLLM_RVV_VLEN AND
         ${VLLM_EXT_SRC})
 endif()
 
+if (S390_FOUND)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/cpu_wna16.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
 if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"
@@ -513,7 +519,11 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/sgl-kernels/moe.cpp"
         "csrc/cpu/sgl-kernels/moe_int8.cpp"
         "csrc/cpu/sgl-kernels/moe_int4.cpp"
-        "csrc/cpu/sgl-kernels/moe_fp8.cpp")
+        "csrc/cpu/sgl-kernels/moe_fp8.cpp"
+        "csrc/cpu/sgl-kernels/bmm.cpp"
+        "csrc/cpu/sgl-kernels/decode.cpp"
+        "csrc/cpu/sgl-kernels/extend.cpp"
+        "csrc/cpu/sgl-kernels/mla_cache.cpp")
 
     set(VLLM_EXT_SRC_AVX512
         "csrc/cpu/sgl-kernels/fla.cpp"
