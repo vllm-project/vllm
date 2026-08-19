@@ -6,12 +6,9 @@ from torch._subclasses.fake_tensor import FakeTensor
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
-# Fixed grid = multi_processor_count * this; grid-stride covers larger inputs.
-_PERSISTENT_BLOCKS_PER_SM = 4
-
 
 @triton.jit
-def moe_fused_mul_sum_persistent_kernel(
+def moe_fused_mul_sum_kernel(
     inputs_ptr,
     topk_weights_ptr,
     outputs_ptr,
@@ -25,72 +22,65 @@ def moe_fused_mul_sum_persistent_kernel(
     size: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_K: tl.constexpr,
-    NUM_K_TILES: tl.constexpr,
 ):
-    # Fixed SM-count grid (CUDA-graph safe); grid-stride over all rows, padding
-    # dropped per-tile by the has_expert_map check.
-    num_m_tiles = tl.cdiv(num_tokens, BLOCK_M)
-    total_tiles = num_m_tiles * NUM_K_TILES
+    pid_k = tl.program_id(0)
+    pid_m = tl.program_id(1)
 
-    pid = tl.program_id(0)
-    num_pid = tl.num_programs(0)
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
 
-    for tile_id in range(pid, total_tiles, num_pid):
-        pid_m = tile_id // NUM_K_TILES
-        pid_k = tile_id % NUM_K_TILES
+    m_mask = offs_m < num_tokens
 
-        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-        offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
-        m_mask = offs_m < num_tokens
-        k_mask = offs_k < size
+    if has_expert_map:
+        # Skip worst-case padding rows (all top ids < 0) with no host sync.
+        row_valid = tl.zeros((BLOCK_M,), dtype=tl.int32)
+        for n in tl.static_range(top_k):
+            idn = tl.load(top_ids_ptr + offs_m * top_k + n, mask=m_mask, other=-1)
+            row_valid += (idn >= 0).to(tl.int32)
+        if tl.sum(row_valid) == 0:
+            return
+        m_mask = m_mask & (row_valid > 0)
 
-        keep_m = m_mask
-        do_work = True
-        if has_expert_map:
-            # Row is kept (and its output written) iff it has any top id >= 0.
-            # This uses top_ids only -- a real row whose ids all map to non-local
-            # experts still has row_present > 0 and must be zeroed, not skipped.
-            row_present = tl.zeros((BLOCK_M,), dtype=tl.int32)
-            for n in tl.static_range(top_k):
-                idn = tl.load(top_ids_ptr + offs_m * top_k + n, mask=m_mask, other=-1)
-                row_present += (idn >= 0).to(tl.int32)
-            keep_m = m_mask & (row_present > 0)
-            do_work = tl.sum(row_present) > 0
+    k_mask = offs_k < size
+    mask = m_mask[:, None] & k_mask[None, :]
 
-        if do_work:
-            store_mask = keep_m[:, None] & k_mask[None, :]
-            a_row = inputs_ptr + (offs_m * stride_m)[:, None] + offs_k[None, :]
-            b_base = topk_weights_ptr + offs_m * top_k
-            acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+    a_base = inputs_ptr + (offs_m * stride_m)[:, None] + offs_k[None, :]
+    b_base = topk_weights_ptr + offs_m * top_k
 
-            for n in tl.static_range(top_k):
-                b_val = tl.load(b_base + n, mask=m_mask, other=0.0).to(tl.float32)
-                if has_topk_ids:
-                    id_val = tl.load(
-                        top_ids_ptr + offs_m * top_k + n, mask=m_mask, other=-1
-                    )
-                    valid = id_val >= 0
-                    if has_expert_map:
-                        local_id = tl.load(
-                            expert_map_ptr + tl.where(valid, id_val, 0),
-                            mask=valid,
-                            other=-1,
-                        )
-                        valid = valid & (local_id >= 0)
-                    row_mask = store_mask & valid[:, None]
-                else:
-                    row_mask = store_mask
-                a_vec = tl.load(a_row + n * size, mask=row_mask, other=0.0).to(
-                    tl.float32
+    acc = tl.zeros((BLOCK_M, BLOCK_K), dtype=tl.float32)
+
+    for n in tl.static_range(top_k):
+        b_val = tl.load(b_base + n, mask=m_mask, other=0.0).to(tl.float32)
+        if has_topk_ids:
+            # -1 marks a slot the expert GEMM skipped (non-local expert under
+            # EP, or an all2all padding row), so `inputs` was never written
+            # there. Both the map lookup and the value load must be masked off:
+            # indexing the map with -1 reads out of bounds.
+            id_val = tl.load(top_ids_ptr + offs_m * top_k + n, mask=m_mask, other=-1)
+            valid = id_val >= 0
+            if has_expert_map:
+                local_id = tl.load(
+                    expert_map_ptr + tl.where(valid, id_val, 0),
+                    mask=valid,
+                    other=-1,
                 )
-                acc += a_vec * b_val[:, None]
+                valid = valid & (local_id >= 0)
+            row_mask = mask & valid[:, None]
+        else:
+            row_mask = mask
+        a_vec = tl.load(
+            a_base + n * size,
+            mask=row_mask,
+            other=0.0,
+        ).to(tl.float32)
+        acc += a_vec * b_val[:, None]
 
-            out_ptrs = outputs_ptr + (offs_m * size)[:, None] + offs_k[None, :]
-            tl.store(
-                out_ptrs,
-                acc.to(outputs_ptr.dtype.element_ty),
-                mask=store_mask,
-            )
+    out_ptrs = outputs_ptr + (offs_m * size)[:, None] + offs_k[None, :]
+    tl.store(
+        out_ptrs,
+        acc.to(outputs_ptr.dtype.element_ty),
+        mask=mask,
+    )
 
 
 def _heuristic_config(
@@ -222,14 +212,8 @@ def moe_fused_mul_sum(
             size,
             inputs.element_size(),
         )
-        # Cap BLOCK_K/num_stages to stay register-bound under the fp32 acc.
-        persistent_block_k = min(BLOCK_K, 256)
-        num_k_tiles = triton.cdiv(size, persistent_block_k)
-        num_sms = torch.cuda.get_device_properties(inputs.device).multi_processor_count
-        max_tiles = triton.cdiv(num_tokens, BLOCK_M) * num_k_tiles
-        grid: tuple[int, ...] = (min(num_sms * _PERSISTENT_BLOCKS_PER_SM, max_tiles),)
-        persistent_num_stages = min(num_stages, 2)
-        moe_fused_mul_sum_persistent_kernel[grid](
+        grid = (triton.cdiv(size, BLOCK_K), triton.cdiv(num_tokens, BLOCK_M))
+        moe_fused_mul_sum_kernel[grid](
             inputs,
             topk_weights,
             outputs,
@@ -242,10 +226,9 @@ def moe_fused_mul_sum(
             top_k,
             size,
             BLOCK_M,
-            persistent_block_k,
-            num_k_tiles,
+            BLOCK_K,
             num_warps=num_warps,
-            num_stages=persistent_num_stages,
+            num_stages=num_stages,
         )
 
     return outputs
