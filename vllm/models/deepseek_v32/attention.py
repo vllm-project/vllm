@@ -45,6 +45,7 @@ from vllm.utils.torch_utils import is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
+    from vllm.v1.kv_offload.sparse.hisparse_runtime import HiSparseIndexGroupBuilder
 
 
 class DeepseekV32Indexer(nn.Module):
@@ -179,6 +180,7 @@ class DeepseekV32Attention(MLAAttention):
         prefix: str,
         topk_indices_buffer: torch.Tensor | None = None,
         attn_backend: "type | None" = None,
+        hisparse_index_group_builder: "HiSparseIndexGroupBuilder | None" = None,
     ) -> None:
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
@@ -262,6 +264,7 @@ class DeepseekV32Attention(MLAAttention):
             use_sparse=True,
             indexer=indexer,
             topk_indices_buffer=topk_indices_buffer,
+            hisparse_index_group_builder=hisparse_index_group_builder,
             attn_backend=attn_backend,
         )
 
