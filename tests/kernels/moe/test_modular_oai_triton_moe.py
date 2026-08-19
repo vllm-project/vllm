@@ -106,36 +106,20 @@ def make_weights(dtype, k, n, e):
     w1_tri = shuffle_weight(w1_tri)
     w1_bias_tri = shuffle_weight(w1_bias_tri)
 
-    # Padding alignment depends on the platform. On ROCm the scale swizzle
-    # requires SCALE_K % 8 == 0 (K % 256) and SCALE_N % 32 == 0
-    # (2*N % 512), matching the production alignment in
-    # mxfp4_round_up_hidden_size_and_intermediate_size. On CUDA (Hopper) the
-    # scale layout pads internally, so the original 64/128 alignment is enough.
     if current_platform.is_rocm():
         k_align, n2_align = 256, 512
     else:
         k_align, n2_align = 64, 128
+
     w1_bottom_pad = round_up(w1_tri.shape[1], k_align) - w1_tri.shape[1]
     w1_right_pad = round_up(w1_tri.shape[2], n2_align) - w1_tri.shape[2]
-
     w2_bottom_pad = w1_right_pad // 2
     w2_right_pad = w1_bottom_pad
-    x_pad = w1_bottom_pad
 
-    w1_tri = F.pad(
-        w1_tri,
-        (0, w1_right_pad, 0, w1_bottom_pad, 0, 0),
-        mode="constant",
-        value=0,
-    )
-    w2_tri = F.pad(
-        w2_tri,
-        (0, w2_right_pad, 0, w2_bottom_pad, 0, 0),
-        mode="constant",
-        value=0,
-    )
-    w1_bias_tri = F.pad(w1_bias_tri, (0, w1_right_pad, 0, 0), mode="constant", value=0)
-    w2_bias_tri = F.pad(w2_bias_tri, (0, w2_right_pad, 0, 0), mode="constant", value=0)
+    w1_tri = F.pad(w1_tri, (0, w1_right_pad, 0, w1_bottom_pad, 0, 0))
+    w2_tri = F.pad(w2_tri, (0, w2_right_pad, 0, w2_bottom_pad, 0, 0))
+    w1_bias_tri = F.pad(w1_bias_tri, (0, w1_right_pad, 0, 0))
+    w2_bias_tri = F.pad(w2_bias_tri, (0, w2_right_pad, 0, 0))
 
     # quant triton_weights
     w1_tri, w1_scale_tri = downcast_to_mxfp(w1_tri, torch.uint8, axis=1)
@@ -185,7 +169,7 @@ def make_weights(dtype, k, n, e):
         w2_bias_tri,
         w1_precision_config,
         w2_precision_config,
-        x_pad,
+        w1_bottom_pad,
     )
 
 
@@ -293,6 +277,7 @@ def test_oai_triton_moe(
 ):
     wait_for_gpu_memory_to_clear(devices=[0], threshold_ratio=0.1)
     set_random_seed(0)
+
     (
         w1,
         w2,
@@ -308,7 +293,7 @@ def test_oai_triton_moe(
     ) = make_weights(dtype, k, n, num_experts)
 
     x = torch.randn((m, k), dtype=dtype, device="cuda")
-    x_tri = F.pad(x, (0, x_pad, 0, 0), mode="constant", value=0)
+    x_tri = F.pad(x, (0, x_pad, 0, 0))
     router_logits = torch.randn(m, num_experts, device="cuda", dtype=dtype)
     topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1, sorted=True)
     topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
@@ -366,7 +351,7 @@ def test_unfused_oai_triton_experts_apply_direct_deepseek_v4_topology(workspace_
     ) = make_weights(dtype, k, n, num_experts)
 
     x = torch.randn((m, k), dtype=dtype, device="cuda")
-    x_tri = F.pad(x, (0, x_pad, 0, 0), mode="constant", value=0)
+    x_tri = F.pad(x, (0, x_pad, 0, 0))
     router_logits = torch.randn(m, num_experts, device="cuda", dtype=dtype)
     topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1, sorted=True)
     topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)

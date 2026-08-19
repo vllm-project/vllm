@@ -16,6 +16,7 @@ from torch.nn import Parameter
 from torch.nn import functional as F
 
 import vllm.model_executor.layers.fused_moe  # noqa
+import vllm.model_executor.layers.fused_moe.fused_moe as fused_moe_module
 from tests.kernels.moe.utils import (
     fused_moe,
     make_dummy_moe_config,
@@ -66,6 +67,46 @@ from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None:
+    captured: dict[str, torch.Tensor] = {}
+
+    class FakeKernel:
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs) -> None:
+                captured["a_scale"] = args[4]
+
+            return launch
+
+    monkeypatch.setattr(fused_moe_module, "fused_moe_kernel", FakeKernel())
+
+    a_scale = torch.tensor(0.5)
+    fused_moe_module.invoke_fused_moe_triton_kernel(
+        A=torch.ones((1, 1)),
+        B=torch.ones((1, 1, 1)),
+        C=torch.empty((1, 1, 1)),
+        A_scale=a_scale,
+        B_scale=torch.ones(1),
+        topk_weights=torch.ones((1, 1)),
+        sorted_token_ids=None,
+        expert_ids=torch.zeros(1, dtype=torch.int32),
+        num_tokens_post_padded=torch.ones(1, dtype=torch.int32),
+        mul_routed_weight=True,
+        top_k=1,
+        config={"BLOCK_SIZE_M": 1, "BLOCK_SIZE_N": 1, "BLOCK_SIZE_K": 1},
+        compute_type=tl.float32,
+        use_fp8_w8a8=True,
+        use_int8_w8a8=False,
+        use_int8_w8a16=False,
+        use_int4_w4a16=False,
+        per_channel_quant=False,
+    )
+
+    captured_scale = captured["a_scale"]
+    assert a_scale.ndim == 0
+    assert captured_scale.shape == (1,)
+    assert captured_scale.data_ptr() == a_scale.data_ptr()
 
 
 def iterative_moe(
