@@ -2,7 +2,7 @@ group: Kernels
 depends_on: 
   - image-build
 steps:
-- label: vLLM IR Tests
+- label: ":nvidia: (H200) vLLM IR"
   key: vllm-ir-tests
   timeout_in_minutes: 35
   device: h200_18gb
@@ -14,7 +14,7 @@ steps:
     - pytest -v -s tests/ir
     - pytest -v -s tests/kernels/ir
 
-- label: Kernels Core Operation Test
+- label: ":nvidia: (H200) Core Operation Kernels Shard %N"
   device: h200_35gb
   key: kernels-core-operation-test
   timeout_in_minutes: 120
@@ -27,7 +27,7 @@ steps:
     - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 3
 
-- label: Kernels MiniMax Reduce RMS Test (2 GPUs)
+- label: ":nvidia: (H100) MiniMax Reduce RMS Kernels"
   key: kernels-minimax-reduce-rms-test-2-gpus
   timeout_in_minutes: 20
   num_devices: 2
@@ -41,7 +41,7 @@ steps:
   commands:
     - pytest -v -s kernels/core/test_minimax_reduce_rms.py
 
-- label: Deepseek V4 Kernel Test (H100)
+- label: ":nvidia: (H100) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-h100
   timeout_in_minutes: 30
   device: h100
@@ -54,7 +54,7 @@ steps:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
     - pytest -v -s kernels/test_top_k_per_row.py
 
-- label: Deepseek V4 Kernel Test (B200)
+- label: ":nvidia: (B200) DeepSeek V4 Kernels"
   key: deepseek-v4-kernel-test-b200
   timeout_in_minutes: 20
   device: b200-k8s
@@ -73,7 +73,7 @@ steps:
 # Files with dedicated jobs elsewhere in this file are excluded via --ignore
 # (test_kda, test_bf16x3_router_gemm_cutedsl and test_ll_bf16_gemm run in
 # their own jobs / Kernels (B200)).
-- label: Kernels Root Misc Test (B200)
+- label: ":nvidia: (B200) Miscellaneous Kernels"
   key: kernels-root-misc-test-b200
   timeout_in_minutes: 45
   device: b200-k8s
@@ -101,7 +101,7 @@ steps:
     # BROKEN on main, pending kernel fixes (B200):
     #   test_shuffle_rows.py (1: test_shuffle_rows_edge_cases)
 
-- label: Kernels Attention Test %N
+- label: ":nvidia: (L4) Attention Kernels Shard %N"
   key: kernels-attention-test
   timeout_in_minutes: 65
   source_file_dependencies:
@@ -116,6 +116,7 @@ steps:
   parallelism: 2
   mirror:
     amd:
+      label: ":amd: (MI300) Attention Kernels Shard %N"
       dind: false
       device: mi300_1
       timeout_in_minutes: 90
@@ -130,7 +131,7 @@ steps:
       - vllm/envs.py
       - vllm/platforms/rocm.py
 
-- label: Kernels Attention DiffKV Test (H100)
+- label: ":nvidia: (H100) Attention DiffKV Kernels"
   key: kernels-attention-diffkv-test-h100
   timeout_in_minutes: 20
   device: h100
@@ -143,7 +144,7 @@ steps:
   commands:
     - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
 
-- label: Kernels FlashMLA Test (H100)
+- label: ":nvidia: (H100) FlashMLA Kernels"
   key: kernels-flashmla-test-h100
   timeout_in_minutes: 25
   device: h100
@@ -161,7 +162,7 @@ steps:
     - pytest -v -s kernels/attention/test_flashmla_sparse.py
     - pytest -v -s kernels/attention/test_mla_cross_layer_kernel_equivalence.py
 
-- label: Kernels Quantization Test %N
+- label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test
   timeout_in_minutes: 60
   source_file_dependencies:
@@ -173,6 +174,7 @@ steps:
   parallelism: 2
   mirror:
     amd:
+      label: ":amd: (MI300) Quantization Kernels Shard %N"
       dind: false
       device: mi300_1
       timeout_in_minutes: 120
@@ -183,12 +185,13 @@ steps:
       - tests/kernels/quantization
       - tests/kernels/quantization/test_rocm_skinny_gemms.py
       - vllm/_aiter_ops.py
+      - vllm/kernels/aiter_ops.py
       - vllm/platforms/rocm.py
       - vllm/model_executor/kernels/
       depends_on:
       - image-build-amd
 
-- label: Kernels MoE Test %N
+- label: ":nvidia: (L4) MoE Kernels Shard %N"
   key: kernels-moe-test
   timeout_in_minutes: 50
   source_file_dependencies:
@@ -205,6 +208,7 @@ steps:
   parallelism: 5
   mirror:
     amd:
+      label: ":amd: (MI300) MoE Kernels Shard %N"
       dind: false
       device: mi300_1
       timeout_in_minutes: 55
@@ -221,7 +225,7 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: Kernels Mamba Test
+- label: ":nvidia: (H200) Mamba Kernels"
   device: h200_35gb
   key: kernels-mamba-test
   timeout_in_minutes: 60
@@ -232,7 +236,7 @@ steps:
   commands:
     - pytest -v -s kernels/mamba
 
-- label: Kernels DeepGEMM Test (H100)
+- label: ":nvidia: (H100) DeepGEMM Kernels"
   key: kernels-deepgemm-test-h100
   timeout_in_minutes: 35
   device: h100
@@ -259,7 +263,7 @@ steps:
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
     - pytest -v -s quantization/test_cutlass_w4a16.py
 
-- label: Kernels (B200)
+- label: ":nvidia: (B200) Kernels"
   key: kernels-b200
   timeout_in_minutes: 80
   working_dir: "/vllm-workspace/"
@@ -339,7 +343,29 @@ steps:
     # e2e
     - pytest -v -s tests/models/quantization/test_nvfp4.py
 
-- label: Kernels Helion Test
+- label: ":nvidia: (DGX) Spark B12X Linear Kernels Nightly"
+  key: b12x-linear-kernels-dgx-spark-nightly
+  timeout_in_minutes: 30
+  device: dgx-spark
+  optional: true
+  num_devices: 1
+  depends_on:
+  - arm64-image-build
+  source_file_dependencies:
+  - setup.py
+  - vllm/model_executor/kernels/linear/
+  - vllm/model_executor/warmup/b12x_warmup.py
+  - vllm/utils/b12x.py
+  - tests/model_executor/kernels/test_b12x_linear.py
+  - tests/model_executor/test_b12x_warmup.py
+  - tests/kernels/quantization/test_block_fp8.py
+  commands:
+  - uv pip install --system b12x==1.2.4
+  - pytest -v -s model_executor/kernels/test_b12x_linear.py
+      model_executor/test_b12x_warmup.py
+      kernels/quantization/test_block_fp8.py -k b12x
+
+- label: ":nvidia: (H100) Helion Kernels Shard %N"
   key: kernels-helion-test
   timeout_in_minutes: 115
   device: h100
@@ -352,7 +378,7 @@ steps:
   parallelism: 2
 
  
-- label: Kernels FP8 MoE Test (1xH100)
+- label: ":nvidia: (H100) FP8 MoE Kernels"
   key: kernels-fp8-moe-test-1xh100
   timeout_in_minutes: 40
   device: h100
@@ -369,7 +395,7 @@ steps:
     - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
     - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
 
-- label: Kernels FP8 MoE Test (2xH100)
+- label: ":nvidia: (H100) DeepEP FP8 MoE Kernels"
   key: kernels-fp8-moe-test-2xh100
   timeout_in_minutes: 45
   device: h100
@@ -379,7 +405,7 @@ steps:
     - pytest -v -s kernels/moe/test_deepep_deepgemm_moe.py
     - pytest -v -s kernels/moe/test_deepep_moe.py
 
-- label: Kernels Fp4 MoE Test (B200)
+- label: ":nvidia: (B200) FP4 MoE Kernels"
   key: kernels-fp4-moe-test-b200
   timeout_in_minutes: 25
   device: b200-k8s
@@ -392,7 +418,7 @@ steps:
     - pytest -v -s kernels/moe/test_ocp_mx_moe.py
 
 
-- label: Kernels FusedMoE Layer Test (2 H100s)
+- label: ":nvidia: (H100) FusedMoE Layer Kernels"
   key: kernels-fusedmoe-layer-test-2-h100s
   timeout_in_minutes: 30
   device: h100
@@ -409,7 +435,7 @@ steps:
     - pytest -v -s kernels/moe/test_moe_layer.py
 
 
-- label: Kernels FusedMoE Layer Test (2 B200s)
+- label: ":nvidia: (B200) FusedMoE Layer Kernels"
   key: kernels-fusedmoe-layer-test-2-b200s
   timeout_in_minutes: 90
   device: b200-k8s

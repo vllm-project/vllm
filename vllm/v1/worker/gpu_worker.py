@@ -91,6 +91,16 @@ from .utils import request_memory
 
 logger = init_logger(__name__)
 
+
+def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> int:
+    spec_config = vllm_config.speculative_config
+    return (
+        2
+        if use_v2_model_runner and spec_config is not None and spec_config.use_dspark()
+        else 1
+    )
+
+
 if TYPE_CHECKING:
     from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -402,9 +412,13 @@ class Worker(WorkerBase):
         else:
             raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
-        # Initialize workspace manager
+        # DSpark target and draft CUDA graphs retain workspace views concurrently.
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
-        init_workspace_manager(self.device, num_ubatches)
+        init_workspace_manager(
+            self.device,
+            num_ubatches,
+            _num_workspace_lanes(self.vllm_config, self.use_v2_model_runner),
+        )
 
         # Construct the model runner
         if self.use_v2_model_runner:
@@ -868,6 +882,19 @@ class Worker(WorkerBase):
 
     def get_draft_model(self) -> nn.Module | None:
         return self.model_runner.get_draft_model()
+
+    def supports_draft_weight_updates(self) -> bool:
+        engine = self.weight_transfer_engine
+        speculative_config = self.speculative_config
+        get_draft_model = getattr(self.model_runner, "get_draft_model", None)
+        return (
+            engine is not None
+            and engine.supports_draft_weight_update
+            and callable(get_draft_model)
+            and get_draft_model() is not None
+            and speculative_config is not None
+            and speculative_config.draft_model_config is not None
+        )
 
     def _set_draft_weight_update_target(self) -> None:
         assert self.weight_transfer_engine is not None
@@ -1348,6 +1375,8 @@ class Worker(WorkerBase):
 
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
+
+        self.elastic_ep_executor.shutdown()
 
         # Release GPU resources held by the model runner so that memory
         # can be reclaimed when running in-process

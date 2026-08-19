@@ -58,6 +58,7 @@ from vllm.multimodal.processing import (
     TimingContext,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 if TYPE_CHECKING:
     from transformers import BatchFeature, PreTrainedModel
@@ -296,7 +297,7 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
 
         # Un-padded fields are already one entry per item, so index rather than slice
         mm_fields: dict[str, MultiModalFieldConfig] = {
-            key: MultiModalFieldConfig.batched(modality)
+            key: MultiModalFieldConfig.batched(modality, keep_on_cpu=True)
             if modality == "audio" or isinstance(hf_inputs[key], list)
             else MultiModalFieldConfig.flat_from_sizes(modality, sizes[modality])
             for modality in modalities
@@ -318,9 +319,13 @@ class _MultiModalProcessorBase(BaseMultiModalProcessor[MultiModalProcessingInfo]
 
         if "image" in modalities:
             # Always one row per item, whatever they describe
-            mm_fields["image_grid_thw"] = MultiModalFieldConfig.batched("image")
+            mm_fields["image_grid_thw"] = MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            )
             # TODO: route to "video" once the video modality is supported
-            mm_fields["video_grid_thw"] = MultiModalFieldConfig.batched("image")
+            mm_fields["video_grid_thw"] = MultiModalFieldConfig.batched(
+                "image", keep_on_cpu=True
+            )
 
         return mm_fields
 
@@ -1061,11 +1066,16 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         kwargs.pop("token_type_ids", None)
         kwargs.pop("mm_token_type_ids", None)
 
-        split_sizes = num_audio_tokens.flatten().tolist()
+        # Per-audio token counts are needed as Python ints to split.
+        with gpu_sync_allowed():
+            split_sizes = num_audio_tokens.flatten().tolist()
         if isinstance(input_features, torch.Tensor):
-            audio_output = self.model.get_audio_features(
-                input_features, return_dict=True, **kwargs
-            )
+            # HuggingFace's `get_audio_features` implementations branch on
+            # per-sample feature lengths internally.
+            with gpu_sync_allowed():
+                audio_output = self.model.get_audio_features(
+                    input_features, return_dict=True, **kwargs
+                )
             return self._split_embeddings(audio_output.pooler_output, split_sizes)
 
         # Audios the processor left un-padded arrive as a list once their
@@ -1134,7 +1144,18 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         }
 
     def _get_image_features(self, pixel_values: torch.Tensor, **kwargs) -> Any:
-        features = self.model.get_image_features(pixel_values, **kwargs)
+        # grid_thw fields are registered keep_on_cpu; restore the on-device
+        # placement that HF get_image_features implementations expect.
+        for key, value in kwargs.items():
+            if isinstance(value, torch.Tensor):
+                kwargs[key] = value.to(pixel_values.device, non_blocking=True)
+
+        # The underlying HuggingFace `get_image_features` implementations
+        # contain model-internal syncs (e.g. Idefics3 filters all-zero
+        # padding images via boolean-mask indexing, LlavaOnevision
+        # branches on per-sample batch counts).
+        with gpu_sync_allowed():
+            features = self.model.get_image_features(pixel_values, **kwargs)
 
         # Transformers `v5`, `self.get_image_features` returns a tuple
         # containing the features and optionally attentions/hidden_states
