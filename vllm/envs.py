@@ -18,6 +18,10 @@ if TYPE_CHECKING:
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_USE_FASTOKENS: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
+    VLLM_SHM_BROADCAST_ADAPTIVE_BUDGET_MS: float = 1.0
+    VLLM_SHM_BROADCAST_ADAPTIVE_MIN_GRACE_MS: float = 0.05
+    VLLM_SHM_BROADCAST_ADAPTIVE_MAX_GRACE_MS: float = 2.0
+    VLLM_SHM_BROADCAST_ADAPTIVE_ALPHA: float = 0.25
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
     VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE: int = 256
@@ -733,6 +737,37 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
         os.environ.get("VLLM_RINGBUFFER_WARNING_INTERVAL", "60")
+    ),
+    # Tunables for the adaptive shm_broadcast reader spin grace. Readers
+    # busy-loop for a grace period after the last read before parking on
+    # the poller; the adaptive policy derives that grace from an EMA of
+    # observed inter-read intervals (T_ema):
+    #     grace = clamp(B * B / T_ema, MIN_GRACE, MAX_GRACE)
+    # B (BUDGET) is the pivot: at T_ema == B the grace equals B; faster
+    # traffic spins toward MAX_GRACE (arrivals near-certain within the
+    # grace), slower traffic parks within MIN_GRACE. The grace is
+    # monotonically decreasing in T_ema, so slower traffic never increases
+    # spin, and it is bounded regardless of estimate staleness. Passing a
+    # float to SpinCondition's busy_loop_s overrides the policy with a
+    # fixed grace. All grace values are in milliseconds.
+    # Time-scale pivot B: grace == B when T_ema == B.
+    "VLLM_SHM_BROADCAST_ADAPTIVE_BUDGET_MS": lambda: float(
+        os.environ.get("VLLM_SHM_BROADCAST_ADAPTIVE_BUDGET_MS", "1.0")
+    ),
+    # Lower bound on the spin grace: an idle reader parks within this
+    # window instead of spinning.
+    "VLLM_SHM_BROADCAST_ADAPTIVE_MIN_GRACE_MS": lambda: float(
+        os.environ.get("VLLM_SHM_BROADCAST_ADAPTIVE_MIN_GRACE_MS", "0.05")
+    ),
+    # Upper bound on the spin grace: the most time a reader busy-loops
+    # even under the fastest observed traffic.
+    "VLLM_SHM_BROADCAST_ADAPTIVE_MAX_GRACE_MS": lambda: float(
+        os.environ.get("VLLM_SHM_BROADCAST_ADAPTIVE_MAX_GRACE_MS", "2.0")
+    ),
+    # EMA coefficient for observed inter-read intervals, in (0, 1]:
+    # higher adapts to cadence changes faster but tracks noise.
+    "VLLM_SHM_BROADCAST_ADAPTIVE_ALPHA": lambda: float(
+        os.environ.get("VLLM_SHM_BROADCAST_ADAPTIVE_ALPHA", "0.25")
     ),
     # path to cudatoolkit home directory, under which should be bin, include,
     # and lib directories.
